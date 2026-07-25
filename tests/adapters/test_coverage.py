@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from coverage import CoverageData
+
+from flamo.adapters import CoverageExtractor
+from flamo.analysis import RecipeService
+from flamo.application import ImportArtifactRequest, ImportService
+from flamo.catalog import Catalog
+from flamo.domain import ArtifactKind
+from flamo.storage import Workspace
+
+
+def test_coverage_extractor_uses_public_data_api_and_normalizes_paths(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "module.py"
+    source.write_text("x = 1\nif x:\n    x += 1\n")
+    data_path = tmp_path / ".coverage"
+    data = CoverageData(basename=str(data_path))
+    data.set_context("test_case")
+    data.add_arcs({str(source): [(1, 2), (2, 3)]})
+    data.write()
+
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(
+            path=data_path,
+            kind=ArtifactKind.EXECUTION_COVERAGE,
+        )
+    )
+    result = CoverageExtractor(workspace).extract(imported.run.run_id)
+
+    assert result.arc_count == 2
+    assert result.line_count == 3
+    with Catalog(workspace).open_snapshot() as snapshot:
+        rows = snapshot.execute(
+            "SELECT kind, file, line_from, line_to, context "
+            "FROM observations ORDER BY kind, line_from, line_to"
+        ).fetchall()
+    assert all(row[1] == "module.py" for row in rows)
+    assert ("branch_arc", "module.py", 1, 2, None) in rows
+    assert ("line_hit", "module.py", 1, None, "test_case") in rows
+    analysis = RecipeService(workspace).execution(imported.run.run_id, limit=2)
+    assert analysis.returned == 2
+    assert analysis.total == 5
+    assert analysis.truncated is True
