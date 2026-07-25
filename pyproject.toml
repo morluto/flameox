@@ -1,0 +1,94 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flamo"
+version = "0.1.0"
+description = "Local runtime evidence CLI and MCP server for coding agents"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "anyio>=4.9,<5",
+    "duckdb>=1.5.4,<1.6",
+    "mcp==2.0.0b2",
+    "mcp-types==2.0.0b2",
+    "numpy>=2.2,<3",
+    "portalocker>=3.2,<4",
+    "pyarrow>=20,<26",
+    "pydantic>=2.13.4,<2.14",
+    "scipy>=1.15,<2",
+    "tomli-w>=1.2,<2",
+    "typer>=0.16,<1",
+]
+
+[project.optional-dependencies]
+python = ["pyperf>=2.9"]
+memory = ["memray>=1.17"]
+torch = ["torch>=2.7"]
+execution = ["coverage>=7.14,<8"]
+trace = ["perfetto>=0.57,<0.58"]
+cpu = ["py-spy>=0.4.2,<0.5"]
+all = [
+    "coverage>=7.14,<8",
+    "memray>=1.17",
+    "perfetto>=0.57,<0.58",
+    "py-spy>=0.4.2,<0.5",
+    "pyperf>=2.9",
+    "torch>=2.7",
+]
+dev = [
+    "hypothesis>=6.130",
+    "mypy>=1.15",
+    "pytest>=8.3",
+    "pytest-cov>=6.1",
+    "pyarrow-stubs>=20.0.0.20260625",
+    "ruff>=0.11",
+    "scipy-stubs>=1.18.0.1,<1.19",
+]
+
+[project.scripts]
+flamo = "flamo.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/flamo"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+markers = [
+    "performance: representative local corpus performance acceptance checks",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["flamo"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["flamo"]
+
+[[tool.mypy.overrides]]
+module = [
+    "memray",
+    "memray.*",
+    "perfetto",
+    "perfetto.*",
+    "pyperf",
+    "pyperf.*",
+    "torch",
+    "torch.*",
+]
+ignore_missing_imports = true
