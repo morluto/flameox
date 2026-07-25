@@ -1,5 +1,35 @@
 # Repository Guidelines
 
+## Product Direction
+
+Flamo is a permanently local runtime-evidence system for coding agents. It
+shortens the path from an unexplained performance, memory, concurrency, or
+reliability symptom to a reproducible, falsifiable conclusion.
+
+Flamo coordinates existing profilers, benchmark tools, debuggers, and trace
+processors. Do not reimplement their collectors, formats, statistics, or
+viewers when maintained public APIs exist.
+
+When changing the product:
+
+- preserve native artifacts, provenance, failed attempts, and experimental
+  structure;
+- distinguish observed, derived, and inferred claims;
+- prefer bounded task-shaped operations over arbitrary commands or SQL;
+- keep DuckDB rebuildable and Parquet/manifests authoritative;
+- keep CLI and MCP as thin transports over the same application services;
+- expose coverage, limitations, compatibility, and containment truthfully;
+- optimize for investigation leverage, not integration count.
+
+Profiles guide discovery but do not prove causality, semantic correctness, or
+performance improvement. Confirmatory claims require representative workloads,
+declared metrics and estimands, compatible identities, preserved samples, and
+a semantic oracle.
+
+A passing test suite does not prove the entire specification complete. Before
+calling work complete, identify the relevant `SPEC.md` acceptance criteria and
+state any remaining proof gaps.
+
 ## Project Structure & Module Organization
 
 Flamo is a Python 3.12+ package using a `src/` layout. Production code lives in
