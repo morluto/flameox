@@ -8,7 +8,7 @@ import tomllib
 from pathlib import Path
 from typing import Annotated, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import Field, JsonValue, model_validator
 
 from flamo.domain import (
     CommandSpec,
@@ -19,27 +19,27 @@ from flamo.domain import (
     WorkloadInstance,
     digest_model,
 )
+from flamo.models import ContractModel
 from flamo.storage import Workspace
 from flamo.storage.atomic import atomic_write_json
 
 Scalar = str | int | float | bool
 
 
-class WorkloadOracleConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class WorkloadOracleConfig(ContractModel):
     strength: OracleStrength = OracleStrength.EXECUTION_CHECK
-    argv: tuple[str, ...] = ()
+    argv: Annotated[tuple[str, ...], Field(max_length=1_024)] = ()
 
 
-class WorkloadConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    argv: tuple[str, ...]
+class WorkloadConfig(ContractModel):
+    argv: Annotated[tuple[str, ...], Field(min_length=1, max_length=1_024)]
     cwd: str = "."
     timeout_seconds: Annotated[float, Field(gt=0, le=86_400)] = 300
-    parameters: dict[str, tuple[Scalar, ...]] = Field(default_factory=dict)
-    environment: dict[str, str] = Field(default_factory=dict)
+    parameters: dict[str, tuple[Scalar, ...]] = Field(
+        default_factory=dict,
+        max_length=128,
+    )
+    environment: dict[str, str] = Field(default_factory=dict, max_length=128)
     oracle: WorkloadOracleConfig | None = None
 
     @model_validator(mode="after")
@@ -58,37 +58,42 @@ class WorkloadConfig(BaseModel):
         return self
 
 
-class ExperimentConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ExperimentConfig(ContractModel):
     workload: str
-    variants: Annotated[tuple[str, ...], Field(min_length=2)]
+    variants: Annotated[tuple[str, ...], Field(min_length=2, max_length=16)]
     design: Literal[
         "randomized_complete_blocks",
         "randomized",
         "fixed_order",
     ] = "randomized_complete_blocks"
-    blocks: Annotated[int, Field(gt=0)] = 1
+    blocks: Annotated[int, Field(gt=0, le=1_000)] = 1
     primary_metric: str
     polarity: Literal["lower_is_better", "higher_is_better", "neutral"]
     estimand: str = "median_paired_log_ratio"
     practical_threshold: Annotated[float, Field(ge=0)] = 0
     confidence_level: Annotated[float, Field(gt=0, lt=1)] = 0.95
     random_seed: Annotated[int, Field(ge=0)] = 0
+    scaling_parameter: str | None = None
+    scaling_values: Annotated[tuple[Scalar, ...], Field(max_length=1_000)] = ()
 
     @model_validator(mode="after")
     def unique_variants(self) -> ExperimentConfig:
         if len(set(self.variants)) != len(self.variants):
             raise ValueError("experiment variants must be unique")
+        if bool(self.scaling_parameter) != bool(self.scaling_values):
+            raise ValueError("scaling_parameter and scaling_values must be declared together")
+        if len(set(self.scaling_values)) != len(self.scaling_values):
+            raise ValueError("experiment scaling values must be unique")
         return self
 
 
-class ProjectConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ProjectConfig(ContractModel):
     schema_version: Literal[1] = 1
-    workloads: dict[str, WorkloadConfig] = Field(default_factory=dict)
-    experiments: dict[str, ExperimentConfig] = Field(default_factory=dict)
+    workloads: dict[str, WorkloadConfig] = Field(default_factory=dict, max_length=1_000)
+    experiments: dict[str, ExperimentConfig] = Field(
+        default_factory=dict,
+        max_length=1_000,
+    )
 
     @model_validator(mode="after")
     def experiments_reference_workloads(self) -> ProjectConfig:
@@ -104,16 +109,12 @@ class ProjectConfig(BaseModel):
         return self
 
 
-class ApprovalRecord(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ApprovalRecord(ContractModel):
     schema_version: Literal[1] = 1
     workloads: dict[str, str] = Field(default_factory=dict)
 
 
-class ResolvedOracle(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ResolvedOracle(ContractModel):
     strength: OracleStrength
     command: CommandSpec
 

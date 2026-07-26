@@ -5,25 +5,25 @@ from pathlib import Path
 
 import pytest
 
-from flamo.adapters import PyPerfExtractor
+from flamo.analysis import RecipeService
 from flamo.application import (
+    AnalysisMaterializationService,
     CaptureService,
-    CompareRunSetsRequest,
-    ComparisonService,
     CreateInvestigationRequest,
     EvidenceInput,
     ExecutionPolicy,
+    ExperimentService,
     FindingService,
-    FreezeRunSetRequest,
     InvestigationService,
+    MaterializeAnalysisRequest,
     RecordFindingRequest,
     RecordHypothesisRequest,
-    RunSetService,
 )
 from flamo.domain import (
     ComparisonDecision,
     ComparisonValidity,
     EvidenceLevel,
+    ExecutionStatus,
     FindingAssessment,
     ValidationStatus,
 )
@@ -58,12 +58,15 @@ async def test_reverse_scan_investigation_proves_candidate_with_oracle(
         "        total = sum(values)\n"
         "else:\n"
         "    total = -1\n"
-        "assert total == length * (length - 1) // 2\n"
+        "print(total)\n"
     )
     (tmp_path / "validate.py").write_text(
-        "import sys\n"
-        "_mode, length = sys.argv[1], int(sys.argv[2])\n"
-        "print(length * (length - 1) // 2)\n"
+        "import subprocess, sys\n"
+        "mode, length = sys.argv[1], int(sys.argv[2])\n"
+        "actual = int(subprocess.check_output("
+        "[sys.executable, 'scan.py', mode, str(length)], text=True))\n"
+        "expected = length * (length - 1) // 2\n"
+        "assert actual == expected, (actual, expected)\n"
     )
     (tmp_path / "flamo.toml").write_text(
         """
@@ -80,6 +83,20 @@ length = [32768, 65536, 131072]
 [workloads.reverse_scan.oracle]
 strength = "cross_treatment_equivalence"
 argv = ["python", "validate.py", "{mode}", "{length}"]
+
+[experiments.reverse_scan_scaling]
+workload = "reverse_scan"
+variants = ["baseline", "candidate"]
+design = "randomized_complete_blocks"
+blocks = 1
+scaling_parameter = "length"
+scaling_values = [32768, 65536, 131072]
+primary_metric = "pyperf.workload"
+polarity = "lower_is_better"
+estimand = "median_paired_log_ratio"
+practical_threshold = 0.05
+confidence_level = 0.95
+random_seed = 1984
 """
     )
     git(tmp_path, "init")
@@ -101,7 +118,7 @@ argv = ["python", "validate.py", "{mode}", "{length}"]
             symptom="Runtime grows with sequence length.",
         )
     )
-    investigations.record_hypothesis(
+    hypothesis = investigations.record_hypothesis(
         RecordHypothesisRequest(
             investigation_id=investigation.investigation_id,
             claim="The Python reverse loop is avoidable interpreter overhead.",
@@ -111,20 +128,37 @@ argv = ["python", "validate.py", "{mode}", "{length}"]
             ),
         )
     )
+    experiment_service = ExperimentService(workspace)
+    experiment_plan = await experiment_service.plan(
+        experiment_name="reverse_scan_scaling",
+        investigation_id=investigation.investigation_id,
+        hypothesis_id=hypothesis.hypothesis_id,
+        adapter="pyperf",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    experiment = await experiment_service.run(experiment_plan.plan_id)
+    assert all(
+        trial.validation_status is ValidationStatus.PASSED
+        for trial in experiment.trials
+    )
+    scaling = RecipeService(workspace).scaling(experiment.experiment.experiment_id)
+    scaling_record = AnalysisMaterializationService(workspace).record(
+        MaterializeAnalysisRequest(
+            recipe="scaling",
+            experiment_id=experiment.experiment.experiment_id,
+        )
+    )
+    assert experiment.comparison is not None
+    comparison = experiment.comparison
+    assert comparison.comparison.validity is ComparisonValidity.VALID, (
+        comparison.comparison.mismatches
+    )
+    assert (
+        comparison.comparison.decision
+        is ComparisonDecision.MEANINGFUL_IMPROVEMENT
+    ), comparison.comparison.model_dump(mode="json")
+
     capture = CaptureService(workspace)
-    run_ids: dict[tuple[str, int], str] = {}
-    for length in (32768, 65536, 131072):
-        for mode in ("baseline", "candidate"):
-            plan = await capture.plan(
-                workload_name="reverse_scan",
-                adapter="pyperf",
-                parameters={"mode": mode, "length": length},
-                execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
-            )
-            result = await capture.execute(plan.plan_id)
-            assert result.run.validation_status is ValidationStatus.PASSED
-            PyPerfExtractor(workspace).extract(result.run.run_id)
-            run_ids[(mode, length)] = result.run.run_id
     broken_plan = await capture.plan(
         workload_name="reverse_scan",
         adapter="pyperf",
@@ -132,25 +166,8 @@ argv = ["python", "validate.py", "{mode}", "{length}"]
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
     broken = await capture.execute(broken_plan.plan_id)
-    assert broken.run.validation_status is not ValidationStatus.PASSED
-    cohorts = RunSetService(workspace)
-    baseline = cohorts.freeze(
-        FreezeRunSetRequest(run_ids=(run_ids[("baseline", 32768)],))
-    )
-    candidate = cohorts.freeze(
-        FreezeRunSetRequest(run_ids=(run_ids[("candidate", 32768)],))
-    )
-    comparison = ComparisonService(workspace).record(
-        CompareRunSetsRequest(
-            baseline_run_set_id=baseline.run_set_id,
-            candidate_run_set_id=candidate.run_set_id,
-            metric="pyperf.workload",
-            unit="ns",
-            polarity="lower_is_better",
-            practical_threshold=0.05,
-            random_seed=1984,
-        )
-    )
+    assert broken.run.execution_status is ExecutionStatus.SUCCEEDED
+    assert broken.run.validation_status is ValidationStatus.FAILED
     finding = FindingService(workspace).record(
         RecordFindingRequest(
             kind="performance",
@@ -165,10 +182,21 @@ argv = ["python", "validate.py", "{mode}", "{length}"]
                     ref_id=comparison.comparison.comparison_id,
                     relation="supports",
                 ),
+                EvidenceInput(
+                    ref_type="analysis",
+                    ref_id=scaling_record.analysis.analysis_id,
+                    relation="context",
+                ),
             ),
         )
     )
 
-    assert comparison.comparison.validity is ComparisonValidity.VALID
-    assert comparison.comparison.decision is ComparisonDecision.MEANINGFUL_IMPROVEMENT
+    assert scaling.attempted_trials == 6
+    assert {point.input_value for point in scaling.points} == {
+        32768.0,
+        65536.0,
+        131072.0,
+    }
+    assert {fit.variant for fit in scaling.fits} == {"baseline", "candidate"}
+    assert scaling_record.result == scaling
     assert finding.finding.assessment is FindingAssessment.SUPPORTED

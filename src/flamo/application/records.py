@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import Field, JsonValue
 
 from flamo.catalog import Catalog
 from flamo.domain import (
@@ -20,20 +20,17 @@ from flamo.domain import (
     new_id,
 )
 from flamo.evidence import GenerationPublisher
+from flamo.models import ContractModel
 from flamo.storage import ArtifactStore, JsonRecordStore, RunStore, Workspace
 
 
-class RecordRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-
-class CreateInvestigationRequest(RecordRequest):
+class CreateInvestigationRequest(ContractModel):
     question: str = Field(min_length=1, max_length=500)
     symptom: str | None = None
     parent_investigation_id: str | None = None
 
 
-class RecordHypothesisRequest(RecordRequest):
+class RecordHypothesisRequest(ContractModel):
     investigation_id: str
     claim: str = Field(min_length=1, max_length=500)
     prediction: str = Field(min_length=1, max_length=500)
@@ -44,7 +41,7 @@ class RecordHypothesisRequest(RecordRequest):
     lifecycle: FindingLifecycle = FindingLifecycle.ACTIVE
 
 
-class EvidenceInput(RecordRequest):
+class EvidenceInput(ContractModel):
     ref_type: Literal[
         "analysis",
         "artifact",
@@ -59,7 +56,7 @@ class EvidenceInput(RecordRequest):
     relation: Literal["supports", "contradicts", "context", "validates"]
 
 
-class RecordFindingRequest(RecordRequest):
+class RecordFindingRequest(ContractModel):
     kind: str
     title: str = Field(min_length=1, max_length=500)
     claim: str = Field(min_length=1, max_length=500)
@@ -74,7 +71,7 @@ class RecordFindingRequest(RecordRequest):
     expected_revision: int | None = Field(default=None, ge=1)
 
 
-class FindingResult(RecordRequest):
+class FindingResult(ContractModel):
     finding: Finding
     evidence: tuple[EvidenceReference, ...]
     corpus_commit_id: str

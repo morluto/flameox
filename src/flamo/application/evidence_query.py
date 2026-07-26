@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
-
 from flamo.catalog import Catalog
 from flamo.domain import CursorCodec, DomainError, ErrorCode, digest_model
+from flamo.models import ContractModel
 from flamo.storage import Workspace
 
 
-class MeasurementItem(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class MeasurementItem(ContractModel):
     measurement_id: str
     run_id: str
     artifact_id: str | None
@@ -31,9 +28,7 @@ class MeasurementItem(BaseModel):
     evidence_level: str
 
 
-class MeasurementQueryResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class MeasurementQueryResult(ContractModel):
     schema_version: int = 1
     corpus_commit_id: str
     measurements: tuple[MeasurementItem, ...]

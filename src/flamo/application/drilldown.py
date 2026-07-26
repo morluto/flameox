@@ -2,16 +2,14 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
-
 from flamo.catalog import Catalog, Snapshot
 from flamo.domain import CursorCodec, DomainError, ErrorCode, digest_model
-from flamo.storage import ArtifactStore, RunStore, Workspace
+from flamo.evidence_scope import resolve_evidence_scope
+from flamo.models import ContractModel
+from flamo.storage import Workspace
 
 
-class FrameDetail(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class FrameDetail(ContractModel):
     frame_id: str
     function: str | None
     module: str | None
@@ -21,9 +19,7 @@ class FrameDetail(BaseModel):
     duration_ns: int
 
 
-class CallEdgeResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class CallEdgeResult(ContractModel):
     schema_version: int = 1
     corpus_commit_id: str
     input_id: str
@@ -40,9 +36,7 @@ class CallEdgeResult(BaseModel):
     )
 
 
-class StackExample(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class StackExample(ContractModel):
     stack_id: str
     start_ns: int
     duration_ns: int
@@ -50,9 +44,7 @@ class StackExample(BaseModel):
     frames: tuple[FrameDetail, ...]
 
 
-class StackExamplesResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class StackExamplesResult(ContractModel):
     schema_version: int = 1
     corpus_commit_id: str
     input_id: str
@@ -114,13 +106,6 @@ class DrilldownService:
     ) -> StackExamplesResult:
         limit = self._limit(limit)
         head = self.workspace.corpus.read_head()
-        run_ids, artifact_ids = self._scope(input_id)
-        where, parameters = self._scope_where(
-            run_ids,
-            artifact_ids,
-            run_column="run_id",
-            artifact_column="artifact_id",
-        )
         scope_digest = digest_model({"input_id": input_id, "frame_id": frame_id})
         after_duration: int | None = None
         after_stack_id: str | None = None
@@ -141,23 +126,25 @@ class DrilldownService:
             assert isinstance(duration_value, int)
             assert isinstance(stack_value, str)
             after_duration, after_stack_id = duration_value, stack_value
-        scoped = (
-            "SELECT DISTINCT stack_id, start_ns, duration_ns, track_id, frame_ids "
-            "FROM stacks WHERE "
-            + where
-            + " AND list_contains(frame_ids, ?)"
-        )
         page_where = ""
         page_parameters: tuple[object, ...] = ()
         if after_duration is not None and after_stack_id is not None:
-            page_where = (
-                " WHERE duration_ns < ? OR "
-                "(duration_ns = ? AND stack_id > ?)"
-            )
+            page_where = " WHERE duration_ns < ? OR (duration_ns = ? AND stack_id > ?)"
             page_parameters = (after_duration, after_duration, after_stack_id)
         with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+            scope = resolve_evidence_scope(snapshot, input_id)
+            where, parameters = scope.predicate(
+                run_column="run_id",
+                artifact_column="artifact_id",
+            )
+            scoped = (
+                "SELECT DISTINCT stack_id, start_ns, duration_ns, track_id, frame_ids "
+                "FROM stacks WHERE " + where + " AND list_contains(frame_ids, ?)"
+            )
             rows = snapshot.execute(
-                "WITH scoped AS (" + scoped + ") SELECT * FROM scoped"
+                "WITH scoped AS ("
+                + scoped
+                + ") SELECT * FROM scoped"
                 + page_where
                 + " ORDER BY duration_ns DESC, stack_id LIMIT ?",
                 (*parameters, frame_id, *page_parameters, limit + 1),
@@ -220,21 +207,8 @@ class DrilldownService:
     ) -> CallEdgeResult:
         limit = self._limit(limit)
         head = self.workspace.corpus.read_head()
-        run_ids, artifact_ids = self._scope(input_id)
-        where, parameters = self._scope_where(
-            run_ids,
-            artifact_ids,
-            run_column="run_id",
-            artifact_column="artifact_id",
-        )
         selected_column = "parent_frame_id" if direction == "callers" else "child_frame_id"
         match_column = "child_frame_id" if direction == "callers" else "parent_frame_id"
-        base = (
-            "SELECT DISTINCT run_id, artifact_id, parent_frame_id, "
-            "child_frame_id, sample_count, duration_ns FROM call_edges WHERE "
-            + where
-            + f" AND {match_column} = ?"
-        )
         scope_digest = digest_model(
             {
                 "input_id": input_id,
@@ -269,12 +243,20 @@ class DrilldownService:
         page_where = ""
         page_parameters: tuple[object, ...] = ()
         if after_duration is not None and after_frame_id is not None:
-            page_where = (
-                " WHERE duration_ns < ? OR "
-                "(duration_ns = ? AND frame_id > ?)"
-            )
+            page_where = " WHERE duration_ns < ? OR (duration_ns = ? AND frame_id > ?)"
             page_parameters = (after_duration, after_duration, after_frame_id)
         with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+            scope = resolve_evidence_scope(snapshot, input_id)
+            where, parameters = scope.predicate(
+                run_column="run_id",
+                artifact_column="artifact_id",
+            )
+            base = (
+                "SELECT DISTINCT run_id, artifact_id, parent_frame_id, "
+                "child_frame_id, sample_count, duration_ns FROM call_edges WHERE "
+                + where
+                + f" AND {match_column} = ?"
+            )
             rows = snapshot.execute(
                 f"WITH scoped AS ({base}), grouped AS ({grouped}) "
                 "SELECT frame_id, sample_count, duration_ns FROM grouped"
@@ -283,8 +265,7 @@ class DrilldownService:
                 (*parameters, frame_id, *page_parameters, limit + 1),
             ).fetchall()
             count_row = snapshot.execute(
-                f"WITH scoped AS ({base}), grouped AS ({grouped}) "
-                "SELECT count(*) FROM grouped",
+                f"WITH scoped AS ({base}), grouped AS ({grouped}) SELECT count(*) FROM grouped",
                 (*parameters, frame_id),
             ).fetchone()
             if count_row is None:
@@ -373,28 +354,6 @@ class DrilldownService:
                 "Stack evidence references missing frame rows.",
                 details={"missing_frame_ids": sorted(missing)},
             )
-
-    def _scope(self, input_id: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        try:
-            run = RunStore(self.workspace).read(input_id)
-        except DomainError:
-            ArtifactStore(self.workspace).get(input_id)
-            return (), (input_id,)
-        return (run.run_id,), tuple(item.artifact_id for item in run.artifacts)
-
-    def _scope_where(
-        self,
-        run_ids: tuple[str, ...],
-        artifact_ids: tuple[str, ...],
-        *,
-        run_column: str,
-        artifact_column: str,
-    ) -> tuple[str, tuple[object, ...]]:
-        if run_ids:
-            placeholders = ", ".join("?" for _ in run_ids)
-            return f"{run_column} IN ({placeholders})", tuple(run_ids)
-        placeholders = ", ".join("?" for _ in artifact_ids)
-        return f"{artifact_column} IN ({placeholders})", tuple(artifact_ids)
 
     def _limit(self, value: int) -> int:
         maximum = self.workspace.config.analysis.max_row_limit

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import Field, model_validator
 
 from flamo.analysis import (
     ExecutionAnalysisResult,
@@ -14,17 +15,22 @@ from flamo.analysis import (
     RecipeService,
     ScalingAnalysisResult,
 )
-from flamo.application.analysis_rows import analysis_row
-from flamo.catalog import Catalog
+from flamo.application.analysis_provenance import (
+    AnalysisProvenanceInput,
+    build_analysis_provenance,
+    context_references,
+)
+from flamo.application.async_work import run_atomic_thread
+from flamo.catalog import Catalog, Snapshot
 from flamo.domain import (
     AnalysisRecord,
-    DomainError,
     EvidenceReference,
     digest_model,
-    new_id,
 )
 from flamo.evidence import GenerationPublisher
-from flamo.storage import ArtifactStore, GenerationManifest, RunStore, Workspace
+from flamo.evidence_scope import resolve_evidence_scope
+from flamo.models import ContractModel
+from flamo.storage import ArtifactStore, GenerationManifest, Workspace
 
 AnalysisRecipe = Literal[
     "hotspots",
@@ -44,30 +50,37 @@ AnalysisValue = (
 )
 
 
-class MaterializeAnalysisRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class MaterializeAnalysisRequest(ContractModel):
     recipe: AnalysisRecipe
     input_id: str | None = None
+    comparison_input_id: str | None = None
     experiment_id: str | None = None
     limit: int | None = Field(default=None, ge=1, le=1_000)
 
     @model_validator(mode="after")
     def validate_scope(self) -> MaterializeAnalysisRequest:
         if self.recipe == "scaling":
-            if self.experiment_id is None or self.input_id is not None:
+            if (
+                self.experiment_id is None
+                or self.input_id is not None
+                or self.comparison_input_id is not None
+            ):
                 raise ValueError("scaling requires only experiment_id")
         elif self.recipe == "failures":
-            if self.input_id is not None or self.experiment_id is not None:
+            if (
+                self.input_id is not None
+                or self.comparison_input_id is not None
+                or self.experiment_id is not None
+            ):
                 raise ValueError("failures uses the pinned corpus population")
         elif self.input_id is None or self.experiment_id is not None:
             raise ValueError(f"{self.recipe} requires only input_id")
+        elif self.comparison_input_id is not None and self.recipe != "execution":
+            raise ValueError("comparison_input_id is supported only by execution")
         return self
 
 
-class MaterializedAnalysisResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class MaterializedAnalysisResult(ContractModel):
     schema_version: int = 1
     result: AnalysisValue
     analysis: AnalysisRecord
@@ -78,17 +91,101 @@ class MaterializedAnalysisResult(BaseModel):
 class AnalysisMaterializationService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
-        self.recipes = RecipeService(workspace)
         self.publisher = GenerationPublisher(workspace)
 
     def record(
         self,
         request: MaterializeAnalysisRequest,
     ) -> MaterializedAnalysisResult:
+        corpus_commit_id = self.workspace.corpus.read_head().commit_id
         started = datetime.now(UTC)
-        result = self._run(request)
+        with Catalog(self.workspace).open_snapshot(corpus_commit_id) as snapshot:
+            result = self._run(
+                request,
+                recipes=RecipeService(self.workspace, snapshot=snapshot),
+            )
+            run_ids, artifact_ids, generation_ids = self._inputs(
+                request,
+                snapshot=snapshot,
+            )
         completed = datetime.now(UTC)
-        run_ids, artifact_ids, generation_ids = self._inputs(request)
+        return self._publish(
+            request,
+            result=result,
+            run_ids=run_ids,
+            artifact_ids=artifact_ids,
+            generation_ids=generation_ids,
+            started=started,
+            completed=completed,
+        )
+
+    async def record_async(
+        self,
+        request: MaterializeAnalysisRequest,
+        *,
+        progress: Callable[[float, float, str], Awaitable[None]] | None = None,
+    ) -> MaterializedAnalysisResult:
+        corpus_commit_id = self.workspace.corpus.read_head().commit_id
+        started = datetime.now(UTC)
+        if progress is not None:
+            await progress(0, 3, "Analysis snapshot pinned")
+
+        def prepare(
+            snapshot: Snapshot,
+        ) -> tuple[
+            AnalysisValue,
+            tuple[str, ...],
+            tuple[str, ...],
+            tuple[str, ...],
+        ]:
+            result = self._run(
+                request,
+                recipes=RecipeService(self.workspace, snapshot=snapshot),
+            )
+            run_ids, artifact_ids, generation_ids = self._inputs(
+                request,
+                snapshot=snapshot,
+            )
+            return result, run_ids, artifact_ids, generation_ids
+
+        result, run_ids, artifact_ids, generation_ids = await Catalog(
+            self.workspace
+        ).run_interruptible(
+            prepare,
+            commit_id=corpus_commit_id,
+            query_name=f"materialize.{request.recipe}",
+        )
+        if progress is not None:
+            await progress(1, 3, "Analysis query complete")
+        completed = datetime.now(UTC)
+        if progress is not None:
+            await progress(2, 3, "Publishing analysis provenance")
+        materialized = await run_atomic_thread(
+            lambda: self._publish(
+                request,
+                result=result,
+                run_ids=run_ids,
+                artifact_ids=artifact_ids,
+                generation_ids=generation_ids,
+                started=started,
+                completed=completed,
+            )
+        )
+        if progress is not None:
+            await progress(3, 3, "Analysis publication complete")
+        return materialized
+
+    def _publish(
+        self,
+        request: MaterializeAnalysisRequest,
+        *,
+        result: AnalysisValue,
+        run_ids: tuple[str, ...],
+        artifact_ids: tuple[str, ...],
+        generation_ids: tuple[str, ...],
+        started: datetime,
+        completed: datetime,
+    ) -> MaterializedAnalysisResult:
         parameters = request.model_dump(mode="json")
         coverage_value = getattr(result, "coverage", {})
         coverage = coverage_value if isinstance(coverage_value, dict) else {}
@@ -98,61 +195,28 @@ class AnalysisMaterializationService:
             if isinstance(limitations_value, tuple)
             else ()
         )
-        analysis = AnalysisRecord(
-            analysis_id=new_id(),
-            recipe=request.recipe,
-            recipe_version="1",
-            parameters=parameters,
-            parameters_digest=digest_model(parameters),
-            corpus_commit_id=result.corpus_commit_id,
-            input_generation_ids=generation_ids,
-            input_run_ids=run_ids,
-            input_artifact_ids=artifact_ids,
-            result_digest=digest_model(result.model_dump(mode="json")),
-            coverage=coverage,
-            limitations=limitations,
-            started_at=started,
-            completed_at=completed,
-        )
-        references = tuple(
-            [
-                EvidenceReference(
-                    owner_type="analysis",
-                    owner_id=analysis.analysis_id,
-                    ref_type="run",
-                    ref_id=run_id,
-                    relation="context",
-                )
-                for run_id in run_ids
-            ]
-            + [
-                EvidenceReference(
-                    owner_type="analysis",
-                    owner_id=analysis.analysis_id,
-                    ref_type="artifact",
-                    ref_id=artifact_id,
-                    relation="context",
-                )
-                for artifact_id in artifact_ids
-            ]
-            + [
-                EvidenceReference(
-                    owner_type="analysis",
-                    owner_id=analysis.analysis_id,
-                    ref_type="generation",
-                    ref_id=generation_id,
-                    relation="context",
-                )
-                for generation_id in generation_ids
-            ]
+        provenance = build_analysis_provenance(
+            AnalysisProvenanceInput(
+                recipe=request.recipe,
+                parameters=parameters,
+                corpus_commit_id=result.corpus_commit_id,
+                input_generation_ids=generation_ids,
+                input_run_ids=run_ids,
+                input_artifact_ids=artifact_ids,
+                result_digest=digest_model(result.model_dump(mode="json")),
+                coverage=coverage,
+                limitations=limitations,
+                started_at=started,
+                completed_at=completed,
+                references=context_references(
+                    run_ids=run_ids,
+                    artifact_ids=artifact_ids,
+                    generation_ids=generation_ids,
+                ),
+            )
         )
         published = self.publisher.publish_rows(
-            {
-                "analyses": [analysis_row(analysis)],
-                "evidence_refs": [
-                    reference.model_dump(mode="python") for reference in references
-                ],
-            },
+            provenance.rows(),
             publisher="flamo.analyses",
             publisher_version="1",
             input_run_ids=run_ids,
@@ -160,57 +224,78 @@ class AnalysisMaterializationService:
         )
         return MaterializedAnalysisResult(
             result=result,
-            analysis=analysis,
-            evidence=references,
+            analysis=provenance.analysis,
+            evidence=provenance.evidence,
             materialized_commit_id=published.commit.commit_id,
         )
 
-    def _run(self, request: MaterializeAnalysisRequest) -> AnalysisValue:
+    def _run(
+        self,
+        request: MaterializeAnalysisRequest,
+        *,
+        recipes: RecipeService,
+    ) -> AnalysisValue:
         if request.recipe == "hotspots":
             assert request.input_id is not None
-            return self.recipes.hotspots(request.input_id, limit=request.limit)
+            return recipes.hotspots(
+                request.input_id,
+                limit=request.limit,
+            )
         if request.recipe == "memory":
             assert request.input_id is not None
-            return self.recipes.memory(request.input_id, limit=request.limit)
+            return recipes.memory(
+                request.input_id,
+                limit=request.limit,
+            )
         if request.recipe == "execution":
             assert request.input_id is not None
-            return self.recipes.execution(request.input_id, limit=request.limit)
+            return recipes.execution(
+                request.input_id,
+                comparison_input_id=request.comparison_input_id,
+                limit=request.limit,
+            )
         if request.recipe == "pytorch":
             assert request.input_id is not None
-            return self.recipes.pytorch(request.input_id, limit=request.limit)
+            return recipes.pytorch(
+                request.input_id,
+                limit=request.limit,
+            )
         if request.recipe == "failures":
-            return self.recipes.failures(limit=request.limit)
+            return recipes.failures(
+                limit=request.limit,
+            )
         assert request.experiment_id is not None
-        return self.recipes.scaling(request.experiment_id)
+        return recipes.scaling(
+            request.experiment_id,
+        )
 
     def _inputs(
         self,
         request: MaterializeAnalysisRequest,
+        *,
+        snapshot: Snapshot,
     ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-        if request.input_id is not None:
-            try:
-                run = RunStore(self.workspace).read(request.input_id)
-            except DomainError:
-                artifact = ArtifactStore(self.workspace).get(request.input_id)
-                return (), (artifact.content.artifact_id,), ()
-            return (
-                (run.run_id,),
-                tuple(item.artifact_id for item in run.artifacts),
-                (),
-            )
+        input_ids = tuple(
+            value for value in (request.input_id, request.comparison_input_id) if value is not None
+        )
+        if input_ids:
+            scope = resolve_evidence_scope(snapshot, input_ids)
+            for artifact_id in (
+                value for value in input_ids if value.startswith("sha256:")
+            ):
+                ArtifactStore(self.workspace).get(artifact_id)
+            return scope.run_ids, scope.artifact_ids, ()
         if request.experiment_id is not None:
-            with Catalog(self.workspace).open_snapshot() as snapshot:
-                rows = snapshot.execute(
-                    "SELECT DISTINCT run_id FROM trials WHERE experiment_id = ? "
-                    "ORDER BY run_id",
-                    (request.experiment_id,),
-                ).fetchall()
+            rows = snapshot.execute(
+                "SELECT DISTINCT run_id FROM trials WHERE experiment_id = ? ORDER BY run_id",
+                (request.experiment_id,),
+            ).fetchall()
             return tuple(str(row[0]) for row in rows), (), ()
-        head = self.workspace.corpus.read_head()
+        commit = self.workspace.corpus.read_commit(snapshot.commit.commit_id)
         generations = tuple(
             GenerationManifest.model_validate_json(
                 (self.workspace.paths.root / path).read_text()
             ).generation_id
-            for path in head.generation_manifests
+            for path in commit.generation_manifests
         )
         return (), (), generations

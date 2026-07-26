@@ -44,6 +44,12 @@ def test_paired_comparison_uses_practical_interval(
     assert result.decision is expected
     assert result.validity is ComparisonValidity.VALID
     assert result.complete_pair_n == 3
+    assert result.estimand == "median_paired_log_ratio"
+    assert result.practical_threshold == 0.05
+    assert result.method == "scipy.bootstrap.bca.median_paired_log_ratio.v1"
+    assert result.independent_unit == "block"
+    assert result.paired
+    assert result.confidence_level == 0.95
 
 
 def test_incomplete_experiment_is_not_presented_as_valid() -> None:

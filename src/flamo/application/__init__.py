@@ -23,6 +23,7 @@ from flamo.application.comparisons import (
     ComparisonService,
     FreezeRunSetMember,
     FreezeRunSetRequest,
+    ProfileChange,
     RunSetService,
 )
 from flamo.application.drilldown import (
@@ -155,6 +156,7 @@ __all__ = [
     "NativeViewerLaunchResult",
     "NativeViewerPlan",
     "NativeViewerService",
+    "ProfileChange",
     "ProjectConfig",
     "QuarantineManifest",
     "QuarantineRestoreResult",

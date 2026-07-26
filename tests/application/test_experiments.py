@@ -15,7 +15,13 @@ from flamo.application import (
 )
 from flamo.catalog import Catalog
 from flamo.config import WorkspaceConfig
-from flamo.domain import ComparisonValidity, ExecutionStatus, TrialOutcome
+from flamo.domain import (
+    ComparisonValidity,
+    DomainError,
+    ErrorCode,
+    ExecutionStatus,
+    TrialOutcome,
+)
 from flamo.storage import RunStore, Workspace
 
 
@@ -98,7 +104,16 @@ random_seed = 1984
         adapter="pyperf",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    result = await service.run(plan.plan_id)
+    progress: list[tuple[float, float, str]] = []
+
+    async def record_progress(
+        completed: float,
+        total: float,
+        message: str,
+    ) -> None:
+        progress.append((completed, total, message))
+
+    result = await service.run(plan.plan_id, progress=record_progress)
 
     assert len(plan.blocks) == 1
     assert set(plan.blocks[0].order) == {"baseline", "candidate"}
@@ -118,6 +133,56 @@ random_seed = 1984
         "baseline",
         "candidate",
     }
+    assert [item[0] for item in progress] == list(range(7))
+    assert {item[1] for item in progress} == {6}
+    assert all(item[2] for item in progress)
+
+
+@pytest.mark.anyio
+async def test_experiment_plan_rejects_multiplicative_trial_explosion(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    scaling_values = ", ".join(str(value) for value in range(1_000))
+    (tmp_path / "flamo.toml").write_text(
+        f"""
+schema_version = 1
+
+[workloads.scan]
+argv = ["python", "-c", "print('{{variant}}', '{{length}}')"]
+cwd = "."
+
+[workloads.scan.parameters]
+variant = ["baseline", "candidate"]
+length = [{scaling_values}]
+
+[experiments.oversized]
+workload = "scan"
+variants = ["baseline", "candidate"]
+design = "randomized_complete_blocks"
+blocks = 1000
+scaling_parameter = "length"
+scaling_values = [{scaling_values}]
+primary_metric = "wall_time"
+polarity = "lower_is_better"
+estimand = "median_paired_log_ratio"
+practical_threshold = 0.01
+"""
+    )
+    investigation = InvestigationService(workspace).create(
+        CreateInvestigationRequest(question="Should an oversized plan be rejected?")
+    )
+
+    with pytest.raises(DomainError) as error:
+        await ExperimentService(workspace).plan(
+            experiment_name="oversized",
+            investigation_id=investigation.investigation_id,
+            adapter="command",
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
+
+    assert error.value.code is ErrorCode.QUERY_BUDGET_EXCEEDED
+    assert error.value.details["trial_count"] == 2_000_000
 
 
 @pytest.mark.anyio
@@ -125,10 +190,7 @@ async def test_cancelled_experiment_preserves_attempted_trial(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    (tmp_path / "wait.py").write_text(
-        "import time\n"
-        "time.sleep(30)\n"
-    )
+    (tmp_path / "wait.py").write_text("import time\ntime.sleep(30)\n")
     (tmp_path / "flamo.toml").write_text(
         """
 schema_version = 1
@@ -156,9 +218,7 @@ random_seed = 7
     )
     config = workspace.config.model_copy(
         update={
-            "execution": workspace.config.execution.model_copy(
-                update={"containment": "disabled"}
-            )
+            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
         }
     )
     workspace.paths.config.write_text(config.to_toml())
@@ -181,14 +241,12 @@ random_seed = 7
 
     with Catalog(workspace).open_snapshot() as snapshot:
         rows = snapshot.execute(
-            "SELECT DISTINCT run_id, outcome FROM trials "
-            "WHERE experiment_id = ?",
+            "SELECT DISTINCT run_id, outcome FROM trials WHERE experiment_id = ?",
             (plan.experiment.experiment_id,),
         ).fetchall()
         assert len(rows) == 1
         run_rows = snapshot.execute(
-            "SELECT execution_status FROM runs WHERE run_id = ? "
-            "ORDER BY published_at DESC LIMIT 1",
+            "SELECT execution_status FROM runs WHERE run_id = ? ORDER BY published_at DESC LIMIT 1",
             (str(rows[0][0]),),
         ).fetchall()
     assert rows[0][1] == "cancelled"
