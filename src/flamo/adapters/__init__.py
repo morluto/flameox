@@ -1,3 +1,11 @@
+from flamo.adapters.client_setup import (
+    ALL_SETUP_CLIENTS,
+    ClientConfigEdit,
+    ClientConfigRegistry,
+    ClientPlanAction,
+    Launcher,
+    SetupClient,
+)
 from flamo.adapters.coverage import CoverageExtractionResult, CoverageExtractor
 from flamo.adapters.memray import MemrayExtractionResult, MemrayExtractor
 from flamo.adapters.observations import (
@@ -17,14 +25,21 @@ from flamo.adapters.registry import (
     AdapterDiscoveryResult,
     AdapterRegistry,
 )
+from flamo.adapters.setup_runtime import ManagedRuntime, RuntimeInstallation
 
 __all__ = [
+    "ALL_SETUP_CLIENTS",
     "AdapterApproval",
     "AdapterDescriptor",
     "AdapterDiscoveryResult",
     "AdapterRegistry",
+    "ClientConfigEdit",
+    "ClientConfigRegistry",
+    "ClientPlanAction",
     "CoverageExtractionResult",
     "CoverageExtractor",
+    "Launcher",
+    "ManagedRuntime",
     "MemrayExtractionResult",
     "MemrayExtractor",
     "ObservationExtractionResult",
@@ -33,6 +48,8 @@ __all__ = [
     "PerfettoExtractor",
     "PyPerfExtractionResult",
     "PyPerfExtractor",
+    "RuntimeInstallation",
+    "SetupClient",
     "TraceEvent",
     "TraceWindowResult",
 ]

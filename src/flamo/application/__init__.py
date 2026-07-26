@@ -85,6 +85,16 @@ from flamo.application.recovery import (
     RecoveryService,
 )
 from flamo.application.repair import RepairEntry, RepairPlan, RepairResult, RepairService
+from flamo.application.setup import (
+    ClientSetupPlan,
+    ResolvedSetupPlan,
+    RuntimeAction,
+    SetupInspection,
+    SetupOperation,
+    SetupPlan,
+    SetupReport,
+    SetupService,
+)
 from flamo.application.status import WorkspaceStatus, workspace_status
 from flamo.application.viewers import (
     NativeViewerLaunchResult,
@@ -113,6 +123,7 @@ __all__ = [
     "CapturePlanRegistry",
     "CaptureResult",
     "CaptureService",
+    "ClientSetupPlan",
     "CompactionResult",
     "CompactionService",
     "CompareRunSetsRequest",
@@ -171,8 +182,15 @@ __all__ = [
     "RepairResult",
     "RepairService",
     "ResolvedOracle",
+    "ResolvedSetupPlan",
     "RunSetService",
+    "RuntimeAction",
     "Scalar",
+    "SetupInspection",
+    "SetupOperation",
+    "SetupPlan",
+    "SetupReport",
+    "SetupService",
     "StackExample",
     "StackExamplesResult",
     "TrashManifest",
