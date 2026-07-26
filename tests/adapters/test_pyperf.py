@@ -5,11 +5,11 @@ from pathlib import Path
 import pyperf
 import pytest
 
-from flamo.adapters import PyPerfExtractor
-from flamo.application import ImportArtifactRequest, ImportService
-from flamo.catalog import Catalog
-from flamo.domain import ArtifactKind, DomainError, ErrorCode
-from flamo.storage import Workspace
+from flameox.adapters import PyPerfExtractor
+from flameox.application import ImportArtifactRequest, ImportService
+from flameox.catalog import Catalog
+from flameox.domain import ArtifactKind, DomainError, ErrorCode
+from flameox.storage import Workspace
 
 
 def write_suite(path: Path) -> None:

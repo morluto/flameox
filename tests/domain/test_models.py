@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from flamo.domain import (
+from flameox.domain import (
     ArtifactKind,
     ArtifactRegistration,
     CaptureStatus,

@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from flamo.application.source import collect_source_state
-from flamo.domain import IdentityQuality
-from flamo.execution import SubprocessBroker
-from flamo.storage import Workspace
+from flameox.application.source import collect_source_state
+from flameox.domain import IdentityQuality
+from flameox.execution import SubprocessBroker
+from flameox.storage import Workspace
 
 
 def git(project: Path, *arguments: str) -> None:

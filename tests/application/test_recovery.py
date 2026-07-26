@@ -3,10 +3,10 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
-from flamo.analysis import RecipeService
-from flamo.application import RecoveryService
-from flamo.catalog import Catalog
-from flamo.domain import (
+from flameox.analysis import RecipeService
+from flameox.application import RecoveryService
+from flameox.catalog import Catalog
+from flameox.domain import (
     CaptureLease,
     CaptureStatus,
     ExecutionStatus,
@@ -14,8 +14,8 @@ from flamo.domain import (
     RunType,
     ValidationStatus,
 )
-from flamo.domain.models import utc_now
-from flamo.storage import RunStore, Workspace
+from flameox.domain.models import utc_now
+from flameox.storage import RunStore, Workspace
 
 DIGEST = "sha256:" + ("a" * 64)
 

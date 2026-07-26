@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from flamo.domain import (
+from flameox.domain import (
     CaptureStatus,
     DomainError,
     ErrorCode,
@@ -14,7 +14,7 @@ from flamo.domain import (
     RunType,
     ValidationStatus,
 )
-from flamo.storage import ArtifactStore, RunStore, Workspace
+from flameox.storage import ArtifactStore, RunStore, Workspace
 
 DIGEST = "sha256:" + ("a" * 64)
 

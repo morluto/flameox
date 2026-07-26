@@ -3,10 +3,10 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from flamo.cli import app
+from flameox.cli import app
 
 
-def test_help_lists_flamos_purpose() -> None:
+def test_help_lists_flameoxs_purpose() -> None:
     result = CliRunner().invoke(app, ["--help"])
 
     assert result.exit_code == 0

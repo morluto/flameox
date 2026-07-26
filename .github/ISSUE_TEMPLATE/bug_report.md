@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a bug in Flamo
+about: Report a bug in flameox
 title: ""
 labels: ["bug", "triage"]
 assignees: []
@@ -18,7 +18,7 @@ assignees: []
 
 ## Environment
 
-- Flamo version (`flamo --version`):
+- flameox version (`flameox --version`):
 - Python version (`python --version`):
 - OS:
 - MCP client (if applicable):

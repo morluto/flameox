@@ -1,10 +1,18 @@
 {
-  "name": "flamo",
-  "version": "0.1.0",
-  "description": "Bootstrap the local Flamo MCP setup wizard",
+  "name": "flameox",
+  "version": "0.1.1",
+  "description": "Bootstrap the local flameox MCP setup wizard",
+  "homepage": "https://github.com/morluto/flameox#readme",
+  "bugs": {
+    "url": "https://github.com/morluto/flameox/issues"
+  },
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/morluto/flameox.git"
+  },
   "bin": {
-    "flamo": "bin/flamo.cjs"
+    "flameox": "bin/flameox.cjs"
   },
   "files": [
     "bin",

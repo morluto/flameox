@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from flamo.adapters import ObservationExtractor
-from flamo.analysis import RecipeService
-from flamo.application import (
+from flameox.adapters import ObservationExtractor
+from flameox.analysis import RecipeService
+from flameox.application import (
     AnalysisMaterializationService,
     CaptureService,
     CompareRunSetsRequest,
@@ -22,8 +22,8 @@ from flamo.application import (
     RecordHypothesisRequest,
     RunSetService,
 )
-from flamo.domain import EvidenceLevel, FindingAssessment
-from flamo.storage import Workspace
+from flameox.domain import EvidenceLevel, FindingAssessment
+from flameox.storage import Workspace
 
 
 @pytest.mark.anyio
@@ -33,14 +33,14 @@ async def test_configuration_interaction_is_visible_as_semantic_evidence(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "policy.py").write_text(
         "import sys\n"
-        "from flamo.sdk import observe, phase\n"
+        "from flameox.sdk import observe, phase\n"
         "mode = sys.argv[1]\n"
         "with phase('ppo_epoch'):\n"
         "    observe('policy.old_log_prob_source', "
         "source='current_policy' if mode == 'bad' else 'frozen_policy')\n"
         "    observe('policy.clipping_enabled', value=mode != 'bad')\n"
     )
-    (tmp_path / "flamo.toml").write_text(
+    (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
 [workloads.policy]

@@ -12,12 +12,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from flamo.application import CompactionService
-from flamo.catalog import Catalog
-from flamo.domain import DomainError, ErrorCode
-from flamo.evidence import GenerationPublisher, schema_for
-from flamo.storage import CorpusCommit, Workspace
-from flamo.storage.atomic import atomic_write_json
+from flameox.application import CompactionService
+from flameox.catalog import Catalog
+from flameox.domain import DomainError, ErrorCode
+from flameox.evidence import GenerationPublisher, schema_for
+from flameox.storage import CorpusCommit, Workspace
+from flameox.storage.atomic import atomic_write_json
 
 DIGEST = "sha256:" + ("a" * 64)
 
@@ -263,7 +263,7 @@ def test_publication_crashes_before_head_never_expose_partial_generation(
             raise RuntimeError("simulated crash")
 
         monkeypatch.setattr(
-            "flamo.evidence.publisher.atomic_write_json",
+            "flameox.evidence.publisher.atomic_write_json",
             fail_after_manifest,
         )
     elif boundary in {"evidence_published", "manifest_published"}:
@@ -281,7 +281,7 @@ def test_publication_crashes_before_head_never_expose_partial_generation(
                 raise RuntimeError("simulated crash")
 
         monkeypatch.setattr(
-            "flamo.evidence.publisher.os.replace",
+            "flameox.evidence.publisher.os.replace",
             fail_after_move,
         )
     elif boundary == "commit_written":

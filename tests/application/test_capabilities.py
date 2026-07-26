@@ -5,11 +5,11 @@ from typing import Any, ClassVar
 
 import pytest
 
-from flamo.adapters import AdapterDiscoveryResult, AdapterRegistry
-from flamo.application import CapabilityService
-from flamo.domain import CapabilityStatus, DomainError, ErrorCode, ProcessResult
-from flamo.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
-from flamo.storage import Workspace
+from flameox.adapters import AdapterDiscoveryResult, AdapterRegistry
+from flameox.application import CapabilityService
+from flameox.domain import CapabilityStatus, DomainError, ErrorCode, ProcessResult
+from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
+from flameox.storage import Workspace
 
 
 class _ProbeBroker(SubprocessBroker):
@@ -86,11 +86,11 @@ def test_entry_point_approval_is_lazy_and_revoked_by_distribution_change(
 
     entry_point = FakeEntryPoint()
     monkeypatch.setattr(
-        "flamo.adapters.registry.entry_points",
+        "flameox.adapters.registry.entry_points",
         lambda *, group: (entry_point,),
     )
     monkeypatch.setattr(
-        "flamo.adapters.registry._distribution_identity",
+        "flameox.adapters.registry._distribution_identity",
         lambda distribution: f"identity:{distribution.version}",
     )
     registry = AdapterRegistry(workspace)
@@ -150,7 +150,7 @@ def test_entry_point_approval_is_revoked_when_installed_content_changes(
 
     entry_point = FakeEntryPoint()
     monkeypatch.setattr(
-        "flamo.adapters.registry.entry_points",
+        "flameox.adapters.registry.entry_points",
         lambda *, group: (entry_point,),
     )
     registry = AdapterRegistry(workspace)

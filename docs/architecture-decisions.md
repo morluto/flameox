@@ -2,9 +2,9 @@
 
 ## Versioned MCP setup runtimes
 
-Flamo's npm package is a bootstrap, not a second implementation or the runtime
-used by MCP clients. `npx flamo setup` launches the exactly matching
-`flamo-diagnostics` release through `uvx`. The Python setup service installs
+flameox's npm package is a bootstrap, not a second implementation or the runtime
+used by MCP clients. `npx flameox setup` launches the exactly matching
+`flameox` release through `uvx`. The Python setup service installs
 that release into a version-addressed user-data directory with
 `uv tool install --no-config --no-sources`, verifies both the CLI and an actual
 MCP stdio handshake, and only then changes client launchers.
@@ -19,25 +19,25 @@ JSON and TOML editing use maintained format libraries. TOML Kit preserves Codex
 configuration structure and comments. Standard JSON uses the Python standard
 library; OpenCode JSONC is edited by the npm package's `jsonc-parser` helper.
 The helper receives one bounded parse or nested-property-edit request over
-stdin. Flamo does not maintain a comment-preserving JSON parser.
+stdin. flameox does not maintain a comment-preserving JSON parser.
 
 The Python distribution is published before the npm bootstrap for a release.
 Both package manifests must carry the same version, which is enforced by a
 repository test. The Python artifact should be installable and pass the managed
 runtime handshake before its matching npm package is published; otherwise
-`npx flamo setup` would resolve a bootstrap whose required runtime does not yet
+`npx flameox setup` would resolve a bootstrap whose required runtime does not yet
 exist.
 
-These choices constrain Flamo's design and implementation. Revisit a settled
+These choices constrain flameox's design and implementation. Revisit a settled
 choice only with concrete implementation evidence and an explicit update to
 this page. Open questions stay here until implementation evidence supports a
 decision.
 
 ## Settled decisions
 
-The following choices are settled for Flamo:
+The following choices are settled for flameox:
 
-- Flamo is permanently local.
+- flameox is permanently local.
 - Python is the implementation language.
 - The MCP SDK is pinned to `mcp==2.0.0b2`.
 - stdio is the supported MCP transport.

@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from flamo.config import WorkspaceConfig
-from flamo.domain import DomainError, ErrorCode
-from flamo.storage import Workspace
+from flameox.config import WorkspaceConfig
+from flameox.domain import DomainError, ErrorCode
+from flameox.storage import Workspace
 
 
 def test_initialize_creates_static_identity_and_empty_corpus(tmp_path: Path) -> None:

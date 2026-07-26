@@ -2,13 +2,13 @@
 
 ## Product Direction
 
-Flamo is a permanently local evidence layer for coding agents investigating
+flameox is a permanently local evidence layer for coding agents investigating
 performance, memory, execution, concurrency, and reliability. It gives an agent
 a reproducible path from a runtime symptom to a conclusion that another person
 or agent can inspect and try to disprove.
 
 Existing profilers, benchmark tools, debuggers, and trace processors measure
-runtime behavior. Flamo coordinates those tools, preserves their native
+runtime behavior. flameox coordinates those tools, preserves their native
 artifacts and provenance, extracts bounded evidence, and compares runs and
 experiments. The agent forms hypotheses, chooses discriminating experiments,
 and explains the conclusion.
@@ -20,7 +20,7 @@ symptom → capture or import → bounded evidence → hypothesis
         → discriminating experiment → supported, refuted, or inconclusive finding
 ```
 
-Flamo is not a profiler, a generic bug finder, a hosted observability service,
+flameox is not a profiler, a generic bug finder, a hosted observability service,
 an unrestricted command or SQL gateway, or a source-code modification system.
 A feature belongs when it improves trustworthy collection, evidence
 preservation, cross-run analysis, experimental validity, or bounded agent
@@ -48,8 +48,8 @@ calling work complete, identify the relevant criteria in
 
 ## Project Structure & Module Organization
 
-Flamo is a Python 3.12+ package using a `src/` layout. Production code lives in
-`src/flamo/`: domain types and errors are in `domain/`, orchestration belongs in
+flameox is a Python 3.12+ package using a `src/` layout. Production code lives in
+`src/flameox/`: domain types and errors are in `domain/`, orchestration belongs in
 `application/`, persistence is in `storage/`, profiler integrations are in
 `adapters/`, and CLI/MCP entry points are in `cli.py` and `mcp/`. Tests mirror
 these boundaries under `tests/`, with additional `golden/`, `performance/`, and
@@ -76,7 +76,7 @@ Use `uv` and the committed `uv.lock`:
 
 ```console
 uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
-uv run flamo --help
+uv run flameox --help
 uv run pytest -q
 uv run ruff check src tests
 uv run mypy src tests
@@ -103,7 +103,7 @@ Pytest is configured with strict markers and configuration. Name files
 `test_<area>.py` and tests `test_<observable_behavior>`. Add regression tests
 near the affected component and prefer public behavior over assertions about
 private implementation. Use Hypothesis where invariants or input ranges matter.
-Coverage tracks branches in `flamo`; no fixed percentage is declared, but new
+Coverage tracks branches in `flameox`; no fixed percentage is declared, but new
 behavior should include meaningful success and failure-path coverage.
 
 ## Commit & Pull Request Guidelines

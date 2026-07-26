@@ -123,7 +123,7 @@ Cross-process catalog coordination uses the shared/exclusive catalog lock.
 
 ### Local does not mean harmless
 
-The MCP host may be controlled by an agent. Flamo must not turn a diagnostic
+The MCP host may be controlled by an agent. flameox must not turn a diagnostic
 tool into unrestricted command, filesystem, or secret access.
 
 The default threat model protects against malformed inputs, accidental
@@ -131,7 +131,7 @@ confused-deputy behavior, stale plans, symlink races, resource exhaustion, and
 untrusted artifact contents. A named workload is still arbitrary same-user
 code. Without an active containment backend it can read the user's accessible
 files, mutate the project or `.diagnostics`, access inherited credentials, and
-use the network. Flamo reports that boundary honestly rather than calling a
+use the network. flameox reports that boundary honestly rather than calling a
 named workload safe.
 
 ### Command execution
@@ -140,7 +140,7 @@ named workload safe.
 - Never invoke a shell.
 - Resolve executables through a documented policy.
 - By default, allow MCP execution only for named workloads declared in
-  `flamo.toml` and approved through the CLI by canonical definition hash.
+  `flameox.toml` and approved through the CLI by canonical definition hash.
 - Do not expose ad-hoc argument-array planning through MCP.
 - Bind MCP execution to the single-use plan invariants in [the MCP execution contract](interfaces.md#mcp-server-specification).
 - Restrict working directories to configured roots.
@@ -191,7 +191,7 @@ before or while consuming input. Publication checks remaining free space.
 
 ### DuckDB
 
-Raw SQL is absent from both Flamo interfaces. Internal connections use the
+Raw SQL is absent from both flameox interfaces. Internal connections use the
 allowlisted-path, locked-configuration, extension, attachment, secret, memory,
 thread, and temporary-file restrictions in [the DuckDB contract](storage-and-evidence.md#duckdb-catalog). Parameterized query APIs
 select from known views only.
@@ -207,7 +207,7 @@ disabled.
 
 ### Network behavior
 
-The Flamo control process performs no network calls during capture or analysis.
+The flameox control process performs no network calls during capture or analysis.
 Capability remediation may print installation documentation but does not fetch
 it. Symbol-server or debuginfod access is disabled unless explicitly enabled
 in local configuration and invoked through the CLI. Child workloads may use
@@ -227,7 +227,7 @@ it.
 
 ### Validation levels
 
-`flamo validate` supports:
+`flameox validate` supports:
 
 - `quick`: manifests, referenced paths, schemas, and sizes;
 - `standard`: quick plus Parquet reads and catalog consistency;
@@ -265,9 +265,9 @@ destructive CLI action after the recovery window. MCP does not expose either.
 Corpus commits referenced by an analysis, comparison, finding, or run set are
 retention roots and cannot be pruned while that record remains active.
 
-## Observability of Flamo itself
+## Observability of flameox itself
 
-Flamo writes structured local logs containing:
+flameox writes structured local logs containing:
 
 - operation ID;
 - run ID when applicable;
@@ -282,7 +282,7 @@ Flamo writes structured local logs containing:
 Logs must not contain raw environment dumps, core contents, or unrestricted
 stdout/stderr.
 
-`flamo status` reports:
+`flameox status` reports:
 
 - workspace and catalog validity;
 - storage by artifact kind;

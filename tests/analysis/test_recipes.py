@@ -6,11 +6,11 @@ from typing import NoReturn
 
 import pytest
 
-from flamo.analysis import RecipeService
-from flamo.catalog import Catalog
-from flamo.domain import DomainError, ErrorCode
-from flamo.evidence import GenerationPublisher
-from flamo.storage import Workspace
+from flameox.analysis import RecipeService
+from flameox.catalog import Catalog
+from flameox.domain import DomainError, ErrorCode
+from flameox.evidence import GenerationPublisher
+from flameox.storage import Workspace
 
 
 def _run_row(run_id: str) -> dict[str, object]:

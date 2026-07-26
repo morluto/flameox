@@ -7,14 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from flamo.application import (
+from flameox.application import (
     ImportArtifactRequest,
     ImportService,
     QuarantineService,
     RepairService,
 )
-from flamo.domain import DomainError, ErrorCode
-from flamo.storage import RunStore, Workspace
+from flameox.domain import DomainError, ErrorCode
+from flameox.storage import RunStore, Workspace
 
 
 def test_repair_quarantines_invalid_projection_and_rebuilds_from_revision(
@@ -88,7 +88,7 @@ def test_quarantine_resume_completes_crash_after_manifest_publication(
         real_replace(move_source, destination)
 
     monkeypatch.setattr(
-        "flamo.application.recoverable_move.os.replace",
+        "flameox.application.recoverable_move.os.replace",
         fail_move,
     )
     with pytest.raises(OSError, match="simulated crash"):
@@ -99,7 +99,7 @@ def test_quarantine_resume_completes_crash_after_manifest_publication(
         )
     (manifest,) = QuarantineService(workspace).list_manifests()
 
-    monkeypatch.setattr("flamo.application.recoverable_move.os.replace", real_replace)
+    monkeypatch.setattr("flameox.application.recoverable_move.os.replace", real_replace)
     resumed = QuarantineService(workspace).resume(manifest.quarantine_id)
 
     assert resumed.state == "quarantined"
@@ -188,7 +188,7 @@ def test_quarantine_resume_revalidates_content_after_interrupted_move(
         real_replace(move_source, destination)
 
     monkeypatch.setattr(
-        "flamo.application.recoverable_move.os.replace",
+        "flameox.application.recoverable_move.os.replace",
         fail_move,
     )
     with pytest.raises(OSError, match="simulated crash"):
@@ -199,7 +199,7 @@ def test_quarantine_resume_revalidates_content_after_interrupted_move(
         )
     (manifest,) = QuarantineService(workspace).list_manifests()
     source.write_bytes(b"changed")
-    monkeypatch.setattr("flamo.application.recoverable_move.os.replace", real_replace)
+    monkeypatch.setattr("flameox.application.recoverable_move.os.replace", real_replace)
 
     with pytest.raises(DomainError) as error:
         QuarantineService(workspace).resume(manifest.quarantine_id)
@@ -229,13 +229,13 @@ def test_quarantine_resume_completes_interrupted_restore(
             raise OSError("injected restore crash")
 
     monkeypatch.setattr(
-        "flamo.application.recoverable_move.os.replace",
+        "flameox.application.recoverable_move.os.replace",
         fail_after_move,
     )
     with pytest.raises(OSError, match="injected restore crash"):
         service.restore(quarantined.quarantine_id)
 
-    monkeypatch.setattr("flamo.application.recoverable_move.os.replace", real_replace)
+    monkeypatch.setattr("flameox.application.recoverable_move.os.replace", real_replace)
     assert service.moving_manifests() == (quarantined.quarantine_id,)
     manifest = service.resume(quarantined.quarantine_id)
 

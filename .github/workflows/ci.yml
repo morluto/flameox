@@ -65,7 +65,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --extra dev
-      - run: uv run vulture src/flamo --min-confidence 80
+      - run: uv run vulture src/flameox --min-confidence 80
 
   import-boundaries:
     name: Import Boundaries
@@ -145,7 +145,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
-      - run: uv run flamo --help
+      - run: uv run flameox --help
       - run: uv run ruff check src tests
       - run: uv run mypy src tests
       - run: uv run pytest --collect-only -q

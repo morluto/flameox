@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from flamo.analysis import RecipeService
-from flamo.application import (
+from flameox.analysis import RecipeService
+from flameox.application import (
     AnalysisMaterializationService,
     CaptureService,
     CreateInvestigationRequest,
@@ -19,7 +19,7 @@ from flamo.application import (
     RecordFindingRequest,
     RecordHypothesisRequest,
 )
-from flamo.domain import (
+from flameox.domain import (
     ComparisonDecision,
     ComparisonValidity,
     EvidenceLevel,
@@ -27,7 +27,7 @@ from flamo.domain import (
     FindingAssessment,
     ValidationStatus,
 )
-from flamo.storage import Workspace
+from flameox.storage import Workspace
 
 
 def git(project: Path, *arguments: str) -> None:
@@ -68,7 +68,7 @@ async def test_reverse_scan_investigation_proves_candidate_with_oracle(
         "expected = length * (length - 1) // 2\n"
         "assert actual == expected, (actual, expected)\n"
     )
-    (tmp_path / "flamo.toml").write_text(
+    (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
 [workloads.reverse_scan]
@@ -102,7 +102,7 @@ random_seed = 1984
     git(tmp_path, "init")
     git(tmp_path, "config", "user.email", "test@example.invalid")
     git(tmp_path, "config", "user.name", "Test")
-    git(tmp_path, "add", "scan.py", "validate.py", "flamo.toml")
+    git(tmp_path, "add", "scan.py", "validate.py", "flameox.toml")
     git(tmp_path, "commit", "-m", "golden fixture")
     workspace = Workspace.initialize(tmp_path)
     config = workspace.config.model_copy(

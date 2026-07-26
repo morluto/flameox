@@ -4,15 +4,15 @@ from pathlib import Path
 
 import pytest
 
-from flamo.application import (
+from flameox.application import (
     ArtifactService,
     ImportArtifactRequest,
     ImportService,
     NativeViewerService,
 )
-from flamo.catalog import Catalog
-from flamo.domain import Sensitivity
-from flamo.storage import Workspace
+from flameox.catalog import Catalog
+from flameox.domain import Sensitivity
+from flameox.storage import Workspace
 
 
 def test_artifact_metadata_keeps_registrations_and_max_sensitivity(
@@ -51,7 +51,7 @@ def test_native_viewer_plan_is_read_only_and_uses_content_path(
     source.write_bytes(b"profile")
     imported = ImportService(workspace).import_artifact(ImportArtifactRequest(path=source))
     monkeypatch.setattr(
-        "flamo.application.viewers.shutil.which",
+        "flameox.application.viewers.shutil.which",
         lambda _: "/usr/bin/xdg-open",
     )
 

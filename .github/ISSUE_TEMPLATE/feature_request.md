@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Propose an enhancement for Flamo
+about: Propose an enhancement for flameox
 title: ""
 labels: ["enhancement", "triage"]
 assignees: []

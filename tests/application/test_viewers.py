@@ -4,14 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from flamo.application import (
+from flameox.application import (
     ImportArtifactRequest,
     ImportService,
     NativeViewerService,
 )
-from flamo.catalog import Catalog
-from flamo.domain import ArtifactKind, Sensitivity
-from flamo.storage import Workspace
+from flameox.catalog import Catalog
+from flameox.domain import ArtifactKind, Sensitivity
+from flameox.storage import Workspace
 
 
 def test_benchmark_artifact_uses_pyperf_viewer(tmp_path: Path) -> None:
@@ -54,7 +54,7 @@ def test_every_supported_native_kind_dispatches_to_ecosystem_viewer(
     executable.write_text("#!/bin/sh\nexit 0\n")
     executable.chmod(0o700)
     monkeypatch.setattr(
-        "flamo.application.viewers.shutil.which",
+        "flameox.application.viewers.shutil.which",
         lambda _name: str(executable),
     )
     artifact_path = tmp_path / f"{kind.value}.bin"
@@ -85,7 +85,7 @@ async def test_explicit_viewer_launch_uses_bounded_subprocess_broker(
     executable.write_text("#!/bin/sh\nexit 0\n")
     executable.chmod(0o700)
     monkeypatch.setattr(
-        "flamo.application.viewers.shutil.which",
+        "flameox.application.viewers.shutil.which",
         lambda _name: str(executable),
     )
     artifact_path = tmp_path / "metadata.bin"

@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from flamo.application import CompactionService, workspace_status
-from flamo.catalog import Catalog
-from flamo.evidence import GenerationPublisher
-from flamo.storage import ArtifactStore, Workspace
+from flameox.application import CompactionService, workspace_status
+from flameox.catalog import Catalog
+from flameox.evidence import GenerationPublisher
+from flameox.storage import ArtifactStore, Workspace
 
 
 def _run_row(index: int) -> dict[str, object]:
@@ -71,8 +71,8 @@ def _measurement_row(index: int) -> dict[str, object]:
             15.0,
             5.0,
             marks=pytest.mark.skipif(
-                os.environ.get("FLAMO_RUN_PERFORMANCE") != "1",
-                reason="set FLAMO_RUN_PERFORMANCE=1 for the 100k acceptance check",
+                os.environ.get("FLAMEOX_RUN_PERFORMANCE") != "1",
+                reason="set FLAMEOX_RUN_PERFORMANCE=1 for the 100k acceptance check",
             ),
         ),
     ),

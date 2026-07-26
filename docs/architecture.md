@@ -1,6 +1,6 @@
 # Architecture
 
-This document explains Flamo's process model, package boundaries, dependencies,
+This document explains flameox's process model, package boundaries, dependencies,
 and platform policy. Data contracts live in
 [Storage and evidence](storage-and-evidence.md); runtime invariants live in
 [Runtime safety](runtime-safety.md). Choices that constrain future changes are
@@ -8,7 +8,7 @@ recorded in [Architectural decisions](architecture-decisions.md).
 
 ## System overview
 
-Flamo is a permanently local command-line application and Model Context
+flameox is a permanently local command-line application and Model Context
 Protocol server that helps coding agents investigate runtime behavior. It does
 not attempt to replace profilers, debuggers, benchmark harnesses, or tracing
 systems. It coordinates those tools, preserves their native artifacts, extracts
@@ -26,7 +26,7 @@ The product exists to make investigations like the following repeatable:
 - analyze a population of crashes or profiles without forcing them into one
   root-cause narrative.
 
-Flamo is not a generic AI bug finder. It is an evidence system for agents.
+flameox is not a generic AI bug finder. It is an evidence system for agents.
 Deterministic collectors and query engines establish what happened. The agent
 uses that evidence to form hypotheses, choose discriminating experiments, and
 explain conclusions.
@@ -51,7 +51,7 @@ normalized Parquet evidence
 DuckDB
   pinned corpus snapshots · comparisons · scaling · cohorts · findings
        │
-       ├──────────────► `flamo` CLI
+       ├──────────────► `flameox` CLI
        └──────────────► local MCP server
 ```
 
@@ -63,7 +63,7 @@ reproducible caches. There is no PostgreSQL service and no SQLite application
 database.
 
 The unit of execution is a run. The unit of experimental reasoning is not.
-Flamo models an investigation containing hypotheses and experiments; each
+flameox models an investigation containing hypotheses and experiments; each
 experiment contains variants and attempted trials, and each trial references
 one run. This preserves randomized blocks, repetitions, input grids, failed or
 timed-out attempts, validation outcomes, and the distinction between an
@@ -92,21 +92,21 @@ An inferred claim must never be represented as an observed fact.
 ### Comparisons are valid only under declared conditions
 
 Every comparison reports the environment and workload fields that match, differ,
-or are unknown. Flamo may refuse a comparison when a mismatch invalidates the
+or are unknown. flameox may refuse a comparison when a mismatch invalidates the
 claim. `--force` can display an exploratory comparison but cannot relabel it
 valid.
 
 ### Task-shaped APIs
 
 Agents should call `compare_run_sets` or `analyze_scaling`, not construct
-arbitrary SQL. Internally, Flamo uses reviewed parameterized SQL and
+arbitrary SQL. Internally, flameox uses reviewed parameterized SQL and
 collector-specific queries. This keeps results compact and prevents DuckDB
 features from becoming an unintended local file-access or code-execution
 interface.
 
 ### Rebuildable derived state
 
-Deleting `catalog.duckdb` must not delete evidence. `flamo catalog rebuild`
+Deleting `catalog.duckdb` must not delete evidence. `flameox catalog rebuild`
 recreates it from immutable manifests and Parquet partitions.
 
 ### Capture outside the write lock
@@ -118,7 +118,7 @@ short-lived workspace write lock.
 ### No silent fallback
 
 If native stacks, GPU events, symbols, shapes, or memory records were requested
-but unavailable, the result states that explicitly. Flamo must not silently
+but unavailable, the result states that explicitly. flameox must not silently
 substitute a weaker collector and present the result as equivalent.
 
 ### Experimental structure is evidence
@@ -139,7 +139,7 @@ corpus `HEAD`.
 
 ### Safe composition over custom infrastructure
 
-Flamo prefers maintained public interfaces: Perfetto Trace Processor for
+flameox prefers maintained public interfaces: Perfetto Trace Processor for
 supported trace and profile formats, PyArrow datasets for Parquet publication,
 DuckDB for analytical SQL, pyperf for benchmark collection, SciPy for declared
 bootstrap calculations, and collector-supported readers for native artifacts.
@@ -150,7 +150,7 @@ Private APIs and parsing human-readable reports are not product contracts.
 ### Package boundaries
 
 ```text
-src/flamo/
+src/flameox/
 ├── domain/                  # contracts and invariants
 ├── application/             # transport-independent use cases
 ├── investigations/          # hypotheses, experiments, variants, and trials
@@ -192,7 +192,7 @@ MCP ─┘          │                 ▲
                 └─► analysis ─────┘
 ```
 
-`flamo.domain` must not import `mcp`, `typer`, DuckDB, Perfetto, PyTorch, or
+`flameox.domain` must not import `mcp`, `typer`, DuckDB, Perfetto, PyTorch, or
 collector packages. Domain models are ordinary Pydantic models and enums.
 
 ### Process model
@@ -207,12 +207,12 @@ execution-time revalidation.
 
 Collectors run as child processes or explicitly selected in-process adapters.
 External commands are always executed as argument arrays with `shell=False`.
-On Linux, Flamo uses a cgroup v2 or systemd scope when available so cancellation,
+On Linux, flameox uses a cgroup v2 or systemd scope when available so cancellation,
 timeouts, and resource limits apply to descendants even if they create a new
 process group. A process-group fallback is reported as degraded containment,
 not as an equivalent guarantee.
 
-`flamo.execution` owns subprocess creation through
+`flameox.execution` owns subprocess creation through
 `asyncio.create_subprocess_exec` behind a single broker. Collectors, validators,
 active capability probes, symbolizers, Perfetto, viewers, and extractor workers
 must use that broker; adapters do not call subprocess APIs directly. This gives
@@ -244,7 +244,7 @@ Required:
 - structured logging using the standard library or a minimal compatible layer.
 
 The MCP beta pin is intentional. It must remain exact until a deliberate SDK
-upgrade is validated. All SDK imports and conversions live under `flamo.mcp`.
+upgrade is validated. All SDK imports and conversions live under `flameox.mcp`.
 The domain service API must be testable without importing MCP.
 
 The project uses the v2 `MCPServer` API, not the v1
@@ -254,12 +254,12 @@ declared in `pyproject.toml`, and the resolved beta is committed in `uv.lock`.
 Optional extras group collector dependencies:
 
 ```text
-flamo[python]       pyperf and Python profiling integrations
-flamo[memory]       Memray integration
-flamo[torch]        in-process PyTorch integration
-flamo[stats]        SciPy and optional statsmodels analyses
-flamo[dev]          test, lint, type-check, and fixture tooling
-flamo[all]          all non-vendor optional integrations
+flameox[python]       pyperf and Python profiling integrations
+flameox[memory]       Memray integration
+flameox[torch]        in-process PyTorch integration
+flameox[stats]        SciPy and optional statsmodels analyses
+flameox[dev]          test, lint, type-check, and fixture tooling
+flameox[all]          all non-vendor optional integrations
 ```
 
 System executables such as `perf`, `py-spy`, `trace_processor_shell`,
@@ -364,5 +364,5 @@ The design intentionally builds on:
   [official Python MCP SDK v2.0.0b2](https://github.com/modelcontextprotocol/python-sdk/tree/v2.0.0b2)
   for the local protocol adapter.
 
-These projects remain separate dependencies or installed tools. Flamo's value
+These projects remain separate dependencies or installed tools. flameox's value
 is the evidence lifecycle and investigation workflow that connects them.

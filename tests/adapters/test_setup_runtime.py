@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from flamo.adapters import ManagedRuntime
+from flameox.adapters import ManagedRuntime
 
 
 class RecordingRuntime(ManagedRuntime):
@@ -38,12 +38,12 @@ async def test_runtime_install_uses_an_exact_isolated_uv_tool_environment(
         recorded_environment.update(environment)
         bin_directory = Path(environment["UV_TOOL_BIN_DIR"])
         bin_directory.mkdir(parents=True)
-        (bin_directory / ("flamo.exe" if os.name == "nt" else "flamo")).write_text("")
+        (bin_directory / ("flameox.exe" if os.name == "nt" else "flameox")).write_text("")
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", install)
 
-    result = await runtime.install("0.1.0")
+    result = await runtime.install("0.1.1")
 
     assert recorded_command == [
         "uv",
@@ -52,14 +52,16 @@ async def test_runtime_install_uses_an_exact_isolated_uv_tool_environment(
         "--force",
         "--no-config",
         "--no-sources",
+        "--prerelease",
+        "allow",
         "--python",
         "3.12",
-        "flamo-diagnostics==0.1.0",
+        "flameox==0.1.1",
     ]
-    assert recorded_environment["UV_TOOL_DIR"] == str(tmp_path / "runtimes" / "0.1.0" / "tools")
+    assert recorded_environment["UV_TOOL_DIR"] == str(tmp_path / "runtimes" / "0.1.1" / "tools")
     assert result.installed is True
     assert runtime.verified == [result.executable]
-    assert runtime.installed_versions() == ("0.1.0",)
+    assert runtime.installed_versions() == ("0.1.1",)
 
 
 def test_installed_version_discovery_ignores_unmanaged_directories(tmp_path: Path) -> None:

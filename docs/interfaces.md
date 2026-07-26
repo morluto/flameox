@@ -2,12 +2,12 @@
 
 ## Local client setup
 
-`npx flamo setup` is the supported interactive path for connecting local MCP
+`npx flameox setup` is the supported interactive path for connecting local MCP
 clients. The npm package and Python distribution share an exact release
 version. npm supplies a thin launcher and the upstream `jsonc-parser` editor;
 the Python application service owns discovery, planning, runtime installation,
 verification, locking, activation, rollback, and structured results. The same
-setup service is available from `flamo setup` for standard JSON and TOML
+setup service is available from `flameox setup` for standard JSON and TOML
 clients.
 
 The first run requires an explicit multi-select. Detection annotates choices
@@ -19,7 +19,7 @@ without mutation.
 
 Client launchers contain the absolute path of a verified managed runtime and
 the fixed arguments `mcp serve --project-root .`. Setup never passes `--init`.
-Each MCP client therefore binds Flamo's project root to the client's launch
+Each MCP client therefore binds flameox's project root to the client's launch
 directory and encounters an ordinary `WORKSPACE_NOT_FOUND` until the user
 initializes that repository deliberately.
 
@@ -44,7 +44,7 @@ provenance, and error semantics belong to the shared application layer.
 
 ### General behavior
 
-The executable is `flamo`. Commands produce readable terminal output by
+The executable is `flameox`. Commands produce readable terminal output by
 default and structured JSON with `--json`. CLI JSON is the domain result model;
 MCP wraps that same model in its transport envelope.
 
@@ -75,12 +75,12 @@ Exit codes:
 ### Workspace commands
 
 ```text
-flamo init
-flamo status
-flamo capabilities [--refresh]
-flamo config show
-flamo validate
-flamo workload approve <name>
+flameox init
+flameox status
+flameox capabilities [--refresh]
+flameox config show
+flameox validate
+flameox workload approve <name>
 ```
 
 `init` creates only local files and never installs collectors. `capabilities`
@@ -90,9 +90,9 @@ commands.
 ### Capture commands
 
 ```text
-flamo capture plan <adapter> [options] -- <argv...>
-flamo capture run <adapter> [options] -- <argv...>
-flamo import <path> [--kind KIND]
+flameox capture plan <adapter> [options] -- <argv...>
+flameox capture run <adapter> [options] -- <argv...>
+flameox import <path> [--kind KIND]
 ```
 
 `capture plan` is side-effect free. `capture run` prints the plan before
@@ -102,50 +102,50 @@ Every import creates a new import run.
 ### Workload commands
 
 ```text
-flamo workload list
-flamo workload show <name>
-flamo workload run <name> [parameter overrides]
-flamo investigations create <structured-input>
-flamo investigations list [filters]
-flamo investigations show <investigation-id>
-flamo hypotheses record <structured-input>
-flamo hypotheses show <hypothesis-id>
-flamo experiment plan <name> [parameter overrides]
-flamo experiment run <name> [parameter overrides]
-flamo experiment show <experiment-id>
+flameox workload list
+flameox workload show <name>
+flameox workload run <name> [parameter overrides]
+flameox investigations create <structured-input>
+flameox investigations list [filters]
+flameox investigations show <investigation-id>
+flameox hypotheses record <structured-input>
+flameox hypotheses show <hypothesis-id>
+flameox experiment plan <name> [parameter overrides]
+flameox experiment run <name> [parameter overrides]
+flameox experiment show <experiment-id>
 ```
 
 ### Analysis commands
 
 ```text
-flamo analyze hotspots <run-or-artifact>
-flamo analyze scaling <experiment-or-run-set>
-flamo analyze compare <baseline-run-set> <candidate-run-set>
-flamo analyze pytorch <run-or-artifact>
-flamo analyze memory <run-or-artifact>
-flamo analyze execution <run-or-artifact> [--compare RUN]
-flamo analyze failures [filters]
-flamo analyze record <structured-input>
-flamo analyze record-comparison <structured-input>
+flameox analyze hotspots <run-or-artifact>
+flameox analyze scaling <experiment-or-run-set>
+flameox analyze compare <baseline-run-set> <candidate-run-set>
+flameox analyze pytorch <run-or-artifact>
+flameox analyze memory <run-or-artifact>
+flameox analyze execution <run-or-artifact> [--compare RUN]
+flameox analyze failures [filters]
+flameox analyze record <structured-input>
+flameox analyze record-comparison <structured-input>
 ```
 
 ### Evidence commands
 
 ```text
-flamo runs list [filters]
-flamo runs show <run-id>
-flamo artifacts list [filters]
-flamo artifacts show <artifact-id>
-flamo findings list [filters]
-flamo findings show <finding-id>
-flamo findings record <structured-input>
-flamo evidence get <typed-reference>
-flamo measurements query [curated filters]
-flamo stacks callers <run-or-artifact> <frame-id>
-flamo stacks callees <run-or-artifact> <frame-id>
-flamo stacks examples <run-or-artifact> <frame-id>
-flamo trace window <artifact-id> --start NS --end NS
-flamo open <artifact-id>
+flameox runs list [filters]
+flameox runs show <run-id>
+flameox artifacts list [filters]
+flameox artifacts show <artifact-id>
+flameox findings list [filters]
+flameox findings show <finding-id>
+flameox findings record <structured-input>
+flameox evidence get <typed-reference>
+flameox measurements query [curated filters]
+flameox stacks callers <run-or-artifact> <frame-id>
+flameox stacks callees <run-or-artifact> <frame-id>
+flameox stacks examples <run-or-artifact> <frame-id>
+flameox trace window <artifact-id> --start NS --end NS
+flameox open <artifact-id>
 ```
 
 Drill-down commands are bounded and use reviewed query families. They report
@@ -153,17 +153,17 @@ total and returned counts, truncation, coverage, and stable keyset cursors.
 There is no arbitrary SQL or free-form PerfettoSQL command.
 
 `open` prints the appropriate installed viewer command by default.
-`flamo open --launch` executes it explicitly. It never launches a browser when
+`flameox open --launch` executes it explicitly. It never launches a browser when
 `--json` is active.
 
 ### Catalog and recovery
 
 ```text
-flamo catalog validate
-flamo catalog rebuild
-flamo recover [--quarantine QUARANTINE_ID]
-flamo repair [PLAN.json]
-flamo gc [--dry-run | --apply | --purge TRASH_MANIFEST | --restore TRASH_MANIFEST]
+flameox catalog validate
+flameox catalog rebuild
+flameox recover [--quarantine QUARANTINE_ID]
+flameox repair [PLAN.json]
+flameox gc [--dry-run | --apply | --purge TRASH_MANIFEST | --restore TRASH_MANIFEST]
 ```
 
 Garbage collection is always dry-run by default. Apply may move only eligible
@@ -175,8 +175,8 @@ manifest.
 ### MCP
 
 ```text
-flamo mcp serve [--init]
-flamo mcp inspect
+flameox mcp serve [--init]
+flameox mcp inspect
 ```
 
 `serve` uses stdio exclusively. `--init` performs the additive workspace
@@ -211,7 +211,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp_types import CallToolResult, TextContent, ToolAnnotations
 
-server = MCPServer("flamo", lifespan=flamo_lifespan)
+server = MCPServer("flameox", lifespan=flameox_lifespan)
 
 
 @server.tool(
@@ -251,7 +251,7 @@ duplicates them into text and structured content; uncaught domain exceptions
 are forbidden because their structured detail is lost.
 
 The concrete v2 SDK context, annotations, content blocks, and lifespan types are
-confined to `flamo.mcp`. The server calls synchronous `server.run()` for stdio.
+confined to `flameox.mcp`. The server calls synchronous `server.run()` for stdio.
 It does not depend on experimental MCP background-task APIs.
 
 ### Tool design
@@ -277,7 +277,7 @@ registration supplies explicit `ToolAnnotations`.
   `idempotent_hint=False`, `open_world_hint=True`, because an uncontained
   workload may modify files or use the network.
 
-`flamo mcp inspect --json` returns the exact installed schemas and annotations.
+`flameox mcp inspect --json` returns the exact installed schemas and annotations.
 The supported tools are grouped as follows:
 
 | Family | Tools |
@@ -295,7 +295,7 @@ The supported tools are grouped as follows:
 
 Additive and idempotent. Initializes only the MCP server's fixed project root.
 It cannot select an external path or approve workloads. Hosts may instead start
-the server using `flamo mcp serve --init`.
+the server using `flameox mcp serve --init`.
 
 #### `workspace_status`
 
@@ -439,13 +439,13 @@ repair command; MCP never repairs.
 Resources provide stable, bounded representations:
 
 ```text
-flamo://runs/{run_id}
-flamo://artifacts/{artifact_id}
-flamo://findings/{finding_id}
-flamo://investigations/{investigation_id}
-flamo://hypotheses/{hypothesis_id}
-flamo://experiments/{experiment_id}
-flamo://run-sets/{run_set_id}
+flameox://runs/{run_id}
+flameox://artifacts/{artifact_id}
+flameox://findings/{finding_id}
+flameox://investigations/{investigation_id}
+flameox://hypotheses/{hypothesis_id}
+flameox://experiments/{experiment_id}
+flameox://run-sets/{run_set_id}
 ```
 
 Resources return JSON or text summaries. Large native artifacts are represented

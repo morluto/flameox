@@ -3,8 +3,8 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "flamo-diagnostics"
-version = "0.1.0"
+name = "flameox"
+version = "0.1.1"
 description = "Local runtime evidence CLI and MCP server for coding agents"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -17,6 +17,7 @@ dependencies = [
     "packaging>=24,<27",
     "portalocker>=3.2,<4",
     "platformdirs>=4.3,<5",
+    "pyperf>=2.9",
     "pytz>=2024.2",
     "pyarrow>=20,<26",
     "pydantic>=2.13.4,<2.14",
@@ -27,6 +28,11 @@ dependencies = [
     "tomlkit>=0.13,<1",
     "typer>=0.16,<1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/morluto/flameox"
+Repository = "https://github.com/morluto/flameox"
+Issues = "https://github.com/morluto/flameox/issues"
 
 [project.optional-dependencies]
 python = ["pyperf>=2.9"]
@@ -61,10 +67,10 @@ dev = [
 ]
 
 [project.scripts]
-flamo = "flamo.cli:app"
+flameox = "flameox.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/flamo"]
+packages = ["src/flameox"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers --durations=10 --reruns=2 --reruns-delay=1"
@@ -76,7 +82,7 @@ xfail_strict = true
 
 [tool.coverage.run]
 branch = true
-source = ["flamo"]
+source = ["flameox"]
 
 [tool.coverage.report]
 show_missing = true
@@ -92,9 +98,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "C90", "TD"]
 ignore = ["TD002"]
 
 [tool.ruff.lint.per-file-ignores]
-"src/flamo/mcp/server.py" = ["C901"]
-"src/flamo/cli.py" = ["C901"]
-"src/flamo/application/capture.py" = ["C901"]
+"src/flameox/mcp/server.py" = ["C901"]
+"src/flameox/cli.py" = ["C901"]
+"src/flameox/application/capture.py" = ["C901"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 18
@@ -107,7 +113,7 @@ docstring-code-format = true
 [tool.mypy]
 python_version = "3.12"
 strict = true
-packages = ["flamo"]
+packages = ["flameox"]
 
 [[tool.mypy.overrides]]
 module = [
@@ -126,22 +132,22 @@ ignore_missing_imports = true
 
 [tool.vulture]
 min_confidence = 80
-paths = ["src/flamo"]
+paths = ["src/flameox"]
 ignore_names = ["setUp", "tearDown", "test_*", "Test*", "*_test"]
 ignore_decorators = ["@app.command", "@property", "@router.*"]
 
 [tool.importlinter]
-root_package = "flamo"
+root_package = "flameox"
 include_external_packages = false
 
 [[tool.importlinter.contracts]]
 name = "Domain layer must not import application or infrastructure"
 type = "forbidden"
-source_modules = ["flamo.domain"]
-forbidden_modules = ["flamo.application", "flamo.storage", "flamo.adapters", "flamo.cli", "flamo.mcp"]
+source_modules = ["flameox.domain"]
+forbidden_modules = ["flameox.application", "flameox.storage", "flameox.adapters", "flameox.cli", "flameox.mcp"]
 
 [[tool.importlinter.contracts]]
 name = "Storage must not import CLI, MCP, or adapters"
 type = "forbidden"
-source_modules = ["flamo.storage"]
-forbidden_modules = ["flamo.cli", "flamo.mcp", "flamo.adapters"]
+source_modules = ["flameox.storage"]
+forbidden_modules = ["flameox.cli", "flameox.mcp", "flameox.adapters"]

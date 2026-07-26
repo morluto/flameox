@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from flamo.domain import canonical_json_bytes, content_id, digest_model
+from flameox.domain import canonical_json_bytes, content_id, digest_model
 
 
 def test_canonical_json_is_order_independent() -> None:
@@ -21,6 +21,6 @@ def test_canonical_json_rejects_non_finite_floats() -> None:
 
 
 def test_content_id_uses_prefixed_lowercase_sha256() -> None:
-    assert content_id(b"flamo") == (
-        "sha256:f383136c64d0c3ee75271bad2457fbb73a36182deed3433ed5226b4d392b377e"
+    assert content_id(b"flameox") == (
+        "sha256:4bbbed24726110a321cbf5aff0c6a29478b60199ef1250b41af5eca6cfd009f6"
     )

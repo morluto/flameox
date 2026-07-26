@@ -5,13 +5,13 @@ from pathlib import Path
 import memray
 import pytest
 
-from flamo.adapters import MemrayExtractor
-from flamo.analysis import RecipeService
-from flamo.application import ImportArtifactRequest, ImportService
-from flamo.catalog import Catalog
-from flamo.domain import ArtifactKind, DomainError, ErrorCode
-from flamo.evidence import GenerationPublisher
-from flamo.storage import Workspace
+from flameox.adapters import MemrayExtractor
+from flameox.analysis import RecipeService
+from flameox.application import ImportArtifactRequest, ImportService
+from flameox.catalog import Catalog
+from flameox.domain import ArtifactKind, DomainError, ErrorCode
+from flameox.evidence import GenerationPublisher
+from flameox.storage import Workspace
 
 
 def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(

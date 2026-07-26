@@ -1,7 +1,7 @@
 # Acceptance and verification
 
 The acceptance criteria are the completion contract for changes that affect
-Flamo's product behavior. The evidence map below records the implementation
+flameox's product behavior. The evidence map below records the implementation
 reviewed on 2026-07-25. A passing ordinary test suite is not enough when the
 relevant criterion requires crash, concurrency, containment, protocol, golden,
 or scale proof.
@@ -10,7 +10,7 @@ or scale proof.
 
 A release is acceptable when:
 
-1. deleting `catalog.duckdb` and running `flamo catalog rebuild` preserves all
+1. deleting `catalog.duckdb` and running `flameox catalog rebuild` preserves all
    queryable evidence at the same corpus commit;
 2. two identical payloads from different runs occupy one artifact object while
    retaining distinct registration provenance and the maximum sensitivity;
@@ -34,7 +34,7 @@ A release is acceptable when:
 12. native artifacts can be opened with existing ecosystem viewers;
 13. a full workspace integrity check detects altered artifact bytes;
 14. ordinary read-only analyses do not acquire the workspace write lock;
-15. the Flamo control process makes no network requests during operations and
+15. the flameox control process makes no network requests during operations and
    capture results truthfully report whether child network access was
    contained;
 16. every confirmatory optimization result records a primary metric, estimand,
@@ -187,7 +187,7 @@ annotations object, structured success, and structured `isError` result.
 
 ### Performance tests
 
-Flamo's own benchmarks cover:
+flameox's own benchmarks cover:
 
 - catalog startup with 10, 1,000, and 100,000 runs;
 - file counts and compaction behavior at those scales;
@@ -197,7 +197,7 @@ Flamo's own benchmarks cover:
 - bounded MCP serialization;
 - catalog rebuild.
 
-Performance tests must distinguish collector overhead from Flamo orchestration
+Performance tests must distinguish collector overhead from flameox orchestration
 overhead.
 
 ### Golden investigations

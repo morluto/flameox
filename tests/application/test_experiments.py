@@ -6,23 +6,23 @@ from pathlib import Path
 
 import pytest
 
-from flamo.analysis import RecipeService
-from flamo.application import (
+from flameox.analysis import RecipeService
+from flameox.application import (
     CreateInvestigationRequest,
     ExecutionPolicy,
     ExperimentService,
     InvestigationService,
 )
-from flamo.catalog import Catalog
-from flamo.config import WorkspaceConfig
-from flamo.domain import (
+from flameox.catalog import Catalog
+from flameox.config import WorkspaceConfig
+from flameox.domain import (
     ComparisonValidity,
     DomainError,
     ErrorCode,
     ExecutionStatus,
     TrialOutcome,
 )
-from flamo.storage import RunStore, Workspace
+from flameox.storage import RunStore, Workspace
 
 
 def _git(project: Path, *args: str) -> None:
@@ -45,7 +45,7 @@ async def test_randomized_experiment_records_trials_and_compares_run_sets(
         "count = 6000 if sys.argv[1] == 'baseline' else 1500\n"
         "assert sum(range(count)) >= 0\n"
     )
-    (tmp_path / "flamo.toml").write_text(
+    (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
 
@@ -82,13 +82,13 @@ random_seed = 1984
     assert isinstance(config, WorkspaceConfig)
     workspace.paths.config.write_text(config.to_toml())
     _git(tmp_path, "init", "-q")
-    _git(tmp_path, "add", "bench.py", "flamo.toml")
+    _git(tmp_path, "add", "bench.py", "flameox.toml")
     _git(
         tmp_path,
         "-c",
-        "user.name=Flamo Test",
+        "user.name=flameox Test",
         "-c",
-        "user.email=flamo@example.invalid",
+        "user.email=flameox@example.invalid",
         "commit",
         "-qm",
         "fixture",
@@ -144,7 +144,7 @@ async def test_experiment_plan_rejects_multiplicative_trial_explosion(
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     scaling_values = ", ".join(str(value) for value in range(1_000))
-    (tmp_path / "flamo.toml").write_text(
+    (tmp_path / "flameox.toml").write_text(
         f"""
 schema_version = 1
 
@@ -191,7 +191,7 @@ async def test_cancelled_experiment_preserves_attempted_trial(
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "wait.py").write_text("import time\ntime.sleep(30)\n")
-    (tmp_path / "flamo.toml").write_text(
+    (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
 

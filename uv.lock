@@ -587,8 +587,8 @@ wheels = [
 ]
 
 [[package]]
-name = "flamo-diagnostics"
-version = "0.1.0"
+name = "flameox"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
@@ -601,6 +601,7 @@ dependencies = [
     { name = "portalocker" },
     { name = "pyarrow" },
     { name = "pydantic" },
+    { name = "pyperf" },
     { name = "pytz" },
     { name = "questionary" },
     { name = "scipy" },
@@ -680,6 +681,7 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=20,<26" },
     { name = "pyarrow-stubs", marker = "extra == 'dev'", specifier = ">=20.0.0.20260625" },
     { name = "pydantic", specifier = ">=2.13.4,<2.14" },
+    { name = "pyperf", specifier = ">=2.9" },
     { name = "pyperf", marker = "extra == 'all'", specifier = ">=2.9" },
     { name = "pyperf", marker = "extra == 'python'", specifier = ">=2.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },

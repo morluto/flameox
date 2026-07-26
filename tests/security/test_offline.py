@@ -6,13 +6,13 @@ from typing import Any
 
 import pytest
 
-from flamo.analysis import RecipeService
-from flamo.application import (
+from flameox.analysis import RecipeService
+from flameox.application import (
     ImportArtifactRequest,
     ImportService,
     workspace_status,
 )
-from flamo.storage import Workspace
+from flameox.storage import Workspace
 
 
 def test_control_process_operations_do_not_open_network_connections(

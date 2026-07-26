@@ -1,6 +1,6 @@
 # Investigations and analysis
 
-This document defines how Flamo turns captures into falsifiable investigations.
+This document defines how flameox turns captures into falsifiable investigations.
 It covers representative workloads, experimental structure, recipe outputs,
 comparison validity, and the boundary between exploratory and confirmatory
 claims.
@@ -37,7 +37,7 @@ defined in [CLI and MCP boundaries](interfaces.md).
 ### Before/after validation
 
 1. Execute the same workload against baseline and candidate source roots,
-   installations, or commands supplied by the caller; Flamo does not switch the
+   installations, or commands supplied by the caller; flameox does not switch the
    working tree between revisions.
 2. Validate behavior before accepting performance evidence.
 3. Compare benchmark distributions.
@@ -86,7 +86,7 @@ population-level analysis remains a first-class architectural requirement.
 
 ### Project configuration
 
-Repeatable workloads live in `flamo.toml` at the project root:
+Repeatable workloads live in `flameox.toml` at the project root:
 
 ```toml
 schema_version = 1
@@ -177,7 +177,7 @@ Some important defects are configuration or algorithmic invariant violations,
 not conventional hotspots. The optional SDK supports explicit annotations:
 
 ```python
-from flamo.sdk import observe, phase
+from flameox.sdk import observe, phase
 
 with phase("ppo_epoch"):
     observe("policy.old_log_prob_source", source="rollout")
@@ -307,7 +307,7 @@ Returns:
 
 ## Statistical and comparison policy
 
-Flamo must preserve raw measurements and avoid presenting one aggregate as the
+flameox must preserve raw measurements and avoid presenting one aggregate as the
 entire experiment.
 
 Default reporting includes:
@@ -331,7 +331,7 @@ criterion; otherwise an interval crossing the practical threshold is
 excessive variance, thermal drift, and background load are reported when
 observable.
 
-Flamo delegates benchmark collection, calibration, warm-up, and instability
+flameox delegates benchmark collection, calibration, warm-up, and instability
 metadata to pyperf through public APIs. It does not use pyperf's private
 programmatic comparison implementation. The default paired comparison uses a
 specified SciPy bootstrap method over the block-level estimand, such as the

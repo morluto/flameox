@@ -6,15 +6,15 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from flamo.cli import app
+from flameox.cli import app
 
 
 def test_setup_dry_run_emits_machine_readable_exact_plan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("FLAMO_SETUP_HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("FLAMO_SETUP_DATA_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("FLAMEOX_SETUP_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("FLAMEOX_SETUP_DATA_ROOT", str(tmp_path / "data"))
 
     result = CliRunner().invoke(app, ["setup", "--claude", "--dry-run", "--json"])
 
@@ -29,8 +29,8 @@ def test_setup_dry_run_emits_machine_readable_exact_plan(
 def test_setup_yes_requires_an_explicit_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("FLAMO_SETUP_HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("FLAMO_SETUP_DATA_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("FLAMEOX_SETUP_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("FLAMEOX_SETUP_DATA_ROOT", str(tmp_path / "data"))
 
     result = CliRunner().invoke(app, ["setup", "--yes"])
 
@@ -45,8 +45,8 @@ def test_setup_reports_corrupt_install_metadata_as_a_domain_error(
     data = tmp_path / "data"
     data.mkdir()
     (data / "install.json").write_text("{broken")
-    monkeypatch.setenv("FLAMO_SETUP_HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("FLAMO_SETUP_DATA_ROOT", str(data))
+    monkeypatch.setenv("FLAMEOX_SETUP_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("FLAMEOX_SETUP_DATA_ROOT", str(data))
 
     result = CliRunner().invoke(app, ["setup", "--verify", "--yes"])
 

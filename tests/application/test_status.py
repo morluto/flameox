@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from flamo.application import (
+from flameox.application import (
     ImportArtifactRequest,
     ImportService,
     QuarantineService,
     workspace_status,
 )
-from flamo.domain import ArtifactKind
-from flamo.observability import OperationLogger
-from flamo.storage import Workspace
+from flameox.domain import ArtifactKind
+from flameox.observability import OperationLogger
+from flameox.storage import Workspace
 
 
 def test_status_reports_integrity_storage_recovery_and_capabilities(

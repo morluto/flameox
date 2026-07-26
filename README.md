@@ -1,10 +1,10 @@
-<h1 align="center">Flamo</h1>
+<h1 align="center">flameox</h1>
 
 <p align="center"><strong>Runtime evidence for coding agents</strong></p>
 
 <p align="center">
   <img
-    src="docs/assets/flamo-flamegraph-hero.png"
+    src="docs/assets/flameox-flamegraph-hero.png"
     width="100%"
     alt="Abstract flame graph built from glowing runtime blocks"
   >
@@ -23,22 +23,22 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> &nbsp;&middot;&nbsp;
-  <a href="#what-flamo-investigates">What Flamo investigates</a> &nbsp;&middot;&nbsp;
+  <a href="#what-flameox-investigates">What flameox investigates</a> &nbsp;&middot;&nbsp;
   <a href="#how-it-works">How it works</a> &nbsp;&middot;&nbsp;
   <a href="#cli-and-mcp">CLI and MCP</a> &nbsp;&middot;&nbsp;
   <a href="#documentation">Documentation</a>
 </p>
 
-<p align="center"><strong>Connect your agent:</strong> <code>npx flamo setup</code></p>
+<p align="center"><strong>Connect your agent:</strong> <code>npx flameox setup</code></p>
 
 ---
 
-Flamo is a permanently local CLI and Model Context Protocol server. It connects
+flameox is a permanently local CLI and Model Context Protocol server. It connects
 coding agents to maintained tools such as pyperf, py-spy, Perfetto Trace
 Processor, coverage.py, Memray, and torch.profiler, then keeps their native
 artifacts and the provenance needed to check a conclusion later.
 
-Flamo is not another profiler and it is not an automatic bug finder. It gives
+flameox is not another profiler and it is not an automatic bug finder. It gives
 agents a consistent evidence workflow: collect from approved workloads, preserve
 what happened, compare compatible runs, and keep observations separate from
 inferences.
@@ -50,7 +50,7 @@ inferences.
 Run the guided setup:
 
 ```console
-npx flamo setup
+npx flameox setup
 ```
 
 The wizard detects Claude Code, Cursor, OpenCode, Codex, Gemini CLI, and
@@ -60,12 +60,12 @@ activates only the clients you approve.
 
 Restart the configured client, open a project, and ask:
 
-> Initialize Flamo in this project and show me which profiling capabilities are
+> Initialize flameox in this project and show me which profiling capabilities are
 > available.
 
-Flamo can initialize its local `.diagnostics/` workspace through MCP. Capturing
+flameox can initialize its local `.diagnostics/` workspace through MCP. Capturing
 code requires one additional safety boundary: declare the command as a named
-workload in `flamo.toml`, inspect its canonical form, and approve it once. The
+workload in `flameox.toml`, inspect its canonical form, and approve it once. The
 [named workload example](#named-workloads-and-capture) shows that flow.
 
 ### Use the CLI from source
@@ -74,11 +74,11 @@ Python 3.12 or newer and `uv` are required:
 
 ```console
 uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
-uv run flamo init .
-uv run flamo status
+uv run flameox init .
+uv run flameox status
 ```
 
-## What Flamo investigates
+## What flameox investigates
 
 | Question | Evidence |
 | --- | --- |
@@ -96,11 +96,11 @@ oracle.
 
 ## How it works
 
-1. **Declare.** You approve a repeatable workload. Flamo never exposes arbitrary
+1. **Declare.** You approve a repeatable workload. flameox never exposes arbitrary
    shell commands or SQL to an agent.
-2. **Capture.** A maintained profiler or benchmark tool runs while Flamo records
+2. **Capture.** A maintained profiler or benchmark tool runs while flameox records
    the exact tool, command, environment, source identity, limits, and outcome.
-3. **Preserve.** Flamo keeps the native artifact and publishes normalized
+3. **Preserve.** flameox keeps the native artifact and publishes normalized
    evidence into an immutable local corpus.
 4. **Analyze.** The CLI and MCP server expose the same bounded operations for
    hotspots, scaling, memory, execution, failures, and comparisons.
@@ -112,12 +112,12 @@ local query layer, and Perfetto Trace Processor handles detailed trace queries.
 
 ## Boundaries
 
-Flamo supports local investigation of performance, memory, execution,
+flameox supports local investigation of performance, memory, execution,
 concurrency, and reliability behavior. It does not continuously monitor
 production, upload evidence, provide accounts or synchronization, modify source
 code, install system tools, or delete artifacts automatically.
 
-Flamo also does not reimplement profilers, trace databases, native viewers, or
+flameox also does not reimplement profilers, trace databases, native viewers, or
 private format decoders. It reports a workload as contained only when an active
 backend enforces that boundary, and it never treats statistical
 non-significance as proof of equivalence.
@@ -126,17 +126,17 @@ non-significance as proof of equivalence.
 
 Run setup again to connect or disconnect clients, verify the active runtime,
 update to the npm package's matching version, or roll back to a previously
-installed version. `npx flamo@latest setup` resolves the newest setup release.
+installed version. `npx flameox@latest setup` resolves the newest setup release.
 Automation can select clients and inspect the plan explicitly:
 
 ```console
-npx flamo setup --codex --claude --yes
-npx flamo setup --all --dry-run --json
-npx flamo setup --verify --yes --json
+npx flameox setup --codex --claude --yes
+npx flameox setup --all --dry-run --json
+npx flameox setup --verify --yes --json
 ```
 
 The npm package is only a bootstrap. It delegates to the exactly matching
-`flamo-diagnostics` Python release and supplies the maintained `jsonc-parser`
+`flameox` Python release and supplies the maintained `jsonc-parser`
 helper needed to preserve comments in OpenCode configuration. MCP clients launch
 the installed runtime directly; they do not invoke `npx`, `uvx`, or a
 network-dependent installer at startup. Setup itself does not initialize a
@@ -153,21 +153,21 @@ Optional Python extras are independent:
 - `torch`: PyTorch capture
 - `all`: all runtime integrations
 
-Flamo pins the official Python MCP SDK to `mcp==2.0.0b2`.
+flameox pins the official Python MCP SDK to `mcp==2.0.0b2`.
 
 ## Local data model
 
 Initialize a project-local workspace:
 
 ```console
-uv run flamo init .
-uv run flamo status
+uv run flameox init .
+uv run flameox status
 ```
 
 `.diagnostics/` contains content-addressed native artifacts, immutable JSON
 records, append-only Parquet generations, and a rebuildable DuckDB catalog.
 Parquet and generation manifests are authoritative; deleting
-`catalog.duckdb` is safe because `flamo catalog rebuild` reconstructs it.
+`catalog.duckdb` is safe because `flameox catalog rebuild` reconstructs it.
 
 Artifacts are deduplicated by SHA-256 without collapsing their contextual
 registrations. A run records source and environment identity, workload and
@@ -177,7 +177,7 @@ frozen run sets, comparisons, and findings remain separate domain records.
 
 ## Named workloads and capture
 
-Repeatable commands live in `flamo.toml`. Templates accept declared scalar
+Repeatable commands live in `flameox.toml`. Templates accept declared scalar
 parameters only—there is no shell expansion:
 
 ```toml
@@ -212,11 +212,11 @@ Inspect and approve the exact canonical workload before exposing it through
 MCP:
 
 ```console
-uv run flamo workload show scan --json
-uv run flamo workload approve scan
-uv run flamo capture plan pyperf --workload scan \
+uv run flameox workload show scan --json
+uv run flameox workload approve scan
+uv run flameox capture plan pyperf --workload scan \
   --parameters '{"implementation":"baseline"}' --json
-uv run flamo capture run pyperf --workload scan \
+uv run flameox capture run pyperf --workload scan \
   --parameters '{"implementation":"baseline"}' --json
 ```
 
@@ -234,12 +234,12 @@ Create an investigation and optionally attach a falsifiable hypothesis before
 running a predeclared experiment:
 
 ```console
-uv run flamo investigations create \
+uv run flameox investigations create \
   '{"question":"Does the candidate remove reverse-scan overhead?"}' --json
-uv run flamo hypotheses record @hypothesis.json --json
-uv run flamo experiment plan scan_comparison \
+uv run flameox hypotheses record @hypothesis.json --json
+uv run flameox experiment plan scan_comparison \
   --investigation <investigation-id> --adapter pyperf --json
-uv run flamo experiment run scan_comparison \
+uv run flameox experiment run scan_comparison \
   --investigation <investigation-id> --adapter pyperf --json
 ```
 
@@ -254,35 +254,35 @@ the evidence rather than disappearing from the denominator.
 Useful read-only analyses include:
 
 ```console
-uv run flamo analyze hotspots <run-or-artifact>
-uv run flamo analyze scaling <experiment-id>
-uv run flamo analyze compare @comparison-request.json
-uv run flamo analyze memory <run-or-artifact>
-uv run flamo analyze execution <run-or-artifact>
-uv run flamo analyze pytorch <run-or-artifact>
-uv run flamo analyze failures
+uv run flameox analyze hotspots <run-or-artifact>
+uv run flameox analyze scaling <experiment-id>
+uv run flameox analyze compare @comparison-request.json
+uv run flameox analyze memory <run-or-artifact>
+uv run flameox analyze execution <run-or-artifact>
+uv run flameox analyze pytorch <run-or-artifact>
+uv run flameox analyze failures
 ```
 
 Those commands are deterministic read-only previews. Persist a recipe result
 and its typed provenance explicitly:
 
 ```console
-uv run flamo analyze record \
+uv run flameox analyze record \
   '{"recipe":"memory","input_id":"<run-id>"}'
-uv run flamo analyze record-comparison @comparison-request.json
+uv run flameox analyze record-comparison @comparison-request.json
 ```
 
 Hotspots can be followed into normalized trace structure without arbitrary SQL:
 
 ```console
-uv run flamo stacks callers <run-or-artifact> <frame-id> [--cursor CURSOR]
-uv run flamo stacks callees <run-or-artifact> <frame-id>
-uv run flamo stacks examples <run-or-artifact> <frame-id>
-uv run flamo trace window <artifact-id> --start 0 --end 1000000 [--cursor CURSOR]
-uv run flamo open <artifact-id>
+uv run flameox stacks callers <run-or-artifact> <frame-id> [--cursor CURSOR]
+uv run flameox stacks callees <run-or-artifact> <frame-id>
+uv run flameox stacks examples <run-or-artifact> <frame-id>
+uv run flameox trace window <artifact-id> --start 0 --end 1000000 [--cursor CURSOR]
+uv run flameox open <artifact-id>
 ```
 
-`flamo open` only prints a native viewer plan. `--launch` is an explicit
+`flameox open` only prints a native viewer plan. `--launch` is an explicit
 consequential action and cannot be combined with `--json`.
 
 ## CLI and MCP
@@ -290,7 +290,7 @@ consequential action and cannot be combined with `--json`.
 Start the permanently local stdio server with a fixed project root:
 
 ```console
-uv run flamo mcp serve --project-root .
+uv run flameox mcp serve --project-root .
 ```
 
 The MCP layer is a thin adapter over the same application services as the CLI.
@@ -308,20 +308,20 @@ and atomically single-use. Restarting the server invalidates them.
 Inspect the protocol surface with a real stdio client:
 
 ```console
-uv run flamo mcp inspect --project-root . --json
+uv run flameox mcp inspect --project-root . --json
 ```
 
 ## Integrity and recovery
 
 ```console
-uv run flamo validate
-uv run flamo validate --full
-uv run flamo catalog validate
-uv run flamo catalog rebuild
-uv run flamo catalog compact
-uv run flamo recover
-uv run flamo gc
-uv run flamo gc --apply
+uv run flameox validate
+uv run flameox validate --full
+uv run flameox catalog validate
+uv run flameox catalog rebuild
+uv run flameox catalog compact
+uv run flameox recover
+uv run flameox gc
+uv run flameox gc --apply
 ```
 
 Full validation hashes native artifacts and Parquet files. Recovery closes only

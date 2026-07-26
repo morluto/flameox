@@ -1,6 +1,6 @@
 # Storage and evidence contracts
 
-This document defines Flamo's authoritative local data, identity, provenance,
+This document defines flameox's authoritative local data, identity, provenance,
 publication, and schema contracts. Changes here must preserve rebuildability:
 native artifacts, JSON manifests, and committed Parquet generations are
 authoritative; DuckDB is derived state.
@@ -14,19 +14,19 @@ recovery, retention, and integrity behavior around this data.
 
 ### Discovery
 
-Flamo discovers a workspace by walking from the requested working directory
+flameox discovers a workspace by walking from the requested working directory
 toward the filesystem root and selecting the nearest `.diagnostics` directory.
 If none exists, commands that mutate state fail with a remediation suggesting
-`flamo init`. Read-only capability discovery does not require initialization.
+`flameox init`. Read-only capability discovery does not require initialization.
 
 An explicit `--workspace` overrides discovery. The resolved workspace must be
 inside the selected project root unless the user explicitly supplies an
 external absolute path through the CLI. MCP tools cannot choose an arbitrary
 external workspace.
 
-In a Git repository, `flamo init` adds `.diagnostics/` to
+In a Git repository, `flameox init` adds `.diagnostics/` to
 `.git/info/exclude` when it is not already ignored. It does not edit the
-project's tracked `.gitignore`. The shareable `flamo.toml` workload
+project's tracked `.gitignore`. The shareable `flameox.toml` workload
 configuration remains outside `.diagnostics` and may be committed deliberately.
 
 ### Directory layout
@@ -122,7 +122,7 @@ instruction to scan the filesystem.
   "workspace_id": "uuid4",
   "created_at": "RFC3339 timestamp",
   "project_root": "..",
-  "flamo_version": "version at creation"
+  "flameox_version": "version at creation"
 }
 ```
 
@@ -184,7 +184,7 @@ allowed roots, environment filtering, containment, network, privilege, output,
 process, memory, or storage limits. Operational defaults use this precedence:
 
 1. explicit CLI arguments or MCP server startup arguments;
-2. the selected named workload in project `flamo.toml`;
+2. the selected named workload in project `flameox.toml`;
 3. `.diagnostics/config.toml`;
 4. built-in safe defaults.
 
@@ -193,7 +193,7 @@ security policy. Environment-variable configuration is limited to documented
 non-secret process settings such as color and log level; there is no generic
 environment-to-configuration mapping.
 
-The project-controlled `flamo.toml` is untrusted until a human approves its
+The project-controlled `flameox.toml` is untrusted until a human approves its
 canonical workload definition hash through the CLI. Editing the command,
 working directory, environment, validator, resource policy, or included
 configuration revokes that approval. MCP can select an approved workload but
@@ -274,7 +274,7 @@ input includes:
 `capture_git_diff` controls whether diff bytes are retained as a sensitive
 artifact; it never controls whether the diff contributes to identity.
 `identity_quality = exact | partial | clean` describes completeness. A partial
-source identity prevents a comparison from being confirmatory. Flamo never
+source identity prevents a comparison from being confirmatory. flameox never
 checks out, resets, or changes revisions; callers provide baseline and candidate
 as separate roots, installations, or resolved commands.
 
@@ -661,7 +661,7 @@ Aggregated profile facts:
 
 Complete stacks remain in pprof or native trace data. Initial hotspot and
 memory recipes must nevertheless expose bounded callers, callees, and
-representative stacks through native-format or Perfetto queries. Flamo reuses
+representative stacks through native-format or Perfetto queries. flameox reuses
 the pprof mapping/location/function/line model when normalizing cross-profile
 stacks instead of inventing an incompatible universal stack schema.
 
@@ -825,7 +825,7 @@ existing connection continues using its old temporary views.
 
 ### Rebuild
 
-`flamo catalog rebuild`:
+`flameox catalog rebuild`:
 
 1. pins and validates the current corpus commit and referenced generation
    manifests without holding the catalog lock;
@@ -841,13 +841,13 @@ existing connection continues using its old temporary views.
 
 Existing readers continue using the old catalog until replacement. A rebuild
 does not mutate or quarantine authoritative artifacts, manifests, or evidence.
-Detected corruption is reported. The explicit `flamo repair` operation,
+Detected corruption is reported. The explicit `flameox repair` operation,
 separate from rebuild, may move recoverable material under the mutation locks
 only from a validated, previewable repair plan.
 
 ### SQL safety
 
-Flamo does not expose arbitrary SQL through MCP or its agent-facing CLI.
+flameox does not expose arbitrary SQL through MCP or its agent-facing CLI.
 
 Internally:
 
@@ -871,7 +871,7 @@ the event loop with a dedicated connection; cancellation invokes DuckDB
 interruption before joining the worker.
 
 Advanced users can open the local catalog with DuckDB's own CLI. That process
-does not honor Flamo's catalog or retention locks and remains outside Flamo's
+does not honor flameox's catalog or retention locks and remains outside flameox's
 safety and concurrency contract.
 
 ### Query result budgets

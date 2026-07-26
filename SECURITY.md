@@ -2,13 +2,13 @@
 
 ## Reporting a vulnerability
 
-If you discover a security issue in Flamo, please report it by emailing the
+If you discover a security issue in flameox, please report it by emailing the
 maintainer at the address listed in the commit history. Do not open a public
 issue.
 
 ## Secrets management
 
-Flamo is a local CLI tool and MCP server. It does not transmit data over the
+flameox is a local CLI tool and MCP server. It does not transmit data over the
 network. Configuration that could contain sensitive values (API keys, tokens,
 paths) should be provided through environment variables, not hardcoded in
 source or committed to the repository.
@@ -28,7 +28,7 @@ source or committed to the repository.
 
 ## Log safety
 
-Flamo's structured operation logger (`observability.py`) enforces a bounded
+flameox's structured operation logger (`observability.py`) enforces a bounded
 event schema that forbids arbitrary payloads. String fields are sanitized to
 redact email addresses and IP addresses before writing. No user data, process
 arguments, or file contents are ever logged.

@@ -8,8 +8,8 @@ from pathlib import Path
 import pyperf
 import pytest
 
-from flamo.adapters import PyPerfExtractor
-from flamo.application import (
+from flameox.adapters import PyPerfExtractor
+from flameox.application import (
     CompareRunSetsRequest,
     ComparisonService,
     CreateInvestigationRequest,
@@ -24,8 +24,8 @@ from flamo.application import (
     RecordHypothesisRequest,
     RunSetService,
 )
-from flamo.catalog import Catalog, Snapshot
-from flamo.domain import (
+from flameox.catalog import Catalog, Snapshot
+from flameox.domain import (
     ArtifactKind,
     ComparisonValidity,
     DomainError,
@@ -34,8 +34,8 @@ from flamo.domain import (
     FindingAssessment,
     RunSet,
 )
-from flamo.evidence import GenerationPublisher
-from flamo.storage import Workspace
+from flameox.evidence import GenerationPublisher
+from flameox.storage import Workspace
 
 
 def benchmark(path: Path, values: tuple[float, float, float]) -> None:

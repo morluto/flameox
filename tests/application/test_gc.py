@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from flamo.application import (
+from flameox.application import (
     CompactionService,
     FreezeRunSetRequest,
     GarbageCollector,
@@ -14,7 +14,7 @@ from flamo.application import (
     ImportService,
     RunSetService,
 )
-from flamo.storage import Workspace
+from flameox.storage import Workspace
 
 
 def test_gc_is_dry_run_first_and_moves_only_plan_to_recoverable_trash(
@@ -101,14 +101,14 @@ def test_gc_manifest_can_resume_an_interrupted_multi_object_move(
         real_replace(source, destination)
 
     monkeypatch.setattr(
-        "flamo.application.recoverable_move.os.replace",
+        "flameox.application.recoverable_move.os.replace",
         interrupted_replace,
     )
     with pytest.raises(OSError, match="injected crash"):
         collector.apply(plan)
     (manifest_id,) = collector.moving_manifests()
 
-    monkeypatch.setattr("flamo.application.recoverable_move.os.replace", real_replace)
+    monkeypatch.setattr("flameox.application.recoverable_move.os.replace", real_replace)
     manifest = collector.resume(manifest_id)
 
     assert manifest.state == "recoverable"
@@ -171,13 +171,13 @@ def test_gc_resume_completes_restore_interrupted_after_object_move(
             raise OSError("injected restore crash")
 
     monkeypatch.setattr(
-        "flamo.application.recoverable_move.os.replace",
+        "flameox.application.recoverable_move.os.replace",
         fail_after_move,
     )
     with pytest.raises(OSError, match="injected restore crash"):
         collector.restore(applied.trash_manifest_id)
 
-    monkeypatch.setattr("flamo.application.recoverable_move.os.replace", real_replace)
+    monkeypatch.setattr("flameox.application.recoverable_move.os.replace", real_replace)
     assert collector.moving_manifests() == (applied.trash_manifest_id,)
     manifest = collector.resume(applied.trash_manifest_id)
 

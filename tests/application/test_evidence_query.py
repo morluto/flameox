@@ -5,16 +5,16 @@ from pathlib import Path
 import pyperf
 import pytest
 
-from flamo.adapters import PyPerfExtractor
-from flamo.application import (
+from flameox.adapters import PyPerfExtractor
+from flameox.application import (
     CreateInvestigationRequest,
     EvidenceQueryService,
     ImportArtifactRequest,
     ImportService,
     InvestigationService,
 )
-from flamo.domain import ArtifactKind, DomainError, ErrorCode
-from flamo.storage import Workspace
+from flameox.domain import ArtifactKind, DomainError, ErrorCode
+from flameox.storage import Workspace
 
 
 def test_measurement_query_uses_bounded_snapshot_cursors(tmp_path: Path) -> None:

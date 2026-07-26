@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from flamo.adapters import PerfettoExtractor
-from flamo.analysis import RecipeService
-from flamo.application import (
+from flameox.adapters import PerfettoExtractor
+from flameox.analysis import RecipeService
+from flameox.application import (
     AnalysisMaterializationService,
     ArtifactService,
     DrilldownService,
@@ -17,9 +17,9 @@ from flamo.application import (
     MaterializeAnalysisRequest,
     NativeViewerService,
 )
-from flamo.catalog import Catalog
-from flamo.domain import ArtifactKind, DomainError, ErrorCode
-from flamo.storage import Workspace
+from flameox.catalog import Catalog
+from flameox.domain import ArtifactKind, DomainError, ErrorCode
+from flameox.storage import Workspace
 
 
 def local_trace_processor() -> Path:

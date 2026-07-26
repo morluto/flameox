@@ -41,8 +41,8 @@ repos:
       - id: vulture
         name: vulture (dead code)
         language: system
-        entry: vulture src/flamo --min-confidence 80
-        files: "^src/flamo/"
+        entry: vulture src/flameox --min-confidence 80
+        files: "^src/flameox/"
         pass_filenames: false
         types: [python]
 

@@ -11,11 +11,11 @@ from mcp.client.stdio import stdio_client
 from mcp_types import TextResourceContents
 from typer.testing import CliRunner
 
-from flamo.application import WorkloadService, workspace_status
-from flamo.catalog import Catalog
-from flamo.cli import app
-from flamo.mcp import create_server
-from flamo.storage import RunStore, Workspace
+from flameox.application import WorkloadService, workspace_status
+from flameox.catalog import Catalog
+from flameox.cli import app
+from flameox.mcp import create_server
+from flameox.storage import RunStore, Workspace
 
 
 @pytest.mark.anyio
@@ -133,7 +133,7 @@ async def test_mcp_import_list_get_and_resource_workflow(tmp_path: Path) -> None
         run_id = imported.structured_content["result"]["run"]["run_id"]
         listed = await client.call_tool("list_runs", {"limit": 10})
         fetched = await client.call_tool("get_run", {"run_id": run_id})
-        resource = await client.read_resource(f"flamo://runs/{run_id}")
+        resource = await client.read_resource(f"flameox://runs/{run_id}")
 
     assert listed.structured_content is not None
     assert listed.structured_content["result"]["runs"][0]["run_id"] == run_id
@@ -151,7 +151,7 @@ async def test_real_stdio_server_keeps_protocol_on_stdout(tmp_path: Path) -> Non
         command=sys.executable,
         args=[
             "-m",
-            "flamo",
+            "flameox",
             "mcp",
             "serve",
             "--project-root",
@@ -175,7 +175,7 @@ async def test_real_stdio_server_keeps_protocol_on_stdout(tmp_path: Path) -> Non
         )
         assert imported.structured_content is not None
         run_id = imported.structured_content["result"]["run"]["run_id"]
-        resource = await client.read_resource(f"flamo://runs/{run_id}")
+        resource = await client.read_resource(f"flameox://runs/{run_id}")
         structured_error = await client.call_tool(
             "get_run",
             {"run_id": "missing-run"},
@@ -197,7 +197,7 @@ async def test_real_stdio_server_keeps_protocol_on_stdout(tmp_path: Path) -> Non
 async def test_real_stdio_server_reports_progress_and_propagates_cancellation(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "flamo.toml").write_text(
+    (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
 [workloads.wait]
@@ -218,7 +218,7 @@ timeout_seconds = 60
         command=sys.executable,
         args=[
             "-m",
-            "flamo",
+            "flameox",
             "mcp",
             "serve",
             "--project-root",
@@ -273,7 +273,7 @@ timeout_seconds = 60
 async def test_mcp_capture_requires_approval_and_plan_tokens_are_single_use(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "flamo.toml").write_text(
+    (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
 [workloads.echo]
@@ -336,7 +336,7 @@ timeout_seconds = 5
 async def test_mcp_cancellation_propagates_to_terminal_run_state(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "flamo.toml").write_text(
+    (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
 [workloads.wait]

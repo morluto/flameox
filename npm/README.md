@@ -1,12 +1,12 @@
-# flamo
+# flameox
 
-This is the small npm bootstrap for Flamo's local MCP setup wizard:
+This is the small npm bootstrap for flameox's local MCP setup wizard:
 
 ```console
-npx flamo setup
+npx flameox setup
 ```
 
-It launches the matching `flamo-diagnostics` Python package with `uvx`. The
+It launches the matching `flameox` Python package with `uvx`. The
 wizard installs a persistent, versioned local runtime and writes only the MCP
-client configurations you approve. Run `npx flamo@latest setup` when you want
+client configurations you approve. Run `npx flameox@latest setup` when you want
 to force npm to resolve the newest setup release.

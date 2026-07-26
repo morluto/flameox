@@ -1,6 +1,6 @@
 # Adapters and capabilities
 
-Adapters connect Flamo to maintained collectors and native formats. They own
+Adapters connect flameox to maintained collectors and native formats. They own
 capability probes, capture planning, extraction, validation, compatibility, and
 viewer handoff. They do not own workspace publication, analysis policy, or MCP
 transport behavior.
@@ -19,27 +19,27 @@ The adapter may use:
 
 The Python API must be configured with a locally installed or deliberately
 packaged Trace Processor binary. Its convenience download behavior is disabled;
-Flamo never fetches a binary during an agent operation.
+flameox never fetches a binary during an agent operation.
 
 Initial Perfetto support is import and query, not unspecified system-wide
 capture. Trace Processor is the preferred ingestion path for formats it
 supports, including Perfetto protobuf traces, Chrome JSON traces, pprof
-profiles, and `perf.data`. Flamo records the Trace Processor binary version and
+profiles, and `perf.data`. flameox records the Trace Processor binary version and
 SHA-256 with every extraction or query.
 
 Initial query modules:
 
 ```text
-flamo.cpu.hotspots
-flamo.cpu.run_queue_delay
-flamo.process.wall_breakdown
-flamo.threads.blocked_time
-flamo.operations.longest
-flamo.operations.repeated
-flamo.pytorch.operator_summary
-flamo.pytorch.cpu_gpu_sync
-flamo.accelerator.idle_gaps
-flamo.memory.timeline_summary
+flameox.cpu.hotspots
+flameox.cpu.run_queue_delay
+flameox.process.wall_breakdown
+flameox.threads.blocked_time
+flameox.operations.longest
+flameox.operations.repeated
+flameox.pytorch.operator_summary
+flameox.pytorch.cpu_gpu_sync
+flameox.accelerator.idle_gaps
+flameox.memory.timeline_summary
 ```
 
 Each query module declares:
@@ -52,7 +52,7 @@ Each query module declares:
 - known blind spots;
 - module version.
 
-Flamo does not copy the entire Perfetto trace into Parquet. It extracts only
+flameox does not copy the entire Perfetto trace into Parquet. It extracts only
 cross-run summaries and source-linked measurements required by supported
 recipes.
 
@@ -92,7 +92,7 @@ only to staging.
 ### Discovery
 
 Built-in adapters are registered explicitly. Third-party adapter support uses
-Python entry points under `flamo.adapters`. Entry points execute
+Python entry points under `flameox.adapters`. Entry points execute
 Python code and are therefore part of the trusted computing base. Only
 built-ins load by default. A third-party plugin requires explicit CLI approval
 by distribution name, version, and package identity, and its approval is
@@ -115,10 +115,10 @@ Each adapter has independent:
 Use for controlled Python benchmarks. Reuse calibration, warm-ups, worker
 processes, machine metadata, instability checks, and JSON output. Preserve
 pyperf JSON as a native artifact and load it through public
-`BenchmarkSuite`/benchmark value and metadata APIs. Flamo does not import
+`BenchmarkSuite`/benchmark value and metadata APIs. flameox does not import
 pyperf's private `_compare` helpers or parse human-readable comparison output.
 pyperf owns calibration, warm-ups, workers, runs, and values within a benchmark
-trial; Flamo's experiment blocks and treatment randomization sit above that
+trial; flameox's experiment blocks and treatment randomization sit above that
 hierarchy and do not duplicate it.
 
 #### `py-spy`
@@ -128,7 +128,7 @@ machine-readable Chrome trace for normalized extraction and feed it to Perfetto
 Trace Processor. Supported py-spy versions emit flamegraph, raw, Speedscope,
 and Chrome trace formats; the adapter must not claim they emit pprof. Record
 whether native frames, subprocesses, idle threads, and GIL state were captured.
-Speedscope or raw output may be preserved for existing viewers, but Flamo does
+Speedscope or raw output may be preserved for existing viewers, but flameox does
 not implement a bespoke sampled-stack parser when Trace Processor can ingest
 the chosen format.
 

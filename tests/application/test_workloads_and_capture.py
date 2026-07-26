@@ -9,16 +9,16 @@ from typing import Any, cast
 
 import pytest
 
-from flamo.adapters import PerfettoExtractor, PyPerfExtractor
-from flamo.application import (
+from flameox.adapters import PerfettoExtractor, PyPerfExtractor
+from flameox.application import (
     CapabilityService,
     CaptureService,
     ExecutionPolicy,
     WorkloadService,
 )
-from flamo.catalog import Catalog
-from flamo.config import WorkspaceConfig
-from flamo.domain import (
+from flameox.catalog import Catalog
+from flameox.config import WorkspaceConfig
+from flameox.domain import (
     CapabilityStatus,
     CaptureStatus,
     DomainError,
@@ -26,11 +26,11 @@ from flamo.domain import (
     ExecutionStatus,
     ValidationStatus,
 )
-from flamo.storage import ArtifactStore, RunStore, Workspace
+from flameox.storage import ArtifactStore, RunStore, Workspace
 
 
 def write_workload(project: Path, *, message: str = "hello") -> None:
-    (project / "flamo.toml").write_text(
+    (project / "flameox.toml").write_text(
         f"""
 schema_version = 1
 
@@ -86,13 +86,13 @@ async def test_capture_plan_uses_minimal_bubblewrap_and_systemd_limits(
     if shutil.which("bwrap") is None or shutil.which("systemd-run") is None:
         pytest.skip("Bubblewrap and systemd-run are required for active containment.")
     workspace = Workspace.initialize(tmp_path)
-    (tmp_path / "flamo.toml").write_text(
+    (tmp_path / "flameox.toml").write_text(
         "schema_version = 1\n"
         "[workloads.echo]\n"
         'argv = ["python", "-c", "'
         "import os, pathlib; "
         "assert not pathlib.Path('.diagnostics/workspace.json').exists(); "
-        "pathlib.Path(os.environ['FLAMO_OBSERVATIONS_PATH']).parent"
+        "pathlib.Path(os.environ['FLAMEOX_OBSERVATIONS_PATH']).parent"
         ".joinpath('write-proof').write_text('ok'); "
         "print('contained')"
         '"]\n'
@@ -149,7 +149,7 @@ async def test_capture_plan_reports_degraded_when_systemd_user_manager_is_unavai
     async def unavailable_user_manager(_systemd_run: str) -> bool:
         return False
 
-    monkeypatch.setattr("flamo.application.capture.shutil.which", available_executable)
+    monkeypatch.setattr("flameox.application.capture.shutil.which", available_executable)
     monkeypatch.setattr(service, "_systemd_user_scope_available", unavailable_user_manager)
 
     plan = await service.plan(
@@ -269,7 +269,7 @@ async def test_capture_cancellation_leaves_terminal_run_revision(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    (tmp_path / "flamo.toml").write_text(
+    (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
 [workloads.wait]
@@ -449,7 +449,7 @@ async def test_coverage_capture_uses_supported_launcher_and_registers_native_dat
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "workload.py").write_text("value = sum(range(10))\nprint(value)\n")
-    (tmp_path / "flamo.toml").write_text(
+    (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
 [workloads.script]
@@ -491,7 +491,7 @@ async def test_py_spy_capture_round_trips_through_perfetto(
         "    total += sum(i * i for i in range(5000))\n"
         "print(total)\n"
     )
-    (tmp_path / "flamo.toml").write_text(
+    (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
 [workloads.busy]
@@ -539,7 +539,7 @@ async def test_pyperf_capture_preserves_native_worker_hierarchy(
         "    total += value\n"
         "assert total > 0\n"
     )
-    (tmp_path / "flamo.toml").write_text(
+    (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
 [workloads.scan]
@@ -586,7 +586,7 @@ async def test_perf_capture_registers_native_profile_when_kernel_allows_sampling
     (tmp_path / "busy.py").write_text(
         "total = 0\nfor value in range(1000000):\n    total += value * value\nprint(total)\n"
     )
-    (tmp_path / "flamo.toml").write_text(
+    (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
 [workloads.busy]
@@ -625,7 +625,7 @@ async def test_torch_profiler_capture_registers_public_chrome_trace(
         "right = torch.ones((16, 16))\n"
         "print(torch.mm(left, right).sum().item())\n"
     )
-    (tmp_path / "flamo.toml").write_text(
+    (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
 [workloads.torch]

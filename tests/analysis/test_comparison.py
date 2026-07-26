@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from flamo.analysis import compare_paired_samples
-from flamo.domain import ComparisonDecision, ComparisonValidity
+from flameox.analysis import compare_paired_samples
+from flameox.domain import ComparisonDecision, ComparisonValidity
 
 BASELINE_SET = "sha256:" + ("a" * 64)
 CANDIDATE_SET = "sha256:" + ("b" * 64)

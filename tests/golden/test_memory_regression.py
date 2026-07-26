@@ -4,8 +4,8 @@ from pathlib import Path
 
 import memray
 
-from flamo.adapters import MemrayExtractor
-from flamo.application import (
+from flameox.adapters import MemrayExtractor
+from flameox.application import (
     AnalysisMaterializationService,
     CompareRunSetsRequest,
     ComparisonService,
@@ -21,9 +21,9 @@ from flamo.application import (
     RecordHypothesisRequest,
     RunSetService,
 )
-from flamo.catalog import Catalog
-from flamo.domain import ArtifactKind, EvidenceLevel, FindingAssessment
-from flamo.storage import Workspace
+from flameox.catalog import Catalog
+from flameox.domain import ArtifactKind, EvidenceLevel, FindingAssessment
+from flameox.storage import Workspace
 
 
 def _capture(path: Path, allocation_count: int) -> None:

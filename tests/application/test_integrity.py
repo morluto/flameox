@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from flamo.application import ImportArtifactRequest, ImportService, IntegrityService
-from flamo.catalog import Catalog
-from flamo.storage import ArtifactStore, Workspace
+from flameox.application import ImportArtifactRequest, ImportService, IntegrityService
+from flameox.catalog import Catalog
+from flameox.storage import ArtifactStore, Workspace
 
 
 def test_full_integrity_detects_altered_artifact_bytes(tmp_path: Path) -> None:

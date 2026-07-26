@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from flamo.application import DrilldownService
-from flamo.domain import (
+from flameox.application import DrilldownService
+from flameox.domain import (
     CaptureStatus,
     DomainError,
     ErrorCode,
@@ -12,8 +12,8 @@ from flamo.domain import (
     RunType,
     ValidationStatus,
 )
-from flamo.evidence_scope import EvidenceScope
-from flamo.storage import RunStore, Workspace
+from flameox.evidence_scope import EvidenceScope
+from flameox.storage import RunStore, Workspace
 
 
 def test_drilldown_rejects_run_absent_from_pinned_corpus(tmp_path: Path) -> None:

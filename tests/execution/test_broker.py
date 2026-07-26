@@ -10,8 +10,8 @@ from uuid import uuid4
 
 import pytest
 
-from flamo.domain import DomainError, ErrorCode
-from flamo.execution import ExecutionRequest, SubprocessBroker
+from flameox.domain import DomainError, ErrorCode
+from flameox.execution import ExecutionRequest, SubprocessBroker
 
 
 def request(tmp_path: Path, *arguments: str, **overrides: object) -> ExecutionRequest:
@@ -149,7 +149,7 @@ async def test_systemd_scope_cancellation_terminates_escaped_descendants(
     )
     if probe.returncode != 0:
         pytest.skip("A systemd user manager is not available")
-    unit = f"flamo-test-{uuid4().hex}.scope"
+    unit = f"flameox-test-{uuid4().hex}.scope"
     pid_path = tmp_path / "descendant.pid"
     code = (
         "import pathlib, subprocess, sys, time; "

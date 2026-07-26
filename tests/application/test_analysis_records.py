@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from flamo.analysis import FailureAnalysisResult, RecipeService
-from flamo.application import (
+from flameox.analysis import FailureAnalysisResult, RecipeService
+from flameox.application import (
     AnalysisMaterializationService,
     MaterializeAnalysisRequest,
 )
-from flamo.catalog import Catalog, Snapshot
-from flamo.storage import Workspace
+from flameox.catalog import Catalog, Snapshot
+from flameox.storage import Workspace
 
 
 @pytest.mark.anyio

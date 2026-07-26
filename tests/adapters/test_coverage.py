@@ -7,12 +7,12 @@ import pytest
 from coverage import Coverage, CoverageData
 from coverage.exceptions import CoverageWarning
 
-from flamo.adapters import CoverageExtractor
-from flamo.analysis import RecipeService
-from flamo.application import ImportArtifactRequest, ImportService
-from flamo.catalog import Catalog
-from flamo.domain import ArtifactKind, DomainError, ErrorCode
-from flamo.storage import Workspace
+from flameox.adapters import CoverageExtractor
+from flameox.analysis import RecipeService
+from flameox.application import ImportArtifactRequest, ImportService
+from flameox.catalog import Catalog
+from flameox.domain import ArtifactKind, DomainError, ErrorCode
+from flameox.storage import Workspace
 
 
 def test_coverage_extractor_uses_public_data_api_and_normalizes_paths(
