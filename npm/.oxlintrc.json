@@ -1,0 +1,34 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "env": {
+    "node": true
+  },
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+  "rules": {
+    "no-unused-vars": ["error", { "argsIgnorePattern": "^_" }],
+    "no-undef": "error",
+    "no-console": "off",
+    "complexity": ["warn", 10],
+    "max-lines": ["warn", { "max": 200, "skipComments": true, "skipBlankLines": true }],
+    "max-depth": ["warn", 4],
+    "max-statements": ["warn", 25],
+    "no-magic-numbers": "off",
+    "sort-keys": "off",
+    "func-style": "off",
+    "no-ternary": "off",
+    "unicorn/no-null": "off"
+  },
+  "overrides": [
+    {
+      "files": ["test/**/*.test.cjs"],
+      "rules": {
+        "no-unused-vars": "off",
+        "no-magic-numbers": "off"
+      }
+    }
+  ]
+}
