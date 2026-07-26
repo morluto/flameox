@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "flamo"
+name = "flamo-diagnostics"
 version = "0.1.0"
 description = "Local runtime evidence CLI and MCP server for coding agents"
 readme = "README.md"
@@ -16,11 +16,14 @@ dependencies = [
     "numpy>=2.2,<3",
     "packaging>=24,<27",
     "portalocker>=3.2,<4",
+    "platformdirs>=4.3,<5",
     "pyarrow>=20,<26",
     "pydantic>=2.13.4,<2.14",
+    "questionary>=2.1,<3",
     "scipy>=1.15,<2",
     "statsmodels>=0.14,<1",
     "tomli-w>=1.2,<2",
+    "tomlkit>=0.13,<1",
     "typer>=0.16,<1",
 ]
 
