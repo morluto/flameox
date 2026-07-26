@@ -1,0 +1,271 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, or dry-run to build without publishing
+        required: true
+        default: dry-run
+        type: string
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build and verify release artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      publishing: ${{ steps.release.outputs.publishing }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.15.0"
+          package-manager-cache: false
+
+      - name: Validate release identity
+        id: release
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          python_version=$(uv version --short)
+          npm_version=$(node -p "require('./npm/package.json').version")
+
+          if [[ "$python_version" != "$npm_version" ]]; then
+            echo "Python version $python_version does not match npm version $npm_version" >&2
+            exit 1
+          fi
+
+          if [[ "$RELEASE_TAG" == "dry-run" ]]; then
+            publishing=false
+          elif [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            if [[ "${RELEASE_TAG#v}" != "$python_version" ]]; then
+              echo "Tag $RELEASE_TAG does not match package version $python_version" >&2
+              exit 1
+            fi
+            if [[ "$(git cat-file -t "refs/tags/$RELEASE_TAG" 2>/dev/null || true)" != "tag" ]]; then
+              echo "Release tag $RELEASE_TAG is missing or is not annotated" >&2
+              exit 1
+            fi
+            tag_commit=$(git rev-list -n 1 "$RELEASE_TAG")
+            if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
+              echo "Release tag $RELEASE_TAG points to $tag_commit, not $GITHUB_SHA" >&2
+              exit 1
+            fi
+            publishing=true
+          else
+            echo "Release tag must be dry-run or a stable vMAJOR.MINOR.PATCH tag" >&2
+            exit 1
+          fi
+
+          {
+            echo "publishing=$publishing"
+            echo "version=$python_version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Python dependencies
+        run: >-
+          uv sync
+          --extra dev
+          --extra python
+          --extra execution
+          --extra memory
+          --extra trace
+          --extra cpu
+
+      - name: Verify Python package
+        run: |
+          uv run ruff check src tests
+          uv run ruff format --check src tests
+          uv run mypy src tests
+          uv run lint-imports
+          uv run pytest -q
+
+      - name: Verify npm bootstrap
+        working-directory: npm
+        run: |
+          npm ci
+          npm run lint
+          npm run format:check
+          npm test
+
+      - name: Build release artifacts
+        run: |
+          mkdir -p dist/python dist/npm
+          uv build --out-dir dist/python
+          uvx --from twine twine check dist/python/*
+          npm pack ./npm --pack-destination "$PWD/dist/npm" --json > dist/npm-pack.json
+          sha256sum dist/python/* dist/npm/*.tgz > dist/SHA256SUMS
+
+      - name: Verify built wheel and npm archive
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          wheel="dist/python/flameox-${RELEASE_VERSION}-py3-none-any.whl"
+          npm_archive="dist/npm/flameox-${RELEASE_VERSION}.tgz"
+          test -f "$wheel"
+          test -f "$npm_archive"
+
+          actual_version=$(
+            uvx \
+              --no-config \
+              --no-sources \
+              --prerelease allow \
+              --python 3.12 \
+              --from "$wheel" \
+              flameox --version
+          )
+          if [[ "$actual_version" != "$RELEASE_VERSION" ]]; then
+            echo "Built CLI reports $actual_version, expected $RELEASE_VERSION" >&2
+            exit 1
+          fi
+
+          package_json=$(tar -xOf "$npm_archive" package/package.json)
+          if [[ "$(jq -r '.name' <<< "$package_json")" != "flameox" ]] ||
+             [[ "$(jq -r '.version' <<< "$package_json")" != "$RELEASE_VERSION" ]]; then
+            echo "npm archive identity does not match flameox@$RELEASE_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-artifacts
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            dist/python/*
+            dist/npm/*.tgz
+            dist/npm-pack.json
+            dist/SHA256SUMS
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    if: needs.build.outputs.publishing == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write # Mint the short-lived PyPI publishing credential.
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-artifacts
+          path: dist
+
+      - name: Publish Python distributions
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
+        with:
+          packages-dir: dist/python
+
+  publish-npm:
+    name: Publish to npm
+    needs: build
+    if: needs.build.outputs.publishing == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Mint the npm publishing credential and provenance.
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-artifacts
+          path: dist
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.15.0"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Verify npm release archive
+        id: package
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          npm_version=$(npm --version)
+          node -e '
+            const [major, minor, patch] = process.argv[1].split(".").map(Number);
+            if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) {
+              throw new Error("npm " + process.argv[1] + " does not support trusted publishing");
+            }
+          ' "$npm_version"
+
+          mapfile -t packages < <(compgen -G 'dist/npm/*.tgz')
+          if [[ "${#packages[@]}" -ne 1 ]]; then
+            echo "Expected exactly one npm archive, found ${#packages[@]}" >&2
+            exit 1
+          fi
+
+          package="${packages[0]}"
+          package_json=$(tar -xOf "$package" package/package.json)
+          package_name=$(jq -r '.name' <<< "$package_json")
+          package_version=$(jq -r '.version' <<< "$package_json")
+          if [[ "$package_name" != "flameox" || "$package_version" != "$RELEASE_VERSION" ]]; then
+            echo "Archive identity $package_name@$package_version does not match flameox@$RELEASE_VERSION" >&2
+            exit 1
+          fi
+
+          npm publish "$package" --access public --dry-run
+          echo "path=$package" >> "$GITHUB_OUTPUT"
+
+      - name: Publish npm package
+        env:
+          NPM_PACKAGE: ${{ steps.package.outputs.path }}
+        run: npm publish "$NPM_PACKAGE" --access public --provenance
+
+  github-release:
+    name: Create GitHub release
+    needs:
+      - build
+      - publish-pypi
+      - publish-npm
+    if: >-
+      always() &&
+      needs.build.outputs.publishing == 'true' &&
+      needs.publish-pypi.result == 'success' &&
+      needs.publish-npm.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Create the release after both registry publishes succeed.
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-artifacts
+          path: dist
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "flameox $RELEASE_VERSION" \
+            --generate-notes \
+            dist/python/* \
+            dist/npm/*.tgz \
+            dist/SHA256SUMS
