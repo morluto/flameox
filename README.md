@@ -1,62 +1,128 @@
 # Flamo
 
-Flamo is a permanently local CLI and Model Context Protocol server for
-collecting, preserving, and querying runtime evidence. It coordinates existing
-profilers and benchmark tools, keeps their native artifacts, and records enough
-experimental structure and provenance for an agent to audit a performance or
-correctness claim.
+### Runtime evidence for coding agents
 
-It is deliberately an evidence system, not a new profiler. pyperf, py-spy,
-Perfetto Trace Processor, coverage.py, Memray, and torch.profiler do collection
-or native decoding. Flamo supplies the shared provenance, immutable corpus,
-bounded analyses, experimental design, and agent-safe transport around them.
+Give an agent profiler traces, benchmark results, memory captures, and execution
+evidence it can query, compare, and audit—without uploading your code or captures.
 
-The durable documentation is split by concern:
+[Quick start](#quick-start) · [What Flamo investigates](#what-flamo-investigates) ·
+[How it works](#how-it-works) · [CLI and MCP](#cli-and-mcp) ·
+[Documentation](#documentation)
 
-- [Architecture](docs/architecture.md) explains the process model, package
-  boundaries, dependencies, and platform policy.
-- [Storage and evidence](docs/storage-and-evidence.md) defines authoritative
-  data, identity, provenance, publication, and schema rules.
-- [Investigations and analysis](docs/investigations.md) defines workloads,
-  experiments, recipes, statistics, and evidence quality.
-- [Adapters and capabilities](docs/adapters.md) defines integration,
-  compatibility, probing, and approval behavior.
-- [Runtime safety](docs/runtime-safety.md) defines concurrency, recovery,
-  retention, integrity, security, privacy, and local observability.
-- [CLI and MCP boundaries](docs/interfaces.md) defines the human and agent
-  interfaces and their trust boundaries.
-- [Architectural decisions](docs/architecture-decisions.md) records settled
-  choices and open design questions.
-- [Acceptance and verification](docs/acceptance.md) defines completion criteria
-  and maps them to representative proof.
+```console
+npx flamo setup
+```
 
-## Scope
+Flamo is a permanently local CLI and Model Context Protocol server. It connects
+coding agents to maintained tools such as pyperf, py-spy, Perfetto Trace
+Processor, coverage.py, Memray, and torch.profiler, then keeps their native
+artifacts and the provenance needed to check a conclusion later.
 
-Flamo supports local, evidence-backed investigation of performance, memory,
-execution, concurrency, and reliability behavior. It preserves native
-artifacts and failed attempts, pins analyses to immutable corpus snapshots, and
-keeps observed, derived, and inferred claims distinct. Profiles guide
-discovery; representative workloads, declared metrics, compatible identities,
-preserved samples, and a semantic oracle support confirmatory claims.
+Flamo is not another profiler and it is not an automatic bug finder. It gives
+agents a consistent evidence workflow: collect from approved workloads, preserve
+what happened, compare compatible runs, and keep observations separate from
+inferences.
 
-Flamo does not implement profilers, trace databases, native viewers, private
-format decoders, or a universal event schema. It does not continuously monitor
-production, upload evidence, provide accounts or remote synchronization,
-modify source code, install system tools, or delete artifacts automatically.
-Neither interface exposes unrestricted shell execution or SQL. Named workloads
-are described as contained only when an active backend enforces that boundary,
-and statistical non-significance is not treated as proof of equivalence.
+## Quick start
 
-## Install
+### Connect an agent
 
-Python 3.12 or newer and `uv` are recommended:
+Run the guided setup:
+
+```console
+npx flamo setup
+```
+
+The wizard detects Claude Code, Cursor, OpenCode, Codex, Gemini CLI, and
+Antigravity. Nothing is selected by default. It previews every configuration
+file it will change, installs and verifies a versioned local runtime, and
+activates only the clients you approve.
+
+Restart the configured client, open a project, and ask:
+
+> Initialize Flamo in this project and show me which profiling capabilities are
+> available.
+
+Flamo can initialize its local `.diagnostics/` workspace through MCP. Capturing
+code requires one additional safety boundary: declare the command as a named
+workload in `flamo.toml`, inspect its canonical form, and approve it once. The
+[named workload example](#named-workloads-and-capture) shows that flow.
+
+### Use the CLI from source
+
+Python 3.12 or newer and `uv` are required:
 
 ```console
 uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
-uv run flamo --help
+uv run flamo init .
+uv run flamo status
 ```
 
-Optional extras are independent:
+## What Flamo investigates
+
+| Question | Evidence Flamo can connect |
+| --- | --- |
+| Where does this workload spend CPU time? | Sampled stacks, frames, callers, callees, and trace windows |
+| Does runtime grow with input size? | Repeated measurements, scaling fits, uncertainty, and correlated hotspots |
+| Why does memory grow? | Allocation records, retained memory, phases, threads, and processes |
+| Which execution paths changed? | Coverage contexts, files, functions, branches, and two-run differences |
+| What does PyTorch spend time on? | Operators, shapes when captured, CPU or accelerator time, and memory |
+| Are failures clustered rather than isolated? | Failed attempts grouped by environment, source, workload, and error |
+
+Profiles point to candidates; they do not prove causality or correctness. A
+confirmatory comparison also needs a representative workload, declared metric,
+compatible source and environment identities, preserved samples, and a semantic
+oracle.
+
+## How it works
+
+1. You declare and approve a repeatable workload. Flamo never exposes arbitrary
+   shell commands or SQL to an agent.
+2. A maintained profiler or benchmark tool performs the capture. Flamo records
+   the exact tool, command, environment, source identity, limits, and outcome.
+3. Flamo preserves the native artifact and publishes normalized evidence into
+   an immutable local corpus.
+4. The CLI and MCP server expose the same bounded operations for hotspots,
+   scaling, memory, execution, failures, and comparisons.
+5. Findings remain tied to the runs, measurements, validation, and analysis
+   that support them. Failed attempts remain visible.
+
+Native artifacts and Parquet evidence are authoritative. DuckDB is a rebuildable
+local query layer, and Perfetto Trace Processor handles detailed trace queries.
+
+## Boundaries
+
+Flamo supports local investigation of performance, memory, execution,
+concurrency, and reliability behavior. It does not continuously monitor
+production, upload evidence, provide accounts or synchronization, modify source
+code, install system tools, or delete artifacts automatically.
+
+Flamo also does not reimplement profilers, trace databases, native viewers, or
+private format decoders. It reports a workload as contained only when an active
+backend enforces that boundary, and it never treats statistical
+non-significance as proof of equivalence.
+
+## Setup and installation details
+
+Run setup again to connect or disconnect clients, verify the active runtime,
+update to the npm package's matching version, or roll back to a previously
+installed version. `npx flamo@latest setup` resolves the newest setup release.
+Automation can select clients and inspect the plan explicitly:
+
+```console
+npx flamo setup --codex --claude --yes
+npx flamo setup --all --dry-run --json
+npx flamo setup --verify --yes --json
+```
+
+The npm package is only a bootstrap. It delegates to the exactly matching
+`flamo-diagnostics` Python release and supplies the maintained `jsonc-parser`
+helper needed to preserve comments in OpenCode configuration. MCP clients launch
+the installed runtime directly; they do not invoke `npx`, `uvx`, or a
+network-dependent installer at startup. Setup itself does not initialize a
+project or create `.diagnostics/`.
+
+Optional Python extras are independent:
 
 - `python`: pyperf capture and import
 - `cpu`: py-spy capture
@@ -68,36 +134,6 @@ Optional extras are independent:
 - `all`: all runtime integrations
 
 Flamo pins the official Python MCP SDK to `mcp==2.0.0b2`.
-
-To connect Flamo to supported coding agents, run the guided local setup:
-
-```console
-npx flamo setup
-```
-
-The wizard detects Claude Code, Cursor, OpenCode, Codex, Gemini CLI, and
-Antigravity, but detection never grants consent: the first run starts with no
-clients selected and previews every file it will change. It installs an exact,
-versioned `flamo-diagnostics` runtime with `uv`, verifies the stdio MCP
-handshake, and then atomically activates the selected client configurations.
-It does not initialize a project or create `.diagnostics/`.
-
-Run the command again to connect or disconnect clients, verify the active
-runtime, update to the npm package's matching version, or roll back to a
-previously installed version. `npx flamo@latest setup` forces npm to resolve
-the newest setup release. Automation can use explicit flags:
-
-```console
-npx flamo setup --codex --claude --yes
-npx flamo setup --all --dry-run --json
-npx flamo setup --verify --yes --json
-```
-
-The npm package is only a bootstrap. It delegates to the matching Python
-release and supplies the maintained `jsonc-parser` helper needed to preserve
-comments in OpenCode configuration. MCP clients launch the persistent managed
-runtime directly; they do not invoke `npx`, `uvx`, or a network-dependent
-installer at startup.
 
 ## Local data model
 
@@ -229,7 +265,7 @@ uv run flamo open <artifact-id>
 `flamo open` only prints a native viewer plan. `--launch` is an explicit
 consequential action and cannot be combined with `--json`.
 
-## MCP
+## CLI and MCP
 
 Start the permanently local stdio server with a fixed project root:
 
@@ -272,6 +308,25 @@ Full validation hashes native artifacts and Parquet files. Recovery closes only
 runs whose exact boot/PID/process-start lease has disappeared. Garbage
 collection is dry-run by default and `--apply` moves eligible objects into
 recoverable trash instead of unlinking them.
+
+## Documentation
+
+- [Architecture](docs/architecture.md): process model, package boundaries,
+  dependencies, and platform policy
+- [Storage and evidence](docs/storage-and-evidence.md): authoritative data,
+  identity, provenance, publication, and schemas
+- [Investigations and analysis](docs/investigations.md): workloads, experiments,
+  recipes, statistics, and evidence quality
+- [Adapters and capabilities](docs/adapters.md): profiler integration,
+  compatibility, probing, and approval behavior
+- [Runtime safety](docs/runtime-safety.md): concurrency, recovery, retention,
+  integrity, security, privacy, and local observability
+- [CLI and MCP boundaries](docs/interfaces.md): human and agent interfaces and
+  their trust boundaries
+- [Architectural decisions](docs/architecture-decisions.md): settled choices and
+  open design questions
+- [Acceptance and verification](docs/acceptance.md): completion criteria and
+  representative proof
 
 ## Development
 
