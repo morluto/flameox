@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -13,7 +15,7 @@ import typer
 from mcp import Client
 from pydantic import BaseModel
 
-from flamo import __version__
+from flamo import __version__, setup_ui
 from flamo.adapters import (
     AdapterRegistry,
     CoverageExtractor,
@@ -21,6 +23,7 @@ from flamo.adapters import (
     ObservationExtractor,
     PerfettoExtractor,
     PyPerfExtractor,
+    SetupClient,
 )
 from flamo.analysis import RecipeService
 from flamo.application import (
@@ -53,6 +56,8 @@ from flamo.application import (
     RepairPlan,
     RepairService,
     RunSetService,
+    SetupOperation,
+    SetupService,
     WorkloadService,
     workspace_status,
 )
@@ -301,6 +306,189 @@ def initialize(
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
+
+
+@app.command("setup")
+def setup(
+    claude: Annotated[bool, typer.Option("--claude", help="Configure Claude Code.")] = False,
+    cursor: Annotated[bool, typer.Option("--cursor", help="Configure Cursor.")] = False,
+    opencode: Annotated[bool, typer.Option("--opencode", help="Configure OpenCode.")] = False,
+    codex: Annotated[bool, typer.Option("--codex", help="Configure Codex.")] = False,
+    gemini: Annotated[bool, typer.Option("--gemini", help="Configure Gemini CLI.")] = False,
+    antigravity: Annotated[
+        bool,
+        typer.Option("--antigravity", help="Configure Antigravity."),
+    ] = False,
+    all_clients: Annotated[
+        bool,
+        typer.Option("--all", help="Select every supported MCP client."),
+    ] = False,
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Select every currently detected MCP client."),
+    ] = False,
+    remove: Annotated[
+        bool,
+        typer.Option("--remove", help="Remove Flamo from the selected MCP clients."),
+    ] = False,
+    rollback: Annotated[
+        str | None,
+        typer.Option("--rollback", metavar="VERSION", help="Activate an installed version."),
+    ] = None,
+    verify: Annotated[
+        bool,
+        typer.Option("--verify", help="Verify the active MCP runtime without changing configs."),
+    ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Apply an explicit plan without confirmation."),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print the exact plan without making changes."),
+    ] = False,
+    json_output: JsonOption = False,
+) -> None:
+    """Install a managed runtime and connect local MCP clients."""
+    service = SetupService(
+        home=Path(os.environ["FLAMO_SETUP_HOME"])
+        if "FLAMO_SETUP_HOME" in os.environ
+        else None,
+        data_root=Path(os.environ["FLAMO_SETUP_DATA_ROOT"])
+        if "FLAMO_SETUP_DATA_ROOT" in os.environ
+        else None,
+        jsonc_helper=Path(os.environ["FLAMO_SETUP_JSONC_HELPER"])
+        if "FLAMO_SETUP_JSONC_HELPER" in os.environ
+        else None,
+        node_executable=os.environ.get("FLAMO_SETUP_NODE", "node"),
+        uv_executable=os.environ.get("FLAMO_SETUP_UV", "uv"),
+    )
+    inspection = service.inspect()
+    explicit_clients = setup_ui.selected_clients(
+        (
+            (SetupClient.CLAUDE, claude),
+            (SetupClient.CURSOR, cursor),
+            (SetupClient.OPENCODE, opencode),
+            (SetupClient.CODEX, codex),
+            (SetupClient.GEMINI, gemini),
+            (SetupClient.ANTIGRAVITY, antigravity),
+        )
+    )
+    action_count = sum((remove, rollback is not None, verify))
+    if action_count > 1:
+        _fail(
+            DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "Choose only one of --remove, --rollback, or --verify.",
+            )
+        )
+    explicit_selection = bool(explicit_clients or all_clients or refresh)
+    if sum((bool(explicit_clients), all_clients, refresh)) > 1:
+        _fail(
+            DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "Choose client flags, --all, or --refresh; do not combine them.",
+            )
+        )
+    if verify and explicit_selection:
+        _fail(
+            DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "--verify does not accept client selections.",
+            )
+        )
+    if yes and not (explicit_selection or rollback is not None or verify):
+        _fail(
+            DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "--yes requires explicit clients, --all, --refresh, --rollback, or --verify.",
+            )
+        )
+
+    operation = (
+        SetupOperation.VERIFY
+        if verify
+        else SetupOperation.ROLLBACK
+        if rollback is not None
+        else SetupOperation.REMOVE
+        if remove
+        else SetupOperation.CONFIGURE
+    )
+    version: str | None = rollback if rollback is not None else __version__
+    clients = explicit_clients
+    if all_clients:
+        clients = tuple(SetupClient)
+    elif refresh:
+        clients = inspection.detected_clients
+
+    interactive = not (
+        explicit_selection
+        or rollback is not None
+        or verify
+        or dry_run
+        or json_output
+        or _cli_defaults().json_output
+        or yes
+    )
+    try:
+        if interactive:
+            if not sys.stdin.isatty():
+                raise DomainError(
+                    ErrorCode.EXECUTION_REFUSED,
+                    "Interactive setup requires a terminal.",
+                    remediation=("Select clients explicitly and pass --yes or --dry-run.",),
+                )
+            setup_ui.print_banner(inspection)
+            if remove:
+                action = SetupOperation.REMOVE.value
+            elif inspection.active_version is None:
+                action = SetupOperation.CONFIGURE.value
+            else:
+                action = setup_ui.choose_action(inspection, __version__)
+            if action == "exit":
+                raise typer.Exit
+            if action == "update":
+                operation = SetupOperation.CONFIGURE
+                clients = inspection.configured_clients
+            else:
+                operation = SetupOperation(action)
+            if operation is SetupOperation.VERIFY:
+                clients = ()
+            elif operation is SetupOperation.ROLLBACK:
+                version = setup_ui.choose_rollback_version(
+                    inspection, inspection.active_version
+                )
+                clients = inspection.configured_clients
+            elif action != "update":
+                clients = setup_ui.choose_clients(
+                    inspection,
+                    remove=operation is SetupOperation.REMOVE,
+                )
+                version = None if operation is SetupOperation.REMOVE else __version__
+        elif operation is SetupOperation.ROLLBACK:
+            clients = clients or inspection.configured_clients
+
+        resolved = service.plan(operation=operation, clients=clients, version=version)
+        if dry_run:
+            _emit(resolved.public, as_json=json_output)
+            return
+        if json_output or _cli_defaults().json_output:
+            if not yes:
+                raise DomainError(
+                    ErrorCode.EXECUTION_REFUSED,
+                    "JSON setup requires --yes or --dry-run.",
+                )
+        elif not yes:
+            setup_ui.print_plan(resolved.public)
+            if not setup_ui.confirm_apply():
+                raise DomainError(ErrorCode.PROCESS_CANCELLED, "Setup cancelled.")
+        report = _run_async(lambda: service.apply(resolved))
+    except DomainError as error:
+        _fail(error)
+    if json_output or _cli_defaults().json_output:
+        _emit(report, as_json=True)
+    else:
+        setup_ui.print_report(report)
 
 
 @app.command("status")
