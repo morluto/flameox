@@ -16,6 +16,9 @@
 - name: triage
   color: "fbca04"
   description: Needs initial assessment
+- name: autorelease
+  color: "ededed"
+  description: Automated release pull request
 - name: adapter/pyperf
   color: "bfdadc"
   description: pyperf integration
