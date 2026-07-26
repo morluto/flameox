@@ -14,10 +14,12 @@ dependencies = [
     "mcp==2.0.0b2",
     "mcp-types==2.0.0b2",
     "numpy>=2.2,<3",
+    "packaging>=24,<27",
     "portalocker>=3.2,<4",
     "pyarrow>=20,<26",
     "pydantic>=2.13.4,<2.14",
     "scipy>=1.15,<2",
+    "statsmodels>=0.14,<1",
     "tomli-w>=1.2,<2",
     "typer>=0.16,<1",
 ]
@@ -88,6 +90,8 @@ module = [
     "perfetto.*",
     "pyperf",
     "pyperf.*",
+    "statsmodels",
+    "statsmodels.*",
     "torch",
     "torch.*",
 ]
