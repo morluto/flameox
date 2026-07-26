@@ -2,9 +2,9 @@
 
 ## Reporting a vulnerability
 
-If you discover a security issue in flameox, please report it by emailing the
-maintainer at the address listed in the commit history. Do not open a public
-issue.
+If you discover a security issue in flameox, please report it privately through
+[GitHub Security Advisories](https://github.com/morluto/flameox/security/advisories/new).
+Do not open a public issue.
 
 ## Secrets management
 
@@ -16,8 +16,6 @@ source or committed to the repository.
 - Copy `.env.example` to `.env` for local development and keep `.env` in
   `.gitignore` (already configured).
 - Never commit credentials, tokens, or private keys.
-- The CI pipeline runs [gitleaks](https://github.com/gitleaks/gitleaks) on
-  every PR to detect accidentally committed secrets.
 
 ## Dependency security
 
