@@ -44,11 +44,16 @@ all = [
     "torch>=2.7",
 ]
 dev = [
+    "deptry>=0.23",
     "hypothesis>=6.130",
     "import-linter>=2.2",
     "mypy>=1.15",
+    "pip-audit>=2.9",
     "pytest>=8.3",
     "pytest-cov>=6.1",
+    "pytest-randomly>=3.16",
+    "pytest-rerunfailures>=15",
+    "pytest-xdist>=3.6",
     "pyarrow-stubs>=20.0.0.20260625",
     "ruff>=0.11",
     "scipy-stubs>=1.18.0.1,<1.19",
@@ -62,11 +67,12 @@ flamo = "flamo.cli:app"
 packages = ["src/flamo"]
 
 [tool.pytest.ini_options]
-addopts = "-ra --strict-config --strict-markers --durations=10"
+addopts = "-ra --strict-config --strict-markers --durations=10 --reruns=2 --reruns-delay=1"
 testpaths = ["tests"]
 markers = [
     "performance: representative local corpus performance acceptance checks",
 ]
+xfail_strict = true
 
 [tool.coverage.run]
 branch = true
