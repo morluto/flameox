@@ -7,6 +7,7 @@ name = "flameox"
 version = "0.1.1"
 description = "Local runtime evidence CLI and MCP server for coding agents"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "anyio>=4.9,<5",
