@@ -5,6 +5,7 @@ from typing import ClassVar, Literal
 
 from pydantic import Field, JsonValue
 
+from flameox.application.recoverable_move import validate_manifest_id
 from flameox.catalog import Catalog
 from flameox.domain import (
     DomainError,
@@ -299,6 +300,7 @@ class FindingService:
             ArtifactStore(self.workspace).get(item.ref_id)
             return
         if item.ref_type == "generation":
+            validate_manifest_id(item.ref_id, kind="generation")
             path = self.workspace.paths.generations / item.ref_id / "manifest.json"
             if path.is_file():
                 return

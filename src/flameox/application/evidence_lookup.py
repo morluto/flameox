@@ -7,6 +7,7 @@ from typing import Any, ClassVar, Literal, cast
 from pydantic import JsonValue
 
 from flameox.application.artifacts import ArtifactService
+from flameox.application.recoverable_move import validate_manifest_id
 from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode
 from flameox.models import ContractModel
@@ -62,6 +63,7 @@ class EvidenceLookupService:
         elif ref_type == "artifact":
             data = ArtifactService(self.workspace).get(ref_id).model_dump(mode="json")
         elif ref_type == "generation":
+            validate_manifest_id(ref_id, kind="generation")
             path = self.workspace.paths.generations / ref_id / "manifest.json"
             try:
                 data = GenerationManifest.model_validate_json(path.read_text()).model_dump(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -84,6 +85,78 @@ def test_artifact_import_enforces_size_and_root(tmp_path: Path) -> None:
     assert root_error.value.code is ErrorCode.EXECUTION_REFUSED
     assert size_error.value.code is ErrorCode.ARTIFACT_TOO_LARGE
     assert list(workspace.paths.staging.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "payload_name",
+    ["", "../outside", r"..\outside", "D:outside", ".", ".."],
+)
+def test_artifact_get_rejects_non_local_payload_name(
+    tmp_path: Path,
+    payload_name: str,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"evidence")
+    store = ArtifactStore(workspace)
+    stored = store.import_path(source, allowed_roots=(tmp_path,), max_bytes=100)
+    metadata_path = stored.payload_path.parent / "artifact.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["payload_name"] = payload_name
+    metadata_path.write_text(json.dumps(metadata))
+
+    with pytest.raises(DomainError) as error:
+        store.get(stored.content.artifact_id)
+
+    assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+
+
+def test_artifact_get_rejects_symlink_payload(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"evidence")
+    store = ArtifactStore(workspace)
+    stored = store.import_path(source, allowed_roots=(tmp_path,), max_bytes=100)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+    stored.payload_path.unlink()
+    stored.payload_path.symlink_to(outside)
+
+    with pytest.raises(DomainError) as error:
+        store.get(stored.content.artifact_id)
+
+    assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+
+
+@pytest.mark.parametrize("component", ["object", "metadata"])
+def test_artifact_get_rejects_symlink_storage_component(
+    tmp_path: Path,
+    component: str,
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"evidence")
+    store = ArtifactStore(workspace)
+    stored = store.import_path(source, allowed_roots=(tmp_path,), max_bytes=100)
+    object_root = stored.payload_path.parent
+    metadata_path = object_root / "artifact.json"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    if component == "metadata":
+        outside_metadata = outside / "artifact.json"
+        outside_metadata.write_bytes(metadata_path.read_bytes())
+        metadata_path.unlink()
+        metadata_path.symlink_to(outside_metadata)
+    else:
+        outside_object = outside / "object"
+        object_root.rename(outside_object)
+        object_root.symlink_to(outside_object, target_is_directory=True)
+
+    with pytest.raises(DomainError) as error:
+        store.get(stored.content.artifact_id)
+
+    assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
 
 
 def test_run_revisions_use_compare_and_swap(tmp_path: Path) -> None:
