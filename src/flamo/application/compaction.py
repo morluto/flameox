@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
-
 from flamo.catalog import Catalog
 from flamo.evidence import GenerationPublisher, schema_for, table_names
+from flamo.models import ContractModel
 from flamo.storage import GenerationManifest, Workspace
 
 _COMMON_COLUMNS = {
@@ -15,9 +14,7 @@ _COMMON_COLUMNS = {
 }
 
 
-class CompactionResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class CompactionResult(ContractModel):
     schema_version: int = 1
     input_corpus_commit_id: str
     output_corpus_commit_id: str
@@ -36,9 +33,7 @@ class CompactionService:
     def compact(self) -> CompactionResult:
         head = self.workspace.corpus.read_head()
         manifests = tuple(
-            GenerationManifest.model_validate_json(
-                (self.workspace.paths.root / path).read_text()
-            )
+            GenerationManifest.model_validate_json((self.workspace.paths.root / path).read_text())
             for path in head.generation_manifests
         )
         file_count_before = sum(len(manifest.files) for manifest in manifests)
@@ -55,18 +50,16 @@ class CompactionService:
         with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
             for table_name in table_names():
                 schema = schema_for(table_name)
-                columns = [
-                    name for name in schema.names if name not in _COMMON_COLUMNS
-                ]
-                count_row = snapshot.execute(
-                    f'SELECT count(*) FROM "{table_name}"'
-                ).fetchone()
+                columns = [name for name in schema.names if name not in _COMMON_COLUMNS]
+                count_row = snapshot.execute(f'SELECT count(*) FROM "{table_name}"').fetchone()
                 if count_row is None or int(count_row[0]) == 0:
                     continue
                 projection = ", ".join(f'"{column}"' for column in columns)
-                rows_by_table[table_name] = snapshot.execute(
-                    f'SELECT {projection} FROM "{table_name}"'
-                ).to_arrow_table().to_pylist()
+                rows_by_table[table_name] = (
+                    snapshot.execute(f'SELECT {projection} FROM "{table_name}"')
+                    .to_arrow_table()
+                    .to_pylist()
+                )
         published = GenerationPublisher(self.workspace).publish_rows(
             rows_by_table,
             publisher="flamo.compaction",
@@ -80,7 +73,5 @@ class CompactionService:
             superseded_generation_count=len(manifests),
             reachable_file_count_before=file_count_before,
             reachable_file_count_after=len(published.manifest.files),
-            row_counts={
-                table_name: len(rows) for table_name, rows in rows_by_table.items()
-            },
+            row_counts={table_name: len(rows) for table_name, rows in rows_by_table.items()},
         )

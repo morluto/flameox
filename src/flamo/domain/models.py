@@ -2,17 +2,17 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from pydantic import (
-    BaseModel,
-    ConfigDict,
     Field,
     JsonValue,
     StringConstraints,
     field_validator,
     model_validator,
 )
+
+from flamo.models import ContractModel
 
 Identifier = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 Digest = Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
@@ -21,17 +21,6 @@ ShortText = Annotated[str, StringConstraints(min_length=1, max_length=500)]
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
-
-
-class ContractModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
-
-    @field_validator("*", mode="after")
-    @classmethod
-    def require_aware_datetimes(cls, value: Any) -> Any:
-        if isinstance(value, datetime) and value.tzinfo is None:
-            raise ValueError("timestamps must include a timezone")
-        return value
 
 
 class EvidenceLevel(StrEnum):
@@ -270,6 +259,9 @@ class CapabilityStatus(StrEnum):
     AVAILABLE = "available"
     UNAVAILABLE = "unavailable"
     DEGRADED = "degraded"
+    PERMISSION_REQUIRED = "permission_required"
+    UNSUPPORTED_PLATFORM = "unsupported_platform"
+    UNKNOWN = "unknown"
 
 
 class CapabilityReport(ContractModel):
@@ -277,12 +269,20 @@ class CapabilityReport(ContractModel):
     adapter: Identifier
     status: CapabilityStatus
     executable: str | None = None
+    import_location: str | None = None
     version: str | None = None
     supported_modes: tuple[str, ...] = ()
+    supported_formats: tuple[str, ...] = ()
+    platform: str | None = None
+    architecture: str | None = None
     permissions: tuple[str, ...] = ()
+    permission_status: str | None = None
+    restrictions: tuple[str, ...] = ()
+    features: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     remediation: tuple[str, ...] = ()
     probe_kind: Literal["passive", "active"] = "passive"
+    probed_at: datetime | None = None
 
 
 class CapturePlan(ContractModel):
@@ -302,8 +302,9 @@ class CapturePlan(ContractModel):
     collector_environment: dict[str, str] = Field(default_factory=dict)
     expected_artifact_kinds: tuple[ArtifactKind, ...]
     expected_overhead: str
-    containment: Literal["active", "uncontained", "unavailable"]
+    containment: Literal["active", "degraded", "uncontained", "unavailable"]
     network_contained: bool
+    systemd_scope_unit: str | None = None
     permissions: tuple[str, ...] = ()
     bound_identities: dict[str, JsonValue] = Field(default_factory=dict)
     limits: dict[str, JsonValue] = Field(default_factory=dict)
@@ -528,6 +529,7 @@ class Comparison(ContractModel):
     unit: Identifier
     polarity: Literal["lower_is_better", "higher_is_better", "neutral"]
     estimand: Identifier
+    practical_threshold: Annotated[float, Field(ge=0)]
     baseline_value_int: int | None = None
     baseline_value_float: float | None = None
     candidate_value_int: int | None = None

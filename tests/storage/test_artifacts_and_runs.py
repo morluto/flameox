@@ -83,6 +83,7 @@ def test_artifact_import_enforces_size_and_root(tmp_path: Path) -> None:
 
     assert root_error.value.code is ErrorCode.EXECUTION_REFUSED
     assert size_error.value.code is ErrorCode.ARTIFACT_TOO_LARGE
+    assert list(workspace.paths.staging.iterdir()) == []
 
 
 def test_run_revisions_use_compare_and_swap(tmp_path: Path) -> None:

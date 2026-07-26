@@ -5,26 +5,22 @@ from pathlib import Path
 from typing import Literal
 
 import pyarrow.parquet as pq
-from pydantic import BaseModel, ConfigDict
 
 from flamo.catalog import Catalog
 from flamo.domain import DomainError
 from flamo.evidence.schemas import schema_for
+from flamo.models import ContractModel
 from flamo.storage import ArtifactStore, GenerationManifest, RunStore, Workspace
 
 
-class IntegrityIssue(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class IntegrityIssue(ContractModel):
     severity: Literal["error", "warning"]
     code: str
     path: str | None = None
     message: str
 
 
-class IntegrityResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class IntegrityResult(ContractModel):
     schema_version: int = 1
     level: Literal["quick", "full"]
     corpus_commit_id: str

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -10,19 +11,18 @@ from typing import Literal
 from uuid import uuid4
 
 import portalocker
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from flamo import __version__
 from flamo.config import WorkspaceConfig
 from flamo.domain.errors import DomainError, ErrorCode
 from flamo.domain.models import utc_now
+from flamo.models import ContractModel
 from flamo.storage.atomic import atomic_write_json, atomic_write_text
 from flamo.storage.corpus import CorpusStore
 
 
-class WorkspaceIdentity(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class WorkspaceIdentity(ContractModel):
     schema_version: Literal[1] = 1
     workspace_id: str = Field(min_length=1)
     created_at: datetime
@@ -75,6 +75,18 @@ class WorkspacePaths:
         return self.root / "trash"
 
     @property
+    def logs(self) -> Path:
+        return self.root / "logs"
+
+    @property
+    def operation_log(self) -> Path:
+        return self.logs / "operations.jsonl"
+
+    @property
+    def operation_log_lock(self) -> Path:
+        return self.logs / "operations.lock"
+
+    @property
     def write_lock(self) -> Path:
         return self.root / "write.lock"
 
@@ -97,6 +109,7 @@ class Workspace:
         "corpus/commits",
         "evidence",
         "generations",
+        "logs",
         "quarantine",
         "records",
         "runs",
@@ -152,6 +165,7 @@ class Workspace:
             workspace.paths.write_lock,
             workspace.paths.catalog_lock,
             workspace.paths.retention_lock,
+            workspace.paths.operation_log_lock,
         ):
             lock_path.touch(mode=0o600, exist_ok=True)
 
@@ -202,44 +216,69 @@ class Workspace:
             remediation=("Run `flamo init` from the project root.",),
         )
 
+    @contextmanager
     def write_locked(
         self,
         *,
         timeout: float = 30,
-    ) -> portalocker.Lock:
-        return portalocker.Lock(
-            self.paths.write_lock,
-            mode="a",
-            timeout=timeout,
-        )
+    ) -> Iterator[object]:
+        yield from self._locked(self.paths.write_lock, timeout=timeout)
 
+    @contextmanager
     def retention_locked(
         self,
         *,
         shared: bool,
         timeout: float = 30,
-    ) -> portalocker.Lock:
+    ) -> Iterator[object]:
         flag = portalocker.LOCK_SH if shared else portalocker.LOCK_EX
-        return portalocker.Lock(
+        yield from self._locked(
             self.paths.retention_lock,
-            mode="a",
             timeout=timeout,
             flags=flag | portalocker.LOCK_NB,
         )
 
+    @contextmanager
     def catalog_locked(
         self,
         *,
         shared: bool,
         timeout: float = 30,
-    ) -> portalocker.Lock:
+    ) -> Iterator[object]:
         flag = portalocker.LOCK_SH if shared else portalocker.LOCK_EX
-        return portalocker.Lock(
+        yield from self._locked(
             self.paths.catalog_lock,
-            mode="a",
             timeout=timeout,
             flags=flag | portalocker.LOCK_NB,
         )
+
+    def _locked(
+        self,
+        path: Path,
+        *,
+        timeout: float,
+        flags: portalocker.LockFlags | None = None,
+    ) -> Iterator[object]:
+        lock = (
+            portalocker.Lock(path, mode="a", timeout=timeout)
+            if flags is None
+            else portalocker.Lock(
+                path,
+                mode="a",
+                timeout=timeout,
+                flags=flags,
+            )
+        )
+        try:
+            with lock as stream:
+                yield stream
+        except portalocker.exceptions.LockException as exc:
+            raise DomainError(
+                ErrorCode.WRITE_LOCK_TIMEOUT,
+                f"Timed out waiting for workspace lock {path.name!r}.",
+                retryable=True,
+                details={"lock": path.name, "timeout_seconds": timeout},
+            ) from exc
 
     @staticmethod
     def _exclude_local_workspace(project_root: Path) -> None:

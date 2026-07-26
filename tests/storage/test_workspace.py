@@ -68,3 +68,17 @@ def test_commit_digest_detects_tampering(tmp_path: Path) -> None:
         workspace.corpus.read_head()
 
     assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+
+
+def test_lock_timeout_maps_to_structured_retryable_error(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+
+    with (
+        workspace.write_locked(),
+        pytest.raises(DomainError) as error,
+        workspace.write_locked(timeout=0.01),
+    ):
+        raise AssertionError("contended lock was unexpectedly acquired")
+
+    assert error.value.code is ErrorCode.WRITE_LOCK_TIMEOUT
+    assert error.value.retryable

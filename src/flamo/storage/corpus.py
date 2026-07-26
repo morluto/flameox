@@ -5,21 +5,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import Field, StringConstraints
 
 from flamo.domain.errors import DomainError, ErrorCode
 from flamo.domain.identity import digest_model
 from flamo.domain.models import utc_now
+from flamo.models import ContractModel
 from flamo.storage.atomic import atomic_write_json, atomic_write_text
 
 Digest = Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
 
 
-class StorageModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
-
-
-class GenerationFile(StorageModel):
+class GenerationFile(ContractModel):
     path: str
     sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
     byte_length: Annotated[int, Field(ge=0)]
@@ -29,7 +26,7 @@ class GenerationFile(StorageModel):
     schema_minor: Annotated[int, Field(ge=0)]
 
 
-class GenerationManifest(StorageModel):
+class GenerationManifest(ContractModel):
     schema_version: Literal[1] = 1
     generation_id: str
     created_at: datetime
@@ -42,7 +39,7 @@ class GenerationManifest(StorageModel):
     supersedes: tuple[str, ...] = ()
 
 
-class CorpusCommit(StorageModel):
+class CorpusCommit(ContractModel):
     schema_version: Literal[1] = 1
     commit_id: Digest
     parent_commit_id: Digest | None

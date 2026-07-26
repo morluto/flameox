@@ -14,6 +14,7 @@ from uuid import uuid4
 from flamo.domain.errors import DomainError, ErrorCode
 from flamo.domain.models import ArtifactContent, Integrity, utc_now
 from flamo.storage.atomic import atomic_write_json, fsync_directory
+from flamo.storage.quotas import StorageQuota
 from flamo.storage.workspace import Workspace
 
 _SAFE_EXTENSION = re.compile(r"^\.[A-Za-z0-9][A-Za-z0-9._-]{0,15}$")
@@ -66,6 +67,7 @@ class ArtifactStore:
         staged_fd = os.open(staged_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         digest = hashlib.sha256()
         total = 0
+        staged_complete = False
         try:
             before = os.fstat(source_fd)
             if not stat.S_ISREG(before.st_mode):
@@ -78,6 +80,10 @@ class ArtifactStore:
                     ErrorCode.EXECUTION_REFUSED,
                     "Artifact imports cannot use mutable hard-link sources.",
                 )
+            StorageQuota(self.workspace).require_capacity(
+                additional_bytes=before.st_size,
+                staging=True,
+            )
             while True:
                 chunk = os.read(source_fd, 1024 * 1024)
                 if not chunk:
@@ -110,9 +116,12 @@ class ArtifactStore:
                     "Artifact import source changed while it was read.",
                     retryable=True,
                 )
+            staged_complete = True
         finally:
             os.close(source_fd)
             os.close(staged_fd)
+            if not staged_complete:
+                shutil.rmtree(staging_root, ignore_errors=True)
 
         hexadecimal = digest.hexdigest()
         artifact_id = f"sha256:{hexadecimal}"
@@ -123,6 +132,7 @@ class ArtifactStore:
 
         try:
             with self.workspace.write_locked():
+                StorageQuota(self.workspace).require_capacity(staging=True)
                 if metadata_path.exists():
                     content = self._read_metadata(metadata_path)
                     if content.artifact_id != artifact_id or content.byte_length != total:

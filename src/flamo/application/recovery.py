@@ -2,23 +2,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
-
+from flamo.application.gc import GarbageCollector
+from flamo.application.quarantine import QuarantineService
 from flamo.application.run_rows import run_row
 from flamo.domain import (
     CaptureStatus,
+    DomainError,
     ExecutionStatus,
     ProcessResult,
     RunManifest,
 )
 from flamo.domain.models import utc_now
 from flamo.evidence import GenerationPublisher
+from flamo.models import ContractModel
 from flamo.storage import RunStore, Workspace
 
 
-class RecoveryInspection(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class RecoveryInspection(ContractModel):
     schema_version: int = 1
     active_run_ids: tuple[str, ...]
     recoverable_run_ids: tuple[str, ...]
@@ -26,11 +26,11 @@ class RecoveryInspection(BaseModel):
     staging_paths: tuple[str, ...]
 
 
-class RecoveryResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class RecoveryResult(ContractModel):
     schema_version: int = 1
     recovered_runs: tuple[RunManifest, ...]
+    resumed_trash_manifests: tuple[str, ...] = ()
+    resumed_quarantine_manifests: tuple[str, ...] = ()
     inspection: RecoveryInspection
 
 
@@ -39,13 +39,19 @@ class RecoveryService:
         self.workspace = workspace
         self.runs = RunStore(workspace)
         self.publisher = GenerationPublisher(workspace)
+        self.garbage = GarbageCollector(workspace)
+        self.quarantine = QuarantineService(workspace)
 
     def inspect(self) -> RecoveryInspection:
         active: list[str] = []
         recoverable: list[str] = []
         indeterminate: list[str] = []
         for projection in sorted(self.workspace.paths.runs.glob("*/manifest.json")):
-            run = self.runs.read(projection.parent.name)
+            try:
+                run = self.runs.read(projection.parent.name)
+            except DomainError:
+                indeterminate.append(projection.parent.name)
+                continue
             if run.execution_status is not ExecutionStatus.RUNNING:
                 continue
             if run.lease is None:
@@ -67,6 +73,12 @@ class RecoveryService:
         )
 
     def recover(self) -> RecoveryResult:
+        resumed_trash = self.garbage.moving_manifests()
+        for manifest_id in resumed_trash:
+            self.garbage.resume(manifest_id)
+        resumed_quarantine = self.quarantine.moving_manifests()
+        for quarantine_id in resumed_quarantine:
+            self.quarantine.resume(quarantine_id)
         inspection = self.inspect()
         recovered: list[RunManifest] = []
         for run_id in inspection.recoverable_run_ids:
@@ -97,6 +109,8 @@ class RecoveryService:
             )
         return RecoveryResult(
             recovered_runs=tuple(recovered),
+            resumed_trash_manifests=resumed_trash,
+            resumed_quarantine_manifests=resumed_quarantine,
             inspection=self.inspect(),
         )
 
