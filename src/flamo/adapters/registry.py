@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from importlib.metadata import Distribution, EntryPoint, entry_points
+from pathlib import Path
+from typing import Any
+
+from flamo.domain import DomainError, ErrorCode, digest_model
+from flamo.models import ContractModel
+from flamo.storage import Workspace
+from flamo.storage.atomic import atomic_write_json
+
+ENTRY_POINT_GROUP = "flamo.adapters"
+
+
+class AdapterApproval(ContractModel):
+    schema_version: int = 1
+    distribution: str
+    version: str
+    package_identity: str
+
+
+class AdapterDescriptor(ContractModel):
+    schema_version: int = 1
+    adapter: str
+    entry_point: str
+    distribution: str
+    version: str
+    package_identity: str
+    approved: bool
+
+
+class AdapterDiscoveryResult(ContractModel):
+    schema_version: int = 1
+    adapters: tuple[AdapterDescriptor, ...]
+
+
+class AdapterRegistry:
+    """Discover entry points without importing them and bind approvals to wheel identity."""
+
+    def __init__(self, workspace: Workspace) -> None:
+        self.workspace = workspace
+        self.approvals_path = workspace.paths.records / "adapter-approvals.json"
+
+    def discover(self) -> AdapterDiscoveryResult:
+        approvals = self._approvals()
+        descriptors: list[AdapterDescriptor] = []
+        for entry_point in sorted(
+            entry_points(group=ENTRY_POINT_GROUP),
+            key=lambda item: (item.name, item.value),
+        ):
+            distribution = entry_point.dist
+            if distribution is None:
+                continue
+            name = distribution.metadata["Name"] or "unknown"
+            identity = _distribution_identity(distribution)
+            approval = approvals.get(name.casefold())
+            descriptors.append(
+                AdapterDescriptor(
+                    adapter=entry_point.name,
+                    entry_point=entry_point.value,
+                    distribution=name,
+                    version=distribution.version,
+                    package_identity=identity,
+                    approved=(
+                        approval is not None
+                        and approval.version == distribution.version
+                        and approval.package_identity == identity
+                    ),
+                )
+            )
+        return AdapterDiscoveryResult(adapters=tuple(descriptors))
+
+    def approve(self, distribution_name: str) -> AdapterDiscoveryResult:
+        matches = [
+            descriptor
+            for descriptor in self.discover().adapters
+            if descriptor.distribution.casefold() == distribution_name.casefold()
+        ]
+        if not matches:
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                f"No {ENTRY_POINT_GROUP!r} entry point is installed for "
+                f"distribution {distribution_name!r}.",
+            )
+        versions = {(item.version, item.package_identity) for item in matches}
+        if len(versions) != 1:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "One distribution resolved to conflicting package identities.",
+            )
+        version, package_identity = versions.pop()
+        if package_identity.startswith("unverifiable:"):
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "The installed distribution contains unreadable or untracked files.",
+            )
+        with self.workspace.write_locked():
+            approvals = self._approvals()
+            approvals[matches[0].distribution.casefold()] = AdapterApproval(
+                distribution=matches[0].distribution,
+                version=version,
+                package_identity=package_identity,
+            )
+            self._write_approvals(approvals)
+        return self.discover()
+
+    def revoke(self, distribution_name: str) -> AdapterDiscoveryResult:
+        with self.workspace.write_locked():
+            approvals = self._approvals()
+            removed = approvals.pop(distribution_name.casefold(), None)
+            if removed is None:
+                raise DomainError(
+                    ErrorCode.REVISION_CONFLICT,
+                    f"Distribution {distribution_name!r} is not approved.",
+                )
+            self._write_approvals(approvals)
+        return self.discover()
+
+    def load_approved(self, adapter: str) -> Any:
+        descriptor = next(
+            (
+                item
+                for item in self.discover().adapters
+                if item.adapter == adapter and item.approved
+            ),
+            None,
+        )
+        if descriptor is None:
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                f"Third-party adapter {adapter!r} is not installed and approved.",
+            )
+        entry_point = self._entry_point(descriptor)
+        try:
+            return entry_point.load()
+        except Exception as exc:
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                f"Approved adapter {adapter!r} could not be loaded.",
+                details={"exception_type": type(exc).__name__},
+            ) from exc
+
+    def _entry_point(self, descriptor: AdapterDescriptor) -> EntryPoint:
+        for entry_point in entry_points(group=ENTRY_POINT_GROUP):
+            distribution = entry_point.dist
+            if distribution is None:
+                continue
+            if (
+                entry_point.name == descriptor.adapter
+                and entry_point.value == descriptor.entry_point
+                and (distribution.metadata["Name"] or "").casefold()
+                == descriptor.distribution.casefold()
+                and distribution.version == descriptor.version
+                and _distribution_identity(distribution) == descriptor.package_identity
+            ):
+                return entry_point
+        raise DomainError(
+            ErrorCode.REVISION_CONFLICT,
+            "The approved entry point changed after discovery.",
+            retryable=True,
+        )
+
+    def _approvals(self) -> dict[str, AdapterApproval]:
+        if not self.approvals_path.exists():
+            return {}
+        try:
+            payload = json.loads(self.approvals_path.read_text())
+            return {
+                key: AdapterApproval.model_validate(value)
+                for key, value in payload["approvals"].items()
+            }
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                "The third-party adapter approval registry is invalid.",
+            ) from exc
+
+    def _write_approvals(self, approvals: dict[str, AdapterApproval]) -> None:
+        atomic_write_json(
+            self.approvals_path,
+            {
+                "schema_version": 1,
+                "approvals": {
+                    key: value.model_dump(mode="json") for key, value in sorted(approvals.items())
+                },
+            },
+        )
+
+
+def _distribution_identity(distribution: Distribution) -> str:
+    files: list[dict[str, str | int | None]] = []
+    installed_paths = tuple(sorted(distribution.files or (), key=str))
+    verifiable = bool(installed_paths)
+    for path in installed_paths:
+        file_hash = path.hash
+        installed = Path(str(distribution.locate_file(path)))
+        content_digest: str | None
+        try:
+            digest = hashlib.sha256()
+            with installed.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            content_digest = digest.hexdigest()
+        except (OSError, ValueError):
+            content_digest = None
+            verifiable = False
+        files.append(
+            {
+                "path": str(path),
+                "hash_mode": file_hash.mode if file_hash is not None else None,
+                "hash_value": file_hash.value if file_hash is not None else None,
+                "size": path.size,
+                "content_sha256": content_digest,
+            }
+        )
+    identity = digest_model(
+        {
+            "name": distribution.metadata["Name"],
+            "version": distribution.version,
+            "files": files,
+        }
+    )
+    return identity if verifiable else f"unverifiable:{identity}"

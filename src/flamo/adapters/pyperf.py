@@ -4,18 +4,17 @@ from pathlib import Path
 from typing import Any
 
 import pyperf
-from pydantic import BaseModel, ConfigDict
 
+from flamo.adapters.compatibility import require_supported_producer_major
 from flamo.domain.errors import DomainError, ErrorCode
 from flamo.domain.identity import digest_model
 from flamo.domain.models import ArtifactKind, RunManifest
 from flamo.evidence import GenerationPublisher
+from flamo.models import ContractModel
 from flamo.storage import ArtifactStore, RunStore, Workspace
 
 
-class PyPerfExtractionResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class PyPerfExtractionResult(ContractModel):
     schema_version: int = 1
     run_id: str
     artifact_id: str
@@ -23,6 +22,7 @@ class PyPerfExtractionResult(BaseModel):
     measurement_count: int
     warmup_count: int
     corpus_commit_id: str
+    limitations: tuple[str, ...] = ()
 
 
 class PyPerfExtractor:
@@ -38,6 +38,11 @@ class PyPerfExtractor:
     def extract(self, run_id: str) -> PyPerfExtractionResult:
         run = self.runs.read(run_id)
         registration = self._benchmark_registration(run)
+        compatibility_limitations = require_supported_producer_major(
+            registration,
+            package="pyperf",
+            producer_tokens=("pyperf",),
+        )
         stored = self.artifacts.get(registration.artifact_id)
         suite = self._load_suite(stored.payload_path)
         rows: list[dict[str, Any]] = []
@@ -96,6 +101,7 @@ class PyPerfExtractor:
             benchmark_names=tuple(suite.get_benchmark_names()),
             measurement_count=measured_count,
             warmup_count=warmup_count,
+            limitations=compatibility_limitations,
             corpus_commit_id=published.commit.commit_id,
         )
 

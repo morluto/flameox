@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import JsonValue
 
 from flamo.domain import (
     ArtifactKind,
@@ -19,13 +19,14 @@ from flamo.domain import (
 )
 from flamo.evidence import GenerationPublisher
 from flamo.execution import ExecutionRequest, SubprocessBroker
+from flamo.models import ContractModel
 from flamo.storage import ArtifactStore, RunStore, Workspace
 from flamo.storage.atomic import atomic_write_json
 
+type _AggregateKey = tuple[str, str | None, str | None]
 
-class PerfettoExtractionResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
+class PerfettoExtractionResult(ContractModel):
     schema_version: int = 1
     run_id: str
     artifact_id: str
@@ -38,9 +39,7 @@ class PerfettoExtractionResult(BaseModel):
     limitations: tuple[str, ...]
 
 
-class TraceEvent(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class TraceEvent(ContractModel):
     slice_id: int
     parent_id: int | None
     name: str
@@ -50,9 +49,7 @@ class TraceEvent(BaseModel):
     track_id: int
 
 
-class TraceWindowResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class TraceWindowResult(ContractModel):
     schema_version: int = 1
     artifact_id: str
     start_ns: int
@@ -116,8 +113,24 @@ class PerfettoExtractor:
                 run_id=run_id,
             )
         frame_by_id: dict[str, dict[str, Any]] = {}
-        aggregates: dict[str, tuple[int, int]] = {}
-        events: dict[int, tuple[int | None, str, int, int, int]] = {}
+        aggregates: dict[_AggregateKey, tuple[int, int]] = {}
+        phases_by_aggregate: dict[_AggregateKey, set[str]] = {}
+        operator_observation_rows: list[dict[str, Any]] = []
+        torch_source = "torch" in (run.collector or "").lower() or (
+            registration.producer is not None and "torch" in registration.producer.lower()
+        )
+        events: dict[
+            int,
+            tuple[
+                int | None,
+                str,
+                int,
+                int,
+                int,
+                str | None,
+                str | None,
+            ],
+        ] = {}
         for row in rows:
             if not isinstance(row, dict):
                 raise DomainError(
@@ -128,6 +141,8 @@ class PerfettoExtractor:
             filename = str(row["filename"]) if row["filename"] is not None else None
             line = int(row["line"]) if row["line"] is not None else None
             category = str(row["category"]) if row["category"] is not None else None
+            thread_name = str(row["thread_name"]) if row.get("thread_name") is not None else None
+            process_name = str(row["process_name"]) if row.get("process_name") is not None else None
             frame_id = digest_model(
                 {
                     "artifact_id": registration.artifact_id,
@@ -159,25 +174,81 @@ class PerfettoExtractor:
                 },
             )
             duration = int(row["dur"])
-            count, inclusive = aggregates.get(frame_id, (0, 0))
-            aggregates[frame_id] = (count + 1, inclusive + duration)
+            aggregate_key = (frame_id, thread_name, process_name)
+            count, inclusive = aggregates.get(aggregate_key, (0, 0))
+            aggregates[aggregate_key] = (count + 1, inclusive + duration)
+            phase = str(row["phase"]) if row.get("phase") is not None else None
+            if phase is not None:
+                phases_by_aggregate.setdefault(aggregate_key, set()).add(phase)
+            if torch_source:
+                values = {
+                    "frame_id": frame_id,
+                    "category": category,
+                    "duration_ns": duration,
+                    "input_shapes": (
+                        str(row["input_shapes"]) if row.get("input_shapes") is not None else None
+                    ),
+                    "allocation_bytes": (
+                        int(row["allocation_bytes"])
+                        if row.get("allocation_bytes") is not None
+                        else None
+                    ),
+                    "phase": phase,
+                }
+                operator_observation_rows.append(
+                    {
+                        "observation_id": digest_model(
+                            {
+                                "artifact_id": registration.artifact_id,
+                                "slice_id": int(row["id"]),
+                                "kind": "pytorch.operator",
+                            }
+                        ),
+                        "run_id": run_id,
+                        "artifact_id": registration.artifact_id,
+                        "kind": "pytorch.operator",
+                        "name": name,
+                        "value_json": json.dumps(
+                            values,
+                            allow_nan=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                        "file": filename,
+                        "line_from": line,
+                        "line_to": line,
+                        "context": phase,
+                        "evidence_level": "observed",
+                    }
+                )
             events[int(row["id"])] = (
                 int(row["parent_id"]) if row["parent_id"] is not None else None,
                 frame_id,
                 int(row["ts"]),
                 duration,
                 int(row["track_id"]),
+                thread_name,
+                process_name,
             )
         child_duration_by_event: dict[int, int] = {}
-        for parent_id, _, _, duration, _ in events.values():
+        for parent_id, _, _, duration, _, _, _ in events.values():
             if parent_id is not None and parent_id in events:
                 child_duration_by_event[parent_id] = (
                     child_duration_by_event.get(parent_id, 0) + duration
                 )
-        self_duration_by_frame: dict[str, int] = {}
-        for event_id, (_, frame_id, _, duration, _) in events.items():
-            self_duration_by_frame[frame_id] = self_duration_by_frame.get(
-                frame_id, 0
+        self_duration_by_aggregate: dict[_AggregateKey, int] = {}
+        for event_id, (
+            _,
+            frame_id,
+            _,
+            duration,
+            _,
+            thread_name,
+            process_name,
+        ) in events.items():
+            aggregate_key = (frame_id, thread_name, process_name)
+            self_duration_by_aggregate[aggregate_key] = self_duration_by_aggregate.get(
+                aggregate_key, 0
             ) + max(0, duration - child_duration_by_event.get(event_id, 0))
         measurement_rows = [
             {
@@ -185,26 +256,40 @@ class PerfettoExtractor:
                 "artifact_id": registration.artifact_id,
                 "frame_id": frame_id,
                 "metric": "trace.slice_duration",
-                "self_value": self_duration_by_frame[frame_id],
+                "self_value": self_duration_by_aggregate[(frame_id, thread_name, process_name)],
                 "inclusive_value": duration,
                 "unit": "ns",
                 "sample_count": count,
-                "thread_name": None,
-                "process_name": None,
-                "phase": None,
+                "thread_name": thread_name,
+                "process_name": process_name,
+                "phase": (
+                    next(iter(phases_by_aggregate[(frame_id, thread_name, process_name)]))
+                    if len(
+                        phases_by_aggregate.get(
+                            (frame_id, thread_name, process_name),
+                            (),
+                        )
+                    )
+                    == 1
+                    else None
+                ),
             }
-            for frame_id, (count, duration) in aggregates.items()
+            for (
+                frame_id,
+                thread_name,
+                process_name,
+            ), (count, duration) in aggregates.items()
         ]
         edge_aggregates: dict[tuple[str, str], tuple[int, int]] = {}
         parent_ids: set[int] = set()
-        for parent_id, child_frame_id, _, duration, _ in events.values():
+        for parent_id, child_frame_id, _, duration, _, _, _ in events.values():
             if parent_id is None or parent_id not in events:
                 continue
             parent_ids.add(parent_id)
             parent_frame_id = events[parent_id][1]
-            key = (parent_frame_id, child_frame_id)
-            count, total = edge_aggregates.get(key, (0, 0))
-            edge_aggregates[key] = (count + 1, total + duration)
+            edge_key = (parent_frame_id, child_frame_id)
+            count, total = edge_aggregates.get(edge_key, (0, 0))
+            edge_aggregates[edge_key] = (count + 1, total + duration)
         edge_rows = [
             {
                 "run_id": run_id,
@@ -220,7 +305,15 @@ class PerfettoExtractor:
             ) in edge_aggregates.items()
         ]
         stack_rows: list[dict[str, Any]] = []
-        for event_id, (_, leaf_frame_id, start, duration, track_id) in events.items():
+        for event_id, (
+            _,
+            leaf_frame_id,
+            start,
+            duration,
+            track_id,
+            _,
+            _,
+        ) in events.items():
             if event_id in parent_ids:
                 continue
             frame_ids: list[str] = []
@@ -228,7 +321,7 @@ class PerfettoExtractor:
             seen: set[int] = set()
             while cursor is not None and cursor in events and cursor not in seen:
                 seen.add(cursor)
-                parent_id, frame_id, _, _, _ = events[cursor]
+                parent_id, frame_id, _, _, _, _, _ = events[cursor]
                 frame_ids.append(frame_id)
                 cursor = parent_id
             frame_ids.reverse()
@@ -252,13 +345,16 @@ class PerfettoExtractor:
                     "track_id": track_id,
                 }
             )
+        evidence_rows: dict[str, list[dict[str, Any]]] = {
+            "frames": list(frame_by_id.values()),
+            "frame_measurements": measurement_rows,
+            "call_edges": edge_rows,
+            "stacks": stack_rows,
+        }
+        if operator_observation_rows:
+            evidence_rows["observations"] = operator_observation_rows
         published = self.publisher.publish_rows(
-            {
-                "frames": list(frame_by_id.values()),
-                "frame_measurements": measurement_rows,
-                "call_edges": edge_rows,
-                "stacks": stack_rows,
-            },
+            evidence_rows,
             publisher=self.name,
             publisher_version=self.version,
             input_run_ids=(run_id,),
@@ -351,13 +447,9 @@ class PerfettoExtractor:
         events = tuple(
             TraceEvent(
                 slice_id=int(row["id"]),
-                parent_id=(
-                    int(row["parent_id"]) if row["parent_id"] is not None else None
-                ),
+                parent_id=(int(row["parent_id"]) if row["parent_id"] is not None else None),
                 name=str(row["name"]),
-                category=(
-                    str(row["category"]) if row["category"] is not None else None
-                ),
+                category=(str(row["category"]) if row["category"] is not None else None),
                 start_ns=int(row["ts"]),
                 duration_ns=int(row["dur"]),
                 track_id=int(row["track_id"]),
@@ -393,11 +485,7 @@ class PerfettoExtractor:
         self,
         request: dict[str, JsonValue],
     ) -> dict[str, Any]:
-        job_root = (
-            self.workspace.paths.staging
-            / "perfetto"
-            / secrets.token_hex(16)
-        )
+        job_root = self.workspace.paths.staging / "perfetto" / secrets.token_hex(16)
         job_root.mkdir(parents=True, exist_ok=False)
         request_path = job_root / "request.json"
         response_path = job_root / "response.json"

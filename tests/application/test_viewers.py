@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from flamo.application import (
     ImportArtifactRequest,
     ImportService,
     NativeViewerService,
 )
 from flamo.catalog import Catalog
-from flamo.domain import ArtifactKind
+from flamo.domain import ArtifactKind, Sensitivity
 from flamo.storage import Workspace
 
 
@@ -30,3 +32,73 @@ def test_benchmark_artifact_uses_pyperf_viewer(tmp_path: Path) -> None:
 
     assert plan.viewer == "pyperf show"
     assert plan.argv[1] == "show"
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_viewer"),
+    (
+        (ArtifactKind.MEMORY_PROFILE, "memray tree"),
+        (ArtifactKind.BENCHMARK_SAMPLES, "pyperf show"),
+        (ArtifactKind.EXECUTION_TRACE, "trace_processor_shell"),
+        (ArtifactKind.SAMPLE_PROFILE, "trace_processor_shell"),
+        (ArtifactKind.CORE_DUMP, "gdb"),
+        (ArtifactKind.COLLECTOR_METADATA, "xdg-open"),
+    ),
+)
+def test_every_supported_native_kind_dispatches_to_ecosystem_viewer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: ArtifactKind,
+    expected_viewer: str,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    executable = tmp_path / "viewer"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    monkeypatch.setattr(
+        "flamo.application.viewers.shutil.which",
+        lambda _name: str(executable),
+    )
+    artifact_path = tmp_path / f"{kind.value}.bin"
+    artifact_path.write_bytes(b"native")
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(
+            path=artifact_path,
+            kind=kind,
+            sensitivity=(
+                Sensitivity.SENSITIVE
+                if kind is ArtifactKind.CORE_DUMP
+                else Sensitivity.INTERNAL
+            ),
+        )
+    )
+
+    plan = NativeViewerService(workspace).plan(imported.artifact_id)
+
+    assert plan.viewer == expected_viewer
+    assert plan.argv[0] == str(executable)
+
+
+@pytest.mark.anyio
+async def test_explicit_viewer_launch_uses_bounded_subprocess_broker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    executable = tmp_path / "viewer"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    monkeypatch.setattr(
+        "flamo.application.viewers.shutil.which",
+        lambda _name: str(executable),
+    )
+    artifact_path = tmp_path / "metadata.bin"
+    artifact_path.write_bytes(b"native")
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(path=artifact_path)
+    )
+
+    result = await NativeViewerService(workspace).launch(imported.artifact_id)
+
+    assert result.plan.launches
+    assert result.process.exit_code == 0

@@ -3,16 +3,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
-
 from flamo.domain import ArtifactKind, DomainError, ErrorCode, digest_model
 from flamo.evidence import GenerationPublisher
+from flamo.models import ContractModel
 from flamo.storage import ArtifactStore, RunStore, Workspace
 
 
-class ObservationExtractionResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ObservationExtractionResult(ContractModel):
     schema_version: int = 1
     run_id: str
     artifact_id: str
