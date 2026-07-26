@@ -38,11 +38,22 @@ const child = spawn(
   { env: environment, stdio: "inherit" },
 );
 
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
-  process.on(signal, () => child.kill(signal));
+const signals = ["SIGINT", "SIGTERM", "SIGHUP"];
+const signalHandlers = new Map();
+for (const signal of signals) {
+  const handler = () => child.kill(signal);
+  signalHandlers.set(signal, handler);
+  process.on(signal, handler);
+}
+
+function removeSignalHandlers() {
+  for (const [signal, handler] of signalHandlers) {
+    process.removeListener(signal, handler);
+  }
 }
 
 child.on("error", (error) => {
+  removeSignalHandlers();
   if (error.code === "ENOENT") {
     process.stderr.write(
       "Flamo setup requires uv. Install it from https://docs.astral.sh/uv/ and retry.\n",
@@ -53,6 +64,7 @@ child.on("error", (error) => {
   process.exitCode = 1;
 });
 child.on("exit", (code, signal) => {
+  removeSignalHandlers();
   if (signal) {
     process.kill(process.pid, signal);
     return;

@@ -213,6 +213,30 @@ def test_direct_python_setup_refuses_to_overwrite_jsonc_without_helper(
     assert config.read_text().startswith("{\n  // user note")
 
 
+def test_jsonc_helper_does_not_relax_standard_json_clients(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    data = tmp_path / "data"
+    home.mkdir()
+    config = home / ".claude.json"
+    config.write_text('{\n  // invalid for Claude\n  "mcpServers": {}\n}\n')
+    service = SetupService(
+        home=home,
+        data_root=data,
+        jsonc_helper=tmp_path / "helper-that-must-not-run.cjs",
+        runtime=FakeRuntime(data),
+    )
+
+    with pytest.raises(DomainError) as caught:
+        service.plan(
+            operation=SetupOperation.CONFIGURE,
+            clients=(SetupClient.CLAUDE,),
+            version="0.1.0",
+        )
+
+    assert caught.value.code is ErrorCode.EXECUTION_REFUSED
+    assert config.read_text().startswith("{\n  // invalid for Claude")
+
+
 @pytest.mark.anyio
 async def test_setup_restores_every_config_after_partial_write(
     tmp_path: Path,

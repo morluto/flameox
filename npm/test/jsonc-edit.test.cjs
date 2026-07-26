@@ -82,3 +82,31 @@ test("bootstrap launches the exactly matching Python release", () => {
     "--dry-run",
   ]);
 });
+
+test(
+  "bootstrap terminates when its child exits from a signal",
+  { skip: process.platform === "win32" },
+  () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "flamo-signal-"));
+    const fakeUvx = path.join(directory, "uvx");
+    fs.writeFileSync(
+      fakeUvx,
+      [
+        "#!/usr/bin/env node",
+        '"use strict";',
+        'setTimeout(() => process.kill(process.pid, "SIGTERM"), 20);',
+      ].join("\n"),
+      { mode: 0o700 },
+    );
+    const bootstrap = path.resolve(__dirname, "../bin/flamo.cjs");
+    const result = spawnSync(process.execPath, [bootstrap, "setup"], {
+      encoding: "utf8",
+      env: { ...process.env, FLAMO_UV_EXECUTABLE: fakeUvx },
+      timeout: 5000,
+    });
+
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, null);
+    assert.equal(result.signal, "SIGTERM");
+  },
+);

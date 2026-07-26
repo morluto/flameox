@@ -268,7 +268,7 @@ class ClientConfigRegistry:
                 f"Editing {definition.path} requires the Flamo npm JSONC helper.",
                 remediation=("Run setup through `npx flamo setup`.",),
             )
-        json_document = self._parse_json(definition.path, text)
+        json_document = self._parse_json(definition, text)
         section = json_document.get(definition.config_key)
         if section is None:
             return None
@@ -294,7 +294,7 @@ class ClientConfigRegistry:
         text = self._decode(definition.path, original) if original is not None else ""
         if definition.format == "toml":
             return self._edit_toml(definition, text, value=value, remove=remove).encode()
-        if self.jsonc_helper is not None:
+        if definition.format == "jsonc" and self.jsonc_helper is not None:
             return self._edit_jsonc(
                 definition,
                 text,
@@ -307,7 +307,7 @@ class ClientConfigRegistry:
                 f"Editing {definition.path} requires the Flamo npm JSONC helper.",
                 remediation=("Run setup through `npx flamo setup`.",),
             )
-        document = self._parse_json(definition.path, text) if text else {}
+        document = self._parse_json(definition, text) if text else {}
         section = document.setdefault(definition.config_key, {})
         if not isinstance(section, dict):
             raise self._invalid_config(
@@ -349,19 +349,31 @@ class ClientConfigRegistry:
             section["flamo"] = table
         return tomlkit.dumps(document)
 
-    def _parse_json(self, path: Path, text: str) -> dict[str, Any]:
+    def _parse_json(self, definition: _ClientDefinition, text: str) -> dict[str, Any]:
         if not text.strip():
             return {}
-        if self.jsonc_helper is not None:
-            result = self._run_jsonc_helper({"operation": "parse", "text": text}, path)
+        if definition.format == "jsonc":
+            if self.jsonc_helper is None:
+                raise DomainError(
+                    ErrorCode.CAPABILITY_UNAVAILABLE,
+                    f"Editing {definition.path} requires the Flamo npm JSONC helper.",
+                    remediation=("Run setup through `npx flamo setup`.",),
+                )
+            result = self._run_jsonc_helper(
+                {"operation": "parse", "text": text},
+                definition.path,
+            )
             value = result.get("value")
         else:
             try:
                 value = json.loads(text)
             except json.JSONDecodeError as exc:
-                raise self._invalid_config(path, exc) from exc
+                raise self._invalid_config(definition.path, exc) from exc
         if not isinstance(value, dict):
-            raise self._invalid_config(path, "the document root is not an object")
+            raise self._invalid_config(
+                definition.path,
+                "the document root is not an object",
+            )
         return value
 
     def _edit_jsonc(

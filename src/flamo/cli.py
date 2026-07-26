@@ -363,7 +363,10 @@ def setup(
         node_executable=os.environ.get("FLAMO_SETUP_NODE", "node"),
         uv_executable=os.environ.get("FLAMO_SETUP_UV", "uv"),
     )
-    inspection = service.inspect()
+    try:
+        inspection = service.inspect()
+    except DomainError as error:
+        _fail(error)
     explicit_clients = setup_ui.selected_clients(
         (
             (SetupClient.CLAUDE, claude),

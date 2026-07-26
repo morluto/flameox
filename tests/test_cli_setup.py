@@ -36,3 +36,21 @@ def test_setup_yes_requires_an_explicit_target(
 
     assert result.exit_code == 9
     assert "--yes requires explicit clients" in result.output
+
+
+def test_setup_reports_corrupt_install_metadata_as_a_domain_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "install.json").write_text("{broken")
+    monkeypatch.setenv("FLAMO_SETUP_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("FLAMO_SETUP_DATA_ROOT", str(data))
+
+    result = CliRunner().invoke(app, ["setup", "--verify", "--yes"])
+
+    assert result.exit_code == 5
+    assert "ARTIFACT_INTEGRITY_FAILED" in result.output
+    assert "Traceback" not in result.output
+    assert result.exception is not None
