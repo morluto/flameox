@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn, cast
 
@@ -11,6 +15,7 @@ from pydantic import BaseModel
 
 from flamo import __version__
 from flamo.adapters import (
+    AdapterRegistry,
     CoverageExtractor,
     MemrayExtractor,
     ObservationExtractor,
@@ -41,9 +46,12 @@ from flamo.application import (
     InvestigationService,
     MaterializeAnalysisRequest,
     NativeViewerService,
+    QuarantineService,
     RecordFindingRequest,
     RecordHypothesisRequest,
     RecoveryService,
+    RepairPlan,
+    RepairService,
     RunSetService,
     WorkloadService,
     workspace_status,
@@ -76,6 +84,7 @@ evidence_app = typer.Typer(help="Retrieve one typed immutable evidence reference
 experiment_app = typer.Typer(help="Plan, run, and inspect controlled experiments.")
 stacks_app = typer.Typer(help="Inspect bounded call relationships and stacks.")
 trace_app = typer.Typer(help="Inspect bounded temporal trace windows.")
+adapters_app = typer.Typer(help="Discover and approve third-party adapter entry points.")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(runs_app, name="runs")
 app.add_typer(extract_app, name="extract")
@@ -94,6 +103,7 @@ app.add_typer(evidence_app, name="evidence")
 app.add_typer(experiment_app, name="experiment")
 app.add_typer(stacks_app, name="stacks")
 app.add_typer(trace_app, name="trace")
+app.add_typer(adapters_app, name="adapters")
 
 WorkspaceOption = Annotated[
     Path | None,
@@ -103,6 +113,22 @@ JsonOption = Annotated[
     bool,
     typer.Option("--json", help="Emit the structured JSON result."),
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class _CliDefaults:
+    workspace: Path | None = None
+    project_root: Path | None = None
+    json_output: bool = False
+    quiet: bool = False
+    timeout_seconds: float | None = None
+
+
+_CLI_DEFAULTS: ContextVar[_CliDefaults | None] = ContextVar("flamo_cli_defaults")
+
+
+def _cli_defaults() -> _CliDefaults:
+    return _CLI_DEFAULTS.get(None) or _CliDefaults()
 
 
 def version_callback(value: bool) -> None:
@@ -120,15 +146,65 @@ def main(
         is_eager=True,
         help="Show the installed Flamo version.",
     ),
+    workspace: Annotated[
+        Path | None,
+        typer.Option(
+            "--workspace",
+            help="Default explicit .diagnostics workspace for this invocation.",
+        ),
+    ] = None,
+    project_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--project-root",
+            help="Default project root used for workspace discovery.",
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit structured JSON from the selected command."),
+    ] = False,
+    quiet: Annotated[
+        bool,
+        typer.Option("--quiet", help="Suppress human-readable success output."),
+    ] = False,
+    log_level: Annotated[
+        Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        typer.Option("--log-level", help="Set local diagnostic log verbosity."),
+    ] = "WARNING",
+    timeout_seconds: Annotated[
+        float | None,
+        typer.Option(
+            "--timeout",
+            min=0.001,
+            help="Bound asynchronous CLI operations in seconds.",
+        ),
+    ] = None,
 ) -> None:
     """Collect and query local runtime evidence."""
+    logging.basicConfig(level=getattr(logging, log_level))
+    _CLI_DEFAULTS.set(
+        _CliDefaults(
+            workspace=workspace,
+            project_root=project_root,
+            json_output=json_output,
+            quiet=quiet,
+            timeout_seconds=timeout_seconds,
+        )
+    )
 
 
 def _workspace(explicit: Path | None) -> Workspace:
-    return Workspace.discover(Path.cwd(), explicit=explicit)
+    defaults = _cli_defaults()
+    return Workspace.discover(
+        defaults.project_root or Path.cwd(),
+        explicit=explicit or defaults.workspace,
+    )
 
 
 def _emit(value: BaseModel | dict[str, Any] | list[Any], *, as_json: bool) -> None:
+    defaults = _cli_defaults()
+    as_json = as_json or defaults.json_output
     if isinstance(value, BaseModel):
         payload: Any = value.model_dump(mode="json")
     else:
@@ -136,12 +212,37 @@ def _emit(value: BaseModel | dict[str, Any] | list[Any], *, as_json: bool) -> No
     if as_json:
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
         return
+    if defaults.quiet:
+        return
     if isinstance(payload, dict):
         for key, item in payload.items():
-            typer.echo(f"{key}: {item}")
+            typer.echo(f"{key}: {_terminal_text(item)}")
         return
     for item in payload:
-        typer.echo(str(item))
+        typer.echo(_terminal_text(item))
+
+
+def _terminal_text(value: object) -> str:
+    if isinstance(value, str):
+        return value.encode("unicode_escape", errors="backslashreplace").decode("ascii")
+    return repr(value)
+
+
+def _run_async[T](operation: Callable[[], Awaitable[T]]) -> T:
+    async def bounded() -> T:
+        timeout = _cli_defaults().timeout_seconds
+        if timeout is None:
+            return await operation()
+        try:
+            with anyio.fail_after(timeout):
+                return await operation()
+        except TimeoutError as exc:
+            raise DomainError(
+                ErrorCode.PROCESS_TIMEOUT,
+                "The CLI operation exceeded its explicit timeout.",
+            ) from exc
+
+    return anyio.run(bounded)
 
 
 def _request[RequestT: BaseModel](model: type[RequestT], value: str) -> RequestT:
@@ -150,24 +251,33 @@ def _request[RequestT: BaseModel](model: type[RequestT], value: str) -> RequestT
             return model.model_validate_json(Path(value[1:]).read_text())
         return model.model_validate_json(value)
     except (OSError, ValueError) as exc:
-        raise DomainError(
-            ErrorCode.WORKSPACE_INVALID,
-            f"Structured input is invalid: {exc}",
-        ) from exc
+        raise typer.BadParameter(f"Structured input is invalid: {exc}") from exc
 
 
 def _fail(error: DomainError) -> NoReturn:
-    typer.echo(f"{error.code.value}: {error.message}", err=True)
+    typer.echo(f"{error.code.value}: {_terminal_text(error.message)}", err=True)
     for remediation in error.remediation:
-        typer.echo(f"  {remediation}", err=True)
+        typer.echo(f"  {_terminal_text(remediation)}", err=True)
     exit_codes = {
         ErrorCode.WORKSPACE_NOT_FOUND: 2,
         ErrorCode.WORKSPACE_INVALID: 5,
         ErrorCode.CAPABILITY_UNAVAILABLE: 3,
+        ErrorCode.INVALID_CAPTURE_PLAN: 9,
         ErrorCode.EXECUTION_REFUSED: 9,
+        ErrorCode.PROCESS_FAILED: 4,
+        ErrorCode.PROCESS_TIMEOUT: 8,
+        ErrorCode.PROCESS_CANCELLED: 8,
         ErrorCode.ARTIFACT_TOO_LARGE: 5,
+        ErrorCode.STORAGE_QUOTA_EXCEEDED: 5,
         ErrorCode.ARTIFACT_INTEGRITY_FAILED: 5,
+        ErrorCode.ARTIFACT_PARSE_FAILED: 5,
+        ErrorCode.EVIDENCE_SCHEMA_MISMATCH: 5,
+        ErrorCode.COMPARISON_INVALID: 6,
+        ErrorCode.QUERY_BUDGET_EXCEEDED: 5,
+        ErrorCode.WRITE_LOCK_TIMEOUT: 7,
+        ErrorCode.SENSITIVE_ARTIFACT_REFUSED: 9,
         ErrorCode.REVISION_CONFLICT: 7,
+        ErrorCode.STALE_CURSOR: 7,
     }
     raise typer.Exit(exit_codes.get(error.code, 1))
 
@@ -175,16 +285,16 @@ def _fail(error: DomainError) -> NoReturn:
 @app.command("init")
 def initialize(
     project_root: Annotated[
-        Path,
+        Path | None,
         typer.Argument(help="Project root in which to create .diagnostics."),
-    ] = Path("."),
+    ] = None,
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
     """Initialize a local Flamo workspace."""
     try:
         initialized = Workspace.initialize(
-            project_root,
+            project_root or _cli_defaults().project_root or Path("."),
             workspace_root=workspace,
         )
         result = workspace_status(initialized)
@@ -208,6 +318,14 @@ def status(
 
 @app.command("capabilities")
 def capabilities(
+    active: Annotated[
+        bool,
+        typer.Option("--active", help="Execute bounded brokered capability probes."),
+    ] = False,
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Ignore process-local active-probe cache."),
+    ] = False,
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
@@ -225,7 +343,57 @@ def capabilities(
             selected = _workspace(workspace)
         except DomainError as error:
             _fail(error)
-    _emit(CapabilityService(selected).list(), as_json=json_output)
+    service = CapabilityService(selected)
+    if active:
+
+        async def probe() -> BaseModel:
+            return await service.list_active(refresh=refresh)
+
+        result: BaseModel = _run_async(probe)
+    else:
+        result = service.list()
+    _emit(result, as_json=json_output)
+
+
+@adapters_app.command("list")
+def adapters_list(
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Discover third-party entry points without importing their code."""
+    try:
+        result = AdapterRegistry(_workspace(workspace)).discover()
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@adapters_app.command("approve")
+def adapters_approve(
+    distribution: Annotated[str, typer.Argument(help="Installed distribution name.")],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Approve the exact installed identity of one adapter distribution."""
+    try:
+        result = AdapterRegistry(_workspace(workspace)).approve(distribution)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@adapters_app.command("revoke")
+def adapters_revoke(
+    distribution: Annotated[str, typer.Argument(help="Approved distribution name.")],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Revoke a local third-party adapter approval."""
+    try:
+        result = AdapterRegistry(_workspace(workspace)).revoke(distribution)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
 
 
 @app.command("validate")
@@ -253,6 +421,26 @@ def garbage_collect(
         bool,
         typer.Option("--apply", help="Move the displayed candidates to recoverable trash."),
     ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Display candidates without moving them."),
+    ] = False,
+    purge: Annotated[
+        str | None,
+        typer.Option(
+            "--purge",
+            metavar="TRASH_MANIFEST",
+            help="Permanently delete one expired trash manifest.",
+        ),
+    ] = None,
+    restore: Annotated[
+        str | None,
+        typer.Option(
+            "--restore",
+            metavar="TRASH_MANIFEST",
+            help="Restore one recoverable trash manifest.",
+        ),
+    ] = None,
     minimum_age_hours: Annotated[
         int,
         typer.Option("--minimum-age-hours", min=1),
@@ -263,8 +451,19 @@ def garbage_collect(
     """Plan garbage collection; mutation requires explicit --apply."""
     try:
         collector = GarbageCollector(_workspace(workspace))
-        plan = collector.plan(minimum_age_hours=minimum_age_hours)
-        result: BaseModel = collector.apply(plan) if apply else plan
+        selected = sum((apply, dry_run, purge is not None, restore is not None))
+        if selected > 1:
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "Choose only one of --dry-run, --apply, --purge, or --restore.",
+            )
+        if purge is not None:
+            result: BaseModel = collector.purge(purge)
+        elif restore is not None:
+            result = collector.restore(restore)
+        else:
+            plan = collector.plan(minimum_age_hours=minimum_age_hours)
+            result = collector.apply(plan) if apply else plan
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -272,12 +471,51 @@ def garbage_collect(
 
 @app.command("recover")
 def recover(
+    quarantine_id: Annotated[
+        str | None,
+        typer.Option("--quarantine", help="Restore one quarantined item by ID."),
+    ] = None,
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
-    """Close runs whose exact leased process identity has disappeared."""
+    """Recover interrupted operations, or restore one quarantined item."""
     try:
-        result = RecoveryService(_workspace(workspace)).recover()
+        selected_workspace = _workspace(workspace)
+        result = (
+            QuarantineService(selected_workspace).restore(quarantine_id)
+            if quarantine_id is not None
+            else RecoveryService(selected_workspace).recover()
+        )
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@app.command("repair")
+def repair(
+    plan_path: Annotated[
+        Path | None,
+        typer.Argument(
+            help="Validated repair-plan JSON to apply; omit to preview a plan.",
+        ),
+    ] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Preview safe repairs, or apply one exact structured plan."""
+    try:
+        service = RepairService(_workspace(workspace))
+        if plan_path is None:
+            result: BaseModel = service.plan()
+        else:
+            try:
+                plan = RepairPlan.model_validate_json(plan_path.read_text())
+            except (OSError, ValueError) as exc:
+                raise DomainError(
+                    ErrorCode.EXECUTION_REFUSED,
+                    f"Repair plan is unreadable or invalid: {plan_path}",
+                ) from exc
+            result = service.apply(plan)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -356,7 +594,7 @@ def open_artifact(
         return service.plan(artifact_id)
 
     try:
-        result = anyio.run(open_viewer)
+        result = _run_async(open_viewer)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -429,7 +667,7 @@ def workload_run(
         return await service.execute(plan.plan_id)
 
     try:
-        result = anyio.run(run)
+        result = _run_async(run)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -474,7 +712,7 @@ def experiment_plan(
         )
 
     try:
-        result = anyio.run(plan)
+        result = _run_async(plan)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -505,7 +743,7 @@ def experiment_run(
         return await service.run(plan.plan_id)
 
     try:
-        result = anyio.run(run)
+        result = _run_async(run)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -556,7 +794,7 @@ def capture_plan(
             ) from exc
 
     try:
-        result = anyio.run(plan)
+        result = _run_async(plan)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -586,7 +824,7 @@ def capture_run(
         return await service.execute(plan.plan_id)
 
     try:
-        result = anyio.run(run)
+        result = _run_async(run)
     except (json.JSONDecodeError, ValueError) as exc:
         _fail(
             DomainError(
@@ -997,13 +1235,21 @@ def analyze_memory(
 @analyze_app.command("execution")
 def analyze_execution(
     input_id: Annotated[str, typer.Argument(help="Run or artifact identifier.")],
+    compare_to: Annotated[
+        str | None,
+        typer.Option("--compare-to", help="Second run or artifact to compare."),
+    ] = None,
     limit: Annotated[int | None, typer.Option(min=1)] = None,
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
     """Return bounded coverage and semantic execution observations."""
     try:
-        result = RecipeService(_workspace(workspace)).execution(input_id, limit=limit)
+        result = RecipeService(_workspace(workspace)).execution(
+            input_id,
+            comparison_input_id=compare_to,
+            limit=limit,
+        )
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -1119,6 +1365,7 @@ def trace_window(
 ) -> None:
     """Query slices overlapping one bounded time interval."""
     try:
+
         async def run() -> BaseModel:
             return await PerfettoExtractor(_workspace(workspace)).trace_window(
                 artifact_id,
@@ -1128,7 +1375,7 @@ def trace_window(
                 cursor=cursor,
             )
 
-        result = anyio.run(run)
+        result = _run_async(run)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -1266,10 +1513,11 @@ def extract_perfetto(
 ) -> None:
     """Extract curated slice aggregates with a pinned local Trace Processor."""
     try:
+
         async def run() -> BaseModel:
             return await PerfettoExtractor(_workspace(workspace)).extract(run_id)
 
-        result = anyio.run(run)
+        result = _run_async(run)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -1329,4 +1577,4 @@ def mcp_inspect(
             ],
         }
 
-    _emit(anyio.run(inspect_server), as_json=json_output)
+    _emit(_run_async(inspect_server), as_json=json_output)
