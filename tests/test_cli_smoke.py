@@ -51,3 +51,60 @@ def test_init_import_and_list_run_as_json(tmp_path: Path) -> None:
     listed_payload = json.loads(listed.stdout)
     assert listed_payload["runs"][0]["run_id"] == imported_payload["run"]["run_id"]
     assert listed_payload["corpus_commit_id"] == imported_payload["corpus_commit_id"]
+
+
+def test_global_workspace_project_json_and_quiet_options(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    workspace = project / ".diagnostics"
+    runner = CliRunner()
+    assert runner.invoke(app, ["init", str(project)]).exit_code == 0
+
+    structured = runner.invoke(
+        app,
+        [
+            "--workspace",
+            str(workspace),
+            "--project-root",
+            str(project),
+            "--json",
+            "status",
+        ],
+    )
+    quiet = runner.invoke(
+        app,
+        ["--workspace", str(workspace), "--quiet", "status"],
+    )
+
+    assert structured.exit_code == 0, structured.output
+    assert json.loads(structured.stdout)["workspace_id"]
+    assert quiet.exit_code == 0
+    assert quiet.stdout == ""
+
+
+def test_global_project_root_initializes_and_invalid_request_exits_two(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    runner = CliRunner()
+
+    initialized = runner.invoke(
+        app,
+        ["--project-root", str(project), "init"],
+    )
+    invalid = runner.invoke(
+        app,
+        [
+            "--workspace",
+            str(project / ".diagnostics"),
+            "investigations",
+            "create",
+            "{invalid",
+        ],
+    )
+
+    assert initialized.exit_code == 0, initialized.output
+    assert (project / ".diagnostics" / "workspace.json").is_file()
+    assert invalid.exit_code == 2
+    assert "Structured input is invalid" in invalid.output

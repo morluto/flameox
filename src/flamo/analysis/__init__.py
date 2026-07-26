@@ -1,6 +1,7 @@
 from flamo.analysis.comparison import compare_paired_samples
 from flamo.analysis.recipes import (
     ExecutionAnalysisResult,
+    ExecutionObservationChange,
     FailureAnalysisResult,
     FailureChangePoint,
     FailureCluster,
@@ -8,16 +9,20 @@ from flamo.analysis.recipes import (
     HotspotResult,
     MeasurementSummary,
     MemoryAnalysisResult,
+    MemoryPhaseGrowth,
     OperatorSummary,
     PyTorchAnalysisResult,
     RecipeService,
     ScalingAnalysisResult,
+    ScalingCorrelatedHotspot,
     ScalingFit,
     ScalingPoint,
+    ScalingTrialSummary,
 )
 
 __all__ = [
     "ExecutionAnalysisResult",
+    "ExecutionObservationChange",
     "FailureAnalysisResult",
     "FailureChangePoint",
     "FailureCluster",
@@ -25,11 +30,14 @@ __all__ = [
     "HotspotResult",
     "MeasurementSummary",
     "MemoryAnalysisResult",
+    "MemoryPhaseGrowth",
     "OperatorSummary",
     "PyTorchAnalysisResult",
     "RecipeService",
     "ScalingAnalysisResult",
+    "ScalingCorrelatedHotspot",
     "ScalingFit",
     "ScalingPoint",
+    "ScalingTrialSummary",
     "compare_paired_samples",
 ]

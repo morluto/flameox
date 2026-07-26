@@ -1,18 +1,26 @@
 from __future__ import annotations
 
+import json
 import math
+import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any, cast
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict
+from scipy.stats import bootstrap, spearmanr
+from statsmodels.api import OLS
+from statsmodels.stats.multitest import multipletests
+from statsmodels.stats.stattools import durbin_watson
 
-from flamo.catalog import Catalog
+from flamo.catalog import Catalog, Snapshot
 from flamo.domain import DomainError, ErrorCode
-from flamo.storage import RunStore, Workspace
+from flamo.evidence_scope import resolve_evidence_scope
+from flamo.models import ContractModel
+from flamo.storage import Workspace
 
 
-class Hotspot(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class Hotspot(ContractModel):
     frame_id: str
     function: str | None
     file: str | None
@@ -24,9 +32,7 @@ class Hotspot(BaseModel):
     sample_count: int | None
 
 
-class HotspotResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class HotspotResult(ContractModel):
     schema_version: int = 1
     corpus_commit_id: str
     input_id: str
@@ -38,9 +44,7 @@ class HotspotResult(BaseModel):
     limitations: tuple[str, ...]
 
 
-class MeasurementSummary(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class MeasurementSummary(ContractModel):
     name: str
     value_int: int | None
     value_float: float | None
@@ -49,20 +53,27 @@ class MeasurementSummary(BaseModel):
     scope: str
 
 
-class MemoryAnalysisResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class MemoryAnalysisResult(ContractModel):
     schema_version: int = 1
     corpus_commit_id: str
     input_id: str
     measurements: tuple[MeasurementSummary, ...]
     hotspots: tuple[Hotspot, ...]
+    phase_growth: tuple[MemoryPhaseGrowth, ...] = ()
     limitations: tuple[str, ...]
 
 
-class ExecutionObservation(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+class MemoryPhaseGrowth(ContractModel):
+    phase: str
+    metric: str
+    value: float
+    previous_value: float | None
+    delta: float | None
+    unit: str
+    sample_count: int
 
+
+class ExecutionObservation(ContractModel):
     observation_id: str
     kind: str
     name: str
@@ -74,22 +85,33 @@ class ExecutionObservation(BaseModel):
     evidence_level: str
 
 
-class ExecutionAnalysisResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ExecutionAnalysisResult(ContractModel):
     schema_version: int = 1
     corpus_commit_id: str
     input_id: str
     observations: tuple[ExecutionObservation, ...]
+    comparison_input_id: str | None = None
+    added: tuple[ExecutionObservation, ...] = ()
+    removed: tuple[ExecutionObservation, ...] = ()
+    changed: tuple[ExecutionObservationChange, ...] = ()
     total: int
     returned: int
     truncated: bool
     limitations: tuple[str, ...]
 
 
-class OperatorSummary(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+class ExecutionObservationChange(ContractModel):
+    kind: str
+    name: str
+    file: str | None
+    line_from: int | None
+    line_to: int | None
+    context: str | None
+    baseline_value_json: str
+    candidate_value_json: str
 
+
+class OperatorSummary(ContractModel):
     frame_id: str
     operator: str
     category: str | None
@@ -104,9 +126,7 @@ class OperatorSummary(BaseModel):
     warmup: bool | None = None
 
 
-class PyTorchAnalysisResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class PyTorchAnalysisResult(ContractModel):
     schema_version: int = 1
     corpus_commit_id: str
     input_id: str
@@ -115,12 +135,15 @@ class PyTorchAnalysisResult(BaseModel):
     returned: int
     truncated: bool
     coverage: dict[str, bool]
+    repeated_small_operations: tuple[OperatorSummary, ...] = ()
+    synchronization_time_ns: int = 0
+    compilation_time_ns: int = 0
+    warmup_time_ns: int = 0
+    allocation_bytes: int | None = None
     limitations: tuple[str, ...]
 
 
-class FailureCluster(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class FailureCluster(ContractModel):
     collector: str | None
     execution_status: str
     capture_status: str
@@ -135,17 +158,13 @@ class FailureCluster(BaseModel):
     representative_artifact_ids: tuple[str, ...] = ()
 
 
-class FailureChangePoint(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class FailureChangePoint(ContractModel):
     observed_date: str
     run_count: int
     previous_run_count: int | None
 
 
-class FailureAnalysisResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class FailureAnalysisResult(ContractModel):
     schema_version: int = 1
     corpus_commit_id: str
     failures: tuple[FailureCluster, ...]
@@ -161,45 +180,80 @@ class FailureAnalysisResult(BaseModel):
     )
 
 
-class ScalingPoint(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ScalingPoint(ContractModel):
     variant: str
     block_id: str | None
     input_value: float | None
     value: float
     dispersion: float
+    confidence_low: float | None = None
+    confidence_high: float | None = None
+    confidence_level: float | None = None
     unit: str
     sample_count: int
+    raw_sample_count: int = 0
     environment_count: int
 
 
-class ScalingFit(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+class ScalingTrialSummary(ContractModel):
+    trial_id: str
+    variant: str
+    block_id: str | None
+    input_value: float | None
+    median: float
+    dispersion: float
+    unit: str
+    raw_sample_count: int
+    environment_id: str
 
+
+class ScalingCorrelatedHotspot(ContractModel):
+    variant: str
+    frame_id: str
+    function: str | None
+    file: str | None
+    line: int | None
+    metric: str
+    unit: str
+    spearman_rho: float
+    p_value: float
+    adjusted_p_value: float
+    multiplicity_method: str
+    tested_hypothesis_count: int
+    independent_trial_count: int
+    supported_min: float
+    supported_max: float
+
+
+class ScalingFit(ContractModel):
     model: str
+    variant: str
     coefficients: tuple[float, ...]
+    coefficient_standard_errors: tuple[float, ...]
+    coefficient_confidence_intervals: tuple[tuple[float, float], ...]
     residual_rms: float
     r_squared: float | None
     aicc: float | None
+    condition_number: float
+    durbin_watson: float | None
     observation_count: int
     supported_min: float
     supported_max: float
 
 
-class ScalingAnalysisResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ScalingAnalysisResult(ContractModel):
     schema_version: int = 1
     corpus_commit_id: str
     experiment_id: str
     metric: str
     points: tuple[ScalingPoint, ...]
+    trials: tuple[ScalingTrialSummary, ...]
     attempted_trials: int
     succeeded_trials: int
     failed_trials: int
     complete_blocks: int
     fits: tuple[ScalingFit, ...]
+    correlated_hotspots: tuple[ScalingCorrelatedHotspot, ...]
     conclusion: str
     environment_stable: bool
     warnings: tuple[str, ...]
@@ -209,19 +263,30 @@ class ScalingAnalysisResult(BaseModel):
 
 
 class RecipeService:
-    def __init__(self, workspace: Workspace) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        *,
+        snapshot: Snapshot | None = None,
+    ) -> None:
         self.workspace = workspace
+        self.snapshot = snapshot
 
-    def hotspots(self, input_id: str, *, limit: int | None = None) -> HotspotResult:
+    def hotspots(
+        self,
+        input_id: str,
+        *,
+        limit: int | None = None,
+        corpus_commit_id: str | None = None,
+    ) -> HotspotResult:
+        corpus_commit_id = self._pinned_commit_id(corpus_commit_id)
         bounded = self._limit(limit)
-        run_ids, artifact_ids = self._scope(input_id)
-        where, parameters = self._scope_where(
-            run_ids,
-            artifact_ids,
-            run_column="fm.run_id",
-            artifact_column="fm.artifact_id",
-        )
-        with Catalog(self.workspace).open_snapshot() as snapshot:
+        with self._open_snapshot(corpus_commit_id) as snapshot:
+            scope = resolve_evidence_scope(snapshot, input_id)
+            where, parameters = scope.predicate(
+                run_column="fm.run_id",
+                artifact_column="fm.artifact_id",
+            )
             count_row = snapshot.execute(
                 "SELECT count(*) FROM frame_measurements fm WHERE " + where,
                 parameters,
@@ -275,16 +340,21 @@ class RecipeService:
             ),
         )
 
-    def memory(self, input_id: str, *, limit: int | None = None) -> MemoryAnalysisResult:
+    def memory(
+        self,
+        input_id: str,
+        *,
+        limit: int | None = None,
+        corpus_commit_id: str | None = None,
+    ) -> MemoryAnalysisResult:
+        corpus_commit_id = self._pinned_commit_id(corpus_commit_id)
         bounded = self._limit(limit)
-        run_ids, artifact_ids = self._scope(input_id)
-        where, parameters = self._scope_where(
-            run_ids,
-            artifact_ids,
-            run_column="run_id",
-            artifact_column="artifact_id",
-        )
-        with Catalog(self.workspace).open_snapshot() as snapshot:
+        with self._open_snapshot(corpus_commit_id) as snapshot:
+            scope = resolve_evidence_scope(snapshot, input_id)
+            where, parameters = scope.predicate(
+                run_column="run_id",
+                artifact_column="artifact_id",
+            )
             rows = snapshot.execute(
                 "SELECT name, value_int, value_float, unit, aggregation, scope "
                 "FROM measurements WHERE "
@@ -292,7 +362,44 @@ class RecipeService:
                 + " AND name LIKE 'memory.%' ORDER BY name LIMIT ?",
                 (*parameters, bounded),
             ).fetchall()
-        hotspot_result = self.hotspots(input_id, limit=bounded)
+            phase_rows = snapshot.execute(
+                "SELECT phase, name, "
+                "median(coalesce(CAST(value_int AS DOUBLE), value_float)), "
+                "count(*), any_value(unit), "
+                "min(coalesce(worker_run_index, 0) * 1000000 "
+                "+ coalesce(value_index, 0)) AS phase_order "
+                "FROM measurements WHERE "
+                + where
+                + " AND name LIKE 'memory.%' AND phase IS NOT NULL "
+                "AND coalesce(CAST(value_int AS DOUBLE), value_float) IS NOT NULL "
+                "GROUP BY phase, name ORDER BY phase_order, phase, name",
+                parameters,
+            ).fetchall()
+            hotspot_result = RecipeService(
+                self.workspace,
+                snapshot=snapshot,
+            ).hotspots(
+                input_id,
+                limit=bounded,
+                corpus_commit_id=corpus_commit_id,
+            )
+        previous_by_metric: dict[str, float] = {}
+        phase_growth: list[MemoryPhaseGrowth] = []
+        for phase, metric, value, sample_count, unit, _ in phase_rows:
+            numeric = float(value)
+            previous = previous_by_metric.get(str(metric))
+            phase_growth.append(
+                MemoryPhaseGrowth(
+                    phase=str(phase),
+                    metric=str(metric),
+                    value=numeric,
+                    previous_value=previous,
+                    delta=numeric - previous if previous is not None else None,
+                    unit=str(unit),
+                    sample_count=int(sample_count),
+                )
+            )
+            previous_by_metric[str(metric)] = numeric
         return MemoryAnalysisResult(
             corpus_commit_id=snapshot.commit.commit_id,
             input_id=input_id,
@@ -310,6 +417,7 @@ class RecipeService:
             hotspots=tuple(
                 item for item in hotspot_result.hotspots if item.metric.startswith("memory.")
             ),
+            phase_growth=tuple(phase_growth),
             limitations=(
                 "High-water-mark, retained-end, and allocation volume are distinct "
                 "concepts and are not substituted for one another.",
@@ -320,55 +428,95 @@ class RecipeService:
         self,
         input_id: str,
         *,
+        comparison_input_id: str | None = None,
         limit: int | None = None,
+        corpus_commit_id: str | None = None,
     ) -> ExecutionAnalysisResult:
+        corpus_commit_id = self._pinned_commit_id(corpus_commit_id)
         bounded = self._limit(limit)
-        run_ids, artifact_ids = self._scope(input_id)
-        where, parameters = self._scope_where(
-            run_ids,
-            artifact_ids,
-            run_column="run_id",
-            artifact_column="artifact_id",
-        )
-        with Catalog(self.workspace).open_snapshot() as snapshot:
-            count_row = snapshot.execute(
-                "SELECT count(*) FROM observations WHERE " + where,
-                parameters,
-            ).fetchone()
-            assert count_row is not None
-            total = int(count_row[0])
-            rows = snapshot.execute(
-                "SELECT observation_id, kind, name, value_json, file, line_from, "
-                "line_to, context, evidence_level FROM observations WHERE "
-                + where
-                + " ORDER BY file, line_from, line_to, observation_id LIMIT ?",
-                (*parameters, bounded),
-            ).fetchall()
-        observations = tuple(
-            ExecutionObservation(
-                observation_id=row[0],
-                kind=row[1],
-                name=row[2],
-                value_json=row[3],
-                file=row[4],
-                line_from=row[5],
-                line_to=row[6],
-                context=row[7],
-                evidence_level=row[8],
+        with self._open_snapshot(corpus_commit_id) as snapshot:
+            all_observations, total = self._execution_observations(
+                snapshot,
+                input_id,
+                limit=None if comparison_input_id is not None else bounded,
             )
-            for row in rows
+            compared = (
+                self._execution_observations(
+                    snapshot,
+                    comparison_input_id,
+                    limit=None,
+                )[0]
+                if comparison_input_id is not None
+                else ()
+            )
+        observations = all_observations[:bounded]
+
+        def key(
+            item: ExecutionObservation,
+        ) -> tuple[str, str, str | None, int | None, int | None, str | None]:
+            return (
+                item.kind,
+                item.name,
+                item.file,
+                item.line_from,
+                item.line_to,
+                item.context,
+            )
+
+        baseline_by_key = {key(item): item for item in all_observations}
+        candidate_by_key = {key(item): item for item in compared}
+        added = tuple(
+            candidate_by_key[item_key]
+            for item_key in sorted(
+                candidate_by_key.keys() - baseline_by_key.keys(),
+                key=repr,
+            )
         )
+        removed = tuple(
+            baseline_by_key[item_key]
+            for item_key in sorted(
+                baseline_by_key.keys() - candidate_by_key.keys(),
+                key=repr,
+            )
+        )
+        changed = tuple(
+            ExecutionObservationChange(
+                kind=item_key[0],
+                name=item_key[1],
+                file=item_key[2],
+                line_from=item_key[3],
+                line_to=item_key[4],
+                context=item_key[5],
+                baseline_value_json=baseline_by_key[item_key].value_json,
+                candidate_value_json=candidate_by_key[item_key].value_json,
+            )
+            for item_key in sorted(
+                baseline_by_key.keys() & candidate_by_key.keys(),
+                key=repr,
+            )
+            if baseline_by_key[item_key].value_json != candidate_by_key[item_key].value_json
+        )
+        limitations = [
+            "Coverage proves that a path executed, not why it executed or which "
+            "values controlled it."
+        ]
+        if comparison_input_id is not None:
+            limitations.append(
+                "Execution-path differences report observed path or value changes; "
+                "they do not establish causality."
+            )
         return ExecutionAnalysisResult(
             corpus_commit_id=snapshot.commit.commit_id,
             input_id=input_id,
             observations=observations,
+            comparison_input_id=comparison_input_id,
+            added=added[:bounded],
+            removed=removed[:bounded],
+            changed=changed[:bounded],
             total=total,
             returned=len(observations),
             truncated=total > len(observations),
-            limitations=(
-                "Coverage proves that a path executed, not why it executed or which "
-                "values controlled it.",
-            ),
+            limitations=tuple(limitations),
         )
 
     def pytorch(
@@ -376,17 +524,17 @@ class RecipeService:
         input_id: str,
         *,
         limit: int | None = None,
+        corpus_commit_id: str | None = None,
     ) -> PyTorchAnalysisResult:
+        corpus_commit_id = self._pinned_commit_id(corpus_commit_id)
         bounded = self._limit(limit)
-        run_ids, artifact_ids = self._scope(input_id)
-        self._require_pytorch_source(run_ids, artifact_ids)
-        where, parameters = self._scope_where(
-            run_ids,
-            artifact_ids,
-            run_column="fm.run_id",
-            artifact_column="fm.artifact_id",
-        )
-        with Catalog(self.workspace).open_snapshot() as snapshot:
+        with self._open_snapshot(corpus_commit_id) as snapshot:
+            scope = resolve_evidence_scope(snapshot, input_id)
+            self._require_pytorch_source(snapshot, scope.run_ids, scope.artifact_ids)
+            where, parameters = scope.predicate(
+                run_column="fm.run_id",
+                artifact_column="fm.artifact_id",
+            )
             count_row = snapshot.execute(
                 "SELECT count(DISTINCT fm.frame_id) FROM frame_measurements fm WHERE " + where,
                 parameters,
@@ -406,6 +554,30 @@ class RecipeService:
                 "LIMIT ?",
                 (*parameters, bounded),
             ).fetchall()
+            observation_where, observation_parameters = scope.predicate(
+                run_column="run_id",
+                artifact_column="artifact_id",
+            )
+            metadata_rows = snapshot.execute(
+                "SELECT name, value_json, context FROM observations WHERE "
+                + observation_where
+                + " AND kind = 'pytorch.operator'",
+                observation_parameters,
+            ).fetchall()
+        metadata_by_operator: dict[tuple[str, str], list[dict[str, object]]] = {}
+        for name, value_json, context in metadata_rows:
+            try:
+                value = json.loads(str(value_json))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            if not isinstance(value, dict):
+                continue
+            frame_id = value.get("frame_id")
+            if not isinstance(frame_id, str):
+                continue
+            if context is not None and value.get("phase") is None:
+                value["phase"] = str(context)
+            metadata_by_operator.setdefault((frame_id, str(name)), []).append(value)
         operators_list: list[OperatorSummary] = []
         device_time_present = False
         synchronization_present = False
@@ -414,6 +586,8 @@ class RecipeService:
             category_lower = (category or "").lower()
             operator = str(row[1])
             operator_lower = operator.lower()
+            frame_id = str(row[0])
+            metadata = metadata_by_operator.get((frame_id, operator), [])
             is_device = any(
                 token in category_lower
                 for token in ("kernel", "gpu", "device", "xpu", "hip", "mps")
@@ -430,9 +604,39 @@ class RecipeService:
             device_time_present = device_time_present or is_device
             synchronization_present = synchronization_present or synchronization
             inclusive = int(row[4])
+            shapes = tuple(
+                sorted(
+                    {
+                        str(value["input_shapes"])
+                        for value in metadata
+                        if value.get("input_shapes") not in {None, ""}
+                    }
+                )
+            )
+            allocations = [
+                allocation
+                for value in metadata
+                if isinstance(
+                    allocation := value.get("allocation_bytes"),
+                    int,
+                )
+            ]
+            phases = {
+                str(value["phase"]).lower()
+                for value in metadata
+                if value.get("phase") not in {None, ""}
+            }
+            warmup_phases = {phase for phase in phases if "warm" in phase}
+            warmup = (
+                True
+                if phases and warmup_phases == phases
+                else False
+                if phases and not warmup_phases
+                else None
+            )
             operators_list.append(
                 OperatorSummary(
-                    frame_id=str(row[0]),
+                    frame_id=frame_id,
                     operator=operator,
                     category=category,
                     self_cpu_ns=None if is_device else int(row[3]),
@@ -440,23 +644,70 @@ class RecipeService:
                     device_ns=inclusive if is_device else None,
                     inclusive_ns=inclusive,
                     event_count=int(row[5]),
+                    input_shapes=shapes,
+                    allocation_bytes=sum(allocations) if allocations else None,
                     synchronization=synchronization,
+                    warmup=warmup,
                 )
             )
         operators = tuple(operators_list)
+        synchronization_time_ns = sum(
+            item.inclusive_ns for item in operators if item.synchronization
+        )
+        compilation_time_ns = sum(
+            item.inclusive_ns
+            for item in operators
+            if any(
+                token in item.operator.lower()
+                for token in ("compile", "dynamo", "inductor", "graph_executor")
+            )
+        )
+        warmup_time_ns = sum(
+            duration
+            for metadata in metadata_by_operator.values()
+            for value in metadata
+            if isinstance(duration := value.get("duration_ns"), int)
+            and "warm" in str(value.get("phase", "")).lower()
+        )
+        allocation_bytes = sum(item.allocation_bytes or 0 for item in operators) or None
+        typical_event_ns = max(
+            1.0,
+            float(
+                np.median(
+                    [operator.inclusive_ns / max(operator.event_count, 1) for operator in operators]
+                )
+            )
+            if operators
+            else 1.0,
+        )
+        repeated_small = tuple(
+            sorted(
+                (
+                    item
+                    for item in operators
+                    if item.event_count >= 3
+                    and item.inclusive_ns / item.event_count <= typical_event_ns
+                ),
+                key=lambda item: (-item.event_count, item.inclusive_ns, item.frame_id),
+            )[:bounded]
+        )
         limitations = [
             "Operator categories and durations come from the exported torch.profiler trace.",
             "Nested operator durations can overlap; self time subtracts direct nested slices.",
         ]
         if not device_time_present:
             limitations.append("The trace contains no recognized accelerator kernel categories.")
-        limitations.extend(
-            (
-                "Input shapes were not present in normalized trace evidence.",
-                "Per-operator allocation bytes were not present in normalized trace evidence.",
-                "Warm-up separation requires profiler phase annotations.",
+        shapes_present = any(item.input_shapes for item in operators)
+        allocations_present = any(item.allocation_bytes is not None for item in operators)
+        warmup_present = any(item.warmup is not None for item in operators)
+        if not shapes_present:
+            limitations.append("Input shapes were not present in normalized trace evidence.")
+        if not allocations_present:
+            limitations.append(
+                "Per-operator allocation bytes were not present in normalized trace evidence."
             )
-        )
+        if not warmup_present:
+            limitations.append("Warm-up separation requires profiler phase annotations.")
         return PyTorchAnalysisResult(
             corpus_commit_id=snapshot.commit.commit_id,
             input_id=input_id,
@@ -468,15 +719,26 @@ class RecipeService:
                 "self_cpu_time": True,
                 "total_cpu_time": True,
                 "device_time": device_time_present,
-                "input_shapes": False,
-                "memory_allocations": False,
+                "input_shapes": shapes_present,
+                "memory_allocations": allocations_present,
                 "synchronization": synchronization_present,
-                "warmup_phases": False,
+                "warmup_phases": warmup_present,
             },
+            repeated_small_operations=repeated_small,
+            synchronization_time_ns=synchronization_time_ns,
+            compilation_time_ns=compilation_time_ns,
+            warmup_time_ns=warmup_time_ns,
+            allocation_bytes=allocation_bytes,
             limitations=tuple(limitations),
         )
 
-    def failures(self, *, limit: int | None = None) -> FailureAnalysisResult:
+    def failures(
+        self,
+        *,
+        limit: int | None = None,
+        corpus_commit_id: str | None = None,
+    ) -> FailureAnalysisResult:
+        corpus_commit_id = self._pinned_commit_id(corpus_commit_id)
         bounded = self._limit(limit)
         query = """
             WITH latest AS (
@@ -507,7 +769,7 @@ class RecipeService:
                     environment_id, source_state_id
             )
         """
-        with Catalog(self.workspace).open_snapshot() as snapshot:
+        with self._open_snapshot(corpus_commit_id) as snapshot:
             count_row = snapshot.execute(query + " SELECT count(*) FROM clusters").fetchone()
             assert count_row is not None
             total = int(count_row[0])
@@ -520,8 +782,7 @@ class RecipeService:
                 (bounded,),
             ).fetchall()
             change_rows = snapshot.execute(
-                query
-                + " , daily AS (SELECT CAST(created_at AS DATE) AS observed_date, "
+                query + " , daily AS (SELECT CAST(created_at AS DATE) AS observed_date, "
                 "count(*) AS run_count FROM failed GROUP BY observed_date), "
                 "with_previous AS (SELECT observed_date, run_count, "
                 "lag(run_count) OVER (ORDER BY observed_date) AS previous_run_count "
@@ -530,8 +791,7 @@ class RecipeService:
                 "OR run_count <> previous_run_count ORDER BY observed_date"
             ).fetchall()
             coverage_row = snapshot.execute(
-                query
-                + " SELECT count(*), "
+                query + " SELECT count(*), "
                 "count(*) FILTER (WHERE source_state_id IS NOT NULL), "
                 "count(*) FILTER (WHERE EXISTS (SELECT 1 FROM artifact_registrations a "
                 "WHERE a.run_id = failed.run_id)), "
@@ -610,10 +870,16 @@ class RecipeService:
             competing_hypotheses=tuple(hypotheses),
         )
 
-    def scaling(self, experiment_id: str) -> ScalingAnalysisResult:
-        with Catalog(self.workspace).open_snapshot() as snapshot:
+    def scaling(
+        self,
+        experiment_id: str,
+        *,
+        corpus_commit_id: str | None = None,
+    ) -> ScalingAnalysisResult:
+        corpus_commit_id = self._pinned_commit_id(corpus_commit_id)
+        with self._open_snapshot(corpus_commit_id) as snapshot:
             experiment_row = snapshot.execute(
-                "SELECT primary_metric FROM experiments WHERE experiment_id = ? "
+                "SELECT primary_metric, confidence_level FROM experiments WHERE experiment_id = ? "
                 "ORDER BY published_at DESC LIMIT 1",
                 (experiment_id,),
             ).fetchone()
@@ -623,6 +889,7 @@ class RecipeService:
                     f"Unknown experiment {experiment_id!r}.",
                 )
             metric = str(experiment_row[0])
+            confidence_level = float(experiment_row[1])
             trial_row = snapshot.execute(
                 "SELECT count(*), "
                 "count(*) FILTER (WHERE outcome = 'succeeded'), "
@@ -636,7 +903,7 @@ class RecipeService:
                 "WITH latest_runs AS (SELECT *, row_number() OVER "
                 "(PARTITION BY run_id ORDER BY published_at DESC) AS revision_order "
                 "FROM runs) "
-                "SELECT v.name, t.block_id, t.parameter_value_int, "
+                "SELECT t.trial_id, v.name, t.block_id, t.parameter_value_int, "
                 "t.parameter_value_float, r.environment_id, "
                 "coalesce(CAST(m.value_int AS DOUBLE), m.value_float), m.unit "
                 "FROM (SELECT DISTINCT trial_id, experiment_id, variant_id, "
@@ -651,6 +918,22 @@ class RecipeService:
                 "ORDER BY t.block_id, v.name, m.measurement_id",
                 (experiment_id, metric),
             ).fetchall()
+            hotspot_rows = snapshot.execute(
+                "SELECT t.trial_id, v.name, t.parameter_value_int, "
+                "t.parameter_value_float, fm.frame_id, f.function, f.file, f.line, "
+                "fm.metric, fm.unit, "
+                "coalesce(CAST(fm.inclusive_value AS DOUBLE), "
+                "CAST(fm.self_value AS DOUBLE)) "
+                "FROM (SELECT DISTINCT trial_id, experiment_id, variant_id, run_id, "
+                "outcome, parameter_value_int, parameter_value_float FROM trials) t "
+                "JOIN (SELECT DISTINCT variant_id, name FROM variants) v "
+                "ON v.variant_id = t.variant_id "
+                "JOIN frame_measurements fm ON fm.run_id = t.run_id "
+                "LEFT JOIN frames f ON f.frame_id = fm.frame_id "
+                "WHERE t.experiment_id = ? AND t.outcome = 'succeeded' "
+                "AND coalesce(fm.inclusive_value, fm.self_value) IS NOT NULL",
+                (experiment_id,),
+            ).fetchall()
             complete_row = snapshot.execute(
                 "WITH expected AS (SELECT count(DISTINCT variant_id) AS n "
                 "FROM variants WHERE experiment_id = ?), "
@@ -662,54 +945,104 @@ class RecipeService:
                 (experiment_id, experiment_id),
             ).fetchone()
             assert complete_row is not None
-        grouped: dict[
-            tuple[str, str | None, float | None, str],
-            tuple[list[float], set[str]],
+        trial_groups: dict[
+            tuple[str, str, str | None, float | None, str, str],
+            list[float],
         ] = {}
         for row in rows:
             input_value = (
-                float(row[2])
-                if row[2] is not None
-                else float(row[3])
+                float(row[3])
                 if row[3] is not None
+                else float(row[4])
+                if row[4] is not None
                 else None
             )
             key = (
                 str(row[0]),
-                str(row[1]) if row[1] is not None else None,
+                str(row[1]),
+                str(row[2]) if row[2] is not None else None,
                 input_value,
-                str(row[6]),
+                str(row[7]),
+                str(row[5]),
             )
-            values, environments = grouped.setdefault(key, ([], set()))
-            if row[5] is not None:
-                values.append(float(row[5]))
-            environments.add(str(row[4]))
-        points_list: list[ScalingPoint] = []
-        for (variant, block_id, input_value, unit), (
-            values,
-            environments,
-        ) in sorted(grouped.items(), key=lambda item: (item[0][1] or "", item[0][0])):
-            if not values:
-                continue
+            if row[6] is not None:
+                trial_groups.setdefault(key, []).append(float(row[6]))
+        trials: list[ScalingTrialSummary] = []
+        for (
+            trial_id,
+            variant,
+            block_id,
+            input_value,
+            unit,
+            environment_id,
+        ), values in sorted(trial_groups.items()):
             median = float(np.median(values))
-            dispersion = float(np.median(np.abs(np.asarray(values) - median)))
-            points_list.append(
-                ScalingPoint(
+            trials.append(
+                ScalingTrialSummary(
+                    trial_id=trial_id,
                     variant=variant,
                     block_id=block_id,
                     input_value=input_value,
+                    median=median,
+                    dispersion=float(np.median(np.abs(np.asarray(values) - median))),
+                    unit=unit,
+                    raw_sample_count=len(values),
+                    environment_id=environment_id,
+                )
+            )
+        point_groups: dict[
+            tuple[str, float | None, str],
+            list[ScalingTrialSummary],
+        ] = {}
+        for trial in trials:
+            point_groups.setdefault(
+                (trial.variant, trial.input_value, trial.unit),
+                [],
+            ).append(trial)
+        points_list: list[ScalingPoint] = []
+        for (variant, input_value, unit), group in sorted(
+            point_groups.items(),
+            key=lambda item: (item[0][0], item[0][1] or -math.inf),
+        ):
+            trial_medians = np.asarray(
+                [trial.median for trial in group],
+                dtype=float,
+            )
+            median = float(np.median(trial_medians))
+            dispersion = float(np.median(np.abs(trial_medians - median)))
+            low, high = self._median_interval(
+                trial_medians,
+                confidence_level=confidence_level,
+            )
+            block_ids = {trial.block_id for trial in group}
+            points_list.append(
+                ScalingPoint(
+                    variant=variant,
+                    block_id=next(iter(block_ids)) if len(block_ids) == 1 else None,
+                    input_value=input_value,
                     value=median,
                     dispersion=dispersion,
+                    confidence_low=low,
+                    confidence_high=high,
+                    confidence_level=confidence_level if low is not None else None,
                     unit=unit,
-                    sample_count=len(values),
-                    environment_count=len(environments),
+                    sample_count=len(group),
+                    raw_sample_count=sum(trial.raw_sample_count for trial in group),
+                    environment_count=len({trial.environment_id for trial in group}),
                 )
             )
         points = tuple(points_list)
-        fits = self._scaling_fits(points)
+        fits = self._scaling_fits(
+            points,
+            confidence_level=confidence_level,
+        )
+        correlated_hotspots = self._correlated_hotspots(hotspot_rows)
         conclusion = "inconclusive"
-        comparable = [fit for fit in fits if fit.aicc is not None]
-        if len(comparable) >= 2:
+        conclusions: list[str] = []
+        for variant in sorted({fit.variant for fit in fits}):
+            comparable = [fit for fit in fits if fit.variant == variant and fit.aicc is not None]
+            if len(comparable) < 2:
+                continue
             ordered = sorted(
                 comparable,
                 key=lambda fit: fit.aicc if fit.aicc is not None else math.inf,
@@ -718,10 +1051,10 @@ class RecipeService:
             second_aicc = ordered[1].aicc
             assert first_aicc is not None and second_aicc is not None
             if second_aicc - first_aicc >= 2:
-                conclusion = f"descriptive_best_fit:{ordered[0].model}"
-        warnings = [
-            "Fits describe only the measured input range and must not be extrapolated."
-        ]
+                conclusions.append(f"{variant}:{ordered[0].model}")
+        if conclusions:
+            conclusion = "descriptive_best_fit:" + ",".join(conclusions)
+        warnings = ["Fits describe only the measured input range and must not be extrapolated."]
         if any(point.input_value is None for point in points):
             warnings.append(
                 "Some variants have no numeric input value and were excluded from fits."
@@ -734,74 +1067,94 @@ class RecipeService:
             experiment_id=experiment_id,
             metric=metric,
             points=points,
+            trials=tuple(trials),
             attempted_trials=int(trial_row[0]),
             succeeded_trials=int(trial_row[1]),
             failed_trials=int(trial_row[2]),
             complete_blocks=int(complete_row[0]),
             fits=fits,
+            correlated_hotspots=correlated_hotspots,
             conclusion=conclusion,
             environment_stable=environment_stable,
             warnings=tuple(warnings),
         )
 
-    def _scaling_fits(self, points: tuple[ScalingPoint, ...]) -> tuple[ScalingFit, ...]:
-        numeric = [
-            point
-            for point in points
-            if point.input_value is not None
-            and point.input_value > 0
-            and math.isfinite(point.input_value)
-            and math.isfinite(point.value)
-        ]
-        if len(numeric) < 3 or len({point.input_value for point in numeric}) < 2:
-            return ()
-        x = np.asarray([point.input_value for point in numeric], dtype=float)
-        y = np.asarray([point.value for point in numeric], dtype=float)
-        candidates = {
-            "constant": np.column_stack((np.ones_like(x),)),
-            "logarithmic": np.column_stack((np.ones_like(x), np.log(x))),
-            "linear": np.column_stack((np.ones_like(x), x)),
-            "n_log_n": np.column_stack((np.ones_like(x), x * np.log(x))),
-            "quadratic": np.column_stack((np.ones_like(x), x, x * x)),
-        }
+    def _scaling_fits(
+        self,
+        points: tuple[ScalingPoint, ...],
+        *,
+        confidence_level: float,
+    ) -> tuple[ScalingFit, ...]:
         fits: list[ScalingFit] = []
-        for name, design in candidates.items():
-            observation_count, parameter_count = design.shape
-            if observation_count <= parameter_count:
+        for variant in sorted({point.variant for point in points}):
+            numeric = [
+                point
+                for point in points
+                if point.variant == variant
+                and point.input_value is not None
+                and point.input_value > 0
+                and math.isfinite(point.input_value)
+                and math.isfinite(point.value)
+            ]
+            if len(numeric) < 3 or len({point.input_value for point in numeric}) < 2:
                 continue
-            coefficients, _, _, _ = np.linalg.lstsq(design, y, rcond=None)
-            predicted = design @ coefficients
-            residuals = y - predicted
-            rss = float(np.dot(residuals, residuals))
-            residual_rms = math.sqrt(rss / observation_count)
-            total = float(np.dot(y - np.mean(y), y - np.mean(y)))
-            r_squared = 1 - rss / total if total > 0 else None
-            aic = observation_count * math.log(
-                max(rss / observation_count, np.finfo(float).tiny)
-            ) + 2 * parameter_count
-            aicc = (
-                aic
-                + (2 * parameter_count * (parameter_count + 1))
-                / (observation_count - parameter_count - 1)
-                if observation_count > parameter_count + 1
-                else None
-            )
-            fits.append(
-                ScalingFit(
-                    model=name,
-                    coefficients=tuple(float(value) for value in coefficients),
-                    residual_rms=residual_rms,
-                    r_squared=r_squared,
-                    aicc=aicc,
-                    observation_count=observation_count,
-                    supported_min=float(np.min(x)),
-                    supported_max=float(np.max(x)),
+            x = np.asarray([point.input_value for point in numeric], dtype=float)
+            y = np.asarray([point.value for point in numeric], dtype=float)
+            candidates = {
+                "constant": np.column_stack((np.ones_like(x),)),
+                "logarithmic": np.column_stack((np.ones_like(x), np.log(x))),
+                "linear": np.column_stack((np.ones_like(x), x)),
+                "n_log_n": np.column_stack((np.ones_like(x), x * np.log(x))),
+                "quadratic": np.column_stack((np.ones_like(x), x, x * x)),
+            }
+            for name, design in candidates.items():
+                observation_count, parameter_count = design.shape
+                if observation_count <= parameter_count:
+                    continue
+                fitted = OLS(y, design).fit()
+                residuals = np.asarray(fitted.resid, dtype=float)
+                rss = float(np.dot(residuals, residuals))
+                confidence = np.asarray(
+                    fitted.conf_int(alpha=1 - confidence_level),
+                    dtype=float,
                 )
-            )
+                aicc = (
+                    float(fitted.aic)
+                    + (2 * parameter_count * (parameter_count + 1))
+                    / (observation_count - parameter_count - 1)
+                    if observation_count > parameter_count + 1
+                    else None
+                )
+                fits.append(
+                    ScalingFit(
+                        model=name,
+                        variant=variant,
+                        coefficients=tuple(float(value) for value in fitted.params),
+                        coefficient_standard_errors=tuple(float(value) for value in fitted.bse),
+                        coefficient_confidence_intervals=tuple(
+                            (float(interval[0]), float(interval[1])) for interval in confidence
+                        ),
+                        residual_rms=math.sqrt(rss / observation_count),
+                        r_squared=(
+                            float(fitted.rsquared)
+                            if math.isfinite(float(fitted.rsquared))
+                            else None
+                        ),
+                        aicc=aicc,
+                        condition_number=float(fitted.condition_number),
+                        durbin_watson=(
+                            float(durbin_watson(residuals)) if observation_count > 1 else None
+                        ),
+                        observation_count=observation_count,
+                        supported_min=float(np.min(x)),
+                        supported_max=float(np.max(x)),
+                    )
+                )
         return tuple(
             sorted(
                 fits,
                 key=lambda fit: (
+                    fit.variant,
                     fit.aicc is None,
                     fit.aicc if fit.aicc is not None else math.inf,
                     fit.model,
@@ -809,51 +1162,245 @@ class RecipeService:
             )
         )
 
-    def _scope(self, input_id: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        if input_id.startswith("sha256:"):
-            return (), (input_id,)
-        run = RunStore(self.workspace).read(input_id)
-        return (run.run_id,), tuple(item.artifact_id for item in run.artifacts)
+    @staticmethod
+    def _median_interval(
+        values: np.ndarray,
+        *,
+        confidence_level: float,
+    ) -> tuple[float | None, float | None]:
+        if values.size < 2:
+            return None, None
+        median = float(np.median(values))
+        if np.allclose(values, median):
+            return median, median
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                result = bootstrap(
+                    (values,),
+                    np.median,
+                    vectorized=False,
+                    confidence_level=confidence_level,
+                    n_resamples=1_999,
+                    method="BCa",
+                    rng=np.random.default_rng(0),
+                )
+        except ValueError:
+            return None, None
+        low = float(result.confidence_interval.low)
+        high = float(result.confidence_interval.high)
+        if not math.isfinite(low) or not math.isfinite(high):
+            return None, None
+        return low, high
+
+    def _correlated_hotspots(
+        self,
+        rows: list[tuple[object, ...]],
+    ) -> tuple[ScalingCorrelatedHotspot, ...]:
+        per_trial: dict[
+            tuple[
+                str,
+                str,
+                str,
+                str | None,
+                str | None,
+                int | None,
+                str,
+                str,
+                float,
+            ],
+            float,
+        ] = {}
+        for row in rows:
+            input_value = (
+                float(cast(Any, row[2]))
+                if row[2] is not None
+                else float(cast(Any, row[3]))
+                if row[3] is not None
+                else None
+            )
+            if input_value is None or not math.isfinite(input_value):
+                continue
+            key = (
+                str(row[0]),
+                str(row[1]),
+                str(row[4]),
+                str(row[5]) if row[5] is not None else None,
+                str(row[6]) if row[6] is not None else None,
+                int(cast(Any, row[7])) if row[7] is not None else None,
+                str(row[8]),
+                str(row[9]),
+                input_value,
+            )
+            per_trial[key] = per_trial.get(key, 0.0) + float(cast(Any, row[10]))
+        groups: dict[
+            tuple[str, str, str | None, str | None, int | None, str, str],
+            list[tuple[float, float]],
+        ] = {}
+        for (
+            _trial_id,
+            variant,
+            frame_id,
+            function,
+            file,
+            line,
+            metric,
+            unit,
+            input_value,
+        ), value in per_trial.items():
+            groups.setdefault(
+                (variant, frame_id, function, file, line, metric, unit),
+                [],
+            ).append((input_value, value))
+        results: list[ScalingCorrelatedHotspot] = []
+        for (
+            variant,
+            frame_id,
+            function,
+            file,
+            line,
+            metric,
+            unit,
+        ), samples in groups.items():
+            if len(samples) < 3 or len({sample[0] for sample in samples}) < 2:
+                continue
+            x = np.asarray([sample[0] for sample in samples], dtype=float)
+            y = np.asarray([sample[1] for sample in samples], dtype=float)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                correlation = spearmanr(x, y)
+            rho = float(correlation.statistic)
+            p_value = float(correlation.pvalue)
+            if not math.isfinite(rho) or not math.isfinite(p_value):
+                continue
+            results.append(
+                ScalingCorrelatedHotspot(
+                    variant=variant,
+                    frame_id=frame_id,
+                    function=function,
+                    file=file,
+                    line=line,
+                    metric=metric,
+                    unit=unit,
+                    spearman_rho=rho,
+                    p_value=p_value,
+                    adjusted_p_value=p_value,
+                    multiplicity_method="benjamini-hochberg-fdr",
+                    tested_hypothesis_count=0,
+                    independent_trial_count=len(samples),
+                    supported_min=float(np.min(x)),
+                    supported_max=float(np.max(x)),
+                )
+            )
+        if results:
+            adjusted = multipletests(
+                [item.p_value for item in results],
+                method="fdr_bh",
+            )[1]
+            tested = len(results)
+            results = [
+                item.model_copy(
+                    update={
+                        "adjusted_p_value": float(adjusted[index]),
+                        "tested_hypothesis_count": tested,
+                    }
+                )
+                for index, item in enumerate(results)
+            ]
+        results.sort(
+            key=lambda item: (
+                -abs(item.spearman_rho),
+                item.adjusted_p_value,
+                item.variant,
+                item.frame_id,
+            )
+        )
+        return tuple(results[: self.workspace.config.analysis.default_row_limit])
+
+    def _execution_observations(
+        self,
+        snapshot: Snapshot,
+        input_id: str,
+        *,
+        limit: int | None,
+    ) -> tuple[tuple[ExecutionObservation, ...], int]:
+        scope = resolve_evidence_scope(snapshot, input_id)
+        where, parameters = scope.predicate(
+            run_column="run_id",
+            artifact_column="artifact_id",
+        )
+        count_row = snapshot.execute(
+            "SELECT count(*) FROM observations WHERE " + where,
+            parameters,
+        ).fetchone()
+        assert count_row is not None
+        query = (
+            "SELECT observation_id, kind, name, value_json, file, line_from, "
+            "line_to, context, evidence_level FROM observations WHERE "
+            + where
+            + " ORDER BY file, line_from, line_to, observation_id"
+        )
+        rows = snapshot.execute(
+            query + (" LIMIT ?" if limit is not None else ""),
+            (*parameters, limit) if limit is not None else parameters,
+        ).fetchall()
+        return (
+            tuple(
+                ExecutionObservation(
+                    observation_id=str(row[0]),
+                    kind=str(row[1]),
+                    name=str(row[2]),
+                    value_json=str(row[3]),
+                    file=str(row[4]) if row[4] is not None else None,
+                    line_from=int(row[5]) if row[5] is not None else None,
+                    line_to=int(row[6]) if row[6] is not None else None,
+                    context=str(row[7]) if row[7] is not None else None,
+                    evidence_level=str(row[8]),
+                )
+                for row in rows
+            ),
+            int(count_row[0]),
+        )
 
     def _require_pytorch_source(
         self,
+        snapshot: Snapshot,
         run_ids: tuple[str, ...],
         artifact_ids: tuple[str, ...],
     ) -> None:
-        if run_ids and all(
-            RunStore(self.workspace).read(run_id).collector == "torch"
-            for run_id in run_ids
-        ):
-            return
+        if run_ids:
+            placeholders = ", ".join("?" for _ in run_ids)
+            rows = snapshot.execute(
+                "SELECT lower(coalesce(collector, '')) FROM ("
+                "SELECT *, row_number() OVER (PARTITION BY run_id "
+                "ORDER BY published_at DESC) AS revision_order FROM runs"
+                f") WHERE revision_order = 1 AND run_id IN ({placeholders})",
+                run_ids,
+            ).fetchall()
+            if len(rows) == len(set(run_ids)) and all("torch" in str(row[0]) for row in rows):
+                return
+            producer_rows = snapshot.execute(
+                "SELECT DISTINCT run_id FROM artifact_registrations "
+                f"WHERE run_id IN ({placeholders}) "
+                "AND lower(coalesce(producer, '')) LIKE '%torch%'",
+                run_ids,
+            ).fetchall()
+            if {str(row[0]) for row in producer_rows} == set(run_ids):
+                return
         if artifact_ids:
             placeholders = ", ".join("?" for _ in artifact_ids)
-            with Catalog(self.workspace).open_snapshot() as snapshot:
-                rows = snapshot.execute(
-                    "SELECT DISTINCT lower(coalesce(producer, '')) "
-                    "FROM artifact_registrations "
-                    f"WHERE artifact_id IN ({placeholders})",
-                    artifact_ids,
-                ).fetchall()
+            rows = snapshot.execute(
+                "SELECT DISTINCT lower(coalesce(producer, '')) "
+                "FROM artifact_registrations "
+                f"WHERE artifact_id IN ({placeholders})",
+                artifact_ids,
+            ).fetchall()
             if any("torch" in str(row[0]) for row in rows):
                 return
         raise DomainError(
             ErrorCode.COMPARISON_INVALID,
             "PyTorch operator analysis requires a torch.profiler-produced trace.",
         )
-
-    def _scope_where(
-        self,
-        run_ids: tuple[str, ...],
-        artifact_ids: tuple[str, ...],
-        *,
-        run_column: str,
-        artifact_column: str,
-    ) -> tuple[str, tuple[object, ...]]:
-        if run_ids:
-            return f"{run_column} = ?", (run_ids[0],)
-        if artifact_ids:
-            return f"{artifact_column} = ?", (artifact_ids[0],)
-        raise DomainError(ErrorCode.WORKSPACE_INVALID, "Analysis input has no scope.")
 
     def _limit(self, value: int | None) -> int:
         if value is None:
@@ -864,3 +1411,28 @@ class RecipeService:
                 f"Limit must be between 1 and {self.workspace.config.analysis.max_row_limit}.",
             )
         return value
+
+    def _pinned_commit_id(self, value: str | None) -> str:
+        if value is not None:
+            if self.snapshot is not None and self.snapshot.commit.commit_id != value:
+                raise DomainError(
+                    ErrorCode.WORKSPACE_INVALID,
+                    "Recipe snapshot does not match the requested corpus commit.",
+                )
+            return value
+        if self.snapshot is not None:
+            return self.snapshot.commit.commit_id
+        return self.workspace.corpus.read_head().commit_id
+
+    @contextmanager
+    def _open_snapshot(self, corpus_commit_id: str) -> Iterator[Snapshot]:
+        if self.snapshot is not None:
+            if self.snapshot.commit.commit_id != corpus_commit_id:
+                raise DomainError(
+                    ErrorCode.WORKSPACE_INVALID,
+                    "Recipe attempted to cross its pinned corpus snapshot.",
+                )
+            yield self.snapshot
+            return
+        with Catalog(self.workspace).open_snapshot(corpus_commit_id) as snapshot:
+            yield snapshot

@@ -2,21 +2,31 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import mimetypes
 import os
 import secrets
 import shutil
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import JsonValue
 
+from flamo.adapters.builtins import (
+    build_capture_invocation,
+    builtin_adapter,
+)
+from flamo.application.async_work import run_atomic_thread
 from flamo.application.capabilities import CapabilityService
 from flamo.application.environment import collect_environment
+from flamo.application.evidence_rows import (
+    artifact_registration_row,
+    environment_row,
+    source_state_row,
+)
 from flamo.application.execution_policy import ExecutionPolicy
 from flamo.application.run_rows import run_row
 from flamo.application.source import collect_source_state
@@ -43,13 +53,13 @@ from flamo.domain import (
 from flamo.domain.models import utc_now
 from flamo.evidence import GenerationPublisher
 from flamo.execution import ExecutionRequest, SubprocessBroker
-from flamo.storage import ArtifactStore, RunStore, Workspace
+from flamo.models import ContractModel
+from flamo.observability import OperationLogger, elapsed_ms
+from flamo.storage import ArtifactStore, RunStore, StorageQuota, Workspace
 from flamo.storage.atomic import atomic_write_bytes
 
 
-class CaptureResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class CaptureResult(ContractModel):
     schema_version: int = 1
     plan: CapturePlan
     run: RunManifest
@@ -61,6 +71,95 @@ class _PlanEntry:
     plan: CapturePlan
     expires_monotonic: float
     consumed: bool = False
+
+
+@dataclass(slots=True)
+class _CaptureExecution:
+    service: CaptureService
+    plan: CapturePlan
+    output_root: Path
+    logger: OperationLogger
+    operation_id: str
+    started_monotonic: float
+    progress: Callable[[float, float, str], Awaitable[None]] | None
+    run: RunManifest | None = None
+    cleanup_complete: bool | None = None
+
+    async def report(self, completed: int, message: str) -> None:
+        self.logger.emit(
+            operation_id=self.operation_id,
+            operation="capture.execute",
+            phase=message,
+            run_id=self.plan.run_id,
+            adapter=self.plan.adapter,
+            elapsed_ms=elapsed_ms(self.started_monotonic),
+        )
+        if self.progress is not None:
+            await self.progress(completed, 8, message)
+
+    async def record_lease(self, process_id: int) -> None:
+        if self.run is None:
+            raise RuntimeError("capture run is not initialized")
+        lease = self.service._lease(process_id)
+        if lease is None:
+            return
+        current = self.run
+        leased = current.model_copy(
+            update={
+                "revision": current.revision + 1,
+                "lease": lease,
+            }
+        )
+        await run_atomic_thread(
+            lambda: self.service.runs.append(
+                leased,
+                expected_revision=current.revision,
+            )
+        )
+        self.run = leased
+
+    async def record_cleanup(self, complete: bool) -> None:
+        self.cleanup_complete = complete
+
+    async def terminate(
+        self,
+        *,
+        execution: ExecutionStatus,
+        message: str,
+        phase: str,
+        error_code: str,
+        cleanup_complete: bool | None = None,
+    ) -> RunManifest:
+        if self.run is None:
+            raise RuntimeError("capture run is not initialized")
+        self.logger.emit(
+            operation_id=self.operation_id,
+            operation="capture.execute",
+            phase=phase,
+            run_id=self.plan.run_id,
+            adapter=self.plan.adapter,
+            elapsed_ms=elapsed_ms(self.started_monotonic),
+            error_code=error_code,
+        )
+        current = self.run
+        try:
+            terminal = await run_atomic_thread(
+                lambda: self.service._finish_error(
+                    current,
+                    execution=execution,
+                    message=message,
+                    cleanup_complete=(
+                        self.cleanup_complete if cleanup_complete is None else cleanup_complete
+                    ),
+                )
+            )
+        finally:
+            self.cleanup_staging()
+        self.run = terminal
+        return terminal
+
+    def cleanup_staging(self) -> None:
+        shutil.rmtree(self.output_root, ignore_errors=True)
 
 
 class CapturePlanRegistry:
@@ -170,14 +269,15 @@ class CaptureService:
             instance.command.argv,
             output_root,
         )
-        containment, network_contained, collector_argv = self._contain(
+        adapter_version = self.capabilities.get(adapter).version
+        adapter_definition = builtin_adapter(adapter)
+        containment, network_contained, systemd_scope_unit, collector_argv = await self._contain(
             collector_argv,
             cwd=Path(instance.command.cwd),
             writable=output_root,
+            unit_name=f"flamo-capture-{plan_id[:24]}.scope",
             required=(
-                execution_policy.requires_containment(
-                    self.workspace.config.execution.containment
-                )
+                execution_policy.requires_containment(self.workspace.config.execution.containment)
             ),
         )
         identities: dict[str, JsonValue] = {
@@ -199,12 +299,14 @@ class CaptureService:
             "approval": approval or definition.workload_definition_id,
             "instance": instance.model_dump(mode="json"),
             "adapter": adapter,
+            "adapter_version": adapter_version,
             "execution_policy": execution_policy.value,
             "collector_argv": collector_argv,
             "collector_environment": collector_environment,
             "bound_identities": identities,
             "policy": self.workspace.config.model_dump(mode="json"),
             "containment": containment,
+            "systemd_scope_unit": systemd_scope_unit,
         }
         plan = CapturePlan(
             plan_id=plan_id,
@@ -216,6 +318,7 @@ class CaptureService:
             approval_digest=approval or definition.workload_definition_id,
             workload_instance=instance,
             adapter=adapter,
+            adapter_version=adapter_version,
             execution_policy=execution_policy.value,
             collector_argv=collector_argv,
             collector_environment=collector_environment,
@@ -223,12 +326,16 @@ class CaptureService:
             expected_overhead=overhead,
             containment=containment,
             network_contained=network_contained,
-            permissions=("ptrace",) if adapter == "py-spy" else (),
+            systemd_scope_unit=systemd_scope_unit,
+            permissions=(adapter_definition.permissions if adapter_definition is not None else ()),
             bound_identities=identities,
             limits={
                 "timeout_seconds": instance.command.timeout_seconds,
                 "max_output_bytes": self.workspace.config.execution.max_output_bytes,
                 "max_artifact_bytes": self.workspace.config.capture.max_artifact_bytes,
+                "max_cpu_percent": self.workspace.config.execution.max_cpu_percent,
+                "max_memory_bytes": self.workspace.config.execution.max_memory_bytes,
+                "max_processes": self.workspace.config.execution.max_processes,
             },
             warnings=warnings,
             created_at=created_at,
@@ -237,11 +344,30 @@ class CaptureService:
         await self.plans.issue(plan)
         return plan
 
-    async def execute(self, plan_id: str) -> CaptureResult:
+    async def execute(
+        self,
+        plan_id: str,
+        *,
+        progress: Callable[[float, float, str], Awaitable[None]] | None = None,
+    ) -> CaptureResult:
+        logger = OperationLogger(self.workspace.paths.root)
+        operation_id = logger.new_id()
+        started = time.monotonic()
+
         plan = await self.plans.consume(plan_id)
         self._recheck(plan)
+        StorageQuota(self.workspace).require_capacity(staging=True)
         output_root = self.workspace.paths.staging / "captures" / plan.plan_id
         output_root.mkdir(parents=True, exist_ok=False)
+        capture = _CaptureExecution(
+            service=self,
+            plan=plan,
+            output_root=output_root,
+            logger=logger,
+            operation_id=operation_id,
+            started_monotonic=started,
+            progress=progress,
+        )
         environment = collect_environment()
         run_id = plan.run_id
         initial = RunManifest(
@@ -255,7 +381,14 @@ class CaptureService:
             measurement_protocol_id=digest_model(
                 {
                     "adapter": plan.adapter,
-                    "collector_argv": plan.collector_argv,
+                    "adapter_version": plan.adapter_version,
+                    "collector_executable_identity": plan.bound_identities.get(
+                        "collector_executable"
+                    ),
+                    "expected_artifact_kinds": plan.expected_artifact_kinds,
+                    "expected_overhead": plan.expected_overhead,
+                    "permissions": plan.permissions,
+                    "warnings": plan.warnings,
                 }
             ),
             environment_id=environment.environment_id,
@@ -265,18 +398,23 @@ class CaptureService:
             command=plan.workload_instance.command,
         )
         self.runs.create(initial)
+        capture.run = initial
         try:
+            await capture.report(1, "Capture plan validated")
+            await capture.report(2, "Run lifecycle initialized")
             source_state = await collect_source_state(
                 self.workspace,
                 workload_executable=plan.workload_instance.command.argv[0],
                 broker=self.broker,
             )
+            await capture.report(3, "Source and environment identity collected")
         except asyncio.CancelledError as cancellation:
             try:
-                self._finish_error(
-                    initial,
+                await capture.terminate(
                     execution=ExecutionStatus.CANCELLED,
                     message="Capture cancelled while collecting source identity.",
+                    phase="capture cancelled during source identity",
+                    error_code="cancelled",
                 )
             finally:
                 raise cancellation
@@ -297,23 +435,13 @@ class CaptureService:
             }
         )
         self.runs.append(running, expected_revision=1)
+        capture.run = running
         acquired_slot = False
-
-        async def record_lease(process_id: int) -> None:
-            nonlocal running
-            lease = self._lease(process_id)
-            leased = running.model_copy(
-                update={
-                    "revision": running.revision + 1,
-                    "lease": lease,
-                }
-            )
-            self.runs.append(leased, expected_revision=running.revision)
-            running = leased
 
         try:
             await self.plans.acquire_capture_slot()
             acquired_slot = True
+            await capture.report(4, "Capture slot acquired")
             outcome = await self.broker.run(
                 ExecutionRequest(
                     argv=plan.collector_argv,
@@ -330,15 +458,20 @@ class CaptureService:
                     allowed_working_roots=self._allowed_roots(),
                     timeout_seconds=plan.workload_instance.command.timeout_seconds,
                     max_output_bytes=self.workspace.config.execution.max_output_bytes,
+                    systemd_scope_unit=plan.systemd_scope_unit,
                 ),
-                on_started=record_lease,
+                on_started=capture.record_lease,
+                on_cleanup=capture.record_cleanup,
             )
+            StorageQuota(self.workspace).require_capacity(staging=True)
+            await capture.report(5, "Collector execution complete")
         except asyncio.CancelledError as cancellation:
             try:
-                self._finish_error(
-                    running,
+                await capture.terminate(
                     execution=ExecutionStatus.CANCELLED,
-                    message="Capture cancelled by caller after contained cleanup.",
+                    message="Capture cancelled by caller after bounded cleanup.",
+                    phase="capture cancelled during collector execution",
+                    error_code="cancelled",
                 )
             finally:
                 raise cancellation
@@ -348,95 +481,135 @@ class CaptureService:
                 if error.code is ErrorCode.PROCESS_TIMEOUT
                 else ExecutionStatus.FAILED
             )
-            terminal = self._finish_error(running, execution=status, message=error.message)
+            terminal = await capture.terminate(
+                execution=status,
+                message=error.message,
+                phase="collector execution failed",
+                error_code=error.code.value,
+            )
             error.run_id = terminal.run_id
             raise
         finally:
             if acquired_slot:
                 self.plans.release_capture_slot()
+        running = capture.run
+        if running is None:
+            raise RuntimeError("capture run disappeared after collector execution")
 
         registrations: list[tuple[ArtifactRegistration, int]] = []
         validation_status = ValidationStatus.NOT_REQUESTED
         validation_limitations: list[str] = []
-        oracle = self.workloads.resolve_oracle(
-            plan.workload_name,
-            cast(dict[str, Scalar], plan.workload_instance.parameters),
-        )
-        if oracle is not None and outcome.process.exit_code == 0:
-            try:
-                validation = await self.broker.run(
-                    ExecutionRequest(
-                        argv=oracle.command.argv,
+        try:
+            oracle = self.workloads.resolve_oracle(
+                plan.workload_name,
+                cast(dict[str, Scalar], plan.workload_instance.parameters),
+            )
+            if oracle is not None and outcome.process.exit_code == 0:
+                try:
+                    (
+                        oracle_containment,
+                        oracle_network_contained,
+                        oracle_scope_unit,
+                        oracle_argv,
+                    ) = await self._contain(
+                        oracle.command.argv,
                         cwd=Path(oracle.command.cwd),
-                        environment_allowlist=(
-                            self.workspace.config.execution.child_environment_allowlist
+                        writable=output_root,
+                        unit_name=f"flamo-validation-{plan.plan_id[:21]}.scope",
+                        required=ExecutionPolicy(plan.execution_policy).requires_containment(
+                            self.workspace.config.execution.containment
                         ),
-                        allowed_working_roots=self._allowed_roots(),
-                        timeout_seconds=oracle.command.timeout_seconds,
-                        max_output_bytes=(self.workspace.config.execution.max_output_bytes),
                     )
-                )
-                validation_status = (
-                    ValidationStatus.PASSED
-                    if validation.process.exit_code == 0
-                    else ValidationStatus.FAILED
-                )
-                validation_output = output_root / "validation.stdout"
-                atomic_write_bytes(validation_output, validation.stdout)
-                role = (
-                    "validation_cross_treatment_equivalence"
-                    if oracle.strength is OracleStrength.CROSS_TREATMENT_EQUIVALENCE
-                    else f"validation_{oracle.strength.value}"
-                )
-                registrations.append(
-                    self._register_path(
-                        run_id,
-                        validation_output,
-                        kind=ArtifactKind.VALIDATION_OUTPUT,
-                        role=role,
-                        media_type="application/octet-stream",
+                    if plan.containment in {"active", "degraded"} and oracle_containment not in {
+                        "active",
+                        "degraded",
+                    }:
+                        raise DomainError(
+                            ErrorCode.EXECUTION_REFUSED,
+                            "The validation oracle cannot preserve the capture containment.",
+                        )
+                    if plan.network_contained and not oracle_network_contained:
+                        raise DomainError(
+                            ErrorCode.EXECUTION_REFUSED,
+                            "The validation oracle cannot preserve capture network isolation.",
+                        )
+                    validation = await self.broker.run(
+                        ExecutionRequest(
+                            argv=oracle_argv,
+                            cwd=Path(oracle.command.cwd),
+                            environment_allowlist=(
+                                self.workspace.config.execution.child_environment_allowlist
+                            ),
+                            allowed_working_roots=self._allowed_roots(),
+                            timeout_seconds=oracle.command.timeout_seconds,
+                            max_output_bytes=(self.workspace.config.execution.max_output_bytes),
+                            systemd_scope_unit=oracle_scope_unit,
+                        ),
+                        on_cleanup=capture.record_cleanup,
                     )
-                )
-                if validation.stderr:
-                    validation_stderr = output_root / "validation.stderr"
-                    atomic_write_bytes(validation_stderr, validation.stderr)
+                    validation_status = (
+                        ValidationStatus.PASSED
+                        if validation.process.exit_code == 0
+                        else ValidationStatus.FAILED
+                    )
+                    validation_output = output_root / "validation.stdout"
+                    atomic_write_bytes(validation_output, validation.stdout)
+                    role = (
+                        "validation_cross_treatment_equivalence"
+                        if oracle.strength is OracleStrength.CROSS_TREATMENT_EQUIVALENCE
+                        else f"validation_{oracle.strength.value}"
+                    )
                     registrations.append(
-                        self._register_path(
+                        await self._register_path_async(
                             run_id,
-                            validation_stderr,
-                            kind=ArtifactKind.PROCESS_OUTPUT,
-                            role="validation_stderr",
+                            validation_output,
+                            kind=ArtifactKind.VALIDATION_OUTPUT,
+                            role=role,
                             media_type="application/octet-stream",
                         )
                     )
-                if validation_status is not ValidationStatus.PASSED:
-                    validation_limitations.append(
-                        "The declared validation oracle exited unsuccessfully."
-                    )
-            except DomainError as error:
-                validation_status = ValidationStatus.ERROR
-                validation_limitations.append(error.message)
-        for name, payload, kind, role, media_type in (
-            (
-                "stdout.bin",
-                outcome.stdout,
-                ArtifactKind.PROCESS_OUTPUT,
-                "stdout",
-                "application/octet-stream",
-            ),
-            (
-                "stderr.bin",
-                outcome.stderr,
-                ArtifactKind.PROCESS_OUTPUT,
-                "stderr",
-                "application/octet-stream",
-            ),
-        ):
-            if payload:
+                    if validation.stderr:
+                        validation_stderr = output_root / "validation.stderr"
+                        atomic_write_bytes(validation_stderr, validation.stderr)
+                        registrations.append(
+                            await self._register_path_async(
+                                run_id,
+                                validation_stderr,
+                                kind=ArtifactKind.PROCESS_OUTPUT,
+                                role="validation_stderr",
+                                media_type="application/octet-stream",
+                            )
+                        )
+                    if validation_status is not ValidationStatus.PASSED:
+                        validation_limitations.append(
+                            "The declared validation oracle exited unsuccessfully."
+                        )
+                except DomainError as error:
+                    validation_status = ValidationStatus.ERROR
+                    validation_limitations.append(error.message)
+            await capture.report(6, "Validation complete")
+            for name, payload, kind, role, media_type in (
+                (
+                    "stdout.bin",
+                    outcome.stdout,
+                    ArtifactKind.PROCESS_OUTPUT,
+                    "stdout",
+                    "application/octet-stream",
+                ),
+                (
+                    "stderr.bin",
+                    outcome.stderr,
+                    ArtifactKind.PROCESS_OUTPUT,
+                    "stderr",
+                    "application/octet-stream",
+                ),
+            ):
+                if not payload:
+                    continue
                 path = output_root / name
                 atomic_write_bytes(path, payload)
                 registrations.append(
-                    self._register_path(
+                    await self._register_path_async(
                         run_id,
                         path,
                         kind=kind,
@@ -444,28 +617,52 @@ class CaptureService:
                         media_type=media_type,
                     )
                 )
-        native = output_root / self._native_filename(plan.adapter)
-        if native.is_file():
-            registrations.append(
-                self._register_path(
-                    run_id,
-                    native,
-                    kind=plan.expected_artifact_kinds[0],
-                    role="primary",
-                    media_type=mimetypes.guess_type(native.name)[0] or "application/octet-stream",
+            native = output_root / self._native_filename(plan.adapter)
+            if native.is_file():
+                registrations.append(
+                    await self._register_path_async(
+                        run_id,
+                        native,
+                        kind=plan.expected_artifact_kinds[0],
+                        role="primary",
+                        media_type=(
+                            mimetypes.guess_type(native.name)[0] or "application/octet-stream"
+                        ),
+                        producer=plan.adapter,
+                        producer_version=plan.adapter_version,
+                    )
                 )
-            )
-        observations = output_root / "observations.jsonl"
-        if observations.is_file():
-            registrations.append(
-                self._register_path(
-                    run_id,
-                    observations,
-                    kind=ArtifactKind.SEMANTIC_OBSERVATIONS,
-                    role="semantic_observations",
-                    media_type="application/x-ndjson",
+            observations = output_root / "observations.jsonl"
+            if observations.is_file():
+                registrations.append(
+                    await self._register_path_async(
+                        run_id,
+                        observations,
+                        kind=ArtifactKind.SEMANTIC_OBSERVATIONS,
+                        role="semantic_observations",
+                        media_type="application/x-ndjson",
+                    )
                 )
+            await capture.report(7, "Artifacts registered")
+        except asyncio.CancelledError as cancellation:
+            try:
+                await capture.terminate(
+                    execution=ExecutionStatus.CANCELLED,
+                    message=("Capture cancelled during validation or artifact registration."),
+                    phase="capture cancelled during validation or registration",
+                    error_code="cancelled",
+                )
+            finally:
+                raise cancellation
+        except DomainError as error:
+            terminal = await capture.terminate(
+                execution=ExecutionStatus.FAILED,
+                message=error.message,
+                phase="validation or artifact registration failed",
+                error_code=error.code.value,
             )
+            error.run_id = terminal.run_id
+            raise
         succeeded = outcome.process.exit_code == 0
         terminal = running.model_copy(
             update={
@@ -489,6 +686,7 @@ class CaptureService:
             }
         )
         self.runs.append(terminal, expected_revision=running.revision)
+        capture.run = terminal
         measurement_rows: list[dict[str, object]] = []
         if terminal.process is not None and terminal.process.wall_time_ns is not None:
             measurement_rows.append(
@@ -522,57 +720,63 @@ class CaptureService:
                     "evidence_level": "observed",
                 }
             )
-        published = self.publisher.publish_rows(
-            {
-                "runs": [run_row(terminal)],
-                "artifact_registrations": [
-                    {
-                        **registration.model_dump(mode="python"),
-                        "kind": registration.kind.value,
-                        "sensitivity": registration.sensitivity.value,
-                        "byte_length": byte_length,
-                    }
-                    for registration, byte_length in registrations
-                ],
-                "environments": [
-                    {
-                        "environment_id": environment.environment_id,
-                        "observed_at": environment.observed_at,
-                        "identity_quality": environment.identity_quality.value,
-                        "fields_json": json.dumps(
-                            environment.fields,
-                            allow_nan=False,
-                            separators=(",", ":"),
-                            sort_keys=True,
-                        ),
-                        "missing_fields": list(environment.missing_fields),
-                    }
-                ],
-                "source_states": [
-                    {
-                        "source_state_id": source_state.source_state_id,
-                        "identity_quality": source_state.identity_quality.value,
-                        "repository_root": source_state.repository_root,
-                        "head_commit": source_state.head_commit,
-                        "diff_digest": source_state.diff_digest,
-                        "executable_digest": source_state.executable_digest,
-                        "build_id": source_state.build_id,
-                        "fields_json": json.dumps(
-                            source_state.fields,
-                            allow_nan=False,
-                            separators=(",", ":"),
-                            sort_keys=True,
-                        ),
-                        "missing_fields": list(source_state.missing_fields),
-                    }
-                ],
-                "measurements": measurement_rows,
-            },
-            publisher="flamo.capture",
-            publisher_version="1",
-            input_run_ids=(run_id,),
-            input_artifact_ids=tuple(registration.artifact_id for registration, _ in registrations),
-        )
+        publication_rows = {
+            "runs": [run_row(terminal)],
+            "artifact_registrations": [
+                artifact_registration_row(registration, byte_length=byte_length)
+                for registration, byte_length in registrations
+            ],
+            "environments": [environment_row(environment)],
+            "source_states": [source_state_row(source_state)],
+            "measurements": measurement_rows,
+        }
+        try:
+            published = await run_atomic_thread(
+                lambda: self.publisher.publish_rows(
+                    publication_rows,
+                    publisher="flamo.capture",
+                    publisher_version="1",
+                    input_run_ids=(run_id,),
+                    input_artifact_ids=tuple(
+                        registration.artifact_id for registration, _ in registrations
+                    ),
+                )
+            )
+        except asyncio.CancelledError as cancellation:
+            await capture.terminate(
+                execution=ExecutionStatus.CANCELLED,
+                message="Capture cancelled during atomic evidence publication.",
+                phase="capture cancelled during evidence publication",
+                error_code="cancelled",
+                cleanup_complete=True,
+            )
+            raise cancellation
+        except Exception as error:
+            message = (
+                error.message
+                if isinstance(error, DomainError)
+                else f"Evidence publication failed: {type(error).__name__}."
+            )
+            try:
+                failed = await capture.terminate(
+                    execution=ExecutionStatus.FAILED,
+                    message=message,
+                    phase="evidence publication failed",
+                    error_code=(
+                        error.code.value if isinstance(error, DomainError) else "publication_failed"
+                    ),
+                    cleanup_complete=True,
+                )
+                if isinstance(error, DomainError):
+                    error.run_id = failed.run_id
+            except Exception as terminalization_error:
+                error.add_note(
+                    "Capture terminalization also failed: "
+                    f"{type(terminalization_error).__name__}: {terminalization_error}"
+                )
+            raise
+        capture.cleanup_staging()
+        await capture.report(8, "Evidence publication complete")
         return CaptureResult(
             plan=plan,
             run=terminal,
@@ -585,160 +789,38 @@ class CaptureService:
         workload_argv: tuple[str, ...],
         output_root: Path,
     ) -> tuple[tuple[str, ...], tuple[ArtifactKind, ...], str, tuple[str, ...]]:
-        if adapter == "command":
-            return (
-                workload_argv,
-                (ArtifactKind.PROCESS_OUTPUT,),
-                "No profiler overhead; process output only.",
-                ("No sampled stack or operator evidence is collected.",),
-            )
         capability = self.capabilities.get(adapter)
-        if capability.status is not CapabilityStatus.AVAILABLE:
+        if adapter != "command" and capability.status is not CapabilityStatus.AVAILABLE:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 f"Adapter {adapter!r} is unavailable.",
                 remediation=capability.remediation,
             )
-        if adapter == "py-spy":
-            assert capability.executable is not None
-            return (
-                (
-                    capability.executable,
-                    "record",
-                    "--format",
-                    "chrometrace",
-                    "--output",
-                    str(output_root / self._native_filename(adapter)),
-                    "--",
-                    *workload_argv,
-                ),
-                (ArtifactKind.SAMPLE_PROFILE,),
-                "Sampling overhead; exact rate and native-frame scope are collector defaults.",
-                ("GIL, native-frame, idle-thread, and subprocess modes are disabled.",),
-            )
-        if adapter == "perf":
-            assert capability.executable is not None
-            return (
-                (
-                    capability.executable,
-                    "record",
-                    "-o",
-                    str(output_root / self._native_filename(adapter)),
-                    "--",
-                    *workload_argv,
-                ),
-                (ArtifactKind.SAMPLE_PROFILE,),
-                "Kernel sampling overhead; symbol coverage depends on build identities.",
-                (),
-            )
-        if adapter in {"coverage", "memray"}:
-            python, target = self._python_target(workload_argv)
-            output = str(output_root / self._native_filename(adapter))
-            if adapter == "coverage":
-                prefix = (
-                    python,
-                    "-m",
-                    "coverage",
-                    "run",
-                    "--branch",
-                    f"--data-file={output}",
-                )
-                return (
-                    (*prefix, *target),
-                    (ArtifactKind.EXECUTION_COVERAGE,),
-                    "Tracing overhead; branch collection is enabled.",
-                    ("Coverage records execution, not values or control-flow causes.",),
-                )
-            prefix = (
-                python,
-                "-m",
-                "memray",
-                "run",
-                "--output",
-                output,
-            )
-            return (
-                (*prefix, *target),
-                (ArtifactKind.MEMORY_PROFILE,),
-                "Allocation tracing overhead; native traces are disabled by default.",
-                (
-                    "The capture records the main process unless follow-fork is "
-                    "explicitly added in a future plan mode.",
-                ),
-            )
-        if adapter == "torch.profiler":
-            python, target = self._python_target(workload_argv)
-            output = str(output_root / self._native_filename(adapter))
-            if target[0] == "-m":
-                if len(target) < 2:
-                    raise DomainError(
-                        ErrorCode.INVALID_CAPTURE_PLAN,
-                        "The Python module name is missing.",
-                    )
-                launcher_target = ("--module", target[1], *target[2:])
-            else:
-                launcher_target = ("--script", target[0], *target[1:])
-            return (
-                (
-                    python,
-                    "-m",
-                    "flamo.collectors.torch_launcher",
-                    "--output",
-                    output,
-                    *launcher_target,
-                ),
-                (ArtifactKind.EXECUTION_TRACE,),
-                "Operator tracing with shapes, memory, and Python stacks has substantial overhead.",
-                (
-                    "Whole-entrypoint mode cannot distinguish application-specific "
-                    "warm-up and steady-state phases.",
-                    "FLOP estimates and module hierarchy are not enabled.",
-                ),
-            )
-        if adapter == "pyperf":
-            python, _ = self._python_target(workload_argv)
-            output = str(output_root / self._native_filename(adapter))
-            return (
-                (
-                    python,
-                    "-m",
-                    "pyperf",
-                    "command",
-                    "--output",
-                    output,
-                    "--processes",
-                    "3",
-                    "--values",
-                    "3",
-                    "--warmups",
-                    "1",
-                    "--name",
-                    "workload",
-                    *workload_argv,
-                ),
-                (ArtifactKind.BENCHMARK_SAMPLES,),
-                "Repeated calibrated process execution; three workers, three values, "
-                "and one warm-up per worker.",
-                (
-                    "Experiment-level treatment randomization is separate from "
-                    "pyperf's worker hierarchy.",
-                ),
-            )
-        raise DomainError(
-            ErrorCode.CAPABILITY_UNAVAILABLE,
-            f"Adapter {adapter!r} does not yet support capture planning.",
+        invocation = build_capture_invocation(
+            adapter,
+            workload_argv,
+            output_root,
+            executable=capability.executable,
+        )
+        return (
+            invocation.argv,
+            invocation.artifact_kinds,
+            invocation.expected_overhead,
+            invocation.limitations,
         )
 
-    def _contain(
+    async def _contain(
         self,
         argv: tuple[str, ...],
         *,
         cwd: Path,
         writable: Path,
+        unit_name: str,
         required: bool,
     ) -> tuple[
-        Literal["active", "uncontained", "unavailable"],
+        Literal["active", "degraded", "uncontained", "unavailable"],
         bool,
+        str | None,
         tuple[str, ...],
     ]:
         if self.workspace.config.execution.containment == "disabled":
@@ -747,7 +829,7 @@ class CaptureService:
                     ErrorCode.EXECUTION_REFUSED,
                     "MCP capture requires containment but containment is disabled.",
                 )
-            return "uncontained", False, argv
+            return "uncontained", False, None, argv
         bwrap = shutil.which("bwrap") if os.name == "posix" else None
         if bwrap is None:
             if required:
@@ -756,31 +838,167 @@ class CaptureService:
                     "MCP capture requires Linux bubblewrap containment.",
                     remediation=("Install bubblewrap or change the trusted local policy.",),
                 )
-            return "unavailable", False, argv
-        wrapped = (
+            return "unavailable", False, None, argv
+        bwrap_argv = self._bubblewrap_argv(
             str(Path(bwrap).resolve()),
+            argv,
+            cwd=cwd,
+            writable=writable,
+        )
+        systemd_run = shutil.which("systemd-run")
+        if systemd_run is None or not await self._systemd_user_scope_available(systemd_run):
+            if required:
+                raise DomainError(
+                    ErrorCode.CAPABILITY_UNAVAILABLE,
+                    "MCP capture requires a systemd user scope for descendant containment.",
+                    remediation=(
+                        "Run under a systemd user manager or use the trusted local policy.",
+                    ),
+                )
+            return (
+                "degraded",
+                self.workspace.config.execution.network == "deny_when_contained",
+                None,
+                bwrap_argv,
+            )
+        wrapped = (
+            str(Path(systemd_run).resolve()),
+            "--user",
+            "--scope",
+            "--quiet",
+            "--collect",
+            "--expand-environment=no",
+            f"--unit={unit_name}",
+            "--property=KillMode=control-group",
+            f"--property=CPUQuota={self.workspace.config.execution.max_cpu_percent}%",
+            f"--property=MemoryMax={self.workspace.config.execution.max_memory_bytes}",
+            f"--property=TasksMax={self.workspace.config.execution.max_processes}",
+            "--",
+            *bwrap_argv,
+        )
+        return (
+            "active",
+            self.workspace.config.execution.network == "deny_when_contained",
+            unit_name,
+            wrapped,
+        )
+
+    async def _systemd_user_scope_available(self, systemd_run: str) -> bool:
+        true_executable = shutil.which("true")
+        if true_executable is None:
+            return False
+        unit_name = f"flamo-probe-{secrets.token_hex(8)}.scope"
+        try:
+            outcome = await self.broker.run(
+                ExecutionRequest(
+                    argv=(
+                        str(Path(systemd_run).resolve()),
+                        "--user",
+                        "--scope",
+                        "--quiet",
+                        "--collect",
+                        "--expand-environment=no",
+                        f"--unit={unit_name}",
+                        "--",
+                        str(Path(true_executable).resolve()),
+                    ),
+                    cwd=self.workspace.project_root,
+                    environment_allowlist=(
+                        self.workspace.config.execution.child_environment_allowlist
+                    ),
+                    allowed_working_roots=self._allowed_roots(),
+                    timeout_seconds=5,
+                    max_output_bytes=65_536,
+                    systemd_scope_unit=unit_name,
+                )
+            )
+        except DomainError:
+            return False
+        return outcome.process.exit_code == 0
+
+    def _bubblewrap_argv(
+        self,
+        bwrap: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        writable: Path,
+    ) -> tuple[str, ...]:
+        project_root = self.workspace.project_root.resolve()
+        resolved_cwd = cwd.resolve()
+        diagnostics = self.workspace.paths.root.resolve()
+        wrapped: list[str] = [
+            bwrap,
             "--die-with-parent",
             "--new-session",
             "--unshare-pid",
-            "--unshare-net",
-            "--ro-bind",
-            "/",
-            "/",
-            "--bind",
-            str(writable),
-            str(writable),
-            "--dev",
-            "/dev",
-            "--proc",
-            "/proc",
-            "--tmpfs",
-            "/tmp",
-            "--chdir",
-            str(cwd),
-            "--",
-            *argv,
+            "--unsetenv",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "--unsetenv",
+            "XDG_RUNTIME_DIR",
+        ]
+        if self.workspace.config.execution.network == "deny_when_contained":
+            wrapped.append("--unshare-net")
+        wrapped.extend(("--tmpfs", "/tmp"))
+        for path in ("/usr", "/usr/local", "/bin", "/lib", "/lib64", "/sbin", "/sys"):
+            if Path(path).exists():
+                wrapped.extend(("--ro-bind", path, path))
+        for path in (
+            "/etc/ld.so.cache",
+            "/etc/ld.so.conf",
+            "/etc/passwd",
+            "/etc/group",
+            "/etc/nsswitch.conf",
+            "/etc/localtime",
+        ):
+            if Path(path).exists():
+                wrapped.extend(("--ro-bind", path, path))
+        wrapped.extend(("--ro-bind", str(project_root), str(project_root)))
+        executable = Path(argv[0])
+        if executable.is_absolute() and executable.exists():
+            executable_candidates = [executable, executable.resolve()]
+            if executable.is_symlink():
+                link_target = Path(os.readlink(executable))
+                executable_candidates.append(
+                    link_target if link_target.is_absolute() else executable.parent / link_target
+                )
+            executable_roots = {
+                (
+                    candidate.parent.parent
+                    if candidate.parent.name in {"bin", "sbin"}
+                    else candidate.parent
+                ).absolute()
+                for candidate in executable_candidates
+            }
+            for executable_root in sorted(executable_roots):
+                try:
+                    executable_root.resolve().relative_to(project_root)
+                except ValueError:
+                    wrapped.extend(("--ro-bind", str(executable_root), str(executable_root)))
+        try:
+            resolved_cwd.relative_to(project_root)
+        except ValueError:
+            wrapped.extend(("--ro-bind", str(resolved_cwd), str(resolved_cwd)))
+        wrapped.extend(
+            (
+                "--tmpfs",
+                str(diagnostics),
+                "--dir",
+                str(writable),
+                "--bind",
+                str(writable),
+                str(writable),
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--chdir",
+                str(resolved_cwd),
+                "--",
+                *argv,
+            )
         )
-        return "active", True, wrapped
+        return tuple(wrapped)
 
     def _recheck(self, plan: CapturePlan) -> None:
         if self.workspace.identity.workspace_id != plan.workspace_id:
@@ -815,6 +1033,7 @@ class CaptureService:
         *,
         execution: ExecutionStatus,
         message: str,
+        cleanup_complete: bool | None = True,
     ) -> RunManifest:
         process = ProcessResult(
             timed_out=execution is ExecutionStatus.TIMED_OUT,
@@ -823,7 +1042,7 @@ class CaptureService:
                 if execution is ExecutionStatus.CANCELLED
                 else ("timeout" if execution is ExecutionStatus.TIMED_OUT else "process_error")
             ),
-            cleanup_complete=True,
+            cleanup_complete=cleanup_complete,
         )
         terminal = running.model_copy(
             update={
@@ -856,6 +1075,8 @@ class CaptureService:
         kind: ArtifactKind,
         role: str,
         media_type: str,
+        producer: str = "flamo.capture",
+        producer_version: str | None = None,
     ) -> tuple[ArtifactRegistration, int]:
         stored = self.artifacts.import_path(
             path,
@@ -870,10 +1091,34 @@ class CaptureService:
             media_type=media_type,
             kind=kind,
             role=role,
-            producer="flamo.capture",
+            producer=producer,
+            producer_version=producer_version,
             sensitivity=Sensitivity.INTERNAL,
         )
         return registration, stored.content.byte_length
+
+    async def _register_path_async(
+        self,
+        run_id: str,
+        path: Path,
+        *,
+        kind: ArtifactKind,
+        role: str,
+        media_type: str,
+        producer: str = "flamo.capture",
+        producer_version: str | None = None,
+    ) -> tuple[ArtifactRegistration, int]:
+        return await run_atomic_thread(
+            lambda: self._register_path(
+                run_id,
+                path,
+                kind=kind,
+                role=role,
+                media_type=media_type,
+                producer=producer,
+                producer_version=producer_version,
+            )
+        )
 
     def _allowed_roots(self) -> tuple[Path, ...]:
         roots = tuple(
@@ -883,33 +1128,12 @@ class CaptureService:
         return (*roots, self.workspace.project_root)
 
     def _native_filename(self, adapter: str) -> str:
-        return {
-            "coverage": ".coverage",
-            "memray": "memory.bin",
-            "py-spy": "profile.json",
-            "perf": "perf.data",
-            "pyperf": "benchmark.json",
-            "torch.profiler": "torch-trace.json",
-        }.get(adapter, "capture.bin")
-
-    def _python_target(
-        self,
-        workload_argv: tuple[str, ...],
-    ) -> tuple[str, tuple[str, ...]]:
-        executable = Path(workload_argv[0]).name
-        if not executable.startswith("python"):
-            raise DomainError(
-                ErrorCode.INVALID_CAPTURE_PLAN,
-                "This adapter can launch only a declared Python script or module.",
-            )
-        arguments = workload_argv[1:]
-        if not arguments or arguments[0] == "-c":
-            raise DomainError(
-                ErrorCode.INVALID_CAPTURE_PLAN,
-                "Inline Python commands cannot be wrapped by this adapter.",
-                remediation=("Declare a script or `python -m module` workload.",),
-            )
-        return workload_argv[0], arguments
+        definition = builtin_adapter(adapter)
+        return (
+            definition.output_filename
+            if definition is not None and definition.output_filename is not None
+            else "capture.bin"
+        )
 
     def _executable_identity(self, executable: str) -> dict[str, Any]:
         resolved = shutil.which(executable) if os.sep not in executable else executable
@@ -934,7 +1158,7 @@ class CaptureService:
             "symlink_mtime_ns": invoked_path.lstat().st_mtime_ns,
         }
 
-    def _lease(self, process_id: int) -> CaptureLease:
+    def _lease(self, process_id: int) -> CaptureLease | None:
         observed = utc_now()
         boot_id_path = Path("/proc/sys/kernel/random/boot_id")
         stat_path = Path("/proc") / str(process_id) / "stat"
@@ -942,6 +1166,8 @@ class CaptureService:
             boot_id = boot_id_path.read_text().strip()
             stat_fields = stat_path.read_text().split()
             process_start_identity = stat_fields[21]
+        except FileNotFoundError:
+            return None
         except (OSError, IndexError) as exc:
             raise DomainError(
                 ErrorCode.PROCESS_FAILED,

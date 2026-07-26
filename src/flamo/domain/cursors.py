@@ -45,8 +45,7 @@ class CursorCodec:
             envelope = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
             position = envelope["position"]
             if not isinstance(position, list) or any(
-                not isinstance(value, (str, int)) or isinstance(value, bool)
-                for value in position
+                not isinstance(value, (str, int)) or isinstance(value, bool) for value in position
             ):
                 raise ValueError("cursor position is invalid")
             content = {

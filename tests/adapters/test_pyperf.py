@@ -3,11 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pyperf
+import pytest
 
 from flamo.adapters import PyPerfExtractor
 from flamo.application import ImportArtifactRequest, ImportService
 from flamo.catalog import Catalog
-from flamo.domain import ArtifactKind
+from flamo.domain import ArtifactKind, DomainError, ErrorCode
 from flamo.storage import Workspace
 
 
@@ -48,6 +49,7 @@ def test_pyperf_extraction_preserves_worker_and_warmup_hierarchy(
 
     assert result.measurement_count == 4
     assert result.warmup_count == 2
+    assert any("compatibility could not be verified" in item for item in result.limitations)
     with Catalog(workspace).open_snapshot() as snapshot:
         rows = snapshot.execute(
             "SELECT worker_id, worker_run_index, value_index, loop_count, "
@@ -62,3 +64,44 @@ def test_pyperf_extraction_preserves_worker_and_warmup_hierarchy(
         ("gae:1", 1, 0, 8, False, 9_000_000, "ns"),
         ("gae:1", 1, 1, 8, False, 10_000_000, "ns"),
     ]
+
+
+@pytest.mark.parametrize("payload", (b"", b"{truncated"))
+def test_pyperf_rejects_empty_and_malformed_artifacts(
+    tmp_path: Path,
+    payload: bytes,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source = tmp_path / "benchmark.json"
+    source.write_bytes(payload)
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(
+            path=source,
+            kind=ArtifactKind.BENCHMARK_SAMPLES,
+        )
+    )
+
+    with pytest.raises(DomainError) as error:
+        PyPerfExtractor(workspace).extract(imported.run.run_id)
+
+    assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
+
+
+def test_pyperf_rejects_identified_newer_producer_major(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source = tmp_path / "benchmark.json"
+    write_suite(source)
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(
+            path=source,
+            kind=ArtifactKind.BENCHMARK_SAMPLES,
+            producer="pyperf",
+            producer_version="999.0",
+        )
+    )
+
+    with pytest.raises(DomainError) as error:
+        PyPerfExtractor(workspace).extract(imported.run.run_id)
+
+    assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
+    assert error.value.details["producer_version"] == "999.0"

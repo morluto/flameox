@@ -23,6 +23,7 @@ from flamo.application.comparisons import (
     ComparisonService,
     FreezeRunSetMember,
     FreezeRunSetRequest,
+    ProfileChange,
     RunSetService,
 )
 from flamo.application.drilldown import (
@@ -54,12 +55,20 @@ from flamo.application.gc import (
     GarbageCollector,
     GarbageEntry,
     GarbagePlan,
+    GarbagePurgeResult,
+    GarbageRestoreResult,
+    TrashManifest,
 )
 from flamo.application.imports import ImportArtifactRequest, ImportResult, ImportService
 from flamo.application.integrity import (
     IntegrityIssue,
     IntegrityResult,
     IntegrityService,
+)
+from flamo.application.quarantine import (
+    QuarantineManifest,
+    QuarantineRestoreResult,
+    QuarantineService,
 )
 from flamo.application.records import (
     CreateInvestigationRequest,
@@ -75,6 +84,7 @@ from flamo.application.recovery import (
     RecoveryResult,
     RecoveryService,
 )
+from flamo.application.repair import RepairEntry, RepairPlan, RepairResult, RepairService
 from flamo.application.status import WorkspaceStatus, workspace_status
 from flamo.application.viewers import (
     NativeViewerLaunchResult,
@@ -130,6 +140,8 @@ __all__ = [
     "GarbageCollector",
     "GarbageEntry",
     "GarbagePlan",
+    "GarbagePurgeResult",
+    "GarbageRestoreResult",
     "ImportArtifactRequest",
     "ImportResult",
     "ImportService",
@@ -144,17 +156,26 @@ __all__ = [
     "NativeViewerLaunchResult",
     "NativeViewerPlan",
     "NativeViewerService",
+    "ProfileChange",
     "ProjectConfig",
+    "QuarantineManifest",
+    "QuarantineRestoreResult",
+    "QuarantineService",
     "RecordFindingRequest",
     "RecordHypothesisRequest",
     "RecoveryInspection",
     "RecoveryResult",
     "RecoveryService",
+    "RepairEntry",
+    "RepairPlan",
+    "RepairResult",
+    "RepairService",
     "ResolvedOracle",
     "RunSetService",
     "Scalar",
     "StackExample",
     "StackExamplesResult",
+    "TrashManifest",
     "WorkloadConfig",
     "WorkloadService",
     "WorkspaceStatus",

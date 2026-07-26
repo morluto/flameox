@@ -4,16 +4,14 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
-
+from flamo.adapters.compatibility import require_supported_producer_major
 from flamo.domain import ArtifactKind, DomainError, ErrorCode, digest_model
 from flamo.evidence import GenerationPublisher
+from flamo.models import ContractModel
 from flamo.storage import ArtifactStore, RunStore, Workspace
 
 
-class MemrayExtractionResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class MemrayExtractionResult(ContractModel):
     schema_version: int = 1
     run_id: str
     artifact_id: str
@@ -51,6 +49,11 @@ class MemrayExtractor:
                 run_id=run_id,
             )
         registration = registrations[0]
+        compatibility_limitations = require_supported_producer_major(
+            registration,
+            package="memray",
+            producer_tokens=("memray",),
+        )
         artifact = ArtifactStore(self.workspace).get(registration.artifact_id)
         try:
             reader = memray.FileReader(str(artifact.payload_path))
@@ -154,7 +157,10 @@ class MemrayExtractor:
             input_run_ids=(run_id,),
             input_artifact_ids=(registration.artifact_id,),
         )
-        limitations = ["Frame aggregates expose bounded callers; complete stacks remain in Memray."]
+        limitations = [
+            *compatibility_limitations,
+            "Frame aggregates expose bounded callers; complete stacks remain in Memray.",
+        ]
         if not metadata.has_native_traces:
             limitations.append("The capture does not contain native stack traces.")
         return MemrayExtractionResult(

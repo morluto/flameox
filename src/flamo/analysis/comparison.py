@@ -115,6 +115,7 @@ def compare_paired_samples(
         unit=unit,
         polarity=polarity,
         estimand="median_paired_log_ratio",
+        practical_threshold=practical_threshold,
         baseline_value_float=baseline_median,
         candidate_value_float=candidate_median,
         absolute_change_float=(

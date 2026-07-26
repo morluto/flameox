@@ -4,17 +4,16 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any, ClassVar, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import JsonValue
 
 from flamo.application.artifacts import ArtifactService
 from flamo.catalog import Catalog
 from flamo.domain import DomainError, ErrorCode
+from flamo.models import ContractModel
 from flamo.storage import GenerationManifest, RunStore, Workspace
 
 
-class EvidenceLookupResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class EvidenceLookupResult(ContractModel):
     schema_version: int = 1
     corpus_commit_id: str
     ref_type: Literal[

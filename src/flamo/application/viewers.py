@@ -5,17 +5,14 @@ import shutil
 import sys
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
-
 from flamo.application.artifacts import ArtifactService
 from flamo.domain import ArtifactKind, DomainError, ErrorCode, ProcessResult
 from flamo.execution import ExecutionRequest, SubprocessBroker
+from flamo.models import ContractModel
 from flamo.storage import ArtifactStore, Workspace
 
 
-class NativeViewerPlan(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class NativeViewerPlan(ContractModel):
     schema_version: int = 1
     artifact_id: str
     artifact_path: str
@@ -28,9 +25,7 @@ class NativeViewerPlan(BaseModel):
     )
 
 
-class NativeViewerLaunchResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class NativeViewerLaunchResult(ContractModel):
     schema_version: int = 1
     plan: NativeViewerPlan
     process: ProcessResult
@@ -45,9 +40,7 @@ class NativeViewerService:
         metadata = ArtifactService(self.workspace).get(artifact_id)
         kinds = tuple(sorted({item.kind for item in metadata.registrations}))
         producers = {
-            item.producer.lower()
-            for item in metadata.registrations
-            if item.producer is not None
+            item.producer.lower() for item in metadata.registrations if item.producer is not None
         }
         viewer, argv = self._viewer_for(
             artifact.payload_path,
@@ -112,8 +105,7 @@ class NativeViewerService:
                     ).resolve()
                 )
                 if configured is not None
-                else shutil.which("trace_processor_shell")
-                or shutil.which("trace_processor")
+                else shutil.which("trace_processor_shell") or shutil.which("trace_processor")
             )
             if (
                 trace_executable is None
@@ -124,8 +116,7 @@ class NativeViewerService:
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                     "No Perfetto Trace Processor is installed for this trace artifact.",
                     remediation=(
-                        "Install trace_processor_shell or configure "
-                        "analysis.trace_processor_path.",
+                        "Install trace_processor_shell or configure analysis.trace_processor_path.",
                     ),
                 )
             return "trace_processor_shell", (trace_executable, str(path))

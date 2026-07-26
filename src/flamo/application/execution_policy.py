@@ -14,7 +14,4 @@ class ExecutionPolicy(StrEnum):
         return self is ExecutionPolicy.APPROVED_AGENT
 
     def requires_containment(self, configured_mode: str) -> bool:
-        return (
-            self is ExecutionPolicy.APPROVED_AGENT
-            and configured_mode == "required_for_mcp"
-        )
+        return self is ExecutionPolicy.APPROVED_AGENT and configured_mode == "required_for_mcp"

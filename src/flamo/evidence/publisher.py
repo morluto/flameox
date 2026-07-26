@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ import pyarrow.parquet as pq
 from flamo.domain.errors import DomainError, ErrorCode
 from flamo.domain.models import utc_now
 from flamo.evidence.schemas import SCHEMA_MAJOR, SCHEMA_MINOR, schema_for
+from flamo.observability import OperationLogger, elapsed_ms
 from flamo.storage.atomic import atomic_write_json, fsync_directory
 from flamo.storage.corpus import (
     CorpusCommit,
@@ -23,6 +25,7 @@ from flamo.storage.corpus import (
     GenerationManifest,
     build_commit,
 )
+from flamo.storage.quotas import StorageQuota
 from flamo.storage.workspace import Workspace
 
 
@@ -55,12 +58,17 @@ class GenerationPublisher:
         supersedes: tuple[str, ...] = (),
         expected_head: str | None = None,
     ) -> PublishedGeneration:
+        quota = StorageQuota(self.workspace)
+        quota.require_generation_rows(rows_by_table)
+        quota.require_capacity(staging=True)
         attempts = 1 if expected_head is not None else 32
         last_error: DomainError | None = None
         for _ in range(attempts):
+            generation_id = str(uuid4())
             try:
                 return self._publish_once(
                     rows_by_table,
+                    generation_id=generation_id,
                     publisher=publisher,
                     publisher_version=publisher_version,
                     input_run_ids=input_run_ids,
@@ -68,19 +76,17 @@ class GenerationPublisher:
                     supersedes=supersedes,
                     expected_head=expected_head,
                 )
-            except DomainError as error:
-                if error.code is not ErrorCode.REVISION_CONFLICT:
+            except BaseException as error:
+                shutil.rmtree(
+                    self.workspace.paths.staging / generation_id,
+                    ignore_errors=True,
+                )
+                if (
+                    not isinstance(error, DomainError)
+                    or error.code is not ErrorCode.REVISION_CONFLICT
+                ):
                     raise
                 last_error = error
-                staging = error.details.get("staging_path")
-                if isinstance(staging, str):
-                    path = Path(staging)
-                    try:
-                        path.relative_to(self.workspace.paths.staging)
-                    except ValueError:
-                        pass
-                    else:
-                        shutil.rmtree(path, ignore_errors=True)
         assert last_error is not None
         raise last_error
 
@@ -88,6 +94,7 @@ class GenerationPublisher:
         self,
         rows_by_table: Mapping[str, Sequence[Mapping[str, Any]]],
         *,
+        generation_id: str,
         publisher: str,
         publisher_version: str,
         input_run_ids: tuple[str, ...] = (),
@@ -95,14 +102,16 @@ class GenerationPublisher:
         supersedes: tuple[str, ...] = (),
         expected_head: str | None = None,
     ) -> PublishedGeneration:
+        quota = StorageQuota(self.workspace)
         initial_head = self.workspace.corpus.read_head()
+        operation_id = OperationLogger(self.workspace.paths.root).new_id()
+        started = time.monotonic()
         if expected_head is not None and expected_head != initial_head.commit_id:
             raise DomainError(
                 ErrorCode.REVISION_CONFLICT,
                 "The corpus changed before generation staging began.",
                 retryable=True,
             )
-        generation_id = str(uuid4())
         published_at = utc_now()
         staging_root = self.workspace.paths.staging / generation_id
         staging_root.mkdir(parents=True, exist_ok=False)
@@ -138,6 +147,7 @@ class GenerationPublisher:
             )
             with staged_path.open("rb") as stream:
                 os.fsync(stream.fileno())
+            quota.require_capacity(staging=True)
             metadata = pq.read_metadata(staged_path)
             if metadata.num_rows != len(rows):
                 raise DomainError(
@@ -176,7 +186,10 @@ class GenerationPublisher:
         atomic_write_json(staged_manifest, manifest.model_dump(mode="json"))
         GenerationManifest.model_validate(json.loads(staged_manifest.read_text()))
 
+        lock_started = time.monotonic()
         with self.workspace.write_locked():
+            lock_wait_ms = elapsed_ms(lock_started)
+            quota.require_capacity(staging=True)
             current_head = self.workspace.corpus.read_head()
             if current_head.commit_id != initial_head.commit_id:
                 raise DomainError(
@@ -225,6 +238,16 @@ class GenerationPublisher:
             self.workspace.corpus.publish_head(commit.commit_id)
 
         shutil.rmtree(staging_root, ignore_errors=True)
+        OperationLogger(self.workspace.paths.root).emit(
+            operation_id=operation_id,
+            operation="evidence.publish",
+            phase="corpus HEAD published",
+            adapter=publisher,
+            elapsed_ms=elapsed_ms(started),
+            lock_wait_ms=lock_wait_ms,
+            rows_returned=sum(len(rows) for rows in rows_by_table.values()),
+            bytes_returned=sum(file.byte_length for file in final_files),
+        )
         return PublishedGeneration(manifest=manifest, commit=commit)
 
     def _without_superseded(

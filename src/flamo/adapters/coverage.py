@@ -4,8 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
-
+from flamo.adapters.compatibility import require_supported_producer_major
 from flamo.domain import (
     ArtifactKind,
     DomainError,
@@ -14,12 +13,11 @@ from flamo.domain import (
     digest_model,
 )
 from flamo.evidence import GenerationPublisher
+from flamo.models import ContractModel
 from flamo.storage import ArtifactStore, RunStore, Workspace
 
 
-class CoverageExtractionResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class CoverageExtractionResult(ContractModel):
     schema_version: int = 1
     run_id: str
     artifact_id: str
@@ -41,6 +39,7 @@ class CoverageExtractor:
     def extract(self, run_id: str) -> CoverageExtractionResult:
         try:
             from coverage import CoverageData
+            from coverage.exceptions import DataError
         except ImportError as exc:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
@@ -49,19 +48,24 @@ class CoverageExtractor:
             ) from exc
         run = RunStore(self.workspace).read(run_id)
         registration = self._registration(run)
+        compatibility_limitations = require_supported_producer_major(
+            registration,
+            package="coverage",
+            producer_tokens=("coverage",),
+        )
         artifact = ArtifactStore(self.workspace).get(registration.artifact_id)
         data = CoverageData(basename=str(artifact.payload_path))
         try:
             data.read()
             measured_files = sorted(data.measured_files())
-        except Exception as exc:
+        except (DataError, OSError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
                 "The artifact is not a supported coverage.py data file.",
                 run_id=run_id,
             ) from exc
         rows: list[dict[str, Any]] = []
-        limitations: list[str] = []
+        limitations: list[str] = list(compatibility_limitations)
         line_count = 0
         arc_count = 0
         maximum = self.workspace.config.storage.max_rows_per_generation

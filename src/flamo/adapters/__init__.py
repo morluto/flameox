@@ -11,8 +11,18 @@ from flamo.adapters.perfetto import (
     TraceWindowResult,
 )
 from flamo.adapters.pyperf import PyPerfExtractionResult, PyPerfExtractor
+from flamo.adapters.registry import (
+    AdapterApproval,
+    AdapterDescriptor,
+    AdapterDiscoveryResult,
+    AdapterRegistry,
+)
 
 __all__ = [
+    "AdapterApproval",
+    "AdapterDescriptor",
+    "AdapterDiscoveryResult",
+    "AdapterRegistry",
     "CoverageExtractionResult",
     "CoverageExtractor",
     "MemrayExtractionResult",

@@ -5,7 +5,7 @@ from typing import Any
 import pyarrow as pa
 
 SCHEMA_MAJOR = 1
-SCHEMA_MINOR = 0
+SCHEMA_MINOR = 1
 UTC_TIMESTAMP = pa.timestamp("us", tz="UTC")
 
 COMMON_FIELDS: tuple[Any, ...] = (
@@ -324,6 +324,7 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("unit", pa.string(), nullable=False),
             pa.field("polarity", pa.string(), nullable=False),
             pa.field("estimand", pa.string(), nullable=False),
+            pa.field("practical_threshold", pa.float64(), nullable=False),
             pa.field("baseline_value_int", pa.int64()),
             pa.field("baseline_value_float", pa.float64()),
             pa.field("candidate_value_int", pa.int64()),

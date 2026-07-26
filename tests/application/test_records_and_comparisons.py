@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import math
+import threading
 from pathlib import Path
 
 import pyperf
@@ -21,7 +24,7 @@ from flamo.application import (
     RecordHypothesisRequest,
     RunSetService,
 )
-from flamo.catalog import Catalog
+from flamo.catalog import Catalog, Snapshot
 from flamo.domain import (
     ArtifactKind,
     ComparisonValidity,
@@ -29,6 +32,7 @@ from flamo.domain import (
     ErrorCode,
     EvidenceLevel,
     FindingAssessment,
+    RunSet,
 )
 from flamo.evidence import GenerationPublisher
 from flamo.storage import Workspace
@@ -60,6 +64,32 @@ def imported_benchmark(
     )
     PyPerfExtractor(workspace).extract(imported.run.run_id)
     return imported.run.run_id
+
+
+def additional_measurement(run_id: str, value: int) -> dict[str, object]:
+    return {
+        "measurement_id": f"additional-{run_id}",
+        "run_id": run_id,
+        "artifact_id": None,
+        "name": "pyperf.scan",
+        "value_int": value,
+        "value_float": None,
+        "unit": "ns",
+        "aggregation": "sample",
+        "scope": "process",
+        "trial_id": None,
+        "worker_id": "additional-worker",
+        "worker_run_index": 0,
+        "value_index": 0,
+        "loop_count": 1,
+        "is_warmup": False,
+        "block_id": None,
+        "variant_id": None,
+        "order_in_block": None,
+        "phase": None,
+        "dimensions": {},
+        "evidence_level": "observed",
+    }
 
 
 def test_investigation_hypothesis_revision_uses_compare_and_swap(
@@ -122,6 +152,89 @@ def test_frozen_run_set_comparison_and_evidence_linked_finding(
         tmp_path / "candidate.json",
         (0.005, 0.0055, 0.006),
     )
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "frames": [
+                {
+                    "frame_id": "scan-frame",
+                    "language": "Python",
+                    "function": "reverse_scan",
+                    "module": "scan",
+                    "file": "scan.py",
+                    "line": 10,
+                    "column": None,
+                    "address": None,
+                    "build_id": None,
+                    "module_relative_address": None,
+                    "inline_chain_id": None,
+                    "source_state_id": None,
+                    "artifact_id": "sha256:" + "b" * 64,
+                    "inlined": False,
+                    "symbolization": "complete",
+                }
+            ]
+            + [
+                {
+                    "frame_id": frame_id,
+                    "language": "Python",
+                    "function": function,
+                    "module": "scan",
+                    "file": "scan.py",
+                    "line": line,
+                    "column": None,
+                    "address": None,
+                    "build_id": None,
+                    "module_relative_address": None,
+                    "inline_chain_id": None,
+                    "source_state_id": None,
+                    "artifact_id": "sha256:" + "b" * 64,
+                    "inlined": False,
+                    "symbolization": "complete",
+                }
+                for frame_id, function, line in (
+                    ("baseline-only", "removed_helper", 20),
+                    ("candidate-only", "added_helper", 30),
+                )
+            ],
+            "frame_measurements": [
+                {
+                    "run_id": run_id,
+                    "artifact_id": "sha256:" + "b" * 64,
+                    "frame_id": "scan-frame",
+                    "metric": "cpu.time",
+                    "self_value": value,
+                    "inclusive_value": value,
+                    "unit": "ns",
+                    "sample_count": 1,
+                    "thread_name": "main",
+                    "process_name": "python",
+                    "phase": "steady_state",
+                }
+                for run_id, value in ((baseline_id, 100), (candidate_id, 25))
+            ]
+            + [
+                {
+                    "run_id": run_id,
+                    "artifact_id": "sha256:" + "b" * 64,
+                    "frame_id": frame_id,
+                    "metric": "cpu.time",
+                    "self_value": value,
+                    "inclusive_value": value,
+                    "unit": "ns",
+                    "sample_count": 1,
+                    "thread_name": "main",
+                    "process_name": "python",
+                    "phase": "steady_state",
+                }
+                for run_id, frame_id, value in (
+                    (baseline_id, "baseline-only", 10),
+                    (candidate_id, "candidate-only", 5),
+                )
+            ],
+        },
+        publisher="profile-comparison-fixture",
+        publisher_version="1",
+    )
     run_sets = RunSetService(workspace)
     baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
     candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
@@ -141,6 +254,19 @@ def test_frozen_run_set_comparison_and_evidence_linked_finding(
     assert workspace.corpus.read_head().commit_id == head_before
     assert preview.comparison.comparison_id == repeated.comparison.comparison_id
     assert preview.analysis is None
+    changes = {item.function: item for item in preview.profile_changes}
+    assert changes["reverse_scan"].direction == "improved"
+    assert changes["reverse_scan"].relative_change == -0.75
+    assert changes["removed_helper"].candidate_value == 0
+    assert changes["removed_helper"].direction == "improved"
+    assert changes["added_helper"].baseline_value == 0
+    assert changes["added_helper"].direction == "regressed"
+    neutral = service.compare(comparison_request.model_copy(update={"polarity": "neutral"}))
+    assert {
+        item.direction
+        for item in neutral.profile_changes
+        if not math.isclose(item.absolute_change, 0.0)
+    } == {"changed"}
 
     result = service.record(comparison_request)
     assert result.analysis is not None
@@ -177,6 +303,101 @@ def test_frozen_run_set_comparison_and_evidence_linked_finding(
     )
     assert finding.evidence[0].ref_id == result.comparison.comparison_id
     assert finding.finding.revision == 1
+
+
+def test_comparison_reads_both_run_sets_from_one_pinned_corpus_commit(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+    baseline_id = imported_benchmark(
+        workspace,
+        tmp_path / "baseline.json",
+        (0.010, 0.011, 0.012),
+    )
+    candidate_id = imported_benchmark(
+        workspace,
+        tmp_path / "candidate.json",
+        (0.005, 0.0055, 0.006),
+    )
+    run_sets = RunSetService(workspace)
+    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "measurements": [
+                additional_measurement(baseline_id, 13_000_000),
+                additional_measurement(candidate_id, 6_500_000),
+            ]
+        },
+        publisher="snapshot-regression",
+        publisher_version="1",
+        input_run_ids=(baseline_id, candidate_id),
+    )
+    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
+
+    result = ComparisonService(workspace).compare(
+        CompareRunSetsRequest(
+            baseline_run_set_id=baseline.run_set_id,
+            candidate_run_set_id=candidate.run_set_id,
+            metric="pyperf.scan",
+            unit="ns",
+            polarity="lower_is_better",
+            practical_threshold=0.05,
+        )
+    )
+
+    assert baseline.corpus_commit_id != candidate.corpus_commit_id
+    assert result.corpus_commit_id == workspace.corpus.read_head().commit_id
+    assert result.comparison.complete_pair_n == 4
+
+
+@pytest.mark.anyio
+async def test_async_comparison_cancellation_interrupts_duckdb(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    baseline_id = imported_benchmark(
+        workspace,
+        tmp_path / "baseline.json",
+        (0.010, 0.011, 0.012),
+    )
+    candidate_id = imported_benchmark(
+        workspace,
+        tmp_path / "candidate.json",
+        (0.005, 0.0055, 0.006),
+    )
+    run_sets = RunSetService(workspace)
+    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
+    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
+    request = CompareRunSetsRequest(
+        baseline_run_set_id=baseline.run_set_id,
+        candidate_run_set_id=candidate.run_set_id,
+        metric="pyperf.scan",
+        unit="ns",
+        polarity="lower_is_better",
+        practical_threshold=0.05,
+    )
+    query_started = threading.Event()
+    original = ComparisonService._compatibility_mismatches
+
+    def slow_compatibility(
+        service: ComparisonService,
+        snapshot: Snapshot,
+        baseline_set: RunSet,
+        candidate_set: RunSet,
+    ) -> list[str]:
+        query_started.set()
+        snapshot.execute("SELECT sum(sin(i)) FROM range(100000000000) values(i)").fetchall()
+        return original(service, snapshot, baseline_set, candidate_set)
+
+    monkeypatch.setattr(ComparisonService, "_compatibility_mismatches", slow_compatibility)
+    task = asyncio.create_task(ComparisonService(workspace).compare_async(request))
+    assert await asyncio.to_thread(query_started.wait, 5)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 def test_trial_block_identity_makes_pairing_independent_of_member_order(
@@ -234,9 +455,7 @@ def test_trial_block_identity_makes_pairing_independent_of_member_order(
         )
     )
     candidates = [
-        (trial_id, run_id)
-        for trial_id, run_id, variant, _ in trials
-        if variant == "candidate"
+        (trial_id, run_id) for trial_id, run_id, variant, _ in trials if variant == "candidate"
     ]
     candidate_forward = run_sets.freeze(
         FreezeRunSetRequest(

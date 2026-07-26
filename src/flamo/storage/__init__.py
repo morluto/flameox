@@ -5,6 +5,7 @@ from flamo.storage.corpus import (
     GenerationFile,
     GenerationManifest,
 )
+from flamo.storage.quotas import StorageQuota, tree_bytes
 from flamo.storage.records import JsonRecordStore
 from flamo.storage.runs import RunStore
 from flamo.storage.workspace import Workspace, WorkspaceIdentity, WorkspacePaths
@@ -17,8 +18,10 @@ __all__ = [
     "GenerationManifest",
     "JsonRecordStore",
     "RunStore",
+    "StorageQuota",
     "StoredArtifact",
     "Workspace",
     "WorkspaceIdentity",
     "WorkspacePaths",
+    "tree_bytes",
 ]

@@ -15,12 +15,38 @@ _SLICE_QUERY = """
         s.dur,
         s.track_id,
         s.category,
+        coalesce(
+            nullif(t.name, ''),
+            nullif(tt.name, ''),
+            CASE WHEN t.tid IS NOT NULL THEN printf('tid:%d', t.tid) END
+        ) AS thread_name,
+        coalesce(
+            nullif(p.name, ''),
+            nullif(pp.name, ''),
+            nullif(pt.name, ''),
+            CASE
+                WHEN coalesce(p.pid, pp.pid) IS NOT NULL
+                THEN printf('pid:%d', coalesce(p.pid, pp.pid))
+            END
+        ) AS process_name,
         max(CASE WHEN a.key = 'args.filename' THEN a.string_value END) AS filename,
-        max(CASE WHEN a.key = 'args.line' THEN a.int_value END) AS line
+        max(CASE WHEN a.key = 'args.line' THEN a.int_value END) AS line,
+        max(CASE WHEN a.key IN ('args.Input Dims', 'args.Input Shapes')
+            THEN a.string_value END) AS input_shapes,
+        sum(CASE WHEN a.key IN ('args.Bytes', 'args.Allocation Bytes')
+            THEN a.int_value END) AS allocation_bytes,
+        max(CASE WHEN a.key IN ('args.phase', 'args.Phase')
+            THEN a.string_value END) AS phase
     FROM slice AS s
     LEFT JOIN args AS a ON a.arg_set_id = s.arg_set_id
+    LEFT JOIN thread_track AS tt ON tt.id = s.track_id
+    LEFT JOIN thread AS t ON t.utid = tt.utid
+    LEFT JOIN process AS p ON p.upid = t.upid
+    LEFT JOIN process_track AS pt ON pt.id = s.track_id
+    LEFT JOIN process AS pp ON pp.upid = pt.upid
     WHERE s.dur > 0
-    GROUP BY s.id, s.parent_id, s.name, s.ts, s.dur, s.track_id, s.category
+    GROUP BY s.id, s.parent_id, s.name, s.ts, s.dur, s.track_id, s.category,
+        t.name, tt.name, t.tid, p.name, p.pid, pp.name, pp.pid, pt.name
     ORDER BY s.ts, s.depth, s.id
 """
 
@@ -70,8 +96,13 @@ def _query(request: dict[str, object]) -> dict[str, object]:
                             "dur",
                             "track_id",
                             "category",
+                            "thread_name",
+                            "process_name",
                             "filename",
                             "line",
+                            "input_shapes",
+                            "allocation_bytes",
+                            "phase",
                         ),
                     )
                     for row in rows

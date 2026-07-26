@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp_types import CallToolResult, TextContent, ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from flamo.adapters import (
     CoverageExtractionResult,
@@ -95,6 +95,7 @@ from flamo.domain import (
     RunSet,
     Sensitivity,
 )
+from flamo.models import ContractModel
 from flamo.storage import RunStore, Workspace
 
 READ_ONLY = ToolAnnotations(
@@ -123,9 +124,7 @@ EXECUTE = ToolAnnotations(
 )
 
 
-class ErrorDetail(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ErrorDetail(ContractModel):
     code: str
     message: str
     retryable: bool
@@ -134,9 +133,7 @@ class ErrorDetail(BaseModel):
     run_id: str | None
 
 
-class ToolPayload[T: BaseModel](BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ToolPayload[T: BaseModel](ContractModel):
     schema_version: int = 1
     ok: bool
     result: T | None = None
@@ -159,18 +156,14 @@ class ToolPayload[T: BaseModel](BaseModel):
         return cls(ok=False, error=ErrorDetail.model_validate(error.to_detail()))
 
 
-class RunSummary(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class RunSummary(ContractModel):
     run_id: str
     created_at: datetime
     run_type: str
     capture_status: str
 
 
-class RunListResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class RunListResult(ContractModel):
     schema_version: int = 1
     corpus_commit_id: str
     runs: tuple[RunSummary, ...]
@@ -179,9 +172,7 @@ class RunListResult(BaseModel):
     truncated: bool
 
 
-class InvestigationListResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class InvestigationListResult(ContractModel):
     schema_version: int = 1
     investigations: tuple[Investigation, ...]
     total: int
@@ -189,9 +180,7 @@ class InvestigationListResult(BaseModel):
     truncated: bool
 
 
-class FindingListResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class FindingListResult(ContractModel):
     schema_version: int = 1
     findings: tuple[Finding, ...]
     total: int
@@ -203,6 +192,7 @@ class FindingListResult(BaseModel):
 class AppContext:
     project_root: Path
     workspace: Workspace | None
+    capabilities: CapabilityService
     capture_plans: CapturePlanRegistry
     experiment_plans: ExperimentPlanRegistry
 
@@ -231,6 +221,18 @@ class AppContext:
 
 def _success[T: BaseModel](result: T, summary: str) -> CallToolResult:
     payload = ToolPayload[T].success(result)
+    serialized_bytes = len(payload.model_dump_json().encode("utf-8"))
+    if serialized_bytes > 4 * 1024 * 1024:
+        return _failure(
+            DomainError(
+                ErrorCode.QUERY_BUDGET_EXCEEDED,
+                "The structured MCP result exceeds the 4 MiB response budget.",
+                details={
+                    "serialized_bytes": serialized_bytes,
+                    "limit_bytes": 4 * 1024 * 1024,
+                },
+            )
+        )
     return CallToolResult(
         content=[TextContent(type="text", text=summary)],
         structured_content=payload.model_dump(mode="json"),
@@ -280,6 +282,7 @@ def create_server(
         state = AppContext(
             project_root=project_root,
             workspace=workspace,
+            capabilities=CapabilityService(workspace),
             capture_plans=CapturePlanRegistry(
                 max_parallel_captures=(
                     workspace.config.capture.max_parallel_captures if workspace is not None else 2
@@ -307,6 +310,7 @@ def create_server(
         try:
             state = ctx.request_context.lifespan_context
             state.workspace = Workspace.initialize(state.project_root)
+            state.capabilities = CapabilityService(state.workspace)
             state.capture_plans = CapturePlanRegistry(
                 max_parallel_captures=(state.workspace.config.capture.max_parallel_captures)
             )
@@ -330,9 +334,12 @@ def create_server(
     @server.tool(name="list_capabilities", annotations=READ_ONLY)
     async def list_capabilities_tool(
         ctx: Context[AppContext],
+        active: bool = False,
+        refresh: bool = False,
     ) -> Annotated[CallToolResult, ToolPayload[CapabilityList]]:
-        """Passively report installed collectors and analysis libraries."""
-        result = CapabilityService(ctx.request_context.lifespan_context.workspace).list()
+        """Report passive capabilities, or explicitly execute bounded active probes."""
+        service = ctx.request_context.lifespan_context.capabilities
+        result = await service.list_active(refresh=refresh) if active else service.list()
         return _success(
             result,
             f"Found {sum(item.status.value == 'available' for item in result.capabilities)} "
@@ -368,12 +375,18 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[CaptureResult]]:
         """Consume one bound plan token and execute the approved capture."""
         try:
-            await ctx.report_progress(0, 1, "Validating capture plan")
-            result = await ctx.request_context.lifespan_context.capture_service().execute(plan_id)
-            await ctx.report_progress(
-                1,
-                1,
-                "Capture and evidence publication complete",
+            await ctx.report_progress(0, 8, "Capture request accepted")
+
+            async def report(
+                completed: float,
+                total: float,
+                message: str,
+            ) -> None:
+                await ctx.report_progress(completed, total, message)
+
+            result = await ctx.request_context.lifespan_context.capture_service().execute(
+                plan_id,
+                progress=report,
             )
             return _success(
                 result,
@@ -416,11 +429,18 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[ExperimentRunResult]]:
         """Consume one experiment plan and execute all declared trials."""
         try:
-            await ctx.report_progress(0, 1, "Validating experiment plan")
+
+            async def report(
+                completed: float,
+                total: float,
+                message: str,
+            ) -> None:
+                await ctx.report_progress(completed, total, message)
+
             result = await ctx.request_context.lifespan_context.experiment_service().run(
                 plan_id,
+                progress=report,
             )
-            await ctx.report_progress(1, 1, "Experiment publication complete")
             return _success(
                 result,
                 f"Experiment {result.experiment.experiment_id} recorded "
@@ -716,9 +736,17 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[ComparisonResult]]:
         """Compare frozen cohorts with the declared paired estimand."""
         try:
-            result = ComparisonService(
+
+            async def report(
+                completed: float,
+                total: float,
+                message: str,
+            ) -> None:
+                await ctx.report_progress(completed, total, message)
+
+            result = await ComparisonService(
                 ctx.request_context.lifespan_context.require_workspace()
-            ).compare(request)
+            ).compare_async(request, progress=report)
             return _success(
                 result,
                 f"Comparison is {result.comparison.decision.value} "
@@ -734,9 +762,17 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[ComparisonResult]]:
         """Persist one comparison and its typed immutable evidence references."""
         try:
-            result = ComparisonService(
+
+            async def report(
+                completed: float,
+                total: float,
+                message: str,
+            ) -> None:
+                await ctx.report_progress(completed, total, message)
+
+            result = await ComparisonService(
                 ctx.request_context.lifespan_context.require_workspace()
-            ).record(request)
+            ).record_async(request, progress=report)
             return _success(
                 result,
                 f"Recorded comparison {result.comparison.comparison_id}.",
@@ -751,13 +787,21 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[MaterializedAnalysisResult]]:
         """Run and persist one curated analysis with typed provenance."""
         try:
-            result = AnalysisMaterializationService(
+
+            async def report(
+                completed: float,
+                total: float,
+                message: str,
+            ) -> None:
+                await ctx.report_progress(completed, total, message)
+
+            service = AnalysisMaterializationService(
                 ctx.request_context.lifespan_context.require_workspace()
-            ).record(request)
+            )
+            result = await service.record_async(request, progress=report)
             return _success(
                 result,
-                f"Recorded {result.analysis.recipe} analysis "
-                f"{result.analysis.analysis_id}.",
+                f"Recorded {result.analysis.recipe} analysis {result.analysis.analysis_id}.",
             )
         except DomainError as error:
             return _failure(error)
@@ -770,9 +814,17 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[HotspotResult]]:
         """Return bounded source-linked profile frame aggregates."""
         try:
-            result = RecipeService(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).hotspots(input_id, limit=limit)
+            workspace = ctx.request_context.lifespan_context.require_workspace()
+            await ctx.report_progress(0, 2, "Hotspot snapshot pinned")
+            result = await Catalog(workspace).run_interruptible(
+                lambda snapshot: RecipeService(
+                    workspace,
+                    snapshot=snapshot,
+                ).hotspots(input_id, limit=limit),
+                query_name="analyze_hotspots",
+            )
+            await ctx.report_progress(1, 2, "Hotspot query complete")
+            await ctx.report_progress(2, 2, "Hotspot result ready")
             return _success(
                 result,
                 f"Returned {result.returned} of {result.total} hotspots.",
@@ -788,9 +840,17 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[MemoryAnalysisResult]]:
         """Return explicit peak, retained-end, and allocation evidence."""
         try:
-            result = RecipeService(ctx.request_context.lifespan_context.require_workspace()).memory(
-                input_id, limit=limit
+            workspace = ctx.request_context.lifespan_context.require_workspace()
+            await ctx.report_progress(0, 2, "Memory snapshot pinned")
+            result = await Catalog(workspace).run_interruptible(
+                lambda snapshot: RecipeService(
+                    workspace,
+                    snapshot=snapshot,
+                ).memory(input_id, limit=limit),
+                query_name="analyze_memory",
             )
+            await ctx.report_progress(1, 2, "Memory query complete")
+            await ctx.report_progress(2, 2, "Memory result ready")
             return _success(
                 result,
                 f"Returned {len(result.measurements)} memory measurements.",
@@ -803,12 +863,25 @@ def create_server(
         input_id: str,
         limit: Annotated[int, Field(ge=1, le=1_000)],
         ctx: Context[AppContext],
+        comparison_input_id: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[ExecutionAnalysisResult]]:
         """Return bounded coverage and semantic observations."""
         try:
-            result = RecipeService(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).execution(input_id, limit=limit)
+            workspace = ctx.request_context.lifespan_context.require_workspace()
+            await ctx.report_progress(0, 2, "Execution snapshot pinned")
+            result = await Catalog(workspace).run_interruptible(
+                lambda snapshot: RecipeService(
+                    workspace,
+                    snapshot=snapshot,
+                ).execution(
+                    input_id,
+                    comparison_input_id=comparison_input_id,
+                    limit=limit,
+                ),
+                query_name="analyze_execution",
+            )
+            await ctx.report_progress(1, 2, "Execution query complete")
+            await ctx.report_progress(2, 2, "Execution result ready")
             return _success(
                 result,
                 f"Returned {result.returned} of {result.total} observations.",
@@ -824,9 +897,17 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[PyTorchAnalysisResult]]:
         """Summarize operators in an existing torch.profiler trace."""
         try:
-            result = RecipeService(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).pytorch(input_id, limit=limit)
+            workspace = ctx.request_context.lifespan_context.require_workspace()
+            await ctx.report_progress(0, 2, "PyTorch snapshot pinned")
+            result = await Catalog(workspace).run_interruptible(
+                lambda snapshot: RecipeService(
+                    workspace,
+                    snapshot=snapshot,
+                ).pytorch(input_id, limit=limit),
+                query_name="analyze_pytorch",
+            )
+            await ctx.report_progress(1, 2, "PyTorch query complete")
+            await ctx.report_progress(2, 2, "PyTorch result ready")
             return _success(result, f"Returned {result.returned} operators.")
         except DomainError as error:
             return _failure(error)
@@ -838,9 +919,17 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[ScalingAnalysisResult]]:
         """Summarize an existing experiment without collecting missing trials."""
         try:
-            result = RecipeService(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).scaling(experiment_id)
+            workspace = ctx.request_context.lifespan_context.require_workspace()
+            await ctx.report_progress(0, 2, "Scaling snapshot pinned")
+            result = await Catalog(workspace).run_interruptible(
+                lambda snapshot: RecipeService(
+                    workspace,
+                    snapshot=snapshot,
+                ).scaling(experiment_id),
+                query_name="analyze_scaling",
+            )
+            await ctx.report_progress(1, 2, "Scaling query complete")
+            await ctx.report_progress(2, 2, "Scaling result ready")
             return _success(
                 result,
                 f"Found {result.complete_blocks} complete experiment blocks.",
@@ -855,9 +944,17 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[FailureAnalysisResult]]:
         """Cluster terminal failures across the local run population."""
         try:
-            result = RecipeService(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).failures(limit=limit)
+            workspace = ctx.request_context.lifespan_context.require_workspace()
+            await ctx.report_progress(0, 2, "Failure-population snapshot pinned")
+            result = await Catalog(workspace).run_interruptible(
+                lambda snapshot: RecipeService(
+                    workspace,
+                    snapshot=snapshot,
+                ).failures(limit=limit),
+                query_name="analyze_failures",
+            )
+            await ctx.report_progress(1, 2, "Failure-population query complete")
+            await ctx.report_progress(2, 2, "Failure-population result ready")
             return _success(result, f"Returned {result.returned} failure clusters.")
         except DomainError as error:
             return _failure(error)

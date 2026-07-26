@@ -1,9 +1,14 @@
 # Flamo: Local Runtime Evidence CLI and MCP Server
 
-Status: proposed implementation specification
+Status: active implementation contract; initial-release acceptance implemented
 Audience: maintainers, contributors, agent-tool authors, and reviewers
 Working language: Python 3.12+
 MCP SDK baseline: `mcp==2.0.0b2`
+Conformance snapshot: implementation tree reviewed 2026-07-25
+
+Normative requirements in this document describe the target product. Section
+30 records implementation conformance at the snapshot above; it is evidence
+for planning and review, not a weakening of any acceptance criterion.
 
 ## 1. Executive summary
 
@@ -1449,13 +1454,14 @@ only to staging.
 
 ### 15.2 Discovery
 
-Built-in adapters are registered explicitly. Third-party adapters use Python
-entry points under `flamo.adapters`. Entry points execute Python code and are
-therefore part of the trusted computing base. Only built-ins load by default.
-A third-party plugin requires explicit CLI approval by distribution name,
-version, and package identity, and its approval is revoked when that identity
-changes. Loading an entry point does not by itself authorize collector
-execution.
+Built-in adapters are registered explicitly. Future third-party adapter
+support uses Python entry points under `flamo.adapters`. Entry points execute
+Python code and are therefore part of the trusted computing base. Only
+built-ins load by default. A third-party plugin requires explicit CLI approval
+by distribution name, version, and package identity, and its approval is
+revoked when that identity changes. Loading an entry point does not by itself
+authorize collector execution. Until this discovery and approval path is
+implemented, only built-in adapters are supported.
 
 Each adapter has independent:
 
@@ -1943,11 +1949,9 @@ There is no arbitrary SQL or free-form PerfettoSQL command.
 ```text
 flamo catalog validate
 flamo catalog rebuild
-flamo recover
-flamo repair <structured-plan>
-flamo gc --dry-run
-flamo gc --apply
-flamo gc --purge <trash-manifest>
+flamo recover [--quarantine QUARANTINE_ID]
+flamo repair [PLAN.json]
+flamo gc [--dry-run | --apply | --purge TRASH_MANIFEST | --restore TRASH_MANIFEST]
 ```
 
 Garbage collection is always dry-run by default. Apply may move only eligible
@@ -2846,7 +2850,7 @@ inferring correctness from CPU time.
 
 ## 29. Initial implementation scope
 
-The first complete vertical slice includes:
+The target initial local product includes:
 
 - workspace initialization and validation;
 - immutable artifact objects and contextual registrations;
@@ -2858,30 +2862,8 @@ The first complete vertical slice includes:
 - rebuildable DuckDB catalog;
 - pyperf JSON import through public APIs;
 - run-set comparison with a declared paired estimand and oracle;
-- CLI commands for import, inspection, experiment analysis, findings, catalog
-  rebuild, and recovery.
-
-Subsequent vertical slices add, in order:
-
 - the subprocess broker, Linux containment, approved named-workload capture,
   cancellation, and randomized experiment execution;
-- py-spy Chrome trace import/capture through Perfetto, hotspot drill-down, and
-  the reverse-scan golden investigation;
-- stdio MCP over the already proven services, including plans, annotations,
-  envelopes, progress, resources, and cancellation;
-- coverage/semantic observations and the configuration-interaction golden
-  investigation;
-- PyTorch, Memray, and additional Perfetto query families independently;
-- compaction and further scale optimization when the 100,000-run benchmarks
-  show a need.
-
-The product remains one permanently local CLI/MCP application. These are
-implementation slices, not hosted deployment phases. Each slice is
-end-to-end, testable, and preserves forward-compatible domain contracts.
-
-The completed initial product includes:
-
-- all vertical slices above;
 - pyperf adapter;
 - py-spy adapter;
 - Perfetto import and Trace Processor queries;
@@ -2895,35 +2877,66 @@ The completed initial product includes:
 - structured findings;
 - catalog rebuild and crash recovery.
 
+The product remains one permanently local CLI/MCP application. Implementation
+work may be divided into reviewable changes, but those changes do not define
+separate deployment phases or alternate product architectures.
+
 The initial version does not require core-dump capture, GPU vendor profilers, a
 custom UI, background jobs, network transport, arbitrary SQL, or automatic
 installation of system tools.
 
-## 30. Suggested implementation order
+## 30. Implementation conformance
 
-0. Compatibility spikes: verify exact MCP beta envelopes, errors, annotations,
-   lifespan, progress and cancellation; verify the pinned DuckDB path-security,
-   empty-schema, interruption, and catalog-replacement behavior; round-trip
-   representative collector fixtures.
-1. Domain and storage slice: artifact/run/experiment models, generation commit
-   protocol, minimal Parquet/DuckDB catalog, pyperf import, run-set comparison,
-   and CLI.
-2. Execution slice: approved named workloads, subprocess broker, containment,
-   quotas, capture leases, cancellation, validation, and atomic publication.
-3. Hotspot slice: py-spy Chrome traces through pinned Trace Processor,
-   source-linked drill-down, and the reverse-scan golden investigation.
-4. MCP slice: `mcp==2.0.0b2` stdio adapter over proven application services and
-   real-client contract tests.
-5. Semantic slice: coverage.py, bounded observations, configuration-interaction
-   golden investigation, and hypothesis/finding workflows.
-6. Specialized evidence slices: PyTorch, Memray, and additional Perfetto
-   analysis, each independently fixture-tested.
-7. Scale hardening: compaction, caches, and additional indexes only when
-   representative corpus benchmarks justify them.
+The current implementation contains the core local architecture: shared domain
+and application services for CLI and MCP, content-addressed native artifacts,
+immutable record projections, generation manifests and atomic corpus commits,
+Parquet evidence, rebuildable DuckDB snapshots, approved capture plans,
+experiments, comparisons, bounded evidence queries, structured findings,
+native-viewer planning, and the three golden investigation fixtures.
 
-MCP follows proven services because it is a thin transport, not an alternate
-implementation. Compatibility spikes settle unstable external APIs before
-domain code depends on them.
+Conformance status uses three terms:
+
+- **Proven** means a representative behavior test exercises the public or
+  storage/runtime seam required by the criterion.
+- **Partial** means useful implementation and evidence exist, but part of the
+  required behavior is absent or lacks representative proof.
+- **Open defect** means the current implementation can violate the criterion,
+  even if related tests pass.
+
+| Criterion | Status | Remaining work or evidence |
+| --- | --- | --- |
+| 1 | Proven | Catalog deletion and rebuild preserve queryable evidence at the pinned commit (`tests/evidence/test_publication_and_catalog.py`). |
+| 2 | Proven | Artifact content deduplicates while registration provenance and maximum sensitivity remain distinct (`tests/storage/test_artifacts_and_runs.py`, `tests/application/test_artifact_service.py`). |
+| 3 | Proven | Crash injection covers staged Parquet, staged manifest, moved evidence, moved manifest, written commit, pre-HEAD, and post-HEAD boundaries (`tests/evidence/test_publication_and_catalog.py`). |
+| 4 | Proven | Concurrent captures execute together while corpus publications serialize without losing either run (`tests/application/test_workloads_and_capture.py`). |
+| 5 | Proven | CLI JSON and MCP `result` are checked against the same `WorkspaceStatus` domain model (`tests/mcp/test_server.py`). |
+| 6 | Proven | MCP exposes neither shell execution nor unrestricted SQL, and subprocesses use argument arrays (`tests/mcp/test_server.py`, `tests/execution/test_broker.py`). |
+| 7 | Proven | Cancellation is exercised at capture phases 1–7, during experiment work, artifact registration, atomic publication, DuckDB materialization and comparison, and subprocess cleanup; the systemd test proves escaped-descendant cleanup when a user manager is available (`tests/application/test_workloads_and_capture.py`, `tests/application/test_experiments.py`, `tests/application/test_analysis_records.py`, `tests/application/test_records_and_comparisons.py`, `tests/execution/test_broker.py`). |
+| 8 | Proven | Frozen run sets preserve attempts and reject identity, environment, block, and oracle incompatibilities (`tests/application/test_records_and_comparisons.py`, `tests/application/test_experiments.py`). |
+| 9 | Proven | Comparisons and materialized analyses use one explicitly pinned `Snapshot`; persisted analyses and findings validate typed immutable references and record the exact source commit (`tests/application/test_records_and_comparisons.py`, `tests/application/test_analysis_records.py`, `tests/application/test_artifact_service.py`). |
+| 10 | Proven | All three fresh-workspace golden investigations produce investigation, hypothesis, analysis, comparison, validation, and finding evidence; reverse scan executes 32K–128K scaling and proves a normally exiting broken treatment is rejected by its oracle (`tests/golden/`). |
+| 11 | Proven | Results expose limitations and compatibility uncertainty; fixtures cover pyperf, Perfetto, Memray, coverage, synthetic torch evidence, empty/malformed/truncated inputs, recursive stacks, multi-process/thread traces, and newer producer versions (`tests/adapters/`, `tests/application/test_workloads_and_capture.py`). |
+| 12 | Proven | Every supported native artifact kind dispatches to an ecosystem viewer, and explicit launch runs through the bounded broker (`tests/application/test_viewers.py`, `tests/adapters/test_perfetto.py`). |
+| 13 | Proven | Full integrity verification detects altered artifact bytes (`tests/application/test_integrity.py`). |
+| 14 | Proven | Read-only recipes fail the test if they acquire the workspace write lock, comparisons leave HEAD unchanged, and both paths return their pinned commit (`tests/analysis/test_recipes.py`, `tests/application/test_records_and_comparisons.py`). |
+| 15 | Proven | A control-process socket trap covers ordinary operations; capture plans report uncontained/degraded/active state, active Bubblewrap hides `.diagnostics`, and active systemd scopes apply CPU, memory, and process limits (`tests/security/test_offline.py`, `tests/application/test_workloads_and_capture.py`). |
+| 16 | Proven | Confirmatory comparisons persist the metric, estimand, practical threshold, confidence method and level, independent unit, paired count, source and protocol compatibility, and cross-treatment validation; incompatible or incomplete evidence is invalid or exploratory (`tests/analysis/test_comparison.py`, `tests/application/test_records_and_comparisons.py`, `tests/application/test_experiments.py`). |
+| 17 | Proven | The real stdio server covers initialize, list, call, resource, named progress, structured errors, and cancellation; every tool has bounded object schemas and explicit annotations, while DuckDB-backed analyses and comparisons are interruptible (`tests/mcp/test_server.py`, `tests/application/test_analysis_records.py`, `tests/application/test_records_and_comparisons.py`). |
+| 18 | Proven | The Perfetto integration test follows hotspot → callers/stack → analysis provenance → run → artifact registration → viewer command without raw SQL (`tests/adapters/test_perfetto.py`). |
+| 19 | Proven | The gated 10/1K/100K matrix records publication, compaction file count, rebuild, startup plus cohort-comparison query, and serialization budgets; hashing has a separate throughput budget (`tests/performance/test_catalog_scale.py`). |
+| 20 | Proven | Public behavior tests cover stale cursors, approval mutation, replayed plans, partial source identity, incomplete blocks, failed validation, lock contention, quota errors, malformed artifacts, and structured CLI/MCP failures (`tests/application/`, `tests/storage/`, `tests/adapters/`, `tests/mcp/test_server.py`, `tests/test_cli_smoke.py`). |
+
+The snapshot, retention, containment, recovery, adapter, analysis,
+observability, and protocol defects recorded by the prior conformance review
+are closed in this implementation tree. Platform-dependent live collector and
+systemd checks remain conditional on those public tools being installed and
+permitted; deterministic fixtures cover their normalized contracts when they
+are unavailable.
+
+MCP remains a thin transport over proven application services. A criterion is
+not promoted to **Proven** merely because a lower-level helper exists or the
+ordinary test suite passes; the evidence must exercise the behavior and seam
+named by the criterion.
 
 ## 31. Acceptance criteria
 
@@ -2980,6 +2993,8 @@ The following choices are settled by this specification:
 - The MCP SDK is pinned to `mcp==2.0.0b2`.
 - stdio is the supported MCP transport.
 - DuckDB is the local cross-run analytical engine.
+- `catalog.duckdb` is a persistent, rebuildable cache over authoritative
+  Parquet and native artifacts; deleting it does not delete evidence.
 - Parquet is the normalized evidence format.
 - native artifacts remain authoritative.
 - corpus commits and generation manifests define atomic analytical snapshots.
@@ -2997,15 +3012,14 @@ The following choices are settled by this specification:
   sensitive artifact content.
 - the CLI and MCP share one domain and application layer; MCP adds a transport
   envelope.
-- third-party adapters are disabled until explicitly approved through the CLI.
+- third-party adapter loading, when implemented, is disabled until the exact
+  distribution identity is explicitly approved through the CLI.
 - existing profilers and viewers are reused rather than reimplemented.
 
 ## 33. Deferred decisions
 
 These choices should be made only with implementation evidence:
 
-- whether the persistent DuckDB file materially improves startup versus
-  constructing an in-memory catalog over Parquet;
 - whether pprof or Perfetto should be preferred when a collector genuinely
   supports both and the required queries are equivalent;
 - whether retaining source snapshots is worth the sensitivity cost; dirty

@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import os
-from collections.abc import Iterator
-from contextlib import contextmanager
+import threading
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import duckdb
 import pyarrow as pa
+from pydantic import BaseModel
 
 from flamo.domain.errors import DomainError, ErrorCode
 from flamo.evidence.schemas import SCHEMA_MAJOR, SCHEMA_MINOR, schema_for, table_names
+from flamo.observability import OperationLogger, elapsed_ms
 from flamo.storage.atomic import fsync_directory
 from flamo.storage.corpus import CorpusCommit, GenerationManifest
 from flamo.storage.workspace import Workspace
@@ -68,6 +73,10 @@ class Snapshot:
         self.connection.interrupt()
 
 
+class _CancelledBeforeQuery(Exception):
+    pass
+
+
 class Catalog:
     FORMAT_VERSION = 1
 
@@ -75,6 +84,8 @@ class Catalog:
         self.workspace = workspace
 
     def rebuild(self) -> None:
+        operation_id = OperationLogger(self.workspace.paths.root).new_id()
+        started = time.monotonic()
         head = self.workspace.corpus.read_head()
         inventory = self._inventory(head)
         temporary = self.workspace.paths.catalog.with_name(f".catalog.{uuid4().hex}.duckdb")
@@ -120,11 +131,14 @@ class Catalog:
 
         with temporary.open("rb") as stream:
             os.fsync(stream.fileno())
+        lock_started = time.monotonic()
+        lock_wait_ms = 0.0
         try:
             with (
                 self.workspace.write_locked(),
                 self.workspace.catalog_locked(shared=False),
             ):
+                lock_wait_ms = elapsed_ms(lock_started)
                 current = self.workspace.corpus.read_head()
                 if current.commit_id != head.commit_id:
                     raise DomainError(
@@ -137,6 +151,13 @@ class Catalog:
                 fsync_directory(self.workspace.paths.catalog.parent)
         finally:
             temporary.unlink(missing_ok=True)
+        OperationLogger(self.workspace.paths.root).emit(
+            operation_id=operation_id,
+            operation="catalog.rebuild",
+            phase="catalog published",
+            elapsed_ms=elapsed_ms(started),
+            lock_wait_ms=lock_wait_ms,
+        )
 
     @contextmanager
     def open_snapshot(self, commit_id: str | None = None) -> Iterator[Snapshot]:
@@ -166,6 +187,99 @@ class Catalog:
                 yield Snapshot(commit=commit, connection=connection)
             finally:
                 connection.close()
+
+    async def run_interruptible[T](
+        self,
+        operation: Callable[[Snapshot], T],
+        *,
+        commit_id: str | None = None,
+        cleanup_timeout_seconds: float = 5,
+        query_name: str | None = None,
+    ) -> T:
+        pinned_commit_id = (
+            self.workspace.corpus.read_head().commit_id if commit_id is None else commit_id
+        )
+        cancellation_requested = threading.Event()
+        holder_lock = threading.Lock()
+        active_snapshot: list[Snapshot] = []
+
+        def run() -> T:
+            with self.open_snapshot(pinned_commit_id) as snapshot:
+                with holder_lock:
+                    active_snapshot.append(snapshot)
+                try:
+                    if cancellation_requested.is_set():
+                        raise _CancelledBeforeQuery
+                    return operation(snapshot)
+                finally:
+                    with holder_lock:
+                        active_snapshot.clear()
+
+        operation_id = OperationLogger(self.workspace.paths.root).new_id()
+        started = time.monotonic()
+        name = query_name or getattr(operation, "__name__", "analysis")
+        task = asyncio.create_task(asyncio.to_thread(run))
+        try:
+            result = await asyncio.shield(task)
+            rows_returned = getattr(result, "returned", None)
+            bytes_returned = (
+                len(result.model_dump_json().encode("utf-8"))
+                if isinstance(result, BaseModel)
+                else None
+            )
+            OperationLogger(self.workspace.paths.root).emit(
+                operation_id=operation_id,
+                operation="catalog.query",
+                phase="query complete",
+                query_name=name,
+                query_duration_ms=elapsed_ms(started),
+                rows_returned=(
+                    int(rows_returned)
+                    if isinstance(rows_returned, int) and rows_returned >= 0
+                    else None
+                ),
+                bytes_returned=bytes_returned,
+            )
+            return result
+        except Exception as error:
+            OperationLogger(self.workspace.paths.root).emit(
+                operation_id=operation_id,
+                operation="catalog.query",
+                phase="query failed",
+                query_name=name,
+                query_duration_ms=elapsed_ms(started),
+                error_code=type(error).__name__,
+            )
+            raise
+        except asyncio.CancelledError as cancellation:
+            cancellation_requested.set()
+            try:
+                deadline = asyncio.get_running_loop().time() + cleanup_timeout_seconds
+                while not task.done():
+                    with holder_lock:
+                        snapshot = active_snapshot[0] if active_snapshot else None
+                    if snapshot is not None:
+                        with suppress(duckdb.ConnectionException):
+                            snapshot.interrupt()
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        break
+                    await asyncio.wait(
+                        {task},
+                        timeout=min(0.05, remaining),
+                    )
+                if task.done():
+                    await asyncio.gather(task, return_exceptions=True)
+            finally:
+                OperationLogger(self.workspace.paths.root).emit(
+                    operation_id=operation_id,
+                    operation="catalog.query",
+                    phase="query cancelled",
+                    query_name=name,
+                    query_duration_ms=elapsed_ms(started),
+                    error_code="cancelled",
+                )
+                raise cancellation
 
     def _inventory(self, commit: CorpusCommit) -> dict[str, list[Path]]:
         inventory: dict[str, list[Path]] = {name: [] for name in table_names()}
@@ -252,14 +366,21 @@ class Catalog:
     def _validated_metadata(self) -> dict[str, object]:
         if not self.workspace.paths.catalog.exists():
             raise DomainError(ErrorCode.WORKSPACE_INVALID, "The DuckDB catalog is missing.")
-        connection = duckdb.connect(str(self.workspace.paths.catalog), read_only=True)
         try:
-            row = connection.execute(
-                "SELECT format_version, schema_major, schema_minor, "
-                "built_at, validated_commit_id FROM flamo_catalog_metadata"
-            ).fetchone()
-        finally:
-            connection.close()
+            connection = duckdb.connect(str(self.workspace.paths.catalog), read_only=True)
+            try:
+                row = connection.execute(
+                    "SELECT format_version, schema_major, schema_minor, "
+                    "built_at, validated_commit_id FROM flamo_catalog_metadata"
+                ).fetchone()
+            finally:
+                connection.close()
+        except duckdb.Error as exc:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                "The DuckDB catalog is unreadable or has invalid metadata.",
+                remediation=("Run `flamo catalog rebuild`.",),
+            ) from exc
         if row is None:
             raise DomainError(ErrorCode.WORKSPACE_INVALID, "Catalog metadata is missing.")
         return {

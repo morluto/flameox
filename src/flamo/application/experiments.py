@@ -6,13 +6,16 @@ import math
 import random
 import secrets
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import partial
 from typing import Literal, cast
 
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import Field, JsonValue
 
 from flamo.adapters import PyPerfExtractor
+from flamo.application.async_work import run_atomic_thread
 from flamo.application.capture import CaptureService
 from flamo.application.comparisons import (
     CompareRunSetsRequest,
@@ -41,19 +44,17 @@ from flamo.domain import (
 )
 from flamo.domain.models import utc_now
 from flamo.evidence import GenerationPublisher, PublishedGeneration
+from flamo.models import ContractModel
 from flamo.storage import JsonRecordStore, RunStore, Workspace
 
 
-class ExperimentBlock(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ExperimentBlock(ContractModel):
     block_id: str
     order: tuple[str, ...]
+    parameters: dict[str, JsonValue] = Field(default_factory=dict)
 
 
-class ExperimentPlan(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ExperimentPlan(ContractModel):
     schema_version: int = 1
     plan_id: str
     request_digest: str
@@ -72,9 +73,7 @@ class ExperimentPlan(BaseModel):
     expires_at: datetime
 
 
-class ExperimentRunResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ExperimentRunResult(ContractModel):
     schema_version: int = 1
     experiment: Experiment
     variants: tuple[Variant, ...]
@@ -220,12 +219,53 @@ class ExperimentService:
                 "Experiment parameter overrides cannot replace the treatment parameter.",
                 details={"parameter": variant_parameter},
             )
-        for variant in config.variants:
-            self.workloads.resolve(
-                config.workload,
-                {**supplied_overrides, variant_parameter: variant},
-                require_approval=execution_policy.requires_workload_approval,
+        if config.scaling_parameter is not None:
+            if config.scaling_parameter == variant_parameter:
+                raise DomainError(
+                    ErrorCode.WORKSPACE_INVALID,
+                    "The scaling parameter must differ from the treatment parameter.",
+                )
+            allowed_scaling_values = workload.parameters.get(config.scaling_parameter)
+            if allowed_scaling_values is None or not set(config.scaling_values).issubset(
+                set(allowed_scaling_values)
+            ):
+                raise DomainError(
+                    ErrorCode.WORKSPACE_INVALID,
+                    "Experiment scaling values must be declared workload parameter choices.",
+                )
+            if config.scaling_parameter in supplied_overrides:
+                raise DomainError(
+                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    "Experiment overrides cannot replace the scaling parameter.",
+                )
+        scaling_parameters: tuple[dict[str, Scalar], ...] = (
+            tuple({config.scaling_parameter: value} for value in config.scaling_values)
+            if config.scaling_parameter is not None
+            else ({},)
+        )
+        trial_count = len(scaling_parameters) * config.blocks * len(config.variants)
+        if trial_count > 100_000:
+            raise DomainError(
+                ErrorCode.QUERY_BUDGET_EXCEEDED,
+                "Experiment plans are limited to 100,000 trials.",
+                details={
+                    "trial_count": trial_count,
+                    "scaling_points": len(scaling_parameters),
+                    "blocks": config.blocks,
+                    "variants": len(config.variants),
+                },
             )
+        for variant in config.variants:
+            for scaling_parameters_for_point in scaling_parameters:
+                self.workloads.resolve(
+                    config.workload,
+                    {
+                        **supplied_overrides,
+                        **scaling_parameters_for_point,
+                        variant_parameter: variant,
+                    },
+                    require_approval=execution_policy.requires_workload_approval,
+                )
         definition = self.workloads.definition(config.workload)
         if (
             execution_policy.requires_workload_approval
@@ -267,15 +307,27 @@ class ExperimentService:
         )
         generator = random.Random(config.random_seed)
         blocks: list[ExperimentBlock] = []
-        for index in range(config.blocks):
-            order = list(config.variants)
-            generator.shuffle(order)
-            blocks.append(
-                ExperimentBlock(
-                    block_id=f"block-{index + 1:04d}",
-                    order=tuple(order),
+        for point_index, scaling_parameters_for_point in enumerate(
+            scaling_parameters,
+            start=1,
+        ):
+            for repetition in range(1, config.blocks + 1):
+                order = list(config.variants)
+                generator.shuffle(order)
+                blocks.append(
+                    ExperimentBlock(
+                        block_id=(
+                            f"point-{point_index:04d}-block-{repetition:04d}"
+                            if config.scaling_parameter is not None
+                            else f"block-{repetition:04d}"
+                        ),
+                        order=tuple(order),
+                        parameters={
+                            name: cast(JsonValue, value)
+                            for name, value in scaling_parameters_for_point.items()
+                        },
+                    )
                 )
-            )
         created = utc_now()
         plan_id = secrets.token_hex(32)
         overrides = {name: cast(JsonValue, value) for name, value in supplied_overrides.items()}
@@ -314,8 +366,22 @@ class ExperimentService:
         await self.plans.issue(plan)
         return plan
 
-    async def run(self, plan_id: str) -> ExperimentRunResult:
+    async def run(
+        self,
+        plan_id: str,
+        *,
+        progress: Callable[[float, float, str], Awaitable[None]] | None = None,
+    ) -> ExperimentRunResult:
         plan = await self.plans.consume(plan_id)
+        trial_count = sum(len(block.order) for block in plan.blocks)
+        total_phases = trial_count + 4
+        completed = 0
+
+        async def report(message: str) -> None:
+            if progress is not None:
+                await progress(completed, total_phases, message)
+
+        await report("Experiment plan consumed")
         if plan.workspace_id != self.workspace.identity.workspace_id:
             raise DomainError(ErrorCode.INVALID_CAPTURE_PLAN, "Workspace changed.")
         project = self.workloads.load()
@@ -334,15 +400,21 @@ class ExperimentService:
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "Workload approval changed after experiment planning.",
             )
+        completed += 1
+        await report("Experiment plan and workload approval validated")
         # Persist the predeclared protocol before the first treatment starts. If
         # execution is interrupted, the investigation still records what was
         # intended rather than leaving an unattributed run population.
         self.experiments.create(plan.experiment)
-        published = self.publisher.publish_rows(
-            {"experiments": [self._experiment_row(plan.experiment)]},
-            publisher="flamo.experiments",
-            publisher_version="1",
+        published = await run_atomic_thread(
+            lambda: self.publisher.publish_rows(
+                {"experiments": [self._experiment_row(plan.experiment)]},
+                publisher="flamo.experiments",
+                publisher_version="1",
+            )
         )
+        completed += 1
+        await report("Experiment protocol published")
         trials: list[Trial] = []
         trials_by_variant: dict[str, list[Trial]] = {name: [] for name in plan.variants}
         run_by_variant: dict[str, RunManifest] = {}
@@ -350,6 +422,7 @@ class ExperimentService:
             for order, variant_name in enumerate(block.order):
                 parameters = {
                     **cast(dict[str, Scalar], plan.parameter_overrides),
+                    **cast(dict[str, Scalar], block.parameters),
                     plan.variant_parameter: variant_name,
                 }
                 capture_plan = await self.captures.plan(
@@ -367,7 +440,12 @@ class ExperimentService:
                         else TrialOutcome.FAILED
                     )
                     if outcome is TrialOutcome.SUCCEEDED and plan.adapter == "pyperf":
-                        PyPerfExtractor(self.workspace).extract(run.run_id)
+                        await run_atomic_thread(
+                            partial(
+                                PyPerfExtractor(self.workspace).extract,
+                                run.run_id,
+                            )
+                        )
                 except asyncio.CancelledError as cancellation:
                     run = RunStore(self.workspace).read(capture_plan.run_id)
                     trial = self._make_trial(
@@ -375,11 +453,12 @@ class ExperimentService:
                         variant_name=variant_name,
                         run=run,
                         block_id=block.block_id,
+                        block_parameters=block.parameters,
                         order=order,
                         outcome=TrialOutcome.CANCELLED,
                     )
                     try:
-                        self._publish_trial(trial)
+                        await run_atomic_thread(partial(self._publish_trial, trial))
                     finally:
                         raise cancellation
                 except DomainError as error:
@@ -397,12 +476,18 @@ class ExperimentService:
                     variant_name=variant_name,
                     run=run,
                     block_id=block.block_id,
+                    block_parameters=block.parameters,
                     order=order,
                     outcome=outcome,
                 )
                 trials.append(trial)
                 trials_by_variant[variant_name].append(trial)
-                published = self._publish_trial(trial)
+                published = await run_atomic_thread(partial(self._publish_trial, trial))
+                completed += 1
+                await report(
+                    f"Trial {completed - 2}/{trial_count} published "
+                    f"({block.block_id}, {variant_name})"
+                )
         variants: list[Variant] = []
         for name in plan.variants:
             run = run_by_variant[name]
@@ -426,36 +511,52 @@ class ExperimentService:
                     source_state_id=source_state_id,
                     workload_instance_id=workload_instance_id,
                     parameters={plan.variant_parameter: name},
-                )
-            )
-        published = self.publisher.publish_rows(
-            {
-                "variants": [self._variant_row(value) for value in variants],
-            },
-            publisher="flamo.experiments",
-            publisher_version="1",
-            input_run_ids=tuple(trial.run_id for trial in trials),
-        )
-        run_sets = tuple(
-            RunSetService(self.workspace).freeze(
-                FreezeRunSetRequest(
-                    members=tuple(
-                        FreezeRunSetMember(
-                            run_id=trial.run_id,
-                            trial_id=trial.trial_id,
-                            included=trial.outcome is TrialOutcome.SUCCEEDED,
-                            reason=trial.exclusion_reason,
-                        )
-                        for trial in trials_by_variant[name]
+                    # A scaling variant spans several workload instances; its
+                    # declared parameter family remains explicit here.
+                    environment_requirements=(
+                        {
+                            "scaling_parameter": config.scaling_parameter,
+                            "scaling_values": list(config.scaling_values),
+                        }
+                        if config.scaling_parameter is not None
+                        else {}
                     ),
-                    selection={
-                        "experiment_id": plan.experiment.experiment_id,
-                        "variant": name,
-                    },
                 )
             )
-            for name in plan.variants
+        published = await run_atomic_thread(
+            lambda: self.publisher.publish_rows(
+                {
+                    "variants": [self._variant_row(value) for value in variants],
+                },
+                publisher="flamo.experiments",
+                publisher_version="1",
+                input_run_ids=tuple(trial.run_id for trial in trials),
+            )
         )
+        run_sets = await run_atomic_thread(
+            lambda: tuple(
+                RunSetService(self.workspace).freeze(
+                    FreezeRunSetRequest(
+                        members=tuple(
+                            FreezeRunSetMember(
+                                run_id=trial.run_id,
+                                trial_id=trial.trial_id,
+                                included=trial.outcome is TrialOutcome.SUCCEEDED,
+                                reason=trial.exclusion_reason,
+                            )
+                            for trial in trials_by_variant[name]
+                        ),
+                        selection={
+                            "experiment_id": plan.experiment.experiment_id,
+                            "variant": name,
+                        },
+                    )
+                )
+                for name in plan.variants
+            )
+        )
+        completed += 1
+        await report("Variants and frozen run sets published")
         comparison: ComparisonResult | None = None
         limitations: list[str] = []
         if len(run_sets) != 2:
@@ -467,24 +568,26 @@ class ExperimentService:
                 "Automatic experiment comparison currently requires pyperf measurements."
             )
         else:
-            comparison = ComparisonService(self.workspace).record(
-                CompareRunSetsRequest(
-                    baseline_run_set_id=run_sets[0].run_set_id,
-                    candidate_run_set_id=run_sets[1].run_set_id,
-                    experiment_id=plan.experiment.experiment_id,
-                    metric=plan.experiment.primary_metric,
-                    unit="ns",
-                    polarity=plan.experiment.polarity,
-                    practical_threshold=plan.experiment.practical_threshold,
-                    confidence_level=plan.experiment.confidence_level,
-                    random_seed=plan.experiment.random_seed,
+            comparison = await run_atomic_thread(
+                lambda: ComparisonService(self.workspace).record(
+                    CompareRunSetsRequest(
+                        baseline_run_set_id=run_sets[0].run_set_id,
+                        candidate_run_set_id=run_sets[1].run_set_id,
+                        experiment_id=plan.experiment.experiment_id,
+                        metric=plan.experiment.primary_metric,
+                        unit="ns",
+                        polarity=plan.experiment.polarity,
+                        practical_threshold=plan.experiment.practical_threshold,
+                        confidence_level=plan.experiment.confidence_level,
+                        random_seed=plan.experiment.random_seed,
+                    )
                 )
             )
         result_commit_id = published.commit.commit_id
         if comparison is not None:
-            result_commit_id = (
-                comparison.materialized_commit_id or comparison.corpus_commit_id
-            )
+            result_commit_id = comparison.materialized_commit_id or comparison.corpus_commit_id
+        completed += 1
+        await report("Experiment comparison and result complete")
         return ExperimentRunResult(
             experiment=plan.experiment,
             variants=tuple(variants),
@@ -502,20 +605,33 @@ class ExperimentService:
         variant_name: str,
         run: RunManifest,
         block_id: str,
+        block_parameters: dict[str, JsonValue],
         order: int,
         outcome: TrialOutcome,
     ) -> Trial:
         parameter_int: int | None = None
         parameter_float: float | None = None
-        try:
-            parameter_int = int(variant_name)
-        except ValueError:
+        parameter_name = plan.variant_parameter
+        parameter_value: JsonValue = variant_name
+        if block_parameters:
+            parameter_name, parameter_value = next(iter(block_parameters.items()))
+        if isinstance(parameter_value, int) and not isinstance(parameter_value, bool):
+            parameter_int = parameter_value
+        elif isinstance(parameter_value, float):
+            parameter_float = parameter_value if math.isfinite(parameter_value) else None
+        elif isinstance(parameter_value, str):
             try:
-                parameter_float = float(variant_name)
-                if not math.isfinite(parameter_float):
-                    parameter_float = None
+                parameter_int = int(parameter_value)
             except ValueError:
-                pass
+                try:
+                    parsed_float = float(parameter_value)
+                except ValueError:
+                    parsed_float = None
+                parameter_float = (
+                    parsed_float
+                    if parsed_float is not None and math.isfinite(parsed_float)
+                    else None
+                )
         return Trial(
             trial_id=new_id(),
             experiment_id=plan.experiment.experiment_id,
@@ -528,7 +644,7 @@ class ExperimentService:
             run_id=run.run_id,
             block_id=block_id,
             order_in_block=order,
-            parameter_name=plan.variant_parameter,
+            parameter_name=parameter_name,
             parameter_value_int=parameter_int,
             parameter_value_float=parameter_float,
             attempt=1,
