@@ -11,21 +11,21 @@
     "lib",
     "README.md"
   ],
-  "engines": {
-    "node": ">=18"
+  "scripts": {
+    "test": "node --test",
+    "lint": "oxlint",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check ."
   },
   "dependencies": {
     "jsonc-parser": "^3.3.1"
   },
   "devDependencies": {
-    "@eslint/js": "^9.0.0",
-    "eslint": "^9.0.0",
-    "prettier": "^3.0.0"
+    "oxc-transform": "^0.60.0",
+    "oxfmt": "^0.60.0",
+    "oxlint": "^1.75.0"
   },
-  "scripts": {
-    "test": "node --test",
-    "lint": "eslint .",
-    "format": "prettier --write .",
-    "format:check": "prettier --check ."
+  "engines": {
+    "node": ">=18"
   }
 }

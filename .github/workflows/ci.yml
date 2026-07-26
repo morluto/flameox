@@ -131,8 +131,8 @@ jobs:
           cache: npm
           cache-dependency-path: npm/package-lock.json
       - run: npm ci
-      - run: npx eslint .
-      - run: npx prettier --check .
+      - run: npx oxlint
+      - run: npx oxfmt --check .
       - run: npm test
 
   agents-md-validate:

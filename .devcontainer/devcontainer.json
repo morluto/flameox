@@ -13,8 +13,7 @@
         "charliermarsh.ruff",
         "ms-python.mypy-type-checker",
         "ms-python.python",
-        "dbaeumer.vscode-eslint",
-        "esbenp.prettier-vscode"
+        "oxc.oxc-vscode"
       ],
       "settings": {
         "python.defaultInterpreterPath": "${containerWorkspaceFolder}/.venv/bin/python",
