@@ -54,9 +54,7 @@ async def test_every_mcp_tool_has_bounded_object_schemas_and_annotations(
         assert tool.input_schema["type"] == "object"
         assert tool.output_schema is not None
         assert tool.output_schema["type"] == "object"
-        assert {"ok", "result", "error"} <= set(
-            tool.output_schema["properties"]
-        )
+        assert {"ok", "result", "error"} <= set(tool.output_schema["properties"])
         assert tool.annotations is not None
         if tool.annotations.read_only_hint:
             assert tool.annotations.destructive_hint is False
@@ -211,9 +209,7 @@ timeout_seconds = 60
     workspace = Workspace.initialize(tmp_path)
     config = workspace.config.model_copy(
         update={
-            "execution": workspace.config.execution.model_copy(
-                update={"containment": "disabled"}
-            )
+            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
         }
     )
     workspace.paths.config.write_text(config.to_toml())

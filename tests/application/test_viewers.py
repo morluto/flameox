@@ -26,9 +26,7 @@ def test_benchmark_artifact_uses_pyperf_viewer(tmp_path: Path) -> None:
         )
     )
 
-    plan = NativeViewerService(workspace).plan(
-        imported.run.artifacts[0].artifact_id
-    )
+    plan = NativeViewerService(workspace).plan(imported.run.artifacts[0].artifact_id)
 
     assert plan.viewer == "pyperf show"
     assert plan.argv[1] == "show"
@@ -66,9 +64,7 @@ def test_every_supported_native_kind_dispatches_to_ecosystem_viewer(
             path=artifact_path,
             kind=kind,
             sensitivity=(
-                Sensitivity.SENSITIVE
-                if kind is ArtifactKind.CORE_DUMP
-                else Sensitivity.INTERNAL
+                Sensitivity.SENSITIVE if kind is ArtifactKind.CORE_DUMP else Sensitivity.INTERNAL
             ),
         )
     )
@@ -94,9 +90,7 @@ async def test_explicit_viewer_launch_uses_bounded_subprocess_broker(
     )
     artifact_path = tmp_path / "metadata.bin"
     artifact_path.write_bytes(b"native")
-    imported = ImportService(workspace).import_artifact(
-        ImportArtifactRequest(path=artifact_path)
-    )
+    imported = ImportService(workspace).import_artifact(ImportArtifactRequest(path=artifact_path))
 
     result = await NativeViewerService(workspace).launch(imported.artifact_id)
 

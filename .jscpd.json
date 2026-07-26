@@ -1,0 +1,17 @@
+{
+  "threshold": 5,
+  "minLines": 5,
+  "minTokens": 50,
+  "mode": "mild",
+  "ignore": [
+    "tests/**",
+    "node_modules/**",
+    ".venv/**",
+    "dist/**",
+    "__pycache__/**",
+    ".mypy_cache/**",
+    ".pytest_cache/**",
+    ".ruff_cache/**"
+  ],
+  "reporters": ["consoleFull"]
+}

@@ -273,9 +273,7 @@ class ClientConfigRegistry:
         if section is None:
             return None
         if not isinstance(section, dict):
-            raise self._invalid_config(
-                definition.path, f"{definition.config_key} is not an object"
-            )
+            raise self._invalid_config(definition.path, f"{definition.config_key} is not an object")
         value = section.get("flamo")
         if value is None:
             return None
@@ -310,9 +308,7 @@ class ClientConfigRegistry:
         document = self._parse_json(definition, text) if text else {}
         section = document.setdefault(definition.config_key, {})
         if not isinstance(section, dict):
-            raise self._invalid_config(
-                definition.path, f"{definition.config_key} is not an object"
-            )
+            raise self._invalid_config(definition.path, f"{definition.config_key} is not an object")
         if remove:
             section.pop("flamo", None)
         else:
@@ -336,9 +332,7 @@ class ClientConfigRegistry:
             section = tomlkit.table()
             document[definition.config_key] = section
         if not hasattr(section, "get") or not hasattr(section, "__setitem__"):
-            raise self._invalid_config(
-                definition.path, f"{definition.config_key} is not a table"
-            )
+            raise self._invalid_config(definition.path, f"{definition.config_key} is not a table")
         if remove:
             section.pop("flamo", None)
         else:

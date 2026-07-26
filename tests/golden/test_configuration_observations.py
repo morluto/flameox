@@ -104,12 +104,8 @@ mode = ["bad", "fixed"]
     )
 
     cohorts = RunSetService(workspace)
-    baseline = cohorts.freeze(
-        FreezeRunSetRequest(run_ids=(runs["bad"].run_id,))
-    )
-    candidate = cohorts.freeze(
-        FreezeRunSetRequest(run_ids=(runs["fixed"].run_id,))
-    )
+    baseline = cohorts.freeze(FreezeRunSetRequest(run_ids=(runs["bad"].run_id,)))
+    candidate = cohorts.freeze(FreezeRunSetRequest(run_ids=(runs["fixed"].run_id,)))
     comparison = ComparisonService(workspace).record(
         CompareRunSetsRequest(
             baseline_run_set_id=baseline.run_set_id,

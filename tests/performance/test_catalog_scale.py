@@ -93,8 +93,7 @@ def test_catalog_scale_budget_matrix(
         publisher.publish_rows(
             {
                 "runs": [
-                    _run_row(index)
-                    for index in range(start, min(start + chunk_size, run_count))
+                    _run_row(index) for index in range(start, min(start + chunk_size, run_count))
                 ],
                 "measurements": [
                     _measurement_row(index)

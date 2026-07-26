@@ -2,12 +2,7 @@
 
 "use strict";
 
-const {
-  applyEdits,
-  modify,
-  parse,
-  printParseErrorCode,
-} = require("jsonc-parser");
+const { applyEdits, modify, parse, printParseErrorCode } = require("jsonc-parser");
 
 let input = "";
 process.stdin.setEncoding("utf8");

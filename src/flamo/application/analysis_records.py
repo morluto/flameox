@@ -280,9 +280,7 @@ class AnalysisMaterializationService:
         )
         if input_ids:
             scope = resolve_evidence_scope(snapshot, input_ids)
-            for artifact_id in (
-                value for value in input_ids if value.startswith("sha256:")
-            ):
+            for artifact_id in (value for value in input_ids if value.startswith("sha256:")):
                 ArtifactStore(self.workspace).get(artifact_id)
             return scope.run_ids, scope.artifact_ids, ()
         if request.experiment_id is not None:

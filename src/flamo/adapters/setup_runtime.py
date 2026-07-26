@@ -50,8 +50,10 @@ class ManagedRuntime:
             if str(parsed) != path.name:
                 continue
             executable = self.executable(path.name)
-            if path.is_dir() and executable.is_file() and self._manifest_matches(
-                path / "runtime.json", path.name, executable
+            if (
+                path.is_dir()
+                and executable.is_file()
+                and self._manifest_matches(path / "runtime.json", path.name, executable)
             ):
                 versions.append(path.name)
         return tuple(sorted(versions, key=Version, reverse=True))

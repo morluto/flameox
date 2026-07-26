@@ -27,16 +27,7 @@ const environment = {
 const pythonPackage = `flamo-diagnostics==${packageJson.version}`;
 const child = spawn(
   process.env.FLAMO_UV_EXECUTABLE || "uvx",
-  [
-    "--no-config",
-    "--no-sources",
-    "--python",
-    "3.12",
-    "--from",
-    pythonPackage,
-    "flamo",
-    ...args,
-  ],
+  ["--no-config", "--no-sources", "--python", "3.12", "--from", pythonPackage, "flamo", ...args],
   { env: environment, stdio: "inherit" },
 );
 

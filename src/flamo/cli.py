@@ -351,9 +351,7 @@ def setup(
 ) -> None:
     """Install a managed runtime and connect local MCP clients."""
     service = SetupService(
-        home=Path(os.environ["FLAMO_SETUP_HOME"])
-        if "FLAMO_SETUP_HOME" in os.environ
-        else None,
+        home=Path(os.environ["FLAMO_SETUP_HOME"]) if "FLAMO_SETUP_HOME" in os.environ else None,
         data_root=Path(os.environ["FLAMO_SETUP_DATA_ROOT"])
         if "FLAMO_SETUP_DATA_ROOT" in os.environ
         else None,
@@ -458,9 +456,7 @@ def setup(
             if operation is SetupOperation.VERIFY:
                 clients = ()
             elif operation is SetupOperation.ROLLBACK:
-                version = setup_ui.choose_rollback_version(
-                    inspection, inspection.active_version
-                )
+                version = setup_ui.choose_rollback_version(inspection, inspection.active_version)
                 clients = inspection.configured_clients
             elif action != "update":
                 clients = setup_ui.choose_clients(

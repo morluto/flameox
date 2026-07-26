@@ -278,7 +278,7 @@ def test_direct_python_setup_refuses_to_overwrite_jsonc_without_helper(
     service, _, home = make_service(tmp_path)
     config = home / ".config" / "opencode" / "opencode.jsonc"
     config.parent.mkdir(parents=True)
-    config.write_text("{\n  // user note\n  \"mcp\": {}\n}\n")
+    config.write_text('{\n  // user note\n  "mcp": {}\n}\n')
 
     with pytest.raises(DomainError) as caught:
         service.plan(
@@ -357,9 +357,7 @@ async def test_setup_restores_every_config_after_partial_write(
 async def test_remove_preserves_other_mcp_servers(tmp_path: Path) -> None:
     service, runtime, home = make_service(tmp_path)
     config = home / ".claude.json"
-    config.write_text(
-        '{"mcpServers":{"other":{"command":"other"},"flamo":{"command":"old"}}}\n'
-    )
+    config.write_text('{"mcpServers":{"other":{"command":"other"},"flamo":{"command":"old"}}}\n')
     plan = service.plan(
         operation=SetupOperation.REMOVE,
         clients=(SetupClient.CLAUDE,),
@@ -368,9 +366,7 @@ async def test_remove_preserves_other_mcp_servers(tmp_path: Path) -> None:
 
     report = await service.apply(plan)
 
-    assert json.loads(config.read_text()) == {
-        "mcpServers": {"other": {"command": "other"}}
-    }
+    assert json.loads(config.read_text()) == {"mcpServers": {"other": {"command": "other"}}}
     assert report.changed_clients == (SetupClient.CLAUDE,)
     assert runtime.verified == []
     assert not service.install_manifest.exists()
@@ -402,9 +398,7 @@ async def test_rollback_repoints_clients_to_an_installed_runtime(tmp_path: Path)
     await service.apply(plan)
 
     configured = json.loads(config.read_text())
-    assert configured["mcpServers"]["flamo"]["command"] == str(
-        runtime.executable("0.0.9")
-    )
+    assert configured["mcpServers"]["flamo"]["command"] == str(runtime.executable("0.0.9"))
     assert service.inspect().active_version == "0.0.9"
 
 
@@ -426,9 +420,7 @@ async def test_rollback_refuses_target_removed_after_preview(tmp_path: Path) -> 
 
     assert caught.value.code is ErrorCode.REVISION_CONFLICT
     assert runtime.versions == set()
-    assert json.loads(config.read_text())["mcpServers"]["flamo"] == {
-        "command": "old"
-    }
+    assert json.loads(config.read_text())["mcpServers"]["flamo"] == {"command": "old"}
 
 
 def test_recovery_refuses_to_overwrite_a_post_crash_user_edit(

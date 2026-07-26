@@ -193,9 +193,7 @@ def test_generation_row_quota_is_enforced_before_staging(tmp_path: Path) -> None
     workspace = Workspace.initialize(tmp_path)
     config = workspace.config.model_copy(
         update={
-            "storage": workspace.config.storage.model_copy(
-                update={"max_rows_per_generation": 1}
-            )
+            "storage": workspace.config.storage.model_copy(update={"max_rows_per_generation": 1})
         }
     )
     workspace.paths.config.write_text(config.to_toml())
@@ -295,6 +293,7 @@ def test_publication_crashes_before_head_never_expose_partial_generation(
 
         monkeypatch.setattr(workspace.corpus, "write_commit", fail_after_commit)
     else:
+
         def fail_before_head(_commit_id: str) -> None:
             raise RuntimeError("simulated crash")
 
@@ -332,6 +331,4 @@ def test_crash_after_head_only_exposes_complete_generation(
         )
 
     with Catalog(workspace).open_snapshot() as snapshot:
-        assert snapshot.execute("SELECT run_id FROM runs").fetchall() == [
-            ("run-after-head",)
-        ]
+        assert snapshot.execute("SELECT run_id FROM runs").fetchall() == [("run-after-head",)]

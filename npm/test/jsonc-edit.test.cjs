@@ -61,14 +61,10 @@ test("bootstrap launches the exactly matching Python release", () => {
     { mode: 0o700 },
   );
   const bootstrap = path.resolve(__dirname, "../bin/flamo.cjs");
-  const result = spawnSync(
-    process.execPath,
-    [bootstrap, "setup", "--codex", "--dry-run"],
-    {
-      encoding: "utf8",
-      env: { ...process.env, FLAMO_UV_EXECUTABLE: fakeUvx, FLAMO_CAPTURE: capture },
-    },
-  );
+  const result = spawnSync(process.execPath, [bootstrap, "setup", "--codex", "--dry-run"], {
+    encoding: "utf8",
+    env: { ...process.env, FLAMO_UV_EXECUTABLE: fakeUvx, FLAMO_CAPTURE: capture },
+  });
 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(fs.readFileSync(capture, "utf8")), [

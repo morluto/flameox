@@ -35,9 +35,7 @@ def test_control_process_operations_do_not_open_network_connections(
     artifact = tmp_path / "local.bin"
     artifact.write_bytes(b"local")
 
-    ImportService(workspace).import_artifact(
-        ImportArtifactRequest(path=artifact)
-    )
+    ImportService(workspace).import_artifact(ImportArtifactRequest(path=artifact))
     workspace_status(workspace)
     RecipeService(workspace).failures(limit=10)
 

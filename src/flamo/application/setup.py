@@ -201,10 +201,7 @@ class SetupService:
                     "A target runtime version is required.",
                 )
             installed_versions = self.runtime.installed_versions()
-            if (
-                operation is SetupOperation.ROLLBACK
-                and version not in installed_versions
-            ):
+            if operation is SetupOperation.ROLLBACK and version not in installed_versions:
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                     f"Flamo {version} is not installed locally.",
@@ -215,9 +212,7 @@ class SetupService:
                 args=("mcp", "serve", "--project-root", "."),
             )
             runtime_action = (
-                RuntimeAction.REUSE
-                if version in installed_versions
-                else RuntimeAction.INSTALL
+                RuntimeAction.REUSE if version in installed_versions else RuntimeAction.INSTALL
             )
 
         edits = tuple(
@@ -338,10 +333,7 @@ class SetupService:
         if (
             manifest_updated is not None
             and manifest_updated != manifest_original
-            and (
-                manifest_original is not None
-                or public.operation is not SetupOperation.REMOVE
-            )
+            and (manifest_original is not None or public.operation is not SetupOperation.REMOVE)
         ):
             mutations.append(
                 _FileMutation(
@@ -408,9 +400,7 @@ class SetupService:
     def _check_preflight(self, plan: ResolvedSetupPlan) -> None:
         for edit in plan.edits:
             current = edit.path.read_bytes() if edit.path.exists() else None
-            current_mode = (
-                stat.S_IMODE(edit.path.stat().st_mode) if edit.path.exists() else 0o600
-            )
+            current_mode = stat.S_IMODE(edit.path.stat().st_mode) if edit.path.exists() else 0o600
             if current != edit.original or current_mode != edit.mode:
                 raise DomainError(
                     ErrorCode.REVISION_CONFLICT,
@@ -538,9 +528,7 @@ class SetupService:
         if not self.install_manifest.exists():
             return None
         try:
-            manifest = _InstallManifest.model_validate_json(
-                self.install_manifest.read_text()
-            )
+            manifest = _InstallManifest.model_validate_json(self.install_manifest.read_text())
             expected = self.runtime.executable(manifest.active_version)
             if manifest.executable != expected:
                 raise ValueError("managed runtime path does not match its version")
@@ -557,6 +545,7 @@ class SetupService:
                 details={"error": str(exc)},
             ) from exc
         return manifest
+
 
 def _unique_clients(clients: tuple[SetupClient, ...]) -> tuple[SetupClient, ...]:
     selected = set(clients)

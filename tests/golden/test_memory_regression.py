@@ -68,12 +68,8 @@ def test_retained_memory_regression_has_native_and_normalized_evidence(
         extractions[name] = MemrayExtractor(workspace).extract(imported.run.run_id)
 
     cohorts = RunSetService(workspace)
-    baseline = cohorts.freeze(
-        FreezeRunSetRequest(run_ids=(runs["baseline"].run_id,))
-    )
-    candidate = cohorts.freeze(
-        FreezeRunSetRequest(run_ids=(runs["candidate"].run_id,))
-    )
+    baseline = cohorts.freeze(FreezeRunSetRequest(run_ids=(runs["baseline"].run_id,)))
+    candidate = cohorts.freeze(FreezeRunSetRequest(run_ids=(runs["candidate"].run_id,)))
     comparison = ComparisonService(workspace).record(
         CompareRunSetsRequest(
             baseline_run_set_id=baseline.run_set_id,

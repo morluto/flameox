@@ -56,9 +56,7 @@ async def test_runtime_install_uses_an_exact_isolated_uv_tool_environment(
         "3.12",
         "flamo-diagnostics==0.1.0",
     ]
-    assert recorded_environment["UV_TOOL_DIR"] == str(
-        tmp_path / "runtimes" / "0.1.0" / "tools"
-    )
+    assert recorded_environment["UV_TOOL_DIR"] == str(tmp_path / "runtimes" / "0.1.0" / "tools")
     assert result.installed is True
     assert runtime.verified == [result.executable]
     assert runtime.installed_versions() == ("0.1.0",)

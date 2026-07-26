@@ -73,9 +73,7 @@ def choose_rollback_version(
     inspection: SetupInspection,
     current_version: str | None,
 ) -> str:
-    choices = [
-        version for version in inspection.installed_versions if version != current_version
-    ]
+    choices = [version for version in inspection.installed_versions if version != current_version]
     answer = questionary.select("Select an installed runtime:", choices=choices).ask()
     return str(_answer(answer))
 
@@ -88,9 +86,7 @@ def print_plan(plan: SetupPlan) -> None:
         typer.echo(f"  Launcher: {plan.runtime_executable}")
     for client in plan.clients:
         detected = "" if client.detected else " (not detected)"
-        typer.echo(
-            f"  {client.display_name}: {client.action.value} {client.path}{detected}"
-        )
+        typer.echo(f"  {client.display_name}: {client.action.value} {client.path}{detected}")
     for warning in plan.warnings:
         typer.secho(f"  Warning: {warning}", fg=typer.colors.YELLOW)
     typer.echo()

@@ -1,0 +1,63 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.0
+    hooks:
+      - id: ruff
+        name: ruff (lint)
+        args: ["--fix"]
+        files: "^(src|tests)/"
+      - id: ruff-format
+        name: ruff (format)
+        files: "^(src|tests)/"
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.15.0
+    hooks:
+      - id: mypy
+        files: "^(src|tests)/"
+        additional_dependencies:
+          - pydantic>=2.13.4
+          - numpy>=2.2
+          - pyarrow>=20
+          - packaging>=24
+
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v3.1.0
+    hooks:
+      - id: prettier
+        files: "^npm/"
+        types_or: [javascript, json, markdown]
+
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint (npm)
+        language: system
+        entry: bash -c 'cd npm && npx eslint .'
+        files: "^npm/"
+        types_or: [javascript]
+        pass_filenames: false
+
+      - id: vulture
+        name: vulture (dead code)
+        language: system
+        entry: vulture src/flamo --min-confidence 80
+        files: "^src/flamo/"
+        pass_filenames: false
+        types: [python]
+
+      - id: large-file-check
+        name: large file detection
+        language: system
+        entry: bash -c 'find src -name "*.py" -type f -size +50000c | while read f; do echo "$f: exceeds 50KB limit ($(wc -c < "$f") bytes)"; exit 1; done'
+        pass_filenames: false
+        files: "."
+        always_run: true
+
+      - id: jscpd
+        name: duplicate code detection
+        language: system
+        entry: bash -c 'npx jscpd --min-tokens 50 --min-lines 5 --threshold 0 src/ npm/lib npm/bin 2>&1 | tail -5'
+        pass_filenames: false
+        files: "."
+        always_run: true

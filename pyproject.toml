@@ -17,6 +17,7 @@ dependencies = [
     "packaging>=24,<27",
     "portalocker>=3.2,<4",
     "platformdirs>=4.3,<5",
+    "pytz>=2024.2",
     "pyarrow>=20,<26",
     "pydantic>=2.13.4,<2.14",
     "questionary>=2.1,<3",
@@ -44,12 +45,14 @@ all = [
 ]
 dev = [
     "hypothesis>=6.130",
+    "import-linter>=2.2",
     "mypy>=1.15",
     "pytest>=8.3",
     "pytest-cov>=6.1",
     "pyarrow-stubs>=20.0.0.20260625",
     "ruff>=0.11",
     "scipy-stubs>=1.18.0.1,<1.19",
+    "vulture>=2.14",
 ]
 
 [project.scripts]
@@ -59,7 +62,7 @@ flamo = "flamo.cli:app"
 packages = ["src/flamo"]
 
 [tool.pytest.ini_options]
-addopts = "-ra --strict-config --strict-markers"
+addopts = "-ra --strict-config --strict-markers --durations=10"
 testpaths = ["tests"]
 markers = [
     "performance: representative local corpus performance acceptance checks",
@@ -72,13 +75,28 @@ source = ["flamo"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+fail_under = 60
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "C90", "TD"]
+ignore = ["TD002"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/flamo/mcp/server.py" = ["C901"]
+"src/flamo/cli.py" = ["C901"]
+"src/flamo/application/capture.py" = ["C901"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 18
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
 
 [tool.mypy]
 python_version = "3.12"
@@ -99,3 +117,25 @@ module = [
     "torch.*",
 ]
 ignore_missing_imports = true
+
+[tool.vulture]
+min_confidence = 80
+paths = ["src/flamo"]
+ignore_names = ["setUp", "tearDown", "test_*", "Test*", "*_test"]
+ignore_decorators = ["@app.command", "@property", "@router.*"]
+
+[tool.importlinter]
+root_package = "flamo"
+include_external_packages = false
+
+[[tool.importlinter.contracts]]
+name = "Domain layer must not import application or infrastructure"
+type = "forbidden"
+source_modules = ["flamo.domain"]
+forbidden_modules = ["flamo.application", "flamo.storage", "flamo.adapters", "flamo.cli", "flamo.mcp"]
+
+[[tool.importlinter.contracts]]
+name = "Storage must not import CLI, MCP, or adapters"
+type = "forbidden"
+source_modules = ["flamo.storage"]
+forbidden_modules = ["flamo.cli", "flamo.mcp", "flamo.adapters"]

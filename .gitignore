@@ -7,3 +7,12 @@ __pycache__/
 *.py[cod]
 htmlcov/
 node_modules/
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

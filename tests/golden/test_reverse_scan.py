@@ -137,10 +137,7 @@ random_seed = 1984
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
     experiment = await experiment_service.run(experiment_plan.plan_id)
-    assert all(
-        trial.validation_status is ValidationStatus.PASSED
-        for trial in experiment.trials
-    )
+    assert all(trial.validation_status is ValidationStatus.PASSED for trial in experiment.trials)
     scaling = RecipeService(workspace).scaling(experiment.experiment.experiment_id)
     scaling_record = AnalysisMaterializationService(workspace).record(
         MaterializeAnalysisRequest(
@@ -153,10 +150,9 @@ random_seed = 1984
     assert comparison.comparison.validity is ComparisonValidity.VALID, (
         comparison.comparison.mismatches
     )
-    assert (
-        comparison.comparison.decision
-        is ComparisonDecision.MEANINGFUL_IMPROVEMENT
-    ), comparison.comparison.model_dump(mode="json")
+    assert comparison.comparison.decision is ComparisonDecision.MEANINGFUL_IMPROVEMENT, (
+        comparison.comparison.model_dump(mode="json")
+    )
 
     capture = CaptureService(workspace)
     broken_plan = await capture.plan(
