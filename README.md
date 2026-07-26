@@ -69,6 +69,36 @@ Optional extras are independent:
 
 Flamo pins the official Python MCP SDK to `mcp==2.0.0b2`.
 
+To connect Flamo to supported coding agents, run the guided local setup:
+
+```console
+npx flamo setup
+```
+
+The wizard detects Claude Code, Cursor, OpenCode, Codex, Gemini CLI, and
+Antigravity, but detection never grants consent: the first run starts with no
+clients selected and previews every file it will change. It installs an exact,
+versioned `flamo-diagnostics` runtime with `uv`, verifies the stdio MCP
+handshake, and then atomically activates the selected client configurations.
+It does not initialize a project or create `.diagnostics/`.
+
+Run the command again to connect or disconnect clients, verify the active
+runtime, update to the npm package's matching version, or roll back to a
+previously installed version. `npx flamo@latest setup` forces npm to resolve
+the newest setup release. Automation can use explicit flags:
+
+```console
+npx flamo setup --codex --claude --yes
+npx flamo setup --all --dry-run --json
+npx flamo setup --verify --yes --json
+```
+
+The npm package is only a bootstrap. It delegates to the matching Python
+release and supplies the maintained `jsonc-parser` helper needed to preserve
+comments in OpenCode configuration. MCP clients launch the persistent managed
+runtime directly; they do not invoke `npx`, `uvx`, or a network-dependent
+installer at startup.
+
 ## Local data model
 
 Initialize a project-local workspace:

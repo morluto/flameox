@@ -1,5 +1,36 @@
 # CLI and MCP boundaries
 
+## Local client setup
+
+`npx flamo setup` is the supported interactive path for connecting local MCP
+clients. The npm package and Python distribution share an exact release
+version. npm supplies a thin launcher and the upstream `jsonc-parser` editor;
+the Python application service owns discovery, planning, runtime installation,
+verification, locking, activation, rollback, and structured results. The same
+setup service is available from `flamo setup` for standard JSON and TOML
+clients.
+
+The first run requires an explicit multi-select. Detection annotates choices
+but does not preselect them. Every mutation has a complete preview and a
+confirmation whose default is no. Non-interactive application requires both an
+explicit target (`--codex`, another client flag, `--all`, `--refresh`,
+`--rollback`, or `--verify`) and `--yes`; `--dry-run --json` returns the plan
+without mutation.
+
+Client launchers contain the absolute path of a verified managed runtime and
+the fixed arguments `mcp serve --project-root .`. Setup never passes `--init`.
+Each MCP client therefore binds Flamo's project root to the client's launch
+directory and encounters an ordinary `WORKSPACE_NOT_FOUND` until the user
+initializes that repository deliberately.
+
+Setup serializes mutations with a user-local lock. Before applying, it compares
+every config with the exact bytes used for the preview. It writes a recovery
+journal before the first config change, uses atomic replacement, and restores
+all original files after a partial failure or on the next invocation after a
+crash. Existing comments, unrelated servers, permissions, and formatting are
+preserved where the native format supports it. Malformed or non-UTF-8 configs
+are refused rather than replaced.
+
 The CLI and MCP server expose the same application services to different trust
 contexts. The CLI may offer explicit local administration and destructive
 recovery operations. MCP exposes bounded, task-shaped operations suitable for
