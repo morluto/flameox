@@ -146,6 +146,7 @@ class SetupService:
         self.lock_path = self.data_root / "setup.lock"
 
     def inspect(self) -> SetupInspection:
+        self._recover_interrupted()
         manifest = self._read_install_manifest()
         return SetupInspection(
             active_version=manifest.active_version if manifest else None,
@@ -162,6 +163,7 @@ class SetupService:
         clients: tuple[SetupClient, ...],
         version: str | None,
     ) -> ResolvedSetupPlan:
+        self._recover_interrupted()
         if operation is SetupOperation.VERIFY:
             executable = self._active_executable()
             public = SetupPlan(
@@ -244,6 +246,21 @@ class SetupService:
             with lock:
                 self._recover_locked()
                 return await self._apply_locked(plan)
+        except portalocker.exceptions.LockException as exc:
+            raise DomainError(
+                ErrorCode.WRITE_LOCK_TIMEOUT,
+                "Another Flamo setup operation holds the setup lock.",
+                retryable=True,
+            ) from exc
+
+    def _recover_interrupted(self) -> None:
+        if not self.journal_path.exists():
+            return
+        self.data_root.mkdir(parents=True, exist_ok=True)
+        try:
+            lock = portalocker.Lock(self.lock_path, mode="a", timeout=10)
+            with lock:
+                self._recover_locked()
         except portalocker.exceptions.LockException as exc:
             raise DomainError(
                 ErrorCode.WRITE_LOCK_TIMEOUT,

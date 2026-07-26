@@ -150,6 +150,53 @@ async def test_setup_recovers_interrupted_config_transaction(tmp_path: Path) -> 
     assert not service.journal_path.exists()
 
 
+def test_setup_recovers_interrupted_transaction_before_planning(tmp_path: Path) -> None:
+    service, runtime, home = make_service(tmp_path)
+    config = home / ".claude.json"
+    original = b'{"mcpServers": {}}\n'
+    staged = (
+        json.dumps(
+            {
+                "mcpServers": {
+                    "flamo": {
+                        "command": str(runtime.executable("0.1.0")),
+                        "args": ["mcp", "serve", "--project-root", "."],
+                    }
+                }
+            }
+        )
+        + "\n"
+    ).encode()
+    config.write_bytes(staged)
+    service.data_root.mkdir(parents=True)
+    atomic_write_json(
+        service.journal_path,
+        {
+            "schema_version": 1,
+            "mutations": [
+                {
+                    "path": str(config),
+                    "original": base64.b64encode(original).decode(),
+                    "original_sha256": hashlib.sha256(original).hexdigest(),
+                    "updated_sha256": hashlib.sha256(staged).hexdigest(),
+                    "mode": 0o600,
+                }
+            ],
+        },
+    )
+
+    plan = service.plan(
+        operation=SetupOperation.CONFIGURE,
+        clients=(SetupClient.CLAUDE,),
+        version="0.1.0",
+    )
+
+    assert plan.edits[0].action.value == "update"
+    assert plan.edits[0].original == original
+    assert config.read_bytes() == original
+    assert not service.journal_path.exists()
+
+
 def test_codex_toml_edit_preserves_comments(tmp_path: Path) -> None:
     service, _, home = make_service(tmp_path)
     config = home / ".codex" / "config.toml"
@@ -330,8 +377,7 @@ async def test_rollback_repoints_clients_to_an_installed_runtime(tmp_path: Path)
     assert service.inspect().active_version == "0.0.9"
 
 
-@pytest.mark.anyio
-async def test_recovery_refuses_to_overwrite_a_post_crash_user_edit(
+def test_recovery_refuses_to_overwrite_a_post_crash_user_edit(
     tmp_path: Path,
 ) -> None:
     service, _, home = make_service(tmp_path)
@@ -356,14 +402,12 @@ async def test_recovery_refuses_to_overwrite_a_post_crash_user_edit(
             ],
         },
     )
-    plan = service.plan(
-        operation=SetupOperation.VERIFY,
-        clients=(),
-        version=None,
-    )
-
     with pytest.raises(DomainError) as caught:
-        await service.apply(plan)
+        service.plan(
+            operation=SetupOperation.VERIFY,
+            clients=(),
+            version=None,
+        )
 
     assert caught.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
     assert config.read_bytes() == user_edit
