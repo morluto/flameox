@@ -18,6 +18,7 @@ from flameox.storage.quotas import StorageQuota
 from flameox.storage.workspace import Workspace
 
 _SAFE_EXTENSION = re.compile(r"^\.[A-Za-z0-9][A-Za-z0-9._-]{0,15}$")
+_SAFE_PAYLOAD_NAME = re.compile(r"^payload(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,15})?$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,11 +171,38 @@ class ArtifactStore:
             character not in "0123456789abcdef" for character in hexadecimal
         ):
             raise DomainError(ErrorCode.WORKSPACE_INVALID, "Invalid artifact identifier.")
-        object_root = self.workspace.paths.artifacts / hexadecimal[:2] / hexadecimal
-        content = self._read_metadata(object_root / "artifact.json")
+        artifacts_root = self.workspace.paths.artifacts
+        shard_root = artifacts_root / hexadecimal[:2]
+        object_root = shard_root / hexadecimal
+        metadata_path = object_root / "artifact.json"
+        for path in (artifacts_root, shard_root, object_root, metadata_path):
+            if path.is_symlink():
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                    "Artifact storage paths must not contain symbolic links.",
+                )
+        try:
+            object_root.resolve().relative_to(artifacts_root.resolve())
+        except ValueError as exc:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Artifact storage path escapes the artifact root.",
+            ) from exc
+        content = self._read_metadata(metadata_path)
+        if _SAFE_PAYLOAD_NAME.fullmatch(content.payload_name) is None:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Artifact metadata contains an invalid payload name.",
+            )
+        payload_path = object_root / content.payload_name
+        if payload_path.is_symlink():
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Artifact payload must not be a symbolic link.",
+            )
         return StoredArtifact(
             content=content,
-            payload_path=object_root / content.payload_name,
+            payload_path=payload_path,
         )
 
     def _read_metadata(self, path: Path) -> ArtifactContent:

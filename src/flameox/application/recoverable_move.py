@@ -8,7 +8,13 @@ from flameox.storage.atomic import fsync_directory
 
 
 def validate_manifest_id(value: str, *, kind: str) -> None:
-    if not value or "/" in value or "\\" in value or "\x00" in value:
+    if (
+        value in {"", ".", ".."}
+        or "/" in value
+        or "\\" in value
+        or ":" in value
+        or "\x00" in value
+    ):
         raise DomainError(ErrorCode.EXECUTION_REFUSED, f"Invalid {kind} ID.")
 
 

@@ -6,7 +6,7 @@
   "bugs": {
     "url": "https://github.com/morluto/flameox/issues"
   },
-  "license": "Apache-2.0",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/morluto/flameox.git"
