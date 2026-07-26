@@ -2,6 +2,8 @@
 
 ### Runtime evidence for coding agents
 
+![Abstract flame graph built from glowing runtime blocks](docs/assets/flamo-flamegraph-hero.png)
+
 Give an agent profiler traces, benchmark results, memory captures, and execution
 evidence it can query, compare, and audit—without uploading your code or captures.
 
