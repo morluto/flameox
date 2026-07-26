@@ -305,6 +305,16 @@ class SetupService:
 
         installation: RuntimeInstallation | None = None
         if public.version is not None:
+            if (
+                public.operation is SetupOperation.ROLLBACK
+                and public.version not in self.runtime.installed_versions()
+            ):
+                raise DomainError(
+                    ErrorCode.REVISION_CONFLICT,
+                    f"Rollback runtime {public.version} is no longer installed.",
+                    retryable=True,
+                    remediation=("Review installed versions and run setup again.",),
+                )
             installation = await self.runtime.install(public.version)
 
         changed = tuple(

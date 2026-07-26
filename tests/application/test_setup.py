@@ -408,6 +408,29 @@ async def test_rollback_repoints_clients_to_an_installed_runtime(tmp_path: Path)
     assert service.inspect().active_version == "0.0.9"
 
 
+@pytest.mark.anyio
+async def test_rollback_refuses_target_removed_after_preview(tmp_path: Path) -> None:
+    service, runtime, home = make_service(tmp_path)
+    runtime.versions.add("0.0.9")
+    config = home / ".claude.json"
+    config.write_text('{"mcpServers":{"flamo":{"command":"old"}}}\n')
+    plan = service.plan(
+        operation=SetupOperation.ROLLBACK,
+        clients=(SetupClient.CLAUDE,),
+        version="0.0.9",
+    )
+    runtime.versions.remove("0.0.9")
+
+    with pytest.raises(DomainError) as caught:
+        await service.apply(plan)
+
+    assert caught.value.code is ErrorCode.REVISION_CONFLICT
+    assert runtime.versions == set()
+    assert json.loads(config.read_text())["mcpServers"]["flamo"] == {
+        "command": "old"
+    }
+
+
 def test_recovery_refuses_to_overwrite_a_post_crash_user_edit(
     tmp_path: Path,
 ) -> None:
