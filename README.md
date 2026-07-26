@@ -1,19 +1,37 @@
-# Flamo
+<h1 align="center">Flamo</h1>
 
-### Runtime evidence for coding agents
+<p align="center"><strong>Runtime evidence for coding agents</strong></p>
 
-![Abstract flame graph built from glowing runtime blocks](docs/assets/flamo-flamegraph-hero.png)
+<p align="center">
+  <img
+    src="docs/assets/flamo-flamegraph-hero.png"
+    width="100%"
+    alt="Abstract flame graph built from glowing runtime blocks"
+  >
+</p>
 
-Give an agent profiler traces, benchmark results, memory captures, and execution
-evidence it can query, compare, and audit—without uploading your code or captures.
+<p align="center">
+  Give an agent profiler traces, benchmark results, memory captures, and execution
+  evidence it can query, compare, and audit—without uploading your code or captures.
+</p>
 
-[Quick start](#quick-start) · [What Flamo investigates](#what-flamo-investigates) ·
-[How it works](#how-it-works) · [CLI and MCP](#cli-and-mcp) ·
-[Documentation](#documentation)
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat&logo=python&logoColor=white" alt="Python 3.12 or newer">
+  <img src="https://img.shields.io/badge/Runtime-Permanently_Local-F97316?style=flat" alt="Permanently local runtime">
+  <img src="https://img.shields.io/badge/Interfaces-CLI_%2B_MCP-7C3AED?style=flat" alt="CLI and MCP interfaces">
+</p>
 
-```console
-npx flamo setup
-```
+<p align="center">
+  <a href="#quick-start">Quick start</a> &nbsp;&middot;&nbsp;
+  <a href="#what-flamo-investigates">What Flamo investigates</a> &nbsp;&middot;&nbsp;
+  <a href="#how-it-works">How it works</a> &nbsp;&middot;&nbsp;
+  <a href="#cli-and-mcp">CLI and MCP</a> &nbsp;&middot;&nbsp;
+  <a href="#documentation">Documentation</a>
+</p>
+
+<p align="center"><strong>Connect your agent:</strong> <code>npx flamo setup</code></p>
+
+---
 
 Flamo is a permanently local CLI and Model Context Protocol server. It connects
 coding agents to maintained tools such as pyperf, py-spy, Perfetto Trace
@@ -62,14 +80,14 @@ uv run flamo status
 
 ## What Flamo investigates
 
-| Question | Evidence Flamo can connect |
+| Question | Evidence |
 | --- | --- |
-| Where does this workload spend CPU time? | Sampled stacks, frames, callers, callees, and trace windows |
-| Does runtime grow with input size? | Repeated measurements, scaling fits, uncertainty, and correlated hotspots |
-| Why does memory grow? | Allocation records, retained memory, phases, threads, and processes |
-| Which execution paths changed? | Coverage contexts, files, functions, branches, and two-run differences |
-| What does PyTorch spend time on? | Operators, shapes when captured, CPU or accelerator time, and memory |
-| Are failures clustered rather than isolated? | Failed attempts grouped by environment, source, workload, and error |
+| **Where does this workload spend CPU time?** | Sampled stacks, frames, callers, callees, and trace windows |
+| **Does runtime grow with input size?** | Repeated measurements, scaling fits, uncertainty, and correlated hotspots |
+| **Why does memory grow?** | Allocation records, retained memory, phases, threads, and processes |
+| **Which execution paths changed?** | Coverage contexts, files, functions, branches, and two-run differences |
+| **What does PyTorch spend time on?** | Operators, shapes when captured, CPU or accelerator time, and memory |
+| **Are failures clustered rather than isolated?** | Failed attempts grouped by environment, source, workload, and error |
 
 Profiles point to candidates; they do not prove causality or correctness. A
 confirmatory comparison also needs a representative workload, declared metric,
@@ -78,16 +96,16 @@ oracle.
 
 ## How it works
 
-1. You declare and approve a repeatable workload. Flamo never exposes arbitrary
+1. **Declare.** You approve a repeatable workload. Flamo never exposes arbitrary
    shell commands or SQL to an agent.
-2. A maintained profiler or benchmark tool performs the capture. Flamo records
+2. **Capture.** A maintained profiler or benchmark tool runs while Flamo records
    the exact tool, command, environment, source identity, limits, and outcome.
-3. Flamo preserves the native artifact and publishes normalized evidence into
-   an immutable local corpus.
-4. The CLI and MCP server expose the same bounded operations for hotspots,
-   scaling, memory, execution, failures, and comparisons.
-5. Findings remain tied to the runs, measurements, validation, and analysis
-   that support them. Failed attempts remain visible.
+3. **Preserve.** Flamo keeps the native artifact and publishes normalized
+   evidence into an immutable local corpus.
+4. **Analyze.** The CLI and MCP server expose the same bounded operations for
+   hotspots, scaling, memory, execution, failures, and comparisons.
+5. **Record.** Findings remain tied to the runs, measurements, validation, and
+   analysis that support them. Failed attempts remain visible.
 
 Native artifacts and Parquet evidence are authoritative. DuckDB is a rebuildable
 local query layer, and Perfetto Trace Processor handles detailed trace queries.
