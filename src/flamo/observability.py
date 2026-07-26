@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -10,6 +11,19 @@ from pydantic import Field
 
 from flamo.domain.models import utc_now
 from flamo.models import ContractModel
+
+_PII_PATTERNS: list[tuple[str, str]] = [
+    (r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", "[REDACTED_EMAIL]"),
+    (r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "[REDACTED_IP]"),
+    (r"\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b", "[REDACTED_IPV6]"),
+]
+
+
+def sanitize(value: str) -> str:
+    """Redact email addresses and IP addresses from a string value."""
+    for pattern, replacement in _PII_PATTERNS:
+        value = re.sub(pattern, replacement, value)
+    return value
 
 
 class OperationEvent(ContractModel):
@@ -58,8 +72,8 @@ class OperationLogger:
         event = OperationEvent(
             timestamp=utc_now().isoformat(),
             operation_id=operation_id,
-            operation=operation,
-            phase=phase,
+            operation=sanitize(operation),
+            phase=sanitize(phase),
             run_id=run_id,
             adapter=adapter,
             elapsed_ms=elapsed_ms,

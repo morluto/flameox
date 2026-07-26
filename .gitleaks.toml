@@ -1,0 +1,13 @@
+# Gitleaks configuration for Flamo
+# https://github.com/gitleaks/gitleaks
+
+[allowlist]
+description = "Global allowlist"
+
+[[rules]]
+id = "generic-api-key"
+[rules.allowlist]
+paths = [
+  '''npm/package-lock\.json''',
+  '''uv\.lock''',
+]

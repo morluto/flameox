@@ -1,0 +1,45 @@
+- name: bug
+  color: "d73a4a"
+  description: Something isn't working
+- name: enhancement
+  color: "a2eeef"
+  description: New feature or improvement
+- name: documentation
+  color: "0075ca"
+  description: Documentation changes
+- name: dependencies
+  color: "0366d6"
+  description: Dependency updates
+- name: security
+  color: "d93f0b"
+  description: Security-related changes
+- name: triage
+  color: "fbca04"
+  description: Needs initial assessment
+- name: adapter/pyperf
+  color: "bfdadc"
+  description: pyperf integration
+- name: adapter/py-spy
+  color: "bfdadc"
+  description: py-spy integration
+- name: adapter/perfetto
+  color: "bfdadc"
+  description: Perfetto integration
+- name: adapter/memray
+  color: "bfdadc"
+  description: Memray integration
+- name: adapter/coverage
+  color: "bfdadc"
+  description: coverage.py integration
+- name: area/storage
+  color: "5319e7"
+  description: Storage and evidence layer
+- name: area/cli
+  color: "5319e7"
+  description: CLI interface
+- name: area/mcp
+  color: "5319e7"
+  description: MCP server
+- name: area/investigations
+  color: "5319e7"
+  description: Investigations and experiments
