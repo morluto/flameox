@@ -2,13 +2,29 @@
 
 ## Product Direction
 
-Flamo is a permanently local runtime-evidence system for coding agents. It
-shortens the path from an unexplained performance, memory, concurrency, or
-reliability symptom to a reproducible, falsifiable conclusion.
+Flamo is a permanently local evidence layer for coding agents investigating
+performance, memory, execution, concurrency, and reliability. It gives an agent
+a reproducible path from a runtime symptom to a conclusion that another person
+or agent can inspect and try to disprove.
 
-Flamo coordinates existing profilers, benchmark tools, debuggers, and trace
-processors. Do not reimplement their collectors, formats, statistics, or
-viewers when maintained public APIs exist.
+Existing profilers, benchmark tools, debuggers, and trace processors measure
+runtime behavior. Flamo coordinates those tools, preserves their native
+artifacts and provenance, extracts bounded evidence, and compares runs and
+experiments. The agent forms hypotheses, chooses discriminating experiments,
+and explains the conclusion.
+
+A typical investigation moves through:
+
+```text
+symptom → capture or import → bounded evidence → hypothesis
+        → discriminating experiment → supported, refuted, or inconclusive finding
+```
+
+Flamo is not a profiler, a generic bug finder, a hosted observability service,
+an unrestricted command or SQL gateway, or a source-code modification system.
+A feature belongs when it improves trustworthy collection, evidence
+preservation, cross-run analysis, experimental validity, or bounded agent
+drill-down without replacing an upstream tool.
 
 When changing the product:
 
