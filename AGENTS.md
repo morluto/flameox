@@ -26,9 +26,9 @@ performance improvement. Confirmatory claims require representative workloads,
 declared metrics and estimands, compatible identities, preserved samples, and
 a semantic oracle.
 
-A passing test suite does not prove the entire specification complete. Before
-calling work complete, identify the relevant `SPEC.md` acceptance criteria and
-state any remaining proof gaps.
+A passing test suite does not prove the documented behavior complete. Before
+calling work complete, identify the relevant criteria in
+`docs/acceptance.md` and state any remaining proof gaps.
 
 ## Project Structure & Module Organization
 
@@ -37,8 +37,22 @@ Flamo is a Python 3.12+ package using a `src/` layout. Production code lives in
 `application/`, persistence is in `storage/`, profiler integrations are in
 `adapters/`, and CLI/MCP entry points are in `cli.py` and `mcp/`. Tests mirror
 these boundaries under `tests/`, with additional `golden/`, `performance/`, and
-`evidence/` suites. Read `SPEC.md` before changing safety, storage, execution, or
-protocol behavior; it defines the product contract.
+`evidence/` suites.
+
+Read the relevant contract before changing product behavior:
+
+- `docs/architecture.md` for process, package, dependency, and platform rules;
+- `docs/storage-and-evidence.md` for storage, provenance, publication, and
+  schema rules;
+- `docs/investigations.md` for experiments, recipes, statistics, and evidence
+  quality;
+- `docs/adapters.md` for integration, compatibility, probing, and approval
+  behavior;
+- `docs/runtime-safety.md` for concurrency, recovery, retention, integrity,
+  security, privacy, and observability;
+- `docs/interfaces.md` for CLI and MCP behavior and trust boundaries;
+- `docs/architecture-decisions.md` for settled constraints and open questions;
+- `docs/acceptance.md` for completion criteria and representative proof.
 
 ## Build, Test, and Development Commands
 

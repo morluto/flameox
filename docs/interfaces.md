@@ -1,0 +1,526 @@
+# CLI and MCP boundaries
+
+The CLI and MCP server expose the same application services to different trust
+contexts. The CLI may offer explicit local administration and destructive
+recovery operations. MCP exposes bounded, task-shaped operations suitable for
+an agent and does not expose arbitrary commands, raw SQL, deletion, or
+sensitive artifact bytes.
+
+The transport does not own domain behavior. Results, validation, cancellation,
+provenance, and error semantics belong to the shared application layer.
+
+## CLI specification
+
+### General behavior
+
+The executable is `flamo`. Commands produce readable terminal output by
+default and structured JSON with `--json`. CLI JSON is the domain result model;
+MCP wraps that same model in its transport envelope.
+
+Common options:
+
+```text
+--workspace PATH
+--project-root PATH
+--json
+--quiet
+--log-level LEVEL
+--timeout SECONDS
+```
+
+Exit codes:
+
+- `0`: successful operation;
+- `1`: operation completed with a negative result such as failed validation;
+- `2`: invalid arguments or configuration;
+- `3`: required capability unavailable;
+- `4`: capture or external process failed;
+- `5`: artifact or corpus integrity failure;
+- `6`: comparison invalid;
+- `7`: lock or concurrency failure;
+- `8`: operation cancelled or timed out;
+- `9`: safety or policy refusal.
+
+### Workspace commands
+
+```text
+flamo init
+flamo status
+flamo capabilities [--refresh]
+flamo config show
+flamo validate
+flamo workload approve <name>
+```
+
+`init` creates only local files and never installs collectors. `capabilities`
+reports installed tools, versions, supported modes, permissions, and remediation
+commands.
+
+### Capture commands
+
+```text
+flamo capture plan <adapter> [options] -- <argv...>
+flamo capture run <adapter> [options] -- <argv...>
+flamo import <path> [--kind KIND]
+```
+
+`capture plan` is side-effect free. `capture run` prints the plan before
+execution unless `--json` is used, in which case the plan is part of the result.
+Every import creates a new import run.
+
+### Workload commands
+
+```text
+flamo workload list
+flamo workload show <name>
+flamo workload run <name> [parameter overrides]
+flamo investigations create <structured-input>
+flamo investigations list [filters]
+flamo investigations show <investigation-id>
+flamo hypotheses record <structured-input>
+flamo hypotheses show <hypothesis-id>
+flamo experiment plan <name> [parameter overrides]
+flamo experiment run <name> [parameter overrides]
+flamo experiment show <experiment-id>
+```
+
+### Analysis commands
+
+```text
+flamo analyze hotspots <run-or-artifact>
+flamo analyze scaling <experiment-or-run-set>
+flamo analyze compare <baseline-run-set> <candidate-run-set>
+flamo analyze pytorch <run-or-artifact>
+flamo analyze memory <run-or-artifact>
+flamo analyze execution <run-or-artifact> [--compare RUN]
+flamo analyze failures [filters]
+flamo analyze record <structured-input>
+flamo analyze record-comparison <structured-input>
+```
+
+### Evidence commands
+
+```text
+flamo runs list [filters]
+flamo runs show <run-id>
+flamo artifacts list [filters]
+flamo artifacts show <artifact-id>
+flamo findings list [filters]
+flamo findings show <finding-id>
+flamo findings record <structured-input>
+flamo evidence get <typed-reference>
+flamo measurements query [curated filters]
+flamo stacks callers <run-or-artifact> <frame-id>
+flamo stacks callees <run-or-artifact> <frame-id>
+flamo stacks examples <run-or-artifact> <frame-id>
+flamo trace window <artifact-id> --start NS --end NS
+flamo open <artifact-id>
+```
+
+Drill-down commands are bounded and use reviewed query families. They report
+total and returned counts, truncation, coverage, and stable keyset cursors.
+There is no arbitrary SQL or free-form PerfettoSQL command.
+
+`open` prints the appropriate installed viewer command by default.
+`flamo open --launch` executes it explicitly. It never launches a browser when
+`--json` is active.
+
+### Catalog and recovery
+
+```text
+flamo catalog validate
+flamo catalog rebuild
+flamo recover [--quarantine QUARANTINE_ID]
+flamo repair [PLAN.json]
+flamo gc [--dry-run | --apply | --purge TRASH_MANIFEST | --restore TRASH_MANIFEST]
+```
+
+Garbage collection is always dry-run by default. Apply may move only eligible
+staging, generations, caches, and unreferenced artifacts to recoverable trash.
+It reports exact paths, retention roots, and recoverability before mutation.
+Purge is a separate destructive action against a specific expired trash
+manifest.
+
+### MCP
+
+```text
+flamo mcp serve [--init]
+flamo mcp inspect
+```
+
+`serve` uses stdio exclusively. `--init` performs the additive workspace
+initialization before protocol startup and never approves project-controlled
+workloads. A network transport is outside the supported product contract.
+
+## MCP server specification
+
+### SDK and transport
+
+The server uses the official Python SDK pinned to `mcp==2.0.0b2`. The pin is
+required because v2 is a prerelease and unpinned resolution may select an
+incompatible stable v1 release.
+
+The supported transport is stdio. The server:
+
+- writes protocol messages only to stdout;
+- writes diagnostics to stderr or MCP logging;
+- initializes workspace and read services through SDK lifespan state;
+- returns an explicit MCP result envelope with concise text and one structured
+  payload;
+- reports progress for long captures and analyses;
+- propagates cancellation through the execution broker and containment backend;
+- closes DuckDB and Perfetto resources on shutdown.
+
+Handlers translate SDK inputs and outputs but contain no diagnostic logic:
+
+```python
+from typing import Annotated
+
+from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
+from mcp_types import CallToolResult, TextContent, ToolAnnotations
+
+server = MCPServer("flamo", lifespan=flamo_lifespan)
+
+
+@server.tool(
+    annotations=ToolAnnotations(
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    )
+)
+async def compare_run_sets(
+    request: CompareRunSetsRequest,
+    ctx: Context[AppContext],
+) -> Annotated[CallToolResult, ToolPayload[ComparisonResult]]:
+    services = ctx.request_context.lifespan_context.services
+    try:
+        result = await services.comparisons.compare(request)
+        payload = ToolPayload.ok(result)
+        return CallToolResult(
+            content=[TextContent(type="text", text=result.short_summary())],
+            structured_content=payload.model_dump(mode="json"),
+        )
+    except DomainError as error:
+        payload = ToolPayload.failed(error.to_detail())
+        return CallToolResult(
+            content=[TextContent(type="text", text=error.concise_message)],
+            structured_content=payload.model_dump(mode="json"),
+            is_error=True,
+        )
+```
+
+`ToolPayload[T]` is an object-root schema with `schema_version`, `ok`,
+`result | null`, and `error | null`. Domain errors use `isError=true` with that
+structured payload. Invalid protocol requests and missing tools remain JSON-RPC
+errors. Returning bare Pydantic models is forbidden because this SDK beta
+duplicates them into text and structured content; uncaught domain exceptions
+are forbidden because their structured detail is lost.
+
+The concrete v2 SDK context, annotations, content blocks, and lifespan types are
+confined to `flamo.mcp`. The server calls synchronous `server.run()` for stdio.
+It does not depend on experimental MCP background-task APIs.
+
+### Tool design
+
+Tools are task-shaped and versioned through their result schemas. Every
+registration supplies explicit `ToolAnnotations`.
+
+- Query, status, and analysis tools set `read_only_hint=True`,
+  `destructive_hint=False`, `idempotent_hint=True`, and
+  `open_world_hint=False`.
+- Read-only analysis results are deterministic for their pinned inputs and do
+  not publish evidence. `record_analysis` and `record_comparison` are explicit
+  additive operations that materialize typed provenance.
+- `plan_capture` and `plan_experiment` are read-only, idempotent, and
+  closed-world with the same annotation values.
+- Imports and finding revisions are mutating, additive where applicable,
+  non-idempotent, and closed-world:
+  `read_only_hint=False`, `destructive_hint=False`,
+  `idempotent_hint=False`, `open_world_hint=False`.
+- Capture and experiment execution are mutating, non-idempotent, potentially
+  destructive, and open-world:
+  `read_only_hint=False`, `destructive_hint=True`,
+  `idempotent_hint=False`, `open_world_hint=True`, because an uncontained
+  workload may modify files or use the network.
+
+`flamo mcp inspect --json` returns the exact installed schemas and annotations.
+The supported tools are grouped as follows:
+
+| Family | Tools |
+| --- | --- |
+| Workspace | `initialize_workspace`, `workspace_status`, `list_capabilities`, `validate_workspace` |
+| Capture and import | `plan_capture`, `execute_capture_plan`, `import_artifact`, `extract_pyperf`, `extract_coverage`, `extract_memray`, `extract_perfetto`, `extract_observations` |
+| Investigations | `create_investigation`, `list_investigations`, `get_investigation`, `record_hypothesis`, `get_hypothesis` |
+| Experiments | `plan_experiment`, `run_experiment`, `get_experiment`, `freeze_run_set` |
+| Runs and artifacts | `list_runs`, `get_run`, `list_artifacts`, `get_artifact`, `get_native_viewer_plan` |
+| Analysis | `analyze_hotspots`, `analyze_scaling`, `analyze_pytorch`, `analyze_memory`, `analyze_execution`, `analyze_failures`, `compare_run_sets`, `record_analysis`, `record_comparison` |
+| Drill-down | `get_evidence`, `query_measurements`, `get_frame_callers`, `get_frame_callees`, `get_stack_examples`, `get_trace_window` |
+| Findings | `record_finding`, `list_findings`, `get_finding` |
+
+#### `initialize_workspace`
+
+Additive and idempotent. Initializes only the MCP server's fixed project root.
+It cannot select an external path or approve workloads. Hosts may instead start
+the server using `flamo mcp serve --init`.
+
+#### `workspace_status`
+
+Read-only. Returns workspace identity, validation state, catalog state, storage
+usage, active captures, and warnings.
+
+#### `list_capabilities`
+
+Read-only. Returns adapter capabilities, installed versions, required
+permissions, unavailable features, and remediation. The default call performs
+only passive inspection. Active executable probes are separately requested,
+bounded, and executed through the subprocess broker; merely listing
+capabilities does not run a project-controlled binary found on `PATH`.
+
+#### `plan_capture`
+
+Read-only. Default inputs are an approved `workload_name`, declared scalar
+parameter overrides, adapter, and requested features. Returns the exact
+resolved plan, expected artifacts, overhead, permissions, limits, containment
+state, warnings, request digest, and a short-lived `plan_id`. The ordinary
+schema does not advertise `argv` or `cwd`. MCP does not expose ad-hoc capture
+planning.
+
+Plan IDs are 256-bit opaque random values held only in MCP-process memory. They
+are bound to workspace ID, workload approval hash, resolved executable and
+identity, arguments, working directory, child-environment policy and overrides,
+adapter/version/capabilities, requested features, validator, source state,
+limits, containment decision, and policy generation. Expiry uses monotonic
+time. Plans are atomically single-use, consumed before process creation,
+bounded in count, invalid after restart, and rejected if any bound input changes.
+A request digest is audit evidence, not an authorization boundary.
+
+#### `execute_capture_plan`
+
+Mutating and command-executing. Executes an unexpired `plan_id`, streams
+progress, observes cancellation, and returns a completed or failed run record.
+Every bound identity, capability, approval, and policy input is rechecked
+immediately before execution. It never accepts a shell string or replacement
+arguments.
+
+#### `plan_experiment` and `run_experiment`
+
+Planning is read-only over an approved named workload and experiment
+definition. Execution runs the predeclared variants and blocks, registers every
+attempted trial, validates outputs, and returns the experiment plus initial
+analysis references.
+
+#### `create_investigation` and `record_hypothesis`
+
+Mutating, additive structured operations. Hypothesis revision requires
+`expected_revision`, an explicit prediction, and a discriminating condition.
+Corresponding bounded list/get tools allow agents to resume an investigation
+without relying on prior conversation context.
+
+#### `import_artifact`
+
+Mutating. Imports a file under allowed roots, computes its identity, validates
+the selected or detected kind, creates a new import run, and optionally extracts
+evidence.
+
+#### `list_runs`
+
+Read-only, filtered, sorted, and paginated. It cannot return unbounded
+manifests.
+
+#### `get_run`
+
+Read-only. Returns one run manifest summary, artifact references, validation,
+and limitations.
+
+#### `get_artifact`
+
+Read-only metadata. Returns artifact identity, kind, size, sensitivity,
+integrity, supported analyses, and paginated registrations. An optional
+`run_id` selects one contextual registration. It does not return binary
+content.
+
+#### `analyze_hotspots`
+
+Read-only. Runs the appropriate profile or trace query and returns bounded
+source-linked hotspots.
+
+#### `analyze_scaling`
+
+Strictly read-only over an existing experiment or frozen run set. It never
+executes missing trials. Work requiring collection uses `plan_experiment` and
+`run_experiment`.
+
+#### `compare_run_sets`
+
+Read-only. Returns compatibility, metric differences, frame/operator changes,
+validation, attempted/failure counts, estimand, and limitations. Pairwise run
+IDs are accepted as one-element run-set shorthand.
+
+#### `record_analysis` and `record_comparison`
+
+Mutating and additive. These execute the same curated deterministic recipes as
+the read-only tools, then persist an `AnalysisRecord`, result digest, exact
+input corpus commit, typed evidence references, coverage, and limitations.
+They do not accept arbitrary SQL or caller-supplied result bodies.
+
+#### `analyze_pytorch`
+
+Read-only over an existing trace. Returns operator and accelerator summaries.
+
+#### `analyze_memory`
+
+Read-only over an existing memory artifact or run.
+
+#### `analyze_execution`
+
+Read-only over coverage, trace annotations, configuration observations, and SDK
+observations. Returns bounded source-path evidence and, optionally, differences
+between two runs.
+
+#### `record_finding`
+
+Mutating. Stores a structured claim with typed evidence references. Updating
+requires `expected_revision`. It validates reference existence, assessment
+requirements, and evidence-level consistency.
+
+#### `list_findings` and `get_finding`
+
+Read-only, filtered, bounded, and paginated finding retrieval.
+
+#### `get_evidence` and bounded drill-down tools
+
+Read-only operations retrieve a typed evidence reference, curated measurement
+query, hotspot callers/callees/representative stacks, or a bounded trace
+time-window/event neighborhood. They return stable cursors, total/returned
+counts, coverage, and limitations. They do not accept raw SQL.
+
+#### `validate_workspace`
+
+Read-only by default. Checks manifests, artifact hashes on request, Parquet
+schemas, references, and catalog freshness. Repairs require the explicit CLI
+repair command; MCP never repairs.
+
+### MCP resources
+
+Resources provide stable, bounded representations:
+
+```text
+flamo://runs/{run_id}
+flamo://artifacts/{artifact_id}
+flamo://findings/{finding_id}
+flamo://investigations/{investigation_id}
+flamo://hypotheses/{hypothesis_id}
+flamo://experiments/{experiment_id}
+flamo://run-sets/{run_set_id}
+```
+
+Resources return JSON or text summaries. Large native artifacts are represented
+by metadata and local handles, not injected into model context. Template
+resources declare `mime_type="application/json"`, percent-encode identifiers,
+and resolve services through a server-local lifespan closure. In the exact
+`2.0.0b2` wheel, template-handler `Context` is reconstructed by Pydantic and
+loses its private request state, so `ctx.request_context` raises at runtime.
+Resource handlers therefore omit `Context`; the MCP adapter stores the active
+lifespan value in a closure for the duration of `server.run()`. Tool handlers
+continue using injected `ctx.request_context.lifespan_context`. A contract test
+must fail if a future SDK change invalidates either path, and the workaround is
+removed on upgrade when template context is proven functional.
+
+Mutable workspace and capability views remain tools rather than static
+resources because this SDK beta does not inject lifespan context into static
+resource handlers. Tool results should include MCP `ResourceLink` blocks for
+addressable runs, artifacts, findings, analyses, and comparisons when useful.
+
+### No MCP prompts
+
+Investigation recipes belong in executable domain logic and tool descriptions,
+not MCP prompt templates. Prompts can be added only when they express a stable
+human-facing workflow that cannot be represented by structured tools.
+
+### Progress
+
+Long operations report named phases:
+
+```text
+planning
+warming_up
+capturing
+validating_artifact
+extracting
+publishing
+analyzing
+completed
+```
+
+Progress is one monotonic stream for the entire request; it never resets at a
+phase boundary. A default operation uses fixed phase work units, for example
+`0/8 planning` through `8/8 completed`. Measurable sub-work may occupy a fixed
+interval. Unknown-duration work reports phase transitions and uses MCP logging
+for elapsed time rather than inventing percentages. Reporting is best-effort:
+`ctx.report_progress()` is a no-op when the client supplied no progress token.
+
+### Cancellation
+
+An incoming MCP cancellation cancels the handler's AnyIO scope. Cleanup must
+therefore be explicitly shielded and bounded:
+
+```python
+try:
+    return await execution.execute_capture_plan(plan)
+except anyio.get_cancelled_exc_class():
+    with anyio.CancelScope(shield=True):
+        with anyio.fail_after(cleanup_timeout):
+            await execution.cancel_containment(plan.run_id)
+            await runs.publish_cancelled(plan.run_id)
+    raise
+```
+
+Cleanup sends a graceful signal, waits a bounded interval, terminates the
+entire containment unit or process tree, retains complete validated artifacts,
+quarantines incomplete artifacts, publishes terminal lifecycle revisions, and
+releases staging resources and locks. It then re-raises cancellation. Startup
+recovery handles process death before shielded cleanup completes. Cancellation
+must not leave an active lease indefinitely.
+
+### Structured errors
+
+Every tool returns the same object-root transport envelope. For an expected
+domain failure, `ok=false`, `result=null`, `error` contains:
+
+```json
+{
+  "code": "CAPABILITY_UNAVAILABLE",
+  "message": "Native stack capture is unavailable on this platform.",
+  "retryable": false,
+  "details": {},
+  "remediation": [
+    "Install py-spy or select Python-only stack capture."
+  ],
+  "run_id": null
+}
+```
+
+Structured error codes include:
+
+- `WORKSPACE_NOT_FOUND`;
+- `WORKSPACE_INVALID`;
+- `CAPABILITY_UNAVAILABLE`;
+- `INVALID_CAPTURE_PLAN`;
+- `EXECUTION_REFUSED`;
+- `PROCESS_FAILED`;
+- `PROCESS_TIMEOUT`;
+- `PROCESS_CANCELLED`;
+- `ARTIFACT_TOO_LARGE`;
+- `ARTIFACT_INTEGRITY_FAILED`;
+- `ARTIFACT_PARSE_FAILED`;
+- `EVIDENCE_SCHEMA_MISMATCH`;
+- `COMPARISON_INVALID`;
+- `QUERY_BUDGET_EXCEEDED`;
+- `WRITE_LOCK_TIMEOUT`;
+- `SENSITIVE_ARTIFACT_REFUSED`;
+- `INTERNAL_ERROR`.
+
+Tracebacks are logged locally but not returned by default.

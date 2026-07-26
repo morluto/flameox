@@ -11,7 +11,41 @@ Perfetto Trace Processor, coverage.py, Memray, and torch.profiler do collection
 or native decoding. Flamo supplies the shared provenance, immutable corpus,
 bounded analyses, experimental design, and agent-safe transport around them.
 
-The full product and safety contract is [SPEC.md](SPEC.md).
+The durable documentation is split by concern:
+
+- [Architecture](docs/architecture.md) explains the process model, package
+  boundaries, dependencies, and platform policy.
+- [Storage and evidence](docs/storage-and-evidence.md) defines authoritative
+  data, identity, provenance, publication, and schema rules.
+- [Investigations and analysis](docs/investigations.md) defines workloads,
+  experiments, recipes, statistics, and evidence quality.
+- [Adapters and capabilities](docs/adapters.md) defines integration,
+  compatibility, probing, and approval behavior.
+- [Runtime safety](docs/runtime-safety.md) defines concurrency, recovery,
+  retention, integrity, security, privacy, and local observability.
+- [CLI and MCP boundaries](docs/interfaces.md) defines the human and agent
+  interfaces and their trust boundaries.
+- [Architectural decisions](docs/architecture-decisions.md) records settled
+  choices and open design questions.
+- [Acceptance and verification](docs/acceptance.md) defines completion criteria
+  and maps them to representative proof.
+
+## Scope
+
+Flamo supports local, evidence-backed investigation of performance, memory,
+execution, concurrency, and reliability behavior. It preserves native
+artifacts and failed attempts, pins analyses to immutable corpus snapshots, and
+keeps observed, derived, and inferred claims distinct. Profiles guide
+discovery; representative workloads, declared metrics, compatible identities,
+preserved samples, and a semantic oracle support confirmatory claims.
+
+Flamo does not implement profilers, trace databases, native viewers, private
+format decoders, or a universal event schema. It does not continuously monitor
+production, upload evidence, provide accounts or remote synchronization,
+modify source code, install system tools, or delete artifacts automatically.
+Neither interface exposes unrestricted shell execution or SQL. Named workloads
+are described as contained only when an active backend enforces that boundary,
+and statistical non-significance is not treated as proof of equivalence.
 
 ## Install
 
