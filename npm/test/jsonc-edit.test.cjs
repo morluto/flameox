@@ -74,6 +74,8 @@ test("bootstrap launches the exactly matching Python release", () => {
   assert.deepEqual(JSON.parse(fs.readFileSync(capture, "utf8")), [
     "--no-config",
     "--no-sources",
+    "--python",
+    "3.12",
     "--from",
     "flamo-diagnostics==0.1.0",
     "flamo",

@@ -81,6 +81,8 @@ class SetupInspection(ContractModel):
 class ResolvedSetupPlan:
     public: SetupPlan
     edits: tuple[ClientConfigEdit, ...]
+    install_manifest_original: bytes | None
+    install_manifest_mode: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,16 +166,22 @@ class SetupService:
         version: str | None,
     ) -> ResolvedSetupPlan:
         self._recover_interrupted()
+        manifest_original, manifest_mode = self._snapshot_file(self.install_manifest)
         if operation is SetupOperation.VERIFY:
-            executable = self._active_executable()
+            manifest = self._read_install_manifest()
             public = SetupPlan(
                 operation=operation,
-                version=self.inspect().active_version,
+                version=manifest.active_version if manifest else None,
                 runtime_action=RuntimeAction.NOT_REQUIRED,
-                runtime_executable=executable,
+                runtime_executable=manifest.executable if manifest else None,
                 clients=(),
             )
-            return ResolvedSetupPlan(public, ())
+            return ResolvedSetupPlan(
+                public,
+                (),
+                manifest_original,
+                manifest_mode,
+            )
         if not clients:
             raise DomainError(
                 ErrorCode.EXECUTION_REFUSED,
@@ -237,7 +245,12 @@ class SetupService:
                 else ()
             ),
         )
-        return ResolvedSetupPlan(public, edits)
+        return ResolvedSetupPlan(
+            public,
+            edits,
+            manifest_original,
+            manifest_mode,
+        )
 
     async def apply(self, plan: ResolvedSetupPlan) -> SetupReport:
         self.data_root.mkdir(parents=True, exist_ok=True)
@@ -270,6 +283,7 @@ class SetupService:
 
     async def _apply_locked(self, plan: ResolvedSetupPlan) -> SetupReport:
         public = plan.public
+        self._check_preflight(plan)
         if public.operation is SetupOperation.VERIFY:
             executable = public.runtime_executable
             if executable is None:
@@ -293,7 +307,6 @@ class SetupService:
         if public.version is not None:
             installation = await self.runtime.install(public.version)
 
-        self._check_preflight(plan.edits)
         changed = tuple(
             edit
             for edit in plan.edits
@@ -301,9 +314,7 @@ class SetupService:
             not in (ClientPlanAction.ALREADY_CURRENT, ClientPlanAction.NOT_CONFIGURED)
         )
         unchanged = tuple(edit.client for edit in plan.edits if edit not in changed)
-        manifest_original = (
-            self.install_manifest.read_bytes() if self.install_manifest.exists() else None
-        )
+        manifest_original = plan.install_manifest_original
         manifest_updated = (
             manifest_original
             if public.operation is SetupOperation.REMOVE
@@ -327,7 +338,7 @@ class SetupService:
                     self.install_manifest,
                     manifest_original,
                     manifest_updated,
-                    0o600,
+                    plan.install_manifest_mode,
                 )
             )
         if not mutations:
@@ -374,21 +385,18 @@ class SetupService:
         self,
         plan: SetupPlan,
     ) -> bytes:
-        current = self._read_install_manifest()
-        version = plan.version or (current.active_version if current else None)
-        executable = plan.runtime_executable or (current.executable if current else None)
-        if version is None or executable is None:
+        if plan.version is None or plan.runtime_executable is None:
             return b""
         manifest = _InstallManifest(
-            active_version=version,
-            executable=executable,
+            active_version=plan.version,
+            executable=plan.runtime_executable,
         )
         return (
             json.dumps(manifest.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
         ).encode()
 
-    def _check_preflight(self, edits: tuple[ClientConfigEdit, ...]) -> None:
-        for edit in edits:
+    def _check_preflight(self, plan: ResolvedSetupPlan) -> None:
+        for edit in plan.edits:
             current = edit.path.read_bytes() if edit.path.exists() else None
             current_mode = (
                 stat.S_IMODE(edit.path.stat().st_mode) if edit.path.exists() else 0o600
@@ -400,6 +408,31 @@ class SetupService:
                     retryable=True,
                     remediation=("Review the new configuration and run setup again.",),
                 )
+        manifest, manifest_mode = self._snapshot_file(self.install_manifest)
+        if (
+            manifest != plan.install_manifest_original
+            or manifest_mode != plan.install_manifest_mode
+        ):
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                "Flamo setup metadata changed after the setup preview.",
+                retryable=True,
+                remediation=("Review the active runtime and run setup again.",),
+            )
+
+    @staticmethod
+    def _snapshot_file(path: Path) -> tuple[bytes | None, int]:
+        try:
+            metadata = path.stat()
+            return path.read_bytes(), stat.S_IMODE(metadata.st_mode)
+        except FileNotFoundError:
+            return None, 0o600
+        except OSError as exc:
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                f"Could not inspect setup state: {path}",
+                details={"error": str(exc)},
+            ) from exc
 
     def _write_journal(self, edits: list[_FileMutation]) -> None:
         journal = _SetupJournal(
@@ -514,11 +547,6 @@ class SetupService:
                 details={"error": str(exc)},
             ) from exc
         return manifest
-
-    def _active_executable(self) -> Path | None:
-        manifest = self._read_install_manifest()
-        return manifest.executable if manifest else None
-
 
 def _unique_clients(clients: tuple[SetupClient, ...]) -> tuple[SetupClient, ...]:
     selected = set(clients)

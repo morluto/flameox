@@ -114,6 +114,37 @@ async def test_setup_refuses_config_changed_after_preview(tmp_path: Path) -> Non
 
 
 @pytest.mark.anyio
+async def test_setup_refuses_stale_plan_after_active_runtime_changes(
+    tmp_path: Path,
+) -> None:
+    service, runtime, home = make_service(tmp_path)
+    competing = SetupService(
+        home=home,
+        data_root=service.data_root,
+        runtime=runtime,
+    )
+    first = service.plan(
+        operation=SetupOperation.CONFIGURE,
+        clients=(SetupClient.CLAUDE,),
+        version="0.1.0",
+    )
+    stale = competing.plan(
+        operation=SetupOperation.CONFIGURE,
+        clients=(SetupClient.GEMINI,),
+        version="0.2.0",
+    )
+
+    await service.apply(first)
+    with pytest.raises(DomainError) as caught:
+        await competing.apply(stale)
+
+    assert caught.value.code is ErrorCode.REVISION_CONFLICT
+    assert service.inspect().active_version == "0.1.0"
+    assert "0.2.0" not in runtime.versions
+    assert not (home / ".gemini" / "settings.json").exists()
+
+
+@pytest.mark.anyio
 async def test_setup_recovers_interrupted_config_transaction(tmp_path: Path) -> None:
     service, _, home = make_service(tmp_path)
     config = home / ".claude.json"

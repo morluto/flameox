@@ -30,6 +30,8 @@ const child = spawn(
   [
     "--no-config",
     "--no-sources",
+    "--python",
+    "3.12",
     "--from",
     pythonPackage,
     "flamo",
