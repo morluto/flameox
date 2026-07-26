@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import json
 import mimetypes
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
-
 from flamo.application.environment import collect_environment
+from flamo.application.evidence_rows import (
+    artifact_registration_row,
+    environment_row,
+    source_state_row,
+)
 from flamo.application.run_rows import run_row
 from flamo.application.source import collect_partial_source_state
 from flamo.domain.errors import DomainError, ErrorCode
@@ -22,14 +24,11 @@ from flamo.domain.models import (
     ValidationStatus,
 )
 from flamo.evidence import GenerationPublisher
+from flamo.models import ContractModel
 from flamo.storage import ArtifactStore, RunStore, Workspace
 
 
-class ApplicationModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-
-class ImportArtifactRequest(ApplicationModel):
+class ImportArtifactRequest(ContractModel):
     path: Path
     kind: ArtifactKind = ArtifactKind.COLLECTOR_METADATA
     media_type: str | None = None
@@ -40,7 +39,7 @@ class ImportArtifactRequest(ApplicationModel):
     allow_external_path: bool = False
 
 
-class ImportResult(ApplicationModel):
+class ImportResult(ContractModel):
     run: RunManifest
     artifact_id: str
     corpus_commit_id: str
@@ -122,45 +121,13 @@ class ImportService:
             {
                 "runs": [run_row(registered)],
                 "artifact_registrations": [
-                    {
-                        **registration.model_dump(mode="python"),
-                        "kind": registration.kind.value,
-                        "sensitivity": registration.sensitivity.value,
-                        "byte_length": stored.content.byte_length,
-                    }
+                    artifact_registration_row(
+                        registration,
+                        byte_length=stored.content.byte_length,
+                    )
                 ],
-                "environments": [
-                    {
-                        "environment_id": environment.environment_id,
-                        "observed_at": environment.observed_at,
-                        "identity_quality": environment.identity_quality.value,
-                        "fields_json": json.dumps(
-                            environment.fields,
-                            allow_nan=False,
-                            separators=(",", ":"),
-                            sort_keys=True,
-                        ),
-                        "missing_fields": list(environment.missing_fields),
-                    }
-                ],
-                "source_states": [
-                    {
-                        "source_state_id": source_state.source_state_id,
-                        "identity_quality": source_state.identity_quality.value,
-                        "repository_root": source_state.repository_root,
-                        "head_commit": source_state.head_commit,
-                        "diff_digest": source_state.diff_digest,
-                        "executable_digest": source_state.executable_digest,
-                        "build_id": source_state.build_id,
-                        "fields_json": json.dumps(
-                            source_state.fields,
-                            allow_nan=False,
-                            separators=(",", ":"),
-                            sort_keys=True,
-                        ),
-                        "missing_fields": list(source_state.missing_fields),
-                    }
-                ],
+                "environments": [environment_row(environment)],
+                "source_states": [source_state_row(source_state)],
             },
             publisher="flamo.import",
             publisher_version="1",

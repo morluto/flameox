@@ -9,10 +9,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import Field, field_validator
 
 from flamo.domain.errors import DomainError, ErrorCode
 from flamo.domain.models import ProcessResult
+from flamo.models import ContractModel
 
 _DANGEROUS_ENVIRONMENT = {
     "BASH_ENV",
@@ -27,9 +28,7 @@ _DANGEROUS_ENVIRONMENT = {
 }
 
 
-class ExecutionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ExecutionRequest(ContractModel):
     argv: tuple[str, ...]
     cwd: Path
     environment_allowlist: tuple[str, ...] = ("PATH",)
@@ -38,6 +37,7 @@ class ExecutionRequest(BaseModel):
     timeout_seconds: float = Field(default=300, gt=0, le=86_400)
     graceful_shutdown_seconds: float = Field(default=5, ge=0, le=60)
     max_output_bytes: int = Field(default=16_777_216, gt=0)
+    systemd_scope_unit: str | None = None
 
     @field_validator("argv")
     @classmethod
@@ -46,6 +46,15 @@ class ExecutionRequest(BaseModel):
             raise ValueError("argv must include an executable")
         if any(not item or "\x00" in item for item in value):
             raise ValueError("argv entries must be non-empty and cannot contain NUL")
+        return value
+
+    @field_validator("systemd_scope_unit")
+    @classmethod
+    def validate_scope_unit(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.endswith(".scope") or "/" in value or "\\" in value or "\x00" in value:
+            raise ValueError("systemd scope unit must be a simple .scope unit name")
         return value
 
 
@@ -78,6 +87,7 @@ class SubprocessBroker:
         request: ExecutionRequest,
         *,
         on_started: Callable[[int], Awaitable[None]] | None = None,
+        on_cleanup: Callable[[bool], Awaitable[None]] | None = None,
     ) -> ExecutionOutcome:
         cwd = self._resolve_cwd(request.cwd, request.allowed_working_roots)
         environment = self._build_environment(request)
@@ -99,13 +109,17 @@ class SubprocessBroker:
             process = await asyncio.shield(spawn)
         except asyncio.CancelledError:
             process = await asyncio.shield(spawn)
-            await asyncio.shield(self._terminate(process, request.graceful_shutdown_seconds))
+            cleanup_complete = await asyncio.shield(self._terminate(process, request))
+            if on_cleanup is not None:
+                await asyncio.shield(on_cleanup(cleanup_complete))
             raise
         if on_started is not None:
             try:
                 await on_started(process.pid)
             except BaseException:
-                await asyncio.shield(self._terminate(process, request.graceful_shutdown_seconds))
+                cleanup_complete = await asyncio.shield(self._terminate(process, request))
+                if on_cleanup is not None:
+                    await asyncio.shield(on_cleanup(cleanup_complete))
                 raise
         assert process.stdout is not None
         assert process.stderr is not None
@@ -125,7 +139,9 @@ class SubprocessBroker:
         except TimeoutError as exc:
             timed_out = True
             cancellation_cause = "timeout"
-            await asyncio.shield(self._terminate(process, request.graceful_shutdown_seconds))
+            cleanup_complete = await asyncio.shield(self._terminate(process, request))
+            if on_cleanup is not None:
+                await asyncio.shield(on_cleanup(cleanup_complete))
             await self._settle_readers(stdout_task, stderr_task)
             raise DomainError(
                 ErrorCode.PROCESS_TIMEOUT,
@@ -134,7 +150,9 @@ class SubprocessBroker:
             ) from exc
         except _OutputLimitExceeded as exc:
             cancellation_cause = "output_limit"
-            await asyncio.shield(self._terminate(process, request.graceful_shutdown_seconds))
+            cleanup_complete = await asyncio.shield(self._terminate(process, request))
+            if on_cleanup is not None:
+                await asyncio.shield(on_cleanup(cleanup_complete))
             await self._settle_readers(stdout_task, stderr_task)
             raise DomainError(
                 ErrorCode.QUERY_BUDGET_EXCEEDED,
@@ -142,7 +160,9 @@ class SubprocessBroker:
             ) from exc
         except asyncio.CancelledError:
             cancellation_cause = "caller_cancelled"
-            await asyncio.shield(self._terminate(process, request.graceful_shutdown_seconds))
+            cleanup_complete = await asyncio.shield(self._terminate(process, request))
+            if on_cleanup is not None:
+                await asyncio.shield(on_cleanup(cleanup_complete))
             await self._settle_readers(stdout_task, stderr_task)
             raise
 
@@ -168,7 +188,11 @@ class SubprocessBroker:
             stdout=stdout,
             stderr=stderr,
             resolved_executable=executable,
-            containment="process_group" if os.name == "posix" else "process",
+            containment=(
+                "systemd_scope"
+                if request.systemd_scope_unit is not None
+                else ("process_group" if os.name == "posix" else "process")
+            ),
         )
 
     async def _read_bounded(
@@ -185,10 +209,16 @@ class SubprocessBroker:
     async def _terminate(
         self,
         process: asyncio.subprocess.Process,
-        grace_seconds: float,
-    ) -> None:
+        request: ExecutionRequest,
+    ) -> bool:
         if process.returncode is not None:
-            return
+            return True
+        scope_stopped = True
+        if request.systemd_scope_unit is not None:
+            scope_stopped = await self._stop_systemd_scope(
+                request.systemd_scope_unit,
+                timeout_seconds=request.graceful_shutdown_seconds,
+            )
         try:
             if os.name == "posix":
                 os.killpg(process.pid, signal.SIGTERM)
@@ -196,11 +226,11 @@ class SubprocessBroker:
                 process.terminate()
         except ProcessLookupError:
             await process.wait()
-            return
+            return scope_stopped
         try:
-            async with asyncio.timeout(grace_seconds):
+            async with asyncio.timeout(request.graceful_shutdown_seconds):
                 await process.wait()
-                return
+                return scope_stopped
         except TimeoutError:
             pass
         try:
@@ -211,6 +241,36 @@ class SubprocessBroker:
         except ProcessLookupError:
             pass
         await process.wait()
+        return scope_stopped
+
+    async def _stop_systemd_scope(
+        self,
+        unit: str,
+        *,
+        timeout_seconds: float,
+    ) -> bool:
+        systemctl = shutil.which("systemctl")
+        if systemctl is None:
+            return False
+        process: asyncio.subprocess.Process | None = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                str(Path(systemctl).resolve()),
+                "--user",
+                "stop",
+                unit,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=os.name == "posix",
+            )
+            async with asyncio.timeout(max(timeout_seconds, 1)):
+                return await process.wait() == 0
+        except (OSError, TimeoutError):
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
+            return False
 
     async def _settle_readers(
         self,
@@ -245,6 +305,10 @@ class SubprocessBroker:
             for name in request.environment_allowlist
             if name in os.environ and name not in _DANGEROUS_ENVIRONMENT
         }
+        if request.systemd_scope_unit is not None:
+            for name in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"):
+                if name in os.environ:
+                    environment[name] = os.environ[name]
         for name, value in request.environment_overrides.items():
             if name in _DANGEROUS_ENVIRONMENT:
                 raise DomainError(

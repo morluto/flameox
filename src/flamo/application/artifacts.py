@@ -3,16 +3,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import ClassVar
 
-from pydantic import BaseModel, ConfigDict
-
 from flamo.catalog import Catalog
 from flamo.domain import ArtifactContent, Sensitivity
+from flamo.models import ContractModel
 from flamo.storage import ArtifactStore, Workspace
 
 
-class ArtifactRegistrationSummary(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ArtifactRegistrationSummary(ContractModel):
     registration_id: str
     run_id: str
     display_name: str
@@ -25,9 +22,7 @@ class ArtifactRegistrationSummary(BaseModel):
     registered_at: datetime
 
 
-class ArtifactMetadataResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ArtifactMetadataResult(ContractModel):
     schema_version: int = 1
     content: ArtifactContent
     local_handle: str
@@ -36,9 +31,7 @@ class ArtifactMetadataResult(BaseModel):
     effective_sensitivity: Sensitivity
 
 
-class ArtifactListItem(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ArtifactListItem(ContractModel):
     artifact_id: str
     byte_length: int
     effective_sensitivity: Sensitivity
@@ -46,9 +39,7 @@ class ArtifactListItem(BaseModel):
     kinds: tuple[str, ...]
 
 
-class ArtifactListResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class ArtifactListResult(ContractModel):
     schema_version: int = 1
     corpus_commit_id: str
     artifacts: tuple[ArtifactListItem, ...]

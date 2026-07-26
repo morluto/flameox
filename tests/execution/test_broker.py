@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -121,3 +125,88 @@ async def test_cancellation_performs_cleanup_before_propagating(
 
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.anyio
+async def test_systemd_scope_cancellation_terminates_escaped_descendants(
+    tmp_path: Path,
+) -> None:
+    systemd_run = shutil.which("systemd-run")
+    if systemd_run is None:
+        pytest.skip("systemd-run is not installed")
+    probe = subprocess.run(
+        (
+            systemd_run,
+            "--user",
+            "--scope",
+            "--quiet",
+            "--collect",
+            "/usr/bin/true",
+        ),
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if probe.returncode != 0:
+        pytest.skip("A systemd user manager is not available")
+    unit = f"flamo-test-{uuid4().hex}.scope"
+    pid_path = tmp_path / "descendant.pid"
+    code = (
+        "import pathlib, subprocess, sys, time; "
+        "child = subprocess.Popen("
+        "[sys.executable, '-c', 'import time; time.sleep(30)'], "
+        "start_new_session=True); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+        "time.sleep(30)"
+    )
+    cleanup: list[bool] = []
+
+    async def record_cleanup(complete: bool) -> None:
+        cleanup.append(complete)
+
+    task = asyncio.create_task(
+        SubprocessBroker().run(
+            ExecutionRequest(
+                argv=(
+                    systemd_run,
+                    "--user",
+                    "--scope",
+                    "--quiet",
+                    "--collect",
+                    "--expand-environment=no",
+                    f"--unit={unit}",
+                    "--property=KillMode=control-group",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    code,
+                    str(pid_path),
+                ),
+                cwd=tmp_path,
+                allowed_working_roots=(tmp_path,),
+                environment_allowlist=("PATH",),
+                timeout_seconds=5,
+                max_output_bytes=1_000,
+                systemd_scope_unit=unit,
+            ),
+            on_cleanup=record_cleanup,
+        )
+    )
+    for _ in range(100):
+        if pid_path.is_file():
+            break
+        await asyncio.sleep(0.02)
+    assert pid_path.is_file()
+    descendant_pid = int(pid_path.read_text())
+    assert os.path.exists(f"/proc/{descendant_pid}")
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    for _ in range(100):
+        if not os.path.exists(f"/proc/{descendant_pid}"):
+            break
+        await asyncio.sleep(0.02)
+
+    assert cleanup == [True]
+    assert not os.path.exists(f"/proc/{descendant_pid}")
