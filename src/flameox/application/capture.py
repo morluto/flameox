@@ -1166,11 +1166,21 @@ class CaptureService:
         stat_path = Path("/proc") / str(process_id) / "stat"
         try:
             boot_id = boot_id_path.read_text().strip()
-            stat_fields = stat_path.read_text().split()
-            process_start_identity = stat_fields[21]
+            # /proc/[pid]/stat field 2 ("comm") is wrapped in parentheses and
+            # may contain spaces or additional parentheses (e.g. "Web Content",
+            # "GPU Process"). Splitting the whole line on whitespace therefore
+            # misaligns every field after "comm" and yields the wrong starttime
+            # (field 22). Isolate "comm" between the first "(" and the last ")"
+            # and split the remainder instead.
+            stat_text = stat_path.read_text()
+            comm_end = stat_text.rindex(")")
+            stat_fields = stat_text[comm_end + 1 :].split()
+            # Fields after "comm" are 1-indexed from field 3 in proc(5);
+            # starttime is field 22, so it sits at index 22 - 3 == 19 here.
+            process_start_identity = stat_fields[19]
         except FileNotFoundError:
             return None
-        except (OSError, IndexError) as exc:
+        except (OSError, IndexError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.PROCESS_FAILED,
                 "Could not establish the child process lease identity.",
