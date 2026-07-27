@@ -219,7 +219,9 @@ class ScalingCorrelatedHotspot(ContractModel):
     p_value: float
     adjusted_p_value: float
     multiplicity_method: str
-    tested_hypothesis_count: int
+    # ``None`` while no hypotheses have been tested yet; the multiplicity
+    # method string must not be combined with a zero count.
+    tested_hypothesis_count: int | None = None
     independent_trial_count: int
     supported_min: float
     supported_max: float
@@ -670,15 +672,17 @@ class RecipeService:
             and "warm" in str(value.get("phase", "")).lower()
         )
         allocation_bytes = sum(item.allocation_bytes or 0 for item in operators) or None
+        # Use the 25th percentile of per-event inclusive time as the
+        # "typical small" threshold. The median flags ~50% of all operators
+        # (by definition) and is not a useful discriminator for "repeated
+        # *small* operations"; the lower quartile targets operators whose
+        # per-event cost is genuinely smaller than the bulk of the workload.
+        per_event_times = [
+            operator.inclusive_ns / max(operator.event_count, 1) for operator in operators
+        ]
         typical_event_ns = max(
             1.0,
-            float(
-                np.median(
-                    [operator.inclusive_ns / max(operator.event_count, 1) for operator in operators]
-                )
-            )
-            if operators
-            else 1.0,
+            float(np.percentile(per_event_times, 25)) if per_event_times else 1.0,
         )
         repeated_small = tuple(
             sorted(
@@ -1286,7 +1290,7 @@ class RecipeService:
                     p_value=p_value,
                     adjusted_p_value=p_value,
                     multiplicity_method="benjamini-hochberg-fdr",
-                    tested_hypothesis_count=0,
+
                     independent_trial_count=len(samples),
                     supported_min=float(np.min(x)),
                     supported_max=float(np.max(x)),

@@ -1169,17 +1169,25 @@ class CaptureService:
         stat_path = Path("/proc") / str(process_id) / "stat"
         try:
             boot_id = boot_id_path.read_text().strip()
-            # /proc/[pid]/stat field 2 ("comm") is wrapped in parentheses and
-            # may contain spaces or additional parentheses (e.g. "Web Content",
-            # "GPU Process"). Splitting the whole line on whitespace therefore
-            # misaligns every field after "comm" and yields the wrong starttime
-            # (field 22). Isolate "comm" between the first "(" and the last ")"
-            # and split the remainder instead.
-            stat_text = stat_path.read_text()
+
+            # Read /proc/[pid]/stat with a bounded low-level read instead of
+            # read_text(), which streams the whole file and can block
+            # indefinitely on a stuck /proc mount. The stat line is small
+            # (well under 8 KiB), so a single bounded os.read is sufficient.
+            # The process name (field 2, "comm") is parenthesized and may
+            # contain spaces or parentheses (e.g. "Web Content"), so split
+            # on the last ")" and index the remainder rather than the whole
+            # line: starttime is field 22, i.e. index 19 in the slice that
+            # starts at field 3.
+            stat_fd = os.open(str(stat_path), os.O_RDONLY)
+            try:
+                stat_raw = os.read(stat_fd, 8192)
+            finally:
+                os.close(stat_fd)
+            stat_text = stat_raw.decode("utf-8", errors="replace")
             comm_end = stat_text.rindex(")")
-            stat_fields = stat_text[comm_end + 1 :].split()
-            # Fields after "comm" are 1-indexed from field 3 in proc(5);
-            # starttime is field 22, so it sits at index 22 - 3 == 19 here.
+            stat_fields = stat_text[comm_end + 1:].split()
+
             process_start_identity = stat_fields[19]
         except FileNotFoundError:
             return None
@@ -1189,8 +1197,8 @@ class CaptureService:
                 "Could not establish the child process lease identity.",
             ) from exc
         return CaptureLease(
-            process_id=process_id,
             process_start_identity=process_start_identity,
+            process_id=process_id,
             boot_id=boot_id,
             heartbeat_monotonic_ns=time.monotonic_ns(),
             observed_at=observed,
