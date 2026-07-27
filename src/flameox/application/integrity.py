@@ -10,7 +10,7 @@ from flameox.catalog import Catalog
 from flameox.domain import DomainError
 from flameox.evidence.schemas import schema_for
 from flameox.models import ContractModel
-from flameox.storage import ArtifactStore, GenerationManifest, RunStore, Workspace
+from flameox.storage import ArtifactStore, CorpusCommit, GenerationManifest, RunStore, Workspace
 
 
 class IntegrityIssue(ContractModel):
@@ -35,9 +35,12 @@ class IntegrityService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
 
-    def validate(self, *, full: bool = False) -> IntegrityResult:
+    def _check_manifests(
+        self,
+        head: CorpusCommit,
+        full: bool,
+    ) -> tuple[int, int, list[IntegrityIssue]]:
         issues: list[IntegrityIssue] = []
-        head = self.workspace.corpus.read_head()
         checked_generations = 0
         checked_parquet = 0
         for relative in head.generation_manifests:
@@ -46,7 +49,30 @@ class IntegrityService:
                 path.relative_to(self.workspace.paths.root)
                 manifest = GenerationManifest.model_validate_json(path.read_text())
                 checked_generations += 1
-            except (ValueError, OSError) as exc:
+            except FileNotFoundError:
+                issues.append(
+                    IntegrityIssue(
+                        severity="error",
+                        code="MISSING_GENERATION_MANIFEST",
+                        path=str(path),
+                        message="Generation manifest is missing from the corpus.",
+                    )
+                )
+                continue
+            except OSError as exc:
+                issues.append(
+                    IntegrityIssue(
+                        severity="error",
+                        code="UNREADABLE_GENERATION_MANIFEST",
+                        path=str(path),
+                        message=str(exc),
+                    )
+                )
+                continue
+            except ValueError as exc:
+                # ValidationError is a ValueError subclass and is the
+                # intended target; a stray ValueError from elsewhere would
+                # otherwise be misreported as a corrupt manifest.
                 issues.append(
                     IntegrityIssue(
                         severity="error",
@@ -87,6 +113,16 @@ class IntegrityService:
                             message=str(exc),
                         )
                     )
+
+        return checked_generations, checked_parquet, issues
+
+    def validate(self, *, full: bool = False) -> IntegrityResult:
+        issues: list[IntegrityIssue] = []
+        head = self.workspace.corpus.read_head()
+        checked_generations, checked_parquet, manifest_issues = self._check_manifests(
+            head, full
+        )
+        issues.extend(manifest_issues)
 
         checked_artifacts = 0
         for metadata_path in self.workspace.paths.artifacts.glob("*/*/artifact.json"):
