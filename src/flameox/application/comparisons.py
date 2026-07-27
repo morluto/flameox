@@ -489,6 +489,12 @@ class ComparisonService:
                         )
                     )
                 )
+                if unit_key in values:
+                    raise DomainError(
+                        ErrorCode.COMPARISON_INVALID,
+                        "Run set contains duplicate measurement keys without block identities.",
+                        details={"run_id": member.run_id, "key": unit_key},
+                    )
                 values[unit_key] = float(value)
             if block_key is not None and member_values:
                 if block_key in values:
