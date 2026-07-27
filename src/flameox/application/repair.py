@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Literal
 
@@ -8,6 +9,8 @@ from flameox.domain import DomainError, ErrorCode, RunManifest, digest_model
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 from flameox.storage.atomic import atomic_write_bytes
+
+logger = logging.getLogger(__name__)
 
 
 class RepairEntry(ContractModel):
@@ -47,8 +50,8 @@ class RepairService:
             try:
                 RunManifest.model_validate_json(projection.read_text())
                 continue
-            except (OSError, ValueError):
-                pass
+            except (OSError, ValueError) as exc:
+                logger.warning("run projection %s is unreadable: %s", projection, exc)
             recovery_source = self._latest_valid_revision(projection.parent)
             relative = projection.relative_to(self.workspace.paths.root).as_posix()
             if recovery_source is None:

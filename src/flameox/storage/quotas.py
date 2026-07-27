@@ -23,7 +23,15 @@ class StorageQuota:
         staging: bool = False,
     ) -> None:
         config = self.workspace.config.storage
-        workspace_bytes = tree_bytes(self.workspace.paths.root)
+        # ``trash`` and ``quarantine`` hold data that has already been
+        # logically deleted (or isolated) and is pending physical purge by
+        # retention. Counting them against the live workspace quota would
+        # refuse new writes after a deletion until retention catches up.
+        workspace_bytes = (
+            tree_bytes(self.workspace.paths.root)
+            - tree_bytes(self.workspace.paths.trash)
+            - tree_bytes(self.workspace.paths.quarantine)
+        )
         if workspace_bytes + additional_bytes > config.max_workspace_bytes:
             raise DomainError(
                 ErrorCode.STORAGE_QUOTA_EXCEEDED,

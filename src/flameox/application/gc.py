@@ -318,7 +318,20 @@ class GarbageCollector:
                 )
             entry_count = len(manifest.entries)
             total_bytes = sum(entry.byte_length for entry in manifest.entries)
-            shutil.rmtree(trash_root)
+            # ``shutil.rmtree`` is not atomic; a partial failure would leave
+            # the trash directory half-deleted with the manifest gone, giving
+            # the operator no recovery path. Capture the failure and re-raise
+            # as a retryable domain error so the caller can re-attempt the
+            # purge once the underlying filesystem issue is resolved.
+            try:
+                shutil.rmtree(trash_root)
+            except OSError as exc:
+                raise DomainError(
+                    ErrorCode.INTERNAL_ERROR,
+                    "Purge failed while deleting the trash directory.",
+                    retryable=True,
+                    details={"trash_manifest_id": trash_manifest_id},
+                ) from exc
             fsync_directory(self.workspace.paths.trash)
             return GarbagePurgeResult(
                 trash_manifest_id=trash_manifest_id,

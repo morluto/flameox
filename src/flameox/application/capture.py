@@ -99,7 +99,7 @@ class _CaptureExecution:
 
     async def record_lease(self, process_id: int) -> None:
         if self.run is None:
-            raise RuntimeError("capture run is not initialized")
+            raise DomainError(ErrorCode.INTERNAL_ERROR, "capture run is not initialized")
         lease = self.service._lease(process_id)
         if lease is None:
             return
@@ -131,7 +131,7 @@ class _CaptureExecution:
         cleanup_complete: bool | None = None,
     ) -> RunManifest:
         if self.run is None:
-            raise RuntimeError("capture run is not initialized")
+            raise DomainError(ErrorCode.INTERNAL_ERROR, "capture run is not initialized")
         self.logger.emit(
             operation_id=self.operation_id,
             operation="capture.execute",
@@ -496,7 +496,10 @@ class CaptureService:
                 self.plans.release_capture_slot()
         running = capture.run
         if running is None:
-            raise RuntimeError("capture run disappeared after collector execution")
+            raise DomainError(
+                ErrorCode.INTERNAL_ERROR,
+                "capture run disappeared after collector execution",
+            )
 
         registrations: list[tuple[ArtifactRegistration, int]] = []
         validation_status = ValidationStatus.NOT_REQUESTED

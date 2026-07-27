@@ -19,6 +19,10 @@ def test_full_integrity_detects_altered_artifact_bytes(tmp_path: Path) -> None:
     quick = IntegrityService(workspace).validate(full=False)
     full = IntegrityService(workspace).validate(full=True)
 
-    assert quick.valid is True
+    # With verify-on-retrieval (M1), the quick path now also catches tampered
+    # artifact bytes because ArtifactStore.get() re-hashes the payload on
+    # every retrieval. Both levels must report the artifact as invalid.
+    assert quick.valid is False
     assert full.valid is False
+    assert any(issue.code == "INVALID_ARTIFACT" for issue in quick.issues)
     assert any(issue.code == "INVALID_ARTIFACT" for issue in full.issues)
