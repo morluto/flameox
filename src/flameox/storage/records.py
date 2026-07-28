@@ -83,7 +83,20 @@ class JsonRecordStore[RecordT: BaseModel]:
             current = self.read(identifier)
             actual = self._revision(current)
             next_revision = self._revision(record)
-            if actual != expected_revision or next_revision != expected_revision + 1:
+            if next_revision != expected_revision + 1:
+                # Caller bug: the supplied next revision does not match the
+                # expected sequence. Retrying would loop forever, so this is
+                # not retryable.
+                raise DomainError(
+                    ErrorCode.REVISION_CONFLICT,
+                    f"{self.kind} {identifier!r} has a stale expected revision.",
+                    details={
+                        "expected_revision": expected_revision,
+                        "supplied_next_revision": next_revision,
+                    },
+                )
+            if actual != expected_revision:
+                # Genuine race: another writer committed first. Retryable.
                 raise DomainError(
                     ErrorCode.REVISION_CONFLICT,
                     f"{self.kind} {identifier!r} changed before the update.",

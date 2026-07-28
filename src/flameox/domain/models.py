@@ -537,6 +537,10 @@ class Comparison(ContractModel):
     absolute_change_int: int | None = None
     absolute_change_float: float | None = None
     relative_change: float | None = None
+    # ``effect_size`` holds the relative median effect (exp(median(log(
+    # candidate/baseline))) - 1), a dimensionless ratio, not a standardized
+    # mean difference such as Cohen's d. See ``estimand`` for the exact
+    # quantity this value estimates.
     effect_size: float | None = None
     confidence_low: float | None = None
     confidence_high: float | None = None

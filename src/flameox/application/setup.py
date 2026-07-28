@@ -287,7 +287,11 @@ class SetupService:
                     "No active flameox runtime is configured.",
                     remediation=("Run `npx flameox setup` first.",),
                 )
-            assert public.version is not None
+            if public.version is None:
+                raise DomainError(
+                    ErrorCode.INTERNAL_ERROR,
+                    "Resolved runtime has no version after installation.",
+                )
             await self.runtime.verify(executable, public.version)
             return SetupReport(
                 operation=public.operation,

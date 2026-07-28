@@ -99,7 +99,7 @@ class _CaptureExecution:
 
     async def record_lease(self, process_id: int) -> None:
         if self.run is None:
-            raise RuntimeError("capture run is not initialized")
+            raise DomainError(ErrorCode.INTERNAL_ERROR, "capture run is not initialized")
         lease = self.service._lease(process_id)
         if lease is None:
             return
@@ -131,7 +131,7 @@ class _CaptureExecution:
         cleanup_complete: bool | None = None,
     ) -> RunManifest:
         if self.run is None:
-            raise RuntimeError("capture run is not initialized")
+            raise DomainError(ErrorCode.INTERNAL_ERROR, "capture run is not initialized")
         self.logger.emit(
             operation_id=self.operation_id,
             operation="capture.execute",
@@ -496,7 +496,10 @@ class CaptureService:
                 self.plans.release_capture_slot()
         running = capture.run
         if running is None:
-            raise RuntimeError("capture run disappeared after collector execution")
+            raise DomainError(
+                ErrorCode.INTERNAL_ERROR,
+                "capture run disappeared after collector execution",
+            )
 
         registrations: list[tuple[ArtifactRegistration, int]] = []
         validation_status = ValidationStatus.NOT_REQUESTED
@@ -1166,18 +1169,36 @@ class CaptureService:
         stat_path = Path("/proc") / str(process_id) / "stat"
         try:
             boot_id = boot_id_path.read_text().strip()
-            stat_fields = stat_path.read_text().split()
-            process_start_identity = stat_fields[21]
+
+            # Read /proc/[pid]/stat with a bounded low-level read instead of
+            # read_text(), which streams the whole file and can block
+            # indefinitely on a stuck /proc mount. The stat line is small
+            # (well under 8 KiB), so a single bounded os.read is sufficient.
+            # The process name (field 2, "comm") is parenthesized and may
+            # contain spaces or parentheses (e.g. "Web Content"), so split
+            # on the last ")" and index the remainder rather than the whole
+            # line: starttime is field 22, i.e. index 19 in the slice that
+            # starts at field 3.
+            stat_fd = os.open(str(stat_path), os.O_RDONLY)
+            try:
+                stat_raw = os.read(stat_fd, 8192)
+            finally:
+                os.close(stat_fd)
+            stat_text = stat_raw.decode("utf-8", errors="replace")
+            comm_end = stat_text.rindex(")")
+            stat_fields = stat_text[comm_end + 1:].split()
+
+            process_start_identity = stat_fields[19]
         except FileNotFoundError:
             return None
-        except (OSError, IndexError) as exc:
+        except (OSError, IndexError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.PROCESS_FAILED,
                 "Could not establish the child process lease identity.",
             ) from exc
         return CaptureLease(
-            process_id=process_id,
             process_start_identity=process_start_identity,
+            process_id=process_id,
             boot_id=boot_id,
             heartbeat_monotonic_ns=time.monotonic_ns(),
             observed_at=observed,

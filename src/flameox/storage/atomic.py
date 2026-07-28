@@ -8,12 +8,23 @@ from typing import Any
 
 
 def fsync_directory(path: Path) -> None:
+    """Best-effort fsync of a directory entry for crash durability.
+
+    On POSIX this opens the directory read-only and fsyncs it. On platforms
+    without ``O_DIRECTORY`` (e.g. Windows) directory fsync is not available
+    and the call is a no-op; the file contents themselves are still fsynced
+    by the caller. Only ``FileNotFoundError`` (the directory was removed
+    concurrently) is swallowed; other OS errors propagate so that real
+    failures (permission denied, I/O error) are not silently masked.
+    """
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         flags |= os.O_DIRECTORY
+    else:
+        return
     try:
         descriptor = os.open(path, flags)
-    except OSError:
+    except FileNotFoundError:
         return
     try:
         os.fsync(descriptor)

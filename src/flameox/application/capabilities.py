@@ -8,7 +8,7 @@ from pathlib import Path
 
 from flameox.adapters.builtins import BUILTIN_ADAPTERS, BuiltinAdapter, builtin_adapter
 from flameox.adapters.registry import AdapterRegistry
-from flameox.domain import CapabilityReport, CapabilityStatus, DomainError
+from flameox.domain import CapabilityReport, CapabilityStatus, DomainError, ErrorCode
 from flameox.domain.models import utc_now
 from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.models import ContractModel
@@ -61,7 +61,11 @@ class CapabilityService:
             if adapter.dependency_kind == "executable"
         )
         for adapter in executable_adapters:
-            assert adapter.dependency is not None
+            if adapter.dependency is None:
+                raise DomainError(
+                    ErrorCode.INTERNAL_ERROR,
+                    "Builtin adapter is missing its dependency declaration.",
+                )
             resolved = self._resolved_executable(adapter.name, adapter.dependency)
             supported_platform = (
                 adapter.supported_platforms is None or system in adapter.supported_platforms
@@ -104,7 +108,11 @@ class CapabilityService:
             adapter for adapter in BUILTIN_ADAPTERS.values() if adapter.dependency_kind == "package"
         )
         for adapter in package_adapters:
-            assert adapter.dependency is not None
+            if adapter.dependency is None:
+                raise DomainError(
+                    ErrorCode.INTERNAL_ERROR,
+                    "Builtin adapter is missing its dependency declaration.",
+                )
             try:
                 package_version = version(adapter.dependency)
             except PackageNotFoundError:

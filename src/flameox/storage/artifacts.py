@@ -200,6 +200,31 @@ class ArtifactStore:
                 ErrorCode.ARTIFACT_INTEGRITY_FAILED,
                 "Artifact payload must not be a symbolic link.",
             )
+        if not payload_path.is_file():
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Artifact payload is missing on disk.",
+            )
+        # Defense-in-depth: re-verify the stored payload against the recorded
+        # integrity digest and length so that corruption or tampering that
+        # occurred after import is detected on retrieval rather than silently
+        # returned to the caller.
+        actual_size = payload_path.stat().st_size
+        if actual_size != content.byte_length:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Artifact payload length does not match recorded metadata.",
+                details={"expected": content.byte_length, "actual": actual_size},
+            )
+        digest = hashlib.sha256()
+        with payload_path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != content.integrity.sha256:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Artifact payload digest does not match recorded metadata.",
+            )
         return StoredArtifact(
             content=content,
             payload_path=payload_path,
