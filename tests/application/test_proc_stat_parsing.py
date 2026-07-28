@@ -32,15 +32,29 @@ def test_lease_parses_starttime_for_multi_word_comm() -> None:
     service = CaptureService(workspace)
     pid = 12345
     expected_starttime = 118
+    stat_content = _stat_line(pid, "Web Content", expected_starttime).encode()
 
     def fake_read_text(self: Path, *args: object, **kwargs: object) -> str:
         if str(self) == "/proc/sys/kernel/random/boot_id":
             return "boot-id-1234\n"
-        if str(self) == f"/proc/{pid}/stat":
-            return _stat_line(pid, "Web Content", expected_starttime)
         raise FileNotFoundError(str(self))
 
-    with patch.object(Path, "read_text", fake_read_text):
+    def fake_open(path: str, flags: int, *args: object, **kwargs: object) -> int:
+        if path == f"/proc/{pid}/stat":
+            return 999
+        raise FileNotFoundError(path)
+
+    def fake_read(fd: int, n: int) -> bytes:
+        if fd == 999:
+            return stat_content
+        raise OSError(fd)
+
+    with (
+        patch.object(Path, "read_text", fake_read_text),
+        patch("os.open", fake_open),
+        patch("os.read", fake_read),
+        patch("os.close", lambda fd: 0),
+    ):
         lease = service._lease(pid)
 
     assert lease is not None
@@ -56,15 +70,29 @@ def test_lease_parses_starttime_for_single_word_comm() -> None:
     service = CaptureService(workspace)
     pid = 6789
     expected_starttime = 999
+    stat_content = _stat_line(pid, "python", expected_starttime).encode()
 
     def fake_read_text(self: Path, *args: object, **kwargs: object) -> str:
         if str(self) == "/proc/sys/kernel/random/boot_id":
             return "boot-id-5678\n"
-        if str(self) == f"/proc/{pid}/stat":
-            return _stat_line(pid, "python", expected_starttime)
         raise FileNotFoundError(str(self))
 
-    with patch.object(Path, "read_text", fake_read_text):
+    def fake_open(path: str, flags: int, *args: object, **kwargs: object) -> int:
+        if path == f"/proc/{pid}/stat":
+            return 888
+        raise FileNotFoundError(path)
+
+    def fake_read(fd: int, n: int) -> bytes:
+        if fd == 888:
+            return stat_content
+        raise OSError(fd)
+
+    with (
+        patch.object(Path, "read_text", fake_read_text),
+        patch("os.open", fake_open),
+        patch("os.read", fake_read),
+        patch("os.close", lambda fd: 0),
+    ):
         lease = service._lease(pid)
 
     assert lease is not None
@@ -81,7 +109,15 @@ def test_lease_returns_none_when_proc_missing() -> None:
     def fake_read_text(self: Path, *args: object, **kwargs: object) -> str:
         raise FileNotFoundError(str(self))
 
-    with patch.object(Path, "read_text", fake_read_text):
+    def fake_open(path: str, flags: int, *args: object, **kwargs: object) -> int:
+        raise FileNotFoundError(path)
+
+    with (
+        patch.object(Path, "read_text", fake_read_text),
+        patch("os.open", fake_open),
+        patch("os.read", lambda fd, n: b""),
+        patch("os.close", lambda fd: 0),
+    ):
         lease = service._lease(99999)
 
     assert lease is None
