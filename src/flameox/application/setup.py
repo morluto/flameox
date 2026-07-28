@@ -169,16 +169,35 @@ class SetupService:
         manifest_original, manifest_mode = self._snapshot_file(self.install_manifest)
         if operation is SetupOperation.VERIFY:
             manifest = self._read_install_manifest()
+            edits: tuple[ClientConfigEdit, ...] = ()
+            if manifest is not None:
+                launcher = Launcher(
+                    command=str(manifest.executable),
+                    args=("mcp", "serve", "--project-root", "."),
+                )
+                edits = tuple(
+                    self.registry.plan(client, launcher, remove=False)
+                    for client in self.registry.configured_clients(strict=True)
+                )
             public = SetupPlan(
                 operation=operation,
                 version=manifest.active_version if manifest else None,
                 runtime_action=RuntimeAction.NOT_REQUIRED,
                 runtime_executable=manifest.executable if manifest else None,
-                clients=(),
+                clients=tuple(
+                    ClientSetupPlan(
+                        client=edit.client,
+                        display_name=edit.client.display_name,
+                        path=edit.path,
+                        action=edit.action,
+                        detected=edit.detected,
+                    )
+                    for edit in edits
+                ),
             )
             return ResolvedSetupPlan(
                 public,
-                (),
+                edits,
                 manifest_original,
                 manifest_mode,
             )
@@ -292,13 +311,28 @@ class SetupService:
                     ErrorCode.INTERNAL_ERROR,
                     "Resolved runtime has no version after installation.",
                 )
+            mismatched = tuple(
+                edit.client
+                for edit in plan.edits
+                if edit.action is not ClientPlanAction.ALREADY_CURRENT
+            )
+            if mismatched:
+                names = ", ".join(client.display_name for client in mismatched)
+                raise DomainError(
+                    ErrorCode.REVISION_CONFLICT,
+                    f"Configured MCP launchers do not match the active runtime: {names}.",
+                    details={"clients": [client.value for client in mismatched]},
+                    remediation=(
+                        "Run `npx flameox setup` and choose Connect or update MCP clients.",
+                    ),
+                )
             await self.runtime.verify(executable, public.version)
             return SetupReport(
                 operation=public.operation,
                 version=public.version,
                 runtime_installed=False,
                 changed_clients=(),
-                unchanged_clients=(),
+                unchanged_clients=tuple(edit.client for edit in plan.edits),
                 verified=True,
             )
 

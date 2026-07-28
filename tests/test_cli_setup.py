@@ -38,6 +38,57 @@ def test_setup_yes_requires_an_explicit_target(
     assert "--yes requires explicit clients" in result.output
 
 
+def test_setup_verify_dry_run_reports_configured_launcher_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    data = tmp_path / "data"
+    home.mkdir()
+    data.mkdir()
+    executable = data / "runtimes" / "0.1.0" / "bin" / "flameox"
+    (home / ".claude.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "flameox": {
+                        "command": str(executable),
+                        "args": ["mcp", "serve", "--project-root", "."],
+                    }
+                }
+            }
+        )
+        + "\n"
+    )
+    (data / "install.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "active_version": "0.1.0",
+                "executable": str(executable),
+            }
+        )
+        + "\n"
+    )
+    monkeypatch.setenv("FLAMEOX_SETUP_HOME", str(home))
+    monkeypatch.setenv("FLAMEOX_SETUP_DATA_ROOT", str(data))
+
+    result = CliRunner().invoke(app, ["setup", "--verify", "--dry-run", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["operation"] == "verify"
+    assert payload["clients"] == [
+        {
+            "client": "claude",
+            "display_name": "Claude Code",
+            "path": str(home / ".claude.json"),
+            "action": "already_current",
+            "detected": True,
+        }
+    ]
+
+
 def test_setup_reports_corrupt_install_metadata_as_a_domain_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -95,6 +95,92 @@ async def test_setup_is_idempotent_and_preserves_unrelated_json(tmp_path: Path) 
 
 
 @pytest.mark.anyio
+async def test_verify_checks_the_runtime_and_every_configured_launcher(tmp_path: Path) -> None:
+    service, runtime, _ = make_service(tmp_path)
+    configured = service.plan(
+        operation=SetupOperation.CONFIGURE,
+        clients=(SetupClient.CLAUDE, SetupClient.GEMINI),
+        version="0.1.0",
+    )
+    await service.apply(configured)
+
+    plan = service.plan(
+        operation=SetupOperation.VERIFY,
+        clients=(),
+        version=None,
+    )
+    report = await service.apply(plan)
+
+    assert tuple(client.client for client in plan.public.clients) == (
+        SetupClient.CLAUDE,
+        SetupClient.GEMINI,
+    )
+    assert all(client.action.value == "already_current" for client in plan.public.clients)
+    assert report.verified
+    assert report.unchanged_clients == (SetupClient.CLAUDE, SetupClient.GEMINI)
+    assert runtime.verified[-1] == runtime.executable("0.1.0")
+
+
+@pytest.mark.anyio
+async def test_verify_refuses_a_configured_launcher_that_drifted_from_active_runtime(
+    tmp_path: Path,
+) -> None:
+    service, runtime, home = make_service(tmp_path)
+    configured = service.plan(
+        operation=SetupOperation.CONFIGURE,
+        clients=(SetupClient.CLAUDE,),
+        version="0.1.0",
+    )
+    await service.apply(configured)
+    config = home / ".claude.json"
+    content = json.loads(config.read_text())
+    content["mcpServers"]["flameox"]["command"] = "/tmp/not-the-active-runtime"
+    config.write_text(json.dumps(content) + "\n")
+    verifications_before = len(runtime.verified)
+
+    plan = service.plan(
+        operation=SetupOperation.VERIFY,
+        clients=(),
+        version=None,
+    )
+    with pytest.raises(DomainError) as caught:
+        await service.apply(plan)
+
+    assert caught.value.code is ErrorCode.REVISION_CONFLICT
+    assert caught.value.details == {"clients": ["claude"]}
+    assert len(runtime.verified) == verifications_before
+    assert json.loads(config.read_text())["mcpServers"]["flameox"]["command"] == (
+        "/tmp/not-the-active-runtime"
+    )
+
+
+def test_verify_refuses_a_malformed_client_configuration(tmp_path: Path) -> None:
+    service, runtime, home = make_service(tmp_path)
+    runtime.versions.add("0.1.0")
+    service.data_root.mkdir(parents=True)
+    atomic_write_json(
+        service.install_manifest,
+        {
+            "schema_version": 1,
+            "active_version": "0.1.0",
+            "executable": str(runtime.executable("0.1.0")),
+        },
+    )
+    config = home / ".claude.json"
+    config.write_text("{broken")
+
+    with pytest.raises(DomainError) as caught:
+        service.plan(
+            operation=SetupOperation.VERIFY,
+            clients=(),
+            version=None,
+        )
+
+    assert caught.value.code is ErrorCode.EXECUTION_REFUSED
+    assert "malformed client configuration" in caught.value.message
+
+
+@pytest.mark.anyio
 async def test_setup_refuses_config_changed_after_preview(tmp_path: Path) -> None:
     service, _, home = make_service(tmp_path)
     config = home / ".claude.json"

@@ -120,10 +120,11 @@ flameox reports the workload as `uncontained`.
 
 ## Setup and installation details
 
-Run setup again to connect or disconnect clients, verify the active runtime,
-update to the npm package's matching version, or roll back to a previously
-installed version. `npx flameox@latest setup` resolves the newest setup release.
-Automation can select clients and inspect the plan explicitly:
+Run setup again to connect or disconnect clients, verify that connected clients
+launch the active runtime, update to the npm package's matching version, or roll
+back to a previously installed version. `npx flameox@latest setup` resolves the
+newest setup release. Automation can select clients and inspect the plan
+explicitly:
 
 ```console
 npx flameox setup --codex --claude --yes
