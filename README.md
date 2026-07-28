@@ -17,7 +17,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat&logo=python&logoColor=white" alt="Python 3.12 or newer">
-  <img src="https://img.shields.io/badge/Runtime-Permanently_Local-F97316?style=flat" alt="Permanently local runtime">
+  <img src="https://img.shields.io/badge/Data-Stays_Local-F97316?style=flat" alt="Data stays local">
   <img src="https://img.shields.io/badge/Interfaces-CLI_%2B_MCP-7C3AED?style=flat" alt="CLI and MCP interfaces">
 </p>
 
@@ -33,14 +33,15 @@
 
 ---
 
-flameox is a permanently local CLI and Model Context Protocol server. It connects
-coding agents to maintained tools such as pyperf, py-spy, Perfetto Trace
-Processor, coverage.py, Memray, and torch.profiler. It preserves their native
-artifacts and the provenance needed to check an agent's conclusion later.
+flameox helps coding agents investigate performance, memory, execution,
+concurrency, and reliability with evidence you can inspect and reproduce. It
+connects agents to maintained tools such as pyperf, py-spy, Perfetto Trace
+Processor, coverage.py, Memray, and torch.profiler, then keeps each original
+artifact alongside a record of how it was produced.
 
-It is not another profiler or an automatic bug finder. It gives agents a
-consistent workflow for collecting approved workloads, preserving what happened,
-comparing compatible runs, and keeping observations separate from inferences.
+flameox is not a profiler or an automatic bug finder. It coordinates existing
+tools, compares runs collected under compatible conditions, and ties findings
+back to the measurements that support them.
 
 ## Quick start
 
@@ -88,38 +89,34 @@ uv run flameox status
 | **What does PyTorch spend time on?** | Operators, shapes when captured, CPU or accelerator time, and memory |
 | **Are failures clustered rather than isolated?** | Failed attempts grouped by environment, source, workload, and error |
 
-Profiles identify candidates; they do not prove causality or correctness. A
-confirmatory comparison needs a representative workload, a declared metric,
-compatible source and environment identities, preserved samples, and a semantic
-oracle.
+Profiles show where to investigate; they do not prove why behavior changed or
+whether the program remains correct. To confirm a result, use a representative
+workload and declared metric, compare the same source and environment, retain the
+samples, and validate the program's output for both the baseline and candidate.
 
 ## How it works
 
-1. **Declare.** You approve a repeatable workload. Agents never receive access to
-   arbitrary shell commands or SQL.
+1. **Declare.** You name a repeatable workload and approve the exact command an
+   agent may run.
 2. **Capture.** A maintained profiler or benchmark tool runs while flameox records
-   the exact tool, command, environment, source identity, limits, and outcome.
-3. **Preserve.** flameox keeps the native artifact and publishes normalized
-   evidence into an immutable local corpus.
-4. **Analyze.** The CLI and MCP server expose the same bounded operations for
+   the tool, command, environment, source revision, limits, and outcome.
+3. **Preserve.** flameox keeps the original artifact and publishes queryable
+   evidence to the project workspace.
+4. **Analyze.** The CLI and MCP server provide focused queries for
    hotspots, scaling, memory, execution, failures, and comparisons.
 5. **Record.** Findings remain tied to the runs, measurements, validation, and
    analysis that support them. Failed attempts remain visible.
 
-Native artifacts and Parquet evidence are authoritative. DuckDB is a rebuildable
-local query layer, and Perfetto Trace Processor handles detailed trace queries.
+## Safety boundaries
 
-## Boundaries
+flameox runs on your machine and does not upload code or captures. It does not
+monitor production, provide accounts or synchronization, modify source code,
+install system tools, or delete artifacts automatically.
 
-flameox investigates performance, memory, execution, concurrency, and
-reliability on the local machine. It does not monitor production, upload
-evidence, provide accounts or synchronization, modify source code, install
-system tools, or delete artifacts automatically.
-
-flameox also does not reimplement profilers, trace databases, native viewers, or
-private format decoders. It reports a workload as contained only when an active
-backend enforces that boundary, and it never treats statistical
-non-significance as proof of equivalence.
+Agents can run only the named workloads you approve. MCP does not provide
+arbitrary shell or SQL access, change approvals, delete evidence, return raw
+artifact bytes, or launch native viewers. When containment is unavailable,
+flameox reports the workload as `uncontained`.
 
 ## Setup and installation details
 
@@ -134,11 +131,10 @@ npx flameox setup --all --dry-run --json
 npx flameox setup --verify --yes --json
 ```
 
-The npm package is a bootstrap, not the runtime. It installs the matching
-`flameox` Python release and includes the `jsonc-parser` helper used to preserve
-comments in OpenCode configuration. MCP clients then launch that installed
-runtime directly; they do not call `npx`, `uvx`, or a network-dependent installer
-at startup. Setup does not initialize a project or create `.diagnostics/`.
+The npm package installs the matching `flameox` Python release. MCP clients then
+launch that installed runtime directly; they do not call `npx`, `uvx`, or a
+network-dependent installer at startup. Setup does not initialize a project or
+create `.diagnostics/`.
 
 Optional Python extras are independent:
 
@@ -151,8 +147,6 @@ Optional Python extras are independent:
 - `torch`: PyTorch capture
 - `all`: all runtime integrations
 
-flameox pins the official Python MCP SDK to `mcp==2.0.0b2`.
-
 ## Local data model
 
 Initialize a project-local workspace:
@@ -162,16 +156,14 @@ uv run flameox init .
 uv run flameox status
 ```
 
-`.diagnostics/` contains content-addressed native artifacts, immutable JSON
-records, append-only Parquet generations, and a rebuildable DuckDB catalog.
-Parquet files and generation manifests are authoritative. If you delete
-`catalog.duckdb`, `flameox catalog rebuild` reconstructs it.
+`.diagnostics/` stores original artifacts, run and investigation records, Parquet
+evidence, and a rebuildable DuckDB catalog. Parquet files and generation
+manifests are the source of truth; if you delete `catalog.duckdb`,
+`flameox catalog rebuild` reconstructs it.
 
-SHA-256 deduplication avoids storing the same artifact twice without losing the
-context in which it was registered. Each run records its source, environment,
-workload, measurements, lifecycle, validation, process evidence, and artifact
-roles. Investigation records keep hypotheses, experiments, trials, comparisons,
-and findings distinct.
+Identical artifacts are stored once, but flameox retains the source, environment,
+workload, and measurement details for every run. Hypotheses, trials, comparisons,
+and findings remain separate so observations do not blur into conclusions.
 
 ## Named workloads and capture
 
@@ -206,8 +198,7 @@ confidence_level = 0.95
 random_seed = 1984
 ```
 
-Inspect and approve the exact canonical workload before exposing it through
-MCP:
+Inspect and approve the exact workload definition before exposing it through MCP:
 
 ```console
 uv run flameox workload show scan --json
@@ -219,12 +210,10 @@ uv run flameox capture run pyperf --workload scan \
 ```
 
 Editing a command, environment, parameter domain, timeout, working directory,
-or oracle changes the canonical digest and revokes that approval. Execution
-uses argument arrays through a single subprocess broker. The broker bounds
-output, cleans up after timeouts and cancellation, and can use bubblewrap for
-containment on Linux. Perfetto parsing runs in a broker-owned worker, so a long
-trace cannot block or outlive the MCP request. An `uncontained` result is never
-reported as sandboxed.
+or oracle invalidates that approval. Execution uses argument arrays instead of
+shell strings, bounds command output, and cleans up after timeouts or
+cancellation. Linux users can configure bubblewrap containment; otherwise, the
+result is reported as `uncontained`.
 
 ## Investigations and experiments
 
@@ -244,8 +233,8 @@ uv run flameox experiment run scan_comparison \
 Before collecting data, flameox saves the declared protocol. It randomizes
 treatment order within complete blocks and records every attempted trial,
 including cancellations and failures. The automatic paired comparison runs only
-when the blocks, measurements, source identity, environment, and
-cross-treatment validation are compatible. Failed trials remain in the evidence
+when the trial blocks are complete and the measurements, source, environment,
+and output validation are compatible. Failed trials remain in the evidence
 instead of disappearing from the denominator.
 
 Useful read-only analyses include:
@@ -260,8 +249,8 @@ uv run flameox analyze pytorch <run-or-artifact>
 uv run flameox analyze failures
 ```
 
-Those commands are deterministic read-only previews. Persist a recipe result
-and its typed provenance explicitly:
+These commands do not modify the workspace. Record a result when you want to
+preserve it with the runs that produced it:
 
 ```console
 uv run flameox analyze record \
@@ -269,7 +258,8 @@ uv run flameox analyze record \
 uv run flameox analyze record-comparison @comparison-request.json
 ```
 
-Hotspots can be followed into normalized trace structure without arbitrary SQL:
+From a hotspot, inspect its callers, callees, representative stacks, or
+surrounding trace window:
 
 ```console
 uv run flameox stacks callers <run-or-artifact> <frame-id> [--cursor CURSOR]
@@ -279,26 +269,20 @@ uv run flameox trace window <artifact-id> --start 0 --end 1000000 [--cursor CURS
 uv run flameox open <artifact-id>
 ```
 
-`flameox open` only prints a native viewer plan. `--launch` is an explicit
-consequential action and cannot be combined with `--json`.
+`flameox open` only prints a native viewer plan. Pass `--launch` separately to
+open the viewer; it cannot be combined with `--json`.
 
 ## CLI and MCP
 
-Start the permanently local stdio server with a fixed project root:
+Start the stdio server with a fixed project root:
 
 ```console
 uv run flameox mcp serve --project-root .
 ```
 
-The MCP layer calls the same application services as the CLI. Agents can plan
-approved captures and experiments, run bounded evidence queries, preview
-analyses, and explicitly record results. MCP does not expose shell strings,
-arbitrary SQL, raw artifact bytes, approval changes, deletion, or viewer
-launching.
-
-Capture and experiment plans use 256-bit, in-memory, short-lived tokens. Each
-token is single-use and bound to the workspace and the approved plan inputs.
-Restarting the server invalidates it.
+Through MCP, agents can plan approved captures and experiments, query evidence,
+preview analyses, and record results. Capture and experiment plans are
+short-lived and single-use; restarting the server invalidates them.
 
 Inspect the protocol surface with a real stdio client:
 
