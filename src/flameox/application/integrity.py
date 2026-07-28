@@ -119,9 +119,7 @@ class IntegrityService:
     def validate(self, *, full: bool = False) -> IntegrityResult:
         issues: list[IntegrityIssue] = []
         head = self.workspace.corpus.read_head()
-        checked_generations, checked_parquet, manifest_issues = self._check_manifests(
-            head, full
-        )
+        checked_generations, checked_parquet, manifest_issues = self._check_manifests(head, full)
         issues.extend(manifest_issues)
 
         checked_artifacts = 0

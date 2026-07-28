@@ -11,45 +11,61 @@ multi-member unblocked path unreachable, so these tests construct the
 minimal single-member scenario where a collision is still possible (a single
 run emitting two measurements with the same worker/worker_run/value_index).
 """
+
 from __future__ import annotations
+
+from typing import cast
 
 import pytest
 
-from flameox.application.comparisons import ComparisonService
+from flameox.application.comparisons import ComparisonService, _SampleSet
+from flameox.catalog import Snapshot
 from flameox.domain import DomainError, ErrorCode
 from flameox.domain.models import RunSet, RunSetMember
 
+type Row = tuple[object, ...]
+
 
 class _FakeSnapshot:
-    def __init__(self, measurements_by_run: dict[str, list[tuple]]) -> None:
+    def __init__(self, measurements_by_run: dict[str, list[Row]]) -> None:
         self._measurements = measurements_by_run
 
-    def execute(self, sql: str, params: tuple) -> object:
+    def execute(self, sql: str, params: tuple[object, ...]) -> _Rows:
         if "FROM measurements" in sql:
-            return _Rows(self._measurements.get(params[0], []))
+            run_id = params[0]
+            assert isinstance(run_id, str)
+            return _Rows(self._measurements.get(run_id, []))
         if "FROM trials" in sql:
             return _Rows([])
         return _Rows([])
 
 
 class _Rows:
-    def __init__(self, rows: list[tuple]) -> None:
+    def __init__(self, rows: list[Row]) -> None:
         self._rows = rows
 
-    def fetchall(self) -> list[tuple]:
+    def fetchall(self) -> list[Row]:
         return self._rows
 
-    def fetchone(self) -> tuple | None:
+    def fetchone(self) -> Row | None:
         return self._rows[0] if self._rows else None
 
 
-def _row(value_int, value_index, worker_id="0", worker_run_index=0,
-         block_id=None) -> tuple:
+def _row(
+    value_int: int,
+    value_index: int,
+    worker_id: str = "0",
+    worker_run_index: int = 0,
+    block_id: str | None = None,
+) -> Row:
     return (value_int, None, block_id, worker_id, worker_run_index, value_index)
 
 
-def _samples(measurements, members):
-    snapshot = _FakeSnapshot(measurements)
+def _samples(
+    measurements: dict[str, list[Row]],
+    members: tuple[RunSetMember, ...],
+) -> _SampleSet:
+    snapshot = cast(Snapshot, _FakeSnapshot(measurements))
     run_set = RunSet(
         run_set_id="sha256:" + "0" * 64,
         corpus_commit_id="sha256:" + "a" * 64,
@@ -57,9 +73,7 @@ def _samples(measurements, members):
         members=members,
         membership_digest="sha256:" + "b" * 64,
     )
-    return ComparisonService.__new__(ComparisonService)._samples(
-        snapshot, run_set, "m", "ns"
-    )
+    return ComparisonService.__new__(ComparisonService)._samples(snapshot, run_set, "m", "ns")
 
 
 def test_unblocked_path_raises_on_duplicate_key() -> None:
