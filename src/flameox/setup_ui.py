@@ -51,7 +51,7 @@ def choose_clients(
     *,
     remove: bool,
 ) -> tuple[SetupClient, ...]:
-    selected = set(inspection.configured_clients if remove else ())
+    selected = set(inspection.configured_clients if remove else inspection.detected_clients)
     detected = set(inspection.detected_clients)
     choices = [
         Choice(
