@@ -36,7 +36,7 @@ def choose_action(inspection: SetupInspection, target_version: str) -> str:
         (
             Choice("Connect or update MCP clients", "configure"),
             Choice("Disconnect MCP clients", "remove"),
-            Choice("Verify the active MCP runtime", "verify"),
+            Choice("Verify connected clients and the active runtime", "verify"),
         )
     )
     if len(inspection.installed_versions) > 1 and inspection.configured_clients:
@@ -86,7 +86,15 @@ def print_plan(plan: SetupPlan) -> None:
         typer.echo(f"  Launcher: {plan.runtime_executable}")
     for client in plan.clients:
         detected = "" if client.detected else " (not detected)"
-        typer.echo(f"  {client.display_name}: {client.action.value} {client.path}{detected}")
+        if plan.operation.value == "verify":
+            status = (
+                "matches active runtime"
+                if client.action.value == "already_current"
+                else "does not match active runtime"
+            )
+            typer.echo(f"  {client.display_name}: {status} {client.path}{detected}")
+        else:
+            typer.echo(f"  {client.display_name}: {client.action.value} {client.path}{detected}")
     for warning in plan.warnings:
         typer.secho(f"  Warning: {warning}", fg=typer.colors.YELLOW)
     typer.echo()
@@ -101,6 +109,11 @@ def print_report(report: SetupReport) -> None:
     typer.echo()
     if report.operation.value == "verify":
         typer.secho("flameox MCP runtime verified.", fg=typer.colors.GREEN)
+        clients = ", ".join(client.display_name for client in report.unchanged_clients)
+        if clients:
+            typer.echo(f"Configured launchers verified: {clients}")
+        else:
+            typer.echo("No MCP clients are currently connected.")
         return
     changed = ", ".join(client.display_name for client in report.changed_clients)
     if changed:

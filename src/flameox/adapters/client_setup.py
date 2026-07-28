@@ -124,7 +124,7 @@ class ClientConfigRegistry:
     def detected_clients(self) -> tuple[SetupClient, ...]:
         return tuple(client for client in ALL_SETUP_CLIENTS if self.definition(client).detected)
 
-    def configured_clients(self) -> tuple[SetupClient, ...]:
+    def configured_clients(self, *, strict: bool = False) -> tuple[SetupClient, ...]:
         configured: list[SetupClient] = []
         for client in ALL_SETUP_CLIENTS:
             definition = self.definition(client)
@@ -133,6 +133,8 @@ class ClientConfigRegistry:
             try:
                 value = self._read_entry(definition)
             except DomainError:
+                if strict:
+                    raise
                 continue
             if value is not None:
                 configured.append(client)

@@ -337,7 +337,10 @@ def setup(
     ] = None,
     verify: Annotated[
         bool,
-        typer.Option("--verify", help="Verify the active MCP runtime without changing configs."),
+        typer.Option(
+            "--verify",
+            help="Verify connected client launchers and the active MCP runtime.",
+        ),
     ] = False,
     yes: Annotated[
         bool,

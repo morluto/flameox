@@ -17,6 +17,13 @@ explicit target (`--codex`, another client flag, `--all`, `--refresh`,
 `--rollback`, or `--verify`) and `--yes`; `--dry-run --json` returns the plan
 without mutation.
 
+Interactive setup is also the lifecycle entry point for connecting or
+disconnecting clients, updating the active runtime, rolling back to an installed
+version, and verification. Verification checks the managed runtime version and
+real MCP handshake, then confirms that every configured client still contains
+the exact active executable and fixed launcher arguments. It is read-only and
+fails on configuration drift instead of repairing it implicitly.
+
 Client launchers contain the absolute path of a verified managed runtime and
 the fixed arguments `mcp serve --project-root .`. Setup never passes `--init`.
 Each MCP client therefore binds flameox's project root to the client's launch

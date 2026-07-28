@@ -1186,7 +1186,7 @@ class CaptureService:
                 os.close(stat_fd)
             stat_text = stat_raw.decode("utf-8", errors="replace")
             comm_end = stat_text.rindex(")")
-            stat_fields = stat_text[comm_end + 1:].split()
+            stat_fields = stat_text[comm_end + 1 :].split()
 
             process_start_identity = stat_fields[19]
         except FileNotFoundError:

@@ -1290,7 +1290,6 @@ class RecipeService:
                     p_value=p_value,
                     adjusted_p_value=p_value,
                     multiplicity_method="benjamini-hochberg-fdr",
-
                     independent_trial_count=len(samples),
                     supported_min=float(np.min(x)),
                     supported_max=float(np.max(x)),

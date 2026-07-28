@@ -283,6 +283,12 @@ timeout_seconds = 5
 """
     )
     workspace = Workspace.initialize(tmp_path)
+    config = workspace.config.model_copy(
+        update={
+            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+        }
+    )
+    workspace.paths.config.write_text(config.to_toml())
     Catalog(workspace).rebuild()
 
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:
@@ -292,7 +298,9 @@ timeout_seconds = 5
         )
     assert refused.is_error is True
     assert refused.structured_content is not None
-    assert refused.structured_content["error"]["code"] == "EXECUTION_REFUSED"
+    assert refused.structured_content["error"]["code"] == "EXECUTION_REFUSED", (
+        refused.structured_content
+    )
 
     WorkloadService(workspace).approve("echo")
     recorded_progress: list[tuple[float, float | None, str | None]] = []
@@ -309,6 +317,7 @@ timeout_seconds = 5
             "plan_capture",
             {"workload_name": "echo", "adapter": "command", "parameters": {}},
         )
+        assert planned.is_error is False, planned.structured_content
         assert planned.structured_content is not None
         plan_id = planned.structured_content["result"]["plan_id"]
         executed = await client.call_tool(
