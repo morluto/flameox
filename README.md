@@ -4,9 +4,9 @@
 
 <p align="center">
   <img
-    src="docs/assets/flameox-flamegraph-hero.png"
-    width="100%"
-    alt="Abstract flame graph built from glowing runtime blocks"
+    src="docs/assets/flameox-mascot-flamegraph.png"
+    width="420"
+    alt="flameox mascot: a friendly ox with a flame graph between its horns"
   >
 </p>
 
