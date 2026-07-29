@@ -128,8 +128,7 @@ def test_python_startup_rejects_malformed_package_container(tmp_path: Path) -> N
 
 def test_import_grouping_accumulates_duplicate_self_time_and_keeps_maximum() -> None:
     _, packages, ignored = _group_imports(
-        "import time: 10 | 100 | package.module\n"
-        "import time: 20 | 80 | package.module\n"
+        "import time: 10 | 100 | package.module\nimport time: 20 | 80 | package.module\n"
     )
 
     assert ignored == 0

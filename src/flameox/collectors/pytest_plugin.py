@@ -141,6 +141,7 @@ def pytest_fixture_setup(fixturedef: Any, request: pytest.FixtureRequest) -> Any
 
 
 def pytest_runtest_logstart(nodeid: str, location: tuple[str, int | None, str]) -> None:
+    del location
     if _worker_id != "master":
         _append_payload(
             {
@@ -186,6 +187,7 @@ def pytest_internalerror(
     excrepr: Any,
     excinfo: pytest.ExceptionInfo[BaseException],
 ) -> None:
+    del excrepr
     if _worker_id == "master":
         _write("internal_error", exception_type=excinfo.typename)
 

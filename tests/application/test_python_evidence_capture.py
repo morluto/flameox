@@ -121,9 +121,7 @@ timeout_seconds = 30
 async def test_pytest_timeout_preserves_partial_and_unexecuted_evidence(tmp_path: Path) -> None:
     workspace = _workspace_without_containment(tmp_path)
     (tmp_path / "test_timeout.py").write_text(
-        "import time\n"
-        "def test_slow(): time.sleep(5)\n"
-        "def test_never_started(): pass\n"
+        "import time\ndef test_slow(): time.sleep(5)\ndef test_never_started(): pass\n"
     )
     (tmp_path / "flameox.toml").write_text(
         f"""

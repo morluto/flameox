@@ -201,7 +201,7 @@ def test_pytest_recovers_valid_prefix_from_truncated_final_record(tmp_path: Path
                 _event("session_finished", exit_status=2),
             )
         )
-        + "\n{\"schema\":"
+        + '\n{"schema":'
     )
     imported = ImportService(workspace).import_artifact(
         ImportArtifactRequest(path=source, kind=ArtifactKind.TEST_EXECUTION)

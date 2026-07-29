@@ -407,8 +407,7 @@ def _completion(
         limitations.append("The pytest session was interrupted or ended with an internal error.")
     if truncated_stream:
         limitations.append(
-            "The pytest event stream ended with a truncated record; "
-            "the valid prefix was recovered."
+            "The pytest event stream ended with a truncated record; the valid prefix was recovered."
         )
     if failed_sidecars:
         limitations.append(
