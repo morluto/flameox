@@ -42,10 +42,7 @@ class PreflightService:
             results.append(self._executable(name, required=name not in requirements.optional))
         for name in requirements.python_distributions:
             results.append(self._distribution(name, required=name not in requirements.optional))
-        passive = {
-            item.adapter: item
-            for item in self.capabilities.list().capabilities
-        }
+        passive = {item.adapter: item for item in self.capabilities.list().capabilities}
         for name in requirements.capabilities:
             active = name in requirements.active
             report = passive.get(name)
@@ -95,9 +92,7 @@ class PreflightService:
         else:
             disposition = "ready"
         limitations = tuple(
-            f"{item.requirement}: {item.status}"
-            for item in results
-            if item.status != "available"
+            f"{item.requirement}: {item.status}" for item in results if item.status != "available"
         )
         content = {
             "mode": mode,
@@ -189,14 +184,17 @@ class PreflightService:
                 status="unknown",
                 limitations=("Flameox does not own a probe for this capability.",),
             )
-        statuses: dict[CapabilityStatus, Literal[
-            "available",
-            "absent",
-            "permission_denied",
-            "unsupported",
-            "unknown",
-            "probe_failed",
-        ]] = {
+        statuses: dict[
+            CapabilityStatus,
+            Literal[
+                "available",
+                "absent",
+                "permission_denied",
+                "unsupported",
+                "unknown",
+                "probe_failed",
+            ],
+        ] = {
             CapabilityStatus.AVAILABLE: "available",
             CapabilityStatus.UNAVAILABLE: "absent",
             CapabilityStatus.PERMISSION_REQUIRED: "permission_denied",

@@ -10,19 +10,23 @@ from flameox.application import (
     RegisterPipelineRequest,
 )
 from flameox.catalog import Catalog
-from flameox.domain import ArtifactKind, Sensitivity
+from flameox.domain import ArtifactKind, Sensitivity, digest_model
 from flameox.storage import RunStore, Workspace
 
 
 def _import(workspace: Workspace, path: Path, content: str, *, sensitive: bool = False) -> str:
     path.write_text(content)
-    return ImportService(workspace).import_artifact(
-        ImportArtifactRequest(
-            path=path,
-            kind=ArtifactKind.COLLECTOR_METADATA,
-            sensitivity=Sensitivity.SENSITIVE if sensitive else Sensitivity.INTERNAL,
+    return (
+        ImportService(workspace)
+        .import_artifact(
+            ImportArtifactRequest(
+                path=path,
+                kind=ArtifactKind.COLLECTOR_METADATA,
+                sensitivity=Sensitivity.SENSITIVE if sensitive else Sensitivity.INTERNAL,
+            )
         )
-    ).run.run_id
+        .run.run_id
+    )
 
 
 def _add_registration(
@@ -90,16 +94,10 @@ def _pipeline(
                 ),
                 format="text",
                 format_schema=schema,
-                extractor=(
-                    "line-summary" if second_status in {"available", "cached"} else None
-                ),
-                extractor_version=(
-                    "1" if second_status in {"available", "cached"} else None
-                ),
+                extractor=("line-summary" if second_status in {"available", "cached"} else None),
+                extractor_version=("1" if second_status in {"available", "cached"} else None),
                 structural_summary=(
-                    {"lines": generated_lines}
-                    if second_status in {"available", "cached"}
-                    else None
+                    {"lines": generated_lines} if second_status in {"available", "cached"} else None
                 ),
             ),
         ),
@@ -207,7 +205,7 @@ def test_pipeline_identity_mismatch_invalidates_stage_comparison(tmp_path: Path)
         right.model_copy(
             update={
                 "revision": right.revision + 1,
-                "environment_id": "different-environment",
+                "environment_id": digest_model({"environment": "different"}),
             }
         ),
         expected_revision=right.revision,

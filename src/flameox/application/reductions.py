@@ -189,9 +189,7 @@ class ReductionService:
                 reduction_id,
                 root,
                 timeout_seconds=(
-                    plan.limits.wall_time_seconds
-                    + plan.limits.predicate_timeout_seconds
-                    + 10
+                    plan.limits.wall_time_seconds + plan.limits.predicate_timeout_seconds + 10
                 ),
             )
         candidate = root / "candidate"
@@ -266,9 +264,7 @@ class ReductionService:
                     stdout_id=stdout_id,
                     stderr_id=stderr_id,
                     cleanup_complete=self._cleanup(root),
-                    limitations=(
-                        "The repeated predicate was contradictory or timed out.",
-                    ),
+                    limitations=("The repeated predicate was contradictory or timed out.",),
                 )
             if reducer.process.exit_code != 0:
                 return self._publish_result(
@@ -307,9 +303,7 @@ class ReductionService:
                     stdout_id=stdout_id,
                     stderr_id=stderr_id,
                     cleanup_complete=self._cleanup(root),
-                    limitations=(
-                        "Final predicate revalidation was contradictory or timed out.",
-                    ),
+                    limitations=("Final predicate revalidation was contradictory or timed out.",),
                 )
             if revalidation.failed or not revalidation.passed:
                 return self._publish_result(
@@ -357,9 +351,7 @@ class ReductionService:
             raise
         except DomainError as execution_error:
             failure_disposition: Literal["failed", "timed_out"] = (
-                "timed_out"
-                if execution_error.code is ErrorCode.PROCESS_TIMEOUT
-                else "failed"
+                "timed_out" if execution_error.code is ErrorCode.PROCESS_TIMEOUT else "failed"
             )
             return self._publish_result(
                 plan,
@@ -549,12 +541,8 @@ class ReductionService:
                         "predicate_definition_id": created.predicate_definition_id,
                         "predicate_instance_id": created.predicate_instance_id,
                         "attempts_json": created.attempts.model_dump_json(),
-                        "reducer_stdout_artifact_id": (
-                            created.reducer_stdout_artifact_id
-                        ),
-                        "reducer_stderr_artifact_id": (
-                            created.reducer_stderr_artifact_id
-                        ),
+                        "reducer_stdout_artifact_id": (created.reducer_stdout_artifact_id),
+                        "reducer_stderr_artifact_id": (created.reducer_stderr_artifact_id),
                         "cleanup_complete": created.cleanup_complete,
                         "limitations": list(created.limitations),
                         "finished_at": created.finished_at,
@@ -658,9 +646,7 @@ class ReductionService:
 
     @staticmethod
     def _write_predicate_wrapper(socket_path: Path, wrapper: Path) -> None:
-        wrapper.write_text(
-            _PREDICATE_WRAPPER.replace("__SOCKET_PATH__", repr(str(socket_path)))
-        )
+        wrapper.write_text(_PREDICATE_WRAPPER.replace("__SOCKET_PATH__", repr(str(socket_path))))
         wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
 
 

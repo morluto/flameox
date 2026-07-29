@@ -117,8 +117,8 @@ class ExperimentConfig(ContractModel):
         "fixed_order",
     ] = "randomized_complete_blocks"
     blocks: Annotated[int, Field(gt=0, le=1_000)] = 1
-    factors: dict[str, Annotated[tuple[Scalar, ...], Field(min_length=1, max_length=32)]] = (
-        Field(default_factory=dict, max_length=8)
+    factors: dict[str, Annotated[tuple[Scalar, ...], Field(min_length=1, max_length=32)]] = Field(
+        default_factory=dict, max_length=8
     )
     combination_policy: Literal["cartesian", "explicit"] = "cartesian"
     combinations: Annotated[tuple[dict[str, Scalar], ...], Field(max_length=10_000)] = ()

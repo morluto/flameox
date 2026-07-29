@@ -244,9 +244,7 @@ class ArtifactPipelineService:
             publisher_version="1",
             input_run_ids=(created.run_id,),
             input_artifact_ids=tuple(
-                stage.artifact_id
-                for stage in created.stages
-                if stage.artifact_id is not None
+                stage.artifact_id for stage in created.stages if stage.artifact_id is not None
             ),
         )
         return created
@@ -292,9 +290,7 @@ class ArtifactPipelineService:
                         "inspection coverage is incomplete."
                     )
                     break
-        limitations.append(
-            "The first observed divergent stage is not a root-cause attribution."
-        )
+        limitations.append("The first observed divergent stage is not a root-cause attribution.")
         input_artifacts = tuple(
             dict.fromkeys(
                 stage.artifact_id
@@ -359,9 +355,7 @@ class ArtifactPipelineService:
                         "stages_json": canonical_json(
                             [stage.model_dump(mode="json") for stage in created.stages]
                         ),
-                        "first_observed_divergent_stage": (
-                            created.first_observed_divergent_stage
-                        ),
+                        "first_observed_divergent_stage": (created.first_observed_divergent_stage),
                         "input_artifact_ids": list(created.input_artifact_ids),
                         "extractor_identities": list(created.extractor_identities),
                         "limitations": list(created.limitations),

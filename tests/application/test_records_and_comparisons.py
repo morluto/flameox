@@ -387,8 +387,10 @@ def test_comparison_rejects_different_or_partial_accelerator_identity(
             runtime_version="12.9",
         )
     )
-    candidate_run = RunStore(workspace).read(candidate_id).model_copy(
-        update={"environment_id": candidate_environment.environment_id}
+    candidate_run = (
+        RunStore(workspace)
+        .read(candidate_id)
+        .model_copy(update={"environment_id": candidate_environment.environment_id})
     )
     GenerationPublisher(workspace).publish_rows(
         {
@@ -505,9 +507,7 @@ def test_comparison_reports_differing_declared_artifact_paths_and_digests(
         )
     )
 
-    assert "declared execution identity differs across treatments" in (
-        result.comparison.mismatches
-    )
+    assert "declared execution identity differs across treatments" in (result.comparison.mismatches)
     detail = next(
         mismatch
         for mismatch in result.comparison.mismatches
@@ -655,9 +655,7 @@ def test_trial_block_identity_makes_pairing_independent_of_member_order(
                     "experiment_id": "experiment",
                     "variant_id": variant,
                     "run_id": run_id,
-                    "combination_id": digest_model(
-                        {"variant": variant, "block": block_id}
-                    ),
+                    "combination_id": digest_model({"variant": variant, "block": block_id}),
                     "factors_json": json.dumps({"variant": variant}, sort_keys=True),
                     "block_id": block_id,
                     "order_in_block": 0,

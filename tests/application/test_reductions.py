@@ -42,9 +42,11 @@ def _approve(workspace: Workspace) -> None:
 
 def _original(workspace: Workspace, path: Path, content: str = "large FAIL input") -> str:
     path.write_text(content)
-    return ImportService(workspace).import_artifact(
-        ImportArtifactRequest(path=path, kind=ArtifactKind.COLLECTOR_METADATA)
-    ).artifact_id
+    return (
+        ImportService(workspace)
+        .import_artifact(ImportArtifactRequest(path=path, kind=ArtifactKind.COLLECTOR_METADATA))
+        .artifact_id
+    )
 
 
 @pytest.mark.anyio

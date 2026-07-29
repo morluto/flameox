@@ -170,9 +170,7 @@ class ExecutionIdentityService:
                     loaded_path=str(resolved) if resolved is not None else None,
                     distribution=distribution if isinstance(distribution, str) else None,
                     version=(
-                        distribution_version
-                        if isinstance(distribution_version, str)
-                        else None
+                        distribution_version if isinstance(distribution_version, str) else None
                     ),
                     content_digest=self._digest(resolved) if resolved is not None else None,
                     status=(
@@ -181,9 +179,7 @@ class ExecutionIdentityService:
                         else "resolution_failed"
                     ),
                     limitations=(
-                        (str(value.get("error")),)
-                        if value.get("error") is not None
-                        else ()
+                        (str(value.get("error")),) if value.get("error") is not None else ()
                     ),
                 )
             )

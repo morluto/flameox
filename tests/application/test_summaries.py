@@ -37,9 +37,7 @@ message = ["candidate", "token-secret"]
 def _disable_containment(workspace: Workspace) -> None:
     config = workspace.config.model_copy(
         update={
-            "execution": workspace.config.execution.model_copy(
-                update={"containment": "disabled"}
-            )
+            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
         }
     )
     assert isinstance(config, WorkspaceConfig)
@@ -115,8 +113,7 @@ async def test_summary_never_excerpts_sensitive_process_output(
     store = RunStore(workspace)
     run = store.read(captured.run.run_id)
     registrations = tuple(
-        item.model_copy(update={"sensitivity": Sensitivity.SENSITIVE})
-        for item in run.artifacts
+        item.model_copy(update={"sensitivity": Sensitivity.SENSITIVE}) for item in run.artifacts
     )
     store.append(
         run.model_copy(update={"revision": run.revision + 1, "artifacts": registrations}),

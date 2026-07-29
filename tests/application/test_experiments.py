@@ -358,9 +358,7 @@ case = ["empty", "boundary", "ordinary"]
     second_cells = [cell for block in second.blocks for cell in block.cells]
 
     assert len(first_cells) == 10
-    assert [cell.trial_id for cell in first_cells] == [
-        cell.trial_id for cell in second_cells
-    ]
+    assert [cell.trial_id for cell in first_cells] == [cell.trial_id for cell in second_cells]
     assert [cell.combination_id for cell in first_cells] == [
         cell.combination_id for cell in second_cells
     ]
@@ -431,9 +429,7 @@ case = ["clean", "bad"]
         ("base", "candidate"),
         ("candidate", "base"),
     }
-    assert [block.order for block in plan.blocks] == [
-        block.order for block in regenerated.blocks
-    ]
+    assert [block.order for block in plan.blocks] == [block.order for block in regenerated.blocks]
     with pytest.raises(DomainError) as conflicting:
         await service.plan(
             experiment_name="matrix",
@@ -507,9 +503,7 @@ case = ["bad", "clean"]
     )
     config = workspace.config.model_copy(
         update={
-            "execution": workspace.config.execution.model_copy(
-                update={"containment": "disabled"}
-            )
+            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
         }
     )
     workspace.paths.config.write_text(config.to_toml())
@@ -577,9 +571,7 @@ case = ["bad"]
     )
     config = workspace.config.model_copy(
         update={
-            "execution": workspace.config.execution.model_copy(
-                update={"containment": "disabled"}
-            )
+            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
         }
     )
     workspace.paths.config.write_text(config.to_toml())
@@ -674,9 +666,7 @@ mode = ["base", "candidate"]
     )
     config = workspace.config.model_copy(
         update={
-            "execution": workspace.config.execution.model_copy(
-                update={"containment": "disabled"}
-            )
+            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
         }
     )
     workspace.paths.config.write_text(config.to_toml())

@@ -53,11 +53,7 @@ class _Broker:
 
     async def run(self, request: ExecutionRequest, **_: object) -> ExecutionOutcome:
         self.requests.append(request)
-        stdout = (
-            self.topology.encode()
-            if request.argv[-2:] == ("topo", "-m")
-            else self.inventory
-        )
+        stdout = self.topology.encode() if request.argv[-2:] == ("topo", "-m") else self.inventory
         return ExecutionOutcome(
             process=ProcessResult(exit_code=0),
             stdout=stdout,
@@ -159,9 +155,7 @@ async def test_accelerator_probe_failure_states_remain_distinct(
 ) -> None:
     monkeypatch.setattr("flameox.application.environment.shutil.which", lambda _: "/bin/nvidia-smi")
 
-    facet = await AcceleratorIdentityService(tmp_path, broker=broker).observe(
-        ("cuda.devices",)
-    )
+    facet = await AcceleratorIdentityService(tmp_path, broker=broker).observe(("cuda.devices",))
 
     assert facet is not None
     assert facet.status == expected
@@ -218,11 +212,7 @@ async def test_unknown_inventory_fields_remain_distinct_and_partial(
                 ),
             )
         },
-        {
-            "links": (
-                AcceleratorLink(left=0, right=1, kind="host_bridge"),
-            )
-        },
+        {"links": (AcceleratorLink(left=0, right=1, kind="host_bridge"),)},
     ],
 )
 def test_driver_model_mig_and_topology_each_change_environment_identity(
@@ -247,6 +237,6 @@ def test_driver_model_mig_and_topology_each_change_environment_identity(
     )
     changed = baseline.model_copy(update=change)
 
-    assert collect_environment(baseline).environment_id != collect_environment(
-        changed
-    ).environment_id
+    assert (
+        collect_environment(baseline).environment_id != collect_environment(changed).environment_id
+    )

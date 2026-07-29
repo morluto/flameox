@@ -158,13 +158,10 @@ class RunDiscoveryService:
                 page_where += " AND (created_at < ? OR (created_at = ? AND run_id > ?))"
                 page_parameters.extend((after_created, after_created, after_run_id))
             rows = snapshot.execute(
-                latest
-                + "SELECT run_id, created_at, run_type, execution_status, capture_status, "
+                latest + "SELECT run_id, created_at, run_type, execution_status, capture_status, "
                 "validation_status, source_state_id, environment_id, workload_definition_id "
                 ", orchestrator, provider, lease_id, worker_id, orchestration_run_id "
-                "FROM latest WHERE "
-                + page_where
-                + " ORDER BY created_at DESC, run_id LIMIT ?",
+                "FROM latest WHERE " + page_where + " ORDER BY created_at DESC, run_id LIMIT ?",
                 (*page_parameters, limit + 1),
             ).fetchall()
         has_more = len(rows) > limit

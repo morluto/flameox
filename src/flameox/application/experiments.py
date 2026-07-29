@@ -246,9 +246,7 @@ class ExperimentService:
             config,
             workload.parameters,
         )
-        variants = tuple(
-            self._factor_label(value) for value in factors[variant_parameter]
-        )
+        variants = tuple(self._factor_label(value) for value in factors[variant_parameter])
         conflicting = sorted(set(supplied_overrides) & set(factors))
         if conflicting:
             raise DomainError(
@@ -298,11 +296,7 @@ class ExperimentService:
             experiment_id=new_id(),
             investigation_id=investigation_id,
             hypothesis_id=hypothesis_id,
-            recipe=(
-                "categorical_outcomes"
-                if config.analysis == "outcome"
-                else "compare_run_sets"
-            ),
+            recipe=("categorical_outcomes" if config.analysis == "outcome" else "compare_run_sets"),
             recipe_version="1",
             workload_definition_id=definition.workload_definition_id,
             experiment_design_id=digest_model(design),
@@ -327,9 +321,7 @@ class ExperimentService:
         coordinates: dict[str, list[dict[str, Scalar]]] = {}
         for combination in combinations:
             coordinate = {
-                name: value
-                for name, value in combination.items()
-                if name != variant_parameter
+                name: value for name, value in combination.items() if name != variant_parameter
             }
             coordinate_id = digest_model(coordinate)
             coordinates.setdefault(coordinate_id, []).append(combination)
@@ -356,12 +348,10 @@ class ExperimentService:
                         ),
                         treatment=self._factor_label(combination[variant_parameter]),
                         factors={
-                            name: cast(JsonValue, value)
-                            for name, value in combination.items()
+                            name: cast(JsonValue, value) for name, value in combination.items()
                         },
                         parameters={
-                            name: cast(JsonValue, value)
-                            for name, value in combination.items()
+                            name: cast(JsonValue, value) for name, value in combination.items()
                         },
                     )
                     for combination in ordered
@@ -460,123 +450,118 @@ class ExperimentService:
         trials_by_variant: dict[str, list[Trial]] = {name: [] for name in plan.variants}
         run_by_variant: dict[str, RunManifest] = {}
         schedule = tuple(
-            (block, order, cell)
-            for block in plan.blocks
-            for order, cell in enumerate(block.cells)
+            (block, order, cell) for block in plan.blocks for order, cell in enumerate(block.cells)
         )
         for schedule_index, (block, order, cell) in enumerate(schedule):
-                variant_name = cell.treatment
-                parameters = {
-                    **cast(dict[str, Scalar], plan.parameter_overrides),
-                    **cast(dict[str, Scalar], cell.parameters),
-                }
-                capture_plan = None
-                run: RunManifest | None = None
-                failure_class: Literal[
-                    "none",
-                    "unattempted",
-                    "oracle_failure",
-                    "process_failure",
-                    "timeout",
-                    "cancellation",
-                    "unsupported_environment",
-                    "resource_policy",
-                    "infrastructure_failure",
-                ]
-                try:
-                    capture_plan = await self.captures.plan(
-                        workload_name=config.workload,
-                        adapter=plan.adapter,
-                        parameters=parameters,
-                        execution_policy=plan.execution_policy,
+            variant_name = cell.treatment
+            parameters = {
+                **cast(dict[str, Scalar], plan.parameter_overrides),
+                **cast(dict[str, Scalar], cell.parameters),
+            }
+            capture_plan = None
+            run: RunManifest | None = None
+            failure_class: Literal[
+                "none",
+                "unattempted",
+                "oracle_failure",
+                "process_failure",
+                "timeout",
+                "cancellation",
+                "unsupported_environment",
+                "resource_policy",
+                "infrastructure_failure",
+            ]
+            try:
+                capture_plan = await self.captures.plan(
+                    workload_name=config.workload,
+                    adapter=plan.adapter,
+                    parameters=parameters,
+                    execution_policy=plan.execution_policy,
+                )
+                captured = await self.captures.execute(capture_plan.plan_id)
+                run = captured.run
+                outcome, failure_class = self._classify_run(run)
+                if outcome is TrialOutcome.SUCCEEDED and plan.adapter == "pyperf":
+                    await run_atomic_thread(
+                        partial(
+                            PyPerfExtractor(self.workspace).extract,
+                            run.run_id,
+                        )
                     )
-                    captured = await self.captures.execute(capture_plan.plan_id)
-                    run = captured.run
-                    outcome, failure_class = self._classify_run(run)
-                    if outcome is TrialOutcome.SUCCEEDED and plan.adapter == "pyperf":
-                        await run_atomic_thread(
-                            partial(
-                                PyPerfExtractor(self.workspace).extract,
-                                run.run_id,
-                            )
-                        )
-                except asyncio.CancelledError as cancellation:
-                    run = (
-                        RunStore(self.workspace).read(capture_plan.run_id)
-                        if capture_plan is not None
-                        and (self.workspace.paths.runs / capture_plan.run_id).exists()
-                        else None
-                    )
-                    trial = self._make_trial(
-                        plan=plan,
-                        cell=cell,
-                        run=run,
-                        block_id=block.block_id,
-                        order=order,
-                        outcome=TrialOutcome.CANCELLED,
-                        failure_class="cancellation",
-                    )
-                    try:
-                        await run_atomic_thread(partial(self._publish_trial, trial))
-                        await self._publish_unattempted(
-                            plan,
-                            schedule[schedule_index + 1 :],
-                        )
-                    finally:
-                        raise cancellation
-                except DomainError as error:
-                    if error.run_id is None:
-                        if config.analysis != "outcome":
-                            failed = self._make_trial(
-                                plan=plan,
-                                cell=cell,
-                                run=None,
-                                block_id=block.block_id,
-                                order=order,
-                                outcome=TrialOutcome.INFRASTRUCTURE_FAILED,
-                                failure_class="infrastructure_failure",
-                            )
-                            await run_atomic_thread(
-                                partial(self._publish_trial, failed)
-                            )
-                            await self._publish_unattempted(
-                                plan,
-                                schedule[schedule_index + 1 :],
-                            )
-                            raise
-                        run = None
-                        outcome = (
-                            TrialOutcome.UNSUPPORTED
-                            if error.code is ErrorCode.CAPABILITY_UNAVAILABLE
-                            else TrialOutcome.INFRASTRUCTURE_FAILED
-                        )
-                        failure_class = (
-                            "unsupported_environment"
-                            if outcome is TrialOutcome.UNSUPPORTED
-                            else "infrastructure_failure"
-                        )
-                    else:
-                        run = RunStore(self.workspace).read(error.run_id)
-                        outcome, failure_class = self._classify_run(run)
-                if run is not None:
-                    run_by_variant.setdefault(variant_name, run)
+            except asyncio.CancelledError as cancellation:
+                run = (
+                    RunStore(self.workspace).read(capture_plan.run_id)
+                    if capture_plan is not None
+                    and (self.workspace.paths.runs / capture_plan.run_id).exists()
+                    else None
+                )
                 trial = self._make_trial(
                     plan=plan,
                     cell=cell,
                     run=run,
                     block_id=block.block_id,
                     order=order,
-                    outcome=outcome,
-                    failure_class=failure_class,
+                    outcome=TrialOutcome.CANCELLED,
+                    failure_class="cancellation",
                 )
-                trials.append(trial)
-                trials_by_variant[variant_name].append(trial)
-                published = await run_atomic_thread(partial(self._publish_trial, trial))
-                completed += 1
-                await report(
-                    f"Trial {completed - 2}/{trial_count} published "
-                    f"({block.block_id}, {variant_name})"
-                )
+                try:
+                    await run_atomic_thread(partial(self._publish_trial, trial))
+                    await self._publish_unattempted(
+                        plan,
+                        schedule[schedule_index + 1 :],
+                    )
+                finally:
+                    raise cancellation
+            except DomainError as error:
+                if error.run_id is None:
+                    if config.analysis != "outcome":
+                        failed = self._make_trial(
+                            plan=plan,
+                            cell=cell,
+                            run=None,
+                            block_id=block.block_id,
+                            order=order,
+                            outcome=TrialOutcome.INFRASTRUCTURE_FAILED,
+                            failure_class="infrastructure_failure",
+                        )
+                        await run_atomic_thread(partial(self._publish_trial, failed))
+                        await self._publish_unattempted(
+                            plan,
+                            schedule[schedule_index + 1 :],
+                        )
+                        raise
+                    run = None
+                    outcome = (
+                        TrialOutcome.UNSUPPORTED
+                        if error.code is ErrorCode.CAPABILITY_UNAVAILABLE
+                        else TrialOutcome.INFRASTRUCTURE_FAILED
+                    )
+                    failure_class = (
+                        "unsupported_environment"
+                        if outcome is TrialOutcome.UNSUPPORTED
+                        else "infrastructure_failure"
+                    )
+                else:
+                    run = RunStore(self.workspace).read(error.run_id)
+                    outcome, failure_class = self._classify_run(run)
+            if run is not None:
+                run_by_variant.setdefault(variant_name, run)
+            trial = self._make_trial(
+                plan=plan,
+                cell=cell,
+                run=run,
+                block_id=block.block_id,
+                order=order,
+                outcome=outcome,
+                failure_class=failure_class,
+            )
+            trials.append(trial)
+            trials_by_variant[variant_name].append(trial)
+            published = await run_atomic_thread(partial(self._publish_trial, trial))
+            completed += 1
+            await report(
+                f"Trial {completed - 2}/{trial_count} published ({block.block_id}, {variant_name})"
+            )
         variants: list[Variant] = []
         for name in plan.variants:
             run = run_by_variant.get(name)
@@ -606,9 +591,7 @@ class ExperimentService:
                     experiment_id=plan.experiment.experiment_id,
                     name=name,
                     source_state_id=run.source_state_id if run is not None else None,
-                    workload_instance_id=(
-                        run.workload_instance_id if run is not None else None
-                    ),
+                    workload_instance_id=(run.workload_instance_id if run is not None else None),
                     parameters=factor_values,
                     # A scaling variant spans several workload instances; its
                     # declared parameter family remains explicit here.
@@ -629,9 +612,7 @@ class ExperimentService:
                 },
                 publisher="flameox.experiments",
                 publisher_version="1",
-                input_run_ids=tuple(
-                    trial.run_id for trial in trials if trial.run_id is not None
-                ),
+                input_run_ids=tuple(trial.run_id for trial in trials if trial.run_id is not None),
             )
         )
         run_sets = await run_atomic_thread(
@@ -881,12 +862,9 @@ class ExperimentService:
             selected = [
                 trial
                 for trial in trials
-                if trial.factors.get(plan.variant_parameter)
-                == treatment_value
+                if trial.factors.get(plan.variant_parameter) == treatment_value
             ]
-            attempted = sum(
-                trial.outcome is not TrialOutcome.UNATTEMPTED for trial in selected
-            )
+            attempted = sum(trial.outcome is not TrialOutcome.UNATTEMPTED for trial in selected)
             eligible = sum(
                 trial.failure_class
                 not in {
@@ -913,8 +891,7 @@ class ExperimentService:
                     timed_out=sum(trial.failure_class == "timeout" for trial in selected),
                     cancelled=sum(trial.failure_class == "cancellation" for trial in selected),
                     unsupported=sum(
-                        trial.failure_class == "unsupported_environment"
-                        for trial in selected
+                        trial.failure_class == "unsupported_environment" for trial in selected
                     ),
                     resource_policy=sum(
                         trial.failure_class == "resource_policy" for trial in selected
@@ -923,8 +900,7 @@ class ExperimentService:
                         trial.failure_class == "oracle_failure" for trial in selected
                     ),
                     infrastructure_failed=sum(
-                        trial.failure_class == "infrastructure_failure"
-                        for trial in selected
+                        trial.failure_class == "infrastructure_failure" for trial in selected
                     ),
                     pass_rate=passed / eligible if eligible else None,
                     failure_rate=failed / eligible if eligible else None,
@@ -997,12 +973,8 @@ class ExperimentService:
             counts=tuple(counts),
             complete_pairs=complete_pairs,
             unmatched_cells=unmatched,
-            first_failure_trial_id=(
-                first_failure.trial_id if first_failure is not None else None
-            ),
-            first_failure_factors=(
-                first_failure.factors if first_failure is not None else None
-            ),
+            first_failure_trial_id=(first_failure.trial_id if first_failure is not None else None),
+            first_failure_factors=(first_failure.factors if first_failure is not None else None),
             limitations=tuple(limitations),
         )
 
@@ -1054,8 +1026,8 @@ class ExperimentService:
             "infrastructure_failure",
         ],
     ) -> Trial:
-        parameter_name, parameter_int, parameter_float = (
-            self._legacy_parameter_projection(plan, cell)
+        parameter_name, parameter_int, parameter_float = self._legacy_parameter_projection(
+            plan, cell
         )
         return Trial(
             trial_id=cell.trial_id,
@@ -1082,9 +1054,7 @@ class ExperimentService:
                 else f"capture outcome was {outcome.value}"
             ),
             validation_status=(
-                run.validation_status
-                if run is not None
-                else ValidationStatus.NOT_REQUESTED
+                run.validation_status if run is not None else ValidationStatus.NOT_REQUESTED
             ),
             failure_class=failure_class,
         )
@@ -1095,13 +1065,9 @@ class ExperimentService:
         cell: ExperimentCell,
     ) -> tuple[str | None, int | None, float | None]:
         """Project one context factor for readers of the pre-factor trial schema."""
-        context_factors = tuple(
-            name for name in cell.factors if name != plan.variant_parameter
-        )
+        context_factors = tuple(name for name in cell.factors if name != plan.variant_parameter)
         parameter_name = context_factors[0] if len(context_factors) == 1 else None
-        parameter_value = (
-            cell.factors[parameter_name] if parameter_name is not None else None
-        )
+        parameter_value = cell.factors[parameter_name] if parameter_name is not None else None
         parameter_int: int | None = None
         parameter_float: float | None = None
         if isinstance(parameter_value, int) and not isinstance(parameter_value, bool):
@@ -1185,9 +1151,7 @@ class ExperimentService:
             "name": value.name,
             "source_state_id": value.source_state_id,
             "workload_instance_id": value.workload_instance_id,
-            "environment_requirements_json": canonical_json(
-                value.environment_requirements
-            ),
+            "environment_requirements_json": canonical_json(value.environment_requirements),
             "parameters_json": canonical_json(value.parameters),
         }
 

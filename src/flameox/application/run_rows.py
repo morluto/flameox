@@ -29,9 +29,7 @@ def run_row(manifest: RunManifest) -> dict[str, object]:
         "lease_id": manifest.external_context.lease_id if manifest.external_context else None,
         "worker_id": manifest.external_context.worker_id if manifest.external_context else None,
         "orchestration_run_id": (
-            manifest.external_context.orchestration_run_id
-            if manifest.external_context
-            else None
+            manifest.external_context.orchestration_run_id if manifest.external_context else None
         ),
         "execution_identity_id": (
             manifest.execution_identity.identity_id if manifest.execution_identity else None

@@ -453,9 +453,7 @@ class RuntimeResourceSummary(ContractModel):
     sampling_interval_ms: Annotated[int, Field(gt=0)]
     minimum_free_bytes: Annotated[int, Field(ge=0)] | None = None
     staging_growth_bytes: Annotated[int, Field(ge=0)] | None = None
-    writable_root_growth_bytes: dict[str, Annotated[int, Field(ge=0)]] = Field(
-        default_factory=dict
-    )
+    writable_root_growth_bytes: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
     peak_rss_bytes: Annotated[int, Field(ge=0)] | None = None
     unavailable_metrics: tuple[str, ...] = ()
     policy_termination: Literal["storage_reserve_exceeded"] | None = None

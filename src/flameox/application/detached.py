@@ -176,9 +176,7 @@ class DetachedCaptureManager:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 "This server does not own the detached capture task.",
-                remediation=(
-                    "Inspect the exact process lease; recover only after it disappears.",
-                ),
+                remediation=("Inspect the exact process lease; recover only after it disappears.",),
                 run_id=run_id,
             )
         task.cancel()

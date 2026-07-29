@@ -94,12 +94,12 @@ class AdapterV1(Protocol):
 
     async def validate(
         self,
-        artifact_path: str,
+        _artifact_path: str,
         declaration: AdapterArtifactDeclaration,
     ) -> AdapterValidationResult: ...
 
     async def extract(
         self,
-        artifact_path: str,
+        _artifact_path: str,
         declaration: AdapterArtifactDeclaration,
     ) -> AdapterExtractionResult: ...

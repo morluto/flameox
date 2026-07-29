@@ -392,13 +392,9 @@ class CaptureService:
             "collector_environment": collector_environment,
             "bound_identities": identities,
             "preflight": preflight.model_dump(mode="json"),
-            "writable_roots": [
-                item.model_dump(mode="json") for item in writable_roots
-            ],
+            "writable_roots": [item.model_dump(mode="json") for item in writable_roots],
             "external_context": (
-                external_context.model_dump(mode="json")
-                if external_context is not None
-                else None
+                external_context.model_dump(mode="json") if external_context is not None else None
             ),
             "planned_execution_identity": planned_execution_identity.model_dump(mode="json"),
             "policy": self.workspace.config.model_dump(mode="json"),
@@ -839,8 +835,7 @@ class CaptureService:
                             kind=plan.expected_artifact_kinds[0],
                             role="primary",
                             media_type=(
-                                mimetypes.guess_type(native.name)[0]
-                                or "application/octet-stream"
+                                mimetypes.guess_type(native.name)[0] or "application/octet-stream"
                             ),
                             producer=plan.adapter,
                             producer_version=plan.adapter_version,
@@ -1287,17 +1282,13 @@ class CaptureService:
             "collector_environment": plan.collector_environment,
             "bound_identities": plan.bound_identities,
             "preflight": plan.preflight.model_dump(mode="json"),
-            "writable_roots": [
-                item.model_dump(mode="json") for item in plan.writable_roots
-            ],
+            "writable_roots": [item.model_dump(mode="json") for item in plan.writable_roots],
             "external_context": (
                 plan.external_context.model_dump(mode="json")
                 if plan.external_context is not None
                 else None
             ),
-            "planned_execution_identity": (
-                plan.planned_execution_identity.model_dump(mode="json")
-            ),
+            "planned_execution_identity": (plan.planned_execution_identity.model_dump(mode="json")),
             "policy": self.workspace.config.model_dump(mode="json"),
             "containment": plan.containment,
             "systemd_scope_unit": plan.systemd_scope_unit,
@@ -1323,10 +1314,7 @@ class CaptureService:
             self.workspace,
             broker=self.broker,
         ).plan(plan.workload_name)
-        if (
-            current_execution_identity.identity_id
-            != plan.planned_execution_identity.identity_id
-        ):
+        if current_execution_identity.identity_id != plan.planned_execution_identity.identity_id:
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "A declared module or native identity input changed after planning.",
@@ -1374,8 +1362,7 @@ class CaptureService:
             )
         current_writable = self.workloads.writable_targets(plan.workload_name)
         planned_writable = tuple(
-            (Path(item.target_path), item.target_identity)
-            for item in plan.writable_roots
+            (Path(item.target_path), item.target_identity) for item in plan.writable_roots
         )
         if current_writable != planned_writable:
             raise DomainError(

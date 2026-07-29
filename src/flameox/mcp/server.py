@@ -728,9 +728,7 @@ def create_server(
             )
             experiment_id = result.experiment.experiment_id
             resource_uri = f"flameox://experiments/{experiment_id}"
-            attempted_trials = sum(
-                trial.outcome != "unattempted" for trial in result.trials
-            )
+            attempted_trials = sum(trial.outcome != "unattempted" for trial in result.trials)
             receipt = ExperimentReceipt(
                 experiment_id=experiment_id,
                 attempted_trials=attempted_trials,
@@ -770,9 +768,9 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[ReductionPlan]]:
         """Bind immutable input and approved reducer/predicate identities before execution."""
         try:
-            plan = ReductionService(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).plan(request)
+            plan = ReductionService(ctx.request_context.lifespan_context.require_workspace()).plan(
+                request
+            )
             return _success(plan, f"Planned reduction {plan.plan_id}.")
         except DomainError as error:
             return _failure(error)
@@ -801,9 +799,9 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[ReductionResult]]:
         """Reconnect to one immutable terminal reduction result."""
         try:
-            result = ReductionService(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).get(reduction_id)
+            result = ReductionService(ctx.request_context.lifespan_context.require_workspace()).get(
+                reduction_id
+            )
             return _success(
                 result,
                 f"Reduction {result.reduction_id} is {result.disposition}.",
@@ -1106,9 +1104,9 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[FindingListResult]]:
         """List bounded current finding projections."""
         try:
-            result = FindingService(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).list(limit=limit, cursor=cursor)
+            result = FindingService(ctx.request_context.lifespan_context.require_workspace()).list(
+                limit=limit, cursor=cursor
+            )
             return _success(
                 result,
                 f"Returned {result.returned} of {result.total} findings.",

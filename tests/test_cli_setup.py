@@ -111,6 +111,8 @@ def test_setup_reports_corrupt_install_metadata_as_a_domain_error(
     assert "ARTIFACT_INTEGRITY_FAILED" in result.output
     assert "Traceback" not in result.output
     assert result.exception is not None
+
+
 def test_npm_bootstrap_prints_runtime_to_wizard_handoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

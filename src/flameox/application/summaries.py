@@ -181,8 +181,7 @@ class EvidenceSummaryService:
                 ]
             )
             claims = tuple(
-                self._claim(snapshot, finding_id, request)
-                for finding_id in request.finding_ids
+                self._claim(snapshot, finding_id, request) for finding_id in request.finding_ids
             )
         limitations = self._limitations(request, runs, references, claims)
         payload = {
@@ -331,8 +330,7 @@ class EvidenceSummaryService:
         if value is None:
             return {"identity": None, "identity_quality": "unknown"}
         connection = snapshot.execute(
-            f'SELECT * FROM "{table}" WHERE "{identifier}" = ? '
-            "ORDER BY published_at DESC LIMIT 1",
+            f'SELECT * FROM "{table}" WHERE "{identifier}" = ? ORDER BY published_at DESC LIMIT 1',
             (value,),
         )
         row = connection.fetchone()
@@ -409,12 +407,8 @@ class EvidenceSummaryService:
                     "comparison",
                     cast(str, item["ref_id"]),
                 ).data
-                invalid_comparison = (
-                    invalid_comparison or comparison.get("validity") != "valid"
-                )
-        candidate_only = (
-            request.candidate_run_id is not None and request.baseline_run_id is None
-        )
+                invalid_comparison = invalid_comparison or comparison.get("validity") != "valid"
+        candidate_only = request.candidate_run_id is not None and request.baseline_run_id is None
         status: Literal["as_recorded", "not_supporting", "candidate_only"]
         limitations = list(finding.limitations)
         if len(rows) > 50:
@@ -464,14 +458,8 @@ class EvidenceSummaryService:
         references: tuple[SummaryReference, ...],
         claims: tuple[SummaryClaim, ...],
     ) -> tuple[str, ...]:
-        limitations = [
-            limitation
-            for run in runs
-            for limitation in run.limitations
-        ]
-        limitations.extend(
-            limitation for claim in claims for limitation in claim.limitations
-        )
+        limitations = [limitation for run in runs for limitation in run.limitations]
+        limitations.extend(limitation for claim in claims for limitation in claim.limitations)
         if request.candidate_run_id is not None and request.baseline_run_id is None:
             limitations.append(
                 "This selection contains candidate validation without a base observation."
@@ -481,8 +469,7 @@ class EvidenceSummaryService:
             and request.candidate_run_id is not None
             and len(
                 {
-                    run.environment.get("environment_id")
-                    or run.environment.get("identity")
+                    run.environment.get("environment_id") or run.environment.get("identity")
                     for run in runs[:2]
                 }
             )
@@ -490,10 +477,7 @@ class EvidenceSummaryService:
         ):
             limitations.append("Baseline and candidate environment identities differ.")
         for reference in references:
-            if (
-                reference.ref_type == "comparison"
-                and reference.data.get("validity") != "valid"
-            ):
+            if reference.ref_type == "comparison" and reference.data.get("validity") != "valid":
                 limitations.append(
                     f"Comparison {reference.ref_id} is "
                     f"{reference.data.get('validity', 'unknown')} and is not supporting proof."

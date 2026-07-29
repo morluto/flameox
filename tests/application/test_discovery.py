@@ -62,14 +62,20 @@ def test_run_and_artifact_pagination_are_snapshot_bound_and_filtered(tmp_path: P
     assert second.returned == 1
     assert second.runs[0].run_id != first.runs[0].run_id
     assert second.next_cursor is None
-    assert runs.list(
-        filter=RunFilter(environment_id=matching_identity),
-        limit=10,
-    ).total == 2
-    assert runs.list(
-        filter=RunFilter(environment_id="sha256:" + "0" * 64),
-        limit=10,
-    ).total == 0
+    assert (
+        runs.list(
+            filter=RunFilter(environment_id=matching_identity),
+            limit=10,
+        ).total
+        == 2
+    )
+    assert (
+        runs.list(
+            filter=RunFilter(environment_id="sha256:" + "0" * 64),
+            limit=10,
+        ).total
+        == 0
+    )
 
     artifacts = ArtifactService(workspace)
     artifact_first = artifacts.list(limit=1)

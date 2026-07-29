@@ -545,9 +545,7 @@ class ComparisonService:
         ]
         environments = {str(run[1]) for run in (*baseline_runs, *candidate_runs)}
         mismatches.extend(self._environment_identity_mismatches(snapshot, environments))
-        mismatches.extend(
-            self._execution_identity_mismatches((*baseline_runs, *candidate_runs))
-        )
+        mismatches.extend(self._execution_identity_mismatches((*baseline_runs, *candidate_runs)))
         baseline_sources = {str(run[2]) if run[2] is not None else None for run in baseline_runs}
         candidate_sources = {str(run[2]) if run[2] is not None else None for run in candidate_runs}
         if len(baseline_sources) > 1 or len(candidate_sources) > 1:
@@ -651,9 +649,7 @@ class ComparisonService:
                 f"WHERE environment_id IN ({placeholders})",
                 tuple(sorted(environments)),
             ).fetchall()
-            if not qualities or any(
-                row[0] != IdentityQuality.EXACT.value for row in qualities
-            ):
+            if not qualities or any(row[0] != IdentityQuality.EXACT.value for row in qualities):
                 mismatches.append("environment identity is partial or unavailable")
         return tuple(mismatches)
 

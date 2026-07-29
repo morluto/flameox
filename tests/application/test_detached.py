@@ -31,9 +31,7 @@ timeout_seconds = {timeout}
     )
     config = workspace.config.model_copy(
         update={
-            "execution": workspace.config.execution.model_copy(
-                update={"containment": "disabled"}
-            )
+            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
         }
     )
     workspace.paths.config.write_text(config.to_toml())
@@ -117,9 +115,7 @@ async def test_lost_start_caller_does_not_cancel_or_orphan_owned_capture(
         adapter="command",
         execution_policy=ExecutionPolicy.APPROVED_AGENT,
     )
-    start_call = asyncio.create_task(
-        manager.start(plan.plan_id, "review-disconnect-001")
-    )
+    start_call = asyncio.create_task(manager.start(plan.plan_id, "review-disconnect-001"))
     for _ in range(200):
         try:
             manager.status(plan.run_id)

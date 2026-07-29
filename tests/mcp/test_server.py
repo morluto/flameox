@@ -66,6 +66,7 @@ async def test_every_mcp_tool_has_bounded_object_schemas_and_annotations(
         if tool.annotations.read_only_hint:
             assert tool.annotations.destructive_hint is False
 
+
 @pytest.mark.anyio
 async def test_mcp_domain_errors_remain_structured(tmp_path: Path) -> None:
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:
@@ -116,10 +117,7 @@ async def test_unknown_declared_workflow_routes_back_to_discovery(tmp_path: Path
     assert result.is_error is True
     assert result.structured_content is not None
     assert result.structured_content["error"]["recovery"]["kind"] == "discover_workflows"
-    assert (
-        result.structured_content["error"]["recovery"]["next_tool"]
-        == "list_declared_workflows"
-    )
+    assert result.structured_content["error"]["recovery"]["next_tool"] == "list_declared_workflows"
 
 
 @pytest.mark.anyio
@@ -658,9 +656,7 @@ timeout_seconds = 60
     workspace = Workspace.initialize(tmp_path)
     config = workspace.config.model_copy(
         update={
-            "execution": workspace.config.execution.model_copy(
-                update={"containment": "disabled"}
-            )
+            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
         }
     )
     workspace.paths.config.write_text(config.to_toml())
