@@ -374,9 +374,7 @@ def _invalid_arguments(
     tool_name: str,
     fields: tuple[dict[str, str], ...],
 ) -> CallToolResult:
-    field_summary = "; ".join(
-        f"{item['field']}: {item['message']}" for item in fields
-    )
+    field_summary = "; ".join(f"{item['field']}: {item['message']}" for item in fields)
     message = f"Invalid arguments for {tool_name}: {field_summary}"
     payload = FailurePayload(
         error=ErrorDetail(
@@ -1634,9 +1632,7 @@ def create_server(
         artifact_id: Annotated[
             str, Field(min_length=1, description="Trace artifact ID from list_artifacts.")
         ],
-        start_ns: Annotated[
-            int, Field(ge=0, description="Inclusive window start in nanoseconds.")
-        ],
+        start_ns: Annotated[int, Field(ge=0, description="Inclusive window start in nanoseconds.")],
         end_ns: Annotated[
             int,
             Field(
