@@ -35,10 +35,17 @@ class RunStore:
             return RunManifest.model_validate_json(
                 (self._run_root(run_id) / "manifest.json").read_text()
             )
-        except (FileNotFoundError, ValueError) as exc:
+        except FileNotFoundError as exc:
+            raise DomainError(
+                ErrorCode.RUN_NOT_FOUND,
+                f"Run {run_id!r} does not exist.",
+                remediation=("Call list_runs to choose an existing run.",),
+                details={"missing_entity": "run"},
+            ) from exc
+        except ValueError as exc:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
-                f"Run {run_id!r} does not exist or has an invalid manifest.",
+                f"Run {run_id!r} has an invalid manifest.",
             ) from exc
 
     def append(

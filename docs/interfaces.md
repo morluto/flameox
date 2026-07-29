@@ -252,9 +252,10 @@ async def compare_run_sets(
 ```
 
 `ToolPayload[T]` is an object-root schema with `schema_version`, `ok`,
-`result | null`, and `error | null`. Domain errors use `isError=true` with that
-structured payload. Invalid protocol requests and missing tools remain JSON-RPC
-errors. Returning bare Pydantic models is forbidden because this SDK beta
+`result | null`, and `error | null`. Domain errors and malformed arguments use
+`isError=true` with that structured payload; malformed arguments use the
+`INVALID_ARGUMENTS` code and include the affected fields. Missing tools and
+invalid JSON-RPC requests remain protocol errors. Returning bare Pydantic models is forbidden because this SDK beta
 duplicates them into text and structured content; uncaught domain exceptions
 are forbidden because their structured detail is lost.
 

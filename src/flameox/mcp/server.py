@@ -18,7 +18,7 @@ from mcp_types import (
     Tool,
     ToolAnnotations,
 )
-from pydantic import BaseModel, Field, RootModel
+from pydantic import BaseModel, Field, RootModel, ValidationError
 
 from flameox.adapters import (
     CoverageExtractionResult,
@@ -163,6 +163,8 @@ class RecoveryAction(ContractModel):
         "initialize_workspace",
         "inspect_capabilities",
         "discover_workflows",
+        "discover_runs",
+        "discover_artifacts",
         "manual",
     ]
     safe_to_repeat_same_call: bool
@@ -210,17 +212,18 @@ class StrictMCPServer[LifespanResultT](MCPServer[LifespanResultT]):
 
     async def list_tools(self) -> list[Tool]:
         tools = await super().list_tools()
-        return [
-            tool.model_copy(
-                update={
-                    "input_schema": {
-                        **tool.input_schema,
-                        "additionalProperties": False,
-                    }
+        listed: list[Tool] = []
+        for tool in tools:
+            update: dict[str, Any] = {
+                "input_schema": {
+                    **tool.input_schema,
+                    "additionalProperties": False,
                 }
-            )
-            for tool in tools
-        ]
+            }
+            if tool.output_schema is not None:
+                update["output_schema"] = {**tool.output_schema, "type": "object"}
+            listed.append(tool.model_copy(update=update))
+        return listed
 
     async def call_tool(
         self,
@@ -233,9 +236,23 @@ class StrictMCPServer[LifespanResultT](MCPServer[LifespanResultT]):
             allowed = set(tool.input_schema.get("properties", {}))
             unknown = sorted(set(arguments) - allowed)
             if unknown:
-                fields = ", ".join(repr(field) for field in unknown)
-                raise ToolError(f"Unknown argument field(s) for {name}: {fields}.")
-        return await super().call_tool(name, arguments, context)
+                return _invalid_arguments(
+                    name,
+                    tuple(
+                        {
+                            "field": field,
+                            "message": "Unknown argument field.",
+                            "type": "extra_forbidden",
+                        }
+                        for field in unknown
+                    ),
+                )
+        try:
+            return await super().call_tool(name, arguments, context)
+        except ToolError as error:
+            if isinstance(error.__cause__, ValidationError):
+                return _invalid_arguments(name, _validation_fields(error.__cause__))
+            raise
 
 
 class CaptureReceipt(ContractModel):
@@ -353,7 +370,57 @@ def _failure(error: DomainError) -> CallToolResult:
     )
 
 
+def _invalid_arguments(
+    tool_name: str,
+    fields: tuple[dict[str, str], ...],
+) -> CallToolResult:
+    field_summary = "; ".join(f"{item['field']}: {item['message']}" for item in fields)
+    message = f"Invalid arguments for {tool_name}: {field_summary}"
+    payload = FailurePayload(
+        error=ErrorDetail(
+            code="INVALID_ARGUMENTS",
+            message=message,
+            retryable=False,
+            details={"fields": list(fields)},
+            remediation=[f"Match the {tool_name} inputSchema and retry."],
+            run_id=None,
+            recovery=RecoveryAction(
+                kind="manual",
+                safe_to_repeat_same_call=False,
+            ),
+        )
+    )
+    return CallToolResult(
+        content=[TextContent(type="text", text=message)],
+        structured_content=payload.model_dump(mode="json"),
+        is_error=True,
+    )
+
+
+def _validation_fields(error: ValidationError) -> tuple[dict[str, str], ...]:
+    return tuple(
+        {
+            "field": ".".join(str(part) for part in item["loc"]),
+            "message": item["msg"],
+            "type": item["type"],
+        }
+        for item in error.errors()
+    )
+
+
 def _recovery_for(error: DomainError) -> RecoveryAction:
+    if error.code is ErrorCode.RUN_NOT_FOUND or error.details.get("missing_entity") == "run":
+        return RecoveryAction(
+            kind="discover_runs",
+            safe_to_repeat_same_call=False,
+            next_tool="list_runs",
+        )
+    if error.details.get("missing_entity") == "artifact":
+        return RecoveryAction(
+            kind="discover_artifacts",
+            safe_to_repeat_same_call=False,
+            next_tool="list_artifacts",
+        )
     if error.details.get("next_tool") == "list_declared_workflows":
         return RecoveryAction(
             kind="discover_workflows",
@@ -461,10 +528,12 @@ def create_server(
             "For a new capture: workspace_status -> list_declared_workflows -> "
             "list_capabilities -> plan_capture -> execute_capture_plan for short work, or "
             "start_detached_capture for long work -> get_detached_capture -> get_run -> analyze. "
-            "For existing evidence: list_runs -> get_run or get_evidence -> analyze_* -> "
-            "record_analysis or record_finding. Initialize a missing workspace only when "
-            "authorized. A synchronous consumed capture plan is never retryable; detached "
-            "starts are "
+            "For existing evidence: list_runs and list_artifacts expose artifact_kinds; use "
+            "extract_pyperf and query_measurements for benchmark_samples, analyze_memory for "
+            "memory profiles, analyze_execution for coverage, and the other analyze_* tools "
+            "only for their documented artifact kinds. Then use get_evidence, record_analysis, "
+            "or record_finding. Initialize a missing workspace only when authorized. A "
+            "synchronous consumed capture plan is never retryable; detached starts are "
             "retryable only with the same idempotency key."
         ),
         lifespan=lifespan,
@@ -508,7 +577,7 @@ def create_server(
         ctx: Context[AppContext],
         mode: Literal["passive", "active_cached", "active_refresh"] = "passive",
     ) -> Annotated[CallToolResult, ToolPayload[CapabilityList]]:
-        """Report passive capabilities, or explicitly execute bounded active probes."""
+        """List capabilities; use passive, active_cached, or active_refresh mode explicitly."""
         service = ctx.request_context.lifespan_context.capabilities
         result = (
             service.list()
@@ -517,8 +586,8 @@ def create_server(
         )
         return _success(
             result,
-            f"Found {sum(item.status.value == 'available' for item in result.capabilities)} "
-            "available capabilities.",
+            f"Found {sum(item.status.value == 'available' for item in result.capabilities)} of "
+            f"{len(result.capabilities)} available capabilities.",
         )
 
     @server.tool(name="list_declared_workflows", annotations=READ_ONLY)
@@ -563,14 +632,26 @@ def create_server(
 
     @server.tool(name="plan_capture", annotations=READ_ONLY)
     async def plan_capture_tool(
-        workload_name: str,
-        adapter: str,
-        parameters: dict[str, Scalar],
+        workload_name: Annotated[
+            str,
+            Field(
+                min_length=1,
+                description="Approved declared workload name from list_declared_workflows.",
+            ),
+        ],
+        adapter: Annotated[
+            str,
+            Field(description="Adapter value reported by list_capabilities for this workload."),
+        ],
+        parameters: Annotated[
+            dict[str, Scalar],
+            Field(description="Declared workload parameters; inspect get_declared_workflow first."),
+        ],
         ctx: Context[AppContext],
         preflight_mode: Literal["passive", "active"] = "passive",
         external_context: ExternalExecutionContext | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[CapturePlan]]:
-        """After discovery, bind one approved capture without running it."""
+        """After workflow and capability discovery, bind one approved capture without running it."""
         try:
             result = await ctx.request_context.lifespan_context.capture_service().plan(
                 workload_name=workload_name,
@@ -682,14 +763,26 @@ def create_server(
 
     @server.tool(name="plan_experiment", annotations=READ_ONLY)
     async def plan_experiment_tool(
-        experiment_name: str,
-        investigation_id: str,
-        adapter: str,
-        parameters: dict[str, Scalar],
+        experiment_name: Annotated[
+            str,
+            Field(min_length=1, description="Approved experiment from list_declared_workflows."),
+        ],
+        investigation_id: Annotated[
+            str,
+            Field(min_length=1, description="Investigation ID from create/list investigations."),
+        ],
+        adapter: Annotated[
+            str,
+            Field(description="Adapter capability reported by list_capabilities."),
+        ],
+        parameters: Annotated[
+            dict[str, Scalar],
+            Field(description="Declared parameters; inspect get_declared_workflow first."),
+        ],
         ctx: Context[AppContext],
         hypothesis_id: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[ExperimentPlan]]:
-        """Bind a declared experiment read-only after discovery, then call run_experiment."""
+        """After workflow and capability discovery, bind a declared experiment; then run it."""
         try:
             result = await ctx.request_context.lifespan_context.experiment_service().plan(
                 experiment_name=experiment_name,
@@ -825,12 +918,23 @@ def create_server(
 
     @server.tool(name="import_artifact", annotations=ADDITIVE)
     async def import_artifact_tool(
-        path: str,
-        kind: ArtifactKind,
-        sensitivity: Sensitivity,
+        path: Annotated[
+            str,
+            Field(
+                description="Project-relative artifact path; absolute and parent paths are refused."
+            ),
+        ],
+        kind: Annotated[
+            ArtifactKind,
+            Field(description="ArtifactKind enum value describing the imported format."),
+        ],
+        sensitivity: Annotated[
+            Sensitivity,
+            Field(description="Sensitivity classification: normal, internal, or sensitive."),
+        ],
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[ImportReceipt]]:
-        """Import a project-local artifact as a new immutable import run."""
+        """Import one project-local artifact as an immutable run; follow returned resource links."""
         try:
             state = ctx.request_context.lifespan_context
             workspace = state.require_workspace()
@@ -884,7 +988,8 @@ def create_server(
             result = RunDiscoveryService(
                 ctx.request_context.lifespan_context.require_workspace()
             ).list(filter=filter or RunFilter(), limit=limit, cursor=cursor)
-            return _success(result, f"Returned {result.returned} runs.")
+            noun = "run" if result.returned == 1 else "runs"
+            return _success(result, f"Returned {result.returned} {noun}.")
         except DomainError as error:
             return _failure(error)
 
@@ -1245,11 +1350,20 @@ def create_server(
 
     @server.tool(name="analyze_hotspots", annotations=READ_ONLY)
     async def analyze_hotspots_tool(
-        input_id: str,
-        limit: Annotated[int, Field(ge=1, le=1_000)],
+        run_or_artifact: Annotated[
+            str,
+            Field(
+                min_length=1,
+                description="Run or artifact ID; discover one with list_runs or list_artifacts.",
+            ),
+        ],
+        limit: Annotated[
+            int, Field(ge=1, le=1_000, description="Maximum hotspots to return (1-1000).")
+        ],
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[HotspotResult]]:
-        """Return bounded source-linked profile frame aggregates."""
+        """Analyze sampled-profile runs or artifacts for bounded source-linked hotspots; use
+        extract_pyperf/query_measurements for benchmark_samples instead."""
         try:
             workspace = ctx.request_context.lifespan_context.require_workspace()
             await ctx.report_progress(0, 2, "Hotspot snapshot pinned")
@@ -1257,7 +1371,7 @@ def create_server(
                 lambda snapshot: RecipeService(
                     workspace,
                     snapshot=snapshot,
-                ).hotspots(input_id, limit=limit),
+                ).hotspots(run_or_artifact, limit=limit),
                 query_name="analyze_hotspots",
             )
             await ctx.report_progress(1, 2, "Hotspot query complete")
@@ -1271,11 +1385,21 @@ def create_server(
 
     @server.tool(name="analyze_memory", annotations=READ_ONLY)
     async def analyze_memory_tool(
-        input_id: str,
-        limit: Annotated[int, Field(ge=1, le=1_000)],
+        run_or_artifact: Annotated[
+            str,
+            Field(
+                min_length=1,
+                description="Run or artifact ID; discover one with list_runs or list_artifacts.",
+            ),
+        ],
+        limit: Annotated[
+            int,
+            Field(ge=1, le=1_000, description="Maximum memory observations to return (1-1000)."),
+        ],
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[MemoryAnalysisResult]]:
-        """Return explicit peak, retained-end, and allocation evidence."""
+        """Analyze memory-profile runs or artifacts for peak, retained-end, and
+        allocation evidence."""
         try:
             workspace = ctx.request_context.lifespan_context.require_workspace()
             await ctx.report_progress(0, 2, "Memory snapshot pinned")
@@ -1283,7 +1407,7 @@ def create_server(
                 lambda snapshot: RecipeService(
                     workspace,
                     snapshot=snapshot,
-                ).memory(input_id, limit=limit),
+                ).memory(run_or_artifact, limit=limit),
                 query_name="analyze_memory",
             )
             await ctx.report_progress(1, 2, "Memory query complete")
@@ -1297,12 +1421,27 @@ def create_server(
 
     @server.tool(name="analyze_execution", annotations=READ_ONLY)
     async def analyze_execution_tool(
-        input_id: str,
-        limit: Annotated[int, Field(ge=1, le=1_000)],
+        run_or_artifact: Annotated[
+            str,
+            Field(
+                min_length=1,
+                description=(
+                    "Primary run or artifact ID; discover with list_runs or list_artifacts."
+                ),
+            ),
+        ],
+        limit: Annotated[
+            int,
+            Field(ge=1, le=1_000, description="Maximum execution observations to return (1-1000)."),
+        ],
         ctx: Context[AppContext],
-        comparison_input_id: str | None = None,
+        comparison_run_or_artifact: Annotated[
+            str | None,
+            Field(description="Optional second run or artifact ID for a compatible comparison."),
+        ] = None,
     ) -> Annotated[CallToolResult, ToolPayload[ExecutionAnalysisResult]]:
-        """Inspect a run or compatible pair read-only; use record_analysis to preserve it."""
+        """Inspect execution-coverage runs or a compatible pair read-only; use
+        record_analysis to preserve it."""
         try:
             workspace = ctx.request_context.lifespan_context.require_workspace()
             await ctx.report_progress(0, 2, "Execution snapshot pinned")
@@ -1311,8 +1450,8 @@ def create_server(
                     workspace,
                     snapshot=snapshot,
                 ).execution(
-                    input_id,
-                    comparison_input_id=comparison_input_id,
+                    run_or_artifact,
+                    comparison_input_id=comparison_run_or_artifact,
                     limit=limit,
                 ),
                 query_name="analyze_execution",
@@ -1328,11 +1467,20 @@ def create_server(
 
     @server.tool(name="analyze_pytorch", annotations=READ_ONLY)
     async def analyze_pytorch_tool(
-        input_id: str,
-        limit: Annotated[int, Field(ge=1, le=1_000)],
+        run_or_artifact: Annotated[
+            str,
+            Field(
+                min_length=1,
+                description="Run ID or artifact ID for an imported torch.profiler trace.",
+            ),
+        ],
+        limit: Annotated[
+            int, Field(ge=1, le=1_000, description="Maximum operators to return (1-1000).")
+        ],
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[PyTorchAnalysisResult]]:
-        """Summarize operators in an existing torch.profiler trace."""
+        """Summarize one imported torch.profiler run or artifact; other kinds are
+        unsupported."""
         try:
             workspace = ctx.request_context.lifespan_context.require_workspace()
             await ctx.report_progress(0, 2, "PyTorch snapshot pinned")
@@ -1340,7 +1488,7 @@ def create_server(
                 lambda snapshot: RecipeService(
                     workspace,
                     snapshot=snapshot,
-                ).pytorch(input_id, limit=limit),
+                ).pytorch(run_or_artifact, limit=limit),
                 query_name="analyze_pytorch",
             )
             await ctx.report_progress(1, 2, "PyTorch query complete")
@@ -1409,9 +1557,16 @@ def create_server(
 
     @server.tool(name="get_frame_callers", annotations=READ_ONLY)
     async def get_frame_callers_tool(
-        input_id: str,
-        frame_id: str,
-        limit: Annotated[int, Field(ge=1, le=1_000)],
+        run_or_artifact: Annotated[
+            str,
+            Field(min_length=1, description="Run ID or artifact ID containing the frame."),
+        ],
+        frame_id: Annotated[
+            str, Field(min_length=1, description="Frame ID returned by an analysis result.")
+        ],
+        limit: Annotated[
+            int, Field(ge=1, le=1_000, description="Maximum caller edges to return (1-1000).")
+        ],
         ctx: Context[AppContext],
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[CallEdgeResult]]:
@@ -1419,16 +1574,23 @@ def create_server(
         try:
             result = DrilldownService(
                 ctx.request_context.lifespan_context.require_workspace()
-            ).callers(input_id, frame_id, limit=limit, cursor=cursor)
+            ).callers(run_or_artifact, frame_id, limit=limit, cursor=cursor)
             return _success(result, f"Returned {result.returned} callers.")
         except DomainError as error:
             return _failure(error)
 
     @server.tool(name="get_frame_callees", annotations=READ_ONLY)
     async def get_frame_callees_tool(
-        input_id: str,
-        frame_id: str,
-        limit: Annotated[int, Field(ge=1, le=1_000)],
+        run_or_artifact: Annotated[
+            str,
+            Field(min_length=1, description="Run ID or artifact ID containing the frame."),
+        ],
+        frame_id: Annotated[
+            str, Field(min_length=1, description="Frame ID returned by an analysis result.")
+        ],
+        limit: Annotated[
+            int, Field(ge=1, le=1_000, description="Maximum callee edges to return (1-1000).")
+        ],
         ctx: Context[AppContext],
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[CallEdgeResult]]:
@@ -1436,16 +1598,23 @@ def create_server(
         try:
             result = DrilldownService(
                 ctx.request_context.lifespan_context.require_workspace()
-            ).callees(input_id, frame_id, limit=limit, cursor=cursor)
+            ).callees(run_or_artifact, frame_id, limit=limit, cursor=cursor)
             return _success(result, f"Returned {result.returned} callees.")
         except DomainError as error:
             return _failure(error)
 
     @server.tool(name="get_stack_examples", annotations=READ_ONLY)
     async def get_stack_examples_tool(
-        input_id: str,
-        frame_id: str,
-        limit: Annotated[int, Field(ge=1, le=1_000)],
+        run_or_artifact: Annotated[
+            str,
+            Field(min_length=1, description="Run ID or artifact ID containing the frame."),
+        ],
+        frame_id: Annotated[
+            str, Field(min_length=1, description="Frame ID returned by an analysis result.")
+        ],
+        limit: Annotated[
+            int, Field(ge=1, le=1_000, description="Maximum stack examples to return (1-1000).")
+        ],
         ctx: Context[AppContext],
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[StackExamplesResult]]:
@@ -1453,22 +1622,43 @@ def create_server(
         try:
             result = DrilldownService(
                 ctx.request_context.lifespan_context.require_workspace()
-            ).examples(input_id, frame_id, limit=limit, cursor=cursor)
+            ).examples(run_or_artifact, frame_id, limit=limit, cursor=cursor)
             return _success(result, f"Returned {result.returned} stack examples.")
         except DomainError as error:
             return _failure(error)
 
     @server.tool(name="get_trace_window", annotations=READ_ONLY)
     async def get_trace_window_tool(
-        artifact_id: str,
-        start_ns: Annotated[int, Field(ge=0)],
-        end_ns: Annotated[int, Field(gt=0)],
-        limit: Annotated[int, Field(ge=1, le=1_000)],
+        artifact_id: Annotated[
+            str, Field(min_length=1, description="Trace artifact ID from list_artifacts.")
+        ],
+        start_ns: Annotated[int, Field(ge=0, description="Inclusive window start in nanoseconds.")],
+        end_ns: Annotated[
+            int,
+            Field(
+                gt=0,
+                description="Exclusive window end in nanoseconds; greater than start_ns.",
+            ),
+        ],
+        limit: Annotated[
+            int, Field(ge=1, le=1_000, description="Maximum trace slices to return (1-1000).")
+        ],
         ctx: Context[AppContext],
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[TraceWindowResult]]:
         """Return bounded trace slices overlapping a declared time window."""
         try:
+            if end_ns <= start_ns:
+                return _invalid_arguments(
+                    "get_trace_window",
+                    (
+                        {
+                            "field": "end_ns",
+                            "message": "must be greater than start_ns",
+                            "type": "greater_than",
+                        },
+                    ),
+                )
             result = await PerfettoExtractor(
                 ctx.request_context.lifespan_context.require_workspace()
             ).trace_window(
@@ -1537,10 +1727,12 @@ def create_server(
             "run_set",
             "trial",
         ],
-        ref_id: str,
+        ref_id: Annotated[
+            str, Field(min_length=1, description="ID of the reference, paired with ref_type.")
+        ],
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[EvidenceLookupResult]]:
-        """Resolve a known typed reference; use list or query tools first to discover one."""
+        """Resolve a known typed reference; pass ref_type and its ID separately after discovery."""
         try:
             result = EvidenceLookupService(
                 ctx.request_context.lifespan_context.require_workspace()
@@ -1559,10 +1751,9 @@ def create_server(
             result = IntegrityService(
                 ctx.request_context.lifespan_context.require_workspace()
             ).validate(full=mode == "full")
-            return _success(
-                result,
-                f"Workspace validation {'passed' if result.valid else 'failed'}.",
-            )
+            outcome = "passed" if result.valid else "failed"
+            issue_suffix = f" with {len(result.issues)} reported issues" if result.issues else ""
+            return _success(result, f"Workspace validation {outcome}{issue_suffix}.")
         except DomainError as error:
             return _failure(error)
 

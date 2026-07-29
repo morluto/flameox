@@ -54,6 +54,7 @@ def test_run_and_artifact_pagination_are_snapshot_bound_and_filtered(tmp_path: P
     assert first.next_cursor is not None
     assert first.coverage.filters_applied == ("execution_status",)
     matching_identity = first.runs[0].environment_id
+    assert first.runs[0].artifact_kinds == ("collector_metadata",)
     second = runs.list(
         filter=RunFilter(execution_status=("not_applicable",)),
         limit=1,

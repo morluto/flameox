@@ -268,6 +268,7 @@ def _fail(error: DomainError) -> NoReturn:
     exit_codes = {
         ErrorCode.WORKSPACE_NOT_FOUND: 2,
         ErrorCode.WORKSPACE_INVALID: 5,
+        ErrorCode.RUN_NOT_FOUND: 1,
         ErrorCode.CAPABILITY_UNAVAILABLE: 3,
         ErrorCode.INVALID_CAPTURE_PLAN: 9,
         ErrorCode.EXECUTION_REFUSED: 9,
