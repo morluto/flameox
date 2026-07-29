@@ -67,11 +67,13 @@ from flameox.domain import (
 )
 from flameox.domain.models import utc_now
 from flameox.evidence import GenerationPublisher
-from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
+from flameox.execution import ExecutionOutcome, ExecutionRequest, ResourcePolicy, SubprocessBroker
 from flameox.models import ContractModel
 from flameox.observability import OperationLogger, elapsed_ms
 from flameox.storage import ArtifactStore, RunStore, StorageQuota, Workspace
 from flameox.storage.atomic import atomic_write_bytes
+
+_MAX_PYTEST_SIDECAR_BYTES = 16 * 1024 * 1024
 
 
 class CaptureResult(ContractModel):
@@ -651,19 +653,35 @@ class CaptureService:
                 if error.code is ErrorCode.PROCESS_TIMEOUT
                 else ExecutionStatus.FAILED
             )
-            terminal = await capture.terminate(
-                execution=status,
-                message=error.message,
-                phase="collector execution failed",
-                error_code=error.code.value,
-                process=(
-                    ProcessResult.model_validate(error.details["process"])
-                    if "process" in error.details
-                    else None
-                ),
+            partial_process = (
+                ProcessResult.model_validate(error.details["process"])
+                if "process" in error.details
+                else None
             )
-            error.run_id = terminal.run_id
-            raise
+            native = output_root / self._native_filename(plan.adapter)
+            if (
+                status is ExecutionStatus.TIMED_OUT
+                and partial_process is not None
+                and native.is_file()
+            ):
+                outcome = ExecutionOutcome(
+                    process=partial_process,
+                    stdout=b"",
+                    stderr=b"",
+                    resolved_executable=Path(plan.collector_argv[0]).resolve(),
+                    containment=plan.containment,
+                )
+                await capture.report(5, "Collector timed out; preserving partial evidence")
+            else:
+                terminal = await capture.terminate(
+                    execution=status,
+                    message=error.message,
+                    phase="collector execution failed",
+                    error_code=error.code.value,
+                    process=partial_process,
+                )
+                error.run_id = terminal.run_id
+                raise
         finally:
             if acquired_slot:
                 self.plans.release_capture_slot()
@@ -873,14 +891,21 @@ class CaptureService:
             error.run_id = terminal.run_id
             raise
         succeeded = outcome.process.exit_code == 0
+        timed_out = outcome.process.timed_out
         terminal = running.model_copy(
             update={
                 "revision": running.revision + 1,
                 "finished_at": utc_now(),
                 "execution_status": (
-                    ExecutionStatus.SUCCEEDED if succeeded else ExecutionStatus.FAILED
+                    ExecutionStatus.TIMED_OUT
+                    if timed_out
+                    else (ExecutionStatus.SUCCEEDED if succeeded else ExecutionStatus.FAILED)
                 ),
-                "capture_status": (CaptureStatus.REGISTERED if succeeded else CaptureStatus.FAILED),
+                "capture_status": (
+                    CaptureStatus.REGISTERED
+                    if succeeded or (timed_out and registrations)
+                    else CaptureStatus.FAILED
+                ),
                 "validation_status": validation_status,
                 "process": outcome.process,
                 "artifacts": tuple(registration for registration, _ in registrations),
@@ -889,7 +914,11 @@ class CaptureService:
                     + (
                         []
                         if succeeded
-                        else [f"Collector exited with status {outcome.process.exit_code}."]
+                        else (
+                            ["Collector timed out; registered artifacts may be partial."]
+                            if timed_out
+                            else [f"Collector exited with status {outcome.process.exit_code}."]
+                        )
                     )
                     + validation_limitations
                 ),
@@ -1520,7 +1549,56 @@ class CaptureService:
                     "limitations": list(extraction.limitations),
                 }
             )
+        if plan.adapter == "pytest":
+            sidecars, sidecar_limitations = await self._preserve_pytest_sidecars(
+                plan,
+                output_root,
+                execution_plan,
+            )
+            registrations.extend(sidecars)
+            limitations.extend(sidecar_limitations)
         return registrations, extractions, limitations
+
+    async def _preserve_pytest_sidecars(
+        self,
+        plan: CapturePlan,
+        output_root: Path,
+        execution_plan: AdapterExecutionPlan,
+    ) -> tuple[list[tuple[ArtifactRegistration, int]], list[str]]:
+        registrations: list[tuple[ArtifactRegistration, int]] = []
+        limitations: list[str] = []
+        for declaration in execution_plan.artifacts:
+            if declaration.kind is not ArtifactKind.TEST_EXECUTION:
+                continue
+            primary = output_root / declaration.relative_path
+            for sidecar in sorted(primary.parent.glob(f"{primary.name}.*.worker")):
+                if sidecar.is_symlink() or not sidecar.is_file():
+                    limitations.append(
+                        "An unrecovered pytest worker sidecar was not a regular file."
+                    )
+                    continue
+                if sidecar.stat().st_size > _MAX_PYTEST_SIDECAR_BYTES:
+                    limitations.append(
+                        "An unrecovered pytest worker sidecar exceeded the preservation limit."
+                    )
+                    continue
+                registrations.append(
+                    await self._register_path_async(
+                        plan.run_id,
+                        sidecar,
+                        kind=ArtifactKind.PROCESS_OUTPUT,
+                        role="pytest_worker_sidecar_unrecovered",
+                        media_type="application/x-ndjson",
+                        producer=plan.adapter,
+                        producer_version=plan.adapter_version,
+                        sensitivity=declaration.sensitivity,
+                    )
+                )
+        if registrations:
+            limitations.append(
+                "Unrecovered pytest worker sidecars were preserved as native artifacts."
+            )
+        return registrations, limitations
 
     def _register_path(
         self,

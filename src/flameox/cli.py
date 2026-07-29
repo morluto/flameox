@@ -23,6 +23,8 @@ from flameox.adapters import (
     ObservationExtractor,
     PerfettoExtractor,
     PyPerfExtractor,
+    PytestExtractor,
+    PythonStartupExtractor,
     SetupClient,
 )
 from flameox.analysis import RecipeService
@@ -1705,6 +1707,34 @@ def extract_pyperf(
     """Extract pyperf workers, warmups, loops, and raw values."""
     try:
         result = PyPerfExtractor(_workspace(workspace)).extract(run_id)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@extract_app.command("python-startup")
+def extract_python_startup(
+    run_id: Annotated[str, typer.Argument(help="Run containing Python startup JSON.")],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Extract startup samples, peak RSS, and package-grouped import costs."""
+    try:
+        result = PythonStartupExtractor(_workspace(workspace)).extract(run_id)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@extract_app.command("pytest")
+def extract_pytest(
+    run_id: Annotated[str, typer.Argument(help="Run containing pytest event JSONL.")],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Extract test phases, fixture cost, worker lifecycle, and failure latency."""
+    try:
+        result = PytestExtractor(_workspace(workspace)).extract(run_id)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)

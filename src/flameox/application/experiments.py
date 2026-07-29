@@ -15,7 +15,7 @@ from typing import Literal, cast
 
 from pydantic import Field, JsonValue
 
-from flameox.adapters import PyPerfExtractor
+from flameox.adapters import PyPerfExtractor, PytestExtractor, PythonStartupExtractor
 from flameox.application.async_work import run_atomic_thread
 from flameox.application.capture import CaptureService
 from flameox.application.comparisons import (
@@ -29,6 +29,7 @@ from flameox.application.comparisons import (
 from flameox.application.execution_policy import ExecutionPolicy
 from flameox.application.workloads import ExperimentConfig, Scalar, WorkloadService
 from flameox.domain import (
+    ArtifactKind,
     DomainError,
     ErrorCode,
     Experiment,
@@ -49,6 +50,24 @@ from flameox.domain.models import utc_now
 from flameox.evidence import GenerationPublisher, PublishedGeneration
 from flameox.models import ContractModel
 from flameox.storage import JsonRecordStore, RunStore, Workspace
+
+
+def _extract_adapter_measurements(workspace: Workspace, adapter: str, run_id: str) -> None:
+    if adapter == "pyperf":
+        PyPerfExtractor(workspace).extract(run_id)
+    elif adapter == "python-startup":
+        PythonStartupExtractor(workspace).extract(run_id)
+    elif adapter == "pytest":
+        PytestExtractor(workspace).extract(run_id)
+
+
+def _has_extractable_artifact(run: RunManifest, adapter: str) -> bool:
+    expected = {
+        "pyperf": ArtifactKind.BENCHMARK_SAMPLES,
+        "python-startup": ArtifactKind.PYTHON_STARTUP,
+        "pytest": ArtifactKind.TEST_EXECUTION,
+    }.get(adapter)
+    return expected is not None and any(item.kind is expected for item in run.artifacts)
 
 
 class ExperimentCell(ContractModel):
@@ -481,10 +500,12 @@ class ExperimentService:
                 captured = await self.captures.execute(capture_plan.plan_id)
                 run = captured.run
                 outcome, failure_class = self._classify_run(run)
-                if outcome is TrialOutcome.SUCCEEDED and plan.adapter == "pyperf":
+                if _has_extractable_artifact(run, plan.adapter):
                     await run_atomic_thread(
                         partial(
-                            PyPerfExtractor(self.workspace).extract,
+                            _extract_adapter_measurements,
+                            self.workspace,
+                            plan.adapter,
                             run.run_id,
                         )
                     )

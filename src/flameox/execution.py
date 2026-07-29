@@ -165,9 +165,22 @@ class SubprocessBroker:
                 await asyncio.shield(on_cleanup(cleanup_complete))
             await self._settle_readers(stdout_task, stderr_task)
             await self._settle_resource(resource_task)
+            timeout_process = ProcessResult(
+                exit_code=None,
+                terminating_signal=(
+                    -process.returncode
+                    if process.returncode is not None and process.returncode < 0
+                    else None
+                ),
+                wall_time_ns=time.monotonic_ns() - started,
+                timed_out=True,
+                cancellation_cause=cancellation_cause,
+                cleanup_complete=cleanup_complete,
+            )
             raise DomainError(
                 ErrorCode.PROCESS_TIMEOUT,
                 f"Process exceeded {request.timeout_seconds} seconds.",
+                details={"process": timeout_process.model_dump(mode="json")},
                 retryable=True,
             ) from exc
         except _OutputLimitExceeded as exc:

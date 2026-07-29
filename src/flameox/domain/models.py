@@ -58,6 +58,8 @@ def effective_sensitivity(
 
 class ArtifactKind(StrEnum):
     EXECUTION_TRACE = "execution_trace"
+    PYTHON_STARTUP = "python_startup"
+    TEST_EXECUTION = "test_execution"
     SAMPLE_PROFILE = "sample_profile"
     MEMORY_PROFILE = "memory_profile"
     BENCHMARK_SAMPLES = "benchmark_samples"

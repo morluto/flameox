@@ -82,7 +82,7 @@ Conformance status uses three terms:
 | 8 | Proven | Frozen run sets preserve attempts and reject identity, environment, block, and oracle incompatibilities (`tests/application/test_records_and_comparisons.py`, `tests/application/test_experiments.py`). |
 | 9 | Proven | Comparisons and materialized analyses use one explicitly pinned `Snapshot`; persisted analyses and findings validate typed immutable references and record the exact source commit (`tests/application/test_records_and_comparisons.py`, `tests/application/test_analysis_records.py`, `tests/application/test_artifact_service.py`). |
 | 10 | Proven | All three fresh-workspace golden investigations produce investigation, hypothesis, analysis, comparison, validation, and finding evidence; reverse scan executes 32K–128K scaling and proves a normally exiting broken treatment is rejected by its oracle (`tests/golden/`). |
-| 11 | Proven | Results expose limitations and compatibility uncertainty; fixtures cover pyperf, Perfetto, Memray, coverage, synthetic torch evidence, empty/malformed/truncated inputs, recursive stacks, multi-process/thread traces, and newer producer versions (`tests/adapters/`, `tests/application/test_workloads_and_capture.py`). |
+| 11 | Proven | Results expose limitations and compatibility uncertainty; fixtures cover Python startup/import costs, pytest/xdist fixture and failure evidence, pyperf, Perfetto, Memray, coverage, synthetic torch evidence, empty/malformed/truncated inputs, recursive stacks, multi-process/thread traces, and newer producer versions (`tests/adapters/`, `tests/application/test_python_evidence_capture.py`, `tests/application/test_workloads_and_capture.py`). |
 | 12 | Proven | Every supported native artifact kind dispatches to an ecosystem viewer, and explicit launch runs through the bounded broker (`tests/application/test_viewers.py`, `tests/adapters/test_perfetto.py`). |
 | 13 | Proven | Full integrity verification detects altered artifact bytes (`tests/application/test_integrity.py`). |
 | 14 | Proven | Read-only recipes fail the test if they acquire the workspace write lock, comparisons leave HEAD unchanged, and both paths return their pinned commit (`tests/analysis/test_recipes.py`, `tests/application/test_records_and_comparisons.py`). |
@@ -132,6 +132,15 @@ validate extraction independently of collector availability. Fixtures cover:
 - multiple processes and threads;
 - recursive and inlined frames;
 - unknown producer versions.
+
+Python startup fixtures additionally preserve raw `-X importtime` lines, cache
+semantics, package grouping, repeated wall samples, and optional peak RSS.
+Pytest fixtures cover serial and two-worker xdist reports, repeated
+worker-scoped fixture setup, worker lifecycle, bounded fixture-sidecar recovery
+after a forced worker crash, first observed and controller-reported failure
+latency, malformed event streams, and a timed-out partial run with explicit
+unexecuted tests. Python startup integration also records whether peak RSS came
+from POSIX `wait4` resource usage or the portable polling fallback.
 
 ### Integration tests
 

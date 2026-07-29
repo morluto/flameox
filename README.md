@@ -35,9 +35,10 @@
 
 flameox helps coding agents investigate performance, memory, execution,
 concurrency, and reliability with evidence you can inspect and reproduce. It
-connects agents to maintained tools such as pyperf, py-spy, Perfetto Trace
-Processor, coverage.py, Memray, and torch.profiler, then keeps each original
-artifact alongside a record of how it was produced.
+connects agents to maintained tools such as Python import-time tracing, pytest,
+xdist, pyperf, py-spy, Perfetto Trace Processor, coverage.py, Memray, and
+torch.profiler, then keeps each original artifact alongside a record of how it
+was produced.
 
 flameox is not a profiler or an automatic bug finder. It coordinates existing
 tools, compares runs collected under compatible conditions, and ties findings
@@ -144,6 +145,7 @@ Optional Python extras are independent:
 - `trace`: Perfetto Python API; a local Trace Processor binary must also be
   configured
 - `execution`: coverage.py
+- `test`: pytest and pytest-xdist evidence capture
 - `memory`: Memray
 - `torch`: PyTorch capture
 - `all`: all runtime integrations

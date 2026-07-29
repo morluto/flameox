@@ -41,6 +41,7 @@ python = ["pyperf>=2.9"]
 memory = ["memray>=1.17"]
 torch = ["torch>=2.7"]
 execution = ["coverage>=7.14,<8"]
+test = ["pytest>=8.3", "pytest-xdist>=3.6"]
 trace = ["perfetto>=0.57,<0.58"]
 cpu = ["py-spy>=0.4.2,<0.5"]
 all = [
@@ -49,6 +50,8 @@ all = [
     "perfetto>=0.57,<0.58",
     "py-spy>=0.4.2,<0.5",
     "pyperf>=2.9",
+    "pytest>=8.3",
+    "pytest-xdist>=3.6",
     "torch>=2.7",
 ]
 dev = [
