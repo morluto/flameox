@@ -118,6 +118,52 @@ pyperf owns calibration, warm-ups, workers, runs, and values within a benchmark
 trial; flameox's experiment blocks and treatment randomization sit above that
 hierarchy and do not duplicate it.
 
+#### `python-startup`
+
+Use for repeated startup of a declared Python script or module. Each sample
+uses a fresh interpreter. Repeated wall/RSS samples run without import
+instrumentation; one separate `-X importtime` process preserves the raw trace
+and package-grouped module counts and costs in the native JSON artifact. The
+first wall sample is labeled
+`uncontrolled_initial`, not cold: flameox does not drop operating-system
+caches. Later samples are warm process restarts with a fresh interpreter and a
+potentially populated filesystem cache.
+
+On POSIX systems with `wait4`, peak RSS comes from the terminated child's
+`ru_maxrss`; the extractor records `wait4_ru_maxrss` as the measurement
+backend. Other platforms use bounded psutil polling and record
+`psutil_polling`, which may miss a very short-lived peak.
+
+Package summaries add module self time and retain the maximum cumulative time
+reported for a module in that top-level package. Summing cumulative import
+times would double-count nested imports. Experiments publish
+`python_startup.wall_time`, `python_startup.peak_rss`, and package dimensions
+through ordinary measurements, so existing identity and compatibility rules
+govern base/candidate comparisons.
+
+#### `pytest`
+
+Use for declared `pytest` or `python -m pytest` workloads. A small plugin writes
+an append-only JSONL event stream while the suite runs. Public pytest hooks
+provide collection, setup/call/teardown reports, fixture setup timing, outcomes,
+and interruption events. With local xdist, fixture and test-start events are
+flushed immediately to bounded per-worker sidecars. After each clean shutdown
+or crash, the controller validates the event schema, type, and worker identity,
+then appends accepted events to the authoritative primary JSONL artifact.
+Controller hooks also record scheduler strategy, worker creation, readiness,
+collection, clean shutdown, and crashes.
+
+`pytest.time_to_first_failure.observed` uses the worker report stop time;
+`pytest.time_to_first_failure.reported` uses controller receipt time and better
+approximates when a parallel failure becomes actionable. Stable xdist hooks do
+not expose an exact per-test controller queue timestamp, so the adapter records
+execution start and reports that limitation instead of inferring queue delay.
+If a run times out after the event stream exists, flameox registers the partial
+artifact and marks the run timed out; collected tests without a phase report
+remain explicitly unexecuted. A forcefully terminated controller can still lose
+sidecar events it had not recovered; the primary artifact never treats an
+unregistered sidecar as authoritative evidence.
+
 #### `py-spy`
 
 Use for out-of-process Python CPU sampling and attach workflows. Prefer a

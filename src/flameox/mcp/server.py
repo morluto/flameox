@@ -31,6 +31,10 @@ from flameox.adapters import (
     PerfettoExtractor,
     PyPerfExtractionResult,
     PyPerfExtractor,
+    PytestExtractionResult,
+    PytestExtractor,
+    PythonStartupExtractionResult,
+    PythonStartupExtractor,
     TraceWindowResult,
 )
 from flameox.analysis import (
@@ -529,7 +533,9 @@ def create_server(
             "list_capabilities -> plan_capture -> execute_capture_plan for short work, or "
             "start_detached_capture for long work -> get_detached_capture -> get_run -> analyze. "
             "For existing evidence: list_runs and list_artifacts expose artifact_kinds; use "
-            "extract_pyperf and query_measurements for benchmark_samples, analyze_memory for "
+            "extract_pyperf and query_measurements for benchmark_samples, "
+            "extract_python_startup for Python startup/import evidence, extract_pytest for "
+            "test phases, fixtures, workers, and failure latency, analyze_memory for "
             "memory profiles, analyze_execution for coverage, and the other analyze_* tools "
             "only for their documented artifact kinds. Then use get_evidence, record_analysis, "
             "or record_finding. Initialize a missing workspace only when authorized. A "
@@ -1770,6 +1776,40 @@ def create_server(
             return _success(
                 result,
                 f"Extracted {result.measurement_count} measured values.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="extract_python_startup", annotations=ADDITIVE)
+    async def extract_python_startup_tool(
+        run_id: str,
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[PythonStartupExtractionResult]]:
+        """Extract repeated startup, peak RSS, and package-grouped import evidence."""
+        try:
+            result = PythonStartupExtractor(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).extract(run_id)
+            return _success(
+                result,
+                f"Extracted {result.measurement_count} startup measurements.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="extract_pytest", annotations=ADDITIVE)
+    async def extract_pytest_tool(
+        run_id: str,
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[PytestExtractionResult]]:
+        """Extract pytest phase, fixture, worker, outcome, and failure-latency evidence."""
+        try:
+            result = PytestExtractor(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).extract(run_id)
+            return _success(
+                result,
+                f"Extracted {result.measurement_count} pytest measurements.",
             )
         except DomainError as error:
             return _failure(error)

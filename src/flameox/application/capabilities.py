@@ -43,18 +43,21 @@ class CapabilityService:
         system = platform.system().lower()
         architecture = platform.machine().lower()
         reports: list[CapabilityReport] = []
-        command = BUILTIN_ADAPTERS["command"]
-        reports.append(
-            CapabilityReport(
-                adapter=command.name,
-                status=CapabilityStatus.AVAILABLE,
-                supported_modes=command.supported_modes,
-                supported_formats=command.supported_formats,
-                platform=system,
-                architecture=architecture,
-                limitations=command.capture_limitations,
+        for adapter in BUILTIN_ADAPTERS.values():
+            if adapter.dependency_kind != "internal":
+                continue
+            reports.append(
+                CapabilityReport(
+                    adapter=adapter.name,
+                    status=CapabilityStatus.AVAILABLE,
+                    supported_modes=adapter.supported_modes,
+                    supported_formats=adapter.supported_formats,
+                    platform=system,
+                    architecture=architecture,
+                    features=adapter.features,
+                    limitations=adapter.capture_limitations,
+                )
             )
-        )
         executable_adapters = (
             adapter
             for adapter in BUILTIN_ADAPTERS.values()

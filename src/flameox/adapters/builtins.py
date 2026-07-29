@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -113,6 +114,50 @@ BUILTIN_ADAPTERS = {
             capture_limitations=(
                 "Experiment-level treatment randomization is separate from "
                 "pyperf's worker hierarchy.",
+            ),
+        ),
+        BuiltinAdapter(
+            name="python-startup",
+            dependency_kind="internal",
+            dependency=None,
+            supported_modes=("repeated_process",),
+            supported_formats=("flameox-python-startup-json", "python-importtime"),
+            features=("wall_time", "import_cost", "module_count", "peak_rss"),
+            output_filename="python-startup.json",
+            artifact_kinds=(ArtifactKind.PYTHON_STARTUP,),
+            expected_overhead=(
+                "Fresh interpreter launches with import timing enabled; target output is "
+                "captured by the launcher and replayed after each sample."
+            ),
+            capture_limitations=(
+                "The initial OS file-cache state is observed but not controlled; flameox does "
+                "not drop caches.",
+                "Import timing instruments imports and therefore adds measurement overhead.",
+            ),
+        ),
+        BuiltinAdapter(
+            name="pytest",
+            dependency_kind="package",
+            dependency="pytest",
+            supported_modes=("serial", "xdist"),
+            supported_formats=("flameox-pytest-events-jsonl",),
+            features=(
+                "test_phases",
+                "fixture_setup",
+                "failure_latency",
+                "worker_lifecycle",
+            ),
+            output_filename="pytest-events.jsonl",
+            artifact_kinds=(ArtifactKind.TEST_EXECUTION,),
+            expected_overhead=(
+                "Pytest hook timestamps and JSONL event recording; fixture setup events are "
+                "written to bounded per-worker sidecars under xdist."
+            ),
+            capture_limitations=(
+                "Public xdist hooks expose scheduler strategy, worker lifecycle, and execution "
+                "start, but not an exact per-test controller queue timestamp.",
+                "If the entire pytest controller is forcibly terminated, sidecars not yet "
+                "recovered into the primary artifact may be unavailable.",
             ),
         ),
         BuiltinAdapter(
@@ -271,6 +316,29 @@ def build_capture_invocation(
             "--",
             *workload_argv,
         )
+    elif adapter_name == "python-startup":
+        python, _ = _python_target(workload_argv)
+        argv = (
+            python,
+            "-m",
+            "flameox.collectors.python_startup",
+            "--output",
+            output,
+            "--samples",
+            "5",
+            "--",
+            *workload_argv,
+        )
+    elif adapter_name == "pytest":
+        argv = (
+            _python_executable_for_launcher(workload_argv),
+            "-m",
+            "flameox.collectors.pytest_launcher",
+            "--output",
+            output,
+            "--",
+            *workload_argv,
+        )
     else:
         raise DomainError(
             ErrorCode.CAPABILITY_UNAVAILABLE,
@@ -310,3 +378,10 @@ def _require_executable(adapter: str, executable: str | None) -> str:
             f"Adapter {adapter!r} has no resolved executable.",
         )
     return executable
+
+
+def _python_executable_for_launcher(workload_argv: tuple[str, ...]) -> str:
+    executable = Path(workload_argv[0]).name
+    if executable.startswith("python"):
+        return workload_argv[0]
+    return sys.executable

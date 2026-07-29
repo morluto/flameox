@@ -292,7 +292,7 @@ The supported tools are grouped as follows:
 | Family | Tools |
 | --- | --- |
 | Workspace | `initialize_workspace`, `workspace_status`, `list_capabilities`, `validate_workspace` |
-| Capture and import | `plan_capture`, `execute_capture_plan`, `import_artifact`, `extract_pyperf`, `extract_coverage`, `extract_memray`, `extract_perfetto`, `extract_observations` |
+| Capture and import | `plan_capture`, `execute_capture_plan`, `import_artifact`, `extract_pyperf`, `extract_python_startup`, `extract_pytest`, `extract_coverage`, `extract_memray`, `extract_perfetto`, `extract_observations` |
 | Detached capture | `start_detached_capture`, `get_detached_capture`, `cancel_detached_capture` |
 | Discovery | `list_declared_workflows`, `get_declared_workflow`, `list_runs`, `list_findings` |
 | Investigations | `create_investigation`, `list_investigations`, `get_investigation`, `record_hypothesis`, `get_hypothesis` |

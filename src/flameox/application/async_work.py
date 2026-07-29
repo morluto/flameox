@@ -4,6 +4,8 @@ import asyncio
 from collections.abc import Callable
 from contextlib import suppress
 
+import anyio
+
 
 def _consume_completion(task: asyncio.Task[object]) -> None:
     with suppress(asyncio.CancelledError):
@@ -21,10 +23,21 @@ async def run_atomic_thread[T](
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError as cancellation:
-        try:
-            async with asyncio.timeout(cleanup_timeout_seconds):
-                await asyncio.shield(asyncio.gather(task, return_exceptions=True))
-        except TimeoutError:
+        deadline = asyncio.get_running_loop().time() + cleanup_timeout_seconds
+        with anyio.CancelScope(shield=True):
+            while not task.done():
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                try:
+                    await asyncio.wait({task}, timeout=remaining)
+                except asyncio.CancelledError:
+                    # asyncio cancellation is edge-triggered and bypasses an
+                    # AnyIO shield. Keep the durability barrier intact when a
+                    # caller repeats cancellation while the thread settles.
+                    continue
+        if task.done():
+            _consume_completion(task)
+        else:
             task.add_done_callback(_consume_completion)
-        finally:
-            raise cancellation
+        raise cancellation

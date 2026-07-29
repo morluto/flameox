@@ -19,6 +19,11 @@ from flameox.adapters.perfetto import (
     TraceWindowResult,
 )
 from flameox.adapters.pyperf import PyPerfExtractionResult, PyPerfExtractor
+from flameox.adapters.pytest import PytestExtractionResult, PytestExtractor
+from flameox.adapters.python_startup import (
+    PythonStartupExtractionResult,
+    PythonStartupExtractor,
+)
 from flameox.adapters.registry import (
     AdapterApproval,
     AdapterDescriptor,
@@ -48,6 +53,10 @@ __all__ = [
     "PerfettoExtractor",
     "PyPerfExtractionResult",
     "PyPerfExtractor",
+    "PytestExtractionResult",
+    "PytestExtractor",
+    "PythonStartupExtractionResult",
+    "PythonStartupExtractor",
     "RuntimeInstallation",
     "SetupClient",
     "TraceEvent",
