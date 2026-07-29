@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from mcp import Client, StdioServerParameters
+from mcp.client.session import ClientSession
 from mcp.client.stdio import stdio_client
 from mcp_types import TextContent, TextResourceContents
 from typer.testing import CliRunner
@@ -54,6 +55,7 @@ async def test_every_mcp_tool_has_bounded_object_schemas_and_annotations(
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:
         tools = (await client.list_tools()).tools
 
+    by_name = {tool.name: tool for tool in tools}
     assert len(tools) >= 40
     for tool in tools:
         assert tool.input_schema["type"] == "object"
@@ -65,6 +67,17 @@ async def test_every_mcp_tool_has_bounded_object_schemas_and_annotations(
         assert tool.annotations is not None
         if tool.annotations.read_only_hint:
             assert tool.annotations.destructive_hint is False
+
+    assert "run_or_artifact" in by_name["analyze_hotspots"].input_schema["properties"]
+    assert "input_id" not in by_name["analyze_hotspots"].input_schema["properties"]
+    assert (
+        by_name["analyze_execution"].input_schema["properties"]["comparison_run_or_artifact"][
+            "description"
+        ]
+        == "Optional second run or artifact ID for a compatible comparison."
+    )
+    assert by_name["get_evidence"].description is not None
+    assert "ref_type and its ID separately" in by_name["get_evidence"].description
 
 
 @pytest.mark.anyio
@@ -203,6 +216,9 @@ async def test_mcp_import_list_get_and_resource_workflow(tmp_path: Path) -> None
     }
     assert listed.structured_content is not None
     assert listed.structured_content["result"]["runs"][0]["run_id"] == run_id
+    assert listed.structured_content["result"]["runs"][0]["artifact_kinds"] == [
+        "collector_metadata"
+    ]
     assert fetched.structured_content is not None
     assert fetched.structured_content["result"]["run_id"] == run_id
     contents = resource.contents[0]
@@ -342,7 +358,43 @@ async def test_real_stdio_server_keeps_protocol_on_stdout(tmp_path: Path) -> Non
     assert run_id in resource.contents[0].text
     assert structured_error.is_error is True
     assert structured_error.structured_content is not None
-    assert structured_error.structured_content["error"]["code"] == "WORKSPACE_INVALID"
+    assert structured_error.structured_content["error"]["code"] == "RUN_NOT_FOUND"
+    assert structured_error.structured_content["error"]["remediation"] == [
+        "Call list_runs to choose an existing run."
+    ]
+    assert structured_error.structured_content["error"]["recovery"] == {
+        "kind": "discover_runs",
+        "safe_to_repeat_same_call": False,
+        "retry_after_ms": None,
+        "next_tool": "list_runs",
+    }
+
+
+@pytest.mark.anyio
+async def test_strict_mcp_client_can_decode_tools_list_output_schemas(tmp_path: Path) -> None:
+    parameters = StdioServerParameters(
+        command=sys.executable,
+        args=[
+            "-m",
+            "flameox",
+            "mcp",
+            "serve",
+            "--project-root",
+            str(tmp_path),
+            "--init",
+        ],
+        cwd=tmp_path,
+    )
+
+    async with stdio_client(parameters) as streams, ClientSession(*streams) as session:
+        await session.initialize()
+        result = await session.list_tools()
+
+    assert len(result.tools) >= 40
+    assert all(tool.output_schema is not None for tool in result.tools)
+    for tool in result.tools:
+        assert tool.output_schema is not None
+        assert tool.output_schema["type"] == "object"
 
 
 @pytest.mark.anyio
@@ -433,6 +485,58 @@ async def test_real_stdio_server_rejects_unknown_tool_arguments(tmp_path: Path) 
     assert result.is_error is True
     assert isinstance(result.content[0], TextContent)
     assert "typo" in result.content[0].text
+    assert result.structured_content is not None
+    assert result.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
+
+
+@pytest.mark.anyio
+async def test_real_stdio_server_returns_structured_schema_validation_errors(
+    tmp_path: Path,
+) -> None:
+    parameters = StdioServerParameters(
+        command=sys.executable,
+        args=[
+            "-m",
+            "flameox",
+            "mcp",
+            "serve",
+            "--project-root",
+            str(tmp_path),
+            "--init",
+        ],
+        cwd=tmp_path,
+    )
+
+    async with Client(stdio_client(parameters), raise_exceptions=True) as client:
+        result = await client.call_tool("list_runs", {"limit": 0})
+
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
+    assert result.structured_content["error"]["details"]["fields"][0]["field"] == "limit"
+    assert "greater than or equal to 1" in result.structured_content["error"]["message"]
+
+
+@pytest.mark.anyio
+async def test_mcp_trace_window_rejects_reversed_time_bounds(tmp_path: Path) -> None:
+    Workspace.initialize(tmp_path)
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        result = await client.call_tool(
+            "get_trace_window",
+            {"artifact_id": "trace", "start_ns": 10, "end_ns": 10, "limit": 1},
+        )
+
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
+    assert result.structured_content["error"]["details"]["fields"] == [
+        {
+            "field": "end_ns",
+            "message": "must be greater than start_ns",
+            "type": "greater_than",
+        }
+    ]
 
 
 @pytest.mark.anyio

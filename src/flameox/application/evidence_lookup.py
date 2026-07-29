@@ -88,6 +88,11 @@ class EvidenceLookupService:
                 raise DomainError(
                     ErrorCode.WORKSPACE_INVALID,
                     f"{ref_type} evidence {ref_id!r} does not exist.",
+                    details={"missing_entity": ref_type},
+                    remediation=(
+                        "Use the list or query tool for this reference type "
+                        "to discover a valid ID.",
+                    ),
                 )
             data = {name: _json_value(value) for name, value in zip(columns, row, strict=True)}
         return EvidenceLookupResult(

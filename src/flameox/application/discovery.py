@@ -55,6 +55,7 @@ class RunSummary(ContractModel):
     lease_id: str | None
     worker_id: str | None
     orchestration_run_id: str | None
+    artifact_kinds: tuple[str, ...]
 
 
 class DiscoveryCoverage(ContractModel):
@@ -161,6 +162,9 @@ class RunDiscoveryService:
                 latest + "SELECT run_id, created_at, run_type, execution_status, capture_status, "
                 "validation_status, source_state_id, environment_id, workload_definition_id "
                 ", orchestrator, provider, lease_id, worker_id, orchestration_run_id "
+                ", coalesce((SELECT list_sort(list_distinct(list(kind))) "
+                "FROM artifact_registrations WHERE run_id = latest.run_id), "
+                "CAST([] AS VARCHAR[])) AS artifact_kinds "
                 "FROM latest WHERE " + page_where + " ORDER BY created_at DESC, run_id LIMIT ?",
                 (*page_parameters, limit + 1),
             ).fetchall()
@@ -181,6 +185,7 @@ class RunDiscoveryService:
                 lease_id=row[11],
                 worker_id=row[12],
                 orchestration_run_id=row[13],
+                artifact_kinds=tuple(row[14]),
             )
             for row in rows[:limit]
         )

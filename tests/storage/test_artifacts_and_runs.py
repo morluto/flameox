@@ -32,6 +32,17 @@ def import_manifest(run_id: str, *, revision: int = 0) -> RunManifest:
     )
 
 
+def test_missing_run_has_distinct_recovery_guidance(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+
+    with pytest.raises(DomainError) as error:
+        RunStore(workspace).read("missing-run")
+
+    assert error.value.code is ErrorCode.RUN_NOT_FOUND
+    assert error.value.details == {"missing_entity": "run"}
+    assert error.value.remediation == ("Call list_runs to choose an existing run.",)
+
+
 def test_identical_artifact_bytes_share_one_content_object(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     first = tmp_path / "first.bin"
