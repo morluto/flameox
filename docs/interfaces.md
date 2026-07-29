@@ -147,6 +147,7 @@ flameox findings list [filters]
 flameox findings show <finding-id>
 flameox findings record <structured-input>
 flameox evidence get <typed-reference>
+flameox evidence summarize [bounded evidence selections] [--format json|markdown]
 flameox measurements query [curated filters]
 flameox stacks callers <run-or-artifact> <frame-id>
 flameox stacks callees <run-or-artifact> <frame-id>
@@ -291,9 +292,13 @@ The supported tools are grouped as follows:
 | --- | --- |
 | Workspace | `initialize_workspace`, `workspace_status`, `list_capabilities`, `validate_workspace` |
 | Capture and import | `plan_capture`, `execute_capture_plan`, `import_artifact`, `extract_pyperf`, `extract_coverage`, `extract_memray`, `extract_perfetto`, `extract_observations` |
+| Detached capture | `start_detached_capture`, `get_detached_capture`, `cancel_detached_capture` |
+| Discovery | `list_declared_workflows`, `get_declared_workflow`, `list_runs`, `list_findings` |
 | Investigations | `create_investigation`, `list_investigations`, `get_investigation`, `record_hypothesis`, `get_hypothesis` |
 | Experiments | `plan_experiment`, `run_experiment`, `get_experiment`, `freeze_run_set` |
 | Runs and artifacts | `list_runs`, `get_run`, `list_artifacts`, `get_artifact`, `get_native_viewer_plan` |
+| Evidence products | `summarize_evidence`, `register_artifact_pipeline`, `compare_artifact_pipelines` |
+| Reductions | `plan_reduction`, `execute_reduction`, `get_reduction` |
 | Analysis | `analyze_hotspots`, `analyze_scaling`, `analyze_pytorch`, `analyze_memory`, `analyze_execution`, `analyze_failures`, `compare_run_sets`, `record_analysis`, `record_comparison` |
 | Drill-down | `get_evidence`, `query_measurements`, `get_frame_callers`, `get_frame_callees`, `get_stack_examples`, `get_trace_window` |
 | Findings | `record_finding`, `list_findings`, `get_finding` |

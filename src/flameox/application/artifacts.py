@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import ClassVar
 
 from flameox.catalog import Catalog
-from flameox.domain import ArtifactContent, Sensitivity
+from flameox.domain import ArtifactContent, CursorCodec, DomainError, ErrorCode, Sensitivity
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, Workspace
 
@@ -46,6 +46,7 @@ class ArtifactListResult(ContractModel):
     total: int
     returned: int
     truncated: bool
+    next_cursor: str | None
 
 
 class ArtifactService:
@@ -100,8 +101,21 @@ class ArtifactService:
             ),
         )
 
-    def list(self, *, limit: int = 100) -> ArtifactListResult:
-        with Catalog(self.workspace).open_snapshot() as snapshot:
+    def list(self, *, limit: int = 100, cursor: str | None = None) -> ArtifactListResult:
+        head = self.workspace.corpus.read_head()
+        after = (
+            CursorCodec.decode(
+                cursor,
+                namespace="artifacts",
+                snapshot_id=head.commit_id,
+                scope_digest="all",
+            )[0]
+            if cursor is not None
+            else None
+        )
+        if after is not None and not isinstance(after, str):
+            raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.")
+        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
             count_row = snapshot.execute(
                 "SELECT count(DISTINCT artifact_id) FROM artifact_registrations"
             ).fetchone()
@@ -111,9 +125,11 @@ class ArtifactService:
                 "max(CASE sensitivity WHEN 'sensitive' THEN 2 "
                 "WHEN 'internal' THEN 1 ELSE 0 END), count(*), "
                 "list_sort(list_distinct(list(kind))) "
-                "FROM artifact_registrations GROUP BY artifact_id "
+                "FROM artifact_registrations "
+                + ("WHERE artifact_id > ? " if after is not None else "")
+                + "GROUP BY artifact_id "
                 "ORDER BY artifact_id LIMIT ?",
-                (limit,),
+                ((after, limit + 1) if after is not None else (limit + 1,)),
             ).fetchall()
             commit_id = snapshot.commit.commit_id
         sensitivity = {
@@ -121,6 +137,7 @@ class ArtifactService:
             1: Sensitivity.INTERNAL,
             2: Sensitivity.SENSITIVE,
         }
+        has_more = len(rows) > limit
         artifacts = tuple(
             ArtifactListItem(
                 artifact_id=row[0],
@@ -129,7 +146,7 @@ class ArtifactService:
                 registration_count=row[3],
                 kinds=tuple(row[4]),
             )
-            for row in rows
+            for row in rows[:limit]
         )
         total = int(count_row[0])
         return ArtifactListResult(
@@ -137,5 +154,15 @@ class ArtifactService:
             artifacts=artifacts,
             total=total,
             returned=len(artifacts),
-            truncated=total > len(artifacts),
+            truncated=has_more,
+            next_cursor=(
+                CursorCodec.encode(
+                    namespace="artifacts",
+                    snapshot_id=head.commit_id,
+                    scope_digest="all",
+                    position=(artifacts[-1].artifact_id,),
+                )
+                if has_more and artifacts
+                else None
+            ),
         )

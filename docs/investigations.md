@@ -137,6 +137,49 @@ realized order are recorded. An arbitrary randomized sequence is not described
 as paired. Fixed-order or incomplete designs remain available for exploratory
 work but their limitations and independent unit are explicit.
 
+### Bounded factor matrices
+
+Experiments may declare up to eight typed workload-parameter factors. A
+`treatment_factor` identifies comparison variants; the remaining factors form
+pairing coordinates:
+
+```toml
+[experiments.semantic_matrix]
+workload = "semantic_case"
+design = "fixed_order"
+blocks = 3
+treatment_factor = "mode"
+combination_policy = "cartesian"
+max_trials = 100
+
+[experiments.semantic_matrix.factors]
+mode = ["reference", "candidate"]
+dtype = ["int8", "int16"]
+case = ["empty", "boundary", "ordinary"]
+```
+
+`combination_policy = "explicit"` uses the declared `combinations` list
+instead. Partial `exclude` rules match only named coordinates. Planning checks
+every value against the workload declaration, materializes the exact ordered
+cells, and rejects products beyond `max_trials`. Every trial carries its stable
+`combination_id` and typed `factors`; names are not parsed to reconstruct
+coordinates. Cancellation or fatal planning failure publishes remaining cells
+as `unattempted`. Legacy variants and scaling configuration normalize into the
+same cell representation.
+
+### Correctness and reliability outcomes
+
+`analysis = "outcome"` selects fixed-attempt categorical analysis without
+requiring pyperf. The persisted `fixed_attempts_v1` result counts passed,
+oracle-failed, process-failed, timed-out, cancelled, unsupported,
+resource-policy, and infrastructure-failed trials by treatment. Pairing uses
+the materialized block and factor coordinates, and incomplete cells remain
+visible.
+
+Results distinguish all-clean, base-only failure, candidate-only failure,
+mixed, unsupported, and insufficient-evidence dispositions. An all-clean
+finite experiment does not claim race freedom or absence of a rarer failure.
+
 The experiment declares its primary metric, polarity, estimand, practical
 threshold, confidence level, sample or stopping rule, and validation oracle
 before confirmatory collection. Adaptive stopping is allowed only when its rule

@@ -8,6 +8,7 @@ from pydantic import Field, JsonValue
 from flameox.application.recoverable_move import validate_manifest_id
 from flameox.catalog import Catalog
 from flameox.domain import (
+    CursorCodec,
     DomainError,
     ErrorCode,
     EvidenceLevel,
@@ -78,6 +79,26 @@ class FindingResult(ContractModel):
     corpus_commit_id: str
 
 
+class InvestigationListResult(ContractModel):
+    schema_version: int = 1
+    corpus_commit_id: str
+    investigations: tuple[Investigation, ...]
+    total: int
+    returned: int
+    truncated: bool
+    next_cursor: str | None
+
+
+class FindingListResult(ContractModel):
+    schema_version: int = 1
+    corpus_commit_id: str
+    findings: tuple[Finding, ...]
+    total: int
+    returned: int
+    truncated: bool
+    next_cursor: str | None
+
+
 class InvestigationService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
@@ -114,6 +135,36 @@ class InvestigationService:
             publisher_version="1",
         )
         return investigation
+
+    def list(self, *, limit: int, cursor: str | None = None) -> InvestigationListResult:
+        head = self.workspace.corpus.read_head()
+        offset = _decode_offset(
+            cursor,
+            namespace="investigations",
+            snapshot_id=head.commit_id,
+        )
+        values = tuple(
+            sorted(
+                self.investigations.list(),
+                key=lambda item: (item.created_at, item.investigation_id),
+                reverse=True,
+            )
+        )
+        selected = values[offset : offset + limit]
+        next_offset = offset + len(selected)
+        return InvestigationListResult(
+            corpus_commit_id=head.commit_id,
+            investigations=selected,
+            total=len(values),
+            returned=len(selected),
+            truncated=next_offset < len(values),
+            next_cursor=_encode_offset(
+                namespace="investigations",
+                snapshot_id=head.commit_id,
+                offset=next_offset,
+                total=len(values),
+            ),
+        )
 
     def record_hypothesis(self, request: RecordHypothesisRequest) -> Hypothesis:
         self.investigations.read(request.investigation_id)
@@ -292,6 +343,32 @@ class FindingService:
             corpus_commit_id=published.commit.commit_id,
         )
 
+    def list(self, *, limit: int, cursor: str | None = None) -> FindingListResult:
+        head = self.workspace.corpus.read_head()
+        offset = _decode_offset(cursor, namespace="findings", snapshot_id=head.commit_id)
+        values = tuple(
+            sorted(
+                self.findings.list(),
+                key=lambda item: (item.created_at, item.finding_id),
+                reverse=True,
+            )
+        )
+        selected = values[offset : offset + limit]
+        next_offset = offset + len(selected)
+        return FindingListResult(
+            corpus_commit_id=head.commit_id,
+            findings=selected,
+            total=len(values),
+            returned=len(selected),
+            truncated=next_offset < len(values),
+            next_cursor=_encode_offset(
+                namespace="findings",
+                snapshot_id=head.commit_id,
+                offset=next_offset,
+                total=len(values),
+            ),
+        )
+
     def _require_reference(self, item: EvidenceInput) -> None:
         if item.ref_type == "run":
             RunStore(self.workspace).read(item.ref_id)
@@ -353,3 +430,34 @@ class FindingService:
             and row[0] == "valid"
             and row[1] not in {"inconclusive", "descriptive_only"}
         )
+
+
+def _decode_offset(cursor: str | None, *, namespace: str, snapshot_id: str) -> int:
+    if cursor is None:
+        return 0
+    position = CursorCodec.decode(
+        cursor,
+        namespace=namespace,
+        snapshot_id=snapshot_id,
+        scope_digest="all",
+    )
+    if len(position) != 1 or not isinstance(position[0], int):
+        raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.")
+    return position[0]
+
+
+def _encode_offset(
+    *,
+    namespace: str,
+    snapshot_id: str,
+    offset: int,
+    total: int,
+) -> str | None:
+    if offset >= total:
+        return None
+    return CursorCodec.encode(
+        namespace=namespace,
+        snapshot_id=snapshot_id,
+        scope_digest="all",
+        position=(offset,),
+    )

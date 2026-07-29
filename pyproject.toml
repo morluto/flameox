@@ -28,6 +28,7 @@ dependencies = [
     "tomli-w>=1.2,<2",
     "tomlkit>=0.13,<1",
     "typer>=0.16,<1",
+    "psutil>=7.2,<8",
 ]
 
 [project.urls]
@@ -152,3 +153,8 @@ name = "Storage must not import CLI, MCP, or adapters"
 type = "forbidden"
 source_modules = ["flameox.storage"]
 forbidden_modules = ["flameox.cli", "flameox.mcp", "flameox.adapters"]
+
+[dependency-groups]
+dev = [
+    "types-psutil>=7.2,<8",
+]

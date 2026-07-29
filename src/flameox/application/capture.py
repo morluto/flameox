@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import mimetypes
 import os
 import secrets
@@ -19,40 +20,54 @@ from flameox.adapters.builtins import (
     build_capture_invocation,
     builtin_adapter,
 )
+from flameox.adapters.registry import AdapterRegistry
 from flameox.application.async_work import run_atomic_thread
 from flameox.application.capabilities import CapabilityService
-from flameox.application.environment import collect_environment
+from flameox.application.environment import AcceleratorIdentityService, collect_environment
 from flameox.application.evidence_rows import (
     artifact_registration_row,
     environment_row,
     source_state_row,
 )
+from flameox.application.execution_identity import ExecutionIdentityService
 from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.preflight import PreflightService
 from flameox.application.run_rows import run_row
 from flameox.application.source import collect_source_state
 from flameox.application.workloads import Scalar, WorkloadService
 from flameox.domain import (
+    AcceleratorIdentityFacet,
+    AdapterExecutionPlan,
+    AdapterExtractionResult,
+    AdapterPlanRequest,
+    AdapterProbeContext,
+    AdapterProbeResult,
+    AdapterValidationResult,
     ArtifactKind,
     ArtifactRegistration,
     CapabilityStatus,
     CaptureLease,
     CapturePlan,
     CaptureStatus,
+    CommandSpec,
     DomainError,
     ErrorCode,
     ExecutionStatus,
+    ExternalExecutionContext,
+    IdentityQuality,
     OracleStrength,
     ProcessResult,
     RunManifest,
     RunType,
     Sensitivity,
     ValidationStatus,
+    WritableRootBinding,
     digest_model,
     new_id,
 )
 from flameox.domain.models import utc_now
 from flameox.evidence import GenerationPublisher
-from flameox.execution import ExecutionRequest, SubprocessBroker
+from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
 from flameox.models import ContractModel
 from flameox.observability import OperationLogger, elapsed_ms
 from flameox.storage import ArtifactStore, RunStore, StorageQuota, Workspace
@@ -64,6 +79,18 @@ class CaptureResult(ContractModel):
     plan: CapturePlan
     run: RunManifest
     corpus_commit_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _AdapterBinding:
+    argv: tuple[str, ...]
+    artifact_kinds: tuple[ArtifactKind, ...]
+    expected_overhead: str
+    limitations: tuple[str, ...]
+    permissions: tuple[str, ...]
+    version: str | None
+    execution_plan: AdapterExecutionPlan | None = None
+    package_identity: str | None = None
 
 
 @dataclass(slots=True)
@@ -129,6 +156,7 @@ class _CaptureExecution:
         phase: str,
         error_code: str,
         cleanup_complete: bool | None = None,
+        process: ProcessResult | None = None,
     ) -> RunManifest:
         if self.run is None:
             raise DomainError(ErrorCode.INTERNAL_ERROR, "capture run is not initialized")
@@ -151,6 +179,7 @@ class _CaptureExecution:
                     cleanup_complete=(
                         self.cleanup_complete if cleanup_complete is None else cleanup_complete
                     ),
+                    process=process,
                 )
             )
         finally:
@@ -215,6 +244,17 @@ class CapturePlanRegistry:
             entry.consumed = True
             return entry.plan
 
+    async def inspect(self, plan_id: str) -> CapturePlan:
+        async with self._lock:
+            self._evict_expired()
+            entry = self._plans.get(plan_id)
+            if entry is None:
+                raise DomainError(
+                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    "Capture plan is missing, expired, or belongs to another server process.",
+                )
+            return entry.plan
+
     def _evict_expired(self) -> None:
         now = time.monotonic()
         for key in [key for key, entry in self._plans.items() if entry.expires_monotonic <= now]:
@@ -247,6 +287,8 @@ class CaptureService:
         adapter: str,
         parameters: dict[str, Scalar] | None = None,
         execution_policy: ExecutionPolicy,
+        preflight_mode: Literal["passive", "active"] = "passive",
+        external_context: ExternalExecutionContext | None = None,
     ) -> CapturePlan:
         instance = self.workloads.resolve(
             workload_name,
@@ -260,23 +302,59 @@ class CaptureService:
                 ErrorCode.EXECUTION_REFUSED,
                 f"Workload {workload_name!r} is not approved.",
             )
+        preflight = await PreflightService(
+            self.workspace,
+            capabilities=self.capabilities,
+        ).inspect(workload_name, mode=preflight_mode)
+        if preflight.disposition == "blocked":
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                f"Required preflight checks failed for workload {workload_name!r}.",
+                details={
+                    "preflight": preflight.model_dump(mode="json"),
+                    "next_tool": "get_declared_workflow",
+                },
+                remediation=tuple(
+                    remediation
+                    for item in preflight.requirements
+                    for remediation in item.remediation
+                ),
+            )
+        planned_execution_identity = ExecutionIdentityService(
+            self.workspace,
+            broker=self.broker,
+        ).plan(workload_name)
         plan_id = secrets.token_hex(32)
         run_id = new_id()
         output_root = self.workspace.paths.staging / "captures" / plan_id
+        writable_roots = tuple(
+            WritableRootBinding(
+                target_path=str(target),
+                storage_path=str(output_root / "writable" / str(index)),
+                target_identity=identity,
+            )
+            for index, (target, identity) in enumerate(
+                self.workloads.writable_targets(workload_name)
+            )
+        )
         collector_environment = {
             "FLAMEOX_OBSERVATIONS_PATH": str(output_root / "observations.jsonl")
         }
-        collector_argv, kinds, overhead, warnings = self._adapter_command(
+        adapter_binding = await self._adapter_command(
             adapter,
-            instance.command.argv,
+            instance.command,
             output_root,
         )
-        adapter_version = self.capabilities.get(adapter).version
-        adapter_definition = builtin_adapter(adapter)
+        collector_argv = adapter_binding.argv
+        kinds = adapter_binding.artifact_kinds
+        overhead = adapter_binding.expected_overhead
+        warnings = adapter_binding.limitations
+        adapter_version = adapter_binding.version
         containment, network_contained, systemd_scope_unit, collector_argv = await self._contain(
             collector_argv,
             cwd=Path(instance.command.cwd),
             writable=output_root,
+            writable_roots=writable_roots,
             unit_name=f"flameox-capture-{plan_id[:24]}.scope",
             required=(
                 execution_policy.requires_containment(self.workspace.config.execution.containment)
@@ -292,6 +370,8 @@ class CaptureService:
                 self._executable_identity(instance.command.argv[0]),
             ),
         }
+        if adapter_binding.package_identity is not None:
+            identities["adapter_package_identity"] = adapter_binding.package_identity
         created_at = utc_now()
         request: dict[str, Any] = {
             "workspace_id": self.workspace.identity.workspace_id,
@@ -302,10 +382,21 @@ class CaptureService:
             "instance": instance.model_dump(mode="json"),
             "adapter": adapter,
             "adapter_version": adapter_version,
+            "adapter_execution_plan": (
+                adapter_binding.execution_plan.model_dump(mode="json")
+                if adapter_binding.execution_plan is not None
+                else None
+            ),
             "execution_policy": execution_policy.value,
             "collector_argv": collector_argv,
             "collector_environment": collector_environment,
             "bound_identities": identities,
+            "preflight": preflight.model_dump(mode="json"),
+            "writable_roots": [item.model_dump(mode="json") for item in writable_roots],
+            "external_context": (
+                external_context.model_dump(mode="json") if external_context is not None else None
+            ),
+            "planned_execution_identity": planned_execution_identity.model_dump(mode="json"),
             "policy": self.workspace.config.model_dump(mode="json"),
             "containment": containment,
             "systemd_scope_unit": systemd_scope_unit,
@@ -321,6 +412,11 @@ class CaptureService:
             workload_instance=instance,
             adapter=adapter,
             adapter_version=adapter_version,
+            adapter_execution_plan=(
+                adapter_binding.execution_plan.model_dump(mode="json")
+                if adapter_binding.execution_plan is not None
+                else None
+            ),
             execution_policy=execution_policy.value,
             collector_argv=collector_argv,
             collector_environment=collector_environment,
@@ -329,7 +425,11 @@ class CaptureService:
             containment=containment,
             network_contained=network_contained,
             systemd_scope_unit=systemd_scope_unit,
-            permissions=(adapter_definition.permissions if adapter_definition is not None else ()),
+            permissions=adapter_binding.permissions,
+            preflight=preflight,
+            writable_roots=writable_roots,
+            external_context=external_context,
+            planned_execution_identity=planned_execution_identity,
             bound_identities=identities,
             limits={
                 "timeout_seconds": instance.command.timeout_seconds,
@@ -338,6 +438,13 @@ class CaptureService:
                 "max_cpu_percent": self.workspace.config.execution.max_cpu_percent,
                 "max_memory_bytes": self.workspace.config.execution.max_memory_bytes,
                 "max_processes": self.workspace.config.execution.max_processes,
+                "minimum_free_bytes": self.workspace.config.storage.min_free_bytes,
+                "resource_sampling_interval_ms": (
+                    self.workspace.config.execution.resource_sampling_interval_ms
+                ),
+                "max_resource_observed_files": (
+                    self.workspace.config.execution.max_resource_observed_files
+                ),
             },
             warnings=warnings,
             created_at=created_at,
@@ -357,10 +464,12 @@ class CaptureService:
         started = time.monotonic()
 
         plan = await self.plans.consume(plan_id)
-        self._recheck(plan)
+        await self._recheck(plan)
         StorageQuota(self.workspace).require_capacity(staging=True)
         output_root = self.workspace.paths.staging / "captures" / plan.plan_id
         output_root.mkdir(parents=True, exist_ok=False)
+        for binding in plan.writable_roots:
+            Path(binding.storage_path).mkdir(parents=True, exist_ok=False)
         capture = _CaptureExecution(
             service=self,
             plan=plan,
@@ -370,7 +479,24 @@ class CaptureService:
             started_monotonic=started,
             progress=progress,
         )
-        environment = collect_environment()
+        identity_requirements = (
+            WorkloadService(self.workspace)
+            .load()
+            .workloads[plan.workload_name]
+            .identity.environment.required
+        )
+        planned_accelerator = (
+            AcceleratorIdentityFacet(
+                provider="cuda",
+                status="unknown",
+                identity_quality=IdentityQuality.PARTIAL,
+                missing_fields=identity_requirements,
+                limitations=("Declared accelerator identity has not been observed yet.",),
+            )
+            if identity_requirements
+            else None
+        )
+        environment = collect_environment(planned_accelerator)
         run_id = plan.run_id
         initial = RunManifest(
             run_id=plan.run_id,
@@ -398,16 +524,35 @@ class CaptureService:
             collector=plan.adapter,
             collector_version=plan.adapter_version,
             command=plan.workload_instance.command,
+            preflight=plan.preflight,
+            writable_roots=plan.writable_roots,
+            external_context=plan.external_context,
+            execution_identity=plan.planned_execution_identity,
+            limitations=plan.preflight.limitations,
         )
         self.runs.create(initial)
         capture.run = initial
         try:
+            accelerator = await AcceleratorIdentityService(self.workspace.project_root).observe(
+                identity_requirements
+            )
+            environment = collect_environment(accelerator)
             await capture.report(1, "Capture plan validated")
             await capture.report(2, "Run lifecycle initialized")
             source_state = await collect_source_state(
                 self.workspace,
                 workload_executable=plan.workload_instance.command.argv[0],
                 broker=self.broker,
+            )
+            execution_identity = await ExecutionIdentityService(
+                self.workspace,
+                broker=self.broker,
+            ).observe(
+                plan.workload_name,
+                parameters=cast(
+                    dict[str, str | int | float | bool],
+                    plan.workload_instance.parameters,
+                ),
             )
             await capture.report(3, "Source and environment identity collected")
         except asyncio.CancelledError as cancellation:
@@ -423,7 +568,9 @@ class CaptureService:
         prepared = initial.model_copy(
             update={
                 "revision": 1,
+                "environment_id": environment.environment_id,
                 "source_state_id": source_state.source_state_id,
+                "execution_identity": execution_identity,
             }
         )
         self.runs.append(prepared, expected_revision=0)
@@ -433,7 +580,9 @@ class CaptureService:
                 "started_at": utc_now(),
                 "execution_status": ExecutionStatus.RUNNING,
                 "capture_status": CaptureStatus.RUNNING,
+                "environment_id": environment.environment_id,
                 "source_state_id": source_state.source_state_id,
+                "execution_identity": execution_identity,
             }
         )
         self.runs.append(running, expected_revision=1)
@@ -461,6 +610,25 @@ class CaptureService:
                     timeout_seconds=plan.workload_instance.command.timeout_seconds,
                     max_output_bytes=self.workspace.config.execution.max_output_bytes,
                     systemd_scope_unit=plan.systemd_scope_unit,
+                    resource_policy=ResourcePolicy(
+                        filesystem_path=self.workspace.paths.root,
+                        staging_root=output_root,
+                        writable_roots=(
+                            *(Path(item.storage_path) for item in plan.writable_roots),
+                        ),
+                        minimum_free_bytes=cast(
+                            int,
+                            plan.limits["minimum_free_bytes"],
+                        ),
+                        sampling_interval_ms=cast(
+                            int,
+                            plan.limits["resource_sampling_interval_ms"],
+                        ),
+                        max_observed_files=cast(
+                            int,
+                            plan.limits["max_resource_observed_files"],
+                        ),
+                    ),
                 ),
                 on_started=capture.record_lease,
                 on_cleanup=capture.record_cleanup,
@@ -488,6 +656,11 @@ class CaptureService:
                 message=error.message,
                 phase="collector execution failed",
                 error_code=error.code.value,
+                process=(
+                    ProcessResult.model_validate(error.details["process"])
+                    if "process" in error.details
+                    else None
+                ),
             )
             error.run_id = terminal.run_id
             raise
@@ -502,6 +675,7 @@ class CaptureService:
             )
 
         registrations: list[tuple[ArtifactRegistration, int]] = []
+        adapter_extraction_rows: list[dict[str, object]] = []
         validation_status = ValidationStatus.NOT_REQUESTED
         validation_limitations: list[str] = []
         try:
@@ -520,6 +694,7 @@ class CaptureService:
                         oracle.command.argv,
                         cwd=Path(oracle.command.cwd),
                         writable=output_root,
+                        writable_roots=plan.writable_roots,
                         unit_name=f"flameox-validation-{plan.plan_id[:21]}.scope",
                         required=ExecutionPolicy(plan.execution_policy).requires_containment(
                             self.workspace.config.execution.containment
@@ -549,6 +724,25 @@ class CaptureService:
                             timeout_seconds=oracle.command.timeout_seconds,
                             max_output_bytes=(self.workspace.config.execution.max_output_bytes),
                             systemd_scope_unit=oracle_scope_unit,
+                            resource_policy=ResourcePolicy(
+                                filesystem_path=self.workspace.paths.root,
+                                staging_root=output_root,
+                                writable_roots=(
+                                    *(Path(item.storage_path) for item in plan.writable_roots),
+                                ),
+                                minimum_free_bytes=cast(
+                                    int,
+                                    plan.limits["minimum_free_bytes"],
+                                ),
+                                sampling_interval_ms=cast(
+                                    int,
+                                    plan.limits["resource_sampling_interval_ms"],
+                                ),
+                                max_observed_files=cast(
+                                    int,
+                                    plan.limits["max_resource_observed_files"],
+                                ),
+                            ),
                         ),
                         on_cleanup=capture.record_cleanup,
                     )
@@ -622,21 +816,31 @@ class CaptureService:
                         media_type=media_type,
                     )
                 )
-            native = output_root / self._native_filename(plan.adapter)
-            if native.is_file():
-                registrations.append(
-                    await self._register_path_async(
-                        run_id,
-                        native,
-                        kind=plan.expected_artifact_kinds[0],
-                        role="primary",
-                        media_type=(
-                            mimetypes.guess_type(native.name)[0] or "application/octet-stream"
-                        ),
-                        producer=plan.adapter,
-                        producer_version=plan.adapter_version,
+            if plan.adapter_execution_plan is not None:
+                (
+                    plugin_registrations,
+                    plugin_extractions,
+                    plugin_limitations,
+                ) = await self._process_adapter_artifacts(plan, output_root)
+                registrations.extend(plugin_registrations)
+                adapter_extraction_rows.extend(plugin_extractions)
+                validation_limitations.extend(plugin_limitations)
+            else:
+                native = output_root / self._native_filename(plan.adapter)
+                if native.is_file():
+                    registrations.append(
+                        await self._register_path_async(
+                            run_id,
+                            native,
+                            kind=plan.expected_artifact_kinds[0],
+                            role="primary",
+                            media_type=(
+                                mimetypes.guess_type(native.name)[0] or "application/octet-stream"
+                            ),
+                            producer=plan.adapter,
+                            producer_version=plan.adapter_version,
+                        )
                     )
-                )
             observations = output_root / "observations.jsonl"
             if observations.is_file():
                 registrations.append(
@@ -681,7 +885,8 @@ class CaptureService:
                 "process": outcome.process,
                 "artifacts": tuple(registration for registration, _ in registrations),
                 "limitations": tuple(
-                    (
+                    list(running.limitations)
+                    + (
                         []
                         if succeeded
                         else [f"Collector exited with status {outcome.process.exit_code}."]
@@ -731,6 +936,7 @@ class CaptureService:
                 artifact_registration_row(registration, byte_length=byte_length)
                 for registration, byte_length in registrations
             ],
+            "adapter_extractions": adapter_extraction_rows,
             "environments": [environment_row(environment)],
             "source_states": [source_state_row(source_state)],
             "measurements": measurement_rows,
@@ -788,30 +994,80 @@ class CaptureService:
             corpus_commit_id=published.commit.commit_id,
         )
 
-    def _adapter_command(
+    async def _adapter_command(
         self,
         adapter: str,
-        workload_argv: tuple[str, ...],
+        workload: CommandSpec,
         output_root: Path,
-    ) -> tuple[tuple[str, ...], tuple[ArtifactKind, ...], str, tuple[str, ...]]:
-        capability = self.capabilities.get(adapter)
-        if adapter != "command" and capability.status is not CapabilityStatus.AVAILABLE:
-            raise DomainError(
-                ErrorCode.CAPABILITY_UNAVAILABLE,
-                f"Adapter {adapter!r} is unavailable.",
-                remediation=capability.remediation,
+    ) -> _AdapterBinding:
+        adapter_definition = builtin_adapter(adapter)
+        if adapter_definition is not None:
+            capability = self.capabilities.get(adapter)
+            if adapter != "command" and capability.status is not CapabilityStatus.AVAILABLE:
+                raise DomainError(
+                    ErrorCode.CAPABILITY_UNAVAILABLE,
+                    f"Adapter {adapter!r} is unavailable.",
+                    remediation=capability.remediation,
+                )
+            invocation = build_capture_invocation(
+                adapter,
+                workload.argv,
+                output_root,
+                executable=capability.executable,
             )
-        invocation = build_capture_invocation(
-            adapter,
-            workload_argv,
-            output_root,
-            executable=capability.executable,
-        )
-        return (
-            invocation.argv,
-            invocation.artifact_kinds,
-            invocation.expected_overhead,
-            invocation.limitations,
+            return _AdapterBinding(
+                argv=invocation.argv,
+                artifact_kinds=invocation.artifact_kinds,
+                expected_overhead=invocation.expected_overhead,
+                limitations=invocation.limitations,
+                permissions=adapter_definition.permissions,
+                version=capability.version,
+            )
+
+        descriptor, contract = AdapterRegistry(self.workspace).load_contract(adapter)
+        try:
+            probe = AdapterProbeResult.model_validate(
+                await contract.probe(
+                    AdapterProbeContext(project_root=str(self.workspace.project_root))
+                )
+            )
+            if probe.status == "unavailable":
+                raise DomainError(
+                    ErrorCode.CAPABILITY_UNAVAILABLE,
+                    f"Approved adapter {adapter!r} is unavailable.",
+                    remediation=probe.remediation,
+                )
+            execution_plan = AdapterExecutionPlan.model_validate(
+                await contract.plan(
+                    AdapterPlanRequest(
+                        project_root=str(self.workspace.project_root),
+                        output_root=str(output_root),
+                        workload=workload,
+                    )
+                )
+            )
+        except DomainError:
+            raise
+        except Exception as error:
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                f"Approved adapter {adapter!r} failed during bounded planning.",
+                details={"exception_type": type(error).__name__},
+            ) from error
+        if execution_plan.adapter != adapter:
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "The approved adapter returned a plan for another adapter name.",
+            )
+        return _AdapterBinding(
+            argv=(*execution_plan.argv_prefix, "--", *workload.argv),
+            artifact_kinds=tuple(item.kind for item in execution_plan.artifacts),
+            expected_overhead=execution_plan.expected_overhead,
+            limitations=(*probe.limitations, *execution_plan.limitations),
+            permissions=execution_plan.permissions,
+            version=descriptor.version,
+            execution_plan=execution_plan,
+            package_identity=descriptor.package_identity,
         )
 
     async def _contain(
@@ -820,6 +1076,7 @@ class CaptureService:
         *,
         cwd: Path,
         writable: Path,
+        writable_roots: tuple[WritableRootBinding, ...],
         unit_name: str,
         required: bool,
     ) -> tuple[
@@ -849,6 +1106,7 @@ class CaptureService:
             argv,
             cwd=cwd,
             writable=writable,
+            writable_roots=writable_roots,
         )
         systemd_run = shutil.which("systemd-run")
         if systemd_run is None or not await self._systemd_user_scope_available(systemd_run):
@@ -928,6 +1186,7 @@ class CaptureService:
         *,
         cwd: Path,
         writable: Path,
+        writable_roots: tuple[WritableRootBinding, ...],
     ) -> tuple[str, ...]:
         project_root = self.workspace.project_root.resolve()
         resolved_cwd = cwd.resolve()
@@ -959,6 +1218,8 @@ class CaptureService:
             if Path(path).exists():
                 wrapped.extend(("--ro-bind", path, path))
         wrapped.extend(("--ro-bind", str(project_root), str(project_root)))
+        for binding in writable_roots:
+            wrapped.extend(("--bind", binding.storage_path, binding.target_path))
         executable = Path(argv[0])
         if executable.is_absolute() and executable.exists():
             executable_candidates = [executable, executable.resolve()]
@@ -1005,7 +1266,59 @@ class CaptureService:
         )
         return tuple(wrapped)
 
-    def _recheck(self, plan: CapturePlan) -> None:
+    async def _recheck(self, plan: CapturePlan) -> None:
+        request = {
+            "workspace_id": plan.workspace_id,
+            "run_id": plan.run_id,
+            "workload_name": plan.workload_name,
+            "definition_id": plan.workload_definition_id,
+            "approval": plan.approval_digest,
+            "instance": plan.workload_instance.model_dump(mode="json"),
+            "adapter": plan.adapter,
+            "adapter_version": plan.adapter_version,
+            "adapter_execution_plan": plan.adapter_execution_plan,
+            "execution_policy": plan.execution_policy,
+            "collector_argv": plan.collector_argv,
+            "collector_environment": plan.collector_environment,
+            "bound_identities": plan.bound_identities,
+            "preflight": plan.preflight.model_dump(mode="json"),
+            "writable_roots": [item.model_dump(mode="json") for item in plan.writable_roots],
+            "external_context": (
+                plan.external_context.model_dump(mode="json")
+                if plan.external_context is not None
+                else None
+            ),
+            "planned_execution_identity": (plan.planned_execution_identity.model_dump(mode="json")),
+            "policy": self.workspace.config.model_dump(mode="json"),
+            "containment": plan.containment,
+            "systemd_scope_unit": plan.systemd_scope_unit,
+        }
+        if digest_model(request) != plan.request_digest:
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "Capture plan contents changed after authorization.",
+            )
+        if plan.adapter_execution_plan is not None:
+            descriptor = AdapterRegistry(self.workspace).approved_descriptor(plan.adapter)
+            if (
+                descriptor.version != plan.adapter_version
+                or descriptor.package_identity
+                != plan.bound_identities.get("adapter_package_identity")
+            ):
+                raise DomainError(
+                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    "The approved adapter package identity changed after planning.",
+                )
+            AdapterRegistry(self.workspace).load_contract(plan.adapter)
+        current_execution_identity = ExecutionIdentityService(
+            self.workspace,
+            broker=self.broker,
+        ).plan(plan.workload_name)
+        if current_execution_identity.identity_id != plan.planned_execution_identity.identity_id:
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "A declared module or native identity input changed after planning.",
+            )
         if self.workspace.identity.workspace_id != plan.workspace_id:
             raise DomainError(ErrorCode.INVALID_CAPTURE_PLAN, "Workspace identity changed.")
         definition = self.workloads.definition(plan.workload_name)
@@ -1031,6 +1344,31 @@ class CaptureService:
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "A bound executable changed after planning.",
             )
+        current_preflight = await PreflightService(
+            self.workspace,
+            capabilities=self.capabilities,
+        ).inspect(plan.workload_name, mode=plan.preflight.mode)
+        if (
+            current_preflight.preflight_id != plan.preflight.preflight_id
+            or current_preflight.disposition == "blocked"
+        ):
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "Workload preflight changed after planning.",
+                details={
+                    "planned_preflight_id": plan.preflight.preflight_id,
+                    "current_preflight_id": current_preflight.preflight_id,
+                },
+            )
+        current_writable = self.workloads.writable_targets(plan.workload_name)
+        planned_writable = tuple(
+            (Path(item.target_path), item.target_identity) for item in plan.writable_roots
+        )
+        if current_writable != planned_writable:
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "A writable build-output root changed after planning.",
+            )
 
     def _finish_error(
         self,
@@ -1039,8 +1377,9 @@ class CaptureService:
         execution: ExecutionStatus,
         message: str,
         cleanup_complete: bool | None = True,
+        process: ProcessResult | None = None,
     ) -> RunManifest:
-        process = ProcessResult(
+        process = process or ProcessResult(
             timed_out=execution is ExecutionStatus.TIMED_OUT,
             cancellation_cause=(
                 "caller_cancelled"
@@ -1060,7 +1399,7 @@ class CaptureService:
                     else CaptureStatus.FAILED
                 ),
                 "process": process,
-                "limitations": (message,),
+                "limitations": (*running.limitations, message),
             }
         )
         terminal = self.runs.append(terminal, expected_revision=running.revision)
@@ -1072,6 +1411,117 @@ class CaptureService:
         )
         return terminal
 
+    async def _process_adapter_artifacts(
+        self,
+        plan: CapturePlan,
+        output_root: Path,
+    ) -> tuple[
+        list[tuple[ArtifactRegistration, int]],
+        list[dict[str, object]],
+        list[str],
+    ]:
+        execution_plan = AdapterExecutionPlan.model_validate(plan.adapter_execution_plan)
+        descriptor, contract = AdapterRegistry(self.workspace).load_contract(plan.adapter)
+        registrations: list[tuple[ArtifactRegistration, int]] = []
+        extractions: list[dict[str, object]] = []
+        limitations: list[str] = []
+        for declaration in execution_plan.artifacts:
+            path = output_root / declaration.relative_path
+            try:
+                resolved = path.resolve(strict=True)
+                resolved.relative_to(output_root.resolve())
+            except (FileNotFoundError, ValueError) as error:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_PARSE_FAILED,
+                    f"Adapter {plan.adapter!r} did not produce declared artifact "
+                    f"{declaration.relative_path!r}.",
+                    run_id=plan.run_id,
+                ) from error
+            if not resolved.is_file():
+                raise DomainError(
+                    ErrorCode.ARTIFACT_PARSE_FAILED,
+                    "A declared adapter artifact is not a regular file.",
+                    run_id=plan.run_id,
+                )
+            try:
+                validation = AdapterValidationResult.model_validate(
+                    await contract.validate(str(resolved), declaration)
+                )
+            except Exception as error:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_PARSE_FAILED,
+                    f"Adapter {plan.adapter!r} artifact validation failed.",
+                    details={"exception_type": type(error).__name__},
+                    run_id=plan.run_id,
+                ) from error
+            if not validation.valid:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_PARSE_FAILED,
+                    f"Adapter {plan.adapter!r} rejected its declared artifact.",
+                    details={"limitations": list(validation.limitations)},
+                    run_id=plan.run_id,
+                )
+            limitations.extend(validation.limitations)
+            registration, byte_length = await self._register_path_async(
+                plan.run_id,
+                resolved,
+                kind=declaration.kind,
+                role=declaration.role,
+                media_type=declaration.media_type,
+                producer=plan.adapter,
+                producer_version=plan.adapter_version,
+                sensitivity=declaration.sensitivity,
+            )
+            registrations.append((registration, byte_length))
+            immutable = self.artifacts.get(registration.artifact_id)
+            try:
+                extraction = AdapterExtractionResult.model_validate(
+                    await contract.extract(
+                        str(immutable.payload_path),
+                        declaration,
+                    )
+                )
+            except Exception as error:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_PARSE_FAILED,
+                    f"Adapter {plan.adapter!r} extraction failed.",
+                    details={"exception_type": type(error).__name__},
+                    run_id=plan.run_id,
+                ) from error
+            if extraction.extractor_version != execution_plan.extractor_version:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_PARSE_FAILED,
+                    "Adapter extraction version differs from the bound plan.",
+                    run_id=plan.run_id,
+                )
+            limitations.extend(extraction.limitations)
+            identity = {
+                "run_id": plan.run_id,
+                "input_artifact_id": registration.artifact_id,
+                "adapter": plan.adapter,
+                "adapter_package_identity": descriptor.package_identity,
+                "extractor_version": extraction.extractor_version,
+                "summary": extraction.summary,
+            }
+            extractions.append(
+                {
+                    "extraction_id": digest_model(identity),
+                    "run_id": plan.run_id,
+                    "input_artifact_id": registration.artifact_id,
+                    "adapter": plan.adapter,
+                    "adapter_package_identity": descriptor.package_identity,
+                    "extractor_version": extraction.extractor_version,
+                    "summary_json": json.dumps(
+                        extraction.summary,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    "limitations": list(extraction.limitations),
+                }
+            )
+        return registrations, extractions, limitations
+
     def _register_path(
         self,
         run_id: str,
@@ -1082,6 +1532,7 @@ class CaptureService:
         media_type: str,
         producer: str = "flameox.capture",
         producer_version: str | None = None,
+        sensitivity: Sensitivity = Sensitivity.INTERNAL,
     ) -> tuple[ArtifactRegistration, int]:
         stored = self.artifacts.import_path(
             path,
@@ -1098,7 +1549,7 @@ class CaptureService:
             role=role,
             producer=producer,
             producer_version=producer_version,
-            sensitivity=Sensitivity.INTERNAL,
+            sensitivity=sensitivity,
         )
         return registration, stored.content.byte_length
 
@@ -1112,6 +1563,7 @@ class CaptureService:
         media_type: str,
         producer: str = "flameox.capture",
         producer_version: str | None = None,
+        sensitivity: Sensitivity = Sensitivity.INTERNAL,
     ) -> tuple[ArtifactRegistration, int]:
         return await run_atomic_thread(
             lambda: self._register_path(
@@ -1122,6 +1574,7 @@ class CaptureService:
                 media_type=media_type,
                 producer=producer,
                 producer_version=producer_version,
+                sensitivity=sensitivity,
             )
         )
 

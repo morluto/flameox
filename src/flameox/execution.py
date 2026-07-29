@@ -8,11 +8,13 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
+import psutil
 from pydantic import Field, field_validator
 
 from flameox.domain.errors import DomainError, ErrorCode
-from flameox.domain.models import ProcessResult
+from flameox.domain.models import ProcessResult, RuntimeResourceSummary
 from flameox.models import ContractModel
 
 _DANGEROUS_ENVIRONMENT = {
@@ -28,6 +30,15 @@ _DANGEROUS_ENVIRONMENT = {
 }
 
 
+class ResourcePolicy(ContractModel):
+    filesystem_path: Path
+    staging_root: Path | None = None
+    writable_roots: tuple[Path, ...] = ()
+    minimum_free_bytes: int = Field(ge=0)
+    sampling_interval_ms: int = Field(default=250, ge=25, le=10_000)
+    max_observed_files: int = Field(default=10_000, ge=1, le=1_000_000)
+
+
 class ExecutionRequest(ContractModel):
     argv: tuple[str, ...]
     cwd: Path
@@ -38,6 +49,7 @@ class ExecutionRequest(ContractModel):
     graceful_shutdown_seconds: float = Field(default=5, ge=0, le=60)
     max_output_bytes: int = Field(default=16_777_216, gt=0)
     systemd_scope_unit: str | None = None
+    resource_policy: ResourcePolicy | None = None
 
     @field_validator("argv")
     @classmethod
@@ -69,6 +81,11 @@ class ExecutionOutcome:
 
 class _OutputLimitExceeded(Exception):
     pass
+
+
+class _ResourcePolicyExceeded(Exception):
+    def __init__(self, summary: RuntimeResourceSummary) -> None:
+        self.summary = summary
 
 
 @dataclass(slots=True)
@@ -127,14 +144,18 @@ class SubprocessBroker:
         output_budget = _OutputBudget(request.max_output_bytes)
         stdout_task = asyncio.create_task(self._read_bounded(process.stdout, output_budget))
         stderr_task = asyncio.create_task(self._read_bounded(process.stderr, output_budget))
+        resource_task = asyncio.create_task(
+            self._observe_resources(process, request.resource_policy)
+        )
         timed_out = False
         cancellation_cause: str | None = None
         try:
             async with asyncio.timeout(request.timeout_seconds):
-                stdout, stderr, _ = await asyncio.gather(
+                stdout, stderr, _, resources = await asyncio.gather(
                     stdout_task,
                     stderr_task,
                     process.wait(),
+                    resource_task,
                 )
         except TimeoutError as exc:
             timed_out = True
@@ -143,6 +164,7 @@ class SubprocessBroker:
             if on_cleanup is not None:
                 await asyncio.shield(on_cleanup(cleanup_complete))
             await self._settle_readers(stdout_task, stderr_task)
+            await self._settle_resource(resource_task)
             raise DomainError(
                 ErrorCode.PROCESS_TIMEOUT,
                 f"Process exceeded {request.timeout_seconds} seconds.",
@@ -154,9 +176,33 @@ class SubprocessBroker:
             if on_cleanup is not None:
                 await asyncio.shield(on_cleanup(cleanup_complete))
             await self._settle_readers(stdout_task, stderr_task)
+            await self._settle_resource(resource_task)
             raise DomainError(
                 ErrorCode.QUERY_BUDGET_EXCEEDED,
                 f"Process output exceeded {request.max_output_bytes} bytes.",
+            ) from exc
+        except _ResourcePolicyExceeded as exc:
+            cancellation_cause = "storage_reserve_exceeded"
+            cleanup_complete = await asyncio.shield(self._terminate(process, request))
+            if on_cleanup is not None:
+                await asyncio.shield(on_cleanup(cleanup_complete))
+            partial_stdout, partial_stderr = await self._collect_readers(
+                stdout_task,
+                stderr_task,
+            )
+            raise DomainError(
+                ErrorCode.STORAGE_QUOTA_EXCEEDED,
+                "Runtime storage reserve was exceeded.",
+                details={
+                    "process": ProcessResult(
+                        cancellation_cause=cancellation_cause,
+                        cleanup_complete=cleanup_complete,
+                        peak_rss_bytes=exc.summary.peak_rss_bytes,
+                        resources=exc.summary,
+                        stdout=partial_stdout.decode(errors="replace"),
+                        stderr=partial_stderr.decode(errors="replace"),
+                    ).model_dump(mode="json")
+                },
             ) from exc
         except asyncio.CancelledError:
             cancellation_cause = "caller_cancelled"
@@ -164,6 +210,7 @@ class SubprocessBroker:
             if on_cleanup is not None:
                 await asyncio.shield(on_cleanup(cleanup_complete))
             await self._settle_readers(stdout_task, stderr_task)
+            await self._settle_resource(resource_task)
             raise
 
         finished = time.monotonic_ns()
@@ -182,6 +229,8 @@ class SubprocessBroker:
             timed_out=timed_out,
             cancellation_cause=cancellation_cause,
             cleanup_complete=True,
+            peak_rss_bytes=resources.peak_rss_bytes if resources is not None else None,
+            resources=resources,
         )
         return ExecutionOutcome(
             process=result,
@@ -194,6 +243,123 @@ class SubprocessBroker:
                 else ("process_group" if os.name == "posix" else "process")
             ),
         )
+
+    async def _observe_resources(
+        self,
+        process: asyncio.subprocess.Process,
+        policy: ResourcePolicy | None,
+    ) -> RuntimeResourceSummary | None:
+        if policy is None:
+            while process.returncode is None:
+                await asyncio.sleep(0.1)
+            return None
+        interval = policy.sampling_interval_ms / 1_000
+        minimum_free: int | None = None
+        peak_rss = 0
+        unavailable: set[str] = set()
+        initial_sizes = {
+            str(root): self._bounded_tree_size(
+                root,
+                max_files=policy.max_observed_files,
+            )
+            for root in policy.writable_roots
+        }
+        initial_staging = (
+            self._bounded_tree_size(policy.staging_root, max_files=policy.max_observed_files)
+            if policy.staging_root is not None
+            else None
+        )
+        while process.returncode is None:
+            free = shutil.disk_usage(policy.filesystem_path).free
+            minimum_free = free if minimum_free is None else min(minimum_free, free)
+            try:
+                parent = psutil.Process(process.pid)
+                processes = (parent, *parent.children(recursive=True))
+                rss = 0
+                for observed in processes:
+                    try:
+                        rss += observed.memory_info().rss
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+                peak_rss = max(peak_rss, rss)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                unavailable.add("descendant_peak_rss")
+            if free < policy.minimum_free_bytes:
+                summary = self._resource_summary(
+                    policy,
+                    initial_sizes=initial_sizes,
+                    initial_staging=initial_staging,
+                    minimum_free=minimum_free,
+                    peak_rss=peak_rss,
+                    unavailable=unavailable,
+                    termination="storage_reserve_exceeded",
+                )
+                raise _ResourcePolicyExceeded(summary)
+            await asyncio.sleep(interval)
+        return self._resource_summary(
+            policy,
+            initial_sizes=initial_sizes,
+            initial_staging=initial_staging,
+            minimum_free=minimum_free,
+            peak_rss=peak_rss,
+            unavailable=unavailable,
+            termination=None,
+        )
+
+    def _resource_summary(
+        self,
+        policy: ResourcePolicy,
+        *,
+        initial_sizes: dict[str, int | None],
+        initial_staging: int | None,
+        minimum_free: int | None,
+        peak_rss: int,
+        unavailable: set[str],
+        termination: Literal["storage_reserve_exceeded"] | None,
+    ) -> RuntimeResourceSummary:
+        growth: dict[str, int] = {}
+        for root in policy.writable_roots:
+            initial = initial_sizes[str(root)]
+            final = self._bounded_tree_size(root, max_files=policy.max_observed_files)
+            if initial is None or final is None:
+                unavailable.add(f"writable_root_growth:{root}")
+            else:
+                growth[str(root)] = max(0, final - initial)
+        staging_growth: int | None = None
+        if policy.staging_root is not None:
+            final_staging = self._bounded_tree_size(
+                policy.staging_root,
+                max_files=policy.max_observed_files,
+            )
+            if initial_staging is None or final_staging is None:
+                unavailable.add("staging_growth")
+            else:
+                nested_growth = sum(growth.values())
+                staging_growth = max(0, final_staging - initial_staging - nested_growth)
+        return RuntimeResourceSummary(
+            sampling_interval_ms=policy.sampling_interval_ms,
+            minimum_free_bytes=minimum_free,
+            staging_growth_bytes=staging_growth,
+            writable_root_growth_bytes=growth,
+            peak_rss_bytes=peak_rss or None,
+            unavailable_metrics=tuple(sorted(unavailable)),
+            policy_termination=termination,
+        )
+
+    def _bounded_tree_size(self, root: Path, *, max_files: int) -> int | None:
+        total = 0
+        observed = 0
+        try:
+            for path in root.rglob("*"):
+                if not path.is_file():
+                    continue
+                observed += 1
+                if observed > max_files:
+                    return None
+                total += path.stat().st_size
+        except OSError:
+            return None
+        return total
 
     async def _read_bounded(
         self,
@@ -280,6 +446,24 @@ class SubprocessBroker:
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _collect_readers(
+        self,
+        stdout_task: asyncio.Task[bytes],
+        stderr_task: asyncio.Task[bytes],
+    ) -> tuple[bytes, bytes]:
+        values = await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        stdout = values[0] if isinstance(values[0], bytes) else b""
+        stderr = values[1] if isinstance(values[1], bytes) else b""
+        return stdout, stderr
+
+    async def _settle_resource(
+        self,
+        task: asyncio.Task[RuntimeResourceSummary | None],
+    ) -> None:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     def _resolve_cwd(self, cwd: Path, allowed_roots: tuple[Path, ...]) -> Path:
         resolved = cwd.resolve()

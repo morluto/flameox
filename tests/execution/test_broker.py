@@ -6,12 +6,13 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
 from flameox.domain import DomainError, ErrorCode
-from flameox.execution import ExecutionRequest, SubprocessBroker
+from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
 
 
 def request(tmp_path: Path, *arguments: str, **overrides: object) -> ExecutionRequest:
@@ -125,6 +126,83 @@ async def test_cancellation_performs_cleanup_before_propagating(
 
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.anyio
+async def test_resource_policy_records_descendant_rss_disk_floor_and_root_growth(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    code = (
+        "import pathlib, subprocess, sys; "
+        "pathlib.Path(sys.argv[1]).write_bytes(b'x' * 4096); "
+        "subprocess.run([sys.executable, '-c', "
+        "'import time; value = bytearray(4000000); time.sleep(0.2)'], check=True)"
+    )
+    outcome = await SubprocessBroker().run(
+        request(
+            tmp_path,
+            "-c",
+            code,
+            str(output / "build.bin"),
+            resource_policy=ResourcePolicy(
+                filesystem_path=tmp_path,
+                writable_roots=(output,),
+                minimum_free_bytes=0,
+                sampling_interval_ms=25,
+            ),
+        )
+    )
+
+    resources = outcome.process.resources
+    assert resources is not None
+    assert resources.minimum_free_bytes is not None
+    assert resources.peak_rss_bytes is not None
+    assert resources.peak_rss_bytes > 0
+    assert resources.writable_root_growth_bytes[str(output)] == 4096
+    assert resources.policy_termination is None
+    assert outcome.process.peak_rss_bytes == resources.peak_rss_bytes
+
+
+@pytest.mark.anyio
+async def test_resource_policy_terminates_scope_with_structured_storage_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checks = 0
+
+    def disk_usage(_path: object) -> SimpleNamespace:
+        nonlocal checks
+        checks += 1
+        free = 100 if checks == 1 else 1
+        return SimpleNamespace(total=100, used=100 - free, free=free)
+
+    monkeypatch.setattr(
+        "flameox.execution.shutil.disk_usage",
+        disk_usage,
+    )
+    with pytest.raises(DomainError) as exceeded:
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                "import time; print('partial', flush=True); time.sleep(10)",
+                resource_policy=ResourcePolicy(
+                    filesystem_path=tmp_path,
+                    minimum_free_bytes=2,
+                    sampling_interval_ms=25,
+                ),
+            )
+        )
+
+    assert exceeded.value.code is ErrorCode.STORAGE_QUOTA_EXCEEDED
+    process = exceeded.value.details["process"]
+    assert isinstance(process, dict)
+    assert process["cancellation_cause"] == "storage_reserve_exceeded"
+    assert process["cleanup_complete"] is True
+    assert process["stdout"] == "partial\n"
+    assert process["resources"]["policy_termination"] == "storage_reserve_exceeded"
 
 
 @pytest.mark.anyio

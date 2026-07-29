@@ -33,6 +33,8 @@ class ExecutionConfig(ContractModel):
     max_processes: Annotated[int, Field(gt=0)] = 256
     max_memory_bytes: Annotated[int, Field(gt=0)] = 17_179_869_184
     max_output_bytes: Annotated[int, Field(gt=0)] = 16_777_216
+    resource_sampling_interval_ms: Annotated[int, Field(ge=25, le=10_000)] = 250
+    max_resource_observed_files: Annotated[int, Field(gt=0, le=1_000_000)] = 10_000
 
 
 class AnalysisConfig(ContractModel):

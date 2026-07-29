@@ -599,6 +599,7 @@ dependencies = [
     { name = "packaging" },
     { name = "platformdirs" },
     { name = "portalocker" },
+    { name = "psutil" },
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pyperf" },
@@ -655,6 +656,11 @@ trace = [
     { name = "perfetto" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "types-psutil" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.9,<5" },
@@ -676,6 +682,7 @@ requires-dist = [
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.9" },
     { name = "platformdirs", specifier = ">=4.3,<5" },
     { name = "portalocker", specifier = ">=3.2,<4" },
+    { name = "psutil", specifier = ">=7.2,<8" },
     { name = "py-spy", marker = "extra == 'all'", specifier = ">=0.4.2,<0.5" },
     { name = "py-spy", marker = "extra == 'cpu'", specifier = ">=0.4.2,<0.5" },
     { name = "pyarrow", specifier = ">=20,<26" },
@@ -703,6 +710,9 @@ requires-dist = [
     { name = "vulture", marker = "extra == 'dev'", specifier = ">=2.14" },
 ]
 provides-extras = ["python", "memory", "torch", "execution", "trace", "cpu", "all", "dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "types-psutil", specifier = ">=7.2,<8" }]
 
 [[package]]
 name = "fsspec"
@@ -2680,6 +2690,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/37/78/fda3361b56efc27944f24225f6ecd13d96d6fcfe37bd0eb34e2f4c63f9fc/typer-0.27.0.tar.gz", hash = "sha256:629bd12ea5d13a17148125d9a264f949eb171fb3f120f9b04d85873cab054fa5", size = 203430, upload-time = "2026-07-15T19:21:07.007Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/40/03/26a383c9e58c213199d1aad1c3d353cfc22d4444ec6d2c0bf8ad02523843/typer-0.27.0-py3-none-any.whl", hash = "sha256:6f4b27631e47f077871b7dc30e933ec0131c1390fbe0e387ea5574b5bac9ccf1", size = 122716, upload-time = "2026-07-15T19:21:05.553Z" },
+]
+
+[[package]]
+name = "types-psutil"
+version = "7.2.2.20260518"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cb/f1/6901857281d4e8d792492e1495eef6f4f01318a3b6a066486d81000a4511/types_psutil-7.2.2.20260518.tar.gz", hash = "sha256:9f825f631463a5b4d26f19f63aebc9ec25f01140d655026f3ad8a67841f9b331", size = 26660, upload-time = "2026-05-18T06:05:09.389Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cd/eb/f726339668879819599c74c2e1f0cab760912a4159046942bdae2ad37bd6/types_psutil-7.2.2.20260518-py3-none-any.whl", hash = "sha256:6a3d697665754a60d7b5a41d5a2cff12b53f5e0676d77810cd28ba5e14cb4049", size = 32820, upload-time = "2026-05-18T06:05:08.321Z" },
 ]
 
 [[package]]

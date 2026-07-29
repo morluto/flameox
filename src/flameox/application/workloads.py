@@ -5,13 +5,14 @@ import os
 import shutil
 import string
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Annotated, Literal, cast
 
 from pydantic import Field, JsonValue, model_validator
 
 from flameox.domain import (
     CommandSpec,
+    CursorCodec,
     DomainError,
     ErrorCode,
     OracleStrength,
@@ -31,6 +32,52 @@ class WorkloadOracleConfig(ContractModel):
     argv: Annotated[tuple[str, ...], Field(max_length=1_024)] = ()
 
 
+class WorkloadRequirementsConfig(ContractModel):
+    executables: Annotated[tuple[str, ...], Field(max_length=64)] = ()
+    python_distributions: Annotated[tuple[str, ...], Field(max_length=64)] = ()
+    capabilities: Annotated[tuple[str, ...], Field(max_length=64)] = ()
+    optional: Annotated[tuple[str, ...], Field(max_length=192)] = ()
+    active: Annotated[tuple[str, ...], Field(max_length=64)] = ()
+    allow_exploratory: bool = False
+
+    @model_validator(mode="after")
+    def references_are_unique_and_declared(self) -> WorkloadRequirementsConfig:
+        declared = (*self.executables, *self.python_distributions, *self.capabilities)
+        if len(set(declared)) != len(declared):
+            raise ValueError("workload requirements must be unique")
+        if not set(self.optional).issubset(declared):
+            raise ValueError("optional requirements must also be declared")
+        if not set(self.active).issubset(self.capabilities):
+            raise ValueError("active requirements must be declared capabilities")
+        return self
+
+
+AcceleratorIdentityRequirement = Literal[
+    "cuda.driver",
+    "cuda.runtime",
+    "cuda.devices",
+    "cuda.peer_topology",
+]
+
+
+class WorkloadEnvironmentIdentityConfig(ContractModel):
+    required: Annotated[tuple[AcceleratorIdentityRequirement, ...], Field(max_length=4)] = ()
+
+    @model_validator(mode="after")
+    def requirements_are_unique(self) -> WorkloadEnvironmentIdentityConfig:
+        if len(set(self.required)) != len(self.required):
+            raise ValueError("environment identity requirements must be unique")
+        return self
+
+
+class WorkloadIdentityConfig(ContractModel):
+    python_modules: Annotated[tuple[str, ...], Field(max_length=64)] = ()
+    native_files: Annotated[tuple[str, ...], Field(max_length=64)] = ()
+    environment: WorkloadEnvironmentIdentityConfig = Field(
+        default_factory=WorkloadEnvironmentIdentityConfig
+    )
+
+
 class WorkloadConfig(ContractModel):
     argv: Annotated[tuple[str, ...], Field(min_length=1, max_length=1_024)]
     cwd: str = "."
@@ -41,6 +88,9 @@ class WorkloadConfig(ContractModel):
     )
     environment: dict[str, str] = Field(default_factory=dict, max_length=128)
     oracle: WorkloadOracleConfig | None = None
+    requirements: WorkloadRequirementsConfig = Field(default_factory=WorkloadRequirementsConfig)
+    writable_paths: Annotated[tuple[str, ...], Field(max_length=16)] = ()
+    identity: WorkloadIdentityConfig = Field(default_factory=WorkloadIdentityConfig)
 
     @model_validator(mode="after")
     def validate_templates(self) -> WorkloadConfig:
@@ -60,15 +110,27 @@ class WorkloadConfig(ContractModel):
 
 class ExperimentConfig(ContractModel):
     workload: str
-    variants: Annotated[tuple[str, ...], Field(min_length=2, max_length=16)]
+    variants: Annotated[tuple[str, ...], Field(max_length=16)] = ()
     design: Literal[
         "randomized_complete_blocks",
         "randomized",
         "fixed_order",
     ] = "randomized_complete_blocks"
     blocks: Annotated[int, Field(gt=0, le=1_000)] = 1
-    primary_metric: str
-    polarity: Literal["lower_is_better", "higher_is_better", "neutral"]
+    factors: dict[str, Annotated[tuple[Scalar, ...], Field(min_length=1, max_length=32)]] = Field(
+        default_factory=dict, max_length=8
+    )
+    combination_policy: Literal["cartesian", "explicit"] = "cartesian"
+    combinations: Annotated[tuple[dict[str, Scalar], ...], Field(max_length=10_000)] = ()
+    exclude: Annotated[tuple[dict[str, Scalar], ...], Field(max_length=1_000)] = ()
+    treatment_factor: str | None = None
+    max_trials: Annotated[int, Field(gt=0, le=100_000)] = 10_000
+    analysis: Literal["performance", "outcome"] = "performance"
+    outcome_goal: Literal["equivalence", "absence_of_failure", "bounded_rate"] | None = None
+    minimum_attempts: Annotated[int, Field(gt=0, le=1_000)] | None = None
+    maximum_attempts: Annotated[int, Field(gt=0, le=1_000)] | None = None
+    primary_metric: str = "categorical_outcome"
+    polarity: Literal["lower_is_better", "higher_is_better", "neutral"] = "neutral"
     estimand: str = "median_paired_log_ratio"
     practical_threshold: Annotated[float, Field(ge=0)] = 0
     confidence_level: Annotated[float, Field(gt=0, lt=1)] = 0.95
@@ -77,13 +139,39 @@ class ExperimentConfig(ContractModel):
     scaling_values: Annotated[tuple[Scalar, ...], Field(max_length=1_000)] = ()
 
     @model_validator(mode="after")
-    def unique_variants(self) -> ExperimentConfig:
+    def valid_design(self) -> ExperimentConfig:
         if len(set(self.variants)) != len(self.variants):
             raise ValueError("experiment variants must be unique")
+        if bool(self.variants) == bool(self.factors):
+            raise ValueError("declare either legacy variants or factors")
+        if self.factors:
+            if self.treatment_factor not in self.factors:
+                raise ValueError("factor experiments require a declared treatment_factor")
+            if self.scaling_parameter is not None or self.scaling_values:
+                raise ValueError("factor experiments cannot use legacy scaling fields")
+            if self.combination_policy == "cartesian" and self.combinations:
+                raise ValueError("cartesian experiments cannot declare explicit combinations")
+            if self.combination_policy == "explicit" and not self.combinations:
+                raise ValueError("explicit experiments require combinations")
+        elif self.combinations or self.exclude or self.treatment_factor is not None:
+            raise ValueError("combination fields require factors")
         if bool(self.scaling_parameter) != bool(self.scaling_values):
             raise ValueError("scaling_parameter and scaling_values must be declared together")
         if len(set(self.scaling_values)) != len(self.scaling_values):
             raise ValueError("experiment scaling values must be unique")
+        if self.analysis == "outcome":
+            if self.outcome_goal is None:
+                raise ValueError("outcome experiments require outcome_goal")
+            minimum = self.minimum_attempts or self.blocks
+            maximum = self.maximum_attempts or self.blocks
+            if minimum > self.blocks or maximum < self.blocks or minimum > maximum:
+                raise ValueError("fixed blocks must lie within declared attempt bounds")
+        elif (
+            self.outcome_goal is not None
+            or self.minimum_attempts is not None
+            or self.maximum_attempts is not None
+        ):
+            raise ValueError("outcome settings require analysis='outcome'")
         return self
 
 
@@ -117,6 +205,40 @@ class ApprovalRecord(ContractModel):
 class ResolvedOracle(ContractModel):
     strength: OracleStrength
     command: CommandSpec
+
+
+class DeclaredWorkflowSummary(ContractModel):
+    kind: Literal["workload", "experiment"]
+    name: str
+    approval: Literal["approved", "unapproved", "not_applicable"]
+    definition_id: str
+    parameter_names: tuple[str, ...] = ()
+    oracle_strength: OracleStrength | None = None
+    timeout_seconds: float | None = None
+
+
+class DeclaredWorkflowList(ContractModel):
+    schema_version: int = 1
+    configuration_id: str
+    workflows: tuple[DeclaredWorkflowSummary, ...]
+    returned: int
+    truncated: bool
+    next_cursor: str | None
+
+
+class DeclaredWorkflowDetail(ContractModel):
+    schema_version: int = 1
+    configuration_id: str
+    summary: DeclaredWorkflowSummary
+    allowed_parameters: dict[str, tuple[Scalar, ...]]
+    workload_name: str | None = None
+    variants: tuple[str, ...] = ()
+    design: str | None = None
+    blocks: int | None = None
+    primary_metric: str | None = None
+    polarity: str | None = None
+    estimand: str | None = None
+    validation_spec_id: str | None = None
 
 
 def _template_fields(value: str) -> set[str]:
@@ -175,6 +297,133 @@ class WorkloadService:
 
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self.load().workloads))
+
+    def list_declared(
+        self,
+        *,
+        kind: Literal["workload", "experiment"],
+        approval: Literal["approved", "unapproved", "any"] = "any",
+        limit: int,
+        cursor: str | None = None,
+    ) -> DeclaredWorkflowList:
+        project = self.load()
+        configuration_id = digest_model(project)
+        query_id = digest_model({"kind": kind, "approval": approval})
+        offset = 0
+        if cursor is not None:
+            position = CursorCodec.decode(
+                cursor,
+                namespace="declared_workflows",
+                snapshot_id=configuration_id,
+                scope_digest=query_id,
+            )
+            try:
+                offset = int(position[0])
+            except (IndexError, TypeError, ValueError) as exc:
+                raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.") from exc
+
+        names = sorted(project.workloads if kind == "workload" else project.experiments)
+        summaries = tuple(self._workflow_summary(project, kind, name) for name in names)
+        if kind == "workload" and approval != "any":
+            summaries = tuple(item for item in summaries if item.approval == approval)
+        selected = summaries[offset : offset + limit]
+        next_offset = offset + len(selected)
+        next_cursor = (
+            CursorCodec.encode(
+                namespace="declared_workflows",
+                snapshot_id=configuration_id,
+                scope_digest=query_id,
+                position=(next_offset,),
+            )
+            if next_offset < len(summaries)
+            else None
+        )
+        return DeclaredWorkflowList(
+            configuration_id=configuration_id,
+            workflows=selected,
+            returned=len(selected),
+            truncated=next_cursor is not None,
+            next_cursor=next_cursor,
+        )
+
+    def get_declared(
+        self,
+        *,
+        kind: Literal["workload", "experiment"],
+        name: str,
+    ) -> DeclaredWorkflowDetail:
+        project = self.load()
+        configuration_id = digest_model(project)
+        summary = self._workflow_summary(project, kind, name)
+        if kind == "workload":
+            config = project.workloads[name]
+            definition = self.definition(name)
+            return DeclaredWorkflowDetail(
+                configuration_id=configuration_id,
+                summary=summary,
+                allowed_parameters=config.parameters,
+                validation_spec_id=definition.validation_spec_id,
+            )
+        experiment = project.experiments[name]
+        workload = project.workloads[experiment.workload]
+        return DeclaredWorkflowDetail(
+            configuration_id=configuration_id,
+            summary=summary,
+            allowed_parameters=workload.parameters,
+            workload_name=experiment.workload,
+            variants=experiment.variants,
+            design=experiment.design,
+            blocks=experiment.blocks,
+            primary_metric=experiment.primary_metric,
+            polarity=experiment.polarity,
+            estimand=experiment.estimand,
+            validation_spec_id=self.definition(experiment.workload).validation_spec_id,
+        )
+
+    def _workflow_summary(
+        self,
+        project: ProjectConfig,
+        kind: Literal["workload", "experiment"],
+        name: str,
+    ) -> DeclaredWorkflowSummary:
+        try:
+            if kind == "workload":
+                workload_config = project.workloads[name]
+                definition = self.definition(name)
+                return DeclaredWorkflowSummary(
+                    kind=kind,
+                    name=name,
+                    approval=(
+                        "approved"
+                        if definition.approved_definition_digest is not None
+                        else "unapproved"
+                    ),
+                    definition_id=definition.workload_definition_id,
+                    parameter_names=tuple(sorted(workload_config.parameters)),
+                    oracle_strength=(
+                        workload_config.oracle.strength
+                        if workload_config.oracle is not None
+                        else None
+                    ),
+                    timeout_seconds=workload_config.timeout_seconds,
+                )
+            experiment_config = project.experiments[name]
+            return DeclaredWorkflowSummary(
+                kind=kind,
+                name=name,
+                approval="not_applicable",
+                definition_id=digest_model(experiment_config),
+                parameter_names=tuple(
+                    sorted(project.workloads[experiment_config.workload].parameters)
+                ),
+            )
+        except KeyError as exc:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                f"Unknown declared {kind} {name!r}.",
+                remediation=(f"Call list_declared_workflows with kind={kind!r}.",),
+                details={"next_tool": "list_declared_workflows", "kind": kind},
+            ) from exc
 
     def definition(self, name: str) -> WorkloadDefinition:
         config = self._selected(name)
@@ -287,6 +536,50 @@ class WorkloadService:
                 timeout_seconds=config.timeout_seconds,
             ),
         )
+
+    def writable_targets(self, name: str) -> tuple[tuple[Path, str], ...]:
+        config = self._selected(name)
+        project_root = self.workspace.project_root.resolve()
+        resolved: list[tuple[Path, str]] = []
+        for value in config.writable_paths:
+            relative = PurePath(value)
+            if (
+                relative.is_absolute()
+                or not relative.parts
+                or ".." in relative.parts
+                or "\x00" in value
+                or relative.parts[0] in {".git", ".diagnostics", "flameox.toml"}
+            ):
+                raise DomainError(
+                    ErrorCode.EXECUTION_REFUSED,
+                    f"Writable path {value!r} is not an allowed project build-output root.",
+                )
+            target = (project_root / Path(relative)).resolve(strict=True)
+            try:
+                target.relative_to(project_root)
+            except ValueError as exc:
+                raise DomainError(
+                    ErrorCode.EXECUTION_REFUSED,
+                    f"Writable path {value!r} escapes the project root.",
+                ) from exc
+            if not target.is_dir():
+                raise DomainError(
+                    ErrorCode.EXECUTION_REFUSED,
+                    f"Writable path {value!r} must be a pre-existing directory.",
+                )
+            stat = target.stat()
+            identity = digest_model(
+                {
+                    "path": str(target),
+                    "device": stat.st_dev,
+                    "inode": stat.st_ino,
+                    "mode": stat.st_mode,
+                }
+            )
+            resolved.append((target, identity))
+        if len({item[0] for item in resolved}) != len(resolved):
+            raise DomainError(ErrorCode.EXECUTION_REFUSED, "Writable paths must be unique.")
+        return tuple(resolved)
 
     def _resolve_executable(self, value: str, cwd: Path) -> Path:
         if os.sep in value or (os.altsep is not None and os.altsep in value):

@@ -4,9 +4,9 @@ import hashlib
 import json
 from importlib.metadata import Distribution, EntryPoint, entry_points
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from flameox.domain import DomainError, ErrorCode, digest_model
+from flameox.domain import ADAPTER_API_VERSION, AdapterV1, DomainError, ErrorCode, digest_model
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 from flameox.storage.atomic import atomic_write_json
@@ -119,6 +119,18 @@ class AdapterRegistry:
         return self.discover()
 
     def load_approved(self, adapter: str) -> Any:
+        descriptor = self.approved_descriptor(adapter)
+        entry_point = self._entry_point(descriptor)
+        try:
+            return entry_point.load()
+        except Exception as exc:
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                f"Approved adapter {adapter!r} could not be loaded.",
+                details={"exception_type": type(exc).__name__},
+            ) from exc
+
+    def approved_descriptor(self, adapter: str) -> AdapterDescriptor:
         descriptor = next(
             (
                 item
@@ -132,15 +144,24 @@ class AdapterRegistry:
                 ErrorCode.EXECUTION_REFUSED,
                 f"Third-party adapter {adapter!r} is not installed and approved.",
             )
-        entry_point = self._entry_point(descriptor)
-        try:
-            return entry_point.load()
-        except Exception as exc:
+        return descriptor
+
+    def load_contract(self, adapter: str) -> tuple[AdapterDescriptor, AdapterV1]:
+        descriptor = self.approved_descriptor(adapter)
+        loaded = self.load_approved(adapter)
+        if (
+            getattr(loaded, "name", None) != adapter
+            or getattr(loaded, "api_version", None) != ADAPTER_API_VERSION
+            or any(
+                not callable(getattr(loaded, method, None))
+                for method in ("probe", "plan", "validate", "extract")
+            )
+        ):
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
-                f"Approved adapter {adapter!r} could not be loaded.",
-                details={"exception_type": type(exc).__name__},
-            ) from exc
+                f"Approved adapter {adapter!r} does not implement the Flameox v1 contract.",
+            )
+        return descriptor, cast(AdapterV1, loaded)
 
     def _entry_point(self, descriptor: AdapterDescriptor) -> EntryPoint:
         for entry_point in entry_points(group=ENTRY_POINT_GROUP):

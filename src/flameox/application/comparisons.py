@@ -26,6 +26,7 @@ from flameox.domain import (
     ErrorCode,
     EvidenceReference,
     Experiment,
+    IdentityQuality,
     RunSet,
     RunSetMember,
     ValidationStatus,
@@ -526,7 +527,8 @@ class ComparisonService:
         run_rows = snapshot.execute(
             "SELECT run_id, environment_id, source_state_id, "
             "workload_definition_id, validation_status, collector, "
-            "collector_version, measurement_protocol_id FROM ("
+            "collector_version, measurement_protocol_id, execution_identity_id, "
+            "execution_identity_quality, execution_identity_json FROM ("
             "SELECT *, row_number() OVER (PARTITION BY run_id "
             "ORDER BY published_at DESC) AS revision_order FROM runs"
             f") WHERE revision_order = 1 AND run_id IN ({run_placeholders})",
@@ -542,8 +544,8 @@ class ComparisonService:
             by_id[member.run_id] for member in candidate.members if member.run_id in by_id
         ]
         environments = {str(run[1]) for run in (*baseline_runs, *candidate_runs)}
-        if len(environments) > 1:
-            mismatches.append("environment_id differs across treatments")
+        mismatches.extend(self._environment_identity_mismatches(snapshot, environments))
+        mismatches.extend(self._execution_identity_mismatches((*baseline_runs, *candidate_runs)))
         baseline_sources = {str(run[2]) if run[2] is not None else None for run in baseline_runs}
         candidate_sources = {str(run[2]) if run[2] is not None else None for run in candidate_runs}
         if len(baseline_sources) > 1 or len(candidate_sources) > 1:
@@ -631,6 +633,65 @@ class ComparisonService:
         if artifact_configurations["baseline"] != artifact_configurations["candidate"]:
             mismatches.append("profiler artifact configuration differs across treatments")
         return mismatches
+
+    @staticmethod
+    def _environment_identity_mismatches(
+        snapshot: Snapshot,
+        environments: set[str],
+    ) -> tuple[str, ...]:
+        mismatches: list[str] = []
+        if len(environments) > 1:
+            mismatches.append("environment_id differs across treatments")
+        if environments:
+            placeholders = ", ".join("?" for _ in environments)
+            qualities = snapshot.execute(
+                "SELECT DISTINCT identity_quality FROM environments "
+                f"WHERE environment_id IN ({placeholders})",
+                tuple(sorted(environments)),
+            ).fetchall()
+            if not qualities or any(row[0] != IdentityQuality.EXACT.value for row in qualities):
+                mismatches.append("environment identity is partial or unavailable")
+        return tuple(mismatches)
+
+    @staticmethod
+    def _execution_identity_mismatches(
+        runs: tuple[tuple[object, ...], ...],
+    ) -> tuple[str, ...]:
+        applicable = [run for run in runs if run[9] not in {None, "not_applicable"}]
+        identities = {str(run[8]) if run[8] is not None else None for run in applicable}
+        qualities = {str(run[9]) if run[9] is not None else None for run in applicable}
+        mismatches: list[str] = []
+        if len(identities) > 1:
+            mismatches.append("declared execution identity differs across treatments")
+            details: dict[str, set[str]] = {}
+            for run in applicable:
+                if not isinstance(run[10], str):
+                    continue
+                value = json.loads(run[10])
+                for item in value.get("inputs", []):
+                    requested = item.get("requested")
+                    if not isinstance(requested, str):
+                        continue
+                    resolved = (
+                        item.get("loaded_path")
+                        or item.get("resolved_path")
+                        or item.get("configured_path")
+                        or item.get("status")
+                        or "unknown"
+                    )
+                    digest = item.get("content_digest")
+                    label = f"{resolved} ({digest})" if digest else str(resolved)
+                    details.setdefault(requested, set()).add(label)
+            for requested, values in sorted(details.items()):
+                if len(values) > 1:
+                    mismatches.append(
+                        f"execution identity input {requested!r} differs: "
+                        + " vs ".join(sorted(values))
+                    )
+                    break
+        if qualities - {"exact"}:
+            mismatches.append("declared execution identity is partial or unavailable")
+        return tuple(mismatches)
 
     def _profile_changes(
         self,

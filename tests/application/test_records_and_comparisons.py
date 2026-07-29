@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import threading
 from pathlib import Path
@@ -24,18 +25,27 @@ from flameox.application import (
     RecordHypothesisRequest,
     RunSetService,
 )
+from flameox.application.environment import collect_environment
+from flameox.application.evidence_rows import environment_row
+from flameox.application.run_rows import run_row
 from flameox.catalog import Catalog, Snapshot
 from flameox.domain import (
+    AcceleratorIdentityFacet,
     ArtifactKind,
     ComparisonValidity,
     DomainError,
     ErrorCode,
     EvidenceLevel,
+    ExecutionIdentityInput,
+    ExternalExecutionContext,
     FindingAssessment,
+    IdentityQuality,
     RunSet,
+    WorkloadExecutionIdentity,
+    digest_model,
 )
 from flameox.evidence import GenerationPublisher
-from flameox.storage import Workspace
+from flameox.storage import RunStore, Workspace
 
 
 def benchmark(path: Path, values: tuple[float, float, float]) -> None:
@@ -351,6 +361,224 @@ def test_comparison_reads_both_run_sets_from_one_pinned_corpus_commit(
     assert result.comparison.complete_pair_n == 4
 
 
+def test_comparison_rejects_different_or_partial_accelerator_identity(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    baseline_id = imported_benchmark(
+        workspace,
+        tmp_path / "baseline-accelerator.json",
+        (0.010, 0.011, 0.012),
+    )
+    candidate_id = imported_benchmark(
+        workspace,
+        tmp_path / "candidate-accelerator.json",
+        (0.005, 0.0055, 0.006),
+    )
+    run_sets = RunSetService(workspace)
+    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
+
+    candidate_environment = collect_environment(
+        AcceleratorIdentityFacet(
+            provider="cuda",
+            status="available",
+            identity_quality=IdentityQuality.EXACT,
+            driver_version="575.57.08",
+            runtime_version="12.9",
+        )
+    )
+    candidate_run = (
+        RunStore(workspace)
+        .read(candidate_id)
+        .model_copy(update={"environment_id": candidate_environment.environment_id})
+    )
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "environments": [environment_row(candidate_environment)],
+            "runs": [run_row(candidate_run)],
+        },
+        publisher="accelerator-identity-test",
+        publisher_version="1",
+        input_run_ids=(candidate_id,),
+    )
+    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
+    request = CompareRunSetsRequest(
+        baseline_run_set_id=baseline.run_set_id,
+        candidate_run_set_id=candidate.run_set_id,
+        metric="pyperf.scan",
+        unit="ns",
+        polarity="lower_is_better",
+        practical_threshold=0.05,
+    )
+
+    different = ComparisonService(workspace).compare(request)
+
+    assert "environment_id differs across treatments" in different.comparison.mismatches
+
+    partial_environment = collect_environment(
+        AcceleratorIdentityFacet(
+            provider="cuda",
+            status="missing",
+            identity_quality=IdentityQuality.PARTIAL,
+            missing_fields=("cuda.devices",),
+        )
+    )
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "environments": [environment_row(partial_environment)],
+            "runs": [
+                run_row(
+                    RunStore(workspace)
+                    .read(run_id)
+                    .model_copy(update={"environment_id": partial_environment.environment_id})
+                )
+                for run_id in (baseline_id, candidate_id)
+            ],
+        },
+        publisher="accelerator-identity-test",
+        publisher_version="2",
+        input_run_ids=(baseline_id, candidate_id),
+    )
+
+    partial = ComparisonService(workspace).compare(request)
+
+    assert "environment identity is partial or unavailable" in partial.comparison.mismatches
+
+
+def test_comparison_reports_differing_declared_artifact_paths_and_digests(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    baseline_id = imported_benchmark(
+        workspace,
+        tmp_path / "baseline-execution-identity.json",
+        (0.010, 0.011, 0.012),
+    )
+    candidate_id = imported_benchmark(
+        workspace,
+        tmp_path / "candidate-execution-identity.json",
+        (0.005, 0.0055, 0.006),
+    )
+
+    def identity(digest_character: str) -> WorkloadExecutionIdentity:
+        item = ExecutionIdentityInput(
+            kind="native_file",
+            requested="build/libtilelang.so",
+            configured_path="/project/build/libtilelang.so",
+            resolved_path="/project/build/libtilelang.so",
+            loaded_path="/project/build/libtilelang.so",
+            content_digest="sha256:" + digest_character * 64,
+            status="exact",
+        )
+        values = {"quality": "exact", "inputs": [item.model_dump(mode="json")]}
+        return WorkloadExecutionIdentity(
+            identity_id=digest_model(values),
+            quality="exact",
+            inputs=(item,),
+        )
+
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "runs": [
+                run_row(
+                    RunStore(workspace)
+                    .read(run_id)
+                    .model_copy(update={"execution_identity": identity(character)})
+                )
+                for run_id, character in ((baseline_id, "a"), (candidate_id, "b"))
+            ]
+        },
+        publisher="execution-identity-test",
+        publisher_version="1",
+        input_run_ids=(baseline_id, candidate_id),
+    )
+    run_sets = RunSetService(workspace)
+    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
+    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
+
+    result = ComparisonService(workspace).compare(
+        CompareRunSetsRequest(
+            baseline_run_set_id=baseline.run_set_id,
+            candidate_run_set_id=candidate.run_set_id,
+            metric="pyperf.scan",
+            unit="ns",
+            polarity="lower_is_better",
+            practical_threshold=0.05,
+        )
+    )
+
+    assert "declared execution identity differs across treatments" in (result.comparison.mismatches)
+    detail = next(
+        mismatch
+        for mismatch in result.comparison.mismatches
+        if mismatch.startswith("execution identity input")
+    )
+    assert "build/libtilelang.so" in detail
+    assert "sha256:" + "a" * 64 in detail
+    assert "sha256:" + "b" * 64 in detail
+
+
+def test_distinct_remote_leases_do_not_change_environment_compatibility(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    baseline_id = imported_benchmark(
+        workspace,
+        tmp_path / "baseline-lease.json",
+        (0.010, 0.011, 0.012),
+    )
+    candidate_id = imported_benchmark(
+        workspace,
+        tmp_path / "candidate-lease.json",
+        (0.005, 0.0055, 0.006),
+    )
+
+    def context(lease_id: str) -> ExternalExecutionContext:
+        return ExternalExecutionContext(
+            orchestrator="crabbox",
+            provider="runpod",
+            lease_id=lease_id,
+            worker_id=f"worker-{lease_id}",
+            orchestration_run_id=f"run-{lease_id}",
+        )
+
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "runs": [
+                run_row(
+                    RunStore(workspace)
+                    .read(run_id)
+                    .model_copy(update={"external_context": context(lease_id)})
+                )
+                for run_id, lease_id in (
+                    (baseline_id, "lease-a"),
+                    (candidate_id, "lease-b"),
+                )
+            ]
+        },
+        publisher="lease-compatibility-test",
+        publisher_version="1",
+        input_run_ids=(baseline_id, candidate_id),
+    )
+    run_sets = RunSetService(workspace)
+    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
+    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
+
+    result = ComparisonService(workspace).compare(
+        CompareRunSetsRequest(
+            baseline_run_set_id=baseline.run_set_id,
+            candidate_run_set_id=candidate.run_set_id,
+            metric="pyperf.scan",
+            unit="ns",
+            polarity="lower_is_better",
+            practical_threshold=0.05,
+        )
+    )
+
+    assert not any("lease" in mismatch for mismatch in result.comparison.mismatches)
+    assert "environment_id differs across treatments" not in result.comparison.mismatches
+
+
 @pytest.mark.anyio
 async def test_async_comparison_cancellation_interrupts_duckdb(
     tmp_path: Path,
@@ -427,6 +655,8 @@ def test_trial_block_identity_makes_pairing_independent_of_member_order(
                     "experiment_id": "experiment",
                     "variant_id": variant,
                     "run_id": run_id,
+                    "combination_id": digest_model({"variant": variant, "block": block_id}),
+                    "factors_json": json.dumps({"variant": variant}, sort_keys=True),
                     "block_id": block_id,
                     "order_in_block": 0,
                     "parameter_name": None,
@@ -436,6 +666,7 @@ def test_trial_block_identity_makes_pairing_independent_of_member_order(
                     "outcome": "succeeded",
                     "exclusion_reason": None,
                     "validation_status": "not_requested",
+                    "failure_class": "none",
                 }
                 for trial_id, run_id, variant, block_id in trials
             ]

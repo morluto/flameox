@@ -860,7 +860,7 @@ Internally:
 - external access outside those paths, extension installation, autoload,
   community extensions, secrets, and attachments are disabled;
 - memory, threads, temporary-directory use, and query time are bounded;
-- result rows and bytes are capped;
+- result rows, fields, nested values, and text lengths are capped;
 - every result records the query name and query version.
 
 The exact DuckDB release is pinned and tested because configuration names and
@@ -879,7 +879,7 @@ safety and concurrency contract.
 Every query accepts or derives:
 
 - maximum rows;
-- maximum serialized bytes;
+- maximum rows, fields, nested values, and text lengths;
 - timeout;
 - sort order;
 - optional cursor.

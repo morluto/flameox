@@ -26,6 +26,19 @@ from flameox.application.comparisons import (
     ProfileChange,
     RunSetService,
 )
+from flameox.application.detached import (
+    DetachedCaptureManager,
+    DetachedCaptureRecord,
+    DetachedCaptureStatus,
+    DetachedProgress,
+)
+from flameox.application.discovery import (
+    DiscoveryCoverage,
+    RunDiscoveryService,
+    RunFilter,
+    RunListResult,
+    RunSummary,
+)
 from flameox.application.drilldown import (
     CallEdgeResult,
     DrilldownService,
@@ -42,13 +55,17 @@ from flameox.application.evidence_query import (
     MeasurementItem,
     MeasurementQueryResult,
 )
+from flameox.application.execution_identity import ExecutionIdentityService
 from flameox.application.execution_policy import ExecutionPolicy
 from flameox.application.experiments import (
     ExperimentBlock,
+    ExperimentCell,
     ExperimentPlan,
     ExperimentPlanRegistry,
     ExperimentRunResult,
     ExperimentService,
+    OutcomeCount,
+    OutcomeExperimentResult,
 )
 from flameox.application.gc import (
     GarbageApplyResult,
@@ -65,6 +82,16 @@ from flameox.application.integrity import (
     IntegrityResult,
     IntegrityService,
 )
+from flameox.application.pipelines import (
+    ArtifactPipeline,
+    ArtifactPipelineService,
+    PipelineComparison,
+    PipelineStage,
+    PipelineStageComparison,
+    PipelineStageDeclaration,
+    RegisterPipelineRequest,
+)
+from flameox.application.preflight import PreflightService
 from flameox.application.quarantine import (
     QuarantineManifest,
     QuarantineRestoreResult,
@@ -73,8 +100,10 @@ from flameox.application.quarantine import (
 from flameox.application.records import (
     CreateInvestigationRequest,
     EvidenceInput,
+    FindingListResult,
     FindingResult,
     FindingService,
+    InvestigationListResult,
     InvestigationService,
     RecordFindingRequest,
     RecordHypothesisRequest,
@@ -83,6 +112,14 @@ from flameox.application.recovery import (
     RecoveryInspection,
     RecoveryResult,
     RecoveryService,
+)
+from flameox.application.reductions import (
+    PlanReductionRequest,
+    ReductionAttemptSummary,
+    ReductionLimits,
+    ReductionPlan,
+    ReductionResult,
+    ReductionService,
 )
 from flameox.application.repair import RepairEntry, RepairPlan, RepairResult, RepairService
 from flameox.application.setup import (
@@ -96,17 +133,33 @@ from flameox.application.setup import (
     SetupService,
 )
 from flameox.application.status import WorkspaceStatus, workspace_status
+from flameox.application.summaries import (
+    EvidenceSummary,
+    EvidenceSummaryBundle,
+    EvidenceSummaryRequest,
+    EvidenceSummaryService,
+    SummaryArtifact,
+    SummaryClaim,
+    SummaryReference,
+    SummaryRun,
+    render_evidence_summary_markdown,
+)
 from flameox.application.viewers import (
     NativeViewerLaunchResult,
     NativeViewerPlan,
     NativeViewerService,
 )
 from flameox.application.workloads import (
+    DeclaredWorkflowDetail,
+    DeclaredWorkflowList,
+    DeclaredWorkflowSummary,
     ExperimentConfig,
     ProjectConfig,
     ResolvedOracle,
     Scalar,
     WorkloadConfig,
+    WorkloadIdentityConfig,
+    WorkloadRequirementsConfig,
     WorkloadService,
 )
 
@@ -115,6 +168,8 @@ __all__ = [
     "ArtifactListItem",
     "ArtifactListResult",
     "ArtifactMetadataResult",
+    "ArtifactPipeline",
+    "ArtifactPipelineService",
     "ArtifactRegistrationSummary",
     "ArtifactService",
     "CallEdgeResult",
@@ -130,18 +185,33 @@ __all__ = [
     "ComparisonResult",
     "ComparisonService",
     "CreateInvestigationRequest",
+    "DeclaredWorkflowDetail",
+    "DeclaredWorkflowList",
+    "DeclaredWorkflowSummary",
+    "DetachedCaptureManager",
+    "DetachedCaptureRecord",
+    "DetachedCaptureStatus",
+    "DetachedProgress",
+    "DiscoveryCoverage",
     "DrilldownService",
     "EvidenceInput",
     "EvidenceLookupResult",
     "EvidenceLookupService",
     "EvidenceQueryService",
+    "EvidenceSummary",
+    "EvidenceSummaryBundle",
+    "EvidenceSummaryRequest",
+    "EvidenceSummaryService",
+    "ExecutionIdentityService",
     "ExecutionPolicy",
     "ExperimentBlock",
+    "ExperimentCell",
     "ExperimentConfig",
     "ExperimentPlan",
     "ExperimentPlanRegistry",
     "ExperimentRunResult",
     "ExperimentService",
+    "FindingListResult",
     "FindingResult",
     "FindingService",
     "FrameDetail",
@@ -159,6 +229,7 @@ __all__ = [
     "IntegrityIssue",
     "IntegrityResult",
     "IntegrityService",
+    "InvestigationListResult",
     "InvestigationService",
     "MaterializeAnalysisRequest",
     "MaterializedAnalysisResult",
@@ -167,6 +238,14 @@ __all__ = [
     "NativeViewerLaunchResult",
     "NativeViewerPlan",
     "NativeViewerService",
+    "OutcomeCount",
+    "OutcomeExperimentResult",
+    "PipelineComparison",
+    "PipelineStage",
+    "PipelineStageComparison",
+    "PipelineStageDeclaration",
+    "PlanReductionRequest",
+    "PreflightService",
     "ProfileChange",
     "ProjectConfig",
     "QuarantineManifest",
@@ -177,13 +256,23 @@ __all__ = [
     "RecoveryInspection",
     "RecoveryResult",
     "RecoveryService",
+    "ReductionAttemptSummary",
+    "ReductionLimits",
+    "ReductionPlan",
+    "ReductionResult",
+    "ReductionService",
+    "RegisterPipelineRequest",
     "RepairEntry",
     "RepairPlan",
     "RepairResult",
     "RepairService",
     "ResolvedOracle",
     "ResolvedSetupPlan",
+    "RunDiscoveryService",
+    "RunFilter",
+    "RunListResult",
     "RunSetService",
+    "RunSummary",
     "RuntimeAction",
     "Scalar",
     "SetupInspection",
@@ -193,9 +282,16 @@ __all__ = [
     "SetupService",
     "StackExample",
     "StackExamplesResult",
+    "SummaryArtifact",
+    "SummaryClaim",
+    "SummaryReference",
+    "SummaryRun",
     "TrashManifest",
     "WorkloadConfig",
+    "WorkloadIdentityConfig",
+    "WorkloadRequirementsConfig",
     "WorkloadService",
     "WorkspaceStatus",
+    "render_evidence_summary_markdown",
     "workspace_status",
 ]

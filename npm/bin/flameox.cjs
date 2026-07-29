@@ -23,8 +23,12 @@ const helper = path.resolve(__dirname, "../lib/jsonc-edit.cjs");
 const environment = {
   ...process.env,
   FLAMEOX_SETUP_JSONC_HELPER: helper,
+  FLAMEOX_NPM_BOOTSTRAP: "1",
 };
 const pythonPackage = `flameox==${packageJson.version}`;
+process.stderr.write(
+  "Preparing flameox's cached managed Python runtime; this does not add packages to your project.\n",
+);
 const child = spawn(
   process.env.FLAMEOX_UV_EXECUTABLE || "uvx",
   [

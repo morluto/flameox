@@ -60,34 +60,31 @@ recipes.
 
 ### Interface
 
-Adapters implement:
+Approved third-party adapters implement the public v1 contract exported from
+`flameox.domain`:
 
 ```python
-class Adapter(Protocol):
+class AdapterV1(Protocol):
     name: str
+    api_version: Literal[1]
 
-    async def probe(self, context: ProbeContext) -> CapabilityReport: ...
-    async def plan(self, request: CaptureRequest) -> CapturePlan: ...
-    async def capture(
-        self,
-        plan: CapturePlan,
-        execution: ExecutionContext,
-    ) -> CaptureResult: ...
-    async def extract(
-        self,
-        artifact: ArtifactRef,
-        context: ExtractionContext,
-    ) -> EvidenceBatch: ...
-    async def validate(
-        self,
-        artifact: ArtifactRef,
-    ) -> ArtifactValidation: ...
+    async def probe(self, context: AdapterProbeContext) -> AdapterProbeResult: ...
+    async def plan(self, request: AdapterPlanRequest) -> AdapterExecutionPlan: ...
+    async def validate(self, artifact_path: str, declaration):
+        ...
+    async def extract(self, artifact_path: str, declaration):
+        ...
 ```
 
-`plan` is side-effect free and returns the exact executable, arguments,
-permissions, estimated overhead, output types, and limitations. `capture` may
-only execute an approved plan. `extract` reads immutable artifacts and writes
-only to staging.
+`plan` is side-effect free and returns a command prefix, declared relative
+artifact paths, permissions, estimated overhead, output types, limitations,
+and extractor version. Flameox appends `--` and the already approved workload
+command; an adapter cannot replace the workload argv, cwd, environment, or
+execution policy. Flameox owns capture execution, containment, quotas,
+cancellation, artifact registration, and publication. `validate` receives the
+declared staging artifact, while `extract` receives the immutable registered
+artifact. Extraction summaries are bounded, versioned, and linked to that
+exact input artifact in `adapter_extractions`.
 
 ### Discovery
 

@@ -8,7 +8,7 @@ import pytest
 
 from flameox.analysis import RecipeService
 from flameox.catalog import Catalog
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import DomainError, ErrorCode, canonical_json
 from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
 
@@ -86,6 +86,10 @@ def test_scaling_reports_dispersion_models_and_supported_range(
                     "experiment_id": "scaling-experiment",
                     "variant_id": variant_id,
                     "run_id": run_id,
+                    "combination_id": f"combination-{input_value}",
+                    "factors_json": canonical_json(
+                        {"implementation": "baseline", "length": input_value}
+                    ),
                     "block_id": f"block-{input_value}-{block}",
                     "order_in_block": block,
                     "parameter_name": "length",
@@ -95,6 +99,7 @@ def test_scaling_reports_dispersion_models_and_supported_range(
                     "outcome": "succeeded",
                     "exclusion_reason": None,
                     "validation_status": "passed",
+                    "failure_class": "none",
                 }
             )
             measurement_rows.append(
@@ -445,6 +450,10 @@ def test_scaling_correlated_hotspots_empty_when_all_filtered(tmp_path: Path) -> 
                     "experiment_id": "scaling-experiment",
                     "variant_id": "variant-baseline",
                     "run_id": run_id,
+                    "combination_id": f"combination-{input_value}",
+                    "factors_json": canonical_json(
+                        {"implementation": "baseline", "length": input_value}
+                    ),
                     "block_id": f"block-{input_value}-{block}",
                     "order_in_block": block,
                     "parameter_name": "length",
@@ -454,6 +463,7 @@ def test_scaling_correlated_hotspots_empty_when_all_filtered(tmp_path: Path) -> 
                     "outcome": "succeeded",
                     "exclusion_reason": None,
                     "validation_status": "passed",
+                    "failure_class": "none",
                 }
             )
             measurement_rows.append(
