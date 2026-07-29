@@ -4,14 +4,21 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path, PurePath
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
-from mcp_types import CallToolResult, TextContent, ToolAnnotations
-from pydantic import BaseModel, Field, model_validator
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp_types import (
+    CallToolResult,
+    InputRequiredResult,
+    ResourceLink,
+    TextContent,
+    Tool,
+    ToolAnnotations,
+)
+from pydantic import BaseModel, Field, RootModel
 
 from flameox.adapters import (
     CoverageExtractionResult,
@@ -39,45 +46,62 @@ from flameox.application import (
     AnalysisMaterializationService,
     ArtifactListResult,
     ArtifactMetadataResult,
+    ArtifactPipeline,
+    ArtifactPipelineService,
     ArtifactService,
     CallEdgeResult,
     CapabilityList,
     CapabilityService,
     CapturePlanRegistry,
-    CaptureResult,
     CaptureService,
     CompareRunSetsRequest,
     ComparisonResult,
     ComparisonService,
     CreateInvestigationRequest,
+    DeclaredWorkflowDetail,
+    DeclaredWorkflowList,
+    DetachedCaptureManager,
+    DetachedCaptureStatus,
     DrilldownService,
     EvidenceLookupResult,
     EvidenceLookupService,
     EvidenceQueryService,
+    EvidenceSummaryBundle,
+    EvidenceSummaryRequest,
+    EvidenceSummaryService,
     ExecutionPolicy,
     ExperimentPlan,
     ExperimentPlanRegistry,
-    ExperimentRunResult,
     ExperimentService,
+    FindingListResult,
     FindingResult,
     FindingService,
     FreezeRunSetRequest,
     ImportArtifactRequest,
-    ImportResult,
     ImportService,
     IntegrityResult,
     IntegrityService,
+    InvestigationListResult,
     InvestigationService,
     MaterializeAnalysisRequest,
-    MaterializedAnalysisResult,
     MeasurementQueryResult,
     NativeViewerPlan,
     NativeViewerService,
+    PipelineComparison,
+    PlanReductionRequest,
     RecordFindingRequest,
     RecordHypothesisRequest,
+    ReductionPlan,
+    ReductionResult,
+    ReductionService,
+    RegisterPipelineRequest,
+    RunDiscoveryService,
+    RunFilter,
+    RunListResult,
     RunSetService,
     Scalar,
     StackExamplesResult,
+    WorkloadService,
     WorkspaceStatus,
     workspace_status,
 )
@@ -88,6 +112,7 @@ from flameox.domain import (
     DomainError,
     ErrorCode,
     Experiment,
+    ExternalExecutionContext,
     Finding,
     Hypothesis,
     Investigation,
@@ -122,6 +147,27 @@ EXECUTE = ToolAnnotations(
     idempotent_hint=False,
     open_world_hint=True,
 )
+IDEMPOTENT_EXECUTE = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
+
+
+class RecoveryAction(ContractModel):
+    kind: Literal[
+        "repeat_same_call",
+        "wait_then_repeat",
+        "replan_capture",
+        "initialize_workspace",
+        "inspect_capabilities",
+        "discover_workflows",
+        "manual",
+    ]
+    safe_to_repeat_same_call: bool
+    retry_after_ms: int | None = Field(default=None, ge=0)
+    next_tool: str | None = None
 
 
 class ErrorDetail(ContractModel):
@@ -131,61 +177,111 @@ class ErrorDetail(ContractModel):
     details: dict[str, Any]
     remediation: list[str]
     run_id: str | None
+    recovery: RecoveryAction
 
 
-class ToolPayload[T: BaseModel](ContractModel):
+class SuccessPayload[T: BaseModel](ContractModel):
     schema_version: int = 1
-    ok: bool
-    result: T | None = None
-    error: ErrorDetail | None = None
-
-    @model_validator(mode="after")
-    def exactly_one_outcome(self) -> ToolPayload[T]:
-        if self.ok != (self.result is not None and self.error is None):
-            raise ValueError("success requires a result and failure requires an error")
-        if not self.ok and self.error is None:
-            raise ValueError("failure requires an error")
-        return self
-
-    @classmethod
-    def success(cls, result: T) -> ToolPayload[T]:
-        return cls(ok=True, result=result)
-
-    @classmethod
-    def failure(cls, error: DomainError) -> ToolPayload[T]:
-        return cls(ok=False, error=ErrorDetail.model_validate(error.to_detail()))
+    ok: Literal[True] = True
+    result: T
+    error: None = None
 
 
-class RunSummary(ContractModel):
+class FailurePayload(ContractModel):
+    schema_version: int = 1
+    ok: Literal[False] = False
+    result: None = None
+    error: ErrorDetail
+
+
+class ToolPayload[T: BaseModel](
+    RootModel[
+        Annotated[
+            SuccessPayload[T] | FailurePayload,
+            Field(discriminator="ok"),
+        ]
+    ]
+):
+    """Advertised success/failure union matching the structured wire payload."""
+
+
+class StrictMCPServer[LifespanResultT](MCPServer[LifespanResultT]):
+    """Close generated argument schemas and enforce the same boundary at runtime."""
+
+    async def list_tools(self) -> list[Tool]:
+        tools = await super().list_tools()
+        return [
+            tool.model_copy(
+                update={
+                    "input_schema": {
+                        **tool.input_schema,
+                        "additionalProperties": False,
+                    }
+                }
+            )
+            for tool in tools
+        ]
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Context[LifespanResultT, Any] | None = None,
+    ) -> CallToolResult | InputRequiredResult:
+        tool = next((item for item in await self.list_tools() if item.name == name), None)
+        if tool is not None:
+            allowed = set(tool.input_schema.get("properties", {}))
+            unknown = sorted(set(arguments) - allowed)
+            if unknown:
+                fields = ", ".join(repr(field) for field in unknown)
+                raise ToolError(f"Unknown argument field(s) for {name}: {fields}.")
+        return await super().call_tool(name, arguments, context)
+
+
+class CaptureReceipt(ContractModel):
+    """Bounded execution receipt; follow resource_uri for the authoritative run."""
+
+    schema_version: int = 1
     run_id: str
-    created_at: datetime
-    run_type: str
-    capture_status: str
-
-
-class RunListResult(ContractModel):
-    schema_version: int = 1
+    execution_status: str
+    validation_status: str
+    source_state_id: str | None
+    environment_id: str
+    artifact_ids: tuple[str, ...]
+    limitations: tuple[str, ...]
     corpus_commit_id: str
-    runs: tuple[RunSummary, ...]
-    total: int
-    returned: int
-    truncated: bool
+    resource_uri: str
 
 
-class InvestigationListResult(ContractModel):
+class ImportReceipt(ContractModel):
     schema_version: int = 1
-    investigations: tuple[Investigation, ...]
-    total: int
-    returned: int
-    truncated: bool
+    run_id: str
+    artifact_id: str
+    corpus_commit_id: str
+    run_resource_uri: str
+    artifact_resource_uri: str
 
 
-class FindingListResult(ContractModel):
+class ExperimentReceipt(ContractModel):
     schema_version: int = 1
-    findings: tuple[Finding, ...]
-    total: int
-    returned: int
-    truncated: bool
+    experiment_id: str
+    attempted_trials: int
+    run_set_ids: tuple[str, ...]
+    comparison_id: str | None
+    outcome_disposition: str | None = None
+    outcome_method: str | None = None
+    corpus_commit_id: str
+    limitations: tuple[str, ...]
+    resource_uri: str
+
+
+class EvidenceReceipt(ContractModel):
+    schema_version: int = 1
+    ref_type: Literal["analysis", "comparison"]
+    ref_id: str
+    materialized_commit_id: str
+    evidence_ref_ids: tuple[str, ...]
+    resource_uri: str
 
 
 @dataclass(slots=True)
@@ -195,6 +291,7 @@ class AppContext:
     capabilities: CapabilityService
     capture_plans: CapturePlanRegistry
     experiment_plans: ExperimentPlanRegistry
+    detached_captures: DetachedCaptureManager | None = None
 
     def require_workspace(self) -> Workspace:
         if self.workspace is None:
@@ -218,33 +315,83 @@ class AppContext:
             plans=self.experiment_plans,
         )
 
-
-def _success[T: BaseModel](result: T, summary: str) -> CallToolResult:
-    payload = ToolPayload[T].success(result)
-    serialized_bytes = len(payload.model_dump_json().encode("utf-8"))
-    if serialized_bytes > 4 * 1024 * 1024:
-        return _failure(
-            DomainError(
-                ErrorCode.QUERY_BUDGET_EXCEEDED,
-                "The structured MCP result exceeds the 4 MiB response budget.",
-                details={
-                    "serialized_bytes": serialized_bytes,
-                    "limit_bytes": 4 * 1024 * 1024,
-                },
+    def detached_service(self) -> DetachedCaptureManager:
+        if self.detached_captures is None:
+            workspace = self.require_workspace()
+            self.detached_captures = DetachedCaptureManager(
+                workspace,
+                self.capture_service(),
             )
-        )
+        return self.detached_captures
+
+
+def _success[T: BaseModel](
+    result: T,
+    summary: str,
+    *,
+    resource_links: tuple[ResourceLink, ...] = (),
+) -> CallToolResult:
+    payload = SuccessPayload[T](result=result)
     return CallToolResult(
-        content=[TextContent(type="text", text=summary)],
+        content=[TextContent(type="text", text=summary), *resource_links],
         structured_content=payload.model_dump(mode="json"),
     )
 
 
 def _failure(error: DomainError) -> CallToolResult:
-    payload = ToolPayload[BaseModel].failure(error)
+    detail = ErrorDetail.model_validate(
+        {
+            **error.to_detail(),
+            "recovery": _recovery_for(error).model_dump(mode="json"),
+        }
+    )
+    payload = FailurePayload(error=detail)
     return CallToolResult(
         content=[TextContent(type="text", text=error.message)],
         structured_content=payload.model_dump(mode="json"),
         is_error=True,
+    )
+
+
+def _recovery_for(error: DomainError) -> RecoveryAction:
+    if error.details.get("next_tool") == "list_declared_workflows":
+        return RecoveryAction(
+            kind="discover_workflows",
+            safe_to_repeat_same_call=False,
+            next_tool="list_declared_workflows",
+        )
+    if error.code is ErrorCode.WORKSPACE_NOT_FOUND:
+        return RecoveryAction(
+            kind="initialize_workspace",
+            safe_to_repeat_same_call=False,
+            next_tool="initialize_workspace",
+        )
+    if error.code is ErrorCode.CAPABILITY_UNAVAILABLE:
+        return RecoveryAction(
+            kind="inspect_capabilities",
+            safe_to_repeat_same_call=False,
+            next_tool="list_capabilities",
+        )
+    if error.code in {ErrorCode.INVALID_CAPTURE_PLAN, ErrorCode.PROCESS_TIMEOUT}:
+        return RecoveryAction(
+            kind="replan_capture",
+            safe_to_repeat_same_call=False,
+            next_tool="plan_capture",
+        )
+    if error.code is ErrorCode.WRITE_LOCK_TIMEOUT:
+        return RecoveryAction(
+            kind="wait_then_repeat",
+            safe_to_repeat_same_call=True,
+            retry_after_ms=100,
+        )
+    if error.retryable:
+        return RecoveryAction(
+            kind="manual",
+            safe_to_repeat_same_call=False,
+        )
+    return RecoveryAction(
+        kind="manual",
+        safe_to_repeat_same_call=False,
     )
 
 
@@ -290,15 +437,36 @@ def create_server(
             ),
             experiment_plans=ExperimentPlanRegistry(),
         )
+        if workspace is not None:
+            state.detached_captures = DetachedCaptureManager(
+                workspace,
+                state.capture_service(),
+            )
         lifespan_state.append(state)
         try:
             yield state
         finally:
+            if state.detached_captures is not None:
+                await state.detached_captures.shutdown()
             lifespan_state.clear()
 
-    server: MCPServer[AppContext] = MCPServer(
+    server: MCPServer[AppContext] = StrictMCPServer(
         "flameox",
         description="Query and collect local runtime evidence.",
+        instructions=(
+            "Use Flameox to collect, preserve, compare, and inspect local runtime evidence "
+            "when source, environment, command, and artifact provenance must be reproducible. "
+            "Do not use it to provision hosts, install dependencies, mutate source or GitHub, "
+            "or prove static claims without runtime evidence. "
+            "For a new capture: workspace_status -> list_declared_workflows -> "
+            "list_capabilities -> plan_capture -> execute_capture_plan for short work, or "
+            "start_detached_capture for long work -> get_detached_capture -> get_run -> analyze. "
+            "For existing evidence: list_runs -> get_run or get_evidence -> analyze_* -> "
+            "record_analysis or record_finding. Initialize a missing workspace only when "
+            "authorized. A synchronous consumed capture plan is never retryable; detached "
+            "starts are "
+            "retryable only with the same idempotency key."
+        ),
         lifespan=lifespan,
     )
 
@@ -315,6 +483,10 @@ def create_server(
                 max_parallel_captures=(state.workspace.config.capture.max_parallel_captures)
             )
             state.experiment_plans = ExperimentPlanRegistry()
+            state.detached_captures = DetachedCaptureManager(
+                state.workspace,
+                state.capture_service(),
+            )
             result = workspace_status(state.workspace)
             return _success(result, f"Initialized workspace {result.workspace_id}.")
         except DomainError as error:
@@ -334,17 +506,60 @@ def create_server(
     @server.tool(name="list_capabilities", annotations=READ_ONLY)
     async def list_capabilities_tool(
         ctx: Context[AppContext],
-        active: bool = False,
-        refresh: bool = False,
+        mode: Literal["passive", "active_cached", "active_refresh"] = "passive",
     ) -> Annotated[CallToolResult, ToolPayload[CapabilityList]]:
         """Report passive capabilities, or explicitly execute bounded active probes."""
         service = ctx.request_context.lifespan_context.capabilities
-        result = await service.list_active(refresh=refresh) if active else service.list()
+        result = (
+            service.list()
+            if mode == "passive"
+            else await service.list_active(refresh=mode == "active_refresh")
+        )
         return _success(
             result,
             f"Found {sum(item.status.value == 'available' for item in result.capabilities)} "
             "available capabilities.",
         )
+
+    @server.tool(name="list_declared_workflows", annotations=READ_ONLY)
+    async def list_declared_workflows_tool(
+        kind: Literal["workload", "experiment"],
+        ctx: Context[AppContext],
+        approval: Literal["approved", "unapproved", "any"] = "any",
+        limit: Annotated[int, Field(ge=1, le=100)] = 50,
+        cursor: str | None = None,
+    ) -> Annotated[CallToolResult, ToolPayload[DeclaredWorkflowList]]:
+        """Choose a declared workload or experiment before planning; this never approves or runs."""
+        try:
+            result = WorkloadService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).list_declared(
+                kind=kind,
+                approval=approval,
+                limit=limit,
+                cursor=cursor,
+            )
+            return _success(
+                result,
+                f"Returned {result.returned} declared {kind} definitions.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="get_declared_workflow", annotations=READ_ONLY)
+    async def get_declared_workflow_tool(
+        kind: Literal["workload", "experiment"],
+        name: str,
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[DeclaredWorkflowDetail]]:
+        """Inspect allowed parameters and validation metadata, then call the matching plan tool."""
+        try:
+            result = WorkloadService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).get_declared(kind=kind, name=name)
+            return _success(result, f"Loaded declared {kind} {name}.")
+        except DomainError as error:
+            return _failure(error)
 
     @server.tool(name="plan_capture", annotations=READ_ONLY)
     async def plan_capture_tool(
@@ -352,14 +567,18 @@ def create_server(
         adapter: str,
         parameters: dict[str, Scalar],
         ctx: Context[AppContext],
+        preflight_mode: Literal["passive", "active"] = "passive",
+        external_context: ExternalExecutionContext | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[CapturePlan]]:
-        """Plan an approved named workload without executing it."""
+        """After discovery, bind one approved capture without running it."""
         try:
             result = await ctx.request_context.lifespan_context.capture_service().plan(
                 workload_name=workload_name,
                 adapter=adapter,
                 parameters=parameters,
                 execution_policy=ExecutionPolicy.APPROVED_AGENT,
+                preflight_mode=preflight_mode,
+                external_context=external_context,
             )
             return _success(
                 result,
@@ -372,8 +591,8 @@ def create_server(
     async def execute_capture_plan_tool(
         plan_id: str,
         ctx: Context[AppContext],
-    ) -> Annotated[CallToolResult, ToolPayload[CaptureResult]]:
-        """Consume one bound plan token and execute the approved capture."""
+    ) -> Annotated[CallToolResult, ToolPayload[CaptureReceipt]]:
+        """Run one approved plan with side effects; the token is single-use, then get_run."""
         try:
             await ctx.report_progress(0, 8, "Capture request accepted")
 
@@ -388,10 +607,76 @@ def create_server(
                 plan_id,
                 progress=report,
             )
+            resource_uri = f"flameox://runs/{result.run.run_id}"
+            receipt = CaptureReceipt(
+                run_id=result.run.run_id,
+                execution_status=result.run.execution_status.value,
+                validation_status=result.run.validation_status.value,
+                source_state_id=result.run.source_state_id,
+                environment_id=result.run.environment_id,
+                artifact_ids=tuple(item.artifact_id for item in result.run.artifacts),
+                limitations=result.run.limitations,
+                corpus_commit_id=result.corpus_commit_id,
+                resource_uri=resource_uri,
+            )
+            return _success(
+                receipt,
+                f"Capture run {result.run.run_id} is {result.run.execution_status.value}.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Run {result.run.run_id}",
+                        uri=resource_uri,
+                        description="Authoritative run manifest and provenance.",
+                        mime_type="application/json",
+                    ),
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="start_detached_capture", annotations=IDEMPOTENT_EXECUTE)
+    async def start_detached_capture_tool(
+        plan_id: str,
+        idempotency_key: Annotated[
+            str,
+            Field(min_length=8, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$"),
+        ],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[DetachedCaptureStatus]]:
+        """Start one approved plan once; reconnect by run_id without keeping this call open."""
+        try:
+            result = await ctx.request_context.lifespan_context.detached_service().start(
+                plan_id,
+                idempotency_key,
+            )
             return _success(
                 result,
-                f"Capture run {result.run.run_id} is {result.run.execution_status.value}.",
+                f"Detached capture {result.run_id} is {result.state}.",
             )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(annotations=READ_ONLY)
+    async def get_detached_capture(
+        run_id: str,
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[DetachedCaptureStatus]]:
+        """Reconnect to bounded progress and lifecycle status for one detached run."""
+        try:
+            result = ctx.request_context.lifespan_context.detached_service().status(run_id)
+            return _success(result, f"Detached capture {run_id} is {result.state}.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(annotations=IDEMPOTENT_EXECUTE)
+    async def cancel_detached_capture(
+        run_id: str,
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[DetachedCaptureStatus]]:
+        """Cancel only the exact detached task owned by this server; repeated calls are safe."""
+        try:
+            result = await ctx.request_context.lifespan_context.detached_service().cancel(run_id)
+            return _success(result, f"Detached capture {run_id} is {result.state}.")
         except DomainError as error:
             return _failure(error)
 
@@ -404,7 +689,7 @@ def create_server(
         ctx: Context[AppContext],
         hypothesis_id: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[ExperimentPlan]]:
-        """Plan a predeclared randomized experiment without executing it."""
+        """Bind a declared experiment read-only after discovery, then call run_experiment."""
         try:
             result = await ctx.request_context.lifespan_context.experiment_service().plan(
                 experiment_name=experiment_name,
@@ -426,8 +711,8 @@ def create_server(
     async def run_experiment_tool(
         plan_id: str,
         ctx: Context[AppContext],
-    ) -> Annotated[CallToolResult, ToolPayload[ExperimentRunResult]]:
-        """Consume one experiment plan and execute all declared trials."""
+    ) -> Annotated[CallToolResult, ToolPayload[ExperimentReceipt]]:
+        """Execute all approved trials from one single-use plan, then inspect get_experiment."""
         try:
 
             async def report(
@@ -441,10 +726,87 @@ def create_server(
                 plan_id,
                 progress=report,
             )
+            experiment_id = result.experiment.experiment_id
+            resource_uri = f"flameox://experiments/{experiment_id}"
+            attempted_trials = sum(
+                trial.outcome != "unattempted" for trial in result.trials
+            )
+            receipt = ExperimentReceipt(
+                experiment_id=experiment_id,
+                attempted_trials=attempted_trials,
+                run_set_ids=tuple(item.run_set_id for item in result.run_sets),
+                comparison_id=(
+                    result.comparison.comparison.comparison_id
+                    if result.comparison is not None
+                    else None
+                ),
+                outcome_disposition=(
+                    result.outcome.disposition if result.outcome is not None else None
+                ),
+                outcome_method=result.outcome.method if result.outcome is not None else None,
+                corpus_commit_id=result.corpus_commit_id,
+                limitations=result.limitations,
+                resource_uri=resource_uri,
+            )
+            return _success(
+                receipt,
+                f"Experiment {experiment_id} recorded {attempted_trials} attempted trials.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Experiment {experiment_id}",
+                        uri=resource_uri,
+                        description="Immutable experiment protocol.",
+                        mime_type="application/json",
+                    ),
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(annotations=READ_ONLY)
+    async def plan_reduction(
+        request: PlanReductionRequest,
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[ReductionPlan]]:
+        """Bind immutable input and approved reducer/predicate identities before execution."""
+        try:
+            plan = ReductionService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).plan(request)
+            return _success(plan, f"Planned reduction {plan.plan_id}.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(annotations=EXECUTE)
+    async def execute_reduction(
+        plan_id: str,
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[ReductionResult]]:
+        """Execute one bound reducer lifecycle and independently revalidate its candidate."""
+        try:
+            result = await ReductionService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).execute(plan_id)
             return _success(
                 result,
-                f"Experiment {result.experiment.experiment_id} recorded "
-                f"{len(result.trials)} attempted trials.",
+                f"Reduction {result.reduction_id} is {result.disposition}.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(annotations=READ_ONLY)
+    async def get_reduction(
+        reduction_id: str,
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[ReductionResult]]:
+        """Reconnect to one immutable terminal reduction result."""
+        try:
+            result = ReductionService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).get(reduction_id)
+            return _success(
+                result,
+                f"Reduction {result.reduction_id} is {result.disposition}.",
             )
         except DomainError as error:
             return _failure(error)
@@ -469,7 +831,7 @@ def create_server(
         kind: ArtifactKind,
         sensitivity: Sensitivity,
         ctx: Context[AppContext],
-    ) -> Annotated[CallToolResult, ToolPayload[ImportResult]]:
+    ) -> Annotated[CallToolResult, ToolPayload[ImportReceipt]]:
         """Import a project-local artifact as a new immutable import run."""
         try:
             state = ctx.request_context.lifespan_context
@@ -482,9 +844,32 @@ def create_server(
                     allow_external_path=False,
                 )
             )
+            run_uri = f"flameox://runs/{result.run.run_id}"
+            artifact_uri = f"flameox://artifacts/{result.artifact_id}"
+            receipt = ImportReceipt(
+                run_id=result.run.run_id,
+                artifact_id=result.artifact_id,
+                corpus_commit_id=result.corpus_commit_id,
+                run_resource_uri=run_uri,
+                artifact_resource_uri=artifact_uri,
+            )
             return _success(
-                result,
+                receipt,
                 f"Imported {result.artifact_id} in run {result.run.run_id}.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Run {result.run.run_id}",
+                        uri=run_uri,
+                        description="Authoritative import run manifest.",
+                        mime_type="application/json",
+                    ),
+                    ResourceLink(
+                        name=f"Artifact {result.artifact_id}",
+                        uri=artifact_uri,
+                        description="Imported artifact metadata.",
+                        mime_type="application/json",
+                    ),
+                ),
             )
         except DomainError as error:
             return _failure(error)
@@ -493,34 +878,14 @@ def create_server(
     async def list_runs(
         limit: Annotated[int, Field(ge=1, le=1_000)],
         ctx: Context[AppContext],
+        filter: RunFilter | None = None,
+        cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[RunListResult]]:
-        """List bounded run summaries from one pinned corpus snapshot."""
+        """Discover a filtered run cohort; follow next_cursor without changing filters."""
         try:
-            catalog = Catalog(ctx.request_context.lifespan_context.require_workspace())
-            with catalog.open_snapshot() as snapshot:
-                count_row = snapshot.execute("SELECT count(*) FROM runs").fetchone()
-                assert count_row is not None
-                total = int(count_row[0])
-                rows = snapshot.execute(
-                    "SELECT run_id, created_at, run_type, capture_status "
-                    "FROM runs ORDER BY created_at DESC, run_id LIMIT ?",
-                    (limit,),
-                ).fetchall()
-                result = RunListResult(
-                    corpus_commit_id=snapshot.commit.commit_id,
-                    runs=tuple(
-                        RunSummary(
-                            run_id=row[0],
-                            created_at=row[1],
-                            run_type=row[2],
-                            capture_status=row[3],
-                        )
-                        for row in rows
-                    ),
-                    total=total,
-                    returned=len(rows),
-                    truncated=total > len(rows),
-                )
+            result = RunDiscoveryService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).list(filter=filter or RunFilter(), limit=limit, cursor=cursor)
             return _success(result, f"Returned {result.returned} runs.")
         except DomainError as error:
             return _failure(error)
@@ -530,7 +895,7 @@ def create_server(
         run_id: str,
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[RunManifest]]:
-        """Return one run's current immutable projection."""
+        """Hydrate a run selected by list_runs; use an analyze_* tool for bounded interpretation."""
         try:
             result = RunStore(ctx.request_context.lifespan_context.require_workspace()).read(run_id)
             return _success(result, f"Run {run_id} is {result.capture_status.value}.")
@@ -551,15 +916,66 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
+    @server.tool(annotations=ADDITIVE)
+    async def register_artifact_pipeline(
+        request: RegisterPipelineRequest,
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[ArtifactPipeline]]:
+        """Bind a bounded ordered pipeline to existing immutable run artifacts."""
+        try:
+            pipeline = ArtifactPipelineService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).register(request)
+            return _success(pipeline, f"Registered artifact pipeline {pipeline.pipeline_id}.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(annotations=READ_ONLY)
+    async def compare_artifact_pipelines(
+        baseline_pipeline_id: str,
+        candidate_pipeline_id: str,
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[PipelineComparison]]:
+        """Compare compatible ordered stages without returning native artifact content."""
+        try:
+            comparison = ArtifactPipelineService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).compare(baseline_pipeline_id, candidate_pipeline_id)
+            return _success(
+                comparison,
+                f"Compared artifact pipelines as {comparison.result_digest}.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(annotations=READ_ONLY)
+    async def summarize_evidence(
+        request: EvidenceSummaryRequest,
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[EvidenceSummaryBundle]]:
+        """Render one bounded canonical proof summary and its Markdown view."""
+        try:
+            result = EvidenceSummaryService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).summarize(request)
+            return _success(
+                result,
+                f"Summarized evidence as {result.summary.summary_digest}.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
     @server.tool(name="list_artifacts", annotations=READ_ONLY)
     async def list_artifacts_tool(
         limit: Annotated[int, Field(ge=1, le=1_000)],
         ctx: Context[AppContext],
+        cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[ArtifactListResult]]:
         """List bounded artifact metadata from one pinned corpus snapshot."""
         try:
             result = ArtifactService(ctx.request_context.lifespan_context.require_workspace()).list(
-                limit=limit
+                limit=limit,
+                cursor=cursor,
             )
             return _success(
                 result,
@@ -586,19 +1002,13 @@ def create_server(
     async def list_investigations_tool(
         limit: Annotated[int, Field(ge=1, le=1_000)],
         ctx: Context[AppContext],
+        cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[InvestigationListResult]]:
         """List bounded current investigation projections."""
         try:
-            values = InvestigationService(
+            result = InvestigationService(
                 ctx.request_context.lifespan_context.require_workspace()
-            ).investigations.list()
-            selected = values[:limit]
-            result = InvestigationListResult(
-                investigations=selected,
-                total=len(values),
-                returned=len(selected),
-                truncated=len(values) > len(selected),
-            )
+            ).list(limit=limit, cursor=cursor)
             return _success(
                 result,
                 f"Returned {result.returned} of {result.total} investigations.",
@@ -692,19 +1102,13 @@ def create_server(
     async def list_findings_tool(
         limit: Annotated[int, Field(ge=1, le=1_000)],
         ctx: Context[AppContext],
+        cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[FindingListResult]]:
         """List bounded current finding projections."""
         try:
-            values = FindingService(
+            result = FindingService(
                 ctx.request_context.lifespan_context.require_workspace()
-            ).findings.list()
-            selected = values[:limit]
-            result = FindingListResult(
-                findings=selected,
-                total=len(values),
-                returned=len(selected),
-                truncated=len(values) > len(selected),
-            )
+            ).list(limit=limit, cursor=cursor)
             return _success(
                 result,
                 f"Returned {result.returned} of {result.total} findings.",
@@ -734,7 +1138,7 @@ def create_server(
         request: CompareRunSetsRequest,
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[ComparisonResult]]:
-        """Compare frozen cohorts with the declared paired estimand."""
+        """Preview compatible frozen cohorts without persistence; use record_comparison to save."""
         try:
 
             async def report(
@@ -759,8 +1163,8 @@ def create_server(
     async def record_comparison_tool(
         request: CompareRunSetsRequest,
         ctx: Context[AppContext],
-    ) -> Annotated[CallToolResult, ToolPayload[ComparisonResult]]:
-        """Persist one comparison and its typed immutable evidence references."""
+    ) -> Annotated[CallToolResult, ToolPayload[EvidenceReceipt]]:
+        """Persist a reviewed comparison; use compare_run_sets for read-only preview."""
         try:
 
             async def report(
@@ -773,9 +1177,27 @@ def create_server(
             result = await ComparisonService(
                 ctx.request_context.lifespan_context.require_workspace()
             ).record_async(request, progress=report)
+            comparison_id = result.comparison.comparison_id
+            resource_uri = f"flameox://evidence/comparison/{comparison_id}"
+            assert result.materialized_commit_id is not None
+            receipt = EvidenceReceipt(
+                ref_type="comparison",
+                ref_id=comparison_id,
+                materialized_commit_id=result.materialized_commit_id,
+                evidence_ref_ids=tuple(item.ref_id for item in result.evidence),
+                resource_uri=resource_uri,
+            )
             return _success(
-                result,
-                f"Recorded comparison {result.comparison.comparison_id}.",
+                receipt,
+                f"Recorded comparison {comparison_id}.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Comparison {comparison_id}",
+                        uri=resource_uri,
+                        description="Authoritative materialized comparison evidence.",
+                        mime_type="application/json",
+                    ),
+                ),
             )
         except DomainError as error:
             return _failure(error)
@@ -784,8 +1206,8 @@ def create_server(
     async def record_analysis_tool(
         request: MaterializeAnalysisRequest,
         ctx: Context[AppContext],
-    ) -> Annotated[CallToolResult, ToolPayload[MaterializedAnalysisResult]]:
-        """Run and persist one curated analysis with typed provenance."""
+    ) -> Annotated[CallToolResult, ToolPayload[EvidenceReceipt]]:
+        """Persist a curated analysis; use analyze_* first for read-only preview."""
         try:
 
             async def report(
@@ -799,9 +1221,26 @@ def create_server(
                 ctx.request_context.lifespan_context.require_workspace()
             )
             result = await service.record_async(request, progress=report)
+            analysis_id = result.analysis.analysis_id
+            resource_uri = f"flameox://evidence/analysis/{analysis_id}"
+            receipt = EvidenceReceipt(
+                ref_type="analysis",
+                ref_id=analysis_id,
+                materialized_commit_id=result.materialized_commit_id,
+                evidence_ref_ids=tuple(item.ref_id for item in result.evidence),
+                resource_uri=resource_uri,
+            )
             return _success(
-                result,
-                f"Recorded {result.analysis.recipe} analysis {result.analysis.analysis_id}.",
+                receipt,
+                f"Recorded {result.analysis.recipe} analysis {analysis_id}.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Analysis {analysis_id}",
+                        uri=resource_uri,
+                        description="Authoritative materialized analysis evidence.",
+                        mime_type="application/json",
+                    ),
+                ),
             )
         except DomainError as error:
             return _failure(error)
@@ -865,7 +1304,7 @@ def create_server(
         ctx: Context[AppContext],
         comparison_input_id: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[ExecutionAnalysisResult]]:
-        """Return bounded coverage and semantic observations."""
+        """Inspect a run or compatible pair read-only; use record_analysis to preserve it."""
         try:
             workspace = ctx.request_context.lifespan_context.require_workspace()
             await ctx.report_progress(0, 2, "Execution snapshot pinned")
@@ -941,16 +1380,27 @@ def create_server(
     async def analyze_failures_tool(
         limit: Annotated[int, Field(ge=1, le=1_000)],
         ctx: Context[AppContext],
+        filter: RunFilter | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[FailureAnalysisResult]]:
-        """Cluster terminal failures across the local run population."""
+        """Analyze an explicit filtered failure cohort read-only after list_runs discovery."""
         try:
             workspace = ctx.request_context.lifespan_context.require_workspace()
+            selected_filter = filter or RunFilter()
             await ctx.report_progress(0, 2, "Failure-population snapshot pinned")
             result = await Catalog(workspace).run_interruptible(
                 lambda snapshot: RecipeService(
                     workspace,
                     snapshot=snapshot,
-                ).failures(limit=limit),
+                ).failures(
+                    limit=limit,
+                    source_state_id=selected_filter.source_state_id,
+                    environment_id=selected_filter.environment_id,
+                    workload_definition_id=selected_filter.workload_definition_id,
+                    execution_status=selected_filter.execution_status,
+                    validation_status=selected_filter.validation_status,
+                    created_after=selected_filter.created_after,
+                    created_before=selected_filter.created_before,
+                ),
                 query_name="analyze_failures",
             )
             await ctx.report_progress(1, 2, "Failure-population query complete")
@@ -1092,7 +1542,7 @@ def create_server(
         ref_id: str,
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[EvidenceLookupResult]]:
-        """Retrieve one typed immutable evidence reference."""
+        """Resolve a known typed reference; use list or query tools first to discover one."""
         try:
             result = EvidenceLookupService(
                 ctx.request_context.lifespan_context.require_workspace()
@@ -1103,14 +1553,14 @@ def create_server(
 
     @server.tool(name="validate_workspace", annotations=READ_ONLY)
     async def validate_workspace_tool(
-        full: bool,
         ctx: Context[AppContext],
+        mode: Literal["standard", "full"] = "standard",
     ) -> Annotated[CallToolResult, ToolPayload[IntegrityResult]]:
         """Validate manifests and schemas; optionally hash every payload."""
         try:
             result = IntegrityService(
                 ctx.request_context.lifespan_context.require_workspace()
-            ).validate(full=full)
+            ).validate(full=mode == "full")
             return _success(
                 result,
                 f"Workspace validation {'passed' if result.valid else 'failed'}.",
@@ -1298,6 +1748,27 @@ def create_server(
         try:
             state = _active_state(lifespan_state)
             value = RunSetService(state.require_workspace()).store.read(run_set_id)
+            return value.model_dump_json(indent=2)
+        except DomainError as error:
+            return json.dumps({"ok": False, "error": error.to_detail()})
+
+    @server.resource(
+        "flameox://evidence/{ref_type}/{ref_id}",
+        mime_type="application/json",
+        description="Authoritative persisted analysis or comparison evidence.",
+    )
+    async def evidence_resource(ref_type: str, ref_id: str) -> str:
+        try:
+            if ref_type not in {"analysis", "comparison"}:
+                raise DomainError(
+                    ErrorCode.WORKSPACE_INVALID,
+                    f"Unsupported evidence resource type {ref_type!r}.",
+                )
+            state = _active_state(lifespan_state)
+            value = EvidenceLookupService(state.require_workspace()).get(
+                cast(Literal["analysis", "comparison"], ref_type),
+                ref_id,
+            )
             return value.model_dump_json(indent=2)
         except DomainError as error:
             return json.dumps({"ok": False, "error": error.to_detail()})
