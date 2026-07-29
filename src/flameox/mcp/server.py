@@ -18,7 +18,7 @@ from mcp_types import (
     Tool,
     ToolAnnotations,
 )
-from pydantic import BaseModel, Field, RootModel
+from pydantic import BaseModel, Field, RootModel, ValidationError
 
 from flameox.adapters import (
     CoverageExtractionResult,
@@ -210,17 +210,18 @@ class StrictMCPServer[LifespanResultT](MCPServer[LifespanResultT]):
 
     async def list_tools(self) -> list[Tool]:
         tools = await super().list_tools()
-        return [
-            tool.model_copy(
-                update={
-                    "input_schema": {
-                        **tool.input_schema,
-                        "additionalProperties": False,
-                    }
+        listed: list[Tool] = []
+        for tool in tools:
+            update: dict[str, Any] = {
+                "input_schema": {
+                    **tool.input_schema,
+                    "additionalProperties": False,
                 }
-            )
-            for tool in tools
-        ]
+            }
+            if tool.output_schema is not None:
+                update["output_schema"] = {**tool.output_schema, "type": "object"}
+            listed.append(tool.model_copy(update=update))
+        return listed
 
     async def call_tool(
         self,
@@ -233,9 +234,23 @@ class StrictMCPServer[LifespanResultT](MCPServer[LifespanResultT]):
             allowed = set(tool.input_schema.get("properties", {}))
             unknown = sorted(set(arguments) - allowed)
             if unknown:
-                fields = ", ".join(repr(field) for field in unknown)
-                raise ToolError(f"Unknown argument field(s) for {name}: {fields}.")
-        return await super().call_tool(name, arguments, context)
+                return _invalid_arguments(
+                    name,
+                    tuple(
+                        {
+                            "field": field,
+                            "message": "Unknown argument field.",
+                            "type": "extra_forbidden",
+                        }
+                        for field in unknown
+                    ),
+                )
+        try:
+            return await super().call_tool(name, arguments, context)
+        except ToolError as error:
+            if isinstance(error.__cause__, ValidationError):
+                return _invalid_arguments(name, _validation_fields(error.__cause__))
+            raise
 
 
 class CaptureReceipt(ContractModel):
@@ -350,6 +365,46 @@ def _failure(error: DomainError) -> CallToolResult:
         content=[TextContent(type="text", text=error.message)],
         structured_content=payload.model_dump(mode="json"),
         is_error=True,
+    )
+
+
+def _invalid_arguments(
+    tool_name: str,
+    fields: tuple[dict[str, str], ...],
+) -> CallToolResult:
+    field_summary = "; ".join(
+        f"{item['field']}: {item['message']}" for item in fields
+    )
+    message = f"Invalid arguments for {tool_name}: {field_summary}"
+    payload = FailurePayload(
+        error=ErrorDetail(
+            code="INVALID_ARGUMENTS",
+            message=message,
+            retryable=False,
+            details={"fields": list(fields)},
+            remediation=[f"Match the {tool_name} inputSchema and retry."],
+            run_id=None,
+            recovery=RecoveryAction(
+                kind="manual",
+                safe_to_repeat_same_call=False,
+            ),
+        )
+    )
+    return CallToolResult(
+        content=[TextContent(type="text", text=message)],
+        structured_content=payload.model_dump(mode="json"),
+        is_error=True,
+    )
+
+
+def _validation_fields(error: ValidationError) -> tuple[dict[str, str], ...]:
+    return tuple(
+        {
+            "field": ".".join(str(part) for part in item["loc"]),
+            "message": item["msg"],
+            "type": item["type"],
+        }
+        for item in error.errors()
     )
 
 

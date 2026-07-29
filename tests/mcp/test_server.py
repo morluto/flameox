@@ -101,6 +101,15 @@ async def test_mcp_modes_make_capability_and_integrity_choices_explicit(tmp_path
     assert invalid.is_error is True
     assert isinstance(invalid.content[0], TextContent)
     assert "refresh" in invalid.content[0].text
+    assert invalid.structured_content is not None
+    assert invalid.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
+    assert invalid.structured_content["error"]["details"]["fields"] == [
+        {
+            "field": "refresh",
+            "message": "Unknown argument field.",
+            "type": "extra_forbidden",
+        }
+    ]
     assert standard.is_error is False
 
 
