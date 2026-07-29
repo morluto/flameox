@@ -57,6 +57,7 @@ test("bootstrap launches the exactly matching Python release", () => {
       "#!/usr/bin/env node",
       '"use strict";',
       'require("node:fs").writeFileSync(process.env.FLAMEOX_CAPTURE, JSON.stringify(process.argv.slice(2)));',
+      "process.stdout.write(`${process.env.FLAMEOX_NPM_BOOTSTRAP}\\n`);",
     ].join("\n"),
     { mode: 0o700 },
   );
@@ -67,6 +68,11 @@ test("bootstrap launches the exactly matching Python release", () => {
   });
 
   assert.equal(result.status, 0, result.stderr);
+  assert.match(
+    result.stderr,
+    /cached managed Python runtime; this does not add packages to your project/,
+  );
+  assert.equal(result.stdout, "1\n");
   assert.deepEqual(JSON.parse(fs.readFileSync(capture, "utf8")), [
     "--no-config",
     "--no-sources",
