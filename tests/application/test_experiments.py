@@ -244,12 +244,456 @@ random_seed = 7
             "SELECT DISTINCT run_id, outcome FROM trials WHERE experiment_id = ?",
             (plan.experiment.experiment_id,),
         ).fetchall()
-        assert len(rows) == 1
+        assert len(rows) == 2
+        assert (None, "unattempted") in rows
+        attempted = next(row for row in rows if row[0] is not None)
         run_rows = snapshot.execute(
             "SELECT execution_status FROM runs WHERE run_id = ? ORDER BY published_at DESC LIMIT 1",
-            (str(rows[0][0]),),
+            (str(attempted[0]),),
         ).fetchall()
-    assert rows[0][1] == "cancelled"
-    run = RunStore(workspace).read(str(rows[0][0]))
+    assert attempted[1] == "cancelled"
+    run = RunStore(workspace).read(str(attempted[0]))
     assert run.execution_status is ExecutionStatus.CANCELLED
     assert run_rows == [("cancelled",)]
+
+
+@pytest.mark.anyio
+async def test_failed_experiment_preserves_failed_and_unattempted_cells(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.probe]
+argv = ["python", "-c", "print('{variant}')"]
+[workloads.probe.parameters]
+variant = ["base", "candidate"]
+[experiments.failed]
+workload = "probe"
+variants = ["base", "candidate"]
+blocks = 1
+primary_metric = "wall_time"
+polarity = "neutral"
+estimand = "descriptive"
+practical_threshold = 0
+"""
+    )
+    investigation = InvestigationService(workspace).create(
+        CreateInvestigationRequest(question="Are unattempted cells preserved?")
+    )
+    service = ExperimentService(workspace)
+    plan = await service.plan(
+        experiment_name="failed",
+        investigation_id=investigation.investigation_id,
+        adapter="missing-adapter",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    with pytest.raises(DomainError):
+        await service.run(plan.plan_id)
+
+    with Catalog(workspace).open_snapshot() as snapshot:
+        rows = snapshot.execute(
+            "SELECT outcome, failure_class, run_id FROM trials "
+            "WHERE experiment_id = ? ORDER BY outcome",
+            (plan.experiment.experiment_id,),
+        ).fetchall()
+    assert rows == [
+        ("infrastructure_failed", "infrastructure_failure", None),
+        ("unattempted", "unattempted", None),
+    ]
+
+
+@pytest.mark.anyio
+async def test_multifactor_cartesian_exclusions_and_order_are_materialized_stably(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.matrix]
+argv = ["python", "-c", "print('{mode}', '{dtype}', '{case}')"]
+[workloads.matrix.parameters]
+mode = ["base", "candidate"]
+dtype = ["int8", "int16"]
+case = ["empty", "boundary", "ordinary"]
+
+[experiments.matrix]
+workload = "matrix"
+design = "fixed_order"
+blocks = 1
+treatment_factor = "mode"
+max_trials = 20
+primary_metric = "wall_time"
+polarity = "neutral"
+estimand = "descriptive"
+practical_threshold = 0
+exclude = [{mode = "candidate", case = "empty"}]
+[experiments.matrix.factors]
+mode = ["base", "candidate"]
+dtype = ["int8", "int16"]
+case = ["empty", "boundary", "ordinary"]
+"""
+    )
+    investigation = InvestigationService(workspace).create(
+        CreateInvestigationRequest(question="Which matrix cells differ?")
+    )
+    service = ExperimentService(workspace)
+
+    first = await service.plan(
+        experiment_name="matrix",
+        investigation_id=investigation.investigation_id,
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    second = await service.plan(
+        experiment_name="matrix",
+        investigation_id=investigation.investigation_id,
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    first_cells = [cell for block in first.blocks for cell in block.cells]
+    second_cells = [cell for block in second.blocks for cell in block.cells]
+
+    assert len(first_cells) == 10
+    assert [cell.trial_id for cell in first_cells] == [
+        cell.trial_id for cell in second_cells
+    ]
+    assert [cell.combination_id for cell in first_cells] == [
+        cell.combination_id for cell in second_cells
+    ]
+    assert all(set(cell.factors) == {"mode", "dtype", "case"} for cell in first_cells)
+    assert not any(
+        cell.factors["mode"] == "candidate" and cell.factors["case"] == "empty"
+        for cell in first_cells
+    )
+    assert first.experiment.experiment_design_id == second.experiment.experiment_design_id
+
+
+@pytest.mark.anyio
+async def test_multifactor_explicit_partial_matrix_and_budget_validation(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.matrix]
+argv = ["python", "-c", "print('{mode}', '{case}')"]
+[workloads.matrix.parameters]
+mode = ["base", "candidate"]
+case = ["clean", "bad"]
+
+[experiments.matrix]
+workload = "matrix"
+design = "randomized"
+blocks = 2
+treatment_factor = "mode"
+combination_policy = "explicit"
+combinations = [
+  {mode = "base", case = "clean"},
+  {mode = "candidate", case = "clean"},
+  {mode = "base", case = "bad"},
+]
+max_trials = 6
+primary_metric = "wall_time"
+polarity = "neutral"
+estimand = "descriptive"
+practical_threshold = 0
+[experiments.matrix.factors]
+mode = ["base", "candidate"]
+case = ["clean", "bad"]
+"""
+    )
+    investigation = InvestigationService(workspace).create(
+        CreateInvestigationRequest(question="Is the explicit matrix bounded?")
+    )
+    service = ExperimentService(workspace)
+
+    plan = await service.plan(
+        experiment_name="matrix",
+        investigation_id=investigation.investigation_id,
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    regenerated = await service.plan(
+        experiment_name="matrix",
+        investigation_id=investigation.investigation_id,
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    assert sum(len(block.cells) for block in plan.blocks) == 6
+    assert any(len(block.cells) == 1 for block in plan.blocks)
+    assert {block.order for block in plan.blocks if len(block.order) == 2} <= {
+        ("base", "candidate"),
+        ("candidate", "base"),
+    }
+    assert [block.order for block in plan.blocks] == [
+        block.order for block in regenerated.blocks
+    ]
+    with pytest.raises(DomainError) as conflicting:
+        await service.plan(
+            experiment_name="matrix",
+            investigation_id=investigation.investigation_id,
+            adapter="command",
+            parameter_overrides={"case": "clean"},
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
+    assert conflicting.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+
+    config_path = tmp_path / "flameox.toml"
+    config_path.write_text(config_path.read_text().replace("max_trials = 6", "max_trials = 5"))
+    with pytest.raises(DomainError) as bounded:
+        await service.plan(
+            experiment_name="matrix",
+            investigation_id=investigation.investigation_id,
+            adapter="command",
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
+    assert bounded.value.code is ErrorCode.QUERY_BUDGET_EXCEEDED
+
+    config_path.write_text(
+        config_path.read_text()
+        .replace("max_trials = 5", "max_trials = 6")
+        .replace('{mode = "base", case = "bad"}', '{mode = "base", case = "unknown"}')
+    )
+    with pytest.raises(DomainError) as undeclared:
+        await service.plan(
+            experiment_name="matrix",
+            investigation_id=investigation.investigation_id,
+            adapter="command",
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
+    assert undeclared.value.code is ErrorCode.WORKSPACE_INVALID
+
+
+@pytest.mark.anyio
+async def test_outcome_experiment_classifies_oracle_failure_and_pairs_coordinates(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.semantic]
+argv = ["python", "-c", "print('{mode}', '{case}')"]
+[workloads.semantic.parameters]
+mode = ["base", "candidate"]
+case = ["bad", "clean"]
+[workloads.semantic.oracle]
+strength = "contract_check"
+argv = [
+  "python", "-c",
+  "import sys; raise SystemExit(1 if sys.argv[1:] == ['base', 'bad'] else 0)",
+  "{mode}", "{case}",
+]
+
+[experiments.semantic]
+workload = "semantic"
+design = "fixed_order"
+blocks = 1
+treatment_factor = "mode"
+analysis = "outcome"
+outcome_goal = "equivalence"
+minimum_attempts = 1
+maximum_attempts = 1
+[experiments.semantic.factors]
+mode = ["base", "candidate"]
+case = ["bad", "clean"]
+"""
+    )
+    config = workspace.config.model_copy(
+        update={
+            "execution": workspace.config.execution.model_copy(
+                update={"containment": "disabled"}
+            )
+        }
+    )
+    workspace.paths.config.write_text(config.to_toml())
+    investigation = InvestigationService(workspace).create(
+        CreateInvestigationRequest(question="Does the candidate preserve semantics?")
+    )
+    service = ExperimentService(workspace)
+    plan = await service.plan(
+        experiment_name="semantic",
+        investigation_id=investigation.investigation_id,
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    result = await service.run(plan.plan_id)
+
+    assert result.comparison is None
+    assert result.outcome is not None
+    assert result.outcome.disposition == "base_only_failure"
+    assert result.outcome.complete_pairs == 2
+    assert result.outcome.unmatched_cells == 0
+    assert result.outcome.first_failure_factors == {"mode": "base", "case": "bad"}
+    counts = {item.treatment: item for item in result.outcome.counts}
+    assert counts["base"].oracle_failed == 1
+    assert counts["base"].failure_rate == 0.5
+    assert counts["candidate"].pass_rate == 1
+    with Catalog(workspace).open_snapshot() as snapshot:
+        row = snapshot.execute(
+            "SELECT method, disposition, complete_pairs FROM experiment_outcomes "
+            "WHERE experiment_id = ?",
+            (result.experiment.experiment_id,),
+        ).fetchone()
+    assert row == ("fixed_attempts_v1", "base_only_failure", 2)
+
+
+@pytest.mark.anyio
+async def test_outcome_partial_matrix_reports_unmatched_and_insufficient_evidence(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.semantic]
+argv = ["python", "-c", "print('{mode}', '{case}')"]
+[workloads.semantic.parameters]
+mode = ["base", "candidate"]
+case = ["bad"]
+
+[experiments.partial]
+workload = "semantic"
+design = "fixed_order"
+blocks = 1
+treatment_factor = "mode"
+combination_policy = "explicit"
+combinations = [{mode = "base", case = "bad"}]
+analysis = "outcome"
+outcome_goal = "absence_of_failure"
+minimum_attempts = 1
+maximum_attempts = 1
+[experiments.partial.factors]
+mode = ["base", "candidate"]
+case = ["bad"]
+"""
+    )
+    config = workspace.config.model_copy(
+        update={
+            "execution": workspace.config.execution.model_copy(
+                update={"containment": "disabled"}
+            )
+        }
+    )
+    workspace.paths.config.write_text(config.to_toml())
+    investigation = InvestigationService(workspace).create(
+        CreateInvestigationRequest(question="Is a partial matrix conclusive?")
+    )
+    service = ExperimentService(workspace)
+    plan = await service.plan(
+        experiment_name="partial",
+        investigation_id=investigation.investigation_id,
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    result = await service.run(plan.plan_id)
+
+    assert result.outcome is not None
+    assert result.outcome.disposition == "insufficient_evidence"
+    assert result.outcome.unmatched_cells == 1
+    assert {item.treatment: item.attempted for item in result.outcome.counts} == {
+        "base": 1,
+        "candidate": 0,
+    }
+
+
+@pytest.mark.anyio
+async def test_outcome_experiment_distinguishes_unsupported_environment(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.semantic]
+argv = ["python", "-c", "print('{mode}')"]
+[workloads.semantic.parameters]
+mode = ["base", "candidate"]
+[workloads.semantic.requirements]
+executables = ["flameox-definitely-missing-executable"]
+
+[experiments.unsupported]
+workload = "semantic"
+blocks = 1
+treatment_factor = "mode"
+analysis = "outcome"
+outcome_goal = "absence_of_failure"
+[experiments.unsupported.factors]
+mode = ["base", "candidate"]
+"""
+    )
+    investigation = InvestigationService(workspace).create(
+        CreateInvestigationRequest(question="Is this environment supported?")
+    )
+    service = ExperimentService(workspace)
+    plan = await service.plan(
+        experiment_name="unsupported",
+        investigation_id=investigation.investigation_id,
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    result = await service.run(plan.plan_id)
+
+    assert result.outcome is not None
+    assert result.outcome.disposition == "unsupported"
+    assert all(item.unsupported == 1 for item in result.outcome.counts)
+    assert all(trial.run_id is None for trial in result.trials)
+    assert all(trial.outcome is TrialOutcome.UNSUPPORTED for trial in result.trials)
+
+
+@pytest.mark.anyio
+async def test_outcome_experiment_classifies_hangs_as_timeouts(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.hang]
+argv = ["python", "-c", "import time; time.sleep(1)", "{mode}"]
+timeout_seconds = 0.1
+[workloads.hang.parameters]
+mode = ["base", "candidate"]
+
+[experiments.hangs]
+workload = "hang"
+blocks = 1
+treatment_factor = "mode"
+analysis = "outcome"
+outcome_goal = "bounded_rate"
+[experiments.hangs.factors]
+mode = ["base", "candidate"]
+"""
+    )
+    config = workspace.config.model_copy(
+        update={
+            "execution": workspace.config.execution.model_copy(
+                update={"containment": "disabled"}
+            )
+        }
+    )
+    workspace.paths.config.write_text(config.to_toml())
+    investigation = InvestigationService(workspace).create(
+        CreateInvestigationRequest(question="Do either treatment hangs?")
+    )
+    service = ExperimentService(workspace)
+    plan = await service.plan(
+        experiment_name="hangs",
+        investigation_id=investigation.investigation_id,
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    result = await service.run(plan.plan_id)
+
+    assert result.outcome is not None
+    assert all(item.timed_out == 1 for item in result.outcome.counts)
+    assert all(trial.failure_class == "timeout" for trial in result.trials)
+    assert all(trial.outcome is TrialOutcome.TIMED_OUT for trial in result.trials)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from flameox.domain import RunManifest
 
 
@@ -20,5 +22,32 @@ def run_row(manifest: RunManifest) -> dict[str, object]:
         "collector_version": manifest.collector_version,
         "exit_code": manifest.process.exit_code if manifest.process else None,
         "wall_time_ns": (manifest.process.wall_time_ns if manifest.process else None),
+        "orchestrator": (
+            manifest.external_context.orchestrator if manifest.external_context else None
+        ),
+        "provider": manifest.external_context.provider if manifest.external_context else None,
+        "lease_id": manifest.external_context.lease_id if manifest.external_context else None,
+        "worker_id": manifest.external_context.worker_id if manifest.external_context else None,
+        "orchestration_run_id": (
+            manifest.external_context.orchestration_run_id
+            if manifest.external_context
+            else None
+        ),
+        "execution_identity_id": (
+            manifest.execution_identity.identity_id if manifest.execution_identity else None
+        ),
+        "execution_identity_quality": (
+            manifest.execution_identity.quality if manifest.execution_identity else None
+        ),
+        "execution_identity_json": (
+            json.dumps(
+                manifest.execution_identity.model_dump(mode="json"),
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            if manifest.execution_identity
+            else None
+        ),
         "manifest_path": f"runs/{manifest.run_id}/manifest.json",
     }

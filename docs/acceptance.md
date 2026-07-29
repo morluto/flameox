@@ -216,3 +216,36 @@ preserves the pyperf worker hierarchy, and demonstrates that the semantic
 oracle fails when the implementation is deliberately perturbed. The
 configuration-interaction case requires semantic observations rather than
 inferring correctness from CPU time.
+
+## Issue 16 and 18–36 acceptance evidence
+
+The 2026-07 contract expansion is checked by observable tests rather than by
+the presence of schemas alone:
+
+| Issues | Proven behavior | Primary evidence |
+| --- | --- | --- |
+| #30, #34 | Closed MCP inputs, explicit modes, discriminated outcomes, and structured recovery actions | `tests/mcp/test_server.py` |
+| #32 | Compact lifecycle receipts and structural result bounds | `tests/mcp/test_server.py`, `tests/application/test_summaries.py` |
+| #31, #33, #35 | Declared-workflow discovery, task routing, filtered snapshot cursors, and cohort selection | `tests/application/test_discovery.py`, `tests/mcp/test_server.py` |
+| #21, #22, #23 | Requirement preflight, contained writable roots, storage reserve enforcement, and descendant resource observation | `tests/application/test_workloads_and_capture.py`, `tests/execution/test_broker.py` |
+| #18, #29, #36 | Module/native-library identity, accelerator/topology identity, and remote worker/lease provenance | `tests/application/test_environment_identity.py`, `tests/application/test_workloads_and_capture.py`, `tests/application/test_records_and_comparisons.py` |
+| #19 | Idempotent detached start, reconnect, terminal status, cancellation, timeout, and output-limit recovery | `tests/application/test_detached.py`, `tests/mcp/test_server.py` |
+| #24 | Approved third-party adapter probe, plan, execution, validation, extraction, cancellation, identity recheck, and artifact quotas | `tests/application/test_third_party_adapters.py` |
+| #25, #26 | Bounded multi-factor matrices, exclusions, stable randomization, categorical outcomes, unmatched cells, and unattempted trials | `tests/application/test_experiments.py` |
+| #20 | Canonical evidence summaries, proof roles, compatibility limitations, redaction, structural truncation, and safe Markdown rendering | `tests/application/test_summaries.py` |
+| #27 | Ordered pipeline lineage, content-addressed reuse, structural comparison, skipped/incompatible stages, first observed divergence, and immutable catalog rows | `tests/application/test_pipelines.py` |
+| #28 | Approved reducer/predicate binding, coordinator-owned bounded predicate attempts, contradictory outcomes, final revalidation, malicious candidate rejection, terminal cancellation, immutable artifacts, and cleanup | `tests/application/test_reductions.py` |
+| #16 | Visible npm/runtime/wizard handoff and a real PTY reaching the first Python prompt | `npm/test/jsonc-edit.test.cjs`, `tests/test_cli_setup.py` |
+
+Pipeline structural summaries are supplied through the versioned declaration
+contract in the first implementation. A future adapter convenience API may
+invoke format-specific extractors directly, but core comparison does not infer
+format semantics or expose native content.
+
+Reducer predicate brokering currently uses a Unix-domain socket. Linux is the
+first-class capture platform, and the same subprocess resource observer,
+output limits, timeouts, process-group cancellation, artifact import checks,
+and storage reserve policy are reused. A platform-neutral broker and parity
+with active Bubblewrap/systemd containment remain required before reduction is
+claimed as supported on macOS or Windows. Reducer results state limitations;
+they do not claim global minimality or candidate quality.

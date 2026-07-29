@@ -8,7 +8,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 
-def canonical_json_bytes(value: Any) -> bytes:
+def canonical_json(value: Any) -> str:
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json", exclude_none=False)
     return json.dumps(
@@ -17,7 +17,11 @@ def canonical_json_bytes(value: Any) -> bytes:
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
-    ).encode()
+    )
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    return canonical_json(value).encode()
 
 
 def sha256_digest(data: bytes) -> str:

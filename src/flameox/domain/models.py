@@ -115,10 +115,15 @@ class GenerationStatus(StrEnum):
 
 
 class TrialOutcome(StrEnum):
+    UNATTEMPTED = "unattempted"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     TIMED_OUT = "timed_out"
     CANCELLED = "cancelled"
+    UNSUPPORTED = "unsupported"
+    RESOURCE_POLICY = "resource_policy"
+    ORACLE_FAILED = "oracle_failed"
+    INFRASTRUCTURE_FAILED = "infrastructure_failed"
     OOM = "oom"
     INVALID = "invalid"
 
@@ -224,6 +229,33 @@ class EnvironmentRecord(ContractModel):
     missing_fields: tuple[str, ...] = ()
 
 
+class AcceleratorDevice(ContractModel):
+    index: Annotated[int, Field(ge=0)]
+    model: str | None = None
+    compute_capability: str | None = None
+    memory_mib: Annotated[int, Field(ge=0)] | None = None
+    mig_mode: Literal["enabled", "disabled", "unknown"] = "unknown"
+
+
+class AcceleratorLink(ContractModel):
+    left: Annotated[int, Field(ge=0)]
+    right: Annotated[int, Field(ge=0)]
+    kind: Literal["nvlink", "pcie", "host_bridge", "numa", "system", "unknown"]
+    width: Annotated[int, Field(gt=0)] | None = None
+
+
+class AcceleratorIdentityFacet(ContractModel):
+    provider: Literal["cuda"]
+    status: Literal["available", "missing", "permission_denied", "unsupported", "unknown"]
+    identity_quality: IdentityQuality
+    driver_version: str | None = None
+    runtime_version: str | None = None
+    devices: tuple[AcceleratorDevice, ...] = ()
+    links: tuple[AcceleratorLink, ...] = ()
+    missing_fields: tuple[str, ...] = ()
+    limitations: tuple[str, ...] = ()
+
+
 class SourceState(ContractModel):
     schema_version: Literal[1] = 1
     source_state_id: Digest
@@ -285,6 +317,86 @@ class CapabilityReport(ContractModel):
     probed_at: datetime | None = None
 
 
+class RequirementResult(ContractModel):
+    requirement: str
+    kind: Literal["executable", "python_distribution", "capability"]
+    required: bool
+    probe_kind: Literal["passive", "active"]
+    status: Literal[
+        "available",
+        "absent",
+        "permission_denied",
+        "unsupported",
+        "unknown",
+        "probe_failed",
+    ]
+    identity: str | None = None
+    evidence: tuple[str, ...] = ()
+    limitations: tuple[str, ...] = ()
+    remediation: tuple[str, ...] = ()
+
+
+class PreflightReport(ContractModel):
+    schema_version: Literal[1] = 1
+    preflight_id: Digest
+    mode: Literal["passive", "active"]
+    disposition: Literal["ready", "blocked", "exploratory"]
+    requirements: tuple[RequirementResult, ...]
+    limitations: tuple[str, ...] = ()
+
+
+class WritableRootBinding(ContractModel):
+    target_path: str
+    storage_path: str
+    target_identity: Digest
+
+
+class ExternalExecutionContext(ContractModel):
+    orchestrator: Annotated[
+        str,
+        StringConstraints(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._:/-]+$"),
+    ]
+    provider: Annotated[
+        str,
+        StringConstraints(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._:/-]+$"),
+    ]
+    lease_id: Annotated[
+        str,
+        StringConstraints(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$"),
+    ]
+    worker_id: Annotated[
+        str,
+        StringConstraints(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$"),
+    ]
+    orchestration_run_id: Annotated[
+        str,
+        StringConstraints(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$"),
+    ]
+    sensitivity: Literal["internal", "sensitive"] = "internal"
+
+
+class ExecutionIdentityInput(ContractModel):
+    kind: Literal["python_module", "native_file"]
+    requested: str
+    configured_path: str | None = None
+    resolved_path: str | None = None
+    loaded_path: str | None = None
+    distribution: str | None = None
+    version: str | None = None
+    content_digest: Digest | None = None
+    build_id: str | None = None
+    status: Literal["exact", "missing", "ambiguous", "resolution_failed", "not_observed"]
+    limitations: tuple[str, ...] = ()
+
+
+class WorkloadExecutionIdentity(ContractModel):
+    schema_version: Literal[1] = 1
+    identity_id: Digest
+    quality: Literal["exact", "partial", "unknown", "not_applicable"]
+    inputs: tuple[ExecutionIdentityInput, ...]
+    missing_inputs: tuple[str, ...] = ()
+
+
 class CapturePlan(ContractModel):
     schema_version: Literal[1] = 1
     plan_id: Identifier
@@ -298,6 +410,7 @@ class CapturePlan(ContractModel):
     adapter: Identifier
     execution_policy: Literal["trusted_local", "approved_agent"]
     adapter_version: str | None = None
+    adapter_execution_plan: dict[str, JsonValue] | None = None
     collector_argv: tuple[str, ...]
     collector_environment: dict[str, str] = Field(default_factory=dict)
     expected_artifact_kinds: tuple[ArtifactKind, ...]
@@ -306,6 +419,10 @@ class CapturePlan(ContractModel):
     network_contained: bool
     systemd_scope_unit: str | None = None
     permissions: tuple[str, ...] = ()
+    preflight: PreflightReport
+    writable_roots: tuple[WritableRootBinding, ...] = ()
+    external_context: ExternalExecutionContext | None = None
+    planned_execution_identity: WorkloadExecutionIdentity
     bound_identities: dict[str, JsonValue] = Field(default_factory=dict)
     limits: dict[str, JsonValue] = Field(default_factory=dict)
     warnings: tuple[str, ...] = ()
@@ -327,6 +444,21 @@ class ProcessResult(ContractModel):
     timed_out: bool = False
     cancellation_cause: str | None = None
     cleanup_complete: bool | None = None
+    resources: RuntimeResourceSummary | None = None
+    stdout: str | None = None
+    stderr: str | None = None
+
+
+class RuntimeResourceSummary(ContractModel):
+    sampling_interval_ms: Annotated[int, Field(gt=0)]
+    minimum_free_bytes: Annotated[int, Field(ge=0)] | None = None
+    staging_growth_bytes: Annotated[int, Field(ge=0)] | None = None
+    writable_root_growth_bytes: dict[str, Annotated[int, Field(ge=0)]] = Field(
+        default_factory=dict
+    )
+    peak_rss_bytes: Annotated[int, Field(ge=0)] | None = None
+    unavailable_metrics: tuple[str, ...] = ()
+    policy_termination: Literal["storage_reserve_exceeded"] | None = None
 
 
 class CaptureLease(ContractModel):
@@ -367,6 +499,10 @@ class RunManifest(ContractModel):
     lease: CaptureLease | None = None
     artifacts: tuple[ArtifactRegistration, ...] = ()
     limitations: tuple[str, ...] = ()
+    preflight: PreflightReport | None = None
+    writable_roots: tuple[WritableRootBinding, ...] = ()
+    external_context: ExternalExecutionContext | None = None
+    execution_identity: WorkloadExecutionIdentity | None = None
 
     @model_validator(mode="after")
     def validate_run_type(self) -> RunManifest:
@@ -435,8 +571,8 @@ class Variant(ContractModel):
     variant_id: Identifier
     experiment_id: Identifier
     name: Identifier
-    source_state_id: Digest
-    workload_instance_id: Digest
+    source_state_id: Digest | None = None
+    workload_instance_id: Digest | None = None
     environment_requirements: dict[str, JsonValue] = Field(default_factory=dict)
     parameters: dict[str, JsonValue] = Field(default_factory=dict)
 
@@ -446,7 +582,9 @@ class Trial(ContractModel):
     trial_id: Identifier
     experiment_id: Identifier
     variant_id: Identifier
-    run_id: Identifier
+    run_id: Identifier | None = None
+    combination_id: Digest
+    factors: dict[str, JsonValue] = Field(default_factory=dict, max_length=8)
     block_id: Identifier | None = None
     order_in_block: Annotated[int, Field(ge=0)] | None = None
     parameter_name: str | None = None
@@ -456,6 +594,17 @@ class Trial(ContractModel):
     outcome: TrialOutcome
     exclusion_reason: str | None = None
     validation_status: ValidationStatus
+    failure_class: Literal[
+        "none",
+        "unattempted",
+        "oracle_failure",
+        "process_failure",
+        "timeout",
+        "cancellation",
+        "unsupported_environment",
+        "resource_policy",
+        "infrastructure_failure",
+    ] = "none"
 
     @model_validator(mode="after")
     def only_one_parameter_value(self) -> Trial:

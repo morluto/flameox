@@ -5,6 +5,7 @@ import math
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any, cast
 
 import numpy as np
@@ -14,7 +15,7 @@ from statsmodels.stats.multitest import multipletests
 from statsmodels.stats.stattools import durbin_watson
 
 from flameox.catalog import Catalog, Snapshot
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import DomainError, ErrorCode, digest_model
 from flameox.evidence_scope import resolve_evidence_scope
 from flameox.models import ContractModel
 from flameox.storage import Workspace
@@ -167,6 +168,8 @@ class FailureChangePoint(ContractModel):
 class FailureAnalysisResult(ContractModel):
     schema_version: int = 1
     corpus_commit_id: str
+    cohort_id: str
+    filters_applied: tuple[str, ...]
     failures: tuple[FailureCluster, ...]
     total_clusters: int
     returned: int
@@ -741,10 +744,46 @@ class RecipeService:
         *,
         limit: int | None = None,
         corpus_commit_id: str | None = None,
+        source_state_id: str | None = None,
+        environment_id: str | None = None,
+        workload_definition_id: str | None = None,
+        execution_status: tuple[str, ...] = (),
+        validation_status: tuple[str, ...] = (),
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> FailureAnalysisResult:
         corpus_commit_id = self._pinned_commit_id(corpus_commit_id)
         bounded = self._limit(limit)
-        query = """
+        filters: list[str] = []
+        parameters: list[object] = []
+        applied: list[str] = []
+        for field, value in (
+            ("source_state_id", source_state_id),
+            ("environment_id", environment_id),
+            ("workload_definition_id", workload_definition_id),
+        ):
+            if value is not None:
+                filters.append(f"{field} = ?")
+                parameters.append(value)
+                applied.append(field)
+        for field, values in (
+            ("execution_status", execution_status),
+            ("validation_status", validation_status),
+        ):
+            if values:
+                filters.append(f"{field} IN ({', '.join('?' for _ in values)})")
+                parameters.extend(values)
+                applied.append(field)
+        if created_after is not None:
+            filters.append("created_at >= ?")
+            parameters.append(created_after)
+            applied.append("created_after")
+        if created_before is not None:
+            filters.append("created_at < ?")
+            parameters.append(created_before)
+            applied.append("created_before")
+        cohort_filter = "".join(f" AND {item}" for item in filters)
+        query = f"""
             WITH latest AS (
                 SELECT *,
                     row_number() OVER (
@@ -760,6 +799,7 @@ class RecipeService:
                     OR capture_status IN ('failed', 'cancelled')
                     OR validation_status = 'failed'
                   )
+                  {cohort_filter}
             ),
             clusters AS (
                 SELECT collector, execution_status, capture_status,
@@ -774,7 +814,10 @@ class RecipeService:
             )
         """
         with self._open_snapshot(corpus_commit_id) as snapshot:
-            count_row = snapshot.execute(query + " SELECT count(*) FROM clusters").fetchone()
+            count_row = snapshot.execute(
+                query + " SELECT count(*) FROM clusters",
+                tuple(parameters),
+            ).fetchone()
             assert count_row is not None
             total = int(count_row[0])
             rows = snapshot.execute(
@@ -783,7 +826,7 @@ class RecipeService:
                 "environment_id, source_state_id, run_count, first_seen, last_seen, "
                 "representative_run_id "
                 "FROM clusters ORDER BY run_count DESC, last_seen DESC LIMIT ?",
-                (bounded,),
+                (*parameters, bounded),
             ).fetchall()
             change_rows = snapshot.execute(
                 query + " , daily AS (SELECT CAST(created_at AS DATE) AS observed_date, "
@@ -792,7 +835,8 @@ class RecipeService:
                 "lag(run_count) OVER (ORDER BY observed_date) AS previous_run_count "
                 "FROM daily) SELECT observed_date, run_count, previous_run_count "
                 "FROM with_previous WHERE previous_run_count IS NULL "
-                "OR run_count <> previous_run_count ORDER BY observed_date"
+                "OR run_count <> previous_run_count ORDER BY observed_date",
+                tuple(parameters),
             ).fetchall()
             coverage_row = snapshot.execute(
                 query + " SELECT count(*), "
@@ -800,7 +844,8 @@ class RecipeService:
                 "count(*) FILTER (WHERE EXISTS (SELECT 1 FROM artifact_registrations a "
                 "WHERE a.run_id = failed.run_id)), "
                 "count(*) FILTER (WHERE EXISTS (SELECT 1 FROM frame_measurements fm "
-                "WHERE fm.run_id = failed.run_id)) FROM failed"
+                "WHERE fm.run_id = failed.run_id)) FROM failed",
+                tuple(parameters),
             ).fetchone()
             assert coverage_row is not None
             representative_artifacts: dict[str, tuple[str, ...]] = {}
@@ -861,6 +906,19 @@ class RecipeService:
             )
         return FailureAnalysisResult(
             corpus_commit_id=snapshot.commit.commit_id,
+            cohort_id=digest_model(
+                {
+                    "corpus_commit_id": corpus_commit_id,
+                    "source_state_id": source_state_id,
+                    "environment_id": environment_id,
+                    "workload_definition_id": workload_definition_id,
+                    "execution_status": execution_status,
+                    "validation_status": validation_status,
+                    "created_after": created_after,
+                    "created_before": created_before,
+                }
+            ),
+            filters_applied=tuple(applied),
             failures=failures,
             total_clusters=total,
             returned=len(failures),

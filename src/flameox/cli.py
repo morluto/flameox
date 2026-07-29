@@ -38,6 +38,8 @@ from flameox.application import (
     DrilldownService,
     EvidenceLookupService,
     EvidenceQueryService,
+    EvidenceSummaryRequest,
+    EvidenceSummaryService,
     ExecutionPolicy,
     ExperimentService,
     FindingService,
@@ -353,6 +355,8 @@ def setup(
     json_output: JsonOption = False,
 ) -> None:
     """Install a managed runtime and connect local MCP clients."""
+    if os.environ.get("FLAMEOX_NPM_BOOTSTRAP") == "1" and not json_output:
+        typer.echo("Managed runtime ready. Starting flameox setup...", err=True)
     service = SetupService(
         home=Path(os.environ["FLAMEOX_SETUP_HOME"]) if "FLAMEOX_SETUP_HOME" in os.environ else None,
         data_root=Path(os.environ["FLAMEOX_SETUP_DATA_ROOT"])
@@ -1645,6 +1649,50 @@ def evidence_get(
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
+
+
+@evidence_app.command("summarize")
+def evidence_summarize(
+    baseline_run_id: Annotated[str | None, typer.Option("--baseline-run")] = None,
+    candidate_run_id: Annotated[str | None, typer.Option("--candidate-run")] = None,
+    run_ids: Annotated[list[str] | None, typer.Option("--run")] = None,
+    comparison_ids: Annotated[list[str] | None, typer.Option("--comparison")] = None,
+    analysis_ids: Annotated[list[str] | None, typer.Option("--analysis")] = None,
+    finding_ids: Annotated[list[str] | None, typer.Option("--finding")] = None,
+    output_excerpts: Annotated[
+        Literal["none", "internal"],
+        typer.Option("--output-excerpts"),
+    ] = "none",
+    sensitive_context: Annotated[
+        Literal["redact", "include"],
+        typer.Option("--sensitive-context"),
+    ] = "redact",
+    output_format: Annotated[
+        Literal["json", "markdown"],
+        typer.Option("--format"),
+    ] = "markdown",
+    workspace: WorkspaceOption = None,
+) -> None:
+    """Render a bounded proof summary from immutable evidence references."""
+    try:
+        result = EvidenceSummaryService(_workspace(workspace)).summarize(
+            EvidenceSummaryRequest(
+                baseline_run_id=baseline_run_id,
+                candidate_run_id=candidate_run_id,
+                run_ids=tuple(run_ids or ()),
+                comparison_ids=tuple(comparison_ids or ()),
+                analysis_ids=tuple(analysis_ids or ()),
+                finding_ids=tuple(finding_ids or ()),
+                output_excerpts=output_excerpts,
+                sensitive_context=sensitive_context,
+            )
+        )
+    except DomainError as error:
+        _fail(error)
+    if output_format == "json":
+        typer.echo(result.summary.model_dump_json(indent=2))
+    else:
+        typer.echo(result.markdown, nl=False)
 
 
 @extract_app.command("pyperf")

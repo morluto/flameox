@@ -285,7 +285,8 @@ class AnalysisMaterializationService:
             return scope.run_ids, scope.artifact_ids, ()
         if request.experiment_id is not None:
             rows = snapshot.execute(
-                "SELECT DISTINCT run_id FROM trials WHERE experiment_id = ? ORDER BY run_id",
+                "SELECT DISTINCT run_id FROM trials "
+                "WHERE experiment_id = ? AND run_id IS NOT NULL ORDER BY run_id",
                 (request.experiment_id,),
             ).fetchall()
             return tuple(str(row[0]) for row in rows), (), ()

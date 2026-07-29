@@ -59,3 +59,14 @@ def test_recovery_closes_only_disappeared_exact_process_lease(tmp_path: Path) ->
     population = RecipeService(workspace).failures()
     assert population.total_clusters == 1
     assert population.failures[0].run_count == 1
+    selected = RecipeService(workspace).failures(
+        environment_id=DIGEST,
+        execution_status=("cancelled",),
+    )
+    excluded = RecipeService(workspace).failures(
+        environment_id="sha256:" + ("b" * 64),
+    )
+    assert selected.total_clusters == 1
+    assert selected.filters_applied == ("environment_id", "execution_status")
+    assert selected.cohort_id != population.cohort_id
+    assert excluded.total_clusters == 0
