@@ -8,6 +8,7 @@ const test = require("node:test");
 const { spawnSync } = require("node:child_process");
 
 const helper = path.resolve(__dirname, "../lib/jsonc-edit.cjs");
+const packageJson = require("../package.json");
 
 function edit(request) {
   const result = spawnSync(process.execPath, [helper], {
@@ -81,7 +82,7 @@ test("bootstrap launches the exactly matching Python release", () => {
     "--python",
     "3.12",
     "--from",
-    "flameox==0.1.1",
+    `flameox==${packageJson.version}`,
     "flameox",
     "setup",
     "--codex",
