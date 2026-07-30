@@ -21,6 +21,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
+          cache-suffix: full-extras
       - run: uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests
@@ -34,6 +36,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
+          cache-suffix: full-extras
       - run: uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
       - run: uv run mypy src tests
 
@@ -49,6 +53,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-suffix: full-extras
       - run: uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
       - run: uv run pytest -q --cov --cov-report=xml --cov-report=term
       - uses: codecov/codecov-action@v5
@@ -65,6 +71,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
+          cache-suffix: dev-only
       - run: uv sync --extra dev
       - run: uv run vulture src/flameox --min-confidence 80
 
@@ -77,6 +85,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
+          cache-suffix: dev-only
       - run: uv sync --extra dev
       - run: uv run lint-imports
 
@@ -89,6 +99,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
+          cache-suffix: dev-only
       - run: uv sync --extra dev
       - run: uv run deptry src
         continue-on-error: true
@@ -102,6 +114,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
+          cache-suffix: dev-only
       - run: uv sync --extra dev
       - run: uv run pip-audit
 
@@ -133,8 +147,95 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
+          cache-suffix: full-extras
       - run: uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
       - run: uv run flameox --help
       - run: uv run ruff check src tests
       - run: uv run mypy src tests
       - run: uv run pytest --collect-only -q
+
+  build-summary:
+    name: Build Performance Summary
+    runs-on: ubuntu-latest
+    needs:
+      - lint
+      - type-check
+      - test
+      - dead-code
+      - import-boundaries
+      - unused-deps
+      - security-audit
+      - npm
+      - agents-md-validate
+    if: always()
+    timeout-minutes: 5
+    steps:
+      - name: Collect job durations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          echo "## Build Performance" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Job | Duration | Started | Completed |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+
+          total_s=0
+          job_count=0
+
+          jobs_json=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" \
+            --jq '.jobs[] | {name: .name, started_at: .started_at, completed_at: .completed_at, conclusion: .conclusion}')
+
+          while IFS= read -r job; do
+            name=$(echo "$job" | jq -r '.name')
+            started=$(echo "$job" | jq -r '.started_at')
+            completed=$(echo "$job" | jq -r '.completed_at')
+            conclusion=$(echo "$job" | jq -r '.conclusion')
+
+            [[ "$name" == "Build Performance Summary" ]] && continue
+            [[ "$started" == "null" ]] && continue
+
+            if [[ "$completed" != "null" ]]; then
+              started_epoch=$(date -d "$started" +%s 2>/dev/null || echo 0)
+              completed_epoch=$(date -d "$completed" +%s 2>/dev/null || echo 0)
+              duration_s=$((completed_epoch - started_epoch))
+              total_s=$((total_s + duration_s))
+              job_count=$((job_count + 1))
+
+              minutes=$((duration_s / 60))
+              seconds=$((duration_s % 60))
+
+              case "$conclusion" in
+                success) status=":white_check_mark:" ;;
+                failure) status=":x:" ;;
+                skipped) status=":fast_forward:" ;;
+                cancelled) status=":stop_sign:" ;;
+                *) status=":grey_question:" ;;
+              esac
+
+              echo "| ${status} ${name} | ${minutes}m ${seconds}s | ${started} | ${completed} |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| :hourglass: ${name} | — | — | — |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done < <(echo "$jobs_json" | jq -c '.')
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$job_count" -gt 0 ]]; then
+            total_min=$((total_s / 60))
+            total_sec=$((total_s % 60))
+            avg_s=$((total_s / job_count))
+            avg_min=$((avg_s / 60))
+            avg_sec=$((avg_s % 60))
+            echo "**Total CI wall-clock time:** ${total_min}m ${total_sec}s across ${job_count} jobs" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Average job duration:** ${avg_min}m ${avg_sec}s" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No completed jobs to report." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo ":package: **Cache strategy:** uv cache (full-extras / dev-only profiles), npm cache (package-lock.json)" >> "$GITHUB_STEP_SUMMARY"
