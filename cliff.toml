@@ -13,7 +13,7 @@ body = """
     {% for commit in commits %}
         - {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
           {{ commit.message | upper_first }}\
-          {% if commit.remote.pr_number %} ([#{{ commit.remote.pr_number }}]({{ commit.remote.pr_url }})){% endif %}\
+          {% if commit.remote.pr_number %} ([#{{ commit.remote.pr_number }}](https://github.com/morluto/flameox/pull/{{ commit.remote.pr_number }})){% endif %}\
     {%- endfor -%}
 {% endfor %}\n
 """

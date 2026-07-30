@@ -120,7 +120,7 @@ jobs:
               --base main \
               --head "$branch" \
               --json number,headRefName \
-              --jq '.[0] | "\(.number) \(.headRefName)"' 2>/dev/null || true
+              --jq '.[0] // empty | "\(.number) \(.headRefName)"' 2>/dev/null || true
           )
           if [[ -n "$existing" ]]; then
             {
