@@ -124,6 +124,7 @@ flameox hypotheses show <hypothesis-id>
 flameox experiment plan <name> [parameter overrides]
 flameox experiment run <name> [parameter overrides]
 flameox experiment show <experiment-id>
+flameox experiment trial <trial-id>
 ```
 
 ### Analysis commands
@@ -360,7 +361,9 @@ arguments.
 Planning is read-only over an approved named workload and experiment
 definition. Execution runs the predeclared variants and blocks, registers every
 attempted trial, validates outputs, and returns the experiment plus initial
-analysis references.
+analysis references. The execution receipt links to the immutable experiment
+protocol, its bounded trial collection, and the first failing trial when one
+exists; it does not duplicate every trial or oracle receipt.
 
 #### `create_investigation` and `record_hypothesis`
 
@@ -464,6 +467,8 @@ flameox://findings/{finding_id}
 flameox://investigations/{investigation_id}
 flameox://hypotheses/{hypothesis_id}
 flameox://experiments/{experiment_id}
+flameox://experiments/{experiment_id}/trials
+flameox://experiments/{experiment_id}/trials/{trial_id}
 flameox://run-sets/{run_set_id}
 ```
 

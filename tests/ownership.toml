@@ -1,5 +1,11 @@
 schema_version = 1
 
+[[ownership]]
+owner = "external-receipt-fixture"
+lane = "core"
+paths = ["tests/test_external_receipt_fixture.py"]
+markers = ["unit"]
+
 # Every test file is listed exactly once.  The pytest support hook adds these
 # markers to collected items, and tools/test.py uses the primary lane to build
 # focused commands.  Process, provider, and performance markers describe test
@@ -466,6 +472,12 @@ owner = "memory-recipes"
 lane = "analysis"
 paths = ["tests/analysis/test_memory_recipes.py"]
 markers = ["integration"]
+
+[[ownership]]
+owner = "semantic-matrix"
+lane = "golden"
+paths = ["tests/golden/test_semantic_matrix.py"]
+markers = ["integration", "process", "serial"]
 
 [[ownership]]
 owner = "execution-recipes"
