@@ -300,7 +300,11 @@ async def test_adapter_capture_cancellation_uses_normal_process_ownership(
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    run = service.runs.read(plan.run_id)
+    for _ in range(100):
+        run = service.runs.read(plan.run_id)
+        if run.execution_status is ExecutionStatus.CANCELLED:
+            break
+        await asyncio.sleep(0.05)
     assert run.execution_status is ExecutionStatus.CANCELLED
     assert run.process is not None
     assert run.process.cleanup_complete is True

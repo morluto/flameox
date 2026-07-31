@@ -1,0 +1,326 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+import pytest
+from mcp import Client, StdioServerParameters
+from mcp.client.session import ClientSession
+from mcp.client.stdio import stdio_client
+from mcp_types import TextContent, TextResourceContents
+
+from flameox.application import WorkloadService
+from flameox.domain import DomainError, RunManifest
+from flameox.storage import RunStore, Workspace
+
+
+@pytest.mark.anyio
+@pytest.mark.process
+@pytest.mark.serial
+async def test_real_stdio_server_keeps_protocol_on_stdout(tmp_path: Path) -> None:
+    (tmp_path / "profile.json").write_text('{"samples": []}')
+    parameters = StdioServerParameters(
+        command=sys.executable,
+        args=[
+            "-m",
+            "flameox",
+            "mcp",
+            "serve",
+            "--project-root",
+            str(tmp_path),
+            "--init",
+        ],
+        cwd=tmp_path,
+    )
+
+    async with Client(stdio_client(parameters), raise_exceptions=True) as client:
+        tools = await client.list_tools()
+        status = await client.call_tool("workspace_status", {})
+        capabilities = await client.call_tool("list_capabilities", {})
+        imported = await client.call_tool(
+            "import_artifact",
+            {
+                "path": "profile.json",
+                "kind": "collector_metadata",
+                "sensitivity": "internal",
+            },
+        )
+        assert imported.structured_content is not None
+        run_id = imported.structured_content["result"]["run_id"]
+        resource = await client.read_resource(f"flameox://runs/{run_id}")
+        structured_error = await client.call_tool(
+            "get_run",
+            {"run_id": "missing-run"},
+        )
+
+    assert "workspace_status" in {tool.name for tool in tools.tools}
+    assert status.is_error is False
+    assert status.structured_content is not None
+    assert status.structured_content["result"]["workspace_id"]
+    assert capabilities.is_error is False
+    assert isinstance(resource.contents[0], TextResourceContents)
+    assert run_id in resource.contents[0].text
+    assert structured_error.is_error is True
+    assert structured_error.structured_content is not None
+    assert structured_error.structured_content["error"]["code"] == "RUN_NOT_FOUND"
+    assert structured_error.structured_content["error"]["remediation"] == [
+        "Call list_runs to choose an existing run."
+    ]
+    assert structured_error.structured_content["error"]["recovery"] == {
+        "kind": "discover_runs",
+        "safe_to_repeat_same_call": False,
+        "retry_after_ms": None,
+        "next_tool": "list_runs",
+    }
+
+
+@pytest.mark.anyio
+@pytest.mark.process
+@pytest.mark.serial
+async def test_strict_mcp_client_can_decode_tools_list_output_schemas(tmp_path: Path) -> None:
+    parameters = StdioServerParameters(
+        command=sys.executable,
+        args=[
+            "-m",
+            "flameox",
+            "mcp",
+            "serve",
+            "--project-root",
+            str(tmp_path),
+            "--init",
+        ],
+        cwd=tmp_path,
+    )
+
+    async with stdio_client(parameters) as streams, ClientSession(*streams) as session:
+        await session.initialize()
+        result = await session.list_tools()
+
+    assert len(result.tools) >= 40
+    assert all(tool.output_schema is not None for tool in result.tools)
+    for tool in result.tools:
+        assert tool.output_schema is not None
+        assert tool.output_schema["type"] == "object"
+
+
+@pytest.mark.anyio
+@pytest.mark.process
+@pytest.mark.serial
+async def test_real_stdio_discovers_then_plans_and_executes_declared_workload(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "flameox.toml").write_text(
+        f"""
+schema_version = 1
+[workloads.probe]
+argv = [{json.dumps(sys.executable)}, "-c", "print('{{value}}')"]
+cwd = "."
+timeout_seconds = 5
+[workloads.probe.parameters]
+value = ["baseline", "candidate"]
+"""
+    )
+    workspace = Workspace.initialize(tmp_path)
+    config = workspace.config.model_copy(
+        update={
+            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+        }
+    )
+    workspace.paths.config.write_text(config.to_toml())
+    WorkloadService(workspace).approve("probe")
+    parameters = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "flameox", "mcp", "serve", "--project-root", str(tmp_path)],
+        cwd=tmp_path,
+    )
+
+    async with Client(stdio_client(parameters), raise_exceptions=True) as client:
+        declared = await client.call_tool(
+            "list_declared_workflows",
+            {"kind": "workload", "approval": "approved", "limit": 10},
+        )
+        assert declared.structured_content is not None
+        assert declared.structured_content["result"]["workflows"][0]["name"] == "probe"
+        detail = await client.call_tool(
+            "get_declared_workflow",
+            {"kind": "workload", "name": "probe"},
+        )
+        assert detail.structured_content is not None
+        assert detail.structured_content["result"]["allowed_parameters"] == {
+            "value": ["baseline", "candidate"]
+        }
+        planned = await client.call_tool(
+            "plan_capture",
+            {
+                "workload_name": "probe",
+                "adapter": "command",
+                "parameters": {"value": "candidate"},
+            },
+        )
+        assert planned.structured_content is not None
+        executed = await client.call_tool(
+            "execute_capture_plan",
+            {"plan_id": planned.structured_content["result"]["plan_id"]},
+        )
+
+    assert executed.is_error is False
+    assert executed.structured_content is not None
+    assert executed.structured_content["result"]["execution_status"] == "succeeded"
+
+
+@pytest.mark.anyio
+@pytest.mark.process
+@pytest.mark.serial
+async def test_real_stdio_server_rejects_unknown_tool_arguments(tmp_path: Path) -> None:
+    parameters = StdioServerParameters(
+        command=sys.executable,
+        args=[
+            "-m",
+            "flameox",
+            "mcp",
+            "serve",
+            "--project-root",
+            str(tmp_path),
+            "--init",
+        ],
+        cwd=tmp_path,
+    )
+
+    async with Client(stdio_client(parameters), raise_exceptions=True) as client:
+        tools = (await client.list_tools()).tools
+        result = await client.call_tool("workspace_status", {"typo": True})
+
+    workspace_status_tool = next(tool for tool in tools if tool.name == "workspace_status")
+    assert workspace_status_tool.input_schema["additionalProperties"] is False
+    assert result.is_error is True
+    assert isinstance(result.content[0], TextContent)
+    assert "typo" in result.content[0].text
+    assert result.structured_content is not None
+    assert result.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
+
+
+@pytest.mark.anyio
+@pytest.mark.process
+@pytest.mark.serial
+async def test_real_stdio_server_returns_structured_schema_validation_errors(
+    tmp_path: Path,
+) -> None:
+    parameters = StdioServerParameters(
+        command=sys.executable,
+        args=[
+            "-m",
+            "flameox",
+            "mcp",
+            "serve",
+            "--project-root",
+            str(tmp_path),
+            "--init",
+        ],
+        cwd=tmp_path,
+    )
+
+    async with Client(stdio_client(parameters), raise_exceptions=True) as client:
+        result = await client.call_tool("list_runs", {"limit": 0})
+
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
+    assert result.structured_content["error"]["details"]["fields"][0]["field"] == "limit"
+    assert "greater than or equal to 1" in result.structured_content["error"]["message"]
+
+
+@pytest.mark.anyio
+@pytest.mark.process
+@pytest.mark.serial
+async def test_real_stdio_server_reports_progress_and_propagates_cancellation(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.wait]
+argv = ["python", "-c", "import time; time.sleep(30)"]
+cwd = "."
+timeout_seconds = 60
+"""
+    )
+    workspace = Workspace.initialize(tmp_path)
+    config = workspace.config.model_copy(
+        update={
+            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+        }
+    )
+    workspace.paths.config.write_text(config.to_toml())
+    WorkloadService(workspace).approve("wait")
+    parameters = StdioServerParameters(
+        command=sys.executable,
+        args=[
+            "-m",
+            "flameox",
+            "mcp",
+            "serve",
+            "--project-root",
+            str(tmp_path),
+        ],
+        cwd=tmp_path,
+    )
+    recorded_progress: list[tuple[float, float | None, str | None]] = []
+
+    async def record_progress(
+        progress: float,
+        total: float | None,
+        message: str | None,
+    ) -> None:
+        progress_events = (progress, total, message)
+        recorded_progress.append(progress_events)
+
+    def read_runs() -> list[RunManifest]:
+        runs: list[RunManifest] = []
+        for path in workspace.paths.runs.iterdir():
+            if not path.is_dir():
+                continue
+            try:
+                runs.append(RunStore(workspace).read(path.name))
+            except DomainError:
+                continue
+        return runs
+
+    async with Client(stdio_client(parameters), raise_exceptions=True) as client:
+        analyzed = await client.call_tool(
+            "analyze_failures",
+            {"limit": 10},
+            progress_callback=record_progress,
+        )
+        planned = await client.call_tool(
+            "plan_capture",
+            {"workload_name": "wait", "adapter": "command", "parameters": {}},
+        )
+        assert planned.structured_content is not None
+        task = asyncio.create_task(
+            client.call_tool(
+                "execute_capture_plan",
+                {"plan_id": planned.structured_content["result"]["plan_id"]},
+            )
+        )
+        for _ in range(200):
+            runs = read_runs()
+            if runs and runs[0].execution_status.value == "running":
+                break
+            await asyncio.sleep(0.05)
+        assert runs and runs[0].execution_status.value == "running"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        for _ in range(100):
+            runs = read_runs()
+            if runs and runs[0].execution_status.value == "cancelled":
+                break
+            await asyncio.sleep(0.05)
+        assert len(runs) == 1
+        assert runs[0].execution_status.value == "cancelled"
+
+    assert analyzed.is_error is False
+    assert [item[0] for item in recorded_progress] == [0, 1, 2]
+    assert runs[0].execution_status.value == "cancelled"
