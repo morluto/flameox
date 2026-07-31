@@ -1071,8 +1071,7 @@ class ExperimentService:
             for trial in trials
         )
         if counts and all(
-            item.unsupported + item.oracle_unsupported == item.attempted
-            and item.attempted > 0
+            item.unsupported + item.oracle_unsupported == item.attempted and item.attempted > 0
             for item in counts
         ):
             disposition = "unsupported"

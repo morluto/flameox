@@ -22,7 +22,7 @@ def parse_oracle_receipt(payload: bytes) -> OracleReceiptV1:
         raise DomainError(ErrorCode.WORKSPACE_INVALID, "Oracle receipt is not UTF-8 JSON.") from exc
 
     decoder = json.JSONDecoder(
-        parse_constant=lambda value: (_raise_invalid_number(value)),
+        parse_constant=lambda value: _raise_invalid_number(value),
         object_pairs_hook=_unique_object,
     )
     try:

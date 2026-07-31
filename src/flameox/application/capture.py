@@ -807,24 +807,24 @@ class CaptureService:
                         else f"validation_{oracle.strength.value}"
                     )
                     stdout_registration = await self._register_path_async(
-                            run_id,
-                            validation_output,
-                            kind=ArtifactKind.VALIDATION_OUTPUT,
-                            role=role,
-                            media_type="application/octet-stream",
-                        )
+                        run_id,
+                        validation_output,
+                        kind=ArtifactKind.VALIDATION_OUTPUT,
+                        role=role,
+                        media_type="application/octet-stream",
+                    )
                     registrations.append(stdout_registration)
                     stderr_artifact_id: str | None = None
                     if validation.stderr:
                         validation_stderr = output_root / "validation.stderr"
                         atomic_write_bytes(validation_stderr, validation.stderr)
                         stderr_registration = await self._register_path_async(
-                                run_id,
-                                validation_stderr,
-                                kind=ArtifactKind.PROCESS_OUTPUT,
-                                role="validation_stderr",
-                                media_type="application/octet-stream",
-                            )
+                            run_id,
+                            validation_stderr,
+                            kind=ArtifactKind.PROCESS_OUTPUT,
+                            role="validation_stderr",
+                            media_type="application/octet-stream",
+                        )
                         registrations.append(stderr_registration)
                         stderr_artifact_id = stderr_registration[0].artifact_id
                     if oracle.receipt_schema is None:
@@ -956,8 +956,7 @@ class CaptureService:
                 )
             if oracle_receipt_record is not None:
                 by_role = {
-                    registration.role: registration.artifact_id
-                    for registration, _ in registrations
+                    registration.role: registration.artifact_id for registration, _ in registrations
                 }
                 missing_roles = tuple(
                     role
@@ -972,8 +971,10 @@ class CaptureService:
                             if role in by_role
                         ),
                         "parsing_limitations": (
-                            ("Some diagnostic roles were not registered on this run: "
-                             + ", ".join(missing_roles),)
+                            (
+                                "Some diagnostic roles were not registered on this run: "
+                                + ", ".join(missing_roles),
+                            )
                             if missing_roles
                             else ()
                         ),

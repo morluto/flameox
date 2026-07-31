@@ -9,10 +9,7 @@ from typing import Any
 import pytest
 
 FIXTURE = (
-    Path(__file__).parents[1]
-    / "docs"
-    / "fixtures"
-    / "gitcontribute-external-validation-v1.json"
+    Path(__file__).parents[1] / "docs" / "fixtures" / "gitcontribute-external-validation-v1.json"
 )
 FIELDS = {
     "schema_version",

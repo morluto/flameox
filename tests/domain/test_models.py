@@ -86,8 +86,9 @@ def test_contracts_require_timezone_aware_datetimes() -> None:
     )
     assert manifest.created_at.tzinfo is UTC
 
+
 def test_oracle_receipt_parser_is_strict_and_preserves_typed_mismatch() -> None:
-    payload = b'''{
+    payload = b"""{
       "schema_version":"flameox.oracle-receipt.v1",
       "status":"fail",
       "reason":"contract_mismatch",
@@ -98,7 +99,7 @@ def test_oracle_receipt_parser_is_strict_and_preserves_typed_mismatch() -> None:
       "absolute_error":0.25,
       "tolerance":{"absolute":0.01,"relative":0.001},
       "diagnostic_roles":["primary"]
-    }'''
+    }"""
 
     receipt = parse_oracle_receipt(payload)
 
