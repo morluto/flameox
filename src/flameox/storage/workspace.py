@@ -32,7 +32,7 @@ class WorkspaceIdentity(ContractModel):
 
 
 def _workspace_initialization_error(error: OSError) -> DomainError:
-    details = {"operation": "workspace_initialization"}
+    details: dict[str, int | str] = {"operation": "workspace_initialization"}
     if error.errno is not None:
         details["errno"] = error.errno
 
