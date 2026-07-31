@@ -1,0 +1,486 @@
+schema_version = 1
+
+# Every test file is listed exactly once.  The pytest support hook adds these
+# markers to collected items, and tools/test.py uses the primary lane to build
+# focused commands.  Process, provider, and performance markers describe test
+# requirements without changing the primary owner.
+
+[[ownership]]
+owner = "adapters"
+lane = "adapters"
+paths = ["tests/adapters/test_coverage.py"]
+markers = ["integration", "optional", "requires_coverage"]
+
+
+[[ownership]]
+owner = "adapters"
+lane = "adapters"
+paths = ["tests/adapters/test_memray.py"]
+markers = ["integration", "optional", "requires_memray"]
+
+
+[[ownership]]
+owner = "adapters"
+lane = "adapters"
+paths = ["tests/adapters/test_pyperf.py", "tests/adapters/test_python_startup.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "adapters"
+lane = "adapters"
+paths = ["tests/adapters/test_pytest.py"]
+markers = ["integration"]
+
+
+[[ownership]]
+owner = "setup-runtime"
+lane = "adapters"
+paths = ["tests/adapters/test_setup_runtime.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "analysis"
+lane = "analysis"
+paths = ["tests/analysis/test_comparison.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "analysis-records"
+lane = "application"
+paths = ["tests/application/test_analysis_records.py"]
+markers = ["integration", "serial"]
+
+
+[[ownership]]
+owner = "artifact-service"
+lane = "application"
+paths = ["tests/application/test_artifact_service.py"]
+markers = ["integration"]
+
+
+[[ownership]]
+owner = "async-work"
+lane = "application"
+paths = ["tests/application/test_async_work.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "capabilities"
+lane = "application"
+paths = ["tests/application/test_capabilities.py"]
+markers = ["integration"]
+
+
+[[ownership]]
+owner = "comparison-samples"
+lane = "application"
+paths = ["tests/application/test_comparison_samples.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "detached-capture"
+lane = "process"
+paths = ["tests/application/test_detached.py"]
+markers = ["integration", "process", "serial"]
+
+
+[[ownership]]
+owner = "discovery"
+lane = "application"
+paths = ["tests/application/test_discovery.py"]
+markers = ["integration"]
+
+
+[[ownership]]
+owner = "environment-identity"
+lane = "application"
+paths = ["tests/application/test_environment_identity.py"]
+markers = ["integration"]
+
+
+[[ownership]]
+owner = "evidence-query"
+lane = "application"
+paths = ["tests/application/test_evidence_query.py"]
+markers = ["integration"]
+
+
+[[ownership]]
+owner = "evidence-scope"
+lane = "application"
+paths = ["tests/application/test_evidence_scope.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "experiments"
+lane = "application"
+paths = ["tests/application/test_experiments.py"]
+markers = ["integration", "serial"]
+
+
+[[ownership]]
+owner = "garbage-collection"
+lane = "storage"
+paths = ["tests/application/test_gc.py"]
+markers = ["integration", "serial"]
+
+
+[[ownership]]
+owner = "integrity"
+lane = "storage"
+paths = ["tests/application/test_integrity.py"]
+markers = ["integration"]
+
+
+[[ownership]]
+owner = "path-containment"
+lane = "application"
+paths = ["tests/application/test_path_containment.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "pipelines"
+lane = "application"
+paths = ["tests/application/test_pipelines.py"]
+markers = ["integration"]
+
+
+[[ownership]]
+owner = "proc-stat"
+lane = "application"
+paths = ["tests/application/test_proc_stat_parsing.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "python-evidence-capture"
+lane = "process"
+paths = ["tests/application/test_python_evidence_capture.py"]
+markers = ["integration", "process", "serial"]
+
+
+[[ownership]]
+owner = "recovery"
+lane = "application"
+paths = ["tests/application/test_recovery.py"]
+markers = ["integration"]
+
+
+[[ownership]]
+owner = "reductions"
+lane = "process"
+paths = ["tests/application/test_reductions.py"]
+markers = ["integration", "process", "serial"]
+
+
+[[ownership]]
+owner = "repair"
+lane = "storage"
+paths = ["tests/application/test_repair.py"]
+markers = ["integration", "serial"]
+
+
+[[ownership]]
+owner = "setup"
+lane = "cli"
+paths = ["tests/application/test_setup.py"]
+markers = ["integration", "serial"]
+
+
+[[ownership]]
+owner = "source-identity"
+lane = "application"
+paths = ["tests/application/test_source_identity.py"]
+markers = ["integration"]
+
+
+[[ownership]]
+owner = "status"
+lane = "application"
+paths = ["tests/application/test_status.py"]
+markers = ["integration"]
+
+
+[[ownership]]
+owner = "summaries"
+lane = "application"
+paths = ["tests/application/test_summaries.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "third-party-adapters"
+lane = "process"
+paths = ["tests/application/test_third_party_adapters.py"]
+markers = ["integration", "process", "serial"]
+
+
+[[ownership]]
+owner = "viewers"
+lane = "application"
+paths = ["tests/application/test_viewers.py"]
+markers = ["integration"]
+
+
+[[ownership]]
+owner = "domain-identity"
+lane = "core"
+paths = ["tests/domain/test_identity.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "domain-models"
+lane = "core"
+paths = ["tests/domain/test_models.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "publication-and-catalog"
+lane = "storage"
+paths = ["tests/evidence/test_publication_and_catalog.py"]
+markers = ["integration", "serial"]
+
+
+[[ownership]]
+owner = "execution-broker"
+lane = "process"
+paths = ["tests/execution/test_broker.py"]
+markers = ["integration", "process", "serial"]
+
+
+[[ownership]]
+owner = "golden-configuration"
+lane = "golden"
+paths = ["tests/golden/test_configuration_observations.py"]
+markers = ["integration", "serial"]
+
+
+[[ownership]]
+owner = "golden-memory"
+lane = "golden"
+paths = ["tests/golden/test_memory_regression.py"]
+markers = ["integration", "optional", "requires_memray", "serial"]
+
+
+[[ownership]]
+owner = "golden-reverse-scan"
+lane = "golden"
+paths = ["tests/golden/test_reverse_scan.py"]
+markers = ["integration", "serial"]
+
+
+[[ownership]]
+owner = "performance"
+lane = "performance"
+paths = ["tests/performance/test_catalog_scale.py"]
+markers = ["performance", "serial"]
+
+
+[[ownership]]
+owner = "offline-security"
+lane = "security"
+paths = ["tests/security/test_offline.py"]
+markers = ["integration", "process", "serial"]
+
+
+[[ownership]]
+owner = "storage-artifacts-and-runs"
+lane = "storage"
+paths = ["tests/storage/test_artifacts_and_runs.py"]
+markers = ["integration", "serial"]
+
+
+[[ownership]]
+owner = "storage-workspace"
+lane = "storage"
+paths = ["tests/storage/test_workspace.py"]
+markers = ["integration", "serial"]
+
+
+[[ownership]]
+owner = "cli-setup"
+lane = "cli"
+paths = ["tests/test_cli_setup.py"]
+markers = ["integration"]
+
+
+[[ownership]]
+owner = "cli-smoke"
+lane = "cli"
+paths = ["tests/test_cli_smoke.py"]
+markers = ["integration"]
+
+
+[[ownership]]
+owner = "release-metadata"
+lane = "core"
+paths = ["tests/test_release_metadata.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "setup-ui"
+lane = "cli"
+paths = ["tests/test_setup_ui.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "capture-planning"
+lane = "application"
+paths = ["tests/application/test_capture_planning.py"]
+markers = ["integration"]
+
+[[ownership]]
+owner = "capture-environment"
+lane = "application"
+paths = ["tests/application/test_capture_environment.py"]
+markers = ["integration"]
+
+[[ownership]]
+owner = "capture-containment"
+lane = "application"
+paths = ["tests/application/test_capture_containment.py"]
+markers = ["integration"]
+
+[[ownership]]
+owner = "capture-containment-providers"
+lane = "optional"
+paths = ["tests/application/test_capture_containment_integrations.py"]
+markers = ["integration", "optional", "process", "serial"]
+
+[[ownership]]
+owner = "capture-lifecycle"
+lane = "process"
+paths = ["tests/application/test_capture_lifecycle.py"]
+markers = ["integration", "process", "serial"]
+
+[[ownership]]
+owner = "capture-integrations"
+lane = "process"
+paths = ["tests/application/test_capture_integrations.py"]
+markers = ["integration", "process", "serial"]
+
+[[ownership]]
+owner = "capture-coverage-provider"
+lane = "optional"
+paths = ["tests/application/test_capture_coverage_provider.py"]
+markers = ["integration", "optional", "process", "serial", "requires_coverage"]
+
+[[ownership]]
+owner = "capture-pyspy-provider"
+lane = "optional"
+paths = ["tests/application/test_capture_pyspy_provider.py"]
+markers = [
+    "integration",
+    "optional",
+    "process",
+    "serial",
+    "requires_perfetto",
+    "requires_pyspy",
+]
+
+[[ownership]]
+owner = "capture-perf-provider"
+lane = "optional"
+paths = ["tests/application/test_capture_perf_provider.py"]
+markers = ["integration", "optional", "process", "serial", "requires_perf"]
+
+[[ownership]]
+owner = "capture-torch-provider"
+lane = "optional"
+paths = ["tests/application/test_capture_torch_provider.py"]
+markers = ["integration", "optional", "process", "serial", "requires_torch"]
+
+[[ownership]]
+owner = "investigation-revisions"
+lane = "application"
+paths = ["tests/application/test_investigation_revisions.py"]
+markers = ["integration", "serial"]
+
+[[ownership]]
+owner = "comparison-compatibility"
+lane = "application"
+paths = ["tests/application/test_comparison_compatibility.py"]
+markers = ["integration", "serial"]
+
+[[ownership]]
+owner = "comparison-cancellation"
+lane = "application"
+paths = ["tests/application/test_comparison_cancellation_and_pairing.py"]
+markers = ["integration", "serial"]
+
+[[ownership]]
+owner = "mcp-contracts"
+lane = "mcp"
+paths = ["tests/mcp/test_contracts.py"]
+markers = ["integration", "serial"]
+
+[[ownership]]
+owner = "mcp-workflows"
+lane = "mcp"
+paths = ["tests/mcp/test_workflows.py"]
+markers = ["integration", "serial"]
+
+[[ownership]]
+owner = "mcp-stdio-transport"
+lane = "process"
+paths = ["tests/mcp/test_stdio_transport.py"]
+markers = ["integration", "process", "serial"]
+
+[[ownership]]
+owner = "mcp-capture-workflows"
+lane = "process"
+paths = ["tests/mcp/test_capture_workflows.py"]
+markers = ["integration", "process", "serial"]
+
+[[ownership]]
+owner = "perfetto-parsing"
+lane = "optional"
+paths = ["tests/adapters/test_perfetto_parsing.py"]
+markers = ["integration", "optional", "requires_perfetto"]
+
+[[ownership]]
+owner = "perfetto-provider"
+lane = "optional"
+paths = ["tests/adapters/test_perfetto_provider.py"]
+markers = ["integration", "optional", "requires_perfetto"]
+
+[[ownership]]
+owner = "scaling-recipes"
+lane = "analysis"
+paths = ["tests/analysis/test_scaling_recipes.py"]
+markers = ["integration"]
+
+[[ownership]]
+owner = "memory-recipes"
+lane = "analysis"
+paths = ["tests/analysis/test_memory_recipes.py"]
+markers = ["integration"]
+
+[[ownership]]
+owner = "execution-recipes"
+lane = "analysis"
+paths = ["tests/analysis/test_execution_recipes.py"]
+markers = ["integration"]
+
+[[ownership]]
+owner = "recipe-invariants"
+lane = "analysis"
+paths = ["tests/analysis/test_recipe_invariants.py"]
+markers = ["integration"]
+
+[[ownership]]
+owner = "cli-process-setup"
+lane = "process"
+paths = ["tests/cli/test_setup_process.py"]
+markers = ["integration", "process", "serial"]

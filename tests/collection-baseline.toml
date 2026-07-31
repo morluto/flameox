@@ -1,0 +1,92 @@
+expected_test_count = 301
+
+# New files are normalized to their pre-split path so this receipt proves
+# test identity and parametrized case preservation across the decomposition.
+[moved_paths]
+'tests/adapters/test_perfetto_parsing.py' = 'tests/adapters/test_perfetto.py'
+'tests/adapters/test_perfetto_provider.py' = 'tests/adapters/test_perfetto.py'
+'tests/analysis/test_execution_recipes.py' = 'tests/analysis/test_recipes.py'
+'tests/analysis/test_memory_recipes.py' = 'tests/analysis/test_recipes.py'
+'tests/analysis/test_recipe_invariants.py' = 'tests/analysis/test_recipes.py'
+'tests/analysis/test_scaling_recipes.py' = 'tests/analysis/test_recipes.py'
+'tests/application/test_capture_containment.py' = 'tests/application/test_workloads_and_capture.py'
+'tests/application/test_capture_containment_integrations.py' = 'tests/application/test_workloads_and_capture.py'
+'tests/application/test_capture_environment.py' = 'tests/application/test_workloads_and_capture.py'
+'tests/application/test_capture_integrations.py' = 'tests/application/test_workloads_and_capture.py'
+'tests/application/test_capture_lifecycle.py' = 'tests/application/test_workloads_and_capture.py'
+'tests/application/test_capture_planning.py' = 'tests/application/test_workloads_and_capture.py'
+'tests/application/test_capture_coverage_provider.py' = 'tests/application/test_workloads_and_capture.py'
+'tests/application/test_capture_perf_provider.py' = 'tests/application/test_workloads_and_capture.py'
+'tests/application/test_capture_pyspy_provider.py' = 'tests/application/test_workloads_and_capture.py'
+'tests/application/test_capture_torch_provider.py' = 'tests/application/test_workloads_and_capture.py'
+'tests/application/test_comparison_cancellation_and_pairing.py' = 'tests/application/test_records_and_comparisons.py'
+'tests/application/test_comparison_compatibility.py' = 'tests/application/test_records_and_comparisons.py'
+'tests/application/test_investigation_revisions.py' = 'tests/application/test_records_and_comparisons.py'
+'tests/cli/test_setup_process.py' = 'tests/test_cli_setup.py'
+'tests/mcp/test_capture_workflows.py' = 'tests/mcp/test_server.py'
+'tests/mcp/test_contracts.py' = 'tests/mcp/test_server.py'
+'tests/mcp/test_stdio_transport.py' = 'tests/mcp/test_server.py'
+'tests/mcp/test_workflows.py' = 'tests/mcp/test_server.py'
+
+[moved_digests]
+'tests/adapters/test_perfetto.py' = 'f10a653fb41df80732bff21b5351b1f4eacfb30dcb358f3b690fb3dc5d3fe70f'
+'tests/analysis/test_recipes.py' = 'ed2303680ba2e59f1c362ed33f1a14bd2b8e271b80c6749f784cebb9abafd7a1'
+'tests/application/test_records_and_comparisons.py' = 'd052ad24e744c16d0058b1c01ab76a18d84bce0729d63cf824d5cd23046d0759'
+'tests/application/test_workloads_and_capture.py' = 'b85395cffa20e8c871139237d7d6a709f5439fde9a955a2f18c4960106904e78'
+'tests/mcp/test_server.py' = '2f0ccbec6e9c53a1a3eeabddadbfde30dc739219d201541d08fc5799893cab0f'
+'tests/test_cli_setup.py' = '2e1c3a607b7b4cefecb44f98c88c2e65ccbc0afaae39201c2c443eef0204c561'
+
+[files]
+'tests/adapters/test_coverage.py' = { count = 3, digest = 'a9aa85687b6f34101ebcf2d6b69c22c866f9279436bdb9cbaff2793dba714891' }
+'tests/adapters/test_memray.py' = { count = 3, digest = '929b943d44dd1e64914730a760870fb7f87154c0a036e7d6ef355ce42d858c66' }
+'tests/adapters/test_perfetto.py' = { count = 5, digest = 'f10a653fb41df80732bff21b5351b1f4eacfb30dcb358f3b690fb3dc5d3fe70f' }
+'tests/adapters/test_pyperf.py' = { count = 4, digest = 'a0b5fdf06a752d5d375254b2f05a5f6962df9a1e917181695f13ce6f24923fb5' }
+'tests/adapters/test_pytest.py' = { count = 6, digest = 'd7756e162c74611dd6c160c09586b40e4361157d3f021dc2497247a9bfed1a50' }
+'tests/adapters/test_python_startup.py' = { count = 8, digest = '8cfb0e6e9eeb98fad169198876908f40b710c9d138284860869c9f0713fd2538' }
+'tests/adapters/test_setup_runtime.py' = { count = 2, digest = '899779fb645d8ae6f3bbc0e5f9877d82a0fe195c2dafc58a978fa67973329bdc' }
+'tests/analysis/test_comparison.py' = { count = 4, digest = '311406582a5fda58dbd1e74e6f7dff58cbe2bb760536031bb160f0c50ff08fa2' }
+'tests/analysis/test_recipes.py' = { count = 7, digest = 'ed2303680ba2e59f1c362ed33f1a14bd2b8e271b80c6749f784cebb9abafd7a1' }
+'tests/application/test_analysis_records.py' = { count = 1, digest = '7a08286f866dbeef9c9a0500cead2b3ebf6ee6546f455ed3b5cc5407ee84b69f' }
+'tests/application/test_artifact_service.py' = { count = 2, digest = '2ed111222920a42e8679d1e0281f185dc0d28406470ca888d80d0a01cd87731c' }
+'tests/application/test_async_work.py' = { count = 1, digest = '5c21ab9d048e8676c0b086ff6859e87b28da82ab793c2b70de975f592355067e' }
+'tests/application/test_capabilities.py' = { count = 3, digest = '1c162d095860cc16b57f6580992dc5fd0d85ffea3c0409285abe4dc4ada736a2' }
+'tests/application/test_comparison_samples.py' = { count = 2, digest = 'f28179055d031cfb2d74b5f002c1c19278a64a46c5d0c02e32f91a4e9fef23df' }
+'tests/application/test_detached.py' = { count = 6, digest = 'b9ea1ff9369428a415da45feb03f7a5fbb2cab4acbde71339a258f10921b47ee' }
+'tests/application/test_discovery.py' = { count = 2, digest = '154e2545ae8110e6e72d19cd62a1734779f7bf2f6b14180f57ea2852365e8fd2' }
+'tests/application/test_environment_identity.py' = { count = 10, digest = '22a3e3a5af0f747fcf9a680ba01e2d05dab7362ed5ac558d774e788826fb62c6' }
+'tests/application/test_evidence_query.py' = { count = 1, digest = '452c19dca4b8844e095364946fdf74c0c3076809f11c7d730acceeb5c6b53e39' }
+'tests/application/test_evidence_scope.py' = { count = 2, digest = 'e3e51e28f67c6512e3943f88f469d937f88d5f7f88317a34868640e55b9f590b' }
+'tests/application/test_experiments.py' = { count = 10, digest = '81a7ad1d3b2724a6dbd32ed4204eda056a766d68141a7b529d2dc474fb95d0fe' }
+'tests/application/test_gc.py' = { count = 5, digest = '366b7ea2fd9e0790315e1a20a7b23700861c0d2a6eadba968f75702cd8d16d5a' }
+'tests/application/test_integrity.py' = { count = 1, digest = 'c44a2cb51b7f5a90c106b4a59e9661551a47ae8d0a21df308387618b99e277aa' }
+'tests/application/test_path_containment.py' = { count = 9, digest = '3336e2349910166ada6bd0519a015e74fe405dc3a0389d63a43e41d706dcfefc' }
+'tests/application/test_pipelines.py' = { count = 4, digest = '1c5ac759bae6ae00ef1b07be03422e53484720fa9f7e6b6f13ed8909426833ac' }
+'tests/application/test_proc_stat_parsing.py' = { count = 3, digest = 'ded9bc9bfb4f1dd3fe0f07efc2fec6e0543ac18e0b21485793f7d1b4c5de5913' }
+'tests/application/test_python_evidence_capture.py' = { count = 4, digest = 'a74791e80211abb9630845a3fd76a324c20124278f4df80140158f8c1495d03d' }
+'tests/application/test_records_and_comparisons.py' = { count = 8, digest = 'd052ad24e744c16d0058b1c01ab76a18d84bce0729d63cf824d5cd23046d0759' }
+'tests/application/test_recovery.py' = { count = 1, digest = 'f91a604faeffcce55b436242fd99e0b72a6a45cea94c92ac7f2ef918adf5db06' }
+'tests/application/test_reductions.py' = { count = 6, digest = '994e0a9b37e71bc4760a519d1e8635a40731ee91616cdb9d1d79d7f6454e20b0' }
+'tests/application/test_repair.py' = { count = 8, digest = '8ef894aad61cb81cffad358a910151ff01b890ff730b4dbcf9d5abd53b644518' }
+'tests/application/test_setup.py' = { count = 18, digest = '37bd26c693a7f435d38584d8c58ce184cfa7419627800b3f20e36ee39ed26248' }
+'tests/application/test_source_identity.py' = { count = 1, digest = '9269cc3025cf0035a14da2b8c601d8ad36dd50f2dabfc1c7b87b6a74e15e1ea4' }
+'tests/application/test_status.py' = { count = 3, digest = '1ff4f1c315236e7e1207fc54890018db1c94071b8bc916e0b9fb75cd5d35f254' }
+'tests/application/test_summaries.py' = { count = 4, digest = '350d1cb8ae547c947cf6e5b492f01a2c75e832af5d239731a87d6b30daa04905' }
+'tests/application/test_third_party_adapters.py' = { count = 7, digest = 'd169c20bdbb6f514887e75fe045f1a8950f946d915abc6d22d6836ac1959ab0c' }
+'tests/application/test_viewers.py' = { count = 8, digest = '17e9b4ec485fff59f49c11bc9a513e28da97e4d6d0af6e945ba548ab72aef663' }
+'tests/application/test_workloads_and_capture.py' = { count = 34, digest = 'b85395cffa20e8c871139237d7d6a709f5439fde9a955a2f18c4960106904e78' }
+'tests/domain/test_identity.py' = { count = 3, digest = '0dd4b644c18a6e8d07d56f9feb07c9af53da4791f465627d4c0f0fe6060a71e5' }
+'tests/domain/test_models.py' = { count = 5, digest = 'd89274e030afb6618d17d5e78c5d57431dd1462e22ce299adf190010bde1a3e8' }
+'tests/evidence/test_publication_and_catalog.py' = { count = 16, digest = '7048ea8ec31423ba2e28a5a8acd984500a8b964855343b10919c0880281f5d47' }
+'tests/execution/test_broker.py' = { count = 8, digest = '7a6c8aac249ab5dbc5ecb54bb12481889667d911c3961a62ece17d02c398d110' }
+'tests/golden/test_configuration_observations.py' = { count = 1, digest = '5cd37d54fc034cd103b3acbad18e1a9771b64e76fe4ec892c068ef36c94179f4' }
+'tests/golden/test_memory_regression.py' = { count = 1, digest = '7898013cd64ec203e28d00b6549f002586a2d23f0c06eba6f1c979478f1aac1e' }
+'tests/golden/test_reverse_scan.py' = { count = 1, digest = '11e8db62d67d86b3e2be63a8e3425dbd7927329f4d405a3d6718251286a20bea' }
+'tests/mcp/test_server.py' = { count = 21, digest = '2f0ccbec6e9c53a1a3eeabddadbfde30dc739219d201541d08fc5799893cab0f' }
+'tests/performance/test_catalog_scale.py' = { count = 4, digest = '1c7587225525c2e0cc877bf62105c1d2447ec5d230e0a9d0eaef0ae7322e9214' }
+'tests/security/test_offline.py' = { count = 1, digest = 'a9de75a583146be9fccb27627ae4fdd6d6f3265912dad9423fe97415ba833fd3' }
+'tests/storage/test_artifacts_and_runs.py' = { count = 14, digest = '0f27557254a46c2635bf5cfd47766e05d84e3bb38becf8d8bf6271cd2ebbfc2e' }
+'tests/storage/test_workspace.py' = { count = 7, digest = '1739a16010d438210cad3beadd3d08271b16200e3673f2756ab5b53786435615' }
+'tests/test_cli_setup.py' = { count = 6, digest = '2e1c3a607b7b4cefecb44f98c88c2e65ccbc0afaae39201c2c443eef0204c561' }
+'tests/test_cli_smoke.py' = { count = 4, digest = '7744e017596d6e7b50b425e639af57396a25a99e9c4ac98a6cd24473f7ce3473' }
+'tests/test_release_metadata.py' = { count = 2, digest = '6235e23370243d1e45fa84e75a6b8f1699af1d5d8a01b59d783a1b882bd077a9' }
+'tests/test_setup_ui.py' = { count = 1, digest = '24035fdd0bc224d58c3df8944d9c16f2525cabc217c3682fe93ffea1ac2204ab' }
