@@ -1,6 +1,9 @@
 .diagnostics/
 .mypy_cache/
 .pytest_cache/
+.coverage
+.test-results/
+.test-tmp.*
 .ruff_cache/
 .venv/
 __pycache__/

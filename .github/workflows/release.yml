@@ -93,11 +93,13 @@ jobs:
 
       - name: Verify Python package
         run: |
-          uv run ruff check src tests
-          uv run ruff format --check src tests
-          uv run mypy src tests
+          uv run ruff check src tests tools
+          uv run ruff format --check src tests tools
+          uv run mypy src tests tools
           uv run lint-imports
-          uv run pytest -q
+          uv run python tools/test.py core
+          uv run python tools/test.py process
+          uv run python tools/test.py collection
 
       - name: Verify npm bootstrap
         working-directory: npm

@@ -335,12 +335,20 @@ recoverable trash instead of deleting them immediately.
   open design questions
 - [Acceptance and verification](docs/acceptance.md): completion criteria and
   representative proof
+- [Testing](docs/testing.md): suite ownership, focused lanes, provider setup,
+  and collection-preservation checks
 
 ## Development
 
 ```console
-uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
-uv run ruff check src tests
-uv run mypy src tests
+uv sync --extra dev
+uv run python tools/test.py list
+uv run python tools/test.py core
+uv run ruff check src tests tools
+uv run mypy src tests tools
 uv run pytest -q
 ```
+
+`pytest` has no hidden retries and runs the deterministic core, excluding
+process, optional-provider, and performance lanes. Use the [testing guide](docs/testing.md)
+for focused subsystem commands, provider matrices, and the collection-preservation receipt.

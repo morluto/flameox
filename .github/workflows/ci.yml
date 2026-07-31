@@ -2,6 +2,8 @@ name: CI
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
   pull_request:
     branches: [main]
   push:
@@ -24,8 +26,8 @@ jobs:
           enable-cache: true
           cache-suffix: full-extras
       - run: uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
-      - run: uv run ruff check src tests
-      - run: uv run ruff format --check src tests
+      - run: uv run ruff check src tests tools
+      - run: uv run ruff format --check src tests tools
 
   type-check:
     name: Type Check
@@ -39,28 +41,99 @@ jobs:
           enable-cache: true
           cache-suffix: full-extras
       - run: uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
-      - run: uv run mypy src tests
+      - run: uv run mypy src tests tools
 
-  test:
-    name: Test
+  test-lanes:
+    name: Test (${{ matrix.lane }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.12"]
+        lane:
+          - core
+          - storage
+          - application
+          - analysis
+          - mcp
+          - process
+          - adapters
+          - cli
+          - security
+          - golden
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
           enable-cache: true
-          cache-suffix: full-extras
-      - run: uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
-      - run: uv run pytest -q --cov --cov-report=xml --cov-report=term
+          cache-suffix: test-lanes
+      - run: uv sync --extra dev
+      - run: uv run python tools/test.py ${{ matrix.lane }}
       - uses: codecov/codecov-action@v5
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && matrix.lane == 'core'
         with:
-          files: coverage.xml
+          files: .test-results/core-coverage.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.lane }}
+          path: .test-results/
+
+  optional-providers:
+    name: Optional provider (${{ matrix.provider }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: coverage
+            extra: execution
+          - provider: memray
+            extra: memory
+          - provider: perfetto
+            extra: trace
+          - provider: pyspy
+            extra: cpu
+          - provider: torch
+            extra: torch
+          - provider: host
+            extra: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-suffix: optional-${{ matrix.extra }}
+      - run: uv sync --extra dev --extra ${{ matrix.extra }}
+      - run: uv run python tools/test.py optional-${{ matrix.provider }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-optional-${{ matrix.provider }}
+          path: .test-results/
+
+  performance:
+    name: Performance acceptance
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-suffix: performance
+      - run: uv sync --extra dev
+      - run: FLAMEOX_RUN_PERFORMANCE=1 uv run python tools/test.py performance
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-performance
+          path: .test-results/
 
   dead-code:
     name: Dead Code
@@ -138,8 +211,8 @@ jobs:
       - run: npx oxfmt --check .
       - run: npm test
 
-  agents-md-validate:
-    name: Validate AGENTS.md
+  collection:
+    name: Collection & ownership
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -148,12 +221,18 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
-          cache-suffix: full-extras
-      - run: uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
+          cache-suffix: collection
+      - run: uv sync --extra dev
       - run: uv run flameox --help
-      - run: uv run ruff check src tests
-      - run: uv run mypy src tests
-      - run: uv run pytest --collect-only -q
+      - run: uv run ruff check src tests tools
+      - run: uv run mypy src tests tools
+      - run: uv run python tools/test.py ownership
+      - run: uv run python tools/test.py collection
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-collection
+          path: .test-results/
 
   build-summary:
     name: Build Performance Summary
@@ -161,13 +240,15 @@ jobs:
     needs:
       - lint
       - type-check
-      - test
+      - test-lanes
+      - optional-providers
+      - performance
       - dead-code
       - import-boundaries
       - unused-deps
       - security-audit
       - npm
-      - agents-md-validate
+      - collection
     if: always()
     timeout-minutes: 5
     steps:
