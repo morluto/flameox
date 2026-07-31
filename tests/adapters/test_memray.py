@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import memray
 import pytest
 
 from flameox.adapters import MemrayExtractor
@@ -12,6 +11,8 @@ from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
+
+memray = pytest.importorskip("memray", reason="optional provider unavailable: install memray")
 
 
 def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(

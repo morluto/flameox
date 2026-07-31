@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import memray
+import pytest
 
 from flameox.adapters import MemrayExtractor
 from flameox.application import (
@@ -24,6 +24,8 @@ from flameox.application import (
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, EvidenceLevel, FindingAssessment
 from flameox.storage import Workspace
+
+memray = pytest.importorskip("memray", reason="optional provider unavailable: install memray")
 
 
 def _capture(path: Path, allocation_count: int) -> None:

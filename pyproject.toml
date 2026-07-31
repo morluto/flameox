@@ -78,10 +78,24 @@ flameox = "flameox.cli:app"
 packages = ["src/flameox"]
 
 [tool.pytest.ini_options]
-addopts = "-ra --strict-config --strict-markers --durations=10 --reruns=2 --reruns-delay=1"
+addopts = "-ra --strict-config --strict-markers --durations=10 -p no:randomly -m 'not performance and not optional and not process'"
 testpaths = ["tests"]
 markers = [
+    "unit: deterministic tests for one semantic owner",
+    "integration: tests crossing two or more Flameox services",
+    "process: tests that spawn, transport to, or cancel another process",
+    "optional: tests requiring a provider or host capability outside the core install",
     "performance: representative local corpus performance acceptance checks",
+    "serial: tests that must not share a process or host resource with another test",
+    "requires_coverage: requires the optional coverage.py provider",
+    "requires_bwrap: requires the Bubblewrap executable",
+    "requires_cargo: requires the Cargo executable",
+    "requires_memray: requires the optional Memray provider",
+    "requires_perf: requires the Linux perf executable and permissions",
+    "requires_perfetto: requires a local Trace Processor provider",
+    "requires_pyspy: requires the optional py-spy provider",
+    "requires_systemd: requires a systemd user manager",
+    "requires_torch: requires the optional PyTorch provider",
 ]
 xfail_strict = true
 

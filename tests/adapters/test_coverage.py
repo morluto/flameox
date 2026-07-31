@@ -4,8 +4,6 @@ import warnings
 from pathlib import Path
 
 import pytest
-from coverage import Coverage, CoverageData
-from coverage.exceptions import CoverageWarning
 
 from flameox.adapters import CoverageExtractor
 from flameox.analysis import RecipeService
@@ -13,6 +11,13 @@ from flameox.application import ImportArtifactRequest, ImportService
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import Workspace
+
+_coverage = pytest.importorskip(
+    "coverage", reason="optional provider unavailable: install coverage"
+)
+Coverage = _coverage.Coverage
+CoverageData = _coverage.CoverageData
+CoverageWarning = _coverage.exceptions.CoverageWarning
 
 
 def test_coverage_extractor_uses_public_data_api_and_normalizes_paths(

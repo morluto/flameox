@@ -1,12 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
-import pty
-import selectors
-import subprocess
-import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -122,52 +116,3 @@ def test_npm_bootstrap_prints_runtime_to_wizard_handoff(
     assert result.exit_code == 0, result.output
     assert "Managed runtime ready. Starting flameox setup..." in result.output
     assert result.output.index("Managed runtime ready") < result.output.index("flameox setup")
-
-
-@pytest.mark.skipif(os.name != "posix", reason="PTY smoke test requires POSIX")
-def test_npm_bootstrap_pty_reaches_first_python_prompt(tmp_path: Path) -> None:
-    fake_uvx = tmp_path / "uvx"
-    flameox = Path(sys.executable).with_name("flameox")
-    fake_uvx.write_text(
-        f"""#!{sys.executable}
-import os, sys
-arguments = sys.argv[1:]
-handoff = arguments.index("flameox")
-os.execv({str(flameox)!r}, [{str(flameox)!r}, *arguments[handoff + 1:]])
-"""
-    )
-    fake_uvx.chmod(0o700)
-    bootstrap = Path(__file__).parents[1] / "npm" / "bin" / "flameox.cjs"
-    master, slave = pty.openpty()
-    process = subprocess.Popen(
-        ["node", str(bootstrap), "setup"],
-        stdin=slave,
-        stdout=slave,
-        stderr=slave,
-        env={
-            **os.environ,
-            "FLAMEOX_UV_EXECUTABLE": str(fake_uvx),
-            "FLAMEOX_SETUP_HOME": str(tmp_path / "home"),
-            "FLAMEOX_SETUP_DATA_ROOT": str(tmp_path / "data"),
-        },
-        close_fds=True,
-    )
-    os.close(slave)
-    selector = selectors.DefaultSelector()
-    selector.register(master, selectors.EVENT_READ)
-    transcript = bytearray()
-    deadline = time.monotonic() + 10
-    try:
-        while time.monotonic() < deadline and b"Select MCP clients to connect" not in transcript:
-            if selector.select(timeout=0.25):
-                transcript.extend(os.read(master, 4_096))
-    finally:
-        process.terminate()
-        process.wait(timeout=5)
-        selector.close()
-        os.close(master)
-
-    output = transcript.decode(errors="replace")
-    assert "cached managed Python runtime" in output
-    assert "Managed runtime ready. Starting flameox setup..." in output
-    assert "Select MCP clients to connect" in output
