@@ -6,7 +6,7 @@ import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 from scipy.stats import bootstrap, spearmanr
@@ -170,6 +170,10 @@ class FailureAnalysisResult(ContractModel):
     corpus_commit_id: str
     cohort_id: str
     filters_applied: tuple[str, ...]
+    eligible_runs: int = 0
+    failed_runs: int = 0
+    population_status: Literal["observed", "empty", "filtered_empty"] = "empty"
+    empty_reason: Literal["no_runs", "no_matching_runs", "no_failures"] | None = "no_runs"
     failures: tuple[FailureCluster, ...]
     total_clusters: int
     returned: int
@@ -791,15 +795,18 @@ class RecipeService:
                     ) AS revision_order
                 FROM runs
             ),
-            failed AS (
+            eligible AS (
                 SELECT * FROM latest
                 WHERE revision_order = 1
-                  AND (
+                  {cohort_filter}
+            ),
+            failed AS (
+                SELECT * FROM eligible
+                WHERE (
                     execution_status NOT IN ('succeeded', 'not_applicable')
                     OR capture_status IN ('failed', 'cancelled')
-                    OR validation_status = 'failed'
+                    OR validation_status IN ('failed', 'error', 'inconclusive', 'unsupported')
                   )
-                  {cohort_filter}
             ),
             clusters AS (
                 SELECT collector, execution_status, capture_status,
@@ -814,6 +821,14 @@ class RecipeService:
             )
         """
         with self._open_snapshot(corpus_commit_id) as snapshot:
+            population_row = snapshot.execute(
+                query + " SELECT "
+                "(SELECT count(*) FROM latest WHERE revision_order = 1), "
+                "(SELECT count(*) FROM eligible), "
+                "(SELECT count(*) FROM failed)",
+                tuple(parameters),
+            ).fetchone()
+            assert population_row is not None
             count_row = snapshot.execute(
                 query + " SELECT count(*) FROM clusters",
                 tuple(parameters),
@@ -885,6 +900,19 @@ class RecipeService:
             for row in change_rows
         )
         failed_run_count = int(coverage_row[0])
+        workspace_run_count = int(population_row[0])
+        eligible_run_count = int(population_row[1])
+        population_status: Literal["observed", "empty", "filtered_empty"]
+        empty_reason: Literal["no_runs", "no_matching_runs", "no_failures"] | None
+        if workspace_run_count == 0:
+            population_status = "empty"
+            empty_reason = "no_runs"
+        elif eligible_run_count == 0:
+            population_status = "filtered_empty"
+            empty_reason = "no_matching_runs"
+        else:
+            population_status = "observed"
+            empty_reason = "no_failures" if failed_run_count == 0 else None
         denominator = failed_run_count or 1
         hypotheses: list[str] = []
         if len({failure.collector for failure in failures}) > 1:
@@ -919,6 +947,10 @@ class RecipeService:
                 }
             ),
             filters_applied=tuple(applied),
+            eligible_runs=eligible_run_count,
+            failed_runs=failed_run_count,
+            population_status=population_status,
+            empty_reason=empty_reason,
             failures=failures,
             total_clusters=total,
             returned=len(failures),
