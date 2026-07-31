@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import memray
+import pytest
 
 from flameox.adapters import MemrayExtractor
 from flameox.application import (
@@ -27,6 +27,7 @@ from flameox.storage import Workspace
 
 
 def _capture(path: Path, allocation_count: int) -> None:
+    memray = pytest.importorskip("memray", reason="optional provider unavailable: install memray")
     with memray.Tracker(str(path)):
         retained = [bytearray(4_096) for _ in range(allocation_count)]
         assert len(retained) == allocation_count

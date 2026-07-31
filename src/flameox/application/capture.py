@@ -11,6 +11,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -139,13 +140,19 @@ class _CaptureExecution:
                 "lease": lease,
             }
         )
-        await run_atomic_thread(
-            lambda: self.service.runs.append(
-                leased,
-                expected_revision=current.revision,
+        lease_write = asyncio.create_task(
+            run_atomic_thread(
+                lambda: self.service.runs.append(
+                    leased,
+                    expected_revision=current.revision,
+                )
             )
         )
-        self.run = leased
+        try:
+            self.run = await asyncio.shield(lease_write)
+        except asyncio.CancelledError:
+            self.run = await asyncio.shield(lease_write)
+            raise
 
     async def record_cleanup(self, complete: bool) -> None:
         self.cleanup_complete = complete
@@ -172,18 +179,33 @@ class _CaptureExecution:
             error_code=error_code,
         )
         current = self.run
-        try:
-            terminal = await run_atomic_thread(
-                lambda: self.service._finish_error(
-                    current,
-                    execution=execution,
-                    message=message,
-                    cleanup_complete=(
-                        self.cleanup_complete if cleanup_complete is None else cleanup_complete
-                    ),
-                    process=process,
-                )
+
+        def finish_error(run: RunManifest) -> RunManifest:
+            return self.service._finish_error(
+                run,
+                execution=execution,
+                message=message,
+                cleanup_complete=(
+                    self.cleanup_complete if cleanup_complete is None else cleanup_complete
+                ),
+                process=process,
             )
+
+        try:
+            for attempt in range(4):
+                try:
+                    terminal = await run_atomic_thread(partial(finish_error, current))
+                    break
+                except DomainError as error:
+                    if error.code is not ErrorCode.REVISION_CONFLICT or attempt == 3:
+                        raise
+                    current = await run_atomic_thread(
+                        lambda: self.service.runs.read(self.plan.run_id)
+                    )
+                    if current.finished_at is not None:
+                        terminal = current
+                        break
+                    self.run = current
         finally:
             self.cleanup_staging()
         self.run = terminal
@@ -559,11 +581,13 @@ class CaptureService:
             await capture.report(3, "Source and environment identity collected")
         except asyncio.CancelledError as cancellation:
             try:
-                await capture.terminate(
-                    execution=ExecutionStatus.CANCELLED,
-                    message="Capture cancelled while collecting source identity.",
-                    phase="capture cancelled during source identity",
-                    error_code="cancelled",
+                await asyncio.shield(
+                    capture.terminate(
+                        execution=ExecutionStatus.CANCELLED,
+                        message="Capture cancelled while collecting source identity.",
+                        phase="capture cancelled during source identity",
+                        error_code="cancelled",
+                    )
                 )
             finally:
                 raise cancellation
@@ -639,11 +663,13 @@ class CaptureService:
             await capture.report(5, "Collector execution complete")
         except asyncio.CancelledError as cancellation:
             try:
-                await capture.terminate(
-                    execution=ExecutionStatus.CANCELLED,
-                    message="Capture cancelled by caller after bounded cleanup.",
-                    phase="capture cancelled during collector execution",
-                    error_code="cancelled",
+                await asyncio.shield(
+                    capture.terminate(
+                        execution=ExecutionStatus.CANCELLED,
+                        message="Capture cancelled by caller after bounded cleanup.",
+                        phase="capture cancelled during collector execution",
+                        error_code="cancelled",
+                    )
                 )
             finally:
                 raise cancellation
@@ -873,11 +899,13 @@ class CaptureService:
             await capture.report(7, "Artifacts registered")
         except asyncio.CancelledError as cancellation:
             try:
-                await capture.terminate(
-                    execution=ExecutionStatus.CANCELLED,
-                    message=("Capture cancelled during validation or artifact registration."),
-                    phase="capture cancelled during validation or registration",
-                    error_code="cancelled",
+                await asyncio.shield(
+                    capture.terminate(
+                        execution=ExecutionStatus.CANCELLED,
+                        message=("Capture cancelled during validation or artifact registration."),
+                        phase="capture cancelled during validation or registration",
+                        error_code="cancelled",
+                    )
                 )
             finally:
                 raise cancellation
@@ -983,12 +1011,14 @@ class CaptureService:
                 )
             )
         except asyncio.CancelledError as cancellation:
-            await capture.terminate(
-                execution=ExecutionStatus.CANCELLED,
-                message="Capture cancelled during atomic evidence publication.",
-                phase="capture cancelled during evidence publication",
-                error_code="cancelled",
-                cleanup_complete=True,
+            await asyncio.shield(
+                capture.terminate(
+                    execution=ExecutionStatus.CANCELLED,
+                    message="Capture cancelled during atomic evidence publication.",
+                    phase="capture cancelled during evidence publication",
+                    error_code="cancelled",
+                    cleanup_complete=True,
+                )
             )
             raise cancellation
         except Exception as error:

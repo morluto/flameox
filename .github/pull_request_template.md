@@ -10,9 +10,11 @@
 
 <!-- Commands you used to verify the change (lint, type-check, test, etc.) -->
 ```console
-uv run ruff check src tests
-uv run mypy src tests
-uv run pytest -q
+uv run ruff check src tests tools
+uv run mypy src tests tools
+uv run python tools/test.py core
+uv run python tools/test.py process
+uv run python tools/test.py collection
 ```
 
 ## Compatibility
