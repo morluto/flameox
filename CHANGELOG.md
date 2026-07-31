@@ -1,6 +1,35 @@
 # Changelog
 
 All notable changes to flameox are documented in this file.
+## [0.1.3] - 2026-07-31
+### Bug Fixes
+
+- **experiments:** Preserve historical trial lookup semantics
+- **capture:** Reconcile cancellation revision races
+- **capture:** Preserve terminal state during cancellation
+- **storage:** Type workspace error details
+- **mcp:** Make workspace initialization idempotent
+- **storage:** Normalize workspace initialization failures
+### Continuous Integration
+
+- Preserve optional collection and upload diagnostics
+- Route explicit test lanes
+- Add build performance tracking with uv caching and summary job
+### Documentation
+
+- **experiments:** Add semantic matrix and receipt fixtures
+- **mcp:** Clarify project initialization flow
+### Features
+
+- **experiments:** Preserve structured oracle receipts
+- **analysis:** Expose failure population semantics
+### Styling
+
+- Apply ruff formatting
+### Testing
+
+- Add ownership and lane runner
+- Decompose suite by semantic owner
 ## [0.1.2] - 2026-07-30
 ### Bug Fixes
 
