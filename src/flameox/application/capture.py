@@ -11,6 +11,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -178,18 +179,33 @@ class _CaptureExecution:
             error_code=error_code,
         )
         current = self.run
-        try:
-            terminal = await run_atomic_thread(
-                lambda: self.service._finish_error(
-                    current,
-                    execution=execution,
-                    message=message,
-                    cleanup_complete=(
-                        self.cleanup_complete if cleanup_complete is None else cleanup_complete
-                    ),
-                    process=process,
-                )
+
+        def finish_error(run: RunManifest) -> RunManifest:
+            return self.service._finish_error(
+                run,
+                execution=execution,
+                message=message,
+                cleanup_complete=(
+                    self.cleanup_complete if cleanup_complete is None else cleanup_complete
+                ),
+                process=process,
             )
+
+        try:
+            for attempt in range(4):
+                try:
+                    terminal = await run_atomic_thread(partial(finish_error, current))
+                    break
+                except DomainError as error:
+                    if error.code is not ErrorCode.REVISION_CONFLICT or attempt == 3:
+                        raise
+                    current = await run_atomic_thread(
+                        lambda: self.service.runs.read(self.plan.run_id)
+                    )
+                    if current.finished_at is not None:
+                        terminal = current
+                        break
+                    self.run = current
         finally:
             self.cleanup_staging()
         self.run = terminal
