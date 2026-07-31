@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -105,6 +107,8 @@ class ValidationStatus(StrEnum):
     PASSED = "passed"
     FAILED = "failed"
     ERROR = "error"
+    INCONCLUSIVE = "inconclusive"
+    UNSUPPORTED = "unsupported"
     CANCELLED = "cancelled"
 
 
@@ -134,6 +138,99 @@ class OracleStrength(StrEnum):
     EXECUTION_CHECK = "execution_check"
     CONTRACT_CHECK = "contract_check"
     CROSS_TREATMENT_EQUIVALENCE = "cross_treatment_equivalence"
+
+
+OracleScalar = None | bool | int | float | str
+
+
+class OracleReceiptValue(ContractModel):
+    kind: Literal["scalar", "digest"]
+    value: OracleScalar
+
+    @model_validator(mode="after")
+    def valid_value(self) -> OracleReceiptValue:
+        if self.kind == "digest":
+            if not isinstance(self.value, str) or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", self.value
+            ):
+                raise ValueError("digest receipt values require a sha256 identity")
+        elif isinstance(self.value, str) and len(self.value) > 500:
+            raise ValueError("scalar receipt strings are limited to 500 characters")
+        elif (
+            isinstance(self.value, int)
+            and not isinstance(self.value, bool)
+            and abs(self.value) > 10**18
+        ):
+            raise ValueError("scalar receipt integers are limited to 18 digits")
+        if isinstance(self.value, float) and not math.isfinite(self.value):
+            raise ValueError("receipt scalar numbers must be finite")
+        return self
+
+
+class OracleTolerance(ContractModel):
+    absolute: Annotated[float, Field(ge=0)] | None = None
+    relative: Annotated[float, Field(ge=0)] | None = None
+    equal_nan: bool = False
+
+    @field_validator("absolute", "relative")
+    @classmethod
+    def finite_tolerance(cls, value: float | None) -> float | None:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("oracle tolerances must be finite")
+        return value
+
+
+class OracleReceiptV1(ContractModel):
+    schema_version: Literal["flameox.oracle-receipt.v1"]
+    status: Literal["pass", "fail", "inconclusive", "unsupported"]
+    reason: Annotated[
+        str,
+        StringConstraints(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._:-]+$"),
+    ]
+    case_id: Identifier | None = None
+    output_field: Identifier | None = None
+    coordinate: Annotated[tuple[str | int, ...], Field(max_length=8)] = ()
+    expected: OracleReceiptValue | None = None
+    observed: OracleReceiptValue | None = None
+    absolute_error: Annotated[float, Field(ge=0)] | None = None
+    relative_error: Annotated[float, Field(ge=0)] | None = None
+    tolerance: OracleTolerance | None = None
+    diagnostic_roles: Annotated[tuple[Identifier, ...], Field(max_length=8)] = ()
+    limitations: Annotated[
+        tuple[Annotated[str, StringConstraints(max_length=500)], ...],
+        Field(max_length=16),
+    ] = ()
+
+    @field_validator("absolute_error", "relative_error")
+    @classmethod
+    def finite_error(cls, value: float | None) -> float | None:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("oracle errors must be finite")
+        return value
+
+    @field_validator("coordinate")
+    @classmethod
+    def bounded_coordinate(cls, value: tuple[str | int, ...]) -> tuple[str | int, ...]:
+        if any(
+            (isinstance(item, bool))
+            or (isinstance(item, str) and (not item or len(item) > 200))
+            or (isinstance(item, int) and abs(item) > 10**9)
+            for item in value
+        ):
+            raise ValueError("coordinate components exceed their bounds")
+        return value
+
+
+class OracleReceiptRecord(ContractModel):
+    receipt: OracleReceiptV1
+    receipt_artifact_id: Digest
+    validation_stdout_artifact_id: Digest | None = None
+    validation_stderr_artifact_id: Digest | None = None
+    diagnostic_artifact_ids: Annotated[tuple[Digest, ...], Field(max_length=8)] = ()
+    parsing_limitations: Annotated[
+        tuple[Annotated[str, StringConstraints(max_length=500)], ...],
+        Field(max_length=16),
+    ] = ()
 
 
 class InvestigationStatus(StrEnum):
@@ -503,6 +600,7 @@ class RunManifest(ContractModel):
     writable_roots: tuple[WritableRootBinding, ...] = ()
     external_context: ExternalExecutionContext | None = None
     execution_identity: WorkloadExecutionIdentity | None = None
+    oracle_receipt: OracleReceiptRecord | None = None
 
     @model_validator(mode="after")
     def validate_run_type(self) -> RunManifest:
@@ -594,10 +692,15 @@ class Trial(ContractModel):
     outcome: TrialOutcome
     exclusion_reason: str | None = None
     validation_status: ValidationStatus
+    oracle_receipt: OracleReceiptV1 | None = None
+    oracle_receipt_artifact_id: Digest | None = None
     failure_class: Literal[
         "none",
         "unattempted",
         "oracle_failure",
+        "oracle_inconclusive",
+        "oracle_unsupported",
+        "oracle_receipt_error",
         "process_failure",
         "timeout",
         "cancellation",

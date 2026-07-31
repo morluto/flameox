@@ -294,6 +294,9 @@ class ExperimentReceipt(ContractModel):
     corpus_commit_id: str
     limitations: tuple[str, ...]
     resource_uri: str
+    trial_collection_resource_uri: str
+    first_failure_trial_id: str | None = None
+    first_failure_resource_uri: str | None = None
 
 
 class EvidenceReceipt(ContractModel):
@@ -842,6 +845,15 @@ def create_server(
             experiment_id = result.experiment.experiment_id
             resource_uri = f"flameox://experiments/{experiment_id}"
             attempted_trials = sum(trial.outcome != "unattempted" for trial in result.trials)
+            trial_collection_uri = f"{resource_uri}/trials"
+            first_failure_trial_id = (
+                result.outcome.first_failure_trial_id if result.outcome is not None else None
+            )
+            first_failure_uri = (
+                f"{trial_collection_uri}/{first_failure_trial_id}"
+                if first_failure_trial_id is not None
+                else None
+            )
             receipt = ExperimentReceipt(
                 experiment_id=experiment_id,
                 attempted_trials=attempted_trials,
@@ -858,6 +870,9 @@ def create_server(
                 corpus_commit_id=result.corpus_commit_id,
                 limitations=result.limitations,
                 resource_uri=resource_uri,
+                first_failure_trial_id=first_failure_trial_id,
+                first_failure_resource_uri=first_failure_uri,
+                trial_collection_resource_uri=trial_collection_uri,
             )
             return _success(
                 receipt,
@@ -868,6 +883,24 @@ def create_server(
                         uri=resource_uri,
                         description="Immutable experiment protocol.",
                         mime_type="application/json",
+                    ),
+                    ResourceLink(
+                        name=f"Experiment {experiment_id} trials",
+                        uri=trial_collection_uri,
+                        description="Bounded immutable trial collection.",
+                        mime_type="application/json",
+                    ),
+                    *(
+                        (
+                            ResourceLink(
+                                name=f"First failing trial {first_failure_trial_id}",
+                                uri=first_failure_uri,
+                                description="First failing trial and structured oracle receipt.",
+                                mime_type="application/json",
+                            ),
+                        )
+                        if first_failure_uri is not None
+                        else ()
                     ),
                 ),
             )
@@ -1978,6 +2011,35 @@ def create_server(
         try:
             state = _active_state(lifespan_state)
             value = ExperimentService(state.require_workspace()).experiments.read(experiment_id)
+            return value.model_dump_json(indent=2)
+        except DomainError as error:
+            return json.dumps({"ok": False, "error": error.to_detail()})
+
+    @server.resource(
+        "flameox://experiments/{experiment_id}/trials",
+        mime_type="application/json",
+        description="Bounded immutable trial collection for an experiment.",
+    )
+    async def experiment_trials_resource(experiment_id: str) -> str:
+        try:
+            state = _active_state(lifespan_state)
+            value = ExperimentService(state.require_workspace()).list_trials(experiment_id)
+            return value.model_dump_json(indent=2)
+        except DomainError as error:
+            return json.dumps({"ok": False, "error": error.to_detail()})
+
+    @server.resource(
+        "flameox://experiments/{experiment_id}/trials/{trial_id}",
+        mime_type="application/json",
+        description="One immutable trial and its structured oracle receipt.",
+    )
+    async def experiment_trial_resource(experiment_id: str, trial_id: str) -> str:
+        try:
+            state = _active_state(lifespan_state)
+            value = ExperimentService(state.require_workspace()).get_trial(
+                trial_id,
+                experiment_id=experiment_id,
+            )
             return value.model_dump_json(indent=2)
         except DomainError as error:
             return json.dumps({"ok": False, "error": error.to_detail()})

@@ -30,6 +30,7 @@ Scalar = str | int | float | bool
 class WorkloadOracleConfig(ContractModel):
     strength: OracleStrength = OracleStrength.EXECUTION_CHECK
     argv: Annotated[tuple[str, ...], Field(max_length=1_024)] = ()
+    receipt_schema: Literal["flameox.oracle-receipt.v1"] | None = None
 
 
 class WorkloadRequirementsConfig(ContractModel):
@@ -205,6 +206,7 @@ class ApprovalRecord(ContractModel):
 class ResolvedOracle(ContractModel):
     strength: OracleStrength
     command: CommandSpec
+    receipt_schema: Literal["flameox.oracle-receipt.v1"] | None = None
 
 
 class DeclaredWorkflowSummary(ContractModel):
@@ -527,6 +529,7 @@ class WorkloadService:
         rendered = tuple(_render(value, selected) for value in config.oracle.argv)
         return ResolvedOracle(
             strength=config.oracle.strength,
+            receipt_schema=config.oracle.receipt_schema,
             command=CommandSpec(
                 argv=(
                     str(self._resolve_executable(rendered[0], cwd)),

@@ -32,6 +32,7 @@ from flameox.application.evidence_rows import (
 )
 from flameox.application.execution_identity import ExecutionIdentityService
 from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.oracle_receipts import parse_oracle_receipt
 from flameox.application.preflight import PreflightService
 from flameox.application.run_rows import run_row
 from flameox.application.source import collect_source_state
@@ -56,6 +57,7 @@ from flameox.domain import (
     ExecutionStatus,
     ExternalExecutionContext,
     IdentityQuality,
+    OracleReceiptRecord,
     OracleStrength,
     ProcessResult,
     RunManifest,
@@ -722,6 +724,7 @@ class CaptureService:
         adapter_extraction_rows: list[dict[str, object]] = []
         validation_status = ValidationStatus.NOT_REQUESTED
         validation_limitations: list[str] = []
+        oracle_receipt_record: OracleReceiptRecord | None = None
         try:
             oracle = self.workloads.resolve_oracle(
                 plan.workload_name,
@@ -764,6 +767,11 @@ class CaptureService:
                             environment_allowlist=(
                                 self.workspace.config.execution.child_environment_allowlist
                             ),
+                            environment_overrides=(
+                                {"FLAMEOX_ORACLE_RECEIPT": str(output_root / "oracle-receipt.json")}
+                                if oracle.receipt_schema is not None
+                                else {}
+                            ),
                             allowed_working_roots=self._allowed_roots(),
                             timeout_seconds=oracle.command.timeout_seconds,
                             max_output_bytes=(self.workspace.config.execution.max_output_bytes),
@@ -790,11 +798,7 @@ class CaptureService:
                         ),
                         on_cleanup=capture.record_cleanup,
                     )
-                    validation_status = (
-                        ValidationStatus.PASSED
-                        if validation.process.exit_code == 0
-                        else ValidationStatus.FAILED
-                    )
+                    validation_status = ValidationStatus.FAILED
                     validation_output = output_root / "validation.stdout"
                     atomic_write_bytes(validation_output, validation.stdout)
                     role = (
@@ -802,30 +806,84 @@ class CaptureService:
                         if oracle.strength is OracleStrength.CROSS_TREATMENT_EQUIVALENCE
                         else f"validation_{oracle.strength.value}"
                     )
-                    registrations.append(
-                        await self._register_path_async(
+                    stdout_registration = await self._register_path_async(
                             run_id,
                             validation_output,
                             kind=ArtifactKind.VALIDATION_OUTPUT,
                             role=role,
                             media_type="application/octet-stream",
                         )
-                    )
+                    registrations.append(stdout_registration)
+                    stderr_artifact_id: str | None = None
                     if validation.stderr:
                         validation_stderr = output_root / "validation.stderr"
                         atomic_write_bytes(validation_stderr, validation.stderr)
-                        registrations.append(
-                            await self._register_path_async(
+                        stderr_registration = await self._register_path_async(
                                 run_id,
                                 validation_stderr,
                                 kind=ArtifactKind.PROCESS_OUTPUT,
                                 role="validation_stderr",
                                 media_type="application/octet-stream",
                             )
+                        registrations.append(stderr_registration)
+                        stderr_artifact_id = stderr_registration[0].artifact_id
+                    if oracle.receipt_schema is None:
+                        validation_status = (
+                            ValidationStatus.PASSED
+                            if validation.process.exit_code == 0
+                            else ValidationStatus.FAILED
                         )
-                    if validation_status is not ValidationStatus.PASSED:
+                    else:
+                        receipt_path = output_root / "oracle-receipt.json"
+                        receipt_registration: tuple[ArtifactRegistration, int] | None = None
+                        try:
+                            receipt_registration = await self._register_path_async(
+                                run_id,
+                                receipt_path,
+                                kind=ArtifactKind.VALIDATION_OUTPUT,
+                                role="validation_receipt",
+                                media_type="application/json",
+                                producer=plan.workload_name,
+                                producer_version=oracle.receipt_schema,
+                            )
+                            registrations.append(receipt_registration)
+                            authoritative_receipt = self.artifacts.get(
+                                receipt_registration[0].artifact_id
+                            )
+                            receipt = parse_oracle_receipt(
+                                authoritative_receipt.payload_path.read_bytes()
+                            )
+                            oracle_receipt_record = OracleReceiptRecord(
+                                receipt=receipt,
+                                receipt_artifact_id=receipt_registration[0].artifact_id,
+                                validation_stdout_artifact_id=stdout_registration[0].artifact_id,
+                                validation_stderr_artifact_id=stderr_artifact_id,
+                            )
+                            if validation.process.exit_code == 0:
+                                validation_status = {
+                                    "pass": ValidationStatus.PASSED,
+                                    "fail": ValidationStatus.FAILED,
+                                    "inconclusive": ValidationStatus.INCONCLUSIVE,
+                                    "unsupported": ValidationStatus.UNSUPPORTED,
+                                }[receipt.status]
+                            elif receipt.status == "pass":
+                                validation_limitations.append(
+                                    "The oracle process failed despite claiming a passing receipt."
+                                )
+                        except DomainError as error:
+                            validation_status = (
+                                ValidationStatus.FAILED
+                                if validation.process.exit_code != 0
+                                else ValidationStatus.ERROR
+                            )
+                            validation_limitations.append(error.message)
+                    if validation.process.exit_code != 0:
                         validation_limitations.append(
                             "The declared validation oracle exited unsuccessfully."
+                        )
+                    elif validation_status is ValidationStatus.FAILED:
+                        validation_limitations.append(
+                            "The declared validation oracle reported a semantic failure."
                         )
                 except DomainError as error:
                     validation_status = ValidationStatus.ERROR
@@ -896,6 +954,31 @@ class CaptureService:
                         media_type="application/x-ndjson",
                     )
                 )
+            if oracle_receipt_record is not None:
+                by_role = {
+                    registration.role: registration.artifact_id
+                    for registration, _ in registrations
+                }
+                missing_roles = tuple(
+                    role
+                    for role in oracle_receipt_record.receipt.diagnostic_roles
+                    if role not in by_role
+                )
+                oracle_receipt_record = oracle_receipt_record.model_copy(
+                    update={
+                        "diagnostic_artifact_ids": tuple(
+                            by_role[role]
+                            for role in oracle_receipt_record.receipt.diagnostic_roles
+                            if role in by_role
+                        ),
+                        "parsing_limitations": (
+                            ("Some diagnostic roles were not registered on this run: "
+                             + ", ".join(missing_roles),)
+                            if missing_roles
+                            else ()
+                        ),
+                    }
+                )
             await capture.report(7, "Artifacts registered")
         except asyncio.CancelledError as cancellation:
             try:
@@ -937,6 +1020,7 @@ class CaptureService:
                 "validation_status": validation_status,
                 "process": outcome.process,
                 "artifacts": tuple(registration for registration, _ in registrations),
+                "oracle_receipt": oracle_receipt_record,
                 "limitations": tuple(
                     list(running.limitations)
                     + (

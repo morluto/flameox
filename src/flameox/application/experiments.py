@@ -28,6 +28,7 @@ from flameox.application.comparisons import (
 )
 from flameox.application.execution_policy import ExecutionPolicy
 from flameox.application.workloads import ExperimentConfig, Scalar, WorkloadService
+from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,
     DomainError,
@@ -117,6 +118,13 @@ class ExperimentRunResult(ContractModel):
     limitations: tuple[str, ...] = ()
 
 
+class ExperimentTrialCollection(ContractModel):
+    schema_version: int = 1
+    experiment_id: str
+    trials: tuple[Trial, ...]
+    returned: int
+
+
 class OutcomeCount(ContractModel):
     treatment: str
     attempted: int
@@ -129,6 +137,9 @@ class OutcomeCount(ContractModel):
     resource_policy: int
     oracle_failed: int
     infrastructure_failed: int
+    oracle_inconclusive: int = 0
+    oracle_unsupported: int = 0
+    oracle_receipt_error: int = 0
     pass_rate: float | None = None
     failure_rate: float | None = None
 
@@ -218,6 +229,80 @@ class ExperimentService:
             kind="experiments",
             model=Experiment,
             id_field="experiment_id",
+        )
+
+    def list_trials(self, experiment_id: str) -> ExperimentTrialCollection:
+        self.experiments.read(experiment_id)
+        head = self.workspace.corpus.read_head()
+        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+            rows = snapshot.execute(
+                "SELECT trial_id, experiment_id, variant_id, run_id, combination_id, "
+                "factors_json, block_id, order_in_block, parameter_name, "
+                "parameter_value_int, parameter_value_float, attempt, outcome, "
+                "exclusion_reason, validation_status, failure_class, "
+                "oracle_receipt_json, oracle_receipt_artifact_id FROM trials "
+                "WHERE experiment_id = ? QUALIFY row_number() OVER ("
+                "PARTITION BY trial_id ORDER BY published_at DESC) = 1 "
+                "ORDER BY block_id, order_in_block, trial_id",
+                (experiment_id,),
+            ).fetchall()
+        trials = tuple(self._trial_from_row(row) for row in rows)
+        return ExperimentTrialCollection(
+            experiment_id=experiment_id,
+            trials=trials,
+            returned=len(trials),
+        )
+
+    def get_trial(self, trial_id: str, *, experiment_id: str | None = None) -> Trial:
+        head = self.workspace.corpus.read_head()
+        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+            row = snapshot.execute(
+                "SELECT trial_id, experiment_id, variant_id, run_id, combination_id, "
+                "factors_json, block_id, order_in_block, parameter_name, "
+                "parameter_value_int, parameter_value_float, attempt, outcome, "
+                "exclusion_reason, validation_status, failure_class, "
+                "oracle_receipt_json, oracle_receipt_artifact_id FROM trials "
+                "WHERE trial_id = ? ORDER BY published_at DESC LIMIT 1",
+                (trial_id,),
+            ).fetchone()
+        if row is None:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                f"Trial {trial_id!r} does not exist.",
+                details={"missing_entity": "trial"},
+            )
+        trial = self._trial_from_row(row)
+        if experiment_id is not None and trial.experiment_id != experiment_id:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                f"Trial {trial_id!r} does not belong to experiment {experiment_id!r}.",
+            )
+        return trial
+
+    @staticmethod
+    def _trial_from_row(row: tuple[object, ...]) -> Trial:
+        receipt_json = str(row[16]) if row[16] is not None else None
+        return Trial.model_validate(
+            {
+                "trial_id": row[0],
+                "experiment_id": row[1],
+                "variant_id": row[2],
+                "run_id": row[3],
+                "combination_id": row[4],
+                "factors": json.loads(str(row[5])),
+                "block_id": row[6],
+                "order_in_block": row[7],
+                "parameter_name": row[8],
+                "parameter_value_int": row[9],
+                "parameter_value_float": row[10],
+                "attempt": row[11],
+                "outcome": row[12],
+                "exclusion_reason": row[13],
+                "validation_status": row[14],
+                "failure_class": row[15],
+                "oracle_receipt": json.loads(receipt_json) if receipt_json is not None else None,
+                "oracle_receipt_artifact_id": row[17],
+            }
         )
 
     async def plan(
@@ -483,6 +568,9 @@ class ExperimentService:
                 "none",
                 "unattempted",
                 "oracle_failure",
+                "oracle_inconclusive",
+                "oracle_unsupported",
+                "oracle_receipt_error",
                 "process_failure",
                 "timeout",
                 "cancellation",
@@ -892,6 +980,7 @@ class ExperimentService:
                     "unattempted",
                     "cancellation",
                     "unsupported_environment",
+                    "oracle_unsupported",
                     "infrastructure_failure",
                 }
                 for trial in selected
@@ -899,7 +988,13 @@ class ExperimentService:
             passed = sum(trial.outcome is TrialOutcome.SUCCEEDED for trial in selected)
             failed = sum(
                 trial.failure_class
-                in {"oracle_failure", "process_failure", "timeout", "resource_policy"}
+                in {
+                    "oracle_failure",
+                    "oracle_receipt_error",
+                    "process_failure",
+                    "timeout",
+                    "resource_policy",
+                }
                 for trial in selected
             )
             counts.append(
@@ -919,6 +1014,15 @@ class ExperimentService:
                     ),
                     oracle_failed=sum(
                         trial.failure_class == "oracle_failure" for trial in selected
+                    ),
+                    oracle_inconclusive=sum(
+                        trial.failure_class == "oracle_inconclusive" for trial in selected
+                    ),
+                    oracle_unsupported=sum(
+                        trial.failure_class == "oracle_unsupported" for trial in selected
+                    ),
+                    oracle_receipt_error=sum(
+                        trial.failure_class == "oracle_receipt_error" for trial in selected
                     ),
                     infrastructure_failed=sum(
                         trial.failure_class == "infrastructure_failure" for trial in selected
@@ -945,6 +1049,7 @@ class ExperimentService:
             if trial.failure_class
             in {
                 "oracle_failure",
+                "oracle_receipt_error",
                 "process_failure",
                 "timeout",
                 "resource_policy",
@@ -961,11 +1066,17 @@ class ExperimentService:
         ]
         if unmatched:
             limitations.append("One or more pairing coordinates lack every treatment.")
+        incomplete_receipts = any(
+            trial.failure_class in {"oracle_inconclusive", "oracle_receipt_error", "unattempted"}
+            for trial in trials
+        )
         if counts and all(
-            item.unsupported == item.attempted and item.attempted > 0 for item in counts
+            item.unsupported + item.oracle_unsupported == item.attempted
+            and item.attempted > 0
+            for item in counts
         ):
             disposition = "unsupported"
-        elif any(item.eligible < minimum for item in counts):
+        elif incomplete_receipts or unmatched or any(item.eligible < minimum for item in counts):
             disposition = "insufficient_evidence"
         elif not failures:
             disposition = "all_clean"
@@ -1039,6 +1150,9 @@ class ExperimentService:
             "none",
             "unattempted",
             "oracle_failure",
+            "oracle_inconclusive",
+            "oracle_unsupported",
+            "oracle_receipt_error",
             "process_failure",
             "timeout",
             "cancellation",
@@ -1076,6 +1190,23 @@ class ExperimentService:
             ),
             validation_status=(
                 run.validation_status if run is not None else ValidationStatus.NOT_REQUESTED
+            ),
+            oracle_receipt=(
+                run.oracle_receipt.receipt
+                if run is not None and run.oracle_receipt is not None
+                else None
+            ),
+            oracle_receipt_artifact_id=(
+                next(
+                    (
+                        artifact.artifact_id
+                        for artifact in run.artifacts
+                        if artifact.role == "validation_receipt"
+                    ),
+                    None,
+                )
+                if run is not None
+                else None
             ),
             failure_class=failure_class,
         )
@@ -1118,6 +1249,9 @@ class ExperimentService:
         Literal[
             "none",
             "oracle_failure",
+            "oracle_inconclusive",
+            "oracle_unsupported",
+            "oracle_receipt_error",
             "process_failure",
             "timeout",
             "cancellation",
@@ -1134,7 +1268,13 @@ class ExperimentService:
             return TrialOutcome.TIMED_OUT, "timeout"
         if run.execution_status.value == "cancelled":
             return TrialOutcome.CANCELLED, "cancellation"
-        if run.validation_status.value in {"failed", "error"}:
+        if run.validation_status is ValidationStatus.INCONCLUSIVE:
+            return TrialOutcome.INVALID, "oracle_inconclusive"
+        if run.validation_status is ValidationStatus.UNSUPPORTED:
+            return TrialOutcome.UNSUPPORTED, "oracle_unsupported"
+        if run.validation_status is ValidationStatus.ERROR:
+            return TrialOutcome.INVALID, "oracle_receipt_error"
+        if run.validation_status is ValidationStatus.FAILED:
             return TrialOutcome.ORACLE_FAILED, "oracle_failure"
         if run.execution_status.value != "succeeded":
             return TrialOutcome.FAILED, "process_failure"
@@ -1183,6 +1323,11 @@ class ExperimentService:
                 "outcome": value.outcome.value,
                 "validation_status": value.validation_status.value,
                 "factors_json": canonical_json(value.factors),
+                "oracle_receipt_json": (
+                    canonical_json(value.oracle_receipt.model_dump(mode="json"))
+                    if value.oracle_receipt is not None
+                    else None
+                ),
             }
         )
         row.pop("factors")
