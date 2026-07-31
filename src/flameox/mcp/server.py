@@ -319,7 +319,10 @@ class AppContext:
             raise DomainError(
                 code=ErrorCode.WORKSPACE_NOT_FOUND,
                 message="No .diagnostics workspace was found.",
-                remediation=("Call initialize_workspace first.",),
+                remediation=(
+                    "Verify the server's fixed project root is the intended checkout, "
+                    "then call initialize_workspace.",
+                ),
             )
         return self.workspace
 
@@ -529,8 +532,12 @@ def create_server(
             "when source, environment, command, and artifact provenance must be reproducible. "
             "Do not use it to provision hosts, install dependencies, mutate source or GitHub, "
             "or prove static claims without runtime evidence. "
-            "For a new capture: workspace_status -> list_declared_workflows -> "
-            "list_capabilities -> plan_capture -> execute_capture_plan for short work, or "
+            "For a new project, call workspace_status first. If it returns "
+            "WORKSPACE_NOT_FOUND, verify that the server's fixed project root is the intended "
+            "checkout and, only when authorized, call initialize_workspace; then repeat "
+            "workspace_status. Initialization writes .diagnostics. After initialization, use "
+            "list_declared_workflows -> list_capabilities -> plan_capture -> "
+            "execute_capture_plan for short work, or "
             "start_detached_capture for long work -> get_detached_capture -> get_run -> analyze. "
             "For existing evidence: list_runs and list_artifacts expose artifact_kinds; use "
             "extract_pyperf and query_measurements for benchmark_samples, "
@@ -549,20 +556,27 @@ def create_server(
     async def initialize_workspace(
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[WorkspaceStatus]]:
-        """Initialize flameox in the server's fixed project root."""
+        """Initialize Flameox in the fixed project root after it has been verified."""
         try:
             state = ctx.request_context.lifespan_context
-            state.workspace = Workspace.initialize(state.project_root)
-            state.capabilities = CapabilityService(state.workspace)
-            state.capture_plans = CapturePlanRegistry(
-                max_parallel_captures=(state.workspace.config.capture.max_parallel_captures)
+            if state.workspace is not None:
+                result = workspace_status(state.workspace)
+                return _success(result, f"Workspace is already initialized: {result.workspace_id}.")
+
+            workspace = Workspace.initialize(state.project_root)
+            capture_plans = CapturePlanRegistry(
+                max_parallel_captures=workspace.config.capture.max_parallel_captures
             )
+            detached_captures = DetachedCaptureManager(
+                workspace,
+                CaptureService(workspace, plans=capture_plans),
+            )
+            state.workspace = workspace
+            state.capabilities = CapabilityService(workspace)
+            state.capture_plans = capture_plans
             state.experiment_plans = ExperimentPlanRegistry()
-            state.detached_captures = DetachedCaptureManager(
-                state.workspace,
-                state.capture_service(),
-            )
-            result = workspace_status(state.workspace)
+            state.detached_captures = detached_captures
+            result = workspace_status(workspace)
             return _success(result, f"Initialized workspace {result.workspace_id}.")
         except DomainError as error:
             return _failure(error)
@@ -571,7 +585,7 @@ def create_server(
     async def workspace_status_tool(
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[WorkspaceStatus]]:
-        """Return the current workspace and corpus status."""
+        """Return workspace status; on first use, follow WORKSPACE_NOT_FOUND recovery."""
         try:
             result = workspace_status(ctx.request_context.lifespan_context.require_workspace())
             return _success(result, f"Workspace is at {result.corpus_commit_id}.")
