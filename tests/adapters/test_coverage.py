@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
+from types import ModuleType
+from typing import cast
 
 import pytest
 
@@ -12,17 +14,19 @@ from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import Workspace
 
-_coverage = pytest.importorskip(
-    "coverage", reason="optional provider unavailable: install coverage"
-)
-Coverage = _coverage.Coverage
-CoverageData = _coverage.CoverageData
-CoverageWarning = _coverage.exceptions.CoverageWarning
+
+def _coverage_module() -> ModuleType:
+    return cast(
+        ModuleType,
+        pytest.importorskip("coverage", reason="optional provider unavailable: install coverage"),
+    )
 
 
 def test_coverage_extractor_uses_public_data_api_and_normalizes_paths(
     tmp_path: Path,
 ) -> None:
+    coverage_module = _coverage_module()
+    CoverageData = coverage_module.CoverageData
     source = tmp_path / "module.py"
     source.write_text("x = 1\nif x:\n    x += 1\n")
     data_path = tmp_path / ".coverage"
@@ -59,6 +63,9 @@ def test_coverage_extractor_uses_public_data_api_and_normalizes_paths(
 
 
 def test_coverage_extractor_accepts_empty_public_data_file(tmp_path: Path) -> None:
+    coverage_module = _coverage_module()
+    Coverage = coverage_module.Coverage
+    CoverageWarning = coverage_module.exceptions.CoverageWarning
     data_path = tmp_path / ".coverage"
     coverage = Coverage(data_file=str(data_path))
     with warnings.catch_warnings():
@@ -81,6 +88,7 @@ def test_coverage_extractor_accepts_empty_public_data_file(tmp_path: Path) -> No
 
 
 def test_coverage_extractor_rejects_truncated_data_file(tmp_path: Path) -> None:
+    _coverage_module()
     data_path = tmp_path / ".coverage"
     data_path.write_bytes(b"not sqlite")
     workspace = Workspace.initialize(tmp_path)

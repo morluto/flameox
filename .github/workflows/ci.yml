@@ -78,6 +78,7 @@ jobs:
         if: always()
         with:
           name: test-results-${{ matrix.lane }}
+          include-hidden-files: true
           path: .test-results/
 
   optional-providers:
@@ -113,6 +114,7 @@ jobs:
         if: always()
         with:
           name: test-results-optional-${{ matrix.provider }}
+          include-hidden-files: true
           path: .test-results/
 
   performance:
@@ -133,6 +135,7 @@ jobs:
         if: always()
         with:
           name: test-results-performance
+          include-hidden-files: true
           path: .test-results/
 
   dead-code:
@@ -232,6 +235,7 @@ jobs:
         if: always()
         with:
           name: test-results-collection
+          include-hidden-files: true
           path: .test-results/
 
   build-summary:

@@ -25,10 +25,9 @@ from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, EvidenceLevel, FindingAssessment
 from flameox.storage import Workspace
 
-memray = pytest.importorskip("memray", reason="optional provider unavailable: install memray")
-
 
 def _capture(path: Path, allocation_count: int) -> None:
+    memray = pytest.importorskip("memray", reason="optional provider unavailable: install memray")
     with memray.Tracker(str(path)):
         retained = [bytearray(4_096) for _ in range(allocation_count)]
         assert len(retained) == allocation_count

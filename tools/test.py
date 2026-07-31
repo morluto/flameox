@@ -168,7 +168,9 @@ def collect_node_ids() -> tuple[str, ...]:
 
 def verify_collection(records: tuple[Ownership, ...]) -> int:
     del records
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     node_ids = collect_node_ids()
+    (RESULTS_DIR / "collection.txt").write_text("\n".join(node_ids) + "\n", encoding="utf-8")
     with COLLECTION_BASELINE_PATH.open("rb") as stream:
         baseline = tomllib.load(stream)
     moved_paths = {
@@ -200,8 +202,6 @@ def verify_collection(records: tuple[Ownership, ...]) -> int:
             )
     for path in sorted(set(current).difference(expected_files)):
         differences.append(f"unexpected collected path: {path}")
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    (RESULTS_DIR / "collection.txt").write_text("\n".join(node_ids) + "\n", encoding="utf-8")
     if differences:
         print("Collection preservation failed:")
         print("\n".join(f"- {difference}" for difference in differences))
