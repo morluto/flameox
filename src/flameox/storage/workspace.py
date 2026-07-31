@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 from collections.abc import Iterator
@@ -28,6 +29,41 @@ class WorkspaceIdentity(ContractModel):
     created_at: datetime
     project_root: str
     flameox_version: str
+
+
+def _workspace_initialization_error(error: OSError) -> DomainError:
+    details: dict[str, int | str] = {"operation": "workspace_initialization"}
+    if error.errno is not None:
+        details["errno"] = error.errno
+
+    quota_errors = {errno.ENOSPC}
+    if hasattr(errno, "EDQUOT"):
+        quota_errors.add(errno.EDQUOT)
+    if error.errno in quota_errors:
+        return DomainError(
+            ErrorCode.STORAGE_QUOTA_EXCEEDED,
+            "Workspace initialization needs more local storage.",
+            details=details,
+            remediation=(
+                "Free local storage or increase the filesystem quota, then retry initialization.",
+            ),
+        )
+    if error.errno in {errno.EACCES, errno.EPERM, errno.EROFS}:
+        return DomainError(
+            ErrorCode.WORKSPACE_INVALID,
+            "The selected project root is not writable for workspace initialization.",
+            details=details,
+            remediation=(
+                "Choose a writable project root or repair its permissions, then retry "
+                "initialization.",
+            ),
+        )
+    return DomainError(
+        ErrorCode.INTERNAL_ERROR,
+        "Workspace initialization failed because the local filesystem rejected a write.",
+        details=details,
+        remediation=("Check filesystem health and permissions, then retry initialization.",),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +184,18 @@ class Workspace:
 
     @classmethod
     def initialize(
+        cls,
+        project_root: Path,
+        *,
+        workspace_root: Path | None = None,
+    ) -> Workspace:
+        try:
+            return cls._initialize(project_root, workspace_root=workspace_root)
+        except OSError as error:
+            raise _workspace_initialization_error(error) from error
+
+    @classmethod
+    def _initialize(
         cls,
         project_root: Path,
         *,

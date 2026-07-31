@@ -10,11 +10,12 @@ verification, locking, activation, rollback, and structured results. The same
 setup service is available from `flameox setup` for standard JSON and TOML
 clients.
 
-The first run requires an explicit multi-select. Detection annotates choices
-but does not preselect them. Every mutation has a complete preview and a
-confirmation whose default is no. Non-interactive application requires both an
-explicit target (`--codex`, another client flag, `--all`, `--refresh`,
-`--rollback`, or `--verify`) and `--yes`; `--dry-run --json` returns the plan
+The first run requires an explicit multi-select. Detection preselects detected
+clients for connection, while the user can adjust the selection before applying
+it. Every mutation has a complete preview and a confirmation whose default is
+no. Non-interactive application requires both an explicit target (`--codex`,
+another client flag, `--all`, `--refresh`, `--rollback`, or `--verify`) and
+`--yes`; `--dry-run --json` returns the plan
 without mutation.
 
 Interactive setup is also the lifecycle entry point for connecting or
@@ -27,8 +28,11 @@ fails on configuration drift instead of repairing it implicitly.
 Client launchers contain the absolute path of a verified managed runtime and
 the fixed arguments `mcp serve --project-root .`. Setup never passes `--init`.
 Each MCP client therefore binds flameox's project root to the client's launch
-directory and encounters an ordinary `WORKSPACE_NOT_FOUND` until the user
-initializes that repository deliberately.
+directory. Client setup is complete when the launcher is verified; each checkout
+still requires deliberate project initialization through `flameox init`,
+`flameox mcp serve --init`, or the MCP `initialize_workspace` tool after the
+client's launch directory has been verified. A fresh server reports
+`WORKSPACE_NOT_FOUND` until that project step is complete.
 
 Setup serializes mutations with a user-local lock. Before applying, it compares
 every config with the exact bytes used for the preview. It writes a recovery
@@ -307,8 +311,10 @@ The supported tools are grouped as follows:
 #### `initialize_workspace`
 
 Additive and idempotent. Initializes only the MCP server's fixed project root.
-It cannot select an external path or approve workloads. Hosts may instead start
-the server using `flameox mcp serve --init`.
+If the server already owns an initialized workspace, the call returns its current
+status without replacing the detached-capture manager. It cannot select an
+external path or approve workloads. Hosts may instead start the server using
+`flameox mcp serve --init`.
 
 #### `workspace_status`
 
@@ -563,8 +569,11 @@ Structured error codes include:
 - `EVIDENCE_SCHEMA_MISMATCH`;
 - `COMPARISON_INVALID`;
 - `QUERY_BUDGET_EXCEEDED`;
+- `STORAGE_QUOTA_EXCEEDED`;
 - `WRITE_LOCK_TIMEOUT`;
 - `SENSITIVE_ARTIFACT_REFUSED`;
+- `REVISION_CONFLICT`;
+- `STALE_CURSOR`;
 - `INTERNAL_ERROR`.
 
 Tracebacks are logged locally but not returned by default.

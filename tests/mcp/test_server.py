@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
@@ -13,7 +15,7 @@ from mcp.client.stdio import stdio_client
 from mcp_types import TextContent, TextResourceContents
 from typer.testing import CliRunner
 
-from flameox.application import WorkloadService, workspace_status
+from flameox.application import DetachedCaptureManager, WorkloadService, workspace_status
 from flameox.catalog import Catalog
 from flameox.cli import app
 from flameox.mcp import create_server
@@ -45,6 +47,8 @@ async def test_mcp_tools_use_explicit_envelopes_and_annotations(
     assert instructions is not None
     assert "list_declared_workflows" in instructions
     assert "consumed capture plan" in instructions
+    assert "WORKSPACE_NOT_FOUND" in instructions
+    assert "verify that the server's fixed project root is the intended checkout" in instructions
 
 
 @pytest.mark.anyio
@@ -89,12 +93,60 @@ async def test_mcp_domain_errors_remain_structured(tmp_path: Path) -> None:
     assert result.structured_content is not None
     assert result.structured_content["ok"] is False
     assert result.structured_content["error"]["code"] == "WORKSPACE_NOT_FOUND"
+    assert result.structured_content["error"]["remediation"] == [
+        "Verify the server's fixed project root is the intended checkout, then call "
+        "initialize_workspace."
+    ]
     assert result.structured_content["error"]["recovery"] == {
         "kind": "initialize_workspace",
         "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
         "next_tool": "initialize_workspace",
     }
+
+
+@pytest.mark.anyio
+async def test_mcp_workspace_initialization_failures_remain_structured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_write(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.ENOSPC, "simulated quota exhaustion")
+
+    monkeypatch.setattr("flameox.storage.workspace.atomic_write_json", fail_write)
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        result = await client.call_tool("initialize_workspace", {})
+
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["error"]["code"] == "STORAGE_QUOTA_EXCEEDED"
+    assert result.structured_content["error"]["remediation"] == [
+        "Free local storage or increase the filesystem quota, then retry initialization."
+    ]
+
+
+@pytest.mark.anyio
+async def test_mcp_initialize_is_idempotent_without_replacing_capture_manager(
+    tmp_path: Path,
+) -> None:
+    with patch(
+        "flameox.mcp.server.DetachedCaptureManager",
+        wraps=DetachedCaptureManager,
+    ) as constructor:
+        async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+            first = await client.call_tool("initialize_workspace", {})
+            second = await client.call_tool("initialize_workspace", {})
+
+    assert first.is_error is False
+    assert second.is_error is False
+    assert constructor.call_count == 1
+    assert first.structured_content is not None
+    assert second.structured_content is not None
+    assert (
+        first.structured_content["result"]["workspace_id"]
+        == second.structured_content["result"]["workspace_id"]
+    )
 
 
 @pytest.mark.anyio

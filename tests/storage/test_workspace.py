@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 from pathlib import Path
 
@@ -22,6 +23,28 @@ def test_initialize_creates_static_identity_and_empty_corpus(tmp_path: Path) -> 
     assert head.generation_manifests == ()
     assert workspace.paths.config.is_file()
     assert WorkspaceConfig.from_path(workspace.paths.config) == WorkspaceConfig()
+
+
+def test_initialize_maps_filesystem_quota_failures_to_domain_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_write(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.ENOSPC, "simulated quota exhaustion")
+
+    monkeypatch.setattr("flameox.storage.workspace.atomic_write_json", fail_write)
+
+    with pytest.raises(DomainError) as error:
+        Workspace.initialize(tmp_path)
+
+    assert error.value.code is ErrorCode.STORAGE_QUOTA_EXCEEDED
+    assert error.value.details == {
+        "operation": "workspace_initialization",
+        "errno": errno.ENOSPC,
+    }
+    assert error.value.remediation == (
+        "Free local storage or increase the filesystem quota, then retry initialization.",
+    )
 
 
 def test_discovery_selects_nearest_workspace(tmp_path: Path) -> None:
