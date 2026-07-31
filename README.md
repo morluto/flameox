@@ -55,14 +55,20 @@ npx flameox setup
 ```
 
 The wizard detects Claude Code, Cursor, OpenCode, Codex, Gemini CLI, and
-Antigravity. It selects nothing by default and previews every configuration file
-it will change. After you approve the plan, it installs and verifies a versioned
-local runtime and activates the clients you chose.
+Antigravity. It preselects detected clients for connection and previews every
+configuration file it will change; you can adjust the selection before applying
+it. After you approve the plan, it installs and verifies a versioned local
+runtime and activates the clients you chose.
 
 Restart the configured client, open a project, and ask:
 
 > Initialize flameox in this project and show me which profiling capabilities are
 > available.
+
+Client setup and project initialization are separate steps. Setup registers the
+MCP server, while the initialization request creates `.diagnostics/` in the
+checkout after you confirm that the client opened the intended project. The
+server does not initialize arbitrary launch directories automatically.
 
 flameox can initialize its `.diagnostics/` workspace through MCP. Before an agent
 can run your code, you must declare the command as a named workload in
