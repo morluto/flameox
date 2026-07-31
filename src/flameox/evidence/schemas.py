@@ -5,7 +5,7 @@ from typing import Any
 import pyarrow as pa
 
 SCHEMA_MAJOR = 1
-SCHEMA_MINOR = 3
+SCHEMA_MINOR = 4
 UTC_TIMESTAMP = pa.timestamp("us", tz="UTC")
 
 COMMON_FIELDS: tuple[Any, ...] = (
@@ -259,6 +259,8 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("exclusion_reason", pa.string()),
             pa.field("validation_status", pa.string(), nullable=False),
             pa.field("failure_class", pa.string(), nullable=False),
+            pa.field("oracle_receipt_json", pa.string()),
+            pa.field("oracle_receipt_artifact_id", pa.string()),
         ),
     ),
     "run_sets": _schema(

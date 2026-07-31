@@ -5,11 +5,13 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+from flameox.application.oracle_receipts import parse_oracle_receipt
 from flameox.domain import (
     ArtifactKind,
     ArtifactRegistration,
     CaptureStatus,
     CommandSpec,
+    DomainError,
     ExecutionStatus,
     RunManifest,
     RunType,
@@ -83,3 +85,40 @@ def test_contracts_require_timezone_aware_datetimes() -> None:
         environment_id=DIGEST,
     )
     assert manifest.created_at.tzinfo is UTC
+
+
+def test_oracle_receipt_parser_is_strict_and_preserves_typed_mismatch() -> None:
+    payload = b"""{
+      "schema_version":"flameox.oracle-receipt.v1",
+      "status":"fail",
+      "reason":"contract_mismatch",
+      "output_field":"backward",
+      "coordinate":[2,"x"],
+      "expected":{"kind":"scalar","value":1.0},
+      "observed":{"kind":"digest","value":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+      "absolute_error":0.25,
+      "tolerance":{"absolute":0.01,"relative":0.001},
+      "diagnostic_roles":["primary"]
+    }"""
+
+    receipt = parse_oracle_receipt(payload)
+
+    assert receipt.status == "fail"
+    assert receipt.output_field == "backward"
+    assert receipt.coordinate == (2, "x")
+    assert receipt.observed is not None and receipt.observed.kind == "digest"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"schema_version":"flameox.oracle-receipt.v1","status":"pass","reason":"ok","reason":"again"}',
+        b'{"schema_version":"flameox.oracle-receipt.v1","status":"pass","reason":"ok"} {}',
+        b'{"schema_version":"flameox.oracle-receipt.v1","status":"pass","reason":"ok","extra":1}',
+        b'{"schema_version":"flameox.oracle-receipt.v2","status":"pass","reason":"ok"}',
+        b'{"schema_version":"flameox.oracle-receipt.v1","status":"pass","reason":"ok","absolute_error":NaN}',
+    ],
+)
+def test_oracle_receipt_parser_rejects_ambiguous_or_unsupported_json(payload: bytes) -> None:
+    with pytest.raises(DomainError):
+        parse_oracle_receipt(payload)

@@ -1,0 +1,33 @@
+{
+  "schema_version": "gitcontribute.external-validation.v1",
+  "producer": "flameox",
+  "receipt_sha256": "cdc220b6b857f0e23e351b9acd0c56474db49238cde55153541db274601881fb",
+  "validation_id": "validation-flameox-compat-001",
+  "investigation_id": "investigation-synthetic-profiler",
+  "kind": "base",
+  "repository": "example/project",
+  "revision": "0123456789abcdef0123456789abcdef01234567",
+  "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "provider": "perf",
+  "external_run_id": "run-synthetic-001",
+  "argv": ["flameox", "capture", "run", "perf", "--workload", "cpu-sample"],
+  "working_dir": "workspace",
+  "environment": {
+    "flameox.version": "0.1.2",
+    "platform": "linux",
+    "python.version": "3.12"
+  },
+  "artifacts": {
+    "profile.data": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "validation.stdout": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "started_at": "2026-07-31T01:02:03Z",
+  "completed_at": "2026-07-31T01:02:13Z",
+  "exit_code": 0,
+  "classification": "passing",
+  "truncated": false,
+  "limitations": [
+    "Kernel call-chain coverage was unavailable; the profile contains user-space samples only."
+  ],
+  "incomplete": true
+}

@@ -2,7 +2,7 @@
 
 The acceptance criteria are the completion contract for changes that affect
 flameox's product behavior. The evidence map below records the implementation
-reviewed on 2026-07-25. A passing ordinary test suite is not enough when the
+reviewed on 2026-07-31. A passing ordinary test suite is not enough when the
 relevant criterion requires crash, concurrency, containment, protocol, golden,
 or scale proof.
 
@@ -51,6 +51,9 @@ A release is acceptable when:
 20. stale cursors, modified workload approvals, replayed plans, partial source
    identity, incomplete blocks, and failed validation are surfaced explicitly
    rather than silently weakened.
+21. failure analysis distinguishes absent, filtered-empty, successful, and
+   failed populations, while structured oracle receipts preserve raw bytes and
+   produce conservative trial outcomes with bounded lazy drill-down.
 
 ## Implementation conformance
 
@@ -92,6 +95,7 @@ Conformance status uses three terms:
 | 18 | Proven | The Perfetto integration test follows hotspot → callers/stack → analysis provenance → run → artifact registration → viewer command without raw SQL (`tests/adapters/test_perfetto_provider.py`). |
 | 19 | Proven | The gated 10/1K/100K matrix records publication, compaction file count, rebuild, startup plus cohort-comparison query, and serialization budgets; hashing has a separate throughput budget (`tests/performance/test_catalog_scale.py`). |
 | 20 | Proven | Public behavior tests cover stale cursors, approval mutation, replayed plans, partial source identity, incomplete blocks, failed validation, lock contention, quota errors, malformed artifacts, and structured CLI/MCP failures (`tests/application/`, `tests/storage/`, `tests/adapters/`, `tests/mcp/test_contracts.py`, `tests/test_cli_smoke.py`). |
+| 21 | Proven | Failure-population invariants, strict receipt parsing and lifecycle projection, typed trial persistence, and the fresh-workspace semantic matrix are exercised by `tests/analysis/test_recipe_invariants.py`, `tests/domain/test_models.py`, `tests/application/test_capture_lifecycle.py`, `tests/application/test_experiments.py`, and `tests/golden/test_semantic_matrix.py`. The downstream fixture contract is checked separately by `tests/test_external_receipt_fixture.py`. |
 
 The snapshot, retention, containment, recovery, adapter, analysis,
 observability, and protocol defects recorded by the prior conformance review

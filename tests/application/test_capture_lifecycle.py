@@ -19,6 +19,7 @@ from flameox.domain import (
     ErrorCode,
     ExecutionStatus,
     ExternalExecutionContext,
+    ValidationStatus,
 )
 from flameox.storage import ArtifactStore, RunStore, Workspace
 from tests.support.capture import disable_containment, write_workload
@@ -58,6 +59,68 @@ async def test_capture_plan_is_single_use_and_publishes_process_evidence(
     with pytest.raises(DomainError) as replay:
         await service.execute(plan.plan_id)
     assert replay.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+
+
+@pytest.mark.anyio
+@pytest.mark.process
+async def test_structured_oracle_receipt_is_managed_preserved_and_projected(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "oracle.py").write_text(
+        """import json
+import os
+from pathlib import Path
+
+Path(os.environ[\"FLAMEOX_ORACLE_RECEIPT\"]).write_text(json.dumps({
+    \"schema_version\": \"flameox.oracle-receipt.v1\",
+    \"status\": \"fail\",
+    \"reason\": \"contract_mismatch\",
+    \"case_id\": \"candidate-mismatch\",
+    \"output_field\": \"forward\",
+    \"coordinate\": [0],
+    \"expected\": {\"kind\": \"scalar\", \"value\": 1.0},
+    \"observed\": {\"kind\": \"scalar\", \"value\": 2.0},
+    \"absolute_error\": 1.0,
+    \"tolerance\": {\"absolute\": 0.01},
+}))
+print(\"oracle diagnostic\")
+"""
+    )
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.semantic]
+argv = ["python", "-c", "print('workload')"]
+[workloads.semantic.oracle]
+strength = "contract_check"
+argv = ["python", "oracle.py"]
+receipt_schema = "flameox.oracle-receipt.v1"
+"""
+    )
+    disable_containment(workspace)
+    service = CaptureService(workspace)
+    plan = await service.plan(
+        workload_name="semantic",
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    result = await service.execute(plan.plan_id)
+
+    assert result.run.validation_status is ValidationStatus.FAILED
+    assert result.run.oracle_receipt is not None
+    assert result.run.oracle_receipt.receipt.output_field == "forward"
+    receipt_registration = next(
+        item for item in result.run.artifacts if item.role == "validation_receipt"
+    )
+    assert receipt_registration.artifact_id == result.run.oracle_receipt.receipt_artifact_id
+    receipt_payload = ArtifactStore(workspace).get(receipt_registration.artifact_id)
+    assert json.loads(receipt_payload.payload_path.read_text())["reason"] == "contract_mismatch"
+    assert {item.role for item in result.run.artifacts} >= {
+        "validation_receipt",
+        "validation_contract_check",
+    }
 
 
 @pytest.mark.anyio

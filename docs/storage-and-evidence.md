@@ -513,9 +513,18 @@ values.
 | `outcome` | string | succeeded, failed, timed_out, cancelled, oom, invalid |
 | `exclusion_reason` | string nullable | predeclared analysis exclusion |
 | `validation_status` | string | oracle outcome |
+| `oracle_receipt_json` | string nullable | bounded parsed structured receipt |
+| `oracle_receipt_artifact_id` | string nullable | authoritative raw receipt identity |
 
 Every attempted trial remains visible, including failures and exclusions.
 Analyses report counts and reasons rather than filtering them silently.
+
+Run manifests may also carry an `oracle_receipt` record containing the parsed
+producer receipt, authoritative receipt artifact, validation stdout/stderr
+artifact identities, same-run diagnostic artifact identities, and
+Flameox-observed parsing limitations. Older manifests and evidence generations
+omit these additive fields. Parquet remains authoritative across mixed schema
+minor versions through name-based union, and DuckDB remains rebuildable.
 
 `run_sets` freeze a cohort for analysis. A run set records its ID, creation
 time, pinned corpus commit, normalized selection parameters, ordered run/trial

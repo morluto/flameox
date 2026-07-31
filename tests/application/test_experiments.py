@@ -540,6 +540,87 @@ case = ["bad", "clean"]
 
 
 @pytest.mark.anyio
+async def test_structured_receipts_round_trip_through_trials_and_lookup(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "oracle.py").write_text(
+        """import json
+import os
+import sys
+from pathlib import Path
+
+treatment = sys.argv[1]
+status = "fail" if treatment == "base" else "pass"
+reason = "contract_mismatch" if status == "fail" else "expected_rejection"
+Path(os.environ["FLAMEOX_ORACLE_RECEIPT"]).write_text(json.dumps({
+    "schema_version": "flameox.oracle-receipt.v1",
+    "status": status,
+    "reason": reason,
+    "case_id": treatment,
+}))
+"""
+    )
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.semantic]
+argv = ["python", "-c", "print('{treatment}')"]
+[workloads.semantic.parameters]
+treatment = ["base", "candidate"]
+[workloads.semantic.oracle]
+strength = "contract_check"
+argv = ["python", "oracle.py", "{treatment}"]
+receipt_schema = "flameox.oracle-receipt.v1"
+
+[experiments.semantic]
+workload = "semantic"
+design = "fixed_order"
+blocks = 1
+treatment_factor = "treatment"
+analysis = "outcome"
+outcome_goal = "equivalence"
+minimum_attempts = 1
+maximum_attempts = 1
+[experiments.semantic.factors]
+treatment = ["base", "candidate"]
+"""
+    )
+    config = workspace.config.model_copy(
+        update={
+            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+        }
+    )
+    workspace.paths.config.write_text(config.to_toml())
+    investigation = InvestigationService(workspace).create(
+        CreateInvestigationRequest(question="Do structured outcomes survive publication?")
+    )
+    service = ExperimentService(workspace)
+    plan = await service.plan(
+        experiment_name="semantic",
+        investigation_id=investigation.investigation_id,
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    result = await service.run(plan.plan_id)
+
+    assert result.outcome is not None
+    assert result.outcome.disposition == "base_only_failure"
+    collection = service.list_trials(result.experiment.experiment_id)
+    assert collection.returned == 2
+    by_treatment = {trial.factors["treatment"]: trial for trial in collection.trials}
+    assert by_treatment["base"].failure_class == "oracle_failure"
+    assert by_treatment["candidate"].outcome is TrialOutcome.SUCCEEDED
+    assert by_treatment["candidate"].oracle_receipt is not None
+    assert by_treatment["candidate"].oracle_receipt.reason == "expected_rejection"
+    loaded = service.get_trial(
+        by_treatment["base"].trial_id,
+        experiment_id=result.experiment.experiment_id,
+    )
+    assert loaded.oracle_receipt_artifact_id is not None
+    assert loaded.oracle_receipt == by_treatment["base"].oracle_receipt
+
+
+@pytest.mark.anyio
 async def test_outcome_partial_matrix_reports_unmatched_and_insufficient_evidence(
     tmp_path: Path,
 ) -> None:

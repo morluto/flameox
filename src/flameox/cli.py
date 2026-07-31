@@ -960,6 +960,20 @@ def experiment_show(
     _emit(result, as_json=json_output)
 
 
+@experiment_app.command("trial")
+def experiment_trial(
+    trial_id: str,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Show one immutable experiment trial and its structured oracle receipt."""
+    try:
+        result = ExperimentService(_workspace(workspace)).get_trial(trial_id)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
 @capture_app.command("plan")
 def capture_plan(
     adapter: Annotated[str, typer.Argument(help="Registered capture adapter.")],

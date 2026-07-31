@@ -171,7 +171,8 @@ same cell representation.
 
 `analysis = "outcome"` selects fixed-attempt categorical analysis without
 requiring pyperf. The persisted `fixed_attempts_v1` result counts passed,
-oracle-failed, process-failed, timed-out, cancelled, unsupported,
+oracle-failed, oracle-inconclusive, oracle-unsupported, invalid-receipt,
+process-failed, timed-out, cancelled, unsupported-environment,
 resource-policy, and infrastructure-failed trials by treatment. Pairing uses
 the materialized block and factor coordinates, and incomplete cells remain
 visible.
@@ -213,6 +214,21 @@ Validation executes without the profiler unless the recipe explicitly requires
 instrumented behavior. A candidate that fails validation cannot be described as
 a successful optimization. Failed, errored, or unavailable validation remains
 visible on the trial and cannot be removed by excluding its performance sample.
+
+An oracle may opt into `receipt_schema = "flameox.oracle-receipt.v1"`. Flameox
+then provides a private `FLAMEOX_ORACLE_RECEIPT` path under the current run's
+staging root. The oracle writes one JSON object there while ordinary diagnostics
+remain on stdout and stderr. The receipt records `pass`, `fail`, `inconclusive`,
+or `unsupported` plus a bounded reason and optional case, output field,
+coordinate, typed expected/observed values, numeric errors and tolerances,
+diagnostic artifact roles, and limitations.
+
+The raw JSON artifact is authoritative. The parsed run and trial fields are a
+bounded derived projection. Missing, malformed, oversized, ambiguous, or
+unsupported receipts produce a validation error; a receipt can never upgrade a
+failed, timed-out, cancelled, or resource-terminated oracle process. A passing
+`expected_rejection` means the wrapper successfully observed its declared
+rejection behavior, not that invalid input was accepted.
 
 ### Semantic observations
 

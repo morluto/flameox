@@ -64,6 +64,7 @@ from flameox.application.experiments import (
     ExperimentPlanRegistry,
     ExperimentRunResult,
     ExperimentService,
+    ExperimentTrialCollection,
     OutcomeCount,
     OutcomeExperimentResult,
 )
@@ -211,6 +212,7 @@ __all__ = [
     "ExperimentPlanRegistry",
     "ExperimentRunResult",
     "ExperimentService",
+    "ExperimentTrialCollection",
     "FindingListResult",
     "FindingResult",
     "FindingService",
