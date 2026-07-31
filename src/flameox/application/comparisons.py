@@ -130,10 +130,18 @@ class RunSetService:
             for order, item in enumerate(requested):
                 RunStore(self.workspace).read(item.run_id)
                 if item.trial_id is not None:
-                    trial_rows = snapshot.execute(
-                        "SELECT DISTINCT run_id FROM trials WHERE trial_id = ?",
-                        (item.trial_id,),
-                    ).fetchall()
+                    experiment_id = request.selection.get("experiment_id")
+                    if isinstance(experiment_id, str):
+                        trial_rows = snapshot.execute(
+                            "SELECT DISTINCT run_id FROM trials "
+                            "WHERE trial_id = ? AND experiment_id = ?",
+                            (item.trial_id, experiment_id),
+                        ).fetchall()
+                    else:
+                        trial_rows = snapshot.execute(
+                            "SELECT DISTINCT run_id FROM trials WHERE trial_id = ?",
+                            (item.trial_id,),
+                        ).fetchall()
                     if len(trial_rows) != 1 or str(trial_rows[0][0]) != item.run_id:
                         raise DomainError(
                             ErrorCode.COMPARISON_INVALID,

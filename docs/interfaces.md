@@ -124,7 +124,7 @@ flameox hypotheses show <hypothesis-id>
 flameox experiment plan <name> [parameter overrides]
 flameox experiment run <name> [parameter overrides]
 flameox experiment show <experiment-id>
-flameox experiment trial <trial-id>
+flameox experiment trial <trial-id> [--experiment-id <experiment-id>]
 ```
 
 ### Analysis commands
@@ -364,6 +364,13 @@ attempted trial, validates outputs, and returns the experiment plus initial
 analysis references. The execution receipt links to the immutable experiment
 protocol, its bounded trial collection, and the first failing trial when one
 exists; it does not duplicate every trial or oracle receipt.
+
+Trial collections are paged at 1,000 entries. The `list_experiment_trials`
+read-only tool accepts a smaller page size and the returned cursor; the trial
+collection resource exposes the first bounded page and its continuation cursor.
+When a trial identifier is reused by multiple historical experiments, callers
+must provide the experiment ID to resolve it; an unscoped lookup reports the
+ambiguity instead of selecting a newer row.
 
 #### `create_investigation` and `record_hypothesis`
 

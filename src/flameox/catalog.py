@@ -352,9 +352,26 @@ class Catalog:
             paths = inventory[name]
             if paths:
                 files = ", ".join(_sql_string(str(path)) for path in paths)
+                available_columns = {
+                    str(row[0])
+                    for row in connection.execute(
+                        f"DESCRIBE SELECT * FROM read_parquet([{files}], union_by_name=true)"
+                    ).fetchall()
+                }
+                projected_columns = ", ".join(
+                    (
+                        _sql_identifier(field.name)
+                        if field.name in available_columns
+                        else (
+                            f"CAST(NULL AS {_duckdb_type(field.type)}) AS "
+                            f"{_sql_identifier(field.name)}"
+                        )
+                    )
+                    for field in schema_for(name)
+                )
                 connection.execute(
                     f"CREATE TEMP VIEW {identifier} AS "
-                    f"SELECT * FROM read_parquet([{files}], union_by_name=true)"
+                    f"SELECT {projected_columns} FROM read_parquet([{files}], union_by_name=true)"
                 )
                 continue
             columns = ", ".join(

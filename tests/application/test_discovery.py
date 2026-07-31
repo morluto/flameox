@@ -77,6 +77,7 @@ def test_run_and_artifact_pagination_are_snapshot_bound_and_filtered(tmp_path: P
         ).total
         == 0
     )
+    assert runs.list(filter=RunFilter(validation_status=("unsupported",)), limit=10).total == 0
 
     artifacts = ArtifactService(workspace)
     artifact_first = artifacts.list(limit=1)

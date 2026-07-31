@@ -77,6 +77,7 @@ from flameox.application import (
     ExperimentPlan,
     ExperimentPlanRegistry,
     ExperimentService,
+    ExperimentTrialCollection,
     FindingListResult,
     FindingResult,
     FindingService,
@@ -123,6 +124,7 @@ from flameox.domain import (
     RunManifest,
     RunSet,
     Sensitivity,
+    TrialOutcome,
 )
 from flameox.models import ContractModel
 from flameox.storage import RunStore, Workspace
@@ -847,7 +849,21 @@ def create_server(
             attempted_trials = sum(trial.outcome != "unattempted" for trial in result.trials)
             trial_collection_uri = f"{resource_uri}/trials"
             first_failure_trial_id = (
-                result.outcome.first_failure_trial_id if result.outcome is not None else None
+                result.outcome.first_failure_trial_id
+                if result.outcome is not None
+                else next(
+                    (
+                        trial.trial_id
+                        for trial in result.trials
+                        if trial.outcome
+                        not in {
+                            TrialOutcome.SUCCEEDED,
+                            TrialOutcome.UNSUPPORTED,
+                            TrialOutcome.UNATTEMPTED,
+                        }
+                    ),
+                    None,
+                )
             )
             first_failure_uri = (
                 f"{trial_collection_uri}/{first_failure_trial_id}"
@@ -966,6 +982,22 @@ def create_server(
                 ctx.request_context.lifespan_context.require_workspace()
             ).experiments.read(experiment_id)
             return _success(result, f"Loaded experiment {experiment_id}.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="list_experiment_trials", annotations=READ_ONLY)
+    async def list_experiment_trials_tool(
+        experiment_id: str,
+        limit: Annotated[int, Field(ge=1, le=1_000)],
+        ctx: Context[AppContext],
+        cursor: str | None = None,
+    ) -> Annotated[CallToolResult, ToolPayload[ExperimentTrialCollection]]:
+        """Return one bounded page of immutable trials for an experiment."""
+        try:
+            result = ExperimentService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).list_trials(experiment_id, limit=limit, cursor=cursor)
+            return _success(result, f"Returned {result.returned} experiment trials.")
         except DomainError as error:
             return _failure(error)
 

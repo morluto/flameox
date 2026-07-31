@@ -77,6 +77,48 @@ def test_rogue_parquet_file_is_invisible_without_manifest(tmp_path: Path) -> Non
         assert snapshot.execute("SELECT count(*) FROM runs").fetchone() == (0,)
 
 
+def test_catalog_projects_additive_trial_columns_for_old_generations(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    published = GenerationPublisher(workspace).publish_rows(
+        {
+            "trials": [
+                {
+                    "trial_id": "trial-1",
+                    "experiment_id": "experiment-1",
+                    "variant_id": "variant-1",
+                    "run_id": None,
+                    "combination_id": "combination-1",
+                    "factors_json": '{"treatment":"base"}',
+                    "block_id": "block-1",
+                    "order_in_block": 1,
+                    "parameter_name": None,
+                    "parameter_value_int": None,
+                    "parameter_value_float": None,
+                    "attempt": 1,
+                    "outcome": "succeeded",
+                    "exclusion_reason": None,
+                    "validation_status": "not_requested",
+                    "failure_class": "none",
+                    "oracle_receipt_json": None,
+                    "oracle_receipt_artifact_id": None,
+                }
+            ]
+        },
+        publisher="test",
+        publisher_version="1",
+    )
+    path = workspace.paths.root / published.manifest.files[0].path
+    table = pq.read_table(path).drop(["oracle_receipt_json", "oracle_receipt_artifact_id"])
+    pq.write_table(table, path)
+
+    Catalog(workspace).rebuild()
+    with Catalog(workspace).open_snapshot() as snapshot:
+        row = snapshot.execute(
+            "SELECT trial_id, oracle_receipt_json, oracle_receipt_artifact_id FROM trials"
+        ).fetchone()
+    assert row == ("trial-1", None, None)
+
+
 def test_snapshot_connection_cannot_read_outside_workspace(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     catalog = Catalog(workspace)

@@ -876,7 +876,9 @@ class CaptureService:
                                 if validation.process.exit_code != 0
                                 else ValidationStatus.ERROR
                             )
-                            validation_limitations.append(error.message)
+                            validation_limitations.append(
+                                f"Oracle receipt validation failed: {error.message}"
+                            )
                     if validation.process.exit_code != 0:
                         validation_limitations.append(
                             "The declared validation oracle exited unsuccessfully."

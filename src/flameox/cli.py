@@ -963,12 +963,19 @@ def experiment_show(
 @experiment_app.command("trial")
 def experiment_trial(
     trial_id: str,
+    experiment_id: Annotated[
+        str | None,
+        typer.Option("--experiment-id", help="Disambiguate a trial reused across experiments."),
+    ] = None,
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
     """Show one immutable experiment trial and its structured oracle receipt."""
     try:
-        result = ExperimentService(_workspace(workspace)).get_trial(trial_id)
+        result = ExperimentService(_workspace(workspace)).get_trial(
+            trial_id,
+            experiment_id=experiment_id,
+        )
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)

@@ -31,6 +31,7 @@ from flameox.application.workloads import ExperimentConfig, Scalar, WorkloadServ
 from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,
+    CursorCodec,
     DomainError,
     ErrorCode,
     Experiment,
@@ -123,6 +124,18 @@ class ExperimentTrialCollection(ContractModel):
     experiment_id: str
     trials: tuple[Trial, ...]
     returned: int
+    truncated: bool = False
+    next_cursor: str | None = None
+
+
+MAX_TRIAL_PAGE_SIZE = 1_000
+_TRIAL_SELECT = (
+    "SELECT trial_id, experiment_id, variant_id, run_id, combination_id, "
+    "factors_json, block_id, order_in_block, parameter_name, "
+    "parameter_value_int, parameter_value_float, attempt, outcome, "
+    "exclusion_reason, validation_status, failure_class, "
+    "oracle_receipt_json, oracle_receipt_artifact_id FROM trials "
+)
 
 
 class OutcomeCount(ContractModel):
@@ -231,40 +244,82 @@ class ExperimentService:
             id_field="experiment_id",
         )
 
-    def list_trials(self, experiment_id: str) -> ExperimentTrialCollection:
+    def list_trials(
+        self,
+        experiment_id: str,
+        *,
+        limit: int = MAX_TRIAL_PAGE_SIZE,
+        cursor: str | None = None,
+    ) -> ExperimentTrialCollection:
+        if not 1 <= limit <= MAX_TRIAL_PAGE_SIZE:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                f"Trial page size must be between 1 and {MAX_TRIAL_PAGE_SIZE}.",
+            )
         self.experiments.read(experiment_id)
         head = self.workspace.corpus.read_head()
+        scope_digest = digest_model({"experiment_id": experiment_id})
+        offset = 0
+        if cursor is not None:
+            position = CursorCodec.decode(
+                cursor,
+                namespace="experiment-trials",
+                snapshot_id=head.commit_id,
+                scope_digest=scope_digest,
+            )
+            if len(position) != 1 or not isinstance(position[0], int):
+                raise DomainError(ErrorCode.STALE_CURSOR, "Trial cursor position is invalid.")
+            offset = position[0]
+            if offset < 0:
+                raise DomainError(ErrorCode.STALE_CURSOR, "Trial cursor position is invalid.")
         with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
             rows = snapshot.execute(
-                "SELECT trial_id, experiment_id, variant_id, run_id, combination_id, "
-                "factors_json, block_id, order_in_block, parameter_name, "
-                "parameter_value_int, parameter_value_float, attempt, outcome, "
-                "exclusion_reason, validation_status, failure_class, "
-                "oracle_receipt_json, oracle_receipt_artifact_id FROM trials "
-                "WHERE experiment_id = ? QUALIFY row_number() OVER ("
+                _TRIAL_SELECT + "WHERE experiment_id = ? QUALIFY row_number() OVER ("
                 "PARTITION BY trial_id ORDER BY published_at DESC) = 1 "
-                "ORDER BY block_id, order_in_block, trial_id",
-                (experiment_id,),
+                "ORDER BY block_id, order_in_block, trial_id LIMIT ? OFFSET ?",
+                (experiment_id, limit + 1, offset),
             ).fetchall()
-        trials = tuple(self._trial_from_row(row) for row in rows)
+        truncated = len(rows) > limit
+        trials = tuple(self._trial_from_row(row) for row in rows[:limit])
+        next_cursor = (
+            CursorCodec.encode(
+                namespace="experiment-trials",
+                snapshot_id=head.commit_id,
+                scope_digest=scope_digest,
+                position=(offset + limit,),
+            )
+            if truncated
+            else None
+        )
         return ExperimentTrialCollection(
             experiment_id=experiment_id,
             trials=trials,
             returned=len(trials),
+            truncated=truncated,
+            next_cursor=next_cursor,
         )
 
     def get_trial(self, trial_id: str, *, experiment_id: str | None = None) -> Trial:
         head = self.workspace.corpus.read_head()
+        where = "trial_id = ?"
+        parameters: list[object] = [trial_id]
+        if experiment_id is not None:
+            where += " AND experiment_id = ?"
+            parameters.append(experiment_id)
         with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
-            row = snapshot.execute(
-                "SELECT trial_id, experiment_id, variant_id, run_id, combination_id, "
-                "factors_json, block_id, order_in_block, parameter_name, "
-                "parameter_value_int, parameter_value_float, attempt, outcome, "
-                "exclusion_reason, validation_status, failure_class, "
-                "oracle_receipt_json, oracle_receipt_artifact_id FROM trials "
-                "WHERE trial_id = ? ORDER BY published_at DESC LIMIT 1",
-                (trial_id,),
-            ).fetchone()
+            rows = snapshot.execute(
+                _TRIAL_SELECT + f"WHERE {where} QUALIFY row_number() OVER ("
+                "PARTITION BY experiment_id ORDER BY published_at DESC) = 1 "
+                "ORDER BY published_at DESC",
+                tuple(parameters),
+            ).fetchall()
+        if experiment_id is None and len(rows) > 1:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                f"Trial {trial_id!r} is ambiguous; provide its experiment ID.",
+                details={"ambiguous_entity": "trial", "experiment_ids": [row[1] for row in rows]},
+            )
+        row = rows[0] if rows else None
         if row is None:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
@@ -272,11 +327,6 @@ class ExperimentService:
                 details={"missing_entity": "trial"},
             )
         trial = self._trial_from_row(row)
-        if experiment_id is not None and trial.experiment_id != experiment_id:
-            raise DomainError(
-                ErrorCode.WORKSPACE_INVALID,
-                f"Trial {trial_id!r} does not belong to experiment {experiment_id!r}.",
-            )
         return trial
 
     @staticmethod
@@ -980,6 +1030,7 @@ class ExperimentService:
                     "unattempted",
                     "cancellation",
                     "unsupported_environment",
+                    "oracle_inconclusive",
                     "oracle_unsupported",
                     "infrastructure_failure",
                 }
@@ -1255,6 +1306,7 @@ class ExperimentService:
             "timeout",
             "cancellation",
             "resource_policy",
+            "infrastructure_failure",
         ],
     ]:
         if (
@@ -1272,7 +1324,12 @@ class ExperimentService:
         if run.validation_status is ValidationStatus.UNSUPPORTED:
             return TrialOutcome.UNSUPPORTED, "oracle_unsupported"
         if run.validation_status is ValidationStatus.ERROR:
-            return TrialOutcome.INVALID, "oracle_receipt_error"
+            if any(
+                limitation.startswith("Oracle receipt validation failed:")
+                for limitation in run.limitations
+            ):
+                return TrialOutcome.INVALID, "oracle_receipt_error"
+            return TrialOutcome.INFRASTRUCTURE_FAILED, "infrastructure_failure"
         if run.validation_status is ValidationStatus.FAILED:
             return TrialOutcome.ORACLE_FAILED, "oracle_failure"
         if run.execution_status.value != "succeeded":

@@ -33,9 +33,9 @@ class RunFilter(ContractModel):
         ...,
     ] = Field(default=(), max_length=8)
     validation_status: tuple[
-        Literal["not_requested", "passed", "failed", "inconclusive"],
+        Literal["not_requested", "passed", "failed", "inconclusive", "unsupported"],
         ...,
-    ] = Field(default=(), max_length=4)
+    ] = Field(default=(), max_length=5)
     created_after: datetime | None = None
     created_before: datetime | None = None
 

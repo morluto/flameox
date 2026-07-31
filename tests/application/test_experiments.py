@@ -619,6 +619,34 @@ treatment = ["base", "candidate"]
     assert loaded.oracle_receipt_artifact_id is not None
     assert loaded.oracle_receipt == by_treatment["base"].oracle_receipt
 
+    first_page = service.list_trials(result.experiment.experiment_id, limit=1)
+    assert first_page.returned == 1
+    assert first_page.truncated is True
+    assert first_page.next_cursor is not None
+    second_page = service.list_trials(
+        result.experiment.experiment_id,
+        limit=1,
+        cursor=first_page.next_cursor,
+    )
+    assert second_page.returned == 1
+    assert second_page.truncated is False
+
+    repeated_plan = await service.plan(
+        experiment_name="semantic",
+        investigation_id=investigation.investigation_id,
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    repeated = await service.run(repeated_plan.plan_id)
+    assert repeated.experiment.experiment_id != result.experiment.experiment_id
+    with pytest.raises(DomainError, match="ambiguous"):
+        service.get_trial(by_treatment["base"].trial_id)
+    historical = service.get_trial(
+        by_treatment["base"].trial_id,
+        experiment_id=result.experiment.experiment_id,
+    )
+    assert historical.experiment_id == result.experiment.experiment_id
+
 
 @pytest.mark.anyio
 async def test_outcome_partial_matrix_reports_unmatched_and_insufficient_evidence(
