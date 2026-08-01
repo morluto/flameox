@@ -33,7 +33,11 @@ def test_removed_ad_hoc_command_setting_is_migrated(
     workspace = Workspace.initialize(tmp_path)
     path = workspace.paths.config
     path.write_text(
-        "schema_version = 1\n\n[execution]\nallow_mcp_ad_hoc_commands = true\n",
+        "# Preserve this project note.\n"
+        "schema_version = 1\n\n"
+        "[execution]\n"
+        "# Preserve this execution note.\n"
+        "allow_mcp_ad_hoc_commands = true\n",
         encoding="utf-8",
     )
 
@@ -41,9 +45,37 @@ def test_removed_ad_hoc_command_setting_is_migrated(
         config = workspace.config
 
     assert config == WorkspaceConfig()
-    assert "allow_mcp_ad_hoc_commands" not in path.read_text()
+    migrated = path.read_text()
+    assert "allow_mcp_ad_hoc_commands" not in migrated
+    assert "# Preserve this project note." in migrated
+    assert "# Preserve this execution note." in migrated
     assert "MCP ad-hoc commands are no longer supported" in caplog.text
     assert workspace.config == config
+
+
+def test_removed_ad_hoc_command_setting_is_readable_without_write_access(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    path = workspace.paths.config
+    path.write_text(
+        "schema_version = 1\n\n[execution]\nallow_mcp_ad_hoc_commands = true\n",
+        encoding="utf-8",
+    )
+
+    def refuse_write(*args: object, **kwargs: object) -> None:
+        raise PermissionError(errno.EROFS, "read-only filesystem")
+
+    monkeypatch.setattr("flameox.storage.workspace.atomic_write_text", refuse_write)
+
+    with caplog.at_level(logging.WARNING, logger="flameox.storage.workspace"):
+        config = workspace.config
+
+    assert config == WorkspaceConfig()
+    assert "allow_mcp_ad_hoc_commands" in path.read_text()
+    assert "using the validated migrated configuration without writing" in caplog.text
 
 
 def test_initialize_maps_filesystem_quota_failures_to_domain_errors(

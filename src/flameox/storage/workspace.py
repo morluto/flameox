@@ -14,7 +14,7 @@ from typing import Literal
 from uuid import uuid4
 
 import portalocker
-import tomli_w
+import tomlkit
 from pydantic import Field
 
 from flameox import __version__
@@ -27,11 +27,24 @@ from flameox.storage.corpus import CorpusStore
 
 logger = logging.getLogger(__name__)
 _REMOVED_EXECUTION_SETTING = "allow_mcp_ad_hoc_commands"
+_READ_ONLY_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
 
 
 def _has_removed_execution_setting(payload: dict[str, object]) -> bool:
     execution = payload.get("execution")
     return isinstance(execution, dict) and _REMOVED_EXECUTION_SETTING in execution
+
+
+def _migrated_config_payload(payload: dict[str, object]) -> dict[str, object]:
+    execution = payload.get("execution")
+    if not isinstance(execution, dict):
+        return payload
+    return {
+        **payload,
+        "execution": {
+            key: value for key, value in execution.items() if key != _REMOVED_EXECUTION_SETTING
+        },
+    }
 
 
 class WorkspaceIdentity(ContractModel):
@@ -197,8 +210,19 @@ class Workspace:
         payload = self._read_config_payload()
         if not _has_removed_execution_setting(payload):
             return WorkspaceConfig.model_validate(payload)
-        with self.write_locked():
-            return self._load_config_locked()
+        try:
+            with self.write_locked():
+                return self._load_config_locked()
+        except OSError as exc:
+            if exc.errno not in _READ_ONLY_ERRNOS:
+                raise
+            logger.warning(
+                "Could not persist removal of deprecated execution.%s from %s; "
+                "using the validated migrated configuration without writing.",
+                _REMOVED_EXECUTION_SETTING,
+                self.paths.config,
+            )
+            return WorkspaceConfig.model_validate(_migrated_config_payload(payload))
 
     def _load_config_locked(self) -> WorkspaceConfig:
         payload = self._read_config_payload()
@@ -206,17 +230,17 @@ class Workspace:
         if not isinstance(execution, dict) or _REMOVED_EXECUTION_SETTING not in execution:
             return WorkspaceConfig.model_validate(payload)
 
-        migrated_payload = {
-            **payload,
-            "execution": {
-                key: value for key, value in execution.items() if key != _REMOVED_EXECUTION_SETTING
-            },
-        }
+        migrated_payload = _migrated_config_payload(payload)
         config = WorkspaceConfig.model_validate(migrated_payload)
+        document = tomlkit.parse(self.paths.config.read_text(encoding="utf-8"))
+        document_execution = document.get("execution")
+        if document_execution is None or _REMOVED_EXECUTION_SETTING not in document_execution:
+            return config
+        del document_execution[_REMOVED_EXECUTION_SETTING]
         mode = self.paths.config.stat().st_mode & 0o777
         atomic_write_text(
             self.paths.config,
-            tomli_w.dumps(migrated_payload),
+            tomlkit.dumps(document),
             mode=mode,
         )
         logger.warning(
