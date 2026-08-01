@@ -1,6 +1,29 @@
 # Changelog
 
 All notable changes to flameox are documented in this file.
+## [0.1.7] - 2026-08-01
+### Bug Fixes
+
+- **storage:** Preserve and safely migrate legacy config
+- **storage:** Migrate removed execution setting
+- **setup:** Prevent stale bootstrap downgrades
+### Documentation
+
+- Document managed agent workflows
+### Features
+
+- **mcp:** Complete typed agent workflow contracts
+- **import:** Classify profiler traces and bound temp roots
+- **capture:** Make agent preflight and containment explicit
+- **capabilities:** Add managed provider preparation
+### Styling
+
+- Apply Ruff formatting
+### Testing
+
+- Refresh collection baseline
+- **cli:** Stabilize npx collection receipt
+- **cli:** Cover stale npx bootstrap upgrades
 ## [0.1.6] - 2026-08-01
 ### Bug Fixes
 
