@@ -80,7 +80,7 @@ plan and run it immediately. See
 Python 3.12 or newer and `uv` are required:
 
 ```console
-uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
+uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu --extra torch
 uv run flameox init .
 uv run flameox status
 ```
@@ -120,10 +120,11 @@ flameox runs on your machine and does not upload code or captures. It does not
 monitor production, provide accounts or synchronization, modify source code,
 install system tools, or delete artifacts automatically.
 
-Agents can run only named workloads declared through the structured workload
+Agents can run named workloads declared through the structured workload
 configuration path. MCP does not provide arbitrary shell or SQL access, delete
-evidence, return raw artifact bytes, or launch native viewers. When containment is unavailable,
-flameox reports the workload as `uncontained`.
+evidence, return raw artifact bytes, or launch native viewers. The default agent
+capture runs directly as trusted local execution and reports `uncontained`
+containment; a project can explicitly require managed containment.
 
 ## Setup and installation details
 
@@ -149,13 +150,22 @@ Optional Python extras are independent:
 
 - `python`: pyperf capture and import
 - `cpu`: py-spy capture
-- `trace`: Perfetto Python API; a local Trace Processor binary must also be
-  configured
+- `trace`: Perfetto Python API; MCP can stage the pinned user-space Trace
+  Processor when it is missing
 - `execution`: coverage.py
 - `test`: pytest and pytest-xdist evidence capture
 - `memory`: Memray
 - `torch`: PyTorch capture
 - `all`: all runtime integrations
+
+When FlameOx is connected to an agent, the agent does not need to guess package
+names. `list_capabilities` reports the exact managed providers that are missing;
+the agent calls `prepare_capabilities`, or `prepare_adapter` for an installed
+third-party entry point. These actions verify their result and never run a
+workload. `prepare_workload_dependencies` installs only Python distributions
+declared by a named workload. Non-privileged user-space tools such as Trace
+Processor are staged automatically; host executables, permissions, and
+privileged collectors remain explicit limitations.
 
 ## Local data model
 
@@ -230,9 +240,10 @@ uv run flameox capture run pyperf --workload scan \
 Editing a command, environment, parameter domain, timeout, working directory,
 or oracle changes the workload definition and invalidates existing plans.
 Execution uses argument arrays instead of shell strings, bounds command output,
-and cleans up after timeouts or cancellation. Linux users can configure
-bubblewrap containment; otherwise, the
-result is reported as `uncontained`.
+and records cleanup after timeouts or cancellation. The default agent path is
+direct local execution and reports `uncontained` containment. Linux users can
+explicitly require managed Bubblewrap/systemd containment when the stronger
+descendant guarantee is needed.
 
 ## Investigations and experiments
 

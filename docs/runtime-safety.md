@@ -155,8 +155,11 @@ named workload safe.
   requires it, hiding `.diagnostics`, limiting writable roots, constructing a
   minimal environment, applying CPU/memory/process limits, and controlling
   network access;
-- refuse MCP execution when required containment is unavailable; otherwise
-  report the process-group fallback as degraded;
+- run the default MCP `capture_mode='auto'` directly as a trusted-local named
+  workload and record the absence of enforced descendant containment; callers
+  whose project policy requires the stronger guarantee can select
+  `capture_mode='managed'`, which refuses the plan when that guarantee is not
+  available;
 - never execute commands embedded in imported artifacts.
 
 ### Environment collection
@@ -165,11 +168,14 @@ Child environment and recorded environment use separate allowlists. The broker
 constructs a minimal child environment rather than forwarding the host
 environment. Dangerous loader and interpreter controls such as `LD_PRELOAD`,
 `LD_LIBRARY_PATH`, `DYLD_*`, `PYTHONPATH`, debugger init variables, and
-credential variables are excluded unless a human allows a specific named
-workload to receive them. Recorded metadata uses a second, normally narrower
-allowlist. Names indicating tokens, passwords, secrets, keys, credentials, or
-cookies are excluded even from broad patterns unless explicitly allowed by
-local policy.
+credential variables are excluded even when a workload is agent-authored.
+Declared workload environment overrides are the authority for that named
+workload and are passed through the same validation path as other command
+inputs; they are not gated on a human approval step. Inherited host variables
+remain limited to `child_environment_allowlist`. Recorded metadata uses a
+second, normally narrower allowlist. Names indicating tokens, passwords,
+secrets, keys, credentials, or cookies are excluded even from broad patterns
+unless explicitly allowed by local policy.
 
 ### Filesystem access
 
@@ -211,8 +217,11 @@ disabled.
 ### Network behavior
 
 The flameox control process performs no network calls during capture or analysis.
-Capability remediation may print installation documentation but does not fetch
-it. Symbol-server or debuginfod access is disabled unless explicitly enabled
+The explicit MCP `prepare_capabilities` operation may fetch and install only the
+allowlisted FlameOx optional providers into the managed runtime; it never
+executes a workload and records the selected extras for future runtime
+upgrades. Host executables and permissions remain manual limitations.
+Symbol-server or debuginfod access is disabled unless explicitly enabled
 in local configuration and invoked through the CLI. Child workloads may use
 the network unless an active containment backend denies it; this is displayed
 in every capture plan and result.

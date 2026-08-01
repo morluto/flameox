@@ -20,6 +20,7 @@ See the available lanes and their exact scopes:
 ```console
 uv run python tools/test.py list
 uv run python tools/test.py providers
+uv run python tools/test.py capabilities  # check managed setup metadata vs extras
 ```
 
 Useful focused commands are:

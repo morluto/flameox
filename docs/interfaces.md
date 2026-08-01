@@ -92,14 +92,16 @@ Exit codes:
 ```text
 flameox init
 flameox status
-flameox capabilities [--refresh]
+flameox capabilities [--active] [--refresh]
 flameox config show
 flameox validate
 ```
 
 `init` creates only local files and never installs collectors. `capabilities`
-reports installed tools, versions, supported modes, permissions, and remediation
-commands.
+reports installed tools, versions, supported modes, permissions, and exact
+managed setup actions. MCP agents use `prepare_capabilities` for FlameOx-managed
+providers and the typed `prepare_adapter` action for an installed third-party
+entry point; neither action runs a workload.
 
 ### Capture commands
 
@@ -261,27 +263,19 @@ async def compare_run_sets(
     services = ctx.request_context.lifespan_context.services
     try:
         result = await services.comparisons.compare(request)
-        payload = ToolPayload.ok(result)
-        return CallToolResult(
-            content=[TextContent(type="text", text=result.short_summary())],
-            structured_content=payload.model_dump(mode="json"),
-        )
+        return _success(result, result.short_summary())
     except DomainError as error:
-        payload = ToolPayload.failed(error.to_detail())
-        return CallToolResult(
-            content=[TextContent(type="text", text=error.concise_message)],
-            structured_content=payload.model_dump(mode="json"),
-            is_error=True,
-        )
+        return _failure(error)
 ```
 
 `ToolPayload[T]` is an object-root schema with `schema_version`, `ok`,
 `result | null`, and `error | null`. Domain errors and malformed arguments use
 `isError=true` with that structured payload; malformed arguments use the
 `INVALID_ARGUMENTS` code and include the affected fields. Missing tools and
-invalid JSON-RPC requests remain protocol errors. Returning bare Pydantic models is forbidden because this SDK beta
-duplicates them into text and structured content; uncaught domain exceptions
-are forbidden because their structured detail is lost.
+invalid JSON-RPC requests remain protocol errors. The shared helpers return a
+JSON-compatible `CallToolResult`; the v2 SDK validates its structured content
+against the annotated `ToolPayload[T]` once at the tool boundary. Uncaught
+domain exceptions are forbidden because their structured detail is lost.
 
 The concrete v2 SDK context, annotations, content blocks, and lifespan types are
 confined to `flameox.mcp`. The server calls synchronous `server.run()` for stdio.
@@ -322,7 +316,7 @@ The supported tools are grouped as follows:
 
 | Family | Tools |
 | --- | --- |
-| Workspace | `initialize_workspace`, `workspace_status`, `workload_configuration_status`, `configure_workload`, `list_capabilities`, `validate_workspace` |
+| Workspace | `initialize_workspace`, `workspace_status`, `workload_configuration_status`, `configure_workload`, `list_capabilities`, `prepare_capabilities`, `prepare_adapter`, `prepare_workload_dependencies`, `validate_workspace` |
 | Capture and import | `plan_capture`, `execute_capture_plan`, `import_artifact`, `extract_pyperf`, `extract_python_startup`, `extract_pytest`, `extract_coverage`, `extract_memray`, `extract_perfetto`, `extract_observations` |
 | Detached capture | `start_detached_capture`, `get_detached_capture`, `cancel_detached_capture` |
 | Discovery | `list_declared_workflows`, `get_declared_workflow`, `list_runs`, `list_findings` |
@@ -344,13 +338,24 @@ initialize_workspace
   → list_declared_workflows
   → get_declared_workflow
   → list_capabilities
-  → plan_capture
+  → prepare_capabilities (when setup_adapters is non-empty)
+  → prepare_adapter (when setup_third_party_adapters is non-empty)
+  → prepare_workload_dependencies (when the workload declares missing Python distributions)
+  → list_capabilities
+  → plan_capture (preflight_mode='auto')
   → execute_capture_plan
 ```
 
 Configuration and execution are separate operations. A configuration result
 never starts the declared command, and a capture plan never accepts replacement
 `argv` or `cwd` values.
+
+`plan_capture` accepts `preflight_mode='auto'` and `capture_mode='auto'` by default. It runs the declared
+workload directly and records that no enforced descendant containment was used.
+Use `capture_mode='managed'` only when the project policy requires that stronger
+guarantee; use `capture_mode='trusted_local'` to request the same direct local
+execution explicitly. Planning still does not execute the workload;
+`execute_capture_plan` is the explicit execution step.
 
 #### `initialize_workspace`
 
@@ -365,9 +370,12 @@ external path or configure workloads. Hosts may instead start the server using
 Read-only and bounded. Reports whether the fixed project's `flameox.toml` is
 `missing`, `valid`, or `invalid`, returns the relative path, valid configuration
 digest, existing workload names, bounded diagnostics, and a machine-readable
-`next_tool`. Missing configuration points to `configure_workload`; invalid
-configuration is reported without replacement so an agent cannot overwrite a
-file it has not successfully parsed.
+`next_tool`. Missing configuration points to `configure_workload`. Invalid
+configuration also points to `configure_workload`: a create operation may
+repair it when the complete resulting project configuration parses and validates.
+The candidate is checked before the atomic replacement; if it is still invalid,
+the original file remains untouched and the error carries typed manual-recovery
+context plus `workload_configuration_status` as its verification tool.
 
 #### `configure_workload`
 
@@ -382,7 +390,8 @@ experiments, and comments are preserved, and `flameox.toml` is atomically
 updated under the workspace lock. The canonical workload is immediately active.
 This tool never runs
 the command; call `list_declared_workflows` next, then
-`get_declared_workflow`, `list_capabilities`, `plan_capture`, and finally
+`get_declared_workflow`, `list_capabilities`, `prepare_capabilities` when
+needed, `list_capabilities` again, `plan_capture`, and finally
 `execute_capture_plan`.
 
 #### `workspace_status`
@@ -393,12 +402,57 @@ usage, active captures, and warnings.
 #### `list_capabilities`
 
 Read-only. Returns adapter capabilities, installed versions, required
-permissions, unavailable features, and remediation. The default call performs
-only passive inspection. Active executable probes are separately requested,
-bounded, and executed through the subprocess broker; merely listing
-capabilities does not run a project-controlled binary found on `PATH`. The
-`active_cached` mode uses a previously completed probe, while
-`active_refresh` explicitly reruns it.
+permissions, unavailable features, remediation, and typed managed setup
+actions. `setup_adapters` is the bounded list of missing providers FlameOx can
+install; `setup_third_party_adapters` identifies installed entry points that
+need exact identity approval through `prepare_adapter`. Call the relevant setup
+tool and then call `list_capabilities` again. The default call performs only
+passive inspection.
+Active executable probes are separately requested, bounded, and executed
+through the subprocess broker; merely listing capabilities does not run a
+project-controlled binary found on `PATH`. The `active_cached` mode uses a
+previously completed probe, while `active_refresh` explicitly reruns it.
+`plan_capture` uses `preflight_mode='auto'` by default and performs the bounded
+active probes needed by the selected plan.
+
+Each capability also reports `provisioning` (`bundled`, `managed_runtime`,
+`host`, `third_party_approval`, or `unsupported`) and `setup_verification`.
+The latter distinguishes setup that is not applicable, pending, passively
+observed, or actively verified. Setup results include a bounded verification
+receipt naming the adapters checked and those still unavailable, so an agent can
+decide whether to refresh discovery before planning.
+
+#### `prepare_capabilities`
+
+Mutating but non-executing. Accepts only adapter names reported by
+`list_capabilities` as managed setup actions: `coverage`, `memray`, `perfetto`,
+`py-spy`, `pytest`, and `torch.profiler`. It installs the published FlameOx
+extra into the active managed Python runtime and stages the pinned user-space
+Trace Processor under `.diagnostics/tools` for `perfetto`. It verifies
+availability, persists selected extras for the next FlameOx runtime upgrade,
+and returns `next_tool="list_capabilities"`. It never runs the declared
+workload, mutates source, installs arbitrary packages, changes host
+permissions, or provisions privileged collectors. A failed install returns a
+bounded installer diagnostic and a retryable recovery action.
+
+#### `prepare_adapter`
+
+Mutating but non-executing. Accepts the exact `adapter` and installed
+`distribution` pair from `list_capabilities`, hashes the installed distribution
+identity, and writes an agent-created approval under the workspace lock. A
+version or package-content change invalidates that approval. It does not install
+the package, import plugin code, or run a workload; call `list_capabilities`
+again before planning.
+
+#### `prepare_workload_dependencies`
+
+Mutating but non-executing. Accepts a declared workload name and installs only
+its `requirements.python_distributions` into the active managed Python runtime.
+Requirements may use package-index version specifiers but not direct URLs or
+local paths. The result includes an active preflight, identifies installed and
+remaining distributions, and points to `plan_capture` when ready. Missing
+executables, permissions, and privileged host capabilities remain explicit
+limitations with their bounded fallback adapters.
 
 #### `list_declared_workflows` and `get_declared_workflow`
 
@@ -465,7 +519,15 @@ without relying on prior conversation context.
 
 Mutating. Imports a file under allowed roots, computes its identity, validates
 the selected or detected kind, creates a new import run, and optionally extracts
-evidence.
+evidence. Use `kind='execution_trace'` for Chrome and Torch profiler traces.
+The default `producer='auto'` recognizes common Torch profiler markers and
+preserves `producer='torch.profiler'` for analysis routing. If a trace is
+ambiguous, pass that producer explicitly. An analysis error that requires Torch
+evidence points back to this import step with the required kind and producer.
+`source_root='project'` accepts project-local paths, including absolute paths
+inside the fixed checkout. `source_root='temp'` accepts absolute or relative
+paths beneath the system temporary directory, which covers profiler output
+written outside the checkout without allowing arbitrary filesystem reads.
 
 #### `list_runs`
 

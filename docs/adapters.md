@@ -89,11 +89,12 @@ exact input artifact in `adapter_extractions`.
 ### Discovery
 
 Built-in adapters are registered explicitly. Third-party adapter support uses
-Python entry points under `flameox.adapters`. Entry points execute
-Python code and are therefore part of the trusted computing base. Only
-built-ins load by default. A third-party plugin requires explicit CLI approval
-by distribution name, version, and package identity, and its approval is
-revoked when that identity changes. Loading an entry point does not by itself
+Python entry points under `flameox.adapters`. Entry points execute Python code
+and are therefore part of the trusted computing base. A third-party plugin
+requires explicit approval by adapter, distribution name, version, and package
+identity. Agents use the MCP `prepare_adapter` tool, which records agent-created
+provenance; the CLI remains available for local manual administration. Approval
+is revoked when that identity changes. Loading an entry point does not by itself
 authorize collector execution.
 
 Each adapter has independent:
@@ -282,6 +283,13 @@ A capability may be:
 - `permission_required`;
 - `unsupported_platform`;
 - `unknown`.
+
+For missing managed providers, the report also contains a typed setup action.
+Agents should pass its adapter name to `prepare_capabilities`, then refresh the
+capability list before planning. This covers the published `execution`,
+`memory`, `cpu`, `test`, and `torch` extras. It does not install host tools or
+change permissions. A fallback adapter must be chosen only after the agent has
+shown the requested capability's evidence limitation in its plan.
 
 Probe commands must be bounded and expected to be side-effect free, but active
 execution is still labeled as execution. An executable found only through a
