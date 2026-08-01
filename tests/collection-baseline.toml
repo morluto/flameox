@@ -90,7 +90,7 @@ expected_test_count = 349
 'tests/storage/test_artifacts_and_runs.py' = { count = 14, digest = '0f27557254a46c2635bf5cfd47766e05d84e3bb38becf8d8bf6271cd2ebbfc2e' }
 'tests/storage/test_workspace.py' = { count = 8, digest = 'e657cc3def63d14daa25687beba8a16a5fc95e61b3548e198dc90d0ced9781de' }
 'tests/test_cli_setup.py' = { count = 6, digest = '2e1c3a607b7b4cefecb44f98c88c2e65ccbc0afaae39201c2c443eef0204c561' }
-'tests/cli/test_npx_upgrade.py' = { count = 2, digest = '4a8d96f2436be4bbb941aca4e6b46da694761f4ef38deef7adbd32cd67ef57fe' }
+'tests/cli/test_npx_upgrade.py' = { count = 2, digest = '4f9d9fc9b4d16d1c42d34bcb6e812036c7cdd12650fefee694ef5cfbef873bab' }
 'tests/test_cli_smoke.py' = { count = 6, digest = '651c7d2e6e4cc20a01957613755d81d2a44f7c3feac77d45d990c9651298df47' }
 'tests/test_release_metadata.py' = { count = 2, digest = '6235e23370243d1e45fa84e75a6b8f1699af1d5d8a01b59d783a1b882bd077a9' }
 'tests/test_setup_ui.py' = { count = 2, digest = '9b80453c3b4df6c3744f2d8e750d794bf6f0dc1d568ca987a39739a124a48e45' }

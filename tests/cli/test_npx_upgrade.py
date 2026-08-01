@@ -19,7 +19,13 @@ def _next_patch_version(version: str) -> str:
 @pytest.mark.skipif(os.name != "posix", reason="npx e2e fixture uses POSIX executable scripts")
 @pytest.mark.process
 @pytest.mark.serial
-@pytest.mark.parametrize("active_version", ("0.1.3", _next_patch_version(__version__)))
+@pytest.mark.parametrize(
+    "active_version",
+    (
+        pytest.param("0.1.3", id="older-active-runtime"),
+        pytest.param(_next_patch_version(__version__), id="newer-active-runtime"),
+    ),
+)
 def test_npx_upgrade_activates_or_preserves_the_managed_runtime(
     tmp_path: Path,
     active_version: str,
