@@ -43,6 +43,28 @@ def test_repair_quarantines_invalid_projection_and_rebuilds_from_revision(
     assert projection.read_text() == "{partial"
 
 
+def test_quarantine_manifest_preserves_native_capture_context(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source = workspace.paths.staging / "perf.data"
+    source.write_bytes(b"partial perf output")
+
+    manifest = QuarantineService(workspace).quarantine(
+        source,
+        reason="Collector timed out before the profile was complete.",
+        operation="capture.native_output",
+        expected_format="perf.data",
+        actual_format="regular_file",
+        adapter="perf",
+        originating_run_id="run-native-partial",
+    )
+
+    assert manifest.adapter == "perf"
+    assert manifest.originating_run_id == "run-native-partial"
+    assert manifest.expected_format == "perf.data"
+    assert manifest.actual_format == "regular_file"
+    assert "timed out" in manifest.reason
+
+
 def test_repair_revalidates_projection_after_acquiring_write_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

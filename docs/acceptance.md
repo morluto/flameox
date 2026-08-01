@@ -2,7 +2,7 @@
 
 The acceptance criteria are the completion contract for changes that affect
 flameox's product behavior. The evidence map below records the implementation
-reviewed on 2026-07-31. A passing ordinary test suite is not enough when the
+reviewed on 2026-08-01. A passing ordinary test suite is not enough when the
 relevant criterion requires crash, concurrency, containment, protocol, golden,
 or scale proof.
 
@@ -54,6 +54,15 @@ A release is acceptable when:
 21. failure analysis distinguishes absent, filtered-empty, successful, and
    failed populations, while structured oracle receipts preserve raw bytes and
    produce conservative trial outcomes with bounded lazy drill-down.
+22. invalid native collector outputs are quarantined with run and adapter
+    provenance, partial timeout artifacts are explicitly marked, and profile
+    analysis distinguishes unavailable evidence from zero hotspots;
+23. permission-sensitive adapters exercise active readiness through the broker,
+    bind that report into capture plans, and recheck it before execution;
+24. terminal captures publish bounded runtime-resource summaries, writable-root
+    observations, and explicit unavailable metrics without leaking host paths;
+25. MCP inspection exposes initialize instructions and declared workflow
+    requirements and adapter options without increasing the tool count.
 
 ## Implementation conformance
 
@@ -96,6 +105,10 @@ Conformance status uses three terms:
 | 19 | Proven | The gated 10/1K/100K matrix records publication, compaction file count, rebuild, startup plus cohort-comparison query, and serialization budgets; hashing has a separate throughput budget (`tests/performance/test_catalog_scale.py`). |
 | 20 | Proven | Public behavior tests cover stale cursors, approval mutation, replayed plans, partial source identity, incomplete blocks, failed validation, lock contention, quota errors, malformed artifacts, and structured CLI/MCP failures (`tests/application/`, `tests/storage/`, `tests/adapters/`, `tests/mcp/test_contracts.py`, `tests/test_cli_smoke.py`). |
 | 21 | Proven | Failure-population invariants, strict receipt parsing and lifecycle projection, typed trial persistence, and the fresh-workspace semantic matrix are exercised by `tests/analysis/test_recipe_invariants.py`, `tests/domain/test_models.py`, `tests/application/test_capture_lifecycle.py`, `tests/application/test_experiments.py`, and `tests/golden/test_semantic_matrix.py`. The downstream fixture contract is checked separately by `tests/test_external_receipt_fixture.py`. |
+| 22 | Proven | Native-output success, empty, missing, failed, and timeout-partial cases exercise publication gates, quarantine metadata, lifecycle statuses, and unavailable hotspot evidence (`tests/application/test_capture_native_outputs.py`, `tests/application/test_capture_lifecycle.py`). |
+| 23 | Proven | Deterministic granted, denied, degraded, cached, refreshed, fixed-command, staging-cleanup, and execution-recheck cases cover active perf readiness (`tests/application/test_capabilities.py`, `tests/application/test_capture_native_outputs.py`). |
+| 24 | Proven | Normal, short-process, storage-policy, and project-relative writable-root observations cover dedicated runtime-resource publication and unavailable metrics (`tests/execution/test_broker.py`, `tests/application/test_capture_containment.py`, `tests/application/test_capture_lifecycle.py`). |
+| 25 | Proven | Workflow requirements/options, bounded recovery choices, inspect parity, real stdio initialization, and the unchanged 58-tool catalog are covered by `tests/application/test_capture_planning.py`, `tests/mcp/test_workflows.py`, and `tests/mcp/test_stdio_transport.py`. |
 
 The snapshot, retention, containment, recovery, adapter, analysis,
 observability, and protocol defects recorded by the prior conformance review

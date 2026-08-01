@@ -47,5 +47,24 @@ def run_row(manifest: RunManifest) -> dict[str, object]:
             if manifest.execution_identity
             else None
         ),
+        "limitations": list(manifest.limitations),
+        "limitation_details_json": json.dumps(
+            [item.model_dump(mode="json") for item in manifest.limitation_details],
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        "resource_availability": (
+            "unavailable"
+            if manifest.process is None or manifest.process.resources is None
+            else (
+                "available"
+                if (
+                    not manifest.process.resources.unavailable_metrics
+                    and manifest.process.resources.policy_termination is None
+                )
+                else "partial"
+            )
+        ),
         "manifest_path": f"runs/{manifest.run_id}/manifest.json",
     }
