@@ -1,6 +1,18 @@
 # Changelog
 
 All notable changes to flameox are documented in this file.
+## [0.1.4] - 2026-08-01
+### Bug Fixes
+
+- **ci:** Refresh formatting and collection baseline
+- **mcp:** Include server instructions in inspect output
+- **capture:** Preserve typed run limitations
+- **capabilities:** Probe perf sampling permissions
+- **capture:** Reject invalid native profiles
+### Features
+
+- **mcp:** Expose workflow requirements and adapter options
+- **evidence:** Publish runtime resource summaries
 ## [0.1.3] - 2026-07-31
 ### Bug Fixes
 
