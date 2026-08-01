@@ -96,6 +96,7 @@ from flameox.application.integrity import (
     IntegrityService,
 )
 from flameox.application.operations import (
+    OperationFailure,
     OperationItemOutcome,
     OperationProgress,
     OperationRecord,
@@ -276,6 +277,7 @@ __all__ = [
     "NativeViewerLaunchResult",
     "NativeViewerPlan",
     "NativeViewerService",
+    "OperationFailure",
     "OperationItemOutcome",
     "OperationProgress",
     "OperationRecord",

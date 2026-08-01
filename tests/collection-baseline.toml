@@ -1,4 +1,4 @@
-expected_test_count = 372
+expected_test_count = 374
 
 # New files are normalized to their pre-split path so this receipt proves
 # test identity and parametrized case preservation across the decomposition.
@@ -76,7 +76,7 @@ expected_test_count = 372
 'tests/application/test_viewers.py' = { count = 8, digest = '17e9b4ec485fff59f49c11bc9a513e28da97e4d6d0af6e945ba548ab72aef663' }
 'tests/application/test_workloads.py' = { count = 4, digest = '8498d6450bad63aec49693d92b49d53555d8f134492f13f4fa8e1502adb9f758' }
 'tests/application/test_workloads_and_capture.py' = { count = 42, digest = '02981babb32a456cb6114f9a436479e8227f7ee42b89dc07f72a06df2fad7c4d' }
-'tests/application/test_operations.py' = { count = 2, digest = '0417b8a959d719352243ac841aa80039c80f579a92eb508c8e07af07e7333bca' }
+'tests/application/test_operations.py' = { count = 4, digest = '6ade7b7f439558867f1b04e1cee637e625651761a17f30ff403329363010fda5' }
 'tests/domain/test_identity.py' = { count = 3, digest = '0dd4b644c18a6e8d07d56f9feb07c9af53da4791f465627d4c0f0fe6060a71e5' }
 'tests/domain/test_models.py' = { count = 11, digest = '3c66f63c2bd90a4d7af1393bd59fe08072fe9872cf2a3c0d101095ba6280e016' }
 'tests/evidence/test_publication_and_catalog.py' = { count = 17, digest = '904a72fd43176a273a70dcd092d849e8dd68e1231f468228e138baeadc1170e1' }

@@ -22,7 +22,7 @@ from platformdirs import user_data_path
 from flameox.adapters.builtins import BUILTIN_ADAPTERS, BuiltinAdapter, builtin_adapter
 from flameox.adapters.registry import AdapterRegistry
 from flameox.adapters.setup_runtime import install_trace_processor
-from flameox.application.operations import OperationRunner, OperationStatus
+from flameox.application.operations import OperationFailure, OperationRunner, OperationStatus
 from flameox.atomic import atomic_write_json
 from flameox.domain import (
     AdapterSetup,
@@ -1052,11 +1052,18 @@ class CapabilitySetupManager:
         cancel_event = threading.Event()
         self.runner.set_cancel_hook(operation_id, cancel_event.set)
         try:
-            result = await asyncio.to_thread(
-                self.service.prepare,
-                self._requested(operation_id),
-                cancel_event=cancel_event,
-            )
+            try:
+                result = await asyncio.to_thread(
+                    self.service.prepare,
+                    self._requested(operation_id),
+                    cancel_event=cancel_event,
+                )
+            except DomainError as error:
+                receipt = self.service._read_setup_receipt()
+                raise OperationFailure(
+                    error,
+                    completed_items=receipt.completed if receipt is not None else (),
+                ) from error
             await progress("verifying", 2, 3, "Refreshing and verifying requested capabilities.")
             await progress("completed", 3, 3, "Capability setup complete.")
             return {"setup": result.model_dump(mode="json")}

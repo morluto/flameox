@@ -4,7 +4,6 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any, Literal
-from uuid import uuid4
 
 from pydantic import Field
 
@@ -41,6 +40,7 @@ class OperationRecovery(ContractModel):
     action: Literal[
         "poll",
         "retry_same_request",
+        "retry_new_operation",
         "retry_failed_items",
         "inspect_capabilities",
         "extract_required_evidence",
@@ -48,6 +48,15 @@ class OperationRecovery(ContractModel):
     ]
     tool: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperationFailure(Exception):
+    """A domain failure with item-level completion known to the operation."""
+
+    def __init__(self, error: DomainError, *, completed_items: tuple[str, ...] = ()) -> None:
+        super().__init__(error.message)
+        self.error = error
+        self.completed_items = completed_items
 
 
 class OperationRecord(ContractModel):
@@ -184,21 +193,16 @@ class OperationRunner:
                 if (
                     existing.state in {"starting", "running"}
                     and existing.operation_id not in self.tasks
+                    and not existing.operation_id.startswith("op-")
                 ):
-                    existing = existing.model_copy(
-                        update={
-                            "state": "unmanaged_after_restart",
-                            "recovery": OperationRecovery(
-                                action="retry_same_request",
-                                tool=f"start_{self.operation.replace('.', '_')}",
-                                arguments=request,
-                            ),
-                        }
-                    )
-                    self.store.records.append(existing, expected_revision=existing.revision)
+                    existing = self._mark_unmanaged(existing)
+                    self.store.records.append(existing, expected_revision=existing.revision - 1)
                 return OperationStatus.from_record(existing)
 
-            operation_id = f"op-{uuid4().hex}"
+            # The digest-derived identity makes the create itself the cross-process
+            # idempotency gate. A process-local asyncio lock cannot protect two MCP
+            # server instances sharing one workspace.
+            operation_id = f"op-{idempotency_digest}"
             record = OperationRecord(
                 operation_id=operation_id,
                 operation=self.operation,
@@ -210,7 +214,19 @@ class OperationRunner:
                     OperationItemOutcome(item=item, status="pending") for item in items
                 ),
             )
-            self.store.records.create(record)
+            try:
+                self.store.records.create(record)
+            except DomainError as error:
+                if error.code is not ErrorCode.REVISION_CONFLICT:
+                    raise
+                existing = self.store.read(operation_id)
+                if existing.request_digest != request_digest:
+                    raise DomainError(
+                        ErrorCode.REVISION_CONFLICT,
+                        "The idempotency key is already bound to a different request.",
+                        details={"operation_id": existing.operation_id},
+                    ) from error
+                return OperationStatus.from_record(existing)
             cancel_event = asyncio.Event()
             self.cancel_events[operation_id] = cancel_event
             self.tasks[operation_id] = asyncio.create_task(
@@ -227,11 +243,7 @@ class OperationRunner:
                 update={
                     "revision": record.revision + 1,
                     "state": "unmanaged_after_restart",
-                    "recovery": OperationRecovery(
-                        action="retry_same_request",
-                        tool=f"start_{self.operation.replace('.', '_')}",
-                        arguments=record.request,
-                    ),
+                    "recovery": self._retry_recovery(record),
                     "updated_at": utc_now(),
                 }
             )
@@ -317,11 +329,7 @@ class OperationRunner:
                     cleanup_status="complete",
                     terminal_receipt=receipt,
                     item_outcomes=self._items(operation_id, "pending"),
-                    recovery=OperationRecovery(
-                        action="retry_same_request",
-                        tool=f"start_{self.operation.replace('.', '_')}",
-                        arguments=self.store.read(operation_id).request,
-                    ),
+                    recovery=self._retry_recovery(self.store.read(operation_id)),
                 )
             else:
                 await self._update(
@@ -340,45 +348,70 @@ class OperationRunner:
                 cleanup_status="complete",
                 item_outcomes=self._items(operation_id, "pending"),
             )
+        except OperationFailure as failure:
+            await self._finish_domain_failure(
+                operation_id,
+                cancel_event,
+                failure.error,
+                completed_items=failure.completed_items,
+            )
         except DomainError as error:
-            if cancel_event.is_set() or error.code is ErrorCode.PROCESS_CANCELLED:
-                await self._update(
-                    operation_id,
-                    state="cancelled",
-                    phase="cancelled",
-                    cleanup_status="complete",
-                    failure_code=error.code.value,
-                    failure_message=error.message,
-                    item_outcomes=self._items(operation_id, "pending"),
-                )
-            else:
-                await self._update(
-                    operation_id,
-                    state="failed",
-                    phase="failed",
-                    cleanup_status="complete",
-                    failure_code=error.code.value,
-                    failure_message=error.message,
-                    item_outcomes=self._items(
-                        operation_id,
-                        "retryable" if error.retryable else "failed",
-                    ),
-                    recovery=OperationRecovery(
-                        action="retry_same_request" if error.retryable else "inspect_capabilities",
-                        tool=f"start_{self.operation.replace('.', '_')}",
-                        arguments=self.store.read(operation_id).request,
-                    ),
-                )
+            await self._finish_domain_failure(operation_id, cancel_event, error)
         except Exception as error:
+            await self._finish_unexpected_failure(operation_id, error)
+
+    async def _finish_domain_failure(
+        self,
+        operation_id: str,
+        cancel_event: asyncio.Event,
+        error: DomainError,
+        *,
+        completed_items: tuple[str, ...] = (),
+    ) -> None:
+        if cancel_event.is_set() or error.code is ErrorCode.PROCESS_CANCELLED:
+            await self._update(
+                operation_id,
+                state="cancelled",
+                phase="cancelled",
+                cleanup_status="complete",
+                failure_code=error.code.value,
+                failure_message=error.message,
+                item_outcomes=self._items(operation_id, "pending", completed_items),
+            )
+        else:
             await self._update(
                 operation_id,
                 state="failed",
                 phase="failed",
                 cleanup_status="complete",
-                failure_code=ErrorCode.INTERNAL_ERROR.value,
-                failure_message=f"Operation failed with {type(error).__name__}.",
-                item_outcomes=self._items(operation_id, "failed"),
+                failure_code=error.code.value,
+                failure_message=error.message,
+                item_outcomes=self._items(
+                    operation_id,
+                    "retryable" if error.retryable else "failed",
+                    completed_items,
+                ),
+                recovery=(
+                    self._retry_recovery(self.store.read(operation_id))
+                    if error.retryable
+                    else OperationRecovery(
+                        action="inspect_capabilities",
+                        tool=f"start_{self.operation.replace('.', '_')}",
+                        arguments=self.store.read(operation_id).request,
+                    )
+                ),
             )
+
+    async def _finish_unexpected_failure(self, operation_id: str, error: Exception) -> None:
+        await self._update(
+            operation_id,
+            state="failed",
+            phase="failed",
+            cleanup_status="complete",
+            failure_code=ErrorCode.INTERNAL_ERROR.value,
+            failure_message=f"Operation failed with {type(error).__name__}.",
+            item_outcomes=self._items(operation_id, "failed"),
+        )
 
     async def _progress(
         self,
@@ -431,6 +464,32 @@ class OperationRunner:
         self,
         operation_id: str,
         status: Literal["pending", "running", "complete", "retryable", "unavailable", "failed"],
+        completed_items: tuple[str, ...] = (),
     ) -> tuple[OperationItemOutcome, ...]:
         current = self.store.read(operation_id)
-        return tuple(item.model_copy(update={"status": status}) for item in current.item_outcomes)
+        completed = set(completed_items)
+        return tuple(
+            item.model_copy(update={"status": "complete" if item.item in completed else status})
+            for item in current.item_outcomes
+        )
+
+    def _mark_unmanaged(self, record: OperationRecord) -> OperationRecord:
+        updated = record.model_copy(
+            update={
+                "revision": record.revision + 1,
+                "state": "unmanaged_after_restart",
+                "recovery": self._retry_recovery(record),
+                "updated_at": utc_now(),
+            }
+        )
+        return updated
+
+    def _retry_recovery(self, record: OperationRecord) -> OperationRecovery:
+        return OperationRecovery(
+            action="retry_new_operation",
+            tool=f"start_{self.operation.replace('.', '_')}",
+            arguments={
+                **record.request,
+                "idempotency_key": f"{record.operation_id}:retry:{record.revision + 1}",
+            },
+        )

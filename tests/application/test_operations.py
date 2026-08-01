@@ -7,8 +7,8 @@ from typing import cast
 
 import pytest
 
-from flameox.application.operations import OperationRunner
-from flameox.domain import DomainError
+from flameox.application.operations import OperationFailure, OperationRunner
+from flameox.domain import DomainError, ErrorCode
 from flameox.storage import Workspace
 
 
@@ -78,4 +78,57 @@ async def test_operation_runner_cancellation_persists_cleanup_and_is_replayable(
     assert cancelled.cleanup_status == "complete"
     assert cancelled.cancellation_requested is True
     assert cancelled.recovery is not None
-    assert cancelled.recovery.arguments == {"value": 1}
+    assert cancelled.recovery.action == "retry_new_operation"
+    assert cancelled.recovery.arguments["value"] == 1
+    assert cancelled.recovery.arguments["idempotency_key"]
+
+
+@pytest.mark.anyio
+async def test_operation_runner_idempotency_is_shared_by_runners(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    first_runner = OperationRunner(workspace, "test.operation")
+    second_runner = OperationRunner(workspace, "test.operation")
+    started = 0
+
+    async def run(
+        operation_id: str,
+        progress: object,
+    ) -> dict[str, object]:
+        nonlocal started
+        started += 1
+        await asyncio.sleep(0.02)
+        return {"operation_id": operation_id}
+
+    first, second = await asyncio.gather(
+        first_runner.start({"value": 1}, "same-key", run),
+        second_runner.start({"value": 1}, "same-key", run),
+    )
+    assert first.operation_id == second.operation_id
+    await asyncio.sleep(0.05)
+    assert started == 1
+
+
+@pytest.mark.anyio
+async def test_operation_runner_preserves_completed_items_on_failure(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    runner = OperationRunner(workspace, "test.operation")
+
+    async def run(
+        operation_id: str,
+        progress: object,
+    ) -> dict[str, object]:
+        raise OperationFailure(
+            DomainError(ErrorCode.PROCESS_FAILED, "The second item failed.", retryable=True),
+            completed_items=("first",),
+        )
+
+    started = await runner.start(
+        {"value": 1},
+        "failure-key",
+        run,
+        items=("first", "second"),
+    )
+    await asyncio.sleep(0.02)
+    status = await runner.status(started.operation_id)
+    assert status.state == "failed"
+    assert [item.status for item in status.item_outcomes] == ["complete", "retryable"]
