@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Sequence
+from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
 from pathlib import Path
@@ -40,6 +41,7 @@ class CapabilityList(ContractModel):
     capabilities: tuple[CapabilityReport, ...]
     setup_adapters: tuple[str, ...] = ()
     setup_third_party_adapters: tuple[str, ...] = ()
+    latest_setup: CapabilitySetupReceipt | None = None
     next_tool: Literal["prepare_capabilities", "prepare_adapter", "list_capabilities"] | None = None
 
 
@@ -51,6 +53,18 @@ class SetupVerification(ContractModel):
     available_adapters: tuple[str, ...]
     unavailable_adapters: tuple[str, ...] = ()
     method: Literal["capability_scan"] = "capability_scan"
+
+
+class CapabilitySetupReceipt(ContractModel):
+    """Latest durable state for a managed capability setup request."""
+
+    schema_version: int = 1
+    requested: tuple[str, ...]
+    completed: tuple[str, ...] = ()
+    phase: Literal["installing_packages", "staging_trace_processor", "completed", "failed"]
+    error: str | None = None
+    updated_at: datetime
+    next_tool: Literal["list_capabilities"] = "list_capabilities"
 
 
 class CapabilitySetupResult(ContractModel):
@@ -96,6 +110,7 @@ class CapabilityService:
         self.capability_manifest = capability_manifest or (
             Path(user_data_path("flameox", appauthor=False)) / "capabilities.json"
         )
+        self.setup_receipt_path = self.capability_manifest.with_name("capability-setup.json")
         self._active_cache: dict[str, CapabilityReport] = {}
 
     def list(self) -> CapabilityList:
@@ -294,7 +309,7 @@ class CapabilityService:
                         setup_verification=("pending" if not descriptor.approved else "passive"),
                     )
                 )
-        return self._finish(reports)
+        return self._finish(reports, latest_setup=self._read_setup_receipt())
 
     async def list_active(self, *, refresh: bool = False) -> CapabilityList:
         passive = self.list()
@@ -310,7 +325,7 @@ class CapabilityService:
                 reports.append(report)
                 continue
             reports.append(await self.probe(report.adapter, refresh=refresh))
-        return self._finish(reports)
+        return self._finish(reports, latest_setup=passive.latest_setup)
 
     async def probe(self, adapter: str, *, refresh: bool = False) -> CapabilityReport:
         if not refresh and adapter in self._active_cache:
@@ -585,9 +600,20 @@ class CapabilityService:
         )
         pending_trace = "perfetto" in pending
         pending_managed = pending
+        self._record_setup_receipt(
+            requested,
+            completed=already_available,
+            phase="installing_packages",
+        )
         lock_path = Path(sys.executable).parent / ".flameox-capability-setup.lock"
         uv = shutil.which("uv") if pending_managed else None
         if pending_managed and uv is None:
+            self._record_setup_receipt(
+                requested,
+                completed=already_available,
+                phase="failed",
+                error="uv is missing from PATH.",
+            )
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 "The managed runtime cannot prepare optional capabilities because uv is missing.",
@@ -619,6 +645,11 @@ class CapabilityService:
                             "error.",
                         ),
                     )
+                self._record_setup_receipt(
+                    requested,
+                    completed=self._available_requested(requested),
+                    phase=("staging_trace_processor" if pending_trace else "completed"),
+                )
             if pending_trace:
                 if self.workspace is None:
                     raise DomainError(
@@ -627,7 +658,21 @@ class CapabilityService:
                         details={"next_tool": "initialize_workspace"},
                     )
                 install_trace_processor(self.workspace)
+        except DomainError as exc:
+            self._record_setup_receipt(
+                requested,
+                completed=self._available_requested(requested),
+                phase="failed",
+                error=exc.message,
+            )
+            raise
         except (OSError, subprocess.SubprocessError, portalocker.exceptions.LockException) as exc:
+            self._record_setup_receipt(
+                requested,
+                completed=self._available_requested(requested),
+                phase="failed",
+                error=str(exc)[:500],
+            )
             raise DomainError(
                 ErrorCode.PROCESS_FAILED,
                 "FlameOx could not prepare the requested optional capabilities.",
@@ -644,6 +689,12 @@ class CapabilityService:
             if refreshed[adapter].status is not CapabilityStatus.AVAILABLE
         )
         if not_ready:
+            self._record_setup_receipt(
+                requested,
+                completed=self._available_requested(requested),
+                phase="failed",
+                error="One or more requested capabilities did not become available.",
+            )
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 "The installer completed but one or more capabilities did not become available.",
@@ -659,6 +710,11 @@ class CapabilityService:
                 for item in (refreshed[adapter].setup for adapter in requested)
                 if isinstance(item, CapabilitySetup)
             )
+        )
+        self._record_setup_receipt(
+            requested,
+            completed=requested,
+            phase="completed",
         )
         return CapabilitySetupResult(
             requested=requested,
@@ -688,7 +744,11 @@ class CapabilityService:
         )
 
     @staticmethod
-    def _finish(reports: Sequence[CapabilityReport]) -> CapabilityList:
+    def _finish(
+        reports: Sequence[CapabilityReport],
+        *,
+        latest_setup: CapabilitySetupReceipt | None = None,
+    ) -> CapabilityList:
         setup_adapters = tuple(
             sorted(
                 item.adapter
@@ -709,12 +769,44 @@ class CapabilityService:
             capabilities=tuple(reports),
             setup_adapters=setup_adapters,
             setup_third_party_adapters=setup_third_party_adapters,
+            latest_setup=latest_setup,
             next_tool=(
                 "prepare_capabilities"
                 if setup_adapters
                 else ("prepare_adapter" if setup_third_party_adapters else None)
             ),
         )
+
+    def _available_requested(self, requested: tuple[str, ...]) -> tuple[str, ...]:
+        reports = {item.adapter: item for item in self.list().capabilities}
+        return tuple(
+            adapter
+            for adapter in requested
+            if reports[adapter].status is CapabilityStatus.AVAILABLE
+        )
+
+    def _record_setup_receipt(
+        self,
+        requested: tuple[str, ...],
+        *,
+        completed: tuple[str, ...],
+        phase: Literal["installing_packages", "staging_trace_processor", "completed", "failed"],
+        error: str | None = None,
+    ) -> None:
+        receipt = CapabilitySetupReceipt(
+            requested=requested,
+            completed=completed,
+            phase=phase,
+            error=error,
+            updated_at=utc_now(),
+        )
+        atomic_write_json(self.setup_receipt_path, receipt.model_dump(mode="json"))
+
+    def _read_setup_receipt(self) -> CapabilitySetupReceipt | None:
+        try:
+            return CapabilitySetupReceipt.model_validate_json(self.setup_receipt_path.read_text())
+        except (OSError, ValueError):
+            return None
 
     @staticmethod
     def _verification(

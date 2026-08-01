@@ -292,6 +292,9 @@ def test_prepare_capabilities_installs_only_declared_missing_providers(
             CapabilityList(
                 capabilities=(available,),
             ),
+            CapabilityList(
+                capabilities=(available,),
+            ),
         )
     )
     monkeypatch.setattr(service, "list", lambda: next(reports))
@@ -310,6 +313,17 @@ def test_prepare_capabilities_installs_only_declared_missing_providers(
 
     assert result.installed == ("torch.profiler",)
     assert result.already_available == ()
+    receipt = json.loads((tmp_path / "capability-setup.json").read_text())
+    assert receipt | {"updated_at": None} == {
+        "completed": ["torch.profiler"],
+        "error": None,
+        "next_tool": "list_capabilities",
+        "phase": "completed",
+        "requested": ["torch.profiler"],
+        "schema_version": 1,
+        "updated_at": None,
+    }
+    assert isinstance(receipt["updated_at"], str)
     assert (tmp_path / "capabilities.json").read_text() == (
         '{\n  "extras": [\n    "torch"\n  ],\n  "schema_version": 1\n}\n'
     )
@@ -338,6 +352,37 @@ def test_prepare_capabilities_rejects_unmanaged_provider(tmp_path: Path) -> None
     assert refused.value.details["next_tool"] == "list_capabilities"
 
 
+def test_prepare_capabilities_records_failure_when_uv_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = CapabilityService(
+        Workspace.initialize(tmp_path),
+        capability_manifest=tmp_path / "capabilities.json",
+    )
+    missing = CapabilityReport(
+        adapter="torch.profiler",
+        status=CapabilityStatus.UNAVAILABLE,
+        setup=CapabilitySetup(
+            extra="torch",
+            method="prepare_capabilities",
+            next_tool="prepare_capabilities",
+            requirement="torch>=2.7",
+        ),
+    )
+    monkeypatch.setattr(service, "list", lambda: CapabilityList(capabilities=(missing,)))
+    monkeypatch.setattr("flameox.application.capabilities.shutil.which", lambda _: None)
+
+    with pytest.raises(DomainError) as unavailable:
+        service.prepare(("torch.profiler",))
+
+    assert unavailable.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
+    receipt = json.loads((tmp_path / "capability-setup.json").read_text())
+    assert receipt["phase"] == "failed"
+    assert receipt["completed"] == []
+    assert receipt["error"] == "uv is missing from PATH."
+
+
 def test_prepare_capabilities_is_idempotent_when_provider_is_available(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -361,6 +406,31 @@ def test_prepare_capabilities_is_idempotent_when_provider_is_available(
 
     assert result.installed == ()
     assert result.already_available == ("torch.profiler",)
+
+
+def test_list_capabilities_exposes_latest_setup_receipt(tmp_path: Path) -> None:
+    manifest = tmp_path / "capabilities.json"
+    (tmp_path / "capability-setup.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "requested": ["torch.profiler", "perfetto"],
+                "completed": ["torch.profiler"],
+                "phase": "staging_trace_processor",
+                "error": None,
+                "updated_at": "2026-08-01T15:30:00Z",
+                "next_tool": "list_capabilities",
+            }
+        )
+    )
+    service = CapabilityService(Workspace.initialize(tmp_path), capability_manifest=manifest)
+
+    result = service.list()
+
+    assert result.latest_setup is not None
+    assert result.latest_setup.requested == ("torch.profiler", "perfetto")
+    assert result.latest_setup.completed == ("torch.profiler",)
+    assert result.latest_setup.phase == "staging_trace_processor"
 
 
 def test_entry_point_approval_is_revoked_when_installed_content_changes(

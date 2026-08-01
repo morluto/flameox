@@ -5,13 +5,14 @@ from pathlib import Path
 import pytest
 
 from flameox.adapters import PyPerfExtractor
+from flameox.analysis import RecipeService
 from flameox.application import (
     CaptureService,
     ExecutionPolicy,
     ImportArtifactRequest,
     ImportService,
 )
-from flameox.domain import ArtifactKind, ExecutionStatus
+from flameox.domain import ArtifactKind, DomainError, ErrorCode, ExecutionStatus
 from flameox.storage import Workspace
 
 
@@ -26,6 +27,26 @@ def test_import_detects_torch_profiler_trace_for_analysis_routing(tmp_path: Path
 
     registration = imported.run.artifacts[0]
     assert registration.producer == "torch.profiler"
+
+
+def test_imported_torch_trace_requires_perfetto_extraction_before_analysis(
+    tmp_path: Path,
+) -> None:
+    trace = tmp_path / "torch-trace.json"
+    trace.write_text('{"traceEvents":[{"cat":"cpu_op","name":"aten::add"}]}')
+    workspace = Workspace.initialize(tmp_path)
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(path=trace, kind=ArtifactKind.EXECUTION_TRACE)
+    )
+
+    with pytest.raises(DomainError) as unavailable:
+        RecipeService(workspace).pytorch(imported.run.run_id)
+
+    assert unavailable.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
+    assert unavailable.value.details == {
+        "next_tool": "extract_perfetto",
+        "run_id": imported.run.run_id,
+    }
 
 
 @pytest.mark.anyio

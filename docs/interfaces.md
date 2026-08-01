@@ -433,7 +433,9 @@ Mutating but non-executing. Accepts only adapter names reported by
 extra into the active managed Python runtime and stages the pinned user-space
 Trace Processor under `.diagnostics/tools` for `perfetto`. It verifies
 availability, persists selected extras for the next FlameOx runtime upgrade,
-and returns `next_tool="list_capabilities"`. It never runs the declared
+and returns `next_tool="list_capabilities"`. `list_capabilities` also reports the latest
+durable setup receipt, including the requested adapters, completed adapters, and phase after a
+cancelled or failed request. It never runs the declared
 workload, mutates source, installs arbitrary packages, changes host
 permissions, or provisions privileged collectors. A failed install returns a
 bounded installer diagnostic and a retryable recovery action.
@@ -577,7 +579,9 @@ They do not accept arbitrary SQL or caller-supplied result bodies.
 
 #### `analyze_pytorch`
 
-Read-only over an existing trace. Returns operator and accelerator summaries.
+Read-only over a Perfetto-extracted trace. Returns operator and accelerator summaries.
+For imported Torch Chrome traces, run `extract_perfetto` first. If the trace has not been
+normalized, the tool returns the exact `run_id` and recovery action instead of an empty report.
 
 #### `analyze_memory`
 

@@ -752,6 +752,29 @@ class RecipeService:
             ).fetchone()
             assert count_row is not None
             total = int(count_row[0])
+            if total == 0:
+                run_rows = snapshot.execute(
+                    "SELECT DISTINCT run_id FROM artifact_registrations WHERE artifact_id IN ("
+                    + ", ".join("?" for _ in scope.artifact_ids)
+                    + ") ORDER BY run_id",
+                    scope.artifact_ids,
+                ).fetchall()
+                run_ids = tuple(str(row[0]) for row in run_rows)
+                details: dict[str, object] = {"next_tool": "extract_perfetto"}
+                if len(run_ids) == 1:
+                    details["run_id"] = run_ids[0]
+                raise DomainError(
+                    ErrorCode.CAPABILITY_UNAVAILABLE,
+                    "PyTorch operator analysis requires Perfetto extraction for this imported "
+                    "trace.",
+                    details=details,
+                    remediation=(
+                        "Call extract_perfetto with the reported run_id, then retry "
+                        "analyze_pytorch.",
+                        "If Trace Processor is unavailable, call prepare_capabilities with "
+                        "adapter='perfetto'.",
+                    ),
+                )
             rows = snapshot.execute(
                 "SELECT fm.frame_id, coalesce(f.function, '<unnamed>'), f.module, "
                 "sum(coalesce(fm.self_value, 0)), "

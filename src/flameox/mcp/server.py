@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
-import anyio
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
@@ -124,6 +123,7 @@ from flameox.application import (
     WorkspaceStatus,
     workspace_status,
 )
+from flameox.application.async_work import run_atomic_thread
 from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,
@@ -463,8 +463,8 @@ def _invalid_arguments(
     if tool_name == "import_artifact" and any(item["field"] == "kind" for item in fields):
         remediation.insert(
             0,
-            "For a Chrome or Torch profiler trace use kind='execution_trace'; the imported "
-            "trace can then be analyzed with analyze_pytorch.",
+            "For a Chrome or Torch profiler trace use kind='execution_trace'; run "
+            "extract_perfetto before analyze_pytorch.",
         )
     message = f"{message} {remediation[0]}"
     return CallToolResult(
@@ -936,12 +936,20 @@ def create_server(
 
         This action is limited to the explicit adapter enum, changes only the active managed
         runtime or stages the user-space Trace Processor under .diagnostics/tools, and never
-        executes a project workload. Call list_capabilities again before planning. It does not
-        change host permissions or install privileged collectors.
+        executes a project workload. Call list_capabilities again before planning or after a
+        cancelled request to inspect the durable setup receipt. It does not change host
+        permissions or install privileged collectors.
         """
         try:
             service = ctx.request_context.lifespan_context.capabilities
-            result = await anyio.to_thread.run_sync(service.prepare, tuple(adapters))
+            await ctx.report_progress(
+                0,
+                2,
+                "Capability setup started; refresh capabilities for receipt",
+            )
+            result = await run_atomic_thread(lambda: service.prepare(tuple(adapters)))
+            await ctx.report_progress(1, 2, "Capability setup verified")
+            await ctx.report_progress(2, 2, "Capability setup complete")
             return _success(
                 result,
                 "Prepared requested capabilities; call list_capabilities before planning.",
@@ -1474,9 +1482,9 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[ImportReceipt]]:
         """Import one project-local artifact and preserve producer identity.
 
-        Chrome traces with Torch profiler markers are identified automatically, so an external
-        Torch trace can be sent directly to analyze_pytorch after import. Use kind='execution_trace'
-        for Chrome/Torch traces. If detection is ambiguous, set producer='torch.profiler'.
+        Chrome traces with Torch profiler markers are identified automatically. Use
+        kind='execution_trace' for Chrome/Torch traces, then run extract_perfetto before
+        analyze_pytorch. If detection is ambiguous, set producer='torch.profiler'.
         """
         try:
             state = ctx.request_context.lifespan_context
@@ -2024,8 +2032,7 @@ def create_server(
         ],
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[PyTorchAnalysisResult]]:
-        """Summarize one imported torch.profiler run or artifact; other kinds are
-        unsupported."""
+        """Summarize one Perfetto-extracted torch.profiler run or artifact."""
         try:
             workspace = ctx.request_context.lifespan_context.require_workspace()
             await ctx.report_progress(0, 2, "PyTorch snapshot pinned")
