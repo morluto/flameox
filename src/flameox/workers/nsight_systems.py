@@ -186,6 +186,47 @@ def _memory_events(
     return events, truncated, True
 
 
+def _graph_launch_events(
+    connection: sqlite3.Connection,
+    table: str,
+    *,
+    limit: int,
+) -> tuple[list[dict[str, object]], bool]:
+    columns = _table_columns(connection, table)
+    rows, truncated = _rows(
+        connection,
+        table,
+        {
+            "start": _required_column(table, columns, "start"),
+            "end": _required_column(table, columns, "end"),
+            "correlation": _column(columns, "correlationId", "correlation"),
+            "device": _column(columns, "deviceId", "device"),
+            "context": _column(columns, "contextId", "context"),
+            "stream": _column(columns, "streamId", "stream"),
+            "process": _column(columns, "globalPid", "processId", "pid"),
+        },
+        limit=limit,
+    )
+    events: list[dict[str, object]] = []
+    for row in rows:
+        start = _integer(row["start"])
+        end = _integer(row["end"])
+        events.append(
+            {
+                "name": "cudaGraphLaunch",
+                "category": "cuda_runtime",
+                "start_ns": start,
+                "duration_ns": max(0, end - start),
+                "correlation_id": row.get("correlation"),
+                "device": row.get("device"),
+                "context": row.get("context"),
+                "stream": row.get("stream"),
+                "process": row.get("process"),
+            }
+        )
+    return events, truncated
+
+
 def _extract(path: Path, *, limit: int) -> dict[str, object]:
     uri = f"file:{quote(str(path.resolve()))}?mode=ro&immutable=1"
     connection = sqlite3.connect(uri, uri=True)
@@ -231,6 +272,24 @@ def _extract(path: Path, *, limit: int) -> dict[str, object]:
         events.extend(runtime_events)
         if truncated:
             truncated_tables.append(runtime_table)
+
+        graph_table = tables.get("cupti_activity_kind_graph_trace")
+        runtime_has_graph_launch = any(
+            "graphlaunch"
+            in "".join(
+                character for character in str(event["name"]).casefold() if character.isalnum()
+            )
+            for event in runtime_events
+        )
+        if graph_table is not None and not runtime_has_graph_launch:
+            graph_events, truncated = _graph_launch_events(
+                connection,
+                graph_table,
+                limit=limit,
+            )
+            events.extend(graph_events)
+            if truncated:
+                truncated_tables.append(graph_table)
 
         driver_table = tables.get("cupti_activity_kind_driver")
         if driver_table is not None:

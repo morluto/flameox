@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -174,6 +175,56 @@ async def test_nsight_sqlite_extracts_launch_evidence_without_nsys_installed(
     assert region.graph_launch_count == 1
     assert region.kernel_count == 2
     assert region.idle_gap_total_ns == 5
+
+
+@pytest.mark.anyio
+@pytest.mark.process
+async def test_nsight_certified_2025_5_export_preserves_graph_launches_and_identity(
+    tmp_path: Path,
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures" / "nsight_systems" / "nsight-2025.5.2.sqlite"
+    payload = fixture.read_bytes()
+    assert hashlib.sha256(payload).hexdigest() == (
+        "de09b9460b9f95a2b51b66d502e28cb7cf4e5dee6b748ab6c39cb6587dcb44a3"
+    )
+    export = tmp_path / fixture.name
+    export.write_bytes(payload)
+    workspace = Workspace.initialize(tmp_path)
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(
+            path=export,
+            kind=ArtifactKind.EXECUTION_TRACE,
+            producer="nsight.systems",
+            producer_version="2025.5.2.266-255236693005v0",
+        )
+    )
+
+    extracted = await NsightSystemsExtractor(workspace).extract(imported.run.run_id)
+    repeated = await NsightSystemsExtractor(workspace).extract(imported.run.run_id)
+    analysis = RecipeService(workspace).accelerator_launches(imported.run.run_id)
+    region = analysis.regions[0]
+
+    assert extracted.producer_version == "2025.5.2.266-255236693005v0"
+    assert (
+        extracted.artifact_id
+        == "sha256:de09b9460b9f95a2b51b66d502e28cb7cf4e5dee6b748ab6c39cb6587dcb44a3"
+    )
+    assert repeated.corpus_commit_id == extracted.corpus_commit_id
+    assert extracted.event_count == 37
+    assert extracted.runtime_event_count == 33
+    assert extracted.kernel_event_count == 3
+    assert extracted.memory_copy_event_count == 1
+    assert extracted.coverage["cuda_runtime"]
+    assert extracted.coverage["cuda_kernels"]
+    assert extracted.coverage["correlation_ids"]
+    assert extracted.coverage["stream_identity"]
+    assert "CUPTI_ACTIVITY_KIND_GRAPH_TRACE" in extracted.observed_tables
+    assert region.direct_launch_count == 4
+    assert region.graph_launch_count == 2
+    assert region.kernel_count == 3
+    assert region.correlated_kernel_count == 3
+    assert region.stream_count == 1
+    assert region.kernel_names[0].name == "add_one(const float *, float *, int)"
 
 
 @pytest.mark.anyio

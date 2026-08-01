@@ -62,8 +62,6 @@ Read the contract that owns the behavior before editing it:
 | Profiler integrations, compatibility, and capability probing | [Adapters](docs/adapters.md) |
 | Concurrency, recovery, integrity, security, and privacy | [Runtime safety](docs/runtime-safety.md) |
 | CLI and MCP behavior and trust boundaries | [Interfaces](docs/interfaces.md) |
-| Settled constraints and open design questions | [Architecture decisions](docs/architecture-decisions.md) |
-| Completion criteria and representative proof | [Acceptance](docs/acceptance.md) |
 
 Keep the CLI and MCP server as thin transports over the same application
 services. Preserve native artifacts, provenance, failed attempts, and
@@ -123,14 +121,13 @@ npm run format:check
 npm test
 ```
 
-A passing default suite is not sufficient for every behavioral change. Identify
-the relevant criteria in [docs/acceptance.md](docs/acceptance.md) and provide the
-representative crash, concurrency, containment, protocol, golden, or scale proof
-that the criterion requires. If a proportionate proof is not feasible, describe
-the gap rather than substituting a test that mirrors the implementation.
+A passing default suite is not sufficient for every behavioral change. Provide
+the representative crash, concurrency, containment, protocol, golden, or scale
+proof that the behavior requires. If a proportionate proof is not feasible,
+describe the gap rather than substituting a test that mirrors the implementation.
 
 Update the owning contract when behavior changes. Also update the README, CLI or
-MCP examples, compatibility notes, and acceptance evidence when they are affected.
+MCP examples, and compatibility notes when they are affected.
 
 ## Commits and pull requests
 

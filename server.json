@@ -1,0 +1,42 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.morluto/flameox",
+  "title": "Flameox",
+  "description": "Local runtime evidence for coding-agent performance and reliability investigations",
+  "websiteUrl": "https://github.com/morluto/flameox",
+  "repository": {
+    "url": "https://github.com/morluto/flameox",
+    "source": "github"
+  },
+  "version": "0.1.8",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "flameox",
+      "version": "0.1.8",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        },
+        {
+          "type": "positional",
+          "value": "serve"
+        },
+        {
+          "type": "positional",
+          "value": "--project-root"
+        },
+        {
+          "type": "positional",
+          "value": "."
+        }
+      ]
+    }
+  ]
+}

@@ -302,11 +302,16 @@ timestamps, CUDA runtime/driver APIs, graph launches, kernels, correlation IDs,
 device, context, stream, NVTX, memcpy, and memset fields when present. NVTX containment is
 reported as a derived temporal association, not causality.
 
-The compatibility suite currently uses a deterministic schema fixture rather
-than a vendor-produced export pinned to a certified Nsight Systems release. The
-schema fingerprint and registered producer version are therefore returned and
-bound into normalization provenance, but release certification remains an
-explicit validation gap.
+The compatibility suite includes a vendor-produced SQLite export from Nsight
+Systems `2025.5.2.266-255236693005v0` in
+`tests/fixtures/nsight_systems/nsight-2025.5.2.sqlite`, pinned by its SHA-256
+digest and exercised through the same import and analysis path as a user
+export. The fixture also covers the 2025.5 graph-trace table: when a producer
+already emits `cudaGraphLaunch` runtime rows, the adapter avoids double
+counting the corresponding graph-trace rows; older compatible exports can use
+the graph-trace table as the graph-launch source. The fixture is hardware- and
+timestamp-specific, so the test asserts event classes and identity coverage,
+not exact timestamps.
 
 ### Candidate adapters
 

@@ -3,8 +3,7 @@
 This document explains flameox's process model, package boundaries, dependencies,
 and platform policy. Data contracts live in
 [Storage and evidence](storage-and-evidence.md); runtime invariants live in
-[Runtime safety](runtime-safety.md). Choices that constrain future changes are
-recorded in [Architectural decisions](architecture-decisions.md).
+[Runtime safety](runtime-safety.md).
 
 ## System overview
 

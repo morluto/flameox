@@ -6,9 +6,8 @@ native artifacts, JSON manifests, and committed Parquet generations are
 authoritative; DuckDB is derived state.
 
 [README.md](../README.md#scope) defines product scope.
-[Acceptance and verification](acceptance.md) records completion criteria and
-representative proof. [Runtime safety](runtime-safety.md) defines locking,
-recovery, retention, and integrity behavior around this data.
+[Runtime safety](runtime-safety.md) defines locking, recovery, retention, and
+integrity behavior around this data.
 
 ## Workspace
 

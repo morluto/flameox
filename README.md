@@ -31,6 +31,8 @@
 
 <p align="center"><strong>Connect your agent:</strong> <code>npx flameox@latest setup</code></p>
 
+<!-- mcp-name: io.github.morluto/flameox -->
+
 ---
 
 flameox helps coding agents investigate performance, memory, execution,
@@ -313,6 +315,20 @@ Start the stdio server with a fixed project root:
 uv run flameox mcp serve --project-root .
 ```
 
+Flameox is published to the official MCP Registry as
+`io.github.morluto/flameox`. The registry entry uses the maintained PyPI
+package and launches the same stdio server through `uvx`; the npm package
+remains the guided setup bootstrap. Registry-aware clients can discover the
+server by that name. The equivalent direct launch for a specific release is:
+
+```console
+uvx --from flameox==VERSION flameox mcp serve --project-root .
+```
+
+The project root is the client's working directory. Flameox does not create its
+`.diagnostics/` workspace until the client explicitly calls the initialization
+workflow for that project.
+
 Through MCP, agents can configure workloads, plan captures and experiments, query evidence,
 preview analyses, and record results. Capture and experiment plans are
 short-lived and single-use; restarting the server invalidates those plan tokens.
@@ -360,10 +376,6 @@ recoverable trash instead of deleting them immediately.
   integrity, security, privacy, and local observability
 - [CLI and MCP boundaries](docs/interfaces.md): agent interfaces and execution
   boundaries
-- [Architectural decisions](docs/architecture-decisions.md): settled choices and
-  open design questions
-- [Acceptance and verification](docs/acceptance.md): completion criteria and
-  representative proof
 - [Testing](docs/testing.md): suite ownership, focused lanes, provider setup,
   and collection-preservation checks
 - [Contributing](CONTRIBUTING.md): development setup, project contracts,

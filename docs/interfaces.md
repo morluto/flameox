@@ -58,6 +58,26 @@ sensitive artifact bytes.
 The transport does not own domain behavior. Results, validation, cancellation,
 provenance, and error semantics belong to the shared application layer.
 
+### MCP Registry distribution
+
+The official MCP Registry name is `io.github.morluto/flameox`. Its checked-in
+`server.json` points to the version-matched `flameox` package on PyPI with the
+`uvx` runtime hint, stdio transport, and fixed package arguments
+`mcp serve --project-root .`. PyPI is the canonical registry package because it
+contains the maintained MCP implementation. The npm package is a setup
+bootstrap and must not be advertised as the stdio server.
+
+The package README carries the registry ownership marker. Release planning
+updates the Python, npm, and registry metadata versions together. A release
+build validates `server.json`; after the exact PyPI artifact is visible, the
+tag workflow authenticates `mcp-publisher` with GitHub OIDC and publishes the
+same metadata. Registry publication must succeed before the GitHub release is
+created.
+
+Registry launch does not imply workspace initialization. The client supplies
+its working directory as `.`, and the server retains the normal explicit
+`initialize_workspace` boundary.
+
 ## CLI specification
 
 ### General behavior

@@ -15,6 +15,10 @@ concurrency:
 
 permissions: {}
 
+env:
+  MCP_PUBLISHER_VERSION: "1.8.0"
+  MCP_PUBLISHER_LINUX_AMD64_SHA256: "1370446bbe74d562608e8005a6ccce02d146a661fbd78674e11cc70b9618d6cf"
+
 jobs:
   build:
     name: Build and verify release artifacts
@@ -48,9 +52,13 @@ jobs:
           set -euo pipefail
           python_version=$(uv version --short)
           npm_version=$(node -p "require('./npm/package.json').version")
+          registry_version=$(jq -r '.version' server.json)
+          registry_package_version=$(jq -r '.packages[0].version' server.json)
 
-          if [[ "$python_version" != "$npm_version" ]]; then
-            echo "Python version $python_version does not match npm version $npm_version" >&2
+          if [[ "$python_version" != "$npm_version" ]] ||
+             [[ "$python_version" != "$registry_version" ]] ||
+             [[ "$python_version" != "$registry_package_version" ]]; then
+            echo "Python, npm, and MCP Registry versions must match $python_version" >&2
             exit 1
           fi
 
@@ -108,6 +116,17 @@ jobs:
           npm run lint
           npm run format:check
           npm test
+
+      - name: Validate MCP Registry metadata
+        run: |
+          set -euo pipefail
+          archive=mcp-publisher.tar.gz
+          curl --fail --location --silent --show-error \
+            --output "$archive" \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_LINUX_AMD64_SHA256}  $archive" | sha256sum --check --strict
+          tar -xzf "$archive" mcp-publisher
+          ./mcp-publisher validate server.json
 
       - name: Build release artifacts
         run: |
@@ -239,17 +258,71 @@ jobs:
           NPM_PACKAGE: ${{ steps.package.outputs.path }}
         run: npm publish "$NPM_PACKAGE" --access public --provenance
 
+  publish-mcp-registry:
+    name: Publish to MCP Registry
+    needs:
+      - build
+      - publish-pypi
+    if: needs.build.outputs.publishing == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Mint the registry-bound GitHub OIDC credential.
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Verify published PyPI identity
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          for attempt in {1..12}; do
+            published_version=$(curl \
+              --fail \
+              --silent \
+              --show-error \
+              "https://pypi.org/pypi/flameox/${RELEASE_VERSION}/json" \
+              | jq -r '.info.version' 2>/dev/null || true)
+            if [[ "$published_version" == "$RELEASE_VERSION" ]]; then
+              exit 0
+            fi
+            if [[ "$attempt" -lt 12 ]]; then
+              sleep 10
+            fi
+          done
+          echo "PyPI did not expose flameox $RELEASE_VERSION within 120 seconds" >&2
+          exit 1
+
+      - name: Install verified MCP publisher
+        run: |
+          set -euo pipefail
+          archive=mcp-publisher.tar.gz
+          curl --fail --location --silent --show-error \
+            --output "$archive" \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_LINUX_AMD64_SHA256}  $archive" | sha256sum --check --strict
+          tar -xzf "$archive" mcp-publisher
+
+      - name: Publish MCP server metadata
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish server.json
+
   github-release:
     name: Create GitHub release
     needs:
       - build
       - publish-pypi
       - publish-npm
+      - publish-mcp-registry
     if: >-
       always() &&
       needs.build.outputs.publishing == 'true' &&
       needs.publish-pypi.result == 'success' &&
-      needs.publish-npm.result == 'success'
+      needs.publish-npm.result == 'success' &&
+      needs.publish-mcp-registry.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write # Create the release after both registry publishes succeed.

@@ -66,8 +66,12 @@ jobs:
           set -euo pipefail
           current_version=$(uv version --short)
           npm_version=$(node -p "require('./npm/package.json').version")
-          if [[ "$current_version" != "$npm_version" ]]; then
-            echo "Python version $current_version does not match npm version $npm_version" >&2
+          registry_version=$(jq -r '.version' server.json)
+          registry_package_version=$(jq -r '.packages[0].version' server.json)
+          if [[ "$current_version" != "$npm_version" ]] ||
+             [[ "$current_version" != "$registry_version" ]] ||
+             [[ "$current_version" != "$registry_package_version" ]]; then
+            echo "Python, npm, and MCP Registry versions must match $current_version" >&2
             exit 1
           fi
 
@@ -152,6 +156,10 @@ jobs:
           uv version --bump patch --no-sync
           version=$(uv version --short)
           npm version "$version" --prefix npm --no-git-tag-version
+          jq --arg version "$version" \
+            '.version = $version | .packages[0].version = $version' \
+            server.json > server.json.tmp
+          mv server.json.tmp server.json
           uv lock
           {
             echo "RELEASE_VERSION=$version"
@@ -180,7 +188,13 @@ jobs:
           gh auth setup-git
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml uv.lock npm/package.json npm/package-lock.json CHANGELOG.md
+          git add \
+            pyproject.toml \
+            uv.lock \
+            npm/package.json \
+            npm/package-lock.json \
+            server.json \
+            CHANGELOG.md
           git commit -m "chore(main): release flameox $RELEASE_VERSION"
           git fetch origin \
             "refs/heads/$RELEASE_BRANCH:refs/remotes/origin/$RELEASE_BRANCH" \
@@ -265,8 +279,10 @@ jobs:
             exit 1
           fi
           if [[ "$(uv version --short)" != "$version" ]] ||
-             [[ "$(node -p "require('./npm/package.json').version")" != "$version" ]]; then
-            echo "Merged package versions do not match release PR version $version" >&2
+             [[ "$(node -p "require('./npm/package.json').version")" != "$version" ]] ||
+             [[ "$(jq -r '.version' server.json)" != "$version" ]] ||
+             [[ "$(jq -r '.packages[0].version' server.json)" != "$version" ]]; then
+            echo "Merged package and MCP Registry versions do not match $version" >&2
             exit 1
           fi
           {

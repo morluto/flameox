@@ -114,6 +114,9 @@ async def test_torch_profiler_sdk_registers_every_scheduled_cycle(
         "root.joinpath('torch-trace-cycle-0000.json').write_text('{}')\n"
         "root.joinpath('torch-trace-cycle-0001.json').write_text('{}')\n"
     )
+    (tmp_path / "missing_steps.py").write_text(
+        "from flameox.sdk import torch_profiler\nwith torch_profiler():\n    pass\n"
+    )
     (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
@@ -123,6 +126,10 @@ cwd = "."
 timeout_seconds = 30
 [workloads.invalid]
 argv = ["python", "invalid_export.py"]
+cwd = "."
+timeout_seconds = 30
+[workloads.missing_steps]
+argv = ["python", "missing_steps.py"]
 cwd = "."
 timeout_seconds = 30
 """
@@ -192,3 +199,14 @@ timeout_seconds = 30
     assert invalid.run.execution_status is ExecutionStatus.SUCCEEDED
     assert invalid.run.capture_status is CaptureStatus.FAILED
     assert all(item.kind.value != "execution_trace" for item in invalid.run.artifacts)
+
+    missing_steps_plan = await service.plan(
+        workload_name="missing_steps",
+        adapter="torch.profiler",
+        adapter_options=plan.adapter_options,
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    missing_steps = await service.execute(missing_steps_plan.plan_id)
+    assert missing_steps.run.execution_status is ExecutionStatus.SUCCEEDED
+    assert missing_steps.run.capture_status is CaptureStatus.FAILED
+    assert all(item.kind.value != "execution_trace" for item in missing_steps.run.artifacts)

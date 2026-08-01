@@ -1,11 +1,5 @@
 schema_version = 1
 
-[[ownership]]
-owner = "external-receipt-fixture"
-lane = "core"
-paths = ["tests/test_external_receipt_fixture.py"]
-markers = ["unit"]
-
 # Every test file is listed exactly once.  The pytest support hook adds these
 # markers to collected items, and tools/test.py uses the primary lane to build
 # focused commands.  Process, provider, and performance markers describe test

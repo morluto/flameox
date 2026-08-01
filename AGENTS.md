@@ -46,8 +46,8 @@ declared metrics and estimands, compatible identities, preserved samples, and
 a semantic oracle.
 
 A passing test suite does not prove the documented behavior complete. Before
-calling work complete, identify the relevant criteria in
-`docs/acceptance.md` and state any remaining proof gaps.
+calling work complete, identify the relevant behavioral contracts and state any
+remaining proof gaps.
 
 ## Project Structure & Module Organization
 
@@ -70,8 +70,6 @@ Read the relevant contract before changing product behavior:
 - `docs/runtime-safety.md` for concurrency, recovery, retention, integrity,
   security, privacy, and observability;
 - `docs/interfaces.md` for CLI and MCP behavior and trust boundaries;
-- `docs/architecture-decisions.md` for settled constraints and open questions;
-- `docs/acceptance.md` for completion criteria and representative proof.
 
 ## Build, Test, and Development Commands
 

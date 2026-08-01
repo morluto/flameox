@@ -122,7 +122,12 @@ def test_imported_torch_trace_requires_perfetto_extraction_before_analysis(
     tmp_path: Path,
 ) -> None:
     trace = tmp_path / "torch-trace.json"
-    trace.write_text('{"traceEvents":[{"cat":"cpu_op","name":"aten::add"}]}')
+    trace.write_text(
+        '{"traceEvents":['
+        '{"cat":"cpu_op","name":"aten::add","ph":"X","ts":0,"dur":5},'
+        '{"cat":"kernel","name":"void aten_add_kernel","ph":"X","ts":10,"dur":2}'
+        "]}"
+    )
     workspace = Workspace.initialize(tmp_path)
     imported = ImportService(workspace).import_artifact(
         ImportArtifactRequest(path=trace, kind=ArtifactKind.EXECUTION_TRACE)
@@ -136,6 +141,7 @@ def test_imported_torch_trace_requires_perfetto_extraction_before_analysis(
         "next_tool": "extract_perfetto",
         "run_id": imported.run.run_id,
     }
+    assert "extract_perfetto" in unavailable.value.remediation[0]
 
 
 @pytest.mark.anyio

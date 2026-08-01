@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import pytest
 
 from flameox.adapters import AdapterDiscoveryResult, AdapterRegistry
 from flameox.application import CapabilityList, CapabilityService
+from flameox.application.capabilities import (
+    CapabilitySetupManager,
+    CapabilitySetupResult,
+    SetupVerification,
+)
 from flameox.application.dependencies import WorkloadDependencyService
 from flameox.domain import (
     CapabilityReport,
@@ -431,6 +437,67 @@ def test_list_capabilities_exposes_latest_setup_receipt(tmp_path: Path) -> None:
     assert result.latest_setup.requested == ("torch.profiler", "perfetto")
     assert result.latest_setup.completed == ("torch.profiler",)
     assert result.latest_setup.phase == "staging_trace_processor"
+
+
+@pytest.mark.anyio
+async def test_capability_setup_manager_persists_progress_and_final_receipt(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+
+    class FakeCapabilityService:
+        def prepare(
+            self,
+            adapters: tuple[str, ...],
+            *,
+            cancel_event: object,
+        ) -> CapabilitySetupResult:
+            del cancel_event
+            return CapabilitySetupResult(
+                requested=adapters,
+                installed=adapters,
+                already_available=(),
+                setup_verification=SetupVerification(
+                    status="verified",
+                    checked_adapters=adapters,
+                    available_adapters=adapters,
+                ),
+            )
+
+        def _read_setup_receipt(self) -> None:
+            return None
+
+    manager = CapabilitySetupManager(workspace, cast(CapabilityService, FakeCapabilityService()))
+    try:
+        started = await manager.start(("torch.profiler", "perfetto"), "proof-key")
+        terminal = started
+        for _ in range(100):
+            terminal = await manager.status(started.operation_id)
+            if terminal.state == "terminal":
+                break
+            await asyncio.sleep(0.01)
+
+        assert terminal.state == "terminal"
+        assert [item.phase for item in terminal.progress] == [
+            "validating_request",
+            "installing_packages",
+            "verifying",
+            "completed",
+        ]
+        assert [item.item for item in terminal.item_outcomes] == ["torch.profiler", "perfetto"]
+        assert all(item.status == "complete" for item in terminal.item_outcomes)
+        assert terminal.cleanup_status == "complete"
+        assert terminal.terminal_receipt is not None
+        assert terminal.terminal_receipt["setup"]["requested"] == [
+            "torch.profiler",
+            "perfetto",
+        ]
+
+        replay = await manager.start(("torch.profiler", "perfetto"), "proof-key")
+        assert replay.operation_id == terminal.operation_id
+        assert replay.request_digest == terminal.request_digest
+    finally:
+        await manager.shutdown()
 
 
 def test_entry_point_approval_is_revoked_when_installed_content_changes(
