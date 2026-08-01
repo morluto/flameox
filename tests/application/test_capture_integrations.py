@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from flameox.adapters import PyPerfExtractor
+from flameox.adapters.builtins import build_capture_invocation
 from flameox.analysis import RecipeService
 from flameox.application import (
     CaptureService,
@@ -14,6 +17,67 @@ from flameox.application import (
 )
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, ExecutionStatus
 from flameox.storage import Workspace
+
+
+def test_torch_capture_launcher_does_not_require_flameox_in_workload_venv(
+    tmp_path: Path,
+) -> None:
+    invocation = build_capture_invocation(
+        "torch.profiler",
+        ("/workload/.venv/bin/python", "-m", "benchmarks.benchmark_kda_decode", "--repeats", "1"),
+        tmp_path,
+        executable=None,
+    )
+
+    assert Path(invocation.argv[1]).name == "torch_launcher.py"
+    assert invocation.argv[2:] == (
+        "--output",
+        str(tmp_path / "torch-trace.json"),
+        "--module",
+        "benchmarks.benchmark_kda_decode",
+        "--repeats",
+        "1",
+    )
+
+
+@pytest.mark.process
+def test_torch_capture_launcher_runs_module_from_working_directory(tmp_path: Path) -> None:
+    (tmp_path / "benchmarks").mkdir()
+    (tmp_path / "benchmarks" / "benchmark_demo.py").write_text("print('workload ran')\n")
+    (tmp_path / "torch.py").write_text(
+        "from pathlib import Path\n"
+        "class ProfilerActivity:\n"
+        "    CPU = 'cpu'\n"
+        "    CUDA = 'cuda'\n"
+        "class _Profile:\n"
+        "    def __enter__(self): return self\n"
+        "    def __exit__(self, *_): return False\n"
+        "    def export_chrome_trace(self, path): Path(path).write_text('trace')\n"
+        "class profiler:\n"
+        "    ProfilerActivity = ProfilerActivity\n"
+        "    @staticmethod\n"
+        "    def profile(**_): return _Profile()\n"
+        "class cuda:\n"
+        "    @staticmethod\n"
+        "    def is_available(): return False\n"
+    )
+    invocation = build_capture_invocation(
+        "torch.profiler",
+        (sys.executable, "-m", "benchmarks.benchmark_demo"),
+        tmp_path,
+        executable=None,
+    )
+
+    completed = subprocess.run(
+        invocation.argv,
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (tmp_path / "torch-trace.json").read_text() == "trace"
 
 
 def test_import_detects_torch_profiler_trace_for_analysis_routing(tmp_path: Path) -> None:

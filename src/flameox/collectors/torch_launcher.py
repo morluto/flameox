@@ -17,6 +17,8 @@ def main() -> None:
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     options = parser.parse_args()
 
+    if options.module is not None:
+        sys.path.insert(0, str(Path.cwd()))
     try:
         import torch
     except ImportError as exc:

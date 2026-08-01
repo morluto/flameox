@@ -309,8 +309,7 @@ def build_capture_invocation(
                 launcher_target = ("--script", target[0], *target[1:])
             argv = (
                 python,
-                "-m",
-                "flameox.collectors.torch_launcher",
+                _launcher_path("torch_launcher.py"),
                 "--output",
                 output,
                 *launcher_target,
@@ -404,3 +403,8 @@ def _python_executable_for_launcher(workload_argv: tuple[str, ...]) -> str:
     if executable.startswith("python"):
         return workload_argv[0]
     return sys.executable
+
+
+def _launcher_path(name: str) -> str:
+    """Return a standalone launcher path usable by an unrelated workload venv."""
+    return str((Path(__file__).parent.parent / "collectors" / name).resolve())

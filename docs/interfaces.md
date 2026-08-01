@@ -508,6 +508,10 @@ progress, observes cancellation, and returns a completed or failed run record.
 Every bound identity, capability, workload definition, and policy input is rechecked
 immediately before execution. It never accepts a shell string or replacement
 arguments.
+Python profiler adapters keep the declared workload interpreter and working
+directory, including for `python -m` workloads, while invoking FlameOx's
+standalone launcher directly. They do not require FlameOx to be importable from
+the workload virtualenv and do not enable `PYTHONPATH` overrides.
 
 #### `plan_experiment` and `run_experiment`
 
