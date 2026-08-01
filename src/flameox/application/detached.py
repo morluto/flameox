@@ -85,19 +85,33 @@ class DetachedCaptureManager:
                 "idempotency_key": idempotency_key,
             }
         )
+        plan_digest = digest_model({"plan_id": plan_id})
         async with self._start_lock:
             existing_run_id = self._idempotency.get(idempotency_digest)
+            existing_record = None
+            if existing_run_id is None:
+                existing_record = next(
+                    (
+                        record
+                        for record in self.records.list()
+                        if record.idempotency_digest == idempotency_digest
+                    ),
+                    None,
+                )
+                if existing_record is not None:
+                    existing_run_id = existing_record.run_id
+
             if existing_run_id is not None:
-                record = self.records.read(existing_run_id)
-                if record.plan_digest != digest_model({"plan_id": plan_id}):
+                record = existing_record or self.records.read(existing_run_id)
+                if record.plan_digest != plan_digest:
                     raise DomainError(
                         ErrorCode.INVALID_CAPTURE_PLAN,
                         "The detached idempotency key is already bound to another plan.",
                     )
-                return self.status(existing_run_id)
+                self._idempotency[idempotency_digest] = record.run_id
+                return self.status(record.run_id)
 
             plan = await self.captures.plans.inspect(plan_id)
-            plan_digest = digest_model({"plan_id": plan_id})
             record = DetachedCaptureRecord(
                 run_id=plan.run_id,
                 idempotency_digest=idempotency_digest,

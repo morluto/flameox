@@ -205,9 +205,12 @@ async def test_restart_reconnect_is_truthfully_read_only(tmp_path: Path) -> None
     )
     await manager.start(plan.plan_id, "review-restart-001")
 
-    replacement = DetachedCaptureManager(workspace, captures)
+    replacement_captures = CaptureService(workspace)
+    replacement = DetachedCaptureManager(workspace, replacement_captures)
+    repeated = await replacement.start(plan.plan_id, "review-restart-001")
     status = replacement.status(plan.run_id)
 
+    assert repeated.run_id == plan.run_id
     assert status.state == "unmanaged_after_restart"
     assert status.limitations
     with pytest.raises(DomainError) as cancellation:
