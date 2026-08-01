@@ -138,11 +138,8 @@ def _preflight_limitation_details(preflight: PreflightReport) -> tuple[Limitatio
                 f"requirement.{item.status}",
                 f"{item.requirement}: {message}",
             )
-            for message in item.limitations or (
-                (f"Requirement status is {item.status}.",)
-                if item.status != "available"
-                else ()
-            )
+            for message in item.limitations
+            or ((f"Requirement status is {item.status}.",) if item.status != "available" else ())
         )
     details.extend(
         _limitation("preflight", "preflight.limitation", message)
@@ -505,9 +502,7 @@ class CaptureService:
                 else None
             ),
             "warnings": warnings,
-            "limitation_details": [
-                item.model_dump(mode="json") for item in limitation_details
-            ],
+            "limitation_details": [item.model_dump(mode="json") for item in limitation_details],
             "writable_roots": [item.model_dump(mode="json") for item in writable_roots],
             "external_context": (
                 external_context.model_dump(mode="json") if external_context is not None else None
@@ -867,8 +862,7 @@ class CaptureService:
                     plan,
                     output_root,
                     reason=(
-                        "Collector exited unsuccessfully; native output is not a completed "
-                        "profile."
+                        "Collector exited unsuccessfully; native output is not a completed profile."
                     ),
                 )
             )
@@ -1136,8 +1130,7 @@ class CaptureService:
                                 _limitation(
                                     "artifact",
                                     "adapter_output_quarantined",
-                                    "Declared adapter output was quarantined "
-                                    f"({quarantine_id}).",
+                                    f"Declared adapter output was quarantined ({quarantine_id}).",
                                 )
                             )
             else:
@@ -1293,16 +1286,16 @@ class CaptureService:
                     terminal_limitation_details,
                     tuple(
                         list(running.limitations)
-                    + (
-                        []
-                        if succeeded
-                        else (
-                            ["Collector timed out; registered artifacts may be partial."]
-                            if timed_out
-                            else [f"Collector exited with status {outcome.process.exit_code}."]
+                        + (
+                            []
+                            if succeeded
+                            else (
+                                ["Collector timed out; registered artifacts may be partial."]
+                                if timed_out
+                                else [f"Collector exited with status {outcome.process.exit_code}."]
+                            )
                         )
-                    )
-                    + validation_limitations
+                        + validation_limitations
                     ),
                 ),
                 "limitation_details": terminal_limitation_details,
@@ -1439,8 +1432,7 @@ class CaptureService:
                     "next_tool": "get_declared_workflow",
                 },
                 remediation=(
-                    "Choose one of the bounded adapter options returned by "
-                    "get_declared_workflow.",
+                    "Choose one of the bounded adapter options returned by get_declared_workflow.",
                 ),
             )
         report = self.capabilities.get(adapter)
@@ -1483,11 +1475,7 @@ class CaptureService:
 
     def _capture_adapter_choices(self) -> tuple[str, ...]:
         builtins = tuple(
-            sorted(
-                adapter.name
-                for adapter in BUILTIN_ADAPTERS.values()
-                if adapter.artifact_kinds
-            )
+            sorted(adapter.name for adapter in BUILTIN_ADAPTERS.values() if adapter.artifact_kinds)
         )
         approved = tuple(
             sorted(
@@ -1548,11 +1536,7 @@ class CaptureService:
                 actual_format=(
                     "symlink"
                     if path.is_symlink()
-                    else (
-                        "regular_file"
-                        if path.is_file()
-                        else "non_regular_file"
-                    )
+                    else ("regular_file" if path.is_file() else "non_regular_file")
                 ),
                 adapter=plan.adapter,
                 originating_run_id=plan.run_id,

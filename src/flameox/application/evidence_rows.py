@@ -60,9 +60,7 @@ def runtime_resource_summary_row(
         "minimum_free_bytes": resources.minimum_free_bytes if resources is not None else None,
         "staging_growth_bytes": resources.staging_growth_bytes if resources is not None else None,
         "peak_rss_bytes": resources.peak_rss_bytes if resources is not None else None,
-        "policy_termination": (
-            resources.policy_termination if resources is not None else None
-        ),
+        "policy_termination": (resources.policy_termination if resources is not None else None),
         "unavailable_metrics": _normalized_unavailable_metrics(unavailable),
     }
 
@@ -77,9 +75,7 @@ def runtime_writable_root_rows(
     rows: list[dict[str, object]] = []
     for binding in manifest.writable_roots:
         growth = (
-            resources.writable_root_growth_bytes.get(binding.storage_path)
-            if resources
-            else None
+            resources.writable_root_growth_bytes.get(binding.storage_path) if resources else None
         )
         marker = f"writable_root_growth:{binding.storage_path}"
         target = Path(binding.target_path)

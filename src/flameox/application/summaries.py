@@ -40,9 +40,7 @@ def _unique_limitation_details(
 def _summary_limitation_details(
     runs: tuple[SummaryRun, ...],
 ) -> tuple[LimitationDetail, ...]:
-    return _unique_limitation_details(
-        [item for run in runs for item in run.limitation_details]
-    )
+    return _unique_limitation_details([item for run in runs for item in run.limitation_details])
 
 
 class EvidenceSummaryRequest(ContractModel):

@@ -585,9 +585,7 @@ class RecipeService:
                 total_staging_growth_bytes=(
                     int(total_row[2]) if total_row[2] is not None else None
                 ),
-                maximum_peak_rss_bytes=(
-                    int(total_row[3]) if total_row[3] is not None else None
-                ),
+                maximum_peak_rss_bytes=(int(total_row[3]) if total_row[3] is not None else None),
             ),
             len(rows) > limit,
         )

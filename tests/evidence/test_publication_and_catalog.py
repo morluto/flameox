@@ -51,10 +51,9 @@ def test_publication_is_visible_only_through_new_corpus_commit(tmp_path: Path) -
 
     with catalog.open_snapshot() as old_snapshot:
         assert old_snapshot.execute("SELECT count(*) FROM runs").fetchone() == (0,)
-        assert (
-            old_snapshot.execute("SELECT count(*) FROM runtime_resource_summaries").fetchone()
-            == (0,)
-        )
+        assert old_snapshot.execute(
+            "SELECT count(*) FROM runtime_resource_summaries"
+        ).fetchone() == (0,)
 
         published = publisher.publish_rows(
             {"runs": [run_row("run-1")]},
@@ -67,10 +66,9 @@ def test_publication_is_visible_only_through_new_corpus_commit(tmp_path: Path) -
     with catalog.open_snapshot() as new_snapshot:
         assert new_snapshot.commit.commit_id == published.commit.commit_id
         assert new_snapshot.execute("SELECT run_id FROM runs").fetchall() == [("run-1",)]
-        assert (
-            new_snapshot.execute("SELECT count(*) FROM runtime_writable_root_growth").fetchone()
-            == (0,)
-        )
+        assert new_snapshot.execute(
+            "SELECT count(*) FROM runtime_writable_root_growth"
+        ).fetchone() == (0,)
 
 
 def test_rogue_parquet_file_is_invisible_without_manifest(tmp_path: Path) -> None:

@@ -123,6 +123,5 @@ timeout_seconds = {timeout}
         )
     if mode == "missing":
         assert any(
-            detail.code == "expected_output_invalid"
-            for detail in result.run.limitation_details
+            detail.code == "expected_output_invalid" for detail in result.run.limitation_details
         )
