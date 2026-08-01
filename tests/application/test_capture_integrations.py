@@ -41,10 +41,13 @@ def test_torch_capture_launcher_does_not_require_flameox_in_workload_venv(
 
 
 @pytest.mark.process
-def test_torch_capture_launcher_runs_module_from_working_directory(tmp_path: Path) -> None:
+def test_torch_capture_launcher_runs_script_with_sibling_imports(tmp_path: Path) -> None:
     (tmp_path / "benchmarks").mkdir()
-    (tmp_path / "benchmarks" / "benchmark_demo.py").write_text("print('workload ran')\n")
-    (tmp_path / "torch.py").write_text(
+    (tmp_path / "benchmarks" / "helper.py").write_text("MESSAGE = 'workload ran'\n")
+    (tmp_path / "benchmarks" / "benchmark_demo.py").write_text(
+        "from helper import MESSAGE\nprint(MESSAGE)\n"
+    )
+    (tmp_path / "benchmarks" / "torch.py").write_text(
         "from pathlib import Path\n"
         "class ProfilerActivity:\n"
         "    CPU = 'cpu'\n"
@@ -63,7 +66,7 @@ def test_torch_capture_launcher_runs_module_from_working_directory(tmp_path: Pat
     )
     invocation = build_capture_invocation(
         "torch.profiler",
-        (sys.executable, "-m", "benchmarks.benchmark_demo"),
+        (sys.executable, "benchmarks/benchmark_demo.py"),
         tmp_path,
         executable=None,
     )

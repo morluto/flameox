@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -239,7 +241,11 @@ class ManagedRuntime:
 TRACE_PROCESSOR_VERSION = "v55.1"
 
 
-def install_trace_processor(workspace: Workspace) -> TraceProcessorInstallation:
+def install_trace_processor(
+    workspace: Workspace,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> TraceProcessorInstallation:
     """Stage the pinned user-space Trace Processor without requiring host privileges."""
     platform_key = {
         ("linux", "x86_64"): "linux-amd64",
@@ -261,7 +267,8 @@ def install_trace_processor(workspace: Workspace) -> TraceProcessorInstallation:
 
     target = workspace.paths.root / "tools" / "trace_processor_shell"
     if target.is_file() and os.access(target, os.X_OK):
-        _verify_trace_processor(target)
+        _check_staging_cancelled(cancel_event)
+        _verify_trace_processor(target, cancel_event=cancel_event)
         return TraceProcessorInstallation(TRACE_PROCESSOR_VERSION, target, False)
 
     url = (
@@ -281,6 +288,7 @@ def install_trace_processor(workspace: Workspace) -> TraceProcessorInstallation:
             with urllib.request.urlopen(url, timeout=120) as response:
                 total = 0
                 while chunk := response.read(1024 * 1024):
+                    _check_staging_cancelled(cancel_event)
                     total += len(chunk)
                     if total > 512 * 1024 * 1024:
                         raise DomainError(
@@ -292,9 +300,11 @@ def install_trace_processor(workspace: Workspace) -> TraceProcessorInstallation:
             stream.flush()
             os.fsync(stream.fileno())
         temporary.chmod(0o755)
-        _verify_trace_processor(temporary)
+        _check_staging_cancelled(cancel_event)
+        _verify_trace_processor(temporary, cancel_event=cancel_event)
         target.parent.mkdir(parents=True, exist_ok=True)
         with workspace.write_locked():
+            _check_staging_cancelled(cancel_event)
             os.replace(temporary, target)
             config = workspace.config
             updated = config.model_copy(
@@ -325,7 +335,53 @@ def install_trace_processor(workspace: Workspace) -> TraceProcessorInstallation:
     return TraceProcessorInstallation(TRACE_PROCESSOR_VERSION, target, True)
 
 
-def _verify_trace_processor(executable: Path) -> None:
+def _verify_trace_processor(
+    executable: Path,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> None:
+    if cancel_event is None:
+        _verify_trace_processor_with_run(executable)
+        return
+    process = subprocess.Popen(
+        [str(executable), "--version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + 30
+    while process.poll() is None:
+        if cancel_event.wait(0.1):
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            raise DomainError(
+                ErrorCode.PROCESS_CANCELLED,
+                "Trace Processor staging was cancelled before publication.",
+                retryable=True,
+                details={"next_tool": "start_capability_setup", "adapter": "perfetto"},
+            )
+        if time.monotonic() >= deadline:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            raise DomainError(
+                ErrorCode.PROCESS_TIMEOUT,
+                "The staged Trace Processor exceeded its 30 second verification timeout.",
+                retryable=True,
+                details={"next_tool": "start_capability_setup", "adapter": "perfetto"},
+            )
+    stdout, stderr = process.communicate()
+    _validate_trace_processor_result(process.returncode, stdout, stderr)
+
+
+def _verify_trace_processor_with_run(executable: Path) -> None:
     try:
         completed = subprocess.run(
             [str(executable), "--version"],
@@ -340,13 +396,31 @@ def _verify_trace_processor(executable: Path) -> None:
             "The staged Trace Processor failed its bounded version check.",
             details={"next_tool": "prepare_capabilities", "adapter": "perfetto"},
         ) from exc
-    output = f"{completed.stdout}\n{completed.stderr}"
-    if completed.returncode != 0 or TRACE_PROCESSOR_VERSION.removeprefix("v") not in output:
+    _validate_trace_processor_result(completed.returncode, completed.stdout, completed.stderr)
+
+
+def _validate_trace_processor_result(
+    returncode: int,
+    stdout: str,
+    stderr: str,
+) -> None:
+    output = f"{stdout}\n{stderr}"
+    if returncode != 0 or TRACE_PROCESSOR_VERSION.removeprefix("v") not in output:
         raise DomainError(
             ErrorCode.PROCESS_FAILED,
             "The staged Trace Processor failed its bounded version check.",
             details={"next_tool": "prepare_capabilities", "adapter": "perfetto"},
-            remediation=(completed.stderr.strip()[:500] or "Retry the managed setup.",),
+            remediation=(stderr.strip()[:500] or "Retry the managed setup.",),
+        )
+
+
+def _check_staging_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise DomainError(
+            ErrorCode.PROCESS_CANCELLED,
+            "Trace Processor staging was cancelled before publication.",
+            retryable=True,
+            details={"next_tool": "start_capability_setup", "adapter": "perfetto"},
         )
 
 

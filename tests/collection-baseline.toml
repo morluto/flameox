@@ -32,7 +32,7 @@ expected_test_count = 381
 'tests/adapters/test_perfetto.py' = 'f10a653fb41df80732bff21b5351b1f4eacfb30dcb358f3b690fb3dc5d3fe70f'
 'tests/analysis/test_recipes.py' = '87ea564890d57d16d9e6303089121662be325905ff4ee485d489c8efeb8d6d7e'
 'tests/application/test_records_and_comparisons.py' = 'd052ad24e744c16d0058b1c01ab76a18d84bce0729d63cf824d5cd23046d0759'
-'tests/application/test_workloads_and_capture.py' = 'e46978fe067047aa9a06ce2685fbec0f84179e220ffe112f9b9dcdfb37dcc298'
+'tests/application/test_workloads_and_capture.py' = '72520d0f76ba10ca4eec4e0b4db2370783c9e8532e0f1d52314829951f9db167'
 'tests/mcp/test_server.py' = 'ab9f9d9f2b4fa37a7ebba360ce480f9cd81e2389e6e307ab035efe3ff9ae6e26'
 'tests/test_cli_setup.py' = '2e1c3a607b7b4cefecb44f98c88c2e65ccbc0afaae39201c2c443eef0204c561'
 

@@ -686,7 +686,7 @@ class CapabilityService:
                         "A workspace is required to stage the managed Trace Processor.",
                         details={"next_tool": "initialize_workspace"},
                     )
-                install_trace_processor(self.workspace)
+                install_trace_processor(self.workspace, cancel_event=cancel_event)
                 self._check_cancelled(cancel_event)
         except DomainError as exc:
             self._record_setup_receipt(

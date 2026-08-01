@@ -1499,25 +1499,66 @@ class RecipeService:
         environment_stable = all(point.environment_count == 1 for point in points)
         if not environment_stable:
             warnings.append("Environment identity varies within at least one scaling point.")
+        attempted_trials = int(trial_row[0])
+        succeeded_trials = int(trial_row[1])
+        failed_trials = int(trial_row[2])
+        evidence, measurement_warning = self._scaling_evidence(
+            points,
+            attempted_trials=attempted_trials,
+            succeeded_trials=succeeded_trials,
+            measured_trials=len(trials),
+        )
+        if measurement_warning is not None:
+            warnings.append(measurement_warning)
         return ScalingAnalysisResult(
             corpus_commit_id=snapshot.commit.commit_id,
             experiment_id=experiment_id,
             metric=metric,
             points=points,
             trials=tuple(trials),
-            attempted_trials=int(trial_row[0]),
-            succeeded_trials=int(trial_row[1]),
-            failed_trials=int(trial_row[2]),
+            attempted_trials=attempted_trials,
+            succeeded_trials=succeeded_trials,
+            failed_trials=failed_trials,
             complete_blocks=int(complete_row[0]),
             fits=fits,
             correlated_hotspots=correlated_hotspots,
             conclusion=conclusion,
             environment_stable=environment_stable,
             warnings=tuple(warnings),
-            evidence=(
-                empty_availability("no_scaling_trials") if not points else available_availability()
-            ),
+            evidence=evidence,
         )
+
+    @staticmethod
+    def _scaling_evidence(
+        points: tuple[ScalingPoint, ...],
+        *,
+        attempted_trials: int,
+        succeeded_trials: int,
+        measured_trials: int,
+    ) -> tuple[EvidenceAvailability, str | None]:
+        if points and succeeded_trials > measured_trials:
+            return (
+                EvidenceAvailability(
+                    status="partial",
+                    reason="primary_metric_measurements_partial",
+                ),
+                "Some succeeded trials published no measurements matching the experiment's "
+                "primary metric.",
+            )
+        if points:
+            return available_availability(), None
+        if succeeded_trials:
+            return (
+                EvidenceAvailability(
+                    status="unavailable",
+                    reason="primary_metric_measurements_unavailable",
+                ),
+                "Succeeded trials published no measurements matching the experiment's "
+                "primary metric.",
+            )
+        if attempted_trials:
+            return empty_availability("no_succeeded_trials"), None
+        return empty_availability("no_scaling_trials"), None
 
     def _scaling_fits(
         self,

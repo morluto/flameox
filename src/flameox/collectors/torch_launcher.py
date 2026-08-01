@@ -19,6 +19,10 @@ def main() -> None:
 
     if options.module is not None:
         sys.path.insert(0, str(Path.cwd()))
+        script_path = None
+    else:
+        script_path = Path(options.script).resolve()
+        sys.path.insert(0, str(script_path.parent))
     try:
         import torch
     except ImportError as exc:
@@ -40,7 +44,8 @@ def main() -> None:
         if options.module is not None:
             runpy.run_module(options.module, run_name="__main__", alter_sys=True)
         else:
-            runpy.run_path(options.script, run_name="__main__")
+            assert script_path is not None
+            runpy.run_path(str(script_path), run_name="__main__")
     profile.export_chrome_trace(str(output))
 
 
