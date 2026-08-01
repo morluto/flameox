@@ -18,8 +18,10 @@ def test_npx_upgrade_activates_the_matching_managed_runtime(tmp_path: Path) -> N
     home = tmp_path / "home"
     data = tmp_path / "data"
     project = tmp_path / "npx-project"
+    package_dist = tmp_path / "package-dist"
     home.mkdir()
     project.mkdir()
+    package_dist.mkdir()
     (home / ".claude").mkdir()
 
     old_version = "0.1.3"
@@ -65,10 +67,70 @@ def test_npx_upgrade_activates_the_matching_managed_runtime(tmp_path: Path) -> N
     )
 
     npm_package = Path(__file__).parents[2] / "npm"
-    node_modules = project / "node_modules"
-    (node_modules / ".bin").mkdir(parents=True)
-    (node_modules / "flameox").symlink_to(npm_package, target_is_directory=True)
-    (node_modules / ".bin" / "flameox").symlink_to("../flameox/bin/flameox.cjs")
+    npm_env = {
+        **os.environ,
+        "npm_config_cache": str(tmp_path / "npm-cache"),
+        "npm_config_fund": "false",
+        "npm_config_update_notifier": "false",
+    }
+    packed = subprocess.run(
+        ["npm", "pack", str(npm_package), "--pack-destination", str(package_dist), "--json"],
+        cwd=tmp_path,
+        env=npm_env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert packed.returncode == 0, packed.stdout + packed.stderr
+    package_tarball = package_dist / json.loads(packed.stdout)[0]["filename"]
+
+    dependency_fixture = tmp_path / "jsonc-parser-fixture"
+    dependency_fixture.mkdir()
+    (dependency_fixture / "package.json").write_text(
+        json.dumps({"name": "jsonc-parser", "version": "3.3.1", "main": "index.js"}) + "\n"
+    )
+    (dependency_fixture / "index.js").write_text("module.exports = {};\n")
+    dependency_pack = subprocess.run(
+        [
+            "npm",
+            "pack",
+            str(dependency_fixture),
+            "--pack-destination",
+            str(package_dist),
+            "--json",
+        ],
+        cwd=tmp_path,
+        env=npm_env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert dependency_pack.returncode == 0, dependency_pack.stdout + dependency_pack.stderr
+    dependency_tarball = package_dist / json.loads(dependency_pack.stdout)[0]["filename"]
+
+    installed = subprocess.run(
+        [
+            "npm",
+            "install",
+            "--prefix",
+            str(project),
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+            "--offline",
+            str(package_tarball),
+            str(dependency_tarball),
+        ],
+        cwd=tmp_path,
+        env=npm_env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stdout + installed.stderr
 
     python_cli = Path(sys.executable).with_name("flameox")
     fake_uvx = tmp_path / "uvx"
@@ -143,3 +205,4 @@ runtime.chmod(0o700)
     )
     assert version.returncode == 0
     assert version.stdout.strip() == __version__
+    assert "node_modules" not in json.loads(config.read_text())["mcpServers"]["flameox"]["command"]
