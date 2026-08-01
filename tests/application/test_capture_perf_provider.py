@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from flameox.application import CapabilityService, CaptureService, ExecutionPolicy
-from flameox.domain import ExecutionStatus
+from flameox.domain import DomainError, ErrorCode, ExecutionStatus
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
 
@@ -34,11 +34,17 @@ timeout_seconds = 30
     )
     disable_containment(workspace)
     service = CaptureService(workspace)
-    plan = await service.plan(
-        workload_name="busy",
-        adapter="perf",
-        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
-    )
+    try:
+        plan = await service.plan(
+            workload_name="busy",
+            adapter="perf",
+            preflight_mode="active",
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
+    except DomainError as error:
+        if error.code is ErrorCode.CAPABILITY_UNAVAILABLE:
+            pytest.skip("The host kernel does not permit perf sampling for this process.")
+        raise
     result = await service.execute(plan.plan_id)
     if result.run.execution_status is not ExecutionStatus.SUCCEEDED:
         pytest.skip("The host kernel does not permit perf sampling for this process.")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -29,6 +30,35 @@ class _ProbeBroker(SubprocessBroker):
             resolved_executable=Path(request.argv[0]),
             containment="process_group",
         )
+
+
+class _PerfProbeBroker(SubprocessBroker):
+    def __init__(self, outcomes: tuple[ExecutionOutcome, ...]) -> None:
+        self.outcomes = list(outcomes)
+        self.requests: list[ExecutionRequest] = []
+
+    async def run(
+        self,
+        request: ExecutionRequest,
+        **_: Any,
+    ) -> ExecutionOutcome:
+        self.requests.append(request)
+        return self.outcomes.pop(0)
+
+
+def _probe_outcome(
+    *,
+    exit_code: int,
+    stdout: bytes = b"perf version 1\n",
+    stderr: bytes = b"",
+) -> ExecutionOutcome:
+    return ExecutionOutcome(
+        process=ProcessResult(exit_code=exit_code, cleanup_complete=True),
+        stdout=stdout,
+        stderr=stderr,
+        resolved_executable=Path("/usr/bin/perf"),
+        containment="process_group",
+    )
 
 
 @pytest.mark.anyio
@@ -61,6 +91,79 @@ async def test_active_capability_probe_is_brokered_cached_and_refreshable(
     pyperf_report = service.get("pyperf")
     assert pyperf_report.import_location is not None
     assert "raw_samples" in pyperf_report.features
+
+
+@pytest.mark.anyio
+async def test_perf_probe_exercises_permissions_and_cleans_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    broker = _PerfProbeBroker(
+        (
+            _probe_outcome(exit_code=0),
+            _probe_outcome(exit_code=0, stdout=b"", stderr=b""),
+            _probe_outcome(exit_code=0),
+            _probe_outcome(
+                exit_code=1,
+                stdout=b"",
+                stderr=b"Error: perf_event_open: Operation not permitted\n",
+            ),
+            _probe_outcome(exit_code=0),
+            _probe_outcome(exit_code=1, stdout=b"", stderr=b"unexpected perf failure\n"),
+        )
+    )
+    service = CapabilityService(workspace, broker=broker)
+    monkeypatch.setattr(
+        service,
+        "_resolved_executable",
+        lambda adapter, executable: "/usr/bin/perf" if adapter == "perf" else None,
+    )
+
+    granted = await service.probe("perf")
+    cached = await service.probe("perf")
+    refreshed = await service.probe("perf", refresh=True)
+
+    assert granted.status is CapabilityStatus.AVAILABLE
+    assert granted.permission_status == "granted"
+    assert cached == granted
+    assert refreshed.status is CapabilityStatus.PERMISSION_REQUIRED
+    assert refreshed.permission_status == "denied"
+    assert refreshed.remediation
+    assert len(broker.requests) == 4
+    record_request = broker.requests[1]
+    assert record_request.argv[1:8] == (
+        "record",
+        "-B",
+        "-N",
+        "--max-size=1M",
+        "-o",
+        record_request.argv[6],
+        "--",
+    )
+    assert record_request.argv[8:] == (sys.executable, "-I", "-S", "-c", "pass")
+    assert record_request.resource_policy is not None
+    assert record_request.resource_policy.staging_root is not None
+    assert not record_request.resource_policy.staging_root.exists()
+
+    degraded_service = CapabilityService(
+        workspace,
+        broker=_PerfProbeBroker(
+            (
+                _probe_outcome(exit_code=0),
+                _probe_outcome(exit_code=1, stdout=b"", stderr=b"unexpected perf failure\n"),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        degraded_service,
+        "_resolved_executable",
+        lambda adapter, executable: "/usr/bin/perf" if adapter == "perf" else None,
+    )
+    degraded = await degraded_service.probe("perf")
+    assert degraded.status is CapabilityStatus.DEGRADED
+    assert degraded.permission_status == "unknown"
+    assert "unexpected perf failure" in degraded.limitations[0]
 
 
 def test_entry_point_approval_is_lazy_and_revoked_by_distribution_change(
