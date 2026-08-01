@@ -68,6 +68,37 @@ async def test_setup_connects_only_explicitly_selected_clients(tmp_path: Path) -
 
 
 @pytest.mark.anyio
+async def test_setup_does_not_downgrade_active_runtime_for_stale_bootstrap(
+    tmp_path: Path,
+) -> None:
+    service, runtime, home = make_service(tmp_path)
+    (home / ".claude").mkdir()
+
+    await service.apply(
+        service.plan(
+            operation=SetupOperation.CONFIGURE,
+            clients=(SetupClient.CLAUDE,),
+            version="0.1.5",
+        )
+    )
+    plan = service.plan(
+        operation=SetupOperation.CONFIGURE,
+        clients=(SetupClient.CLAUDE,),
+        version="0.1.1",
+    )
+
+    assert plan.public.version == "0.1.5"
+    assert plan.public.runtime_action.value == "reuse"
+    assert plan.public.warnings == (
+        "Requested flameox 0.1.1 is older than the active runtime 0.1.5; "
+        "keeping the active runtime.",
+    )
+    await service.apply(plan)
+    configured = json.loads((home / ".claude.json").read_text())
+    assert configured["mcpServers"]["flameox"]["command"] == str(runtime.executable("0.1.5"))
+
+
+@pytest.mark.anyio
 async def test_setup_is_idempotent_and_preserves_unrelated_json(tmp_path: Path) -> None:
     service, _, home = make_service(tmp_path)
     config = home / ".gemini" / "settings.json"

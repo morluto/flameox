@@ -11,10 +11,25 @@ import pytest
 from flameox import __version__
 
 
+def _next_patch_version(version: str) -> str:
+    major, minor, patch = (int(part) for part in version.split("."))
+    return f"{major}.{minor}.{patch + 1}"
+
+
 @pytest.mark.skipif(os.name != "posix", reason="npx e2e fixture uses POSIX executable scripts")
 @pytest.mark.process
 @pytest.mark.serial
-def test_npx_upgrade_activates_the_matching_managed_runtime(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "active_version",
+    (
+        pytest.param("0.1.3", id="older-active-runtime"),
+        pytest.param(_next_patch_version(__version__), id="newer-active-runtime"),
+    ),
+)
+def test_npx_upgrade_activates_or_preserves_the_managed_runtime(
+    tmp_path: Path,
+    active_version: str,
+) -> None:
     home = tmp_path / "home"
     data = tmp_path / "data"
     project = tmp_path / "npx-project"
@@ -24,29 +39,29 @@ def test_npx_upgrade_activates_the_matching_managed_runtime(tmp_path: Path) -> N
     package_dist.mkdir()
     (home / ".claude").mkdir()
 
-    old_version = "0.1.3"
-    old_executable = data / "runtimes" / old_version / "bin" / "flameox"
-    old_executable.parent.mkdir(parents=True)
-    old_executable.write_text("#!/bin/sh\nprintf '%s\\n' '0.1.3'\n")
-    old_executable.chmod(0o700)
-    (old_executable.parent.parent / "runtime.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "distribution": "flameox",
-                "version": old_version,
-                "executable": str(old_executable),
-            }
+    active_executable = data / "runtimes" / active_version / "bin" / "flameox"
+    if active_version == "0.1.3":
+        active_executable.parent.mkdir(parents=True)
+        active_executable.write_text("#!/bin/sh\nprintf '%s\\n' '0.1.3'\n")
+        active_executable.chmod(0o700)
+        (active_executable.parent.parent / "runtime.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "distribution": "flameox",
+                    "version": active_version,
+                    "executable": str(active_executable),
+                }
+            )
+            + "\n"
         )
-        + "\n"
-    )
     data.mkdir(exist_ok=True)
     (data / "install.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
-                "active_version": old_version,
-                "executable": str(old_executable),
+                "active_version": active_version,
+                "executable": str(active_executable),
             }
         )
         + "\n"
@@ -57,7 +72,7 @@ def test_npx_upgrade_activates_the_matching_managed_runtime(tmp_path: Path) -> N
             {
                 "mcpServers": {
                     "flameox": {
-                        "command": str(old_executable),
+                        "command": str(active_executable),
                         "args": ["mcp", "serve", "--project-root", "."],
                     }
                 }
@@ -149,18 +164,28 @@ os.execv({str(python_cli)!r}, [{str(python_cli)!r}, *arguments[handoff + 1:]])
     fake_uv = tmp_path / "uv"
     fake_uv.write_text(
         f"""#!{sys.executable}
+import json
 import os
 from pathlib import Path
 import sys
 
 if sys.argv[1:3] != ["tool", "install"]:
     raise SystemExit("unexpected uv invocation")
+version = next(
+    argument.split("==", 1)[1]
+    for argument in sys.argv
+    if argument.startswith("flameox==")
+)
+Path(os.environ["FLAMEOX_UV_CAPTURE"]).write_text(json.dumps(sys.argv[1:]))
 runtime = Path(os.environ["UV_TOOL_BIN_DIR"]) / "flameox"
 runtime.parent.mkdir(parents=True, exist_ok=True)
 runtime.write_text(
     "#!{sys.executable}\\n"
     "import os, sys\\n"
-    "os.execv({str(python_cli)!r}, [{str(python_cli)!r}, *sys.argv[1:]])\\n"
+    "if sys.argv[1:] == ['--version']:\\n"
+    "    print(" + repr(version) + ")\\n"
+    "else:\\n"
+    "    os.execv({str(python_cli)!r}, [{str(python_cli)!r}, *sys.argv[1:]])\\n"
 )
 runtime.chmod(0o700)
 """
@@ -176,6 +201,7 @@ runtime.chmod(0o700)
             "FLAMEOX_SETUP_DATA_ROOT": str(data),
             "FLAMEOX_SETUP_UV": str(fake_uv),
             "FLAMEOX_UV_EXECUTABLE": str(fake_uvx),
+            "FLAMEOX_UV_CAPTURE": str(tmp_path / "uv-arguments.json"),
         },
         capture_output=True,
         text=True,
@@ -187,9 +213,10 @@ runtime.chmod(0o700)
     assert "Managed runtime ready. Starting flameox setup..." in result.stderr
 
     manifest = json.loads((data / "install.json").read_text())
-    current_executable = data / "runtimes" / __version__ / "bin" / "flameox"
+    expected_version = __version__ if active_version == "0.1.3" else active_version
+    current_executable = data / "runtimes" / expected_version / "bin" / "flameox"
     assert manifest == {
-        "active_version": __version__,
+        "active_version": expected_version,
         "executable": str(current_executable),
         "schema_version": 1,
     }
@@ -204,5 +231,8 @@ runtime.chmod(0o700)
         check=False,
     )
     assert version.returncode == 0
-    assert version.stdout.strip() == __version__
+    assert version.stdout.strip() == expected_version
     assert "node_modules" not in json.loads(config.read_text())["mcpServers"]["flameox"]["command"]
+    assert json.loads((tmp_path / "uv-arguments.json").read_text())[-1] == (
+        f"flameox=={expected_version}"
+    )

@@ -473,7 +473,11 @@ def setup(
                     inspection,
                     remove=operation is SetupOperation.REMOVE,
                 )
-                version = None if operation is SetupOperation.REMOVE else __version__
+                version = (
+                    None
+                    if operation is SetupOperation.REMOVE
+                    else setup_ui.effective_runtime_version(inspection, __version__)
+                )
         elif operation is SetupOperation.ROLLBACK:
             clients = clients or inspection.configured_clients
 
