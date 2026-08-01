@@ -238,7 +238,7 @@ MCP host.
 Required:
 
 - Python 3.12 or newer;
-- `mcp==2.0.0b2`;
+- `mcp==2.0.0` and `mcp-types==2.0.0`;
 - Pydantic 2;
 - DuckDB;
 - PyArrow;
@@ -247,13 +247,13 @@ Required:
 - Portalocker for cross-process shared and exclusive file locks;
 - structured logging using the standard library or a minimal compatible layer.
 
-The MCP beta pin is intentional. It must remain exact until a deliberate SDK
-upgrade is validated. All SDK imports and conversions live under `flameox.mcp`.
-The domain service API must be testable without importing MCP.
+The MCP packages remain exact-pinned as a matched SDK/protocol-model release.
+All SDK imports and conversions live under `flameox.mcp`. The domain service
+API must be testable without importing MCP.
 
-The project uses the v2 `MCPServer` API, not the v1
-`mcp.server.fastmcp.FastMCP` compatibility surface. The exact dependency is
-declared in `pyproject.toml`, and the resolved beta is committed in `uv.lock`.
+The project uses the stable v2 `MCPServer` API, not the v1
+`mcp.server.fastmcp.FastMCP` compatibility surface. The exact dependencies are
+declared in `pyproject.toml`, and the resolved release is committed in `uv.lock`.
 
 Optional extras group collector dependencies:
 
@@ -376,7 +376,7 @@ The design intentionally builds on:
 - [Bubblewrap](https://github.com/containers/bubblewrap) and Linux cgroup/systemd
   scopes for optional enforced workload containment;
 - the
-  [official Python MCP SDK v2.0.0b2](https://github.com/modelcontextprotocol/python-sdk/tree/v2.0.0b2)
+  [official Python MCP SDK v2.0.0](https://github.com/modelcontextprotocol/python-sdk/tree/v2.0.0)
   for the local protocol adapter.
 
 These projects remain separate dependencies or installed tools. flameox's value

@@ -43,7 +43,8 @@ The following choices are settled for flameox:
 
 - flameox is permanently local.
 - Python is the implementation language.
-- The MCP SDK is pinned to `mcp==2.0.0b2`.
+- The MCP SDK and protocol models are pinned to `mcp==2.0.0` and
+  `mcp-types==2.0.0`.
 - stdio is the supported MCP transport.
 - DuckDB is the local cross-run analytical engine.
 - `catalog.duckdb` is a persistent, rebuildable cache over authoritative

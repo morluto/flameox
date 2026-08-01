@@ -228,9 +228,9 @@ A network transport is outside the supported product contract.
 
 ### SDK and transport
 
-The server uses the official Python SDK pinned to `mcp==2.0.0b2`. The pin is
-required because v2 is a prerelease and unpinned resolution may select an
-incompatible stable v1 release.
+The server uses the official Python SDK pinned to stable `mcp==2.0.0` with the
+matching `mcp-types==2.0.0` protocol models. Both packages remain exact-pinned
+because their wire types are released and consumed as a matched pair.
 
 The supported transport is stdio. The server:
 
@@ -659,20 +659,18 @@ flameox://run-sets/{run_set_id}
 
 Resources return JSON or text summaries. Large native artifacts are represented
 by metadata and opaque resource references, never host storage paths and never
-injected into model context. Template
-resources declare `mime_type="application/json"`, percent-encode identifiers,
-and resolve services through a server-local lifespan closure. In the exact
-`2.0.0b2` wheel, template-handler `Context` is reconstructed by Pydantic and
-loses its private request state, so `ctx.request_context` raises at runtime.
-Resource handlers therefore omit `Context`; the MCP adapter stores the active
-lifespan value in a closure for the duration of `server.run()`. Tool handlers
-continue using injected `ctx.request_context.lifespan_context`. A contract test
-must fail if a future SDK change invalidates either path, and the workaround is
-removed on upgrade when template context is proven functional.
+injected into model context. Template resources declare
+`mime_type="application/json"`, percent-encode identifiers, and resolve services
+through a server-local lifespan closure. Stable SDK 2.0.0 still passes template
+handlers through Pydantic call validation, which reconstructs `Context` without
+its private request state; resource handlers therefore omit `Context`. Tool
+handlers use injected `ctx.request_context.lifespan_context`. Contract tests
+cover both paths so SDK lifecycle changes cannot silently detach resources from
+the active workspace.
 
 Mutable workspace and capability views remain tools rather than static
-resources because this SDK beta does not inject lifespan context into static
-resource handlers. Tool results should include MCP `ResourceLink` blocks for
+resources because they require current state and explicit recovery semantics.
+Tool results should include MCP `ResourceLink` blocks for
 addressable runs, artifacts, findings, analyses, and comparisons when useful.
 
 ### No MCP prompts
