@@ -24,7 +24,6 @@ class PrivacyConfig(ContractModel):
 
 class ExecutionConfig(ContractModel):
     allow_privileged_collectors: bool = False
-    allow_mcp_ad_hoc_commands: bool = False
     allowed_working_roots: tuple[str, ...] = ("..",)
     child_environment_allowlist: tuple[str, ...] = ("PATH", "CUDA_VISIBLE_DEVICES")
     containment: Literal["required_for_mcp", "preferred", "disabled"] = "required_for_mcp"

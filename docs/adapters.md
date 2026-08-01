@@ -78,7 +78,7 @@ class AdapterV1(Protocol):
 
 `plan` is side-effect free and returns a command prefix, declared relative
 artifact paths, permissions, estimated overhead, output types, limitations,
-and extractor version. Flameox appends `--` and the already approved workload
+and extractor version. Flameox appends `--` and the already declared workload
 command; an adapter cannot replace the workload argv, cwd, environment, or
 execution policy. Flameox owns capture execution, containment, quotas,
 cancellation, artifact registration, and publication. `validate` receives the

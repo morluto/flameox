@@ -90,7 +90,6 @@ class ExecutionIdentityService:
         instance = self.workloads.resolve(
             workload_name,
             parameters,
-            require_approval=False,
         )
         inputs: list[ExecutionIdentityInput] = []
         if config.identity.python_modules:

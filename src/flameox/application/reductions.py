@@ -99,7 +99,7 @@ class ReductionResult(ContractModel):
 
 
 class ReductionService:
-    """Coordinate an approved reducer around an approved bounded predicate."""
+    """Coordinate a declared reducer around a bounded predicate."""
 
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
@@ -125,12 +125,10 @@ class ReductionService:
         reducer = self.workloads.resolve(
             request.reducer_workload,
             request.reducer_parameters,
-            require_approval=True,
         )
         predicate = self.workloads.resolve(
             request.predicate_workload,
             request.predicate_parameters,
-            require_approval=True,
         )
         bound = {
             "workspace_id": self.workspace.identity.workspace_id,
@@ -400,12 +398,10 @@ class ReductionService:
         reducer = self.workloads.resolve(
             plan.reducer_workload,
             plan.reducer_parameters,
-            require_approval=True,
         )
         predicate = self.workloads.resolve(
             plan.predicate_workload,
             plan.predicate_parameters,
-            require_approval=True,
         )
         if (
             reducer.workload_definition_id != plan.reducer_definition_id

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from flameox.atomic import atomic_write_json
 from flameox.domain.errors import DomainError, ErrorCode
 from flameox.domain.models import RunManifest
-from flameox.storage.atomic import atomic_write_json
 from flameox.storage.workspace import Workspace
 
 

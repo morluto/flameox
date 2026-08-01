@@ -101,7 +101,6 @@ class ExperimentPlan(ContractModel):
     factors: dict[str, tuple[JsonValue, ...]] = Field(default_factory=dict)
     parameter_overrides: dict[str, JsonValue]
     blocks: tuple[ExperimentBlock, ...]
-    workload_approval_digest: str
     experiment_config_digest: str
     created_at: datetime
     expires_at: datetime
@@ -424,17 +423,8 @@ class ExperimentService:
             self.workloads.resolve(
                 config.workload,
                 {**supplied_overrides, **combination},
-                require_approval=execution_policy.requires_workload_approval,
             )
         definition = self.workloads.definition(config.workload)
-        if (
-            execution_policy.requires_workload_approval
-            and definition.approved_definition_digest is None
-        ):
-            raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                f"Workload {config.workload!r} is not approved.",
-            )
         oracle = workload.oracle
         role: Literal["exploratory", "confirmatory"] = (
             "confirmatory"
@@ -537,9 +527,7 @@ class ExperimentService:
             },
             "parameters": overrides,
             "blocks": [block.model_dump(mode="json") for block in blocks],
-            "approval": (
-                definition.approved_definition_digest or definition.workload_definition_id
-            ),
+            "workload_definition_id": definition.workload_definition_id,
             "experiment_config_digest": digest_model(config.model_dump(mode="json")),
         }
         plan = ExperimentPlan(
@@ -558,9 +546,6 @@ class ExperimentService:
             },
             parameter_overrides=overrides,
             blocks=tuple(blocks),
-            workload_approval_digest=(
-                definition.approved_definition_digest or definition.workload_definition_id
-            ),
             experiment_config_digest=digest_model(config.model_dump(mode="json")),
             created_at=created,
             expires_at=created + timedelta(seconds=self.plans.ttl_seconds),
@@ -586,7 +571,7 @@ class ExperimentService:
         await report("Experiment plan consumed")
         config = self._validate_plan(plan)
         completed += 1
-        await report("Experiment plan and workload approval validated")
+        await report("Experiment plan and workload definition validated")
         # Persist the predeclared protocol before the first treatment starts. If
         # execution is interrupted, the investigation still records what was
         # intended rather than leaving an unattributed run population.
@@ -884,13 +869,10 @@ class ExperimentService:
                 "Experiment definition changed after planning.",
             )
         definition = self.workloads.definition(config.workload)
-        current_approval = (
-            definition.approved_definition_digest or definition.workload_definition_id
-        )
-        if current_approval != plan.workload_approval_digest:
+        if definition.workload_definition_id != plan.experiment.workload_definition_id:
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
-                "Workload approval changed after experiment planning.",
+                "Workload definition changed after experiment planning.",
             )
         return config
 

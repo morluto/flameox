@@ -48,7 +48,7 @@ A release is acceptable when:
    artifact registration, and native viewer command without raw SQL;
 19. a 100,000-run synthetic corpus meets recorded startup, query, file-count,
    and rebuild budgets after compaction;
-20. stale cursors, modified workload approvals, replayed plans, partial source
+20. stale cursors, modified workload definitions, replayed plans, partial source
    identity, incomplete blocks, and failed validation are surfaced explicitly
    rather than silently weakened.
 21. failure analysis distinguishes absent, filtered-empty, successful, and
@@ -61,15 +61,19 @@ A release is acceptable when:
     bind that report into capture plans, and recheck it before execution;
 24. terminal captures publish bounded runtime-resource summaries, writable-root
     observations, and explicit unavailable metrics without leaking host paths;
-25. MCP inspection exposes initialize instructions and declared workflow
-    requirements and adapter options without increasing the tool count.
+25. MCP inspection exposes the first-run configuration and capture workflow,
+    bounded workload schemas, recovery actions, and declared workflow
+    requirements and adapter options.
+26. direct agent configuration is idempotent, digest-checked for replacement,
+    preserves unrelated project state, records configuration provenance, and
+    rejects removed ad-hoc execution settings without a human execution gate.
 
 ## Implementation conformance
 
 The reviewed implementation contains the core local architecture: shared domain
 and application services for CLI and MCP, content-addressed native artifacts,
 immutable record projections, generation manifests and atomic corpus commits,
-Parquet evidence, rebuildable DuckDB snapshots, approved capture plans,
+Parquet evidence, rebuildable DuckDB snapshots, current capture plans,
 experiments, comparisons, bounded evidence queries, structured findings,
 native-viewer planning, and the three golden investigation fixtures.
 
@@ -103,12 +107,13 @@ Conformance status uses three terms:
 | 17 | Proven | The real stdio server covers initialize, list, call, resource, named progress, structured errors, and cancellation; every tool has bounded object schemas and explicit annotations, while DuckDB-backed analyses and comparisons are interruptible (`tests/mcp/test_stdio_transport.py`, `tests/application/test_analysis_records.py`, `tests/application/test_comparison_compatibility.py`). |
 | 18 | Proven | The Perfetto integration test follows hotspot → callers/stack → analysis provenance → run → artifact registration → viewer command without raw SQL (`tests/adapters/test_perfetto_provider.py`). |
 | 19 | Proven | The gated 10/1K/100K matrix records publication, compaction file count, rebuild, startup plus cohort-comparison query, and serialization budgets; hashing has a separate throughput budget (`tests/performance/test_catalog_scale.py`). |
-| 20 | Proven | Public behavior tests cover stale cursors, approval mutation, replayed plans, partial source identity, incomplete blocks, failed validation, lock contention, quota errors, malformed artifacts, and structured CLI/MCP failures (`tests/application/`, `tests/storage/`, `tests/adapters/`, `tests/mcp/test_contracts.py`, `tests/test_cli_smoke.py`). |
+| 20 | Proven | Public behavior tests cover stale cursors, workload configuration mutation, replayed plans, partial source identity, incomplete blocks, failed validation, lock contention, quota errors, malformed artifacts, and structured CLI/MCP failures (`tests/application/`, `tests/storage/`, `tests/adapters/`, `tests/mcp/test_contracts.py`, `tests/test_cli_smoke.py`). |
 | 21 | Proven | Failure-population invariants, strict receipt parsing and lifecycle projection, typed trial persistence, and the fresh-workspace semantic matrix are exercised by `tests/analysis/test_recipe_invariants.py`, `tests/domain/test_models.py`, `tests/application/test_capture_lifecycle.py`, `tests/application/test_experiments.py`, and `tests/golden/test_semantic_matrix.py`. The downstream fixture contract is checked separately by `tests/test_external_receipt_fixture.py`. |
 | 22 | Proven | Native-output success, empty, missing, failed, and timeout-partial cases exercise publication gates, quarantine metadata, lifecycle statuses, and unavailable hotspot evidence (`tests/application/test_capture_native_outputs.py`, `tests/application/test_capture_lifecycle.py`). |
 | 23 | Proven | Deterministic granted, denied, degraded, cached, refreshed, fixed-command, staging-cleanup, and execution-recheck cases cover active perf readiness (`tests/application/test_capabilities.py`, `tests/application/test_capture_native_outputs.py`). |
 | 24 | Proven | Normal, short-process, storage-policy, and project-relative writable-root observations cover dedicated runtime-resource publication and unavailable metrics (`tests/execution/test_broker.py`, `tests/application/test_capture_containment.py`, `tests/application/test_capture_lifecycle.py`). |
-| 25 | Proven | Workflow requirements/options, bounded recovery choices, inspect parity, real stdio initialization, and the unchanged 58-tool catalog are covered by `tests/application/test_capture_planning.py`, `tests/mcp/test_workflows.py`, and `tests/mcp/test_stdio_transport.py`. |
+| 25 | Proven | Workload status, direct configuration, bounded recovery choices, workflow requirements/options, inspect parity, and the real stdio configure → discover → plan → execute flow are covered by `tests/application/test_workloads.py`, `tests/mcp/test_workflows.py`, `tests/mcp/test_contracts.py`, and `tests/mcp/test_stdio_transport.py`. |
+| 26 | Proven | Idempotence, replacement revision conflicts, state/comment preservation, invalid-config non-overwrite, direct configuration provenance, named-only planning, and six deterministic offline agent traces are covered by `tests/application/test_workloads.py`, `tests/storage/test_workspace.py`, `tests/mcp/test_capture_workflows.py`, and `tests/mcp/test_agent_workflows.py`. |
 
 The snapshot, retention, containment, recovery, adapter, analysis,
 observability, and protocol defects recorded by the prior conformance review
@@ -174,6 +179,8 @@ from POSIX `wait4` resource usage or the portable polling fallback.
 - run CLI JSON and MCP calls against the same expected domain result;
 - start the real stdio MCP server and perform initialize, list, call, resource
   read, progress, and cancellation operations;
+- run deterministic offline agent traces for missing, additive, stale,
+  invalid, ad-hoc, and normal configure → discover → plan → execute workflows;
 - assert that server stdout contains only valid JSON-RPC messages.
 
 Contract snapshots cover every MCP input schema, output envelope schema,
@@ -207,7 +214,7 @@ annotations object, structured success, and structured `isError` result.
   untrusted data;
 - output and artifact budgets are enforced;
 - imported files cannot trigger execution;
-- changed workload approval hashes and replayed or expired plan IDs fail;
+- changed workload definition hashes and replayed or expired plan IDs fail;
 - required containment failure refuses MCP execution;
 - escaped descendants are terminated under the Linux containment backend.
 
@@ -262,6 +269,7 @@ the presence of schemas alone:
 | #27 | Ordered pipeline lineage, content-addressed reuse, structural comparison, skipped/incompatible stages, first observed divergence, and immutable catalog rows | `tests/application/test_pipelines.py` |
 | #28 | Approved reducer/predicate binding, coordinator-owned bounded predicate attempts, contradictory outcomes, final revalidation, malicious candidate rejection, terminal cancellation, immutable artifacts, and cleanup | `tests/application/test_reductions.py` |
 | #16 | Visible npm/runtime/wizard handoff and a real PTY reaching the first Python prompt | `npm/test/jsonc-edit.test.cjs`, `tests/test_cli_setup.py`, `tests/cli/test_setup_process.py`, `tests/cli/test_npx_upgrade.py` |
+| #63–65 | Structured workload status/configuration, named-only capture planning, no ad-hoc MCP command setting, and deterministic agent workflow traces | `tests/application/test_workloads.py`, `tests/mcp/test_agent_workflows.py`, `tests/mcp/test_capture_workflows.py`, `tests/storage/test_workspace.py` |
 
 Pipeline structural summaries are supplied through the versioned declaration
 contract in the first implementation. A future adapter convenience API may

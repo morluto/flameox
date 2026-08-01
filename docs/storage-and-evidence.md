@@ -193,11 +193,15 @@ security policy. Environment-variable configuration is limited to documented
 non-secret process settings such as color and log level; there is no generic
 environment-to-configuration mapping.
 
-The project-controlled `flameox.toml` is untrusted until a human approves its
-canonical workload definition hash through the CLI. Editing the command,
-working directory, environment, validator, resource policy, or included
-configuration revokes that approval. MCP can select an approved workload but
-cannot approve one.
+The project-controlled `flameox.toml` is validated when it is created or loaded.
+The current canonical workload definition hash is bound into every plan and
+run. Editing the command, working directory, environment, validator, resource
+policy, or included configuration changes that hash and invalidates existing
+plans before execution. MCP can create and update named workloads, but it never
+accepts replacement arguments or shell strings outside the structured definition.
+The structured configuration path records the canonical definition in
+`flameox.toml`; there is no separate workload approval record or human execution
+check.
 
 ## Identity and provenance
 

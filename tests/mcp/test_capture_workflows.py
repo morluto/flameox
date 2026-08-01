@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 from mcp import Client
 
-from flameox.application import WorkloadService
 from flameox.catalog import Catalog
 from flameox.mcp import create_server
 from flameox.storage import RunStore, Workspace
@@ -15,7 +14,7 @@ from flameox.storage import RunStore, Workspace
 @pytest.mark.anyio
 @pytest.mark.process
 @pytest.mark.serial
-async def test_mcp_capture_requires_approval_and_plan_tokens_are_single_use(
+async def test_mcp_capture_uses_current_workload_and_plan_tokens_are_single_use(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "flameox.toml").write_text(
@@ -36,18 +35,6 @@ timeout_seconds = 5
     workspace.paths.config.write_text(config.to_toml())
     Catalog(workspace).rebuild()
 
-    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
-        refused = await client.call_tool(
-            "plan_capture",
-            {"workload_name": "echo", "adapter": "command", "parameters": {}},
-        )
-    assert refused.is_error is True
-    assert refused.structured_content is not None
-    assert refused.structured_content["error"]["code"] == "EXECUTION_REFUSED", (
-        refused.structured_content
-    )
-
-    WorkloadService(workspace).approve("echo")
     recorded_progress: list[tuple[float, float | None, str | None]] = []
 
     async def record_progress(
@@ -103,6 +90,45 @@ timeout_seconds = 5
 
 
 @pytest.mark.anyio
+async def test_mcp_plan_capture_rejects_adhoc_argv_and_cwd_inputs(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.probe]
+argv = ["python", "-c", "print('ok')"]
+"""
+    )
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        argv = await client.call_tool(
+            "plan_capture",
+            {
+                "workload_name": "probe",
+                "adapter": "command",
+                "parameters": {},
+                "argv": ["echo", "unsafe"],
+            },
+        )
+        cwd = await client.call_tool(
+            "plan_capture",
+            {
+                "workload_name": "probe",
+                "adapter": "command",
+                "parameters": {},
+                "cwd": ".",
+            },
+        )
+
+    assert workspace.project_root == tmp_path.resolve()
+    for result, field in ((argv, "argv"), (cwd, "cwd")):
+        assert result.is_error is True
+        assert result.structured_content is not None
+        assert result.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
+        assert result.structured_content["error"]["details"]["fields"][0]["field"] == field
+
+
+@pytest.mark.anyio
 @pytest.mark.process
 @pytest.mark.serial
 async def test_mcp_cancellation_propagates_to_terminal_run_state(
@@ -124,8 +150,6 @@ timeout_seconds = 60
         }
     )
     workspace.paths.config.write_text(config.to_toml())
-    WorkloadService(workspace).approve("wait")
-
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:
         planned = await client.call_tool(
             "plan_capture",
@@ -176,8 +200,6 @@ timeout_seconds = 60
         }
     )
     workspace.paths.config.write_text(config.to_toml())
-    WorkloadService(workspace).approve("wait")
-
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:
         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
         planned = await client.call_tool(

@@ -6,10 +6,10 @@ from importlib.metadata import Distribution, EntryPoint, entry_points
 from pathlib import Path
 from typing import Any, cast
 
+from flameox.atomic import atomic_write_json
 from flameox.domain import ADAPTER_API_VERSION, AdapterV1, DomainError, ErrorCode, digest_model
 from flameox.models import ContractModel
 from flameox.storage import Workspace
-from flameox.storage.atomic import atomic_write_json
 
 ENTRY_POINT_GROUP = "flameox.adapters"
 

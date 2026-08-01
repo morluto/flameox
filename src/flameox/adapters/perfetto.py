@@ -10,6 +10,7 @@ from typing import Any
 
 from pydantic import JsonValue
 
+from flameox.atomic import atomic_write_json
 from flameox.domain import (
     ArtifactKind,
     CursorCodec,
@@ -21,7 +22,6 @@ from flameox.evidence import GenerationPublisher
 from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
-from flameox.storage.atomic import atomic_write_json
 
 type _AggregateKey = tuple[str, str | None, str | None]
 

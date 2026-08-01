@@ -79,8 +79,8 @@ catalog_app = typer.Typer(help="Validate and rebuild the analytical catalog.")
 runs_app = typer.Typer(help="List and inspect execution and import runs.")
 extract_app = typer.Typer(help="Extract normalized evidence from native artifacts.")
 mcp_app = typer.Typer(help="Run or inspect the local MCP adapter.")
-capture_app = typer.Typer(help="Plan and execute approved profiler captures.")
-workload_app = typer.Typer(help="Inspect, approve, and execute named workloads.")
+capture_app = typer.Typer(help="Plan and execute named profiler captures.")
+workload_app = typer.Typer(help="Create, inspect, and execute named workloads.")
 investigations_app = typer.Typer(help="Create and inspect diagnostic investigations.")
 hypotheses_app = typer.Typer(help="Record and inspect falsifiable hypotheses.")
 findings_app = typer.Typer(help="Record and inspect evidence-linked findings.")
@@ -802,7 +802,7 @@ def workload_list(
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
-    """List named project workloads and current approval state."""
+    """List named project workloads and their current definition identities."""
     try:
         service = WorkloadService(_workspace(workspace))
         result = {
@@ -822,23 +822,9 @@ def workload_show(
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
-    """Show a workload's canonical identity and approval state."""
+    """Show a workload's canonical identity and active definition state."""
     try:
         result = WorkloadService(_workspace(workspace)).inspect(name)
-    except DomainError as error:
-        _fail(error)
-    _emit(result, as_json=json_output)
-
-
-@workload_app.command("approve")
-def workload_approve(
-    name: Annotated[str, typer.Argument(help="Named workload reviewed by a human.")],
-    workspace: WorkspaceOption = None,
-    json_output: JsonOption = False,
-) -> None:
-    """Approve exactly the current canonical workload definition."""
-    try:
-        result = WorkloadService(_workspace(workspace)).approve(name)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)

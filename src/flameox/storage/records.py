@@ -5,8 +5,8 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
+from flameox.atomic import atomic_write_json
 from flameox.domain import DomainError, ErrorCode
-from flameox.storage.atomic import atomic_write_json
 from flameox.storage.workspace import Workspace
 
 RecordT = TypeVar("RecordT", bound=BaseModel)

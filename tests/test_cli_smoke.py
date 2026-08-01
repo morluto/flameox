@@ -13,6 +13,27 @@ def test_help_lists_flameoxs_purpose() -> None:
     assert "runtime evidence" in result.stdout
 
 
+def test_capture_help_uses_named_workload_syntax() -> None:
+    runner = CliRunner()
+
+    plan = runner.invoke(app, ["capture", "plan", "--help"])
+    run = runner.invoke(app, ["capture", "run", "--help"])
+
+    assert plan.exit_code == 0, plan.output
+    assert run.exit_code == 0, run.output
+    assert "--workload" in plan.stdout
+    assert "--workload" in run.stdout
+    assert "argv" not in plan.stdout.lower()
+    assert "argv" not in run.stdout.lower()
+
+
+def test_workload_help_has_no_inert_approval_command() -> None:
+    result = CliRunner().invoke(app, ["workload", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "approve" not in result.stdout.lower()
+
+
 def test_init_import_and_list_run_as_json(tmp_path: Path) -> None:
     runner = CliRunner()
     project = tmp_path / "project"

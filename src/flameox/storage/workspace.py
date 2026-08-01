@@ -15,11 +15,11 @@ import portalocker
 from pydantic import Field
 
 from flameox import __version__
+from flameox.atomic import atomic_write_json, atomic_write_text
 from flameox.config import WorkspaceConfig
 from flameox.domain.errors import DomainError, ErrorCode
 from flameox.domain.models import utc_now
 from flameox.models import ContractModel
-from flameox.storage.atomic import atomic_write_json, atomic_write_text
 from flameox.storage.corpus import CorpusStore
 
 

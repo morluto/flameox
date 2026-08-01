@@ -12,8 +12,8 @@ from mcp import Client, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from packaging.version import InvalidVersion, Version
 
+from flameox.atomic import atomic_write_json
 from flameox.domain import DomainError, ErrorCode
-from flameox.storage.atomic import atomic_write_json
 
 
 @dataclass(frozen=True, slots=True)

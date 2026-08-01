@@ -12,7 +12,6 @@ from mcp.client.stdio import stdio_client
 from mcp_types import TextContent, TextResourceContents
 from typer.testing import CliRunner
 
-from flameox.application import WorkloadService
 from flameox.cli import app
 from flameox.domain import DomainError, RunManifest
 from flameox.storage import RunStore, Workspace
@@ -123,25 +122,6 @@ async def test_strict_mcp_client_can_decode_tools_list_output_schemas(tmp_path: 
 async def test_real_stdio_discovers_then_plans_and_executes_declared_workload(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "flameox.toml").write_text(
-        f"""
-schema_version = 1
-[workloads.probe]
-argv = [{json.dumps(sys.executable)}, "-c", "print('{{value}}')"]
-cwd = "."
-timeout_seconds = 5
-[workloads.probe.parameters]
-value = ["baseline", "candidate"]
-"""
-    )
-    workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
-        update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
-        }
-    )
-    workspace.paths.config.write_text(config.to_toml())
-    WorkloadService(workspace).approve("probe")
     parameters = StdioServerParameters(
         command=sys.executable,
         args=["-m", "flameox", "mcp", "serve", "--project-root", str(tmp_path)],
@@ -149,9 +129,33 @@ value = ["baseline", "candidate"]
     )
 
     async with Client(stdio_client(parameters), raise_exceptions=True) as client:
+        tools = await client.list_tools()
+        initialized = await client.call_tool("initialize_workspace", {})
+        assert initialized.is_error is False
+        workspace = Workspace.discover(tmp_path)
+        config = workspace.config.model_copy(
+            update={
+                "execution": workspace.config.execution.model_copy(
+                    update={"containment": "disabled"}
+                )
+            }
+        )
+        workspace.paths.config.write_text(config.to_toml())
+        status = await client.call_tool("workload_configuration_status", {})
+        configured = await client.call_tool(
+            "configure_workload",
+            {
+                "name": "probe",
+                "operation": "create",
+                "argv": [sys.executable, "-c", "print('{value}')"],
+                "timeout_seconds": 5,
+                "parameters": {"value": ["baseline", "candidate"]},
+            },
+        )
+        assert not any(workspace.paths.runs.iterdir())
         declared = await client.call_tool(
             "list_declared_workflows",
-            {"kind": "workload", "approval": "approved", "limit": 10},
+            {"kind": "workload", "limit": 10},
         )
         assert declared.structured_content is not None
         assert declared.structured_content["result"]["workflows"][0]["name"] == "probe"
@@ -177,6 +181,17 @@ value = ["baseline", "candidate"]
             {"plan_id": planned.structured_content["result"]["plan_id"]},
         )
 
+    assert {tool.name for tool in tools.tools} >= {
+        "initialize_workspace",
+        "workload_configuration_status",
+        "configure_workload",
+    }
+    assert status.is_error is False
+    assert status.structured_content is not None
+    assert status.structured_content["result"]["status"] == "missing"
+    assert configured.is_error is False
+    assert configured.structured_content is not None
+    assert configured.structured_content["result"]["configuration_source"] == "agent"
     assert executed.is_error is False
     assert executed.structured_content is not None
     assert executed.structured_content["result"]["execution_status"] == "succeeded"
@@ -265,7 +280,6 @@ timeout_seconds = 60
         }
     )
     workspace.paths.config.write_text(config.to_toml())
-    WorkloadService(workspace).approve("wait")
     parameters = StdioServerParameters(
         command=sys.executable,
         args=[

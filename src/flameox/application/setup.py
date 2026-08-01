@@ -22,9 +22,9 @@ from flameox.adapters.client_setup import (
     SetupClient,
 )
 from flameox.adapters.setup_runtime import ManagedRuntime, RuntimeInstallation
+from flameox.atomic import atomic_write_bytes, atomic_write_json, fsync_directory
 from flameox.domain import DomainError, ErrorCode
 from flameox.models import ContractModel
-from flameox.storage.atomic import atomic_write_bytes, atomic_write_json, fsync_directory
 
 
 class RuntimeAction(StrEnum):
