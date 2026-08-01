@@ -1,6 +1,11 @@
 # Changelog
 
 All notable changes to flameox are documented in this file.
+## [0.1.8] - 2026-08-01
+### Bug Fixes
+
+- **ci:** Avoid empty release workflow cache
+- **setup:** Explain stale npx bootstrap recovery
 ## [0.1.7] - 2026-08-01
 ### Bug Fixes
 
