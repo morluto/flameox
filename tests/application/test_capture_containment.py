@@ -12,6 +12,7 @@ from flameox.application import (
     ExecutionPolicy,
     WorkloadService,
 )
+from flameox.catalog import Catalog
 from flameox.domain import (
     DomainError,
     ErrorCode,
@@ -109,3 +110,9 @@ timeout_seconds = 20
     assert run.process.cleanup_complete is True
     assert run.process.resources is not None
     assert run.process.resources.policy_termination == "storage_reserve_exceeded"
+    with Catalog(workspace).open_snapshot() as snapshot:
+        resource_row = snapshot.execute(
+            "SELECT policy_termination FROM runtime_resource_summaries WHERE run_id = ?",
+            (plan.run_id,),
+        ).fetchone()
+    assert resource_row == ("storage_reserve_exceeded",)

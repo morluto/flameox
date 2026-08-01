@@ -56,6 +56,7 @@ class RunSummary(ContractModel):
     worker_id: str | None
     orchestration_run_id: str | None
     artifact_kinds: tuple[str, ...]
+    resource_availability: Literal["available", "partial", "unavailable"] = "unavailable"
 
 
 class DiscoveryCoverage(ContractModel):
@@ -164,7 +165,11 @@ class RunDiscoveryService:
                 ", orchestrator, provider, lease_id, worker_id, orchestration_run_id "
                 ", coalesce((SELECT list_sort(list_distinct(list(kind))) "
                 "FROM artifact_registrations WHERE run_id = latest.run_id), "
-                "CAST([] AS VARCHAR[])) AS artifact_kinds "
+                "CAST([] AS VARCHAR[])) AS artifact_kinds, "
+                "coalesce((SELECT resource_availability FROM runs resource_runs "
+                "WHERE resource_runs.run_id = latest.run_id "
+                "ORDER BY resource_runs.published_at DESC LIMIT 1), 'unavailable') "
+                "AS resource_availability "
                 "FROM latest WHERE " + page_where + " ORDER BY created_at DESC, run_id LIMIT ?",
                 (*page_parameters, limit + 1),
             ).fetchall()
@@ -186,6 +191,7 @@ class RunDiscoveryService:
                 worker_id=row[12],
                 orchestration_run_id=row[13],
                 artifact_kinds=tuple(row[14]),
+                resource_availability=row[15],
             )
             for row in rows[:limit]
         )
