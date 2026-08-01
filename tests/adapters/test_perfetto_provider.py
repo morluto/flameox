@@ -189,3 +189,78 @@ async def test_pytorch_analysis_keeps_same_named_frames_and_mixed_phases_separat
     assert steady.allocation_bytes == 700
     assert steady.warmup is False
     assert result.warmup_time_ns == 5_000
+
+
+@pytest.mark.anyio
+@pytest.mark.optional
+@pytest.mark.requires_perfetto
+async def test_perfetto_inherits_sdk_phase_ranges_for_launch_analysis(
+    tmp_path: Path,
+) -> None:
+    binary = require_trace_processor()
+    trace = tmp_path / "scheduled-cycle.json"
+    trace.write_text(
+        json.dumps(
+            {
+                "traceEvents": [
+                    {
+                        "name": "flameox.phase:decode",
+                        "cat": "user_annotation",
+                        "ph": "X",
+                        "ts": 0,
+                        "dur": 100,
+                        "pid": 1,
+                        "tid": 1,
+                        "args": {},
+                    },
+                    {
+                        "name": "cudaLaunchKernel",
+                        "cat": "cuda_runtime",
+                        "ph": "X",
+                        "ts": 10,
+                        "dur": 2,
+                        "pid": 1,
+                        "tid": 1,
+                        "args": {"correlation": 41},
+                    },
+                    {
+                        "name": "projection_kernel",
+                        "cat": "kernel",
+                        "ph": "X",
+                        "ts": 20,
+                        "dur": 5,
+                        "pid": 1,
+                        "tid": 1,
+                        "args": {"correlation": 41, "stream": 9, "device": 0},
+                    },
+                ]
+            }
+        )
+    )
+    workspace = Workspace.initialize(tmp_path)
+    config = workspace.config.model_copy(
+        update={
+            "analysis": workspace.config.analysis.model_copy(
+                update={"trace_processor_path": str(binary)}
+            )
+        }
+    )
+    workspace.paths.config.write_text(config.to_toml())
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(
+            path=trace,
+            kind=ArtifactKind.EXECUTION_TRACE,
+            producer="torch.profiler",
+        )
+    )
+
+    await PerfettoExtractor(workspace).extract(imported.run.run_id)
+    result = RecipeService(workspace).accelerator_launches(
+        imported.run.run_id,
+        phase="decode",
+    )
+
+    region = result.regions[0]
+    assert region.region == "decode"
+    assert region.direct_launch_count == 1
+    assert region.kernel_count == 1

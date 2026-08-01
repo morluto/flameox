@@ -18,8 +18,10 @@ from pydantic import BaseModel
 from flameox import __version__, setup_ui
 from flameox.adapters import (
     AdapterRegistry,
+    BenchmarkSamplesExtractor,
     CoverageExtractor,
     MemrayExtractor,
+    NsightSystemsExtractor,
     ObservationExtractor,
     PerfettoExtractor,
     PyPerfExtractor,
@@ -979,6 +981,13 @@ def capture_plan(
         str,
         typer.Option("--parameters", help="JSON object of declared scalar overrides."),
     ] = "{}",
+    adapter_options: Annotated[
+        str,
+        typer.Option(
+            "--adapter-options",
+            help="JSON object of adapter-specific capture options.",
+        ),
+    ] = "{}",
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
@@ -989,10 +998,14 @@ def capture_plan(
             values = json.loads(parameters)
             if not isinstance(values, dict):
                 raise ValueError("parameters must be a JSON object")
+            options = json.loads(adapter_options)
+            if not isinstance(options, dict):
+                raise ValueError("adapter options must be a JSON object")
             return await CaptureService(_workspace(workspace)).plan(
                 workload_name=workload_name,
                 adapter=adapter,
                 parameters=values,
+                adapter_options=options,
                 execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
             )
         except (json.JSONDecodeError, ValueError) as exc:
@@ -1013,6 +1026,7 @@ def capture_run(
     adapter: Annotated[str, typer.Argument(help="Registered capture adapter.")],
     workload_name: Annotated[str, typer.Option("--workload")],
     parameters: Annotated[str, typer.Option("--parameters")] = "{}",
+    adapter_options: Annotated[str, typer.Option("--adapter-options")] = "{}",
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
@@ -1022,11 +1036,15 @@ def capture_run(
         values = json.loads(parameters)
         if not isinstance(values, dict):
             raise ValueError("parameters must be a JSON object")
+        options = json.loads(adapter_options)
+        if not isinstance(options, dict):
+            raise ValueError("adapter options must be a JSON object")
         service = CaptureService(_workspace(workspace))
         plan = await service.plan(
             workload_name=workload_name,
             adapter=adapter,
             parameters=values,
+            adapter_options=options,
             execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
         )
         return await service.execute(plan.plan_id)
@@ -1481,6 +1499,34 @@ def analyze_pytorch(
     _emit(result, as_json=json_output)
 
 
+@analyze_app.command("accelerator-launches")
+def analyze_accelerator_launches(
+    input_id: Annotated[str, typer.Argument(help="Run or artifact identifier.")],
+    compare_to: Annotated[
+        str | None,
+        typer.Option("--compare-to", help="Optional comparison run or artifact."),
+    ] = None,
+    phase: Annotated[
+        str | None,
+        typer.Option("--phase", help="Exact normalized phase to select."),
+    ] = None,
+    limit: Annotated[int | None, typer.Option(min=1)] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Summarize direct launches, graph launches, kernels, and accelerator idle gaps."""
+    try:
+        result = RecipeService(_workspace(workspace)).accelerator_launches(
+            input_id,
+            comparison_input_id=compare_to,
+            phase=phase,
+            limit=limit,
+        )
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
 @analyze_app.command("failures")
 def analyze_failures(
     limit: Annotated[int | None, typer.Option(min=1)] = None,
@@ -1723,6 +1769,23 @@ def extract_pyperf(
     _emit(result, as_json=json_output)
 
 
+@extract_app.command("benchmark-samples")
+def extract_benchmark_samples(
+    run_id: Annotated[
+        str,
+        typer.Argument(help="Import run containing flameox benchmark-samples v1 JSON."),
+    ],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Extract producer-neutral raw benchmark samples and timing semantics."""
+    try:
+        result = BenchmarkSamplesExtractor(_workspace(workspace)).extract(run_id)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
 @extract_app.command("python-startup")
 def extract_python_startup(
     run_id: Annotated[str, typer.Argument(help="Run containing Python startup JSON.")],
@@ -1788,6 +1851,10 @@ def extract_perfetto(
         str,
         typer.Argument(help="Import run containing a Perfetto-compatible trace."),
     ],
+    artifact_id: Annotated[
+        str | None,
+        typer.Option("--artifact-id", help="Exact trace artifact for a multi-cycle run."),
+    ] = None,
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
@@ -1795,7 +1862,31 @@ def extract_perfetto(
     try:
 
         async def run() -> BaseModel:
-            return await PerfettoExtractor(_workspace(workspace)).extract(run_id)
+            return await PerfettoExtractor(_workspace(workspace)).extract(
+                run_id,
+                artifact_id=artifact_id,
+            )
+
+        result = _run_async(run)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@extract_app.command("nsight-systems")
+def extract_nsight_systems(
+    run_id: Annotated[
+        str,
+        typer.Argument(help="Import run containing an official Nsight Systems SQLite export."),
+    ],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Extract a maintained, versioned subset of an Nsight Systems SQLite export."""
+    try:
+
+        async def run() -> BaseModel:
+            return await NsightSystemsExtractor(_workspace(workspace)).extract(run_id)
 
         result = _run_async(run)
     except DomainError as error:

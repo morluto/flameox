@@ -577,6 +577,7 @@ class CapturePlan(ContractModel):
     workload_definition_id: Digest
     workload_instance: WorkloadInstance
     adapter: Identifier
+    adapter_options: dict[str, JsonValue] = Field(default_factory=dict)
     execution_policy: Literal["trusted_local", "approved_agent"]
     adapter_version: str | None = None
     adapter_execution_plan: dict[str, JsonValue] | None = None

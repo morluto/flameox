@@ -71,6 +71,41 @@ def test_publication_is_visible_only_through_new_corpus_commit(tmp_path: Path) -
         ).fetchone() == (0,)
 
 
+def test_idempotent_publication_reuses_or_supersedes_exact_operation(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    publisher = GenerationPublisher(workspace)
+
+    first = publisher.publish_rows_idempotent(
+        {"runs": [run_row("normalized-run")]},
+        publisher="extractor",
+        publisher_version="1",
+        input_run_ids=("source-run",),
+        operation_identity={"tool_digest": "sha256:first"},
+    )
+    repeated = publisher.publish_rows_idempotent(
+        {"runs": [run_row("normalized-run")]},
+        publisher="extractor",
+        publisher_version="1",
+        input_run_ids=("source-run",),
+        operation_identity={"tool_digest": "sha256:first"},
+    )
+    changed = publisher.publish_rows_idempotent(
+        {"runs": [run_row("normalized-run")]},
+        publisher="extractor",
+        publisher_version="1",
+        input_run_ids=("source-run",),
+        operation_identity={"tool_digest": "sha256:second"},
+    )
+
+    assert repeated.commit.commit_id == first.commit.commit_id
+    assert repeated.manifest.generation_id == first.manifest.generation_id
+    assert changed.manifest.supersedes == (first.manifest.generation_id,)
+    assert changed.manifest.operation_digest != first.manifest.operation_digest
+    assert len(workspace.corpus.read_head().generation_manifests) == 1
+    with Catalog(workspace).open_snapshot() as snapshot:
+        assert snapshot.execute("SELECT count(*) FROM runs").fetchone() == (1,)
+
+
 def test_rogue_parquet_file_is_invisible_without_manifest(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     catalog = Catalog(workspace)

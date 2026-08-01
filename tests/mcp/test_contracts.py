@@ -105,6 +105,89 @@ async def test_every_mcp_tool_has_bounded_object_schemas_and_annotations(
 
 
 @pytest.mark.anyio
+async def test_accelerator_tools_advertise_bounded_v2_schemas(tmp_path: Path) -> None:
+    Workspace.initialize(tmp_path)
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+
+    launches = tools["analyze_accelerator_launches"].input_schema["properties"]
+    assert launches["run_or_artifact"]["minLength"] == 1
+    assert launches["run_or_artifact"]["maxLength"] == 200
+    assert launches["limit"] == {
+        "description": "Maximum regions and kernel names to return.",
+        "maximum": 1000,
+        "minimum": 1,
+        "title": "Limit",
+        "type": "integer",
+    }
+    for name in ("extract_benchmark_samples", "extract_nsight_systems"):
+        run_id = tools[name].input_schema["properties"]["run_id"]
+        assert run_id["minLength"] == 1
+        assert run_id["maxLength"] == 200
+
+    perfetto = tools["extract_perfetto"].input_schema["properties"]
+    assert perfetto["run_id"]["minLength"] == 1
+    assert perfetto["artifact_id"]["anyOf"][0]["minLength"] == 1
+    profiler = tools["plan_capture"].input_schema["$defs"]["TorchProfilerCaptureOptions"]
+    assert profiler["additionalProperties"] is False
+    schedule = tools["plan_capture"].input_schema["$defs"]["TorchProfilerSchedule"]
+    assert schedule["additionalProperties"] is False
+    assert schedule["properties"]["repeat"]["maximum"] == 100
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "expected_fields"),
+    [
+        (
+            "analyze_accelerator_launches",
+            {"run_or_artifact": "run", "limit": True},
+            ("limit",),
+        ),
+        ("extract_benchmark_samples", {"run_id": ""}, ("run_id",)),
+        ("extract_nsight_systems", {"run_id": ""}, ("run_id",)),
+        ("extract_perfetto", {"run_id": "run", "artifact_id": ""}, ("artifact_id",)),
+        (
+            "plan_capture",
+            {
+                "workload_name": "workload",
+                "adapter": "torch.profiler",
+                "parameters": {},
+                "torch_profiler_options": {
+                    "mode": "sdk",
+                    "record_shapes": 1,
+                    "schedule": {"active": True},
+                },
+            },
+            (
+                "torch_profiler_options.record_shapes",
+                "torch_profiler_options.schedule.active",
+            ),
+        ),
+    ],
+)
+async def test_accelerator_tools_return_typed_errors_for_invalid_wire_values(
+    tmp_path: Path,
+    tool_name: str,
+    arguments: dict[str, object],
+    expected_fields: tuple[str, ...],
+) -> None:
+    Workspace.initialize(tmp_path)
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+        result = await client.call_tool(tool_name, arguments)
+
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
+    fields = result.structured_content["error"]["details"]["fields"]
+    assert set(expected_fields) <= {item["field"] for item in fields}
+    assert not list(
+        Draft202012Validator(tools[tool_name].output_schema).iter_errors(result.structured_content)
+    )
+
+
+@pytest.mark.anyio
 async def test_mcp_domain_errors_remain_structured(tmp_path: Path) -> None:
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:
         result = await client.call_tool("workspace_status", {})

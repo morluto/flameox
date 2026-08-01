@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from flameox.analysis import (
+    AcceleratorLaunchAnalysisResult,
     ExecutionAnalysisResult,
     FailureAnalysisResult,
     HotspotResult,
@@ -33,6 +34,7 @@ from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, GenerationManifest, Workspace
 
 AnalysisRecipe = Literal[
+    "accelerator_launches",
     "hotspots",
     "memory",
     "execution",
@@ -41,7 +43,8 @@ AnalysisRecipe = Literal[
     "scaling",
 ]
 AnalysisValue = (
-    HotspotResult
+    AcceleratorLaunchAnalysisResult
+    | HotspotResult
     | MemoryAnalysisResult
     | ExecutionAnalysisResult
     | PyTorchAnalysisResult
@@ -56,6 +59,7 @@ class MaterializeAnalysisRequest(ContractModel):
     comparison_input_id: str | None = None
     experiment_id: str | None = None
     limit: int | None = Field(default=None, ge=1, le=1_000)
+    phase: str | None = Field(default=None, min_length=1, max_length=200)
 
     @model_validator(mode="after")
     def validate_scope(self) -> MaterializeAnalysisRequest:
@@ -75,8 +79,15 @@ class MaterializeAnalysisRequest(ContractModel):
                 raise ValueError("failures uses the pinned corpus population")
         elif self.input_id is None or self.experiment_id is not None:
             raise ValueError(f"{self.recipe} requires only input_id")
-        elif self.comparison_input_id is not None and self.recipe != "execution":
-            raise ValueError("comparison_input_id is supported only by execution")
+        elif self.comparison_input_id is not None and self.recipe not in {
+            "execution",
+            "accelerator_launches",
+        }:
+            raise ValueError(
+                "comparison_input_id is supported only by execution and accelerator_launches"
+            )
+        if self.phase is not None and self.recipe != "accelerator_launches":
+            raise ValueError("phase is supported only by accelerator_launches")
         return self
 
 
@@ -258,6 +269,14 @@ class AnalysisMaterializationService:
             assert request.input_id is not None
             return recipes.pytorch(
                 request.input_id,
+                limit=request.limit,
+            )
+        if request.recipe == "accelerator_launches":
+            assert request.input_id is not None
+            return recipes.accelerator_launches(
+                request.input_id,
+                comparison_input_id=request.comparison_input_id,
+                phase=request.phase,
                 limit=request.limit,
             )
         if request.recipe == "failures":

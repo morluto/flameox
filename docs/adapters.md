@@ -176,6 +176,39 @@ Speedscope or raw output may be preserved for existing viewers, but flameox does
 not implement a bespoke sampled-stack parser when Trace Processor can ingest
 the chosen format.
 
+#### `flameox.benchmark-samples.v1`
+
+Producer-neutral accelerator benchmarks may be imported as bounded JSON with
+raw warm-up and measured samples. Every series declares its exact unit,
+measurement clock, synchronization method, loop count, phase, device/stream,
+trial/block/variant identity, and bounded workload dimensions. Extraction
+publishes one observed measurement per raw sample; it does not replace samples
+with a precomputed mean. Device-event measurements with missing or unknown
+synchronization remain available with an explicit limitation.
+
+```json
+{
+  "schema_version": "flameox.benchmark-samples.v1",
+  "producer": "decode-benchmark",
+  "producer_version": "git:abc123",
+  "benchmarks": [{
+    "name": "decode.token_latency",
+    "unit": "ns",
+    "measurement_clock": "cuda_event",
+    "synchronization": "event_synchronize",
+    "device": {"type": "cuda", "index": 0, "stream": "7"},
+    "warmups": [45000],
+    "samples": [42100, 41900, 42400]
+  }]
+}
+```
+
+Host monotonic time measures the host-side interval. A CUDA/HIP event measures
+device-stream progress and requires the declared event or stream/device
+synchronization before its result is comparable; Flameox preserves these clocks
+as different measurement semantics. Repeating extraction for the same artifact
+and extractor identity reuses the existing normalized generation.
+
 #### `torch.profiler`
 
 Use for operator-level CPU and accelerator activity. Record all enabled
@@ -189,6 +222,17 @@ The adapter has three explicit capability tiers:
   promise of application-specific phase separation;
 - SDK/recipe mode for user-instrumented steps, phases, schedules, and semantic
   annotations.
+
+Capture plans bind `mode`, activities, shapes, memory, stacks, FLOPs, module
+hierarchy, and the full bounded schedule. Whole-entrypoint mode rejects a
+schedule because an external launcher cannot infer iteration boundaries. SDK
+mode requires an explicit schedule and an approved workload using
+`flameox.sdk.torch_profiler()`; the yielded session exposes `step()` and a
+trace-visible `phase()` range. Every active cycle is exported to a distinct
+planned filename and registered with a cycle role. Missing, extra, empty, or
+overwritten cycle outputs fail the native-output publication gate.
+Normalize a multi-cycle run by calling `extract_perfetto` once per exact trace
+artifact ID; cycle roles survive normalization and keep regions separate.
 
 Arbitrary non-Python commands cannot be transparently wrapped by
 `torch.profiler`; the adapter must report that limitation instead of pretending
@@ -240,6 +284,30 @@ repository-relative line and arc sets. This adapter answers whether a path
 executed; it does not claim why the path executed or what values flowed through
 it.
 
+#### `nsight.systems` structured export
+
+The maintained import-first adapter supports official Nsight Systems SQLite
+exports registered with producer `nsight.systems`. It never parses
+`.nsys-rep` and does not require `nsys` to be installed during extraction.
+Produce the supported input outside Flameox with, for example,
+`nsys export --type sqlite --output report.sqlite report.nsys-rep`, then import
+`report.sqlite` as an execution trace with producer `nsight.systems`.
+The current compatibility family requires `CUPTI_ACTIVITY_KIND_RUNTIME` and
+`CUPTI_ACTIVITY_KIND_KERNEL`; `StringIds`, `NVTX_EVENTS`, and
+`CUPTI_ACTIVITY_KIND_DRIVER`, `CUPTI_ACTIVITY_KIND_MEMCPY`, and
+`CUPTI_ACTIVITY_KIND_MEMSET` are versioned optional evidence. Table/column
+identity is fingerprinted, unknown required schemas fail explicitly, and the
+source SQLite artifact remains authoritative. Extraction preserves nanosecond
+timestamps, CUDA runtime/driver APIs, graph launches, kernels, correlation IDs,
+device, context, stream, NVTX, memcpy, and memset fields when present. NVTX containment is
+reported as a derived temporal association, not causality.
+
+The compatibility suite currently uses a deterministic schema fixture rather
+than a vendor-produced export pinned to a certified Nsight Systems release. The
+schema fingerprint and registered producer version are therefore returned and
+bound into normalization provenance, but release certification remains an
+explicit validation gap.
+
 ### Candidate adapters
 
 - GDB/LLDB and elfutils for core metadata, with user init files, autoload, and
@@ -248,7 +316,8 @@ it.
   with narrow producer-versioned extraction rather than a claimed universal
   JSON schema;
 - `rr` recording references;
-- Nsight Systems supported Arrow, JSONL, SQLite, or Parquet exports;
+- Nsight Systems Arrow, JSONL, or Parquet exports beyond the maintained SQLite
+  subset;
 - `rocprofv3` Perfetto-compatible exports;
 - heaptrack or platform-native heap profiles;
 - VizTracer or Python monitoring integrations when ordered call evidence is

@@ -1,5 +1,9 @@
 from flameox.analysis.comparison import compare_paired_samples
 from flameox.analysis.recipes import (
+    AcceleratorLaunchAnalysisResult,
+    AcceleratorLaunchComparison,
+    AcceleratorLaunchRegion,
+    AcceleratorStreamSummary,
     ExecutionAnalysisResult,
     ExecutionObservationChange,
     FailureAnalysisResult,
@@ -7,6 +11,7 @@ from flameox.analysis.recipes import (
     FailureCluster,
     Hotspot,
     HotspotResult,
+    KernelNameCount,
     MeasurementSummary,
     MemoryAnalysisResult,
     MemoryPhaseGrowth,
@@ -21,6 +26,10 @@ from flameox.analysis.recipes import (
 )
 
 __all__ = [
+    "AcceleratorLaunchAnalysisResult",
+    "AcceleratorLaunchComparison",
+    "AcceleratorLaunchRegion",
+    "AcceleratorStreamSummary",
     "ExecutionAnalysisResult",
     "ExecutionObservationChange",
     "FailureAnalysisResult",
@@ -28,6 +37,7 @@ __all__ = [
     "FailureCluster",
     "Hotspot",
     "HotspotResult",
+    "KernelNameCount",
     "MeasurementSummary",
     "MemoryAnalysisResult",
     "MemoryPhaseGrowth",

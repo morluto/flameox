@@ -19,14 +19,18 @@ from mcp_types import (
     Tool,
     ToolAnnotations,
 )
-from pydantic import BaseModel, Field, RootModel, ValidationError
+from pydantic import BaseModel, Field, RootModel, StrictInt, ValidationError
 
 from flameox import __version__
 from flameox.adapters import (
+    BenchmarkSamplesExtractionResult,
+    BenchmarkSamplesExtractor,
     CoverageExtractionResult,
     CoverageExtractor,
     MemrayExtractionResult,
     MemrayExtractor,
+    NsightSystemsExtractionResult,
+    NsightSystemsExtractor,
     ObservationExtractionResult,
     ObservationExtractor,
     PerfettoExtractionResult,
@@ -37,9 +41,11 @@ from flameox.adapters import (
     PytestExtractor,
     PythonStartupExtractionResult,
     PythonStartupExtractor,
+    TorchProfilerCaptureOptions,
     TraceWindowResult,
 )
 from flameox.analysis import (
+    AcceleratorLaunchAnalysisResult,
     ExecutionAnalysisResult,
     FailureAnalysisResult,
     HotspotResult,
@@ -1196,6 +1202,7 @@ def create_server(
         preflight_mode: Literal["auto", "passive", "active"] = "auto",
         capture_mode: Literal["auto", "managed", "trusted_local"] = "auto",
         external_context: ExternalExecutionContext | None = None,
+        torch_profiler_options: TorchProfilerCaptureOptions | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[CapturePlan]]:
         """Bind one current capture without running it.
 
@@ -1217,6 +1224,11 @@ def create_server(
                 execution_policy=execution_policy,
                 preflight_mode=preflight_mode,
                 external_context=external_context,
+                adapter_options=(
+                    torch_profiler_options.model_dump(mode="json")
+                    if torch_profiler_options is not None
+                    else None
+                ),
             )
             return _success(
                 result,
@@ -2174,6 +2186,49 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
+    @server.tool(name="analyze_accelerator_launches", annotations=READ_ONLY)
+    async def analyze_accelerator_launches_tool(
+        run_or_artifact: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=200,
+                description="Run or artifact with normalized Perfetto or Nsight trace events.",
+            ),
+        ],
+        limit: Annotated[
+            StrictInt,
+            Field(ge=1, le=1_000, description="Maximum regions and kernel names to return."),
+        ],
+        ctx: Context[AppContext],
+        comparison_run_or_artifact: Annotated[
+            str | None,
+            Field(min_length=1, max_length=200),
+        ] = None,
+        phase: Annotated[str | None, Field(min_length=1, max_length=200)] = None,
+    ) -> Annotated[CallToolResult, ToolPayload[AcceleratorLaunchAnalysisResult]]:
+        """Analyze observed runtime launches, graph launches, kernels, and idle gaps."""
+        try:
+            workspace = ctx.request_context.lifespan_context.require_workspace()
+            await ctx.report_progress(0, 2, "Accelerator trace snapshot pinned")
+            result = await Catalog(workspace).run_interruptible(
+                lambda snapshot: RecipeService(
+                    workspace,
+                    snapshot=snapshot,
+                ).accelerator_launches(
+                    run_or_artifact,
+                    comparison_input_id=comparison_run_or_artifact,
+                    phase=phase,
+                    limit=limit,
+                ),
+                query_name="analyze_accelerator_launches",
+            )
+            await ctx.report_progress(1, 2, "Accelerator launch query complete")
+            await ctx.report_progress(2, 2, "Accelerator launch result ready")
+            return _success(result, f"Returned {result.returned} launch regions.")
+        except DomainError as error:
+            return _failure(error)
+
     @server.tool(name="analyze_scaling", annotations=READ_ONLY)
     async def analyze_scaling_tool(
         experiment_id: str,
@@ -2455,6 +2510,26 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
+    @server.tool(name="extract_benchmark_samples", annotations=ADDITIVE)
+    async def extract_benchmark_samples_tool(
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[BenchmarkSamplesExtractionResult]]:
+        """Extract raw accelerator benchmark samples with explicit timing semantics."""
+        try:
+            result = await run_atomic_thread(
+                lambda: BenchmarkSamplesExtractor(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).extract(run_id)
+            )
+            return _success(
+                result,
+                f"Extracted {result.measurement_count} measured values and "
+                f"{result.warmup_count} warmups.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
     @server.tool(name="extract_python_startup", annotations=ADDITIVE)
     async def extract_python_startup_tool(
         run_id: str,
@@ -2534,18 +2609,36 @@ def create_server(
 
     @server.tool(name="extract_perfetto", annotations=ADDITIVE)
     async def extract_perfetto_tool(
-        run_id: str,
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
         ctx: Context[AppContext],
+        artifact_id: Annotated[str | None, Field(min_length=1, max_length=200)] = None,
     ) -> Annotated[CallToolResult, ToolPayload[PerfettoExtractionResult]]:
         """Run versioned curated queries through a configured local Trace Processor."""
         try:
             result = await PerfettoExtractor(
                 ctx.request_context.lifespan_context.require_workspace()
-            ).extract(run_id)
+            ).extract(run_id, artifact_id=artifact_id)
             return _success(
                 result,
                 f"Extracted {result.slice_count} slices into "
                 f"{result.frame_count} frame aggregates.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="extract_nsight_systems", annotations=ADDITIVE)
+    async def extract_nsight_systems_tool(
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[NsightSystemsExtractionResult]]:
+        """Extract curated evidence from an imported official Nsight Systems SQLite export."""
+        try:
+            result = await NsightSystemsExtractor(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).extract(run_id)
+            return _success(
+                result,
+                f"Extracted {result.event_count} Nsight Systems events.",
             )
         except DomainError as error:
             return _failure(error)

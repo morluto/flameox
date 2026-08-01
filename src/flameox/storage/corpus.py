@@ -35,6 +35,7 @@ class GenerationManifest(ContractModel):
     input_artifact_ids: tuple[Digest, ...] = ()
     publisher: str
     publisher_version: str
+    operation_digest: Digest | None = None
     files: tuple[GenerationFile, ...]
     supersedes: tuple[str, ...] = ()
 

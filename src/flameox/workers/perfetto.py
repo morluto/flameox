@@ -36,7 +36,15 @@ _SLICE_QUERY = """
         sum(CASE WHEN a.key IN ('args.Bytes', 'args.Allocation Bytes')
             THEN a.int_value END) AS allocation_bytes,
         max(CASE WHEN a.key IN ('args.phase', 'args.Phase')
-            THEN a.string_value END) AS phase
+            THEN a.string_value END) AS phase,
+        max(CASE WHEN a.key IN (
+            'args.correlation', 'args.correlationId', 'args.Correlation ID',
+            'args.External id', 'args.external id'
+        ) THEN coalesce(a.string_value, cast(a.int_value AS TEXT)) END) AS correlation_id,
+        max(CASE WHEN a.key IN ('args.device', 'args.deviceId', 'args.Device')
+            THEN coalesce(a.string_value, cast(a.int_value AS TEXT)) END) AS device,
+        max(CASE WHEN a.key IN ('args.stream', 'args.streamId', 'args.Stream')
+            THEN coalesce(a.string_value, cast(a.int_value AS TEXT)) END) AS stream
     FROM slice AS s
     LEFT JOIN args AS a ON a.arg_set_id = s.arg_set_id
     LEFT JOIN thread_track AS tt ON tt.id = s.track_id
@@ -82,9 +90,15 @@ def _query(request: dict[str, object]) -> dict[str, object]:
         )
         operation = request["operation"]
         if operation == "extract":
-            rows = list(processor.query(_SLICE_QUERY))
+            max_rows = int(str(request["max_rows"]))
+            rows = list(
+                processor.query(
+                    f"SELECT * FROM ({_SLICE_QUERY}) AS bounded_slices LIMIT {max_rows + 1:d}"
+                )
+            )
             return {
                 "ok": True,
+                "truncated": len(rows) > max_rows,
                 "rows": [
                     _row(
                         row,
@@ -103,9 +117,12 @@ def _query(request: dict[str, object]) -> dict[str, object]:
                             "input_shapes",
                             "allocation_bytes",
                             "phase",
+                            "correlation_id",
+                            "device",
+                            "stream",
                         ),
                     )
-                    for row in rows
+                    for row in rows[:max_rows]
                 ],
             }
         if operation == "window":
