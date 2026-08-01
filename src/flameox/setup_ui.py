@@ -5,6 +5,7 @@ from typing import cast
 
 import questionary
 import typer
+from packaging.version import InvalidVersion, Version
 from questionary import Choice
 
 from flameox.adapters.client_setup import ALL_SETUP_CLIENTS, SetupClient
@@ -28,7 +29,7 @@ def choose_action(inspection: SetupInspection, target_version: str) -> str:
     choices: list[Choice] = []
     if (
         inspection.active_version is not None
-        and inspection.active_version != target_version
+        and _is_newer(target_version, inspection.active_version)
         and inspection.configured_clients
     ):
         choices.append(Choice(f"Update flameox to {target_version}", "update"))
@@ -44,6 +45,20 @@ def choose_action(inspection: SetupInspection, target_version: str) -> str:
     choices.append(Choice("Exit", "exit"))
     answer = questionary.select("What would you like to do?", choices=choices).ask()
     return cast(str, _answer(answer))
+
+
+def effective_runtime_version(inspection: SetupInspection, target_version: str) -> str:
+    """Keep a stale bootstrap from replacing a newer active runtime."""
+    if inspection.active_version is None or _is_newer(target_version, inspection.active_version):
+        return target_version
+    return inspection.active_version
+
+
+def _is_newer(candidate: str, current: str) -> bool:
+    try:
+        return Version(candidate) > Version(current)
+    except InvalidVersion:
+        return candidate != current
 
 
 def choose_clients(

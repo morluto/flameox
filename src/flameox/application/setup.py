@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 import portalocker
+from packaging.version import InvalidVersion, Version
 from platformdirs import user_data_path
 from pydantic import Field
 
@@ -207,6 +208,7 @@ class SetupService:
                 "Select at least one MCP client.",
             )
 
+        warnings: list[str] = []
         remove = operation is SetupOperation.REMOVE
         if remove:
             launcher = Launcher(command="", args=())
@@ -219,6 +221,17 @@ class SetupService:
                     ErrorCode.EXECUTION_REFUSED,
                     "A target runtime version is required.",
                 )
+            active_manifest = self._read_install_manifest()
+            if (
+                operation is SetupOperation.CONFIGURE
+                and active_manifest is not None
+                and _is_older_version(version, active_manifest.active_version)
+            ):
+                warnings.append(
+                    f"Requested flameox {version} is older than the active runtime "
+                    f"{active_manifest.active_version}; keeping the active runtime."
+                )
+                version = active_manifest.active_version
             installed_versions = self.runtime.installed_versions()
             if operation is SetupOperation.ROLLBACK and version not in installed_versions:
                 raise DomainError(
@@ -253,7 +266,8 @@ class SetupService:
                 )
                 for edit in edits
             ),
-            warnings=(
+            warnings=tuple(warnings)
+            + (
                 ("Client detection is informational; only selected clients will change.",)
                 if any(not edit.detected for edit in edits)
                 else ()
@@ -588,6 +602,13 @@ class SetupService:
 def _unique_clients(clients: tuple[SetupClient, ...]) -> tuple[SetupClient, ...]:
     selected = set(clients)
     return tuple(client for client in ALL_SETUP_CLIENTS if client in selected)
+
+
+def _is_older_version(candidate: str, current: str) -> bool:
+    try:
+        return Version(candidate) < Version(current)
+    except InvalidVersion:
+        return False
 
 
 def _digest(value: bytes | None) -> str | None:
