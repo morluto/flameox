@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from click import unstyle
 from typer.testing import CliRunner
 
 from flameox.cli import app
@@ -16,15 +17,17 @@ def test_help_lists_flameoxs_purpose() -> None:
 def test_capture_help_uses_named_workload_syntax() -> None:
     runner = CliRunner()
 
-    plan = runner.invoke(app, ["capture", "plan", "--help"], color=False)
-    run = runner.invoke(app, ["capture", "run", "--help"], color=False)
+    plan = runner.invoke(app, ["capture", "plan", "--help"])
+    run = runner.invoke(app, ["capture", "run", "--help"])
 
     assert plan.exit_code == 0, plan.output
     assert run.exit_code == 0, run.output
-    assert "--workload" in plan.stdout
-    assert "--workload" in run.stdout
-    assert "argv" not in plan.stdout.lower()
-    assert "argv" not in run.stdout.lower()
+    plan_help = unstyle(plan.stdout)
+    run_help = unstyle(run.stdout)
+    assert "--workload" in plan_help
+    assert "--workload" in run_help
+    assert "argv" not in plan_help.lower()
+    assert "argv" not in run_help.lower()
 
 
 def test_workload_help_has_no_inert_approval_command() -> None:
