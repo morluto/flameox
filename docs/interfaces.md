@@ -102,9 +102,12 @@ flameox validate
 
 `init` creates only local files and never installs collectors. `capabilities`
 reports installed tools, versions, supported modes, permissions, and exact
-managed setup actions. MCP agents use `prepare_capabilities` for FlameOx-managed
-providers and the typed `prepare_adapter` action for an installed third-party
-entry point; neither action runs a workload.
+managed setup actions. MCP agents use `start_capability_setup` with an explicit
+idempotency key for FlameOx-managed providers, then poll
+`get_capability_setup` or cancel with `cancel_capability_setup`. The older
+`prepare_capabilities` entry point remains a compatibility wrapper. The typed
+`prepare_adapter` action handles an installed third-party entry point; none of
+these actions runs a workload.
 
 ### Capture commands
 
@@ -393,8 +396,8 @@ experiments, and comments are preserved, and `flameox.toml` is atomically
 updated under the workspace lock. The canonical workload is immediately active.
 This tool never runs
 the command; call `list_declared_workflows` next, then
-`get_declared_workflow`, `list_capabilities`, `prepare_capabilities` when
-needed, `list_capabilities` again, `plan_capture`, and finally
+`get_declared_workflow`, `list_capabilities`, `start_capability_setup` when
+needed, `get_capability_setup`, `list_capabilities` again, `plan_capture`, and finally
 `execute_capture_plan`.
 
 #### `workspace_status`

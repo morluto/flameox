@@ -266,20 +266,22 @@ flameox[dev]          test, lint, type-check, and fixture tooling
 flameox[all]          all non-vendor optional integrations
 ```
 
-The MCP setup actions are the agent-facing installers. `prepare_capabilities`
-accepts an explicit managed adapter enum and resolves the matching published
-extra; `prepare_adapter` records an exact installed third-party identity; and
+The MCP setup actions are the agent-facing installers. `start_capability_setup`
+accepts an explicit managed adapter enum and idempotency key, returns a durable
+operation, and is followed by `get_capability_setup` or
+`cancel_capability_setup`; `prepare_capabilities` is the compatibility wrapper.
+`prepare_adapter` records an exact installed third-party identity, and
 `prepare_workload_dependencies` installs only Python distributions already
-declared by a named workload. Selected extras are recorded in the user-local
-managed-runtime manifest so a later runtime upgrade does not silently remove
-them. None of these actions runs a workload.
+declared by a named workload. Selected extras are recorded in the workspace
+capability manifest so a later runtime upgrade does not silently remove them.
+None of these actions runs a workload.
 
 System and privileged executables such as `perf`, `llvm-symbolizer`, Bubblewrap,
 GDB, or LLDB are detected at runtime and are not provisioned by FlameOx. The
-non-privileged Trace Processor is the exception: `prepare_capabilities` stages a
-pinned platform-specific binary under `.diagnostics/tools`, verifies its bounded
-version command, and records the configured path. Permission requirements such
-as `perf_event_open` remain explicit.
+non-privileged Trace Processor is the exception: `start_capability_setup` stages
+a pinned platform-specific binary under `.diagnostics/tools`, verifies its
+bounded version command, and records the configured path. Permission
+requirements such as `perf_event_open` remain explicit.
 
 ### Application services
 

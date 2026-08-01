@@ -285,11 +285,13 @@ A capability may be:
 - `unknown`.
 
 For missing managed providers, the report also contains a typed setup action.
-Agents should pass its adapter name to `prepare_capabilities`, then refresh the
-capability list before planning. This covers the published `execution`,
-`memory`, `cpu`, `test`, and `torch` extras. It does not install host tools or
-change permissions. A fallback adapter must be chosen only after the agent has
-shown the requested capability's evidence limitation in its plan.
+Agents should pass its adapter name to `start_capability_setup` with a stable
+idempotency key, poll the durable result, and then refresh the capability list
+before planning. `prepare_capabilities` remains a compatibility wrapper. This
+covers the published `execution`, `memory`, `cpu`, `test`, and `torch` extras.
+It does not install host tools or change permissions. A fallback adapter must be
+chosen only after the agent has shown the requested capability's evidence
+limitation in its plan.
 
 Probe commands must be bounded and expected to be side-effect free, but active
 execution is still labeled as execution. An executable found only through a

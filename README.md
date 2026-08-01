@@ -160,12 +160,13 @@ Optional Python extras are independent:
 
 When FlameOx is connected to an agent, the agent does not need to guess package
 names. `list_capabilities` reports the exact managed providers that are missing;
-the agent calls `prepare_capabilities`, or `prepare_adapter` for an installed
-third-party entry point. These actions verify their result and never run a
-workload. `prepare_workload_dependencies` installs only Python distributions
-declared by a named workload. Non-privileged user-space tools such as Trace
-Processor are staged automatically; host executables, permissions, and
-privileged collectors remain explicit limitations.
+the agent calls `start_capability_setup` with an idempotency key, then polls
+`get_capability_setup` (or calls `cancel_capability_setup` when needed).
+`prepare_capabilities` remains as a compatibility wrapper. These actions verify
+their result and never run a workload. `prepare_workload_dependencies` installs
+only Python distributions declared by a named workload. Non-privileged
+user-space tools such as Trace Processor are staged automatically; host
+executables, permissions, and privileged collectors remain explicit limitations.
 
 ## Local data model
 
@@ -222,10 +223,12 @@ An agent can create this declaration directly through MCP with
 `configure_workload`. That operation validates the complete project, preserves
 unrelated workloads and experiments, and makes the workload immediately
 available; it never runs the command. The agent then follows
-`list_declared_workflows → get_declared_workflow → list_capabilities →
-plan_capture → execute_capture_plan`. A valid manually authored workload is
-also immediately active. There is no separate workload approval or human-check
-step: the canonical definition in `flameox.toml` is the execution binding.
+`list_declared_workflows` (no arguments lists workloads) →
+`get_declared_workflow → list_capabilities → plan_capture → execute_capture_plan`.
+Pass `kind="experiment"` when discovering experiments. A valid manually authored
+workload is also immediately active. There is no separate workload approval or
+human-check step: the canonical definition in `flameox.toml` is the execution
+binding.
 
 The equivalent CLI capture commands are:
 
@@ -312,7 +315,10 @@ uv run flameox mcp serve --project-root .
 
 Through MCP, agents can configure workloads, plan captures and experiments, query evidence,
 preview analyses, and record results. Capture and experiment plans are
-short-lived and single-use; restarting the server invalidates them.
+short-lived and single-use; restarting the server invalidates those plan tokens.
+Detached capture records persist across a manager restart: retry the same
+`idempotency_key` to reconnect to the original run rather than starting another
+capture.
 
 Inspect the protocol surface with a real stdio client:
 
