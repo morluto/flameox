@@ -32,6 +32,7 @@ async def test_operation_runner_persists_exact_request_and_reconnects(tmp_path: 
     first = await runner.start({"run_id": "run-1"}, "same-key", run, items=("run-1",))
     second = await runner.start({"run_id": "run-1"}, "same-key", run, items=("run-1",))
     assert second.operation_id == first.operation_id
+    assert ":" not in first.operation_id
     assert second.request == {"run_id": "run-1"}
 
     for _ in range(50):
@@ -106,6 +107,34 @@ async def test_operation_runner_idempotency_is_shared_by_runners(tmp_path: Path)
     assert first.operation_id == second.operation_id
     await asyncio.sleep(0.05)
     assert started == 1
+
+
+@pytest.mark.anyio
+async def test_operation_runner_does_not_steal_a_live_cross_process_lease(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    first_runner = OperationRunner(workspace, "test.operation")
+    second_runner = OperationRunner(workspace, "test.operation")
+    stopped = asyncio.Event()
+
+    async def run(
+        operation_id: str,
+        progress: object,
+    ) -> dict[str, object]:
+        cancel_event = asyncio.Event()
+        first_runner.set_cancel_hook(operation_id, cancel_event.set)
+        await cancel_event.wait()
+        stopped.set()
+        return {"receipt": "cancelled"}
+
+    started = await first_runner.start({"value": 1}, "lease-key", run)
+    observed = await second_runner.status(started.operation_id)
+
+    assert observed.state == "running"
+    assert observed.recovery is None
+    await first_runner.cancel(started.operation_id)
+    assert stopped.is_set()
 
 
 @pytest.mark.anyio

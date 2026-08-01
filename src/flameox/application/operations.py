@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import Field
 
@@ -80,6 +81,8 @@ class OperationRecord(ContractModel):
     cleanup_status: Literal["not_required", "pending", "complete", "incomplete"] = "not_required"
     terminal_receipt: dict[str, Any] | None = None
     recovery: OperationRecovery | None = None
+    owner_id: str | None = None
+    owner_heartbeat_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -108,7 +111,7 @@ class OperationStatus(ContractModel):
 
     @classmethod
     def from_record(cls, record: OperationRecord) -> OperationStatus:
-        return cls(**record.model_dump())
+        return cls.model_validate(record.model_dump(exclude={"owner_id", "owner_heartbeat_at"}))
 
 
 class OperationStore:
@@ -155,6 +158,9 @@ def operation_digests(
 class OperationRunner:
     """Small durable runner used by MCP operations with external side effects."""
 
+    _LEASE_TIMEOUT = timedelta(seconds=30)
+    _LEASE_HEARTBEAT_INTERVAL = 5.0
+
     def __init__(self, workspace: Workspace, operation: str) -> None:
         self.workspace = workspace
         self.operation = operation
@@ -162,6 +168,9 @@ class OperationRunner:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.cancel_events: dict[str, asyncio.Event] = {}
         self.cancel_hooks: dict[str, Callable[[], None]] = {}
+        self.lease_tasks: dict[str, asyncio.Task[None]] = {}
+        self.owner_id = uuid4().hex
+        self.record_lock = asyncio.Lock()
         self.lock = asyncio.Lock()
 
     async def start(
@@ -193,7 +202,7 @@ class OperationRunner:
                 if (
                     existing.state in {"starting", "running"}
                     and existing.operation_id not in self.tasks
-                    and not existing.operation_id.startswith("op-")
+                    and not self._lease_is_active(existing)
                 ):
                     existing = self._mark_unmanaged(existing)
                     self.store.records.append(existing, expected_revision=existing.revision - 1)
@@ -202,7 +211,7 @@ class OperationRunner:
             # The digest-derived identity makes the create itself the cross-process
             # idempotency gate. A process-local asyncio lock cannot protect two MCP
             # server instances sharing one workspace.
-            operation_id = f"op-{idempotency_digest}"
+            operation_id = f"op-{idempotency_digest.removeprefix('sha256:')}"
             record = OperationRecord(
                 operation_id=operation_id,
                 operation=self.operation,
@@ -210,6 +219,8 @@ class OperationRunner:
                 request_digest=request_digest,
                 request=request,
                 idempotency_digest=idempotency_digest,
+                owner_id=self.owner_id,
+                owner_heartbeat_at=utc_now(),
                 item_outcomes=tuple(
                     OperationItemOutcome(item=item, status="pending") for item in items
                 ),
@@ -233,20 +244,21 @@ class OperationRunner:
                 self._execute(operation_id, run, cancel_event),
                 name=f"flameox-operation-{operation_id}",
             )
+            self.lease_tasks[operation_id] = asyncio.create_task(
+                self._heartbeat(operation_id),
+                name=f"flameox-operation-lease-{operation_id}",
+            )
         await asyncio.sleep(0)
         return OperationStatus.from_record(self.store.read(operation_id))
 
     async def status(self, operation_id: str) -> OperationStatus:
         record = self.store.read(operation_id)
-        if record.state in {"starting", "running"} and operation_id not in self.tasks:
-            record = record.model_copy(
-                update={
-                    "revision": record.revision + 1,
-                    "state": "unmanaged_after_restart",
-                    "recovery": self._retry_recovery(record),
-                    "updated_at": utc_now(),
-                }
-            )
+        if (
+            record.state in {"starting", "running"}
+            and operation_id not in self.tasks
+            and not self._lease_is_active(record)
+        ):
+            record = self._mark_unmanaged(record)
             self.store.records.append(record, expected_revision=record.revision - 1)
         return OperationStatus.from_record(record)
 
@@ -277,17 +289,19 @@ class OperationRunner:
         hook = self.cancel_hooks.get(operation_id)
         if hook is not None:
             hook()
-        current = self.store.read(operation_id)
-        updated = current.model_copy(
-            update={
-                "revision": current.revision + 1,
-                "cancellation_requested": True,
-                "phase": "cancelling",
-                "cleanup_status": "pending",
-                "updated_at": utc_now(),
-            }
-        )
-        self.store.records.append(updated, expected_revision=current.revision)
+        async with self.record_lock:
+            current = self.store.read(operation_id)
+            updated = current.model_copy(
+                update={
+                    "revision": current.revision + 1,
+                    "cancellation_requested": True,
+                    "phase": "cancelling",
+                    "cleanup_status": "pending",
+                    "owner_heartbeat_at": utc_now(),
+                    "updated_at": utc_now(),
+                }
+            )
+            self.store.records.append(updated, expected_revision=current.revision)
         task = self.tasks.get(operation_id)
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
@@ -347,6 +361,7 @@ class OperationRunner:
                 phase="cancelled",
                 cleanup_status="complete",
                 item_outcomes=self._items(operation_id, "pending"),
+                recovery=self._retry_recovery(self.store.read(operation_id)),
             )
         except OperationFailure as failure:
             await self._finish_domain_failure(
@@ -359,6 +374,11 @@ class OperationRunner:
             await self._finish_domain_failure(operation_id, cancel_event, error)
         except Exception as error:
             await self._finish_unexpected_failure(operation_id, error)
+        finally:
+            lease_task = self.lease_tasks.pop(operation_id, None)
+            if lease_task is not None:
+                lease_task.cancel()
+                await asyncio.gather(lease_task, return_exceptions=True)
 
     async def _finish_domain_failure(
         self,
@@ -377,6 +397,7 @@ class OperationRunner:
                 failure_code=error.code.value,
                 failure_message=error.message,
                 item_outcomes=self._items(operation_id, "pending", completed_items),
+                recovery=self._retry_recovery(self.store.read(operation_id)),
             )
         else:
             await self._update(
@@ -411,7 +432,22 @@ class OperationRunner:
             failure_code=ErrorCode.INTERNAL_ERROR.value,
             failure_message=f"Operation failed with {type(error).__name__}.",
             item_outcomes=self._items(operation_id, "failed"),
+            recovery=self._retry_recovery(self.store.read(operation_id)),
         )
+
+    async def _heartbeat(self, operation_id: str) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self._LEASE_HEARTBEAT_INTERVAL)
+                current = self.store.read(operation_id)
+                if (
+                    current.state not in {"starting", "running"}
+                    or current.owner_id != self.owner_id
+                ):
+                    return
+                await self._update(operation_id, owner_heartbeat_at=utc_now())
+        except asyncio.CancelledError:
+            return
 
     async def _progress(
         self,
@@ -421,44 +457,57 @@ class OperationRunner:
         total: float | None,
         message: str,
     ) -> None:
-        current = self.store.read(operation_id)
-        if current.progress:
-            previous = current.progress[-1]
-            if (
-                completed is not None
-                and previous.completed is not None
-                and completed < previous.completed
-            ):
-                raise DomainError(
-                    ErrorCode.REVISION_CONFLICT,
-                    "Operation progress must be monotonic.",
-                )
         event = OperationProgress(
             phase=phase,
             completed=completed,
             total=total,
             message=message,
         )
-        self.store.records.append(
-            current.model_copy(
-                update={
-                    "revision": current.revision + 1,
-                    "phase": phase,
-                    "progress": (*current.progress[-31:], event),
-                    "updated_at": utc_now(),
-                }
-            ),
-            expected_revision=current.revision,
-        )
+        async with self.record_lock:
+            current = self.store.read(operation_id)
+            if current.progress:
+                previous = current.progress[-1]
+                if (
+                    completed is not None
+                    and previous.completed is not None
+                    and completed < previous.completed
+                ):
+                    raise DomainError(
+                        ErrorCode.REVISION_CONFLICT,
+                        "Operation progress must be monotonic.",
+                    )
+            self.store.records.append(
+                current.model_copy(
+                    update={
+                        "revision": current.revision + 1,
+                        "phase": phase,
+                        "progress": (*current.progress[-31:], event),
+                        "owner_heartbeat_at": (
+                            utc_now()
+                            if current.owner_id == self.owner_id
+                            else current.owner_heartbeat_at
+                        ),
+                        "updated_at": utc_now(),
+                    }
+                ),
+                expected_revision=current.revision,
+            )
 
     async def _update(self, operation_id: str, **updates: Any) -> None:
-        current = self.store.read(operation_id)
-        self.store.records.append(
-            current.model_copy(
-                update={"revision": current.revision + 1, "updated_at": utc_now(), **updates}
-            ),
-            expected_revision=current.revision,
-        )
+        async with self.record_lock:
+            current = self.store.read(operation_id)
+            state = updates.get("state", current.state)
+            if state in {"starting", "running"} and current.owner_id == self.owner_id:
+                updates.setdefault("owner_heartbeat_at", utc_now())
+            elif state not in {"starting", "running"}:
+                updates.setdefault("owner_id", None)
+                updates.setdefault("owner_heartbeat_at", None)
+            self.store.records.append(
+                current.model_copy(
+                    update={"revision": current.revision + 1, "updated_at": utc_now(), **updates}
+                ),
+                expected_revision=current.revision,
+            )
 
     def _items(
         self,
@@ -479,6 +528,8 @@ class OperationRunner:
                 "revision": record.revision + 1,
                 "state": "unmanaged_after_restart",
                 "recovery": self._retry_recovery(record),
+                "owner_id": None,
+                "owner_heartbeat_at": None,
                 "updated_at": utc_now(),
             }
         )
@@ -492,4 +543,12 @@ class OperationRunner:
                 **record.request,
                 "idempotency_key": f"{record.operation_id}:retry:{record.revision + 1}",
             },
+        )
+
+    def _lease_is_active(self, record: OperationRecord) -> bool:
+        heartbeat = record.owner_heartbeat_at
+        return (
+            record.owner_id is not None
+            and heartbeat is not None
+            and utc_now() - heartbeat < self._LEASE_TIMEOUT
         )

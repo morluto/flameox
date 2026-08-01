@@ -547,6 +547,15 @@ class RecipeService:
                 "Runtime resource summary was not published for this evidence generation."
             )
         memory_run_id = scope.run_ids[0] if len(scope.run_ids) == 1 else None
+        memory_hotspots = tuple(
+            item for item in hotspot_result.hotspots if item.metric.startswith("memory.")
+        )
+        has_runtime_evidence = bool(
+            resource_rows
+            or writable_rows
+            or policy_termination is not None
+            or (resource_total is not None and resource_total.run_count > 0)
+        )
         evidence = (
             EvidenceAvailability(
                 status="unavailable",
@@ -560,14 +569,32 @@ class RecipeService:
                     {"run_id": memory_run_id} if has_memory_profile and memory_run_id else None
                 ),
             )
-            if not rows and has_memory_profile
+            if (
+                not rows
+                and not memory_hotspots
+                and not phase_growth
+                and has_memory_profile
+                and not has_runtime_evidence
+            )
             else (
                 EvidenceAvailability(
-                    status="unavailable",
-                    reason="no_memory_profile_artifact",
+                    status="partial" if has_runtime_evidence else "unavailable",
+                    reason=(
+                        (
+                            "memory_profile_not_extracted_runtime_evidence_present"
+                            if has_memory_profile
+                            else "no_memory_profile_artifact_runtime_evidence_present"
+                        )
+                        if has_runtime_evidence
+                        else "no_memory_profile_artifact"
+                    ),
                 )
-                if not rows and hotspot_result.evidence_status == "unavailable"
-                else empty_availability("no_memory_measurements")
+                if not rows and not memory_hotspots and not phase_growth
+                else (
+                    available_availability()
+                    if memory_hotspots or phase_growth
+                    else empty_availability("no_memory_measurements")
+                )
                 if not rows
                 else available_availability()
             )
@@ -586,9 +613,7 @@ class RecipeService:
                 )
                 for row in rows
             ),
-            hotspots=tuple(
-                item for item in hotspot_result.hotspots if item.metric.startswith("memory.")
-            ),
+            hotspots=memory_hotspots,
             phase_growth=tuple(phase_growth),
             limitations=tuple(limitations),
             runtime_resources=resource_rows,
@@ -844,7 +869,7 @@ class RecipeService:
                 else:
                     run_ids = ()
                 details: dict[str, object] = {"next_tool": "extract_perfetto"}
-                if len(run_ids) == 1:
+                if run_ids:
                     details["run_id"] = run_ids[0]
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,

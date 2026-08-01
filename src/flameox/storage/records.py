@@ -31,19 +31,29 @@ class JsonRecordStore[RecordT: BaseModel]:
         self.revision_field = revision_field
 
     def create(self, record: RecordT) -> RecordT:
-        identifier = self._identifier(record)
         with self.workspace.write_locked():
-            root = self._root(identifier)
-            if root.exists():
-                raise DomainError(
-                    ErrorCode.REVISION_CONFLICT,
-                    f"{self.kind} {identifier!r} already exists.",
-                )
-            root.mkdir(parents=True)
-            if self.revision_field is not None:
-                (root / "revisions").mkdir()
-                self._write_revision(record)
-            self._write_projection(record)
+            self.create_locked(record)
+        return record
+
+    def create_locked(self, record: RecordT) -> RecordT:
+        """Create a record while the caller owns the workspace write lock.
+
+        This is intentionally a small escape hatch for compound operations
+        that must inspect and create records in one cross-process critical
+        section. Callers must hold ``workspace.write_locked()``.
+        """
+        identifier = self._identifier(record)
+        root = self._root(identifier)
+        if root.exists():
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                f"{self.kind} {identifier!r} already exists.",
+            )
+        root.mkdir(parents=True)
+        if self.revision_field is not None:
+            (root / "revisions").mkdir()
+            self._write_revision(record)
+        self._write_projection(record)
         return record
 
     def read(self, identifier: str) -> RecordT:

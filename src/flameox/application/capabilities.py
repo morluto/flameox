@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -97,6 +98,8 @@ _CONTAINMENT_VERSION_ARGS = {
     "containment.systemd": ("--version",),
 }
 
+_CAPABILITY_INSTALL_TIMEOUT_SECONDS = 1_800
+
 
 class CapabilityService:
     """Passive discovery plus explicit, brokered, process-lifetime active probes."""
@@ -110,6 +113,9 @@ class CapabilityService:
     ) -> None:
         self.workspace = workspace
         self.broker = broker or SubprocessBroker()
+        self._uses_default_workspace_manifest = (
+            capability_manifest is None and workspace is not None
+        )
         self.capability_manifest = capability_manifest or (
             workspace.paths.records / "capabilities.json"
             if workspace is not None
@@ -650,7 +656,7 @@ class CapabilityService:
                             capture_output=True,
                             text=True,
                             check=False,
-                            timeout=1_800,
+                            timeout=_CAPABILITY_INSTALL_TIMEOUT_SECONDS,
                             env={**os.environ, "UV_NO_PROGRESS": "1"},
                         )
                     else:
@@ -771,19 +777,36 @@ class CapabilityService:
             text=True,
             env={**os.environ, "UV_NO_PROGRESS": "1"},
         )
+        deadline = time.monotonic() + _CAPABILITY_INSTALL_TIMEOUT_SECONDS
+
+        def terminate() -> None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
         while process.poll() is None:
             if cancel_event.wait(0.1):
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+                terminate()
                 raise DomainError(
                     ErrorCode.PROCESS_CANCELLED,
                     "Capability setup was cancelled and its installer was terminated.",
                     retryable=True,
                     details={"next_tool": "start_capability_setup"},
+                )
+            if time.monotonic() >= deadline:
+                terminate()
+                raise DomainError(
+                    ErrorCode.PROCESS_TIMEOUT,
+                    "Capability setup installer exceeded its 1800 second timeout.",
+                    retryable=True,
+                    details={"next_tool": "start_capability_setup"},
+                    remediation=(
+                        "Retry capability setup after checking package-index access and the "
+                        "managed runtime.",
+                    ),
                 )
         stdout, stderr = process.communicate()
         return subprocess.CompletedProcess(
@@ -927,10 +950,31 @@ class CapabilityService:
                 }
         except (OSError, ValueError):
             pass
-        atomic_write_json(
-            self.capability_manifest,
-            {"schema_version": 1, "extras": sorted(existing | values)},
-        )
+        payload = {"schema_version": 1, "extras": sorted(existing | values)}
+        atomic_write_json(self.capability_manifest, payload)
+        if self.workspace is not None and self._uses_default_workspace_manifest:
+            runtime_manifest = (
+                Path(user_data_path("flameox", appauthor=False)) / "capabilities.json"
+            )
+            if runtime_manifest != self.capability_manifest:
+                runtime_existing: set[str] = set()
+                try:
+                    runtime_payload = json.loads(runtime_manifest.read_text())
+                    if isinstance(runtime_payload, dict) and isinstance(
+                        runtime_payload.get("extras"), list
+                    ):
+                        runtime_existing = {
+                            value
+                            for value in runtime_payload["extras"]
+                            if isinstance(value, str)
+                            and value in {"cpu", "execution", "memory", "test", "trace", "torch"}
+                        }
+                except (OSError, ValueError):
+                    pass
+                atomic_write_json(
+                    runtime_manifest,
+                    {"schema_version": 1, "extras": sorted(runtime_existing | values)},
+                )
 
     def _containment_reports(
         self,
