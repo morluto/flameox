@@ -99,6 +99,43 @@ polarity = "lower_is_better"
     assert stale.value.code is ErrorCode.STALE_CURSOR
 
 
+def test_declared_workflow_details_expose_requirements_and_adapter_options(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.probe]
+argv = ["python", "-c", "print('ok')"]
+[workloads.probe.requirements]
+executables = ["python"]
+capabilities = ["perf"]
+optional = ["perf"]
+active = ["perf"]
+"""
+    )
+
+    service = WorkloadService(workspace)
+    detail = service.get_declared(kind="workload", name="probe")
+    inspection = service.inspect("probe")
+
+    requirements = {item.name: item for item in detail.requirements}
+    assert requirements["python"].kind == "executable"
+    assert requirements["python"].required is True
+    assert requirements["perf"].optional is True
+    assert requirements["perf"].probe_kind == "active"
+    assert detail.adapter_option_total >= len(detail.adapter_options)
+    assert detail.adapter_option_total <= 64 or detail.adapter_options_truncated is True
+    assert tuple(item.adapter for item in detail.adapter_options) == tuple(
+        sorted(item.adapter for item in detail.adapter_options)
+    )
+    command = next(item for item in detail.adapter_options if item.adapter == "command")
+    assert command.planning_disposition == "ready"
+    assert inspection.command_template == ("python", "-c", "print('ok')")
+    assert inspection.configuration_id == detail.configuration_id
+
+
 @pytest.mark.anyio
 async def test_preflight_distinguishes_required_optional_and_active_requirements(
     tmp_path: Path,
@@ -204,6 +241,28 @@ python_distributions = ["flameox-missing-distribution"]
     preflight = blocked.value.details["preflight"]
     assert isinstance(preflight, dict)
     assert preflight["disposition"] == "blocked"
+
+
+@pytest.mark.anyio
+async def test_invalid_capture_adapter_reports_bounded_recovery_choices(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    write_workload(tmp_path)
+
+    with pytest.raises(DomainError) as refused:
+        await CaptureService(workspace).plan(
+            workload_name="echo",
+            adapter="not-a-capture-adapter",
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
+
+    assert refused.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
+    choices = refused.value.details["allowed_adapters"]
+    assert isinstance(choices, list)
+    assert len(choices) <= 64
+    assert choices == sorted(choices)
+    assert refused.value.details["next_tool"] == "get_declared_workflow"
 
 
 @pytest.mark.anyio

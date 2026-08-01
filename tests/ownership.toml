@@ -371,6 +371,12 @@ paths = ["tests/application/test_capture_lifecycle.py"]
 markers = ["integration", "process", "serial"]
 
 [[ownership]]
+owner = "capture-native-outputs"
+lane = "process"
+paths = ["tests/application/test_capture_native_outputs.py"]
+markers = ["integration", "process", "serial"]
+
+[[ownership]]
 owner = "capture-integrations"
 lane = "process"
 paths = ["tests/application/test_capture_integrations.py"]

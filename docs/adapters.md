@@ -214,6 +214,17 @@ off-CPU, and system-wide capture. Preserve `perf.data` and feed supported data
 to Trace Processor. Record kernel restrictions, scope, privilege,
 symbolization coverage, and build identities.
 
+Perf readiness is an active permission check, not executable version discovery.
+The broker runs a fixed Flameox-owned `perf record` probe in a temporary
+staging directory with an explicit output path, bounded timeout, output, and
+resource policy. Build-ID cache and uncontrolled output side effects are
+disabled. A successful probe reports granted permission; a recognized
+`perf_event_open` or kernel-policy denial reports `permission_required` with
+remediation; other failures remain `degraded` with bounded diagnostics. Passive
+capability discovery therefore reports that an active probe is required, and a
+capture plan must bind and recheck the active report immediately before running
+the workload.
+
 #### `perfetto`
 
 Import Perfetto-compatible traces and run versioned PerfettoSQL queries.
@@ -275,3 +286,10 @@ A capability may be:
 Probe commands must be bounded and expected to be side-effect free, but active
 execution is still labeled as execution. An executable found only through a
 project-controlled `PATH` is not run during passive discovery.
+
+Declared workflow details expose bounded, sorted adapter options for
+capture-capable built-ins and approved third-party adapters. Each option
+includes capability status, planning disposition, required preflight mode,
+permissions, supported modes and formats, features, limitations, and
+remediation. The list is capped at 64 entries and reports its total and
+truncation state.

@@ -10,7 +10,12 @@ from typing import Annotated, Literal, cast
 
 from pydantic import Field, JsonValue, model_validator
 
+from flameox.adapters.builtins import BUILTIN_ADAPTERS
+from flameox.adapters.registry import AdapterRegistry
+from flameox.application.capabilities import CapabilityService
 from flameox.domain import (
+    CapabilityReport,
+    CapabilityStatus,
     CommandSpec,
     CursorCodec,
     DomainError,
@@ -241,6 +246,48 @@ class DeclaredWorkflowDetail(ContractModel):
     polarity: str | None = None
     estimand: str | None = None
     validation_spec_id: str | None = None
+    requirements: tuple[DeclaredWorkflowRequirement, ...] = ()
+    adapter_options: tuple[AdapterOption, ...] = ()
+    adapter_option_total: int = 0
+    adapter_options_total: int = 0
+    adapter_options_truncated: bool = False
+
+
+class DeclaredWorkflowRequirement(ContractModel):
+    name: str
+    kind: Literal["executable", "python_distribution", "capability"]
+    required: bool
+    optional: bool
+    probe_kind: Literal["passive", "active"]
+
+
+class AdapterOption(ContractModel):
+    adapter: str
+    status: CapabilityStatus
+    capability_status: CapabilityStatus
+    planning_disposition: Literal[
+        "ready",
+        "active_probe_required",
+        "unavailable",
+        "unsupported",
+        "degraded",
+    ]
+    required_preflight_mode: Literal["passive", "active"]
+    permission_status: str | None = None
+    supported_modes: tuple[str, ...] = ()
+    supported_formats: tuple[str, ...] = ()
+    features: tuple[str, ...] = ()
+    limitations: tuple[str, ...] = ()
+    remediation: tuple[str, ...] = ()
+
+
+class WorkloadInspection(WorkloadDefinition):
+    configuration_id: str
+    requirements: tuple[DeclaredWorkflowRequirement, ...] = ()
+    adapter_options: tuple[AdapterOption, ...] = ()
+    adapter_option_total: int = 0
+    adapter_options_total: int = 0
+    adapter_options_truncated: bool = False
 
 
 def _template_fields(value: str) -> set[str]:
@@ -357,6 +404,14 @@ class WorkloadService:
         project = self.load()
         configuration_id = digest_model(project)
         summary = self._workflow_summary(project, kind, name)
+        workload_config = (
+            project.workloads[name]
+            if kind == "workload"
+            else project.workloads[project.experiments[name].workload]
+        )
+        requirements, adapter_options, option_total, options_truncated = self._inspection_fields(
+            workload_config
+        )
         if kind == "workload":
             config = project.workloads[name]
             definition = self.definition(name)
@@ -365,6 +420,11 @@ class WorkloadService:
                 summary=summary,
                 allowed_parameters=config.parameters,
                 validation_spec_id=definition.validation_spec_id,
+                requirements=requirements,
+                adapter_options=adapter_options,
+                adapter_option_total=option_total,
+                adapter_options_total=option_total,
+                adapter_options_truncated=options_truncated,
             )
         experiment = project.experiments[name]
         workload = project.workloads[experiment.workload]
@@ -380,6 +440,111 @@ class WorkloadService:
             polarity=experiment.polarity,
             estimand=experiment.estimand,
             validation_spec_id=self.definition(experiment.workload).validation_spec_id,
+            requirements=requirements,
+            adapter_options=adapter_options,
+            adapter_option_total=option_total,
+            adapter_options_total=option_total,
+            adapter_options_truncated=options_truncated,
+        )
+
+    def inspect(self, name: str) -> WorkloadInspection:
+        project = self.load()
+        definition = self.definition(name)
+        config = project.workloads[name]
+        requirements, options, total, truncated = self._inspection_fields(config)
+        return WorkloadInspection(
+            **definition.model_dump(mode="python"),
+            configuration_id=digest_model(project),
+            requirements=requirements,
+            adapter_options=options,
+            adapter_option_total=total,
+            adapter_options_total=total,
+            adapter_options_truncated=truncated,
+        )
+
+    def _inspection_fields(
+        self,
+        config: WorkloadConfig,
+    ) -> tuple[
+        tuple[DeclaredWorkflowRequirement, ...],
+        tuple[AdapterOption, ...],
+        int,
+        bool,
+    ]:
+        requirement_groups: tuple[
+            tuple[Literal["executable", "python_distribution", "capability"], tuple[str, ...]],
+            ...,
+        ] = (
+            ("executable", config.requirements.executables),
+            ("python_distribution", config.requirements.python_distributions),
+            ("capability", config.requirements.capabilities),
+        )
+        requirements = tuple(
+            DeclaredWorkflowRequirement(
+                name=name,
+                kind=kind,
+                required=name not in config.requirements.optional,
+                optional=name in config.requirements.optional,
+                probe_kind=("active" if name in config.requirements.active else "passive"),
+            )
+            for kind, values in requirement_groups
+            for name in values
+        )
+        approved_third_party = {
+            item.adapter
+            for item in AdapterRegistry(self.workspace).discover().adapters
+            if item.approved
+        }
+        reports = [
+            item
+            for item in CapabilityService(self.workspace).list().capabilities
+            if (
+                bool(BUILTIN_ADAPTERS.get(item.adapter, None))
+                and bool(BUILTIN_ADAPTERS[item.adapter].artifact_kinds)
+            )
+            or item.adapter in approved_third_party
+        ]
+        reports.sort(key=lambda item: item.adapter)
+        options = tuple(self._adapter_option(item) for item in reports[:64])
+        return requirements, options, len(reports), len(reports) > len(options)
+
+    @staticmethod
+    def _adapter_option(capability: CapabilityReport) -> AdapterOption:
+        permission_sensitive = capability.permission_status in {
+            "unknown_until_active_probe",
+            "not_exercised",
+        }
+        required_mode: Literal["passive", "active"] = (
+            "active" if permission_sensitive else "passive"
+        )
+        if permission_sensitive and capability.status is CapabilityStatus.AVAILABLE:
+            disposition: Literal[
+                "ready",
+                "active_probe_required",
+                "unavailable",
+                "unsupported",
+                "degraded",
+            ] = "active_probe_required"
+        elif capability.status is CapabilityStatus.UNAVAILABLE:
+            disposition = "unavailable"
+        elif capability.status is CapabilityStatus.UNSUPPORTED_PLATFORM:
+            disposition = "unsupported"
+        elif capability.status is CapabilityStatus.DEGRADED:
+            disposition = "degraded"
+        else:
+            disposition = "ready"
+        return AdapterOption(
+            adapter=capability.adapter,
+            status=capability.status,
+            capability_status=capability.status,
+            planning_disposition=disposition,
+            required_preflight_mode=required_mode,
+            permission_status=capability.permission_status,
+            supported_modes=capability.supported_modes,
+            supported_formats=capability.supported_formats,
+            features=capability.features,
+            limitations=capability.limitations,
+            remediation=capability.remediation,
         )
 
     def _workflow_summary(
