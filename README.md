@@ -366,8 +366,13 @@ recoverable trash instead of deleting them immediately.
   representative proof
 - [Testing](docs/testing.md): suite ownership, focused lanes, provider setup,
   and collection-preservation checks
+- [Contributing](CONTRIBUTING.md): development setup, project contracts,
+  validation, and pull request expectations
 
 ## Development
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development and pull request
+workflow.
 
 ```console
 uv sync --extra dev
