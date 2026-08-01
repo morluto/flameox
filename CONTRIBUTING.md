@@ -1,0 +1,158 @@
+# Contributing to flameox
+
+Thanks for helping improve flameox. Contributions are most useful when they
+strengthen the path from a runtime symptom to evidence that another person or
+agent can inspect and try to disprove.
+
+Before proposing a large change, read the [system overview and design
+principles](docs/architecture.md#system-overview). flameox coordinates existing
+profilers and trace processors; it is not a new profiler, a hosted observability
+service, an unrestricted command or SQL gateway, or a generic source-code
+modification system.
+
+## Before you start
+
+Use the repository's issue templates for bugs and feature requests. Small fixes
+and documentation improvements can usually go straight to a pull request. For a
+substantial feature, new integration, or change to a public or persisted contract,
+open an issue first so the intended behavior and contribution fit can be agreed
+before implementation.
+
+Search existing issues and pull requests before starting. If you discover a
+security vulnerability, follow [SECURITY.md](SECURITY.md) and report it privately
+instead of opening a public issue.
+
+## Development setup
+
+flameox requires Python 3.12 or newer and uses
+[`uv`](https://docs.astral.sh/uv/) with the committed `uv.lock`:
+
+```console
+git clone https://github.com/morluto/flameox.git
+cd flameox
+uv sync --extra dev
+uv run flameox --help
+uv run python tools/test.py list
+```
+
+Install only the optional providers needed for the area you are changing. The
+[testing guide](docs/testing.md#optional-providers-and-performance) lists the
+available extras and their test lanes. To install every supported integration,
+run:
+
+```console
+uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu --extra torch
+```
+
+## Understand the contract you are changing
+
+Production code uses a `src/` layout. Domain types and errors belong in
+`src/flameox/domain/`, transport-independent orchestration in
+`src/flameox/application/`, persistence in `src/flameox/storage/`, external tool
+integration in `src/flameox/adapters/`, and transport code in `src/flameox/cli.py`
+and `src/flameox/mcp/`. Tests mirror these boundaries under `tests/`.
+
+Read the contract that owns the behavior before editing it:
+
+| Area | Contract |
+| --- | --- |
+| Process model, dependencies, and package boundaries | [Architecture](docs/architecture.md) |
+| Storage, provenance, publication, and schemas | [Storage and evidence](docs/storage-and-evidence.md) |
+| Experiments, comparisons, statistics, and evidence quality | [Investigations](docs/investigations.md) |
+| Profiler integrations, compatibility, and capability probing | [Adapters](docs/adapters.md) |
+| Concurrency, recovery, integrity, security, and privacy | [Runtime safety](docs/runtime-safety.md) |
+| CLI and MCP behavior and trust boundaries | [Interfaces](docs/interfaces.md) |
+| Settled constraints and open design questions | [Architecture decisions](docs/architecture-decisions.md) |
+| Completion criteria and representative proof | [Acceptance](docs/acceptance.md) |
+
+Keep the CLI and MCP server as thin transports over the same application
+services. Preserve native artifacts, provenance, failed attempts, and
+experimental structure. Observed, derived, and inferred claims must remain
+distinct, and limitations must be reported rather than hidden behind a fallback.
+
+Prefer a maintained public interface or an existing repository helper over a
+custom abstraction. Fix the condition that caused a defect rather than adding a
+fixture-specific workaround.
+
+## Make and test the change
+
+Use complete type annotations and Python 3.12 syntax. Ruff enforces formatting,
+import ordering, a 100-character line limit, and the configured lint rules; mypy
+runs in strict mode.
+
+Add tests near the behavior's semantic owner. Name test files `test_<area>.py`
+and tests `test_<observable_behavior>`. Prefer observable behavior or stable
+artifacts over assertions about private helper names or source text. Cover the
+meaningful failure path as well as the success path, and use Hypothesis when the
+contract is an invariant over a useful input range.
+
+Run a focused test while iterating:
+
+```console
+uv run pytest tests/storage/test_workspace.py -q
+```
+
+Then run validation proportional to the change. The usual baseline is:
+
+```console
+uv run ruff check src tests tools
+uv run ruff format --check src tests tools
+uv run mypy src tests tools
+uv run pytest -q
+```
+
+`pytest -q` runs the deterministic default suite without hidden retries. Use the
+focused lanes in [docs/testing.md](docs/testing.md) for process, storage, MCP,
+adapter, golden, optional-provider, and performance behavior. In particular:
+
+- Run `uv run python tools/test.py ownership` and
+  `uv run python tools/test.py collection` when moving or reorganizing tests.
+- Run `uv run lint-imports` when changing package boundaries.
+- Run the matching optional-provider lane when changing an integration; a skip
+  because the provider is unavailable is not provider evidence.
+- Run `uv run python tools/test.py performance` only for changes whose claims or
+  risks depend on the declared performance budgets.
+
+For changes under `npm/`, use the package's own checks:
+
+```console
+cd npm
+npm ci
+npm run lint
+npm run format:check
+npm test
+```
+
+A passing default suite is not sufficient for every behavioral change. Identify
+the relevant criteria in [docs/acceptance.md](docs/acceptance.md) and provide the
+representative crash, concurrency, containment, protocol, golden, or scale proof
+that the criterion requires. If a proportionate proof is not feasible, describe
+the gap rather than substituting a test that mirrors the implementation.
+
+Update the owning contract when behavior changes. Also update the README, CLI or
+MCP examples, compatibility notes, and acceptance evidence when they are affected.
+
+## Commits and pull requests
+
+Keep commits focused, reviewable, and buildable. Commit subjects follow the
+Conventional Commit style used in the repository, for example:
+
+```text
+fix(storage): preserve provenance during artifact deduplication
+feat(adapters): add bounded provider readiness probe
+docs: explain comparison compatibility
+```
+
+Open the pull request against `main` and complete the pull request template.
+Explain the concrete problem, the chosen approach, and why it fits flameox's
+architecture. Link related issues and list only commands that actually ran.
+Call out compatibility, platform, persistence, security, or containment effects,
+along with any meaningful proof gaps.
+
+For user-visible CLI or protocol changes, include representative output. Keep the
+change focused on one outcome and avoid unrelated cleanup or formatting churn.
+Before submitting, review the complete diff against `main` and confirm that the
+documentation and test claims match the final tree.
+
+By participating, please keep discussion technical, specific, and collaborative.
+The project is available under the [MIT License](LICENSE).
