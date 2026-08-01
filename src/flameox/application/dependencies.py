@@ -48,8 +48,7 @@ class WorkloadDependencyService:
                 ),
             )
         requirements = tuple(
-            self._validated_requirement(item)
-            for item in config.requirements.python_distributions
+            self._validated_requirement(item) for item in config.requirements.python_distributions
         )
         names = tuple(str(item) for item in requirements)
         missing = tuple(item for item in requirements if not self._is_available(item))
@@ -132,9 +131,9 @@ class WorkloadDependencyService:
             for item in preflight.requirements
             if item.kind == "python_distribution" and item.status != "available"
         )
-        next_tool: Literal[
-            "plan_capture", "list_capabilities", "prepare_workload_dependencies"
-        ] | None
+        next_tool: (
+            Literal["plan_capture", "list_capabilities", "prepare_workload_dependencies"] | None
+        )
         if missing_after:
             next_tool = "prepare_workload_dependencies"
         elif preflight.disposition == "ready" or preflight.disposition == "exploratory":

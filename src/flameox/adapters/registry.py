@@ -119,8 +119,7 @@ class AdapterRegistry:
         if not matches:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
-                f"No installed adapter {adapter!r} belongs to distribution "
-                f"{distribution_name!r}.",
+                f"No installed adapter {adapter!r} belongs to distribution {distribution_name!r}.",
                 details={"next_tool": "list_capabilities", "adapter": adapter},
                 remediation=(
                     "Use the adapter and distribution identity returned by list_capabilities, "
@@ -134,8 +133,7 @@ class AdapterRegistry:
                 "The installed adapter distribution has no verifiable package identity.",
                 details={"adapter": adapter, "distribution": descriptor.distribution},
                 remediation=(
-                    "Reinstall the distribution with intact metadata, then retry "
-                    "prepare_adapter.",
+                    "Reinstall the distribution with intact metadata, then retry prepare_adapter.",
                 ),
             )
         with self.workspace.write_locked():
@@ -148,9 +146,7 @@ class AdapterRegistry:
             )
             self._write_approvals(approvals)
         refreshed = next(
-            item
-            for item in self.discover().adapters
-            if item.adapter == adapter and item.approved
+            item for item in self.discover().adapters if item.adapter == adapter and item.approved
         )
         return refreshed
 

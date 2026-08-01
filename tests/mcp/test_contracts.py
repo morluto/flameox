@@ -60,18 +60,15 @@ async def test_mcp_tools_use_explicit_envelopes_and_annotations(
     assert "capture_mode='auto'" in instructions
     assert "execute_capture_plan" in instructions
     assert "producer" in by_name["import_artifact"].input_schema["properties"]
-    assert "torch.profiler" in by_name["import_artifact"].input_schema["properties"]["producer"][
-        "enum"
-    ]
-    assert "temp" in by_name["import_artifact"].input_schema["properties"]["source_root"][
-        "enum"
-    ]
+    assert (
+        "torch.profiler"
+        in by_name["import_artifact"].input_schema["properties"]["producer"]["enum"]
+    )
+    assert "temp" in by_name["import_artifact"].input_schema["properties"]["source_root"]["enum"]
     assert "prepare_adapter" in by_name
     assert "prepare_workload_dependencies" in by_name
     assert "exact installed package identity" in (by_name["prepare_adapter"].description or "")
-    assert "never executes" in (
-        by_name["prepare_workload_dependencies"].description or ""
-    )
+    assert "never executes" in (by_name["prepare_workload_dependencies"].description or "")
 
 
 @pytest.mark.anyio

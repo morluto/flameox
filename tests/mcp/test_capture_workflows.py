@@ -152,9 +152,7 @@ python_distributions = ["flameox-agent-fixture>=99"]
     error = result.structured_content["error"]
     assert error["code"] == "CAPABILITY_UNAVAILABLE"
     assert error["details"]["next_tool"] == "prepare_workload_dependencies"
-    assert error["details"]["missing_python_distributions"] == [
-        "flameox-agent-fixture>=99"
-    ]
+    assert error["details"]["missing_python_distributions"] == ["flameox-agent-fixture>=99"]
     assert error["recovery"] == {
         "kind": "prepare_workload_dependencies",
         "safe_to_repeat_same_call": True,

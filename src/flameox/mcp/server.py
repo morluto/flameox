@@ -196,9 +196,7 @@ class ManualConfigurationRecoveryContext(ContractModel):
     kind: Literal["manual_configuration"]
     config_path: Literal["flameox.toml"] = "flameox.toml"
     diagnostic: str = Field(max_length=500)
-    verification_tool: Literal["workload_configuration_status"] = (
-        "workload_configuration_status"
-    )
+    verification_tool: Literal["workload_configuration_status"] = "workload_configuration_status"
 
 
 type RecoveryContext = Annotated[

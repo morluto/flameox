@@ -494,13 +494,16 @@ class RequirementResult(ContractModel):
     evidence: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     remediation: tuple[str, ...] = ()
-    next_tool: Literal[
-        "prepare_adapter",
-        "prepare_capabilities",
-        "prepare_workload_dependencies",
-        "list_capabilities",
-        "plan_capture",
-    ] | None = None
+    next_tool: (
+        Literal[
+            "prepare_adapter",
+            "prepare_capabilities",
+            "prepare_workload_dependencies",
+            "list_capabilities",
+            "plan_capture",
+        ]
+        | None
+    ) = None
 
 
 class PreflightReport(ContractModel):

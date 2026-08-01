@@ -727,7 +727,7 @@ class WorkloadService:
                             "configuration_id": current_id,
                             "next_tool": "workload_configuration_status",
                         },
-                )
+                    )
                 action: Literal["created", "updated", "unchanged"] = (
                     "created"
                     if recovered_invalid
