@@ -16,8 +16,8 @@ def test_help_lists_flameoxs_purpose() -> None:
 def test_capture_help_uses_named_workload_syntax() -> None:
     runner = CliRunner()
 
-    plan = runner.invoke(app, ["capture", "plan", "--help"])
-    run = runner.invoke(app, ["capture", "run", "--help"])
+    plan = runner.invoke(app, ["capture", "plan", "--help"], color=False)
+    run = runner.invoke(app, ["capture", "run", "--help"], color=False)
 
     assert plan.exit_code == 0, plan.output
     assert run.exit_code == 0, run.output
