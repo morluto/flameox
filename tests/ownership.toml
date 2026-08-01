@@ -28,7 +28,11 @@ markers = ["integration", "optional", "requires_memray"]
 [[ownership]]
 owner = "adapters"
 lane = "adapters"
-paths = ["tests/adapters/test_pyperf.py", "tests/adapters/test_python_startup.py"]
+paths = [
+  "tests/adapters/test_benchmark_samples.py",
+  "tests/adapters/test_pyperf.py",
+  "tests/adapters/test_python_startup.py",
+]
 markers = ["unit"]
 
 
@@ -507,6 +511,24 @@ markers = ["integration", "process", "serial"]
 owner = "execution-recipes"
 lane = "analysis"
 paths = ["tests/analysis/test_execution_recipes.py"]
+markers = ["integration"]
+
+[[ownership]]
+owner = "accelerator-launch-recipes"
+lane = "analysis"
+paths = ["tests/analysis/test_accelerator_launches.py"]
+markers = ["integration"]
+
+[[ownership]]
+owner = "nsight-systems-adapter"
+lane = "process"
+paths = ["tests/adapters/test_nsight_systems.py"]
+markers = ["integration", "process", "serial"]
+
+[[ownership]]
+owner = "perfetto-phase-normalization"
+lane = "adapters"
+paths = ["tests/adapters/test_perfetto_normalization.py"]
 markers = ["integration"]
 
 [[ownership]]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -30,14 +31,35 @@ def test_torch_capture_launcher_does_not_require_flameox_in_workload_venv(
     )
 
     assert Path(invocation.argv[1]).name == "torch_launcher.py"
-    assert invocation.argv[2:] == (
+    assert invocation.argv[2:4] == (
         "--output",
         str(tmp_path / "torch-trace.json"),
+    )
+    assert invocation.argv[4] == "--config"
+    assert json.loads(invocation.argv[5])["mode"] == "whole_entrypoint"
+    assert invocation.argv[6:] == (
         "--module",
         "benchmarks.benchmark_kda_decode",
         "--repeats",
         "1",
     )
+
+
+def test_torch_capture_rejects_schedule_without_explicit_sdk_steps(tmp_path: Path) -> None:
+    with pytest.raises(DomainError) as failure:
+        build_capture_invocation(
+            "torch.profiler",
+            (sys.executable, "benchmark.py"),
+            tmp_path,
+            executable=None,
+            options={
+                "mode": "whole_entrypoint",
+                "schedule": {"wait": 1, "warmup": 1, "active": 1, "repeat": 1},
+            },
+        )
+
+    assert failure.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+    assert "explicit profile.step() calls" in failure.value.remediation[0]
 
 
 @pytest.mark.process

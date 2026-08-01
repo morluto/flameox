@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 
 from flameox.application import CapabilityService, CaptureService, ExecutionPolicy
-from flameox.domain import CapabilityStatus, ExecutionStatus
+from flameox.domain import (
+    CapabilityReport,
+    CapabilityStatus,
+    CaptureStatus,
+    ExecutionStatus,
+)
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
 
@@ -51,3 +56,139 @@ timeout_seconds = 30
         if registration.kind.value == "execution_trace"
     )
     assert trace.display_name == "torch-trace.json"
+
+
+@pytest.mark.anyio
+@pytest.mark.process
+async def test_torch_profiler_sdk_registers_every_scheduled_cycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "torch.py").write_text(
+        "from contextlib import nullcontext\n"
+        "from pathlib import Path\n"
+        "class ProfilerActivity:\n"
+        "    CPU = 'cpu'\n"
+        "    CUDA = 'cuda'\n"
+        "class _Profile:\n"
+        "    def __init__(self, schedule, on_trace_ready, **_):\n"
+        "        self.schedule = schedule\n"
+        "        self.on_trace_ready = on_trace_ready\n"
+        "        self.index = 0\n"
+        "    def __enter__(self): return self\n"
+        "    def __exit__(self, *_): return False\n"
+        "    def step(self):\n"
+        "        self.index += 1\n"
+        "        width = self.schedule['wait'] + self.schedule['warmup'] + "
+        "self.schedule['active']\n"
+        "        relative = self.index - self.schedule['skip_first']\n"
+        "        if relative > 0 and relative % width == 0:\n"
+        "            self.on_trace_ready(self)\n"
+        "    def export_chrome_trace(self, path):\n"
+        "        Path(path).write_text('{\\\"traceEvents\\\": []}')\n"
+        "class profiler:\n"
+        "    ProfilerActivity = ProfilerActivity\n"
+        "    @staticmethod\n"
+        "    def schedule(**values): return values\n"
+        "    @staticmethod\n"
+        "    def profile(**values): return _Profile(**values)\n"
+        "    @staticmethod\n"
+        "    def record_function(_): return nullcontext()\n"
+        "class cuda:\n"
+        "    @staticmethod\n"
+        "    def is_available(): return False\n"
+    )
+    (tmp_path / "scheduled_workload.py").write_text(
+        "from flameox.sdk import torch_profiler\n"
+        "with torch_profiler() as session:\n"
+        "    for index in range(6):\n"
+        "        with session.phase('warmup' if index < 2 else 'decode'):\n"
+        "            pass\n"
+        "        session.step()\n"
+    )
+    (tmp_path / "invalid_export.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "root = Path(os.environ['FLAMEOX_TORCH_PROFILER_OUTPUT_ROOT'])\n"
+        "root.joinpath('torch-trace-cycle-0000.json').write_text('{}')\n"
+        "root.joinpath('torch-trace-cycle-0001.json').write_text('{}')\n"
+    )
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.scheduled]
+argv = ["python", "scheduled_workload.py"]
+cwd = "."
+timeout_seconds = 30
+[workloads.invalid]
+argv = ["python", "invalid_export.py"]
+cwd = "."
+timeout_seconds = 30
+"""
+    )
+    disable_containment(workspace)
+    report = CapabilityReport(
+        adapter="torch.profiler",
+        status=CapabilityStatus.AVAILABLE,
+        version="fixture",
+        supported_modes=("sdk",),
+        supported_formats=("chrome-trace",),
+        permission_status="granted",
+        probe_kind="passive",
+    )
+    service = CaptureService(workspace)
+    monkeypatch.setattr(service.capabilities, "get", lambda _adapter: report)
+    plan = await service.plan(
+        workload_name="scheduled",
+        adapter="torch.profiler",
+        adapter_options={
+            "mode": "sdk",
+            "activities": ["cpu"],
+            "record_shapes": False,
+            "profile_memory": False,
+            "with_stack": False,
+            "schedule": {
+                "wait": 1,
+                "warmup": 1,
+                "active": 1,
+                "repeat": 2,
+                "skip_first": 0,
+            },
+        },
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    result = await service.execute(plan.plan_id)
+
+    assert result.run.execution_status is ExecutionStatus.SUCCEEDED
+    assert plan.adapter_options["mode"] == "sdk"
+    schedule = plan.adapter_options["schedule"]
+    assert isinstance(schedule, dict)
+    assert schedule["repeat"] == 2
+    assert "without shapes, memory, stacks" in plan.expected_overhead
+    traces = [
+        registration
+        for registration in result.run.artifacts
+        if registration.kind.value == "execution_trace"
+    ]
+    assert [item.role for item in traces] == ["cycle_0000", "cycle_0001"]
+    assert [item.display_name for item in traces] == [
+        "torch-trace-cycle-0000.json",
+        "torch-trace-cycle-0001.json",
+    ]
+    manifest = next(
+        item for item in result.run.artifacts if item.role == "torch_profiler_cycle_manifest"
+    )
+    assert manifest.display_name == "torch-profiler-cycles.json"
+
+    invalid_plan = await service.plan(
+        workload_name="invalid",
+        adapter="torch.profiler",
+        adapter_options=plan.adapter_options,
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    invalid = await service.execute(invalid_plan.plan_id)
+    assert invalid.run.execution_status is ExecutionStatus.SUCCEEDED
+    assert invalid.run.capture_status is CaptureStatus.FAILED
+    assert all(item.kind.value != "execution_trace" for item in invalid.run.artifacts)

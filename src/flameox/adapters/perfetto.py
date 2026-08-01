@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -13,6 +14,7 @@ from pydantic import Field, JsonValue
 from flameox.atomic import atomic_write_json
 from flameox.domain import (
     ArtifactKind,
+    ArtifactRegistration,
     CursorCodec,
     DomainError,
     ErrorCode,
@@ -32,10 +34,14 @@ class PerfettoExtractionResult(ContractModel):
     run_id: str
     artifact_id: str
     trace_processor_path: str
+    trace_processor_sha256: str
+    query_version: str
     slice_count: int
     frame_count: int
     call_edge_count: int
     representative_stack_count: int
+    trace_event_count: int
+    truncated: bool = False
     corpus_commit_id: str
     limitations: tuple[str, ...]
 
@@ -73,6 +79,7 @@ class PerfettoExtractor:
 
     name = "perfetto"
     version = "1"
+    query_version = "flameox.perfetto.trace-events.v1"
 
     def __init__(
         self,
@@ -84,27 +91,33 @@ class PerfettoExtractor:
         self.broker = broker or SubprocessBroker()
         self.publisher = GenerationPublisher(workspace)
 
-    async def extract(self, run_id: str) -> PerfettoExtractionResult:
+    async def extract(
+        self,
+        run_id: str,
+        *,
+        artifact_id: str | None = None,
+    ) -> PerfettoExtractionResult:
         run = RunStore(self.workspace).read(run_id)
-        registrations = [
-            item
-            for item in run.artifacts
-            if item.kind in {ArtifactKind.EXECUTION_TRACE, ArtifactKind.SAMPLE_PROFILE}
-        ]
-        if len(registrations) != 1:
-            raise DomainError(
-                ErrorCode.ARTIFACT_PARSE_FAILED,
-                "The run must contain exactly one Perfetto-compatible trace.",
-                run_id=run_id,
-            )
-        registration = registrations[0]
+        registration = self._trace_registration(run.artifacts, artifact_id, run_id=run_id)
+
         artifact = ArtifactStore(self.workspace).get(registration.artifact_id)
+
         binary = self._trace_processor_path()
+        with binary.open("rb") as stream:
+            trace_processor_sha256 = "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
+        maximum = self.workspace.config.storage.max_rows_per_generation
+        if maximum < 7:
+            raise DomainError(
+                ErrorCode.QUERY_BUDGET_EXCEEDED,
+                "Perfetto normalization requires room for provenance and one bounded slice.",
+            )
+        max_slices = (maximum - 1) // 6
         response = await self._run_worker(
             {
                 "operation": "extract",
                 "artifact_path": str(artifact.payload_path),
                 "binary_path": str(binary),
+                "max_rows": max_slices,
             }
         )
         rows = response.get("rows")
@@ -114,10 +127,12 @@ class PerfettoExtractor:
                 "Perfetto worker returned no slice rows.",
                 run_id=run_id,
             )
+        normalized_phase_by_id = self._normalized_phases(rows)
         frame_by_id: dict[str, dict[str, Any]] = {}
         aggregates: dict[_AggregateKey, tuple[int, int]] = {}
         phases_by_aggregate: dict[_AggregateKey, set[str]] = {}
         operator_observation_rows: list[dict[str, Any]] = []
+        trace_event_observation_rows: list[dict[str, Any]] = []
         torch_source = "torch" in (run.collector or "").lower() or (
             registration.producer is not None and "torch" in registration.producer.lower()
         )
@@ -179,7 +194,7 @@ class PerfettoExtractor:
             aggregate_key = (frame_id, thread_name, process_name)
             count, inclusive = aggregates.get(aggregate_key, (0, 0))
             aggregates[aggregate_key] = (count + 1, inclusive + duration)
-            phase = str(row["phase"]) if row.get("phase") is not None else None
+            phase = normalized_phase_by_id.get(int(row["id"]))
             if phase is not None:
                 phases_by_aggregate.setdefault(aggregate_key, set()).add(phase)
             if torch_source:
@@ -223,6 +238,49 @@ class PerfettoExtractor:
                         "evidence_level": "observed",
                     }
                 )
+            trace_event_values = {
+                "slice_id": int(row["id"]),
+                "parent_id": int(row["parent_id"]) if row["parent_id"] is not None else None,
+                "category": category,
+                "start_ns": int(row["ts"]),
+                "duration_ns": duration,
+                "track_id": int(row["track_id"]),
+                "thread_name": thread_name,
+                "process_name": process_name,
+                "phase": phase,
+                "correlation_id": (
+                    str(row["correlation_id"]) if row.get("correlation_id") is not None else None
+                ),
+                "device": str(row["device"]) if row.get("device") is not None else None,
+                "stream": str(row["stream"]) if row.get("stream") is not None else None,
+                "artifact_role": registration.role,
+            }
+            trace_event_observation_rows.append(
+                {
+                    "observation_id": digest_model(
+                        {
+                            "artifact_id": registration.artifact_id,
+                            "slice_id": int(row["id"]),
+                            "kind": "trace.event",
+                        }
+                    ),
+                    "run_id": run_id,
+                    "artifact_id": registration.artifact_id,
+                    "kind": "trace.event",
+                    "name": name,
+                    "value_json": json.dumps(
+                        trace_event_values,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    "file": filename,
+                    "line_from": line,
+                    "line_to": line,
+                    "context": phase,
+                    "evidence_level": "observed",
+                }
+            )
             events[int(row["id"])] = (
                 int(row["parent_id"]) if row["parent_id"] is not None else None,
                 frame_id,
@@ -353,30 +411,145 @@ class PerfettoExtractor:
             "call_edges": edge_rows,
             "stacks": stack_rows,
         }
-        if operator_observation_rows:
-            evidence_rows["observations"] = operator_observation_rows
-        published = self.publisher.publish_rows(
+        extraction_observation = {
+            "observation_id": digest_model(
+                {
+                    "artifact_id": registration.artifact_id,
+                    "kind": "trace.extraction",
+                    "query_version": self.query_version,
+                    "trace_processor_sha256": trace_processor_sha256,
+                }
+            ),
+            "run_id": run_id,
+            "artifact_id": registration.artifact_id,
+            "kind": "trace.extraction",
+            "name": self.query_version,
+            "value_json": json.dumps(
+                {
+                    "query_version": self.query_version,
+                    "trace_processor_sha256": trace_processor_sha256,
+                    "normalized_slice_count": len(events),
+                    "truncated": response.get("truncated") is True,
+                },
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            "file": None,
+            "line_from": None,
+            "line_to": None,
+            "context": "extractor_provenance",
+            "evidence_level": "observed",
+        }
+        if operator_observation_rows or trace_event_observation_rows:
+            evidence_rows["observations"] = [
+                extraction_observation,
+                *operator_observation_rows,
+                *trace_event_observation_rows,
+            ]
+        else:
+            evidence_rows["observations"] = [extraction_observation]
+        published = self.publisher.publish_rows_idempotent(
             evidence_rows,
             publisher=self.name,
             publisher_version=self.version,
             input_run_ids=(run_id,),
             input_artifact_ids=(registration.artifact_id,),
+            operation_identity={
+                "query_version": self.query_version,
+                "trace_processor_sha256": trace_processor_sha256,
+                "max_slices": max_slices,
+            },
         )
         return PerfettoExtractionResult(
             run_id=run_id,
             artifact_id=registration.artifact_id,
             trace_processor_path=str(binary),
+            trace_processor_sha256=trace_processor_sha256,
+            query_version=self.query_version,
             slice_count=len(events),
             frame_count=len(frame_by_id),
             call_edge_count=len(edge_rows),
             representative_stack_count=len(stack_rows),
+            trace_event_count=len(trace_event_observation_rows),
+            truncated=response.get("truncated") is True,
             corpus_commit_id=published.commit.commit_id,
             limitations=(
                 "Slice duration is inclusive and nested slices can overlap.",
                 "Parent-child edges reflect trace nesting, not causal dependence.",
                 "Complete temporal detail remains in the native trace.",
+                *(
+                    (
+                        "Normalized extraction reached the generation row budget; later slices "
+                        "remain only in the native trace.",
+                    )
+                    if response.get("truncated") is True
+                    else ()
+                ),
             ),
         )
+
+    @staticmethod
+    def _trace_registration(
+        artifacts: tuple[ArtifactRegistration, ...],
+        artifact_id: str | None,
+        *,
+        run_id: str,
+    ) -> ArtifactRegistration:
+        registrations = [
+            item
+            for item in artifacts
+            if item.kind in {ArtifactKind.EXECUTION_TRACE, ArtifactKind.SAMPLE_PROFILE}
+        ]
+        available_artifact_ids = [item.artifact_id for item in registrations]
+        if artifact_id is not None:
+            registrations = [item for item in registrations if item.artifact_id == artifact_id]
+        if len(registrations) == 1:
+            return registrations[0]
+        if artifact_id is not None:
+            message = "The selected Perfetto-compatible trace artifact was not found on the run."
+        elif registrations:
+            message = "The run contains multiple Perfetto-compatible traces; select one."
+        else:
+            message = "The run contains no Perfetto-compatible trace."
+        raise DomainError(
+            ErrorCode.ARTIFACT_PARSE_FAILED,
+            message,
+            run_id=run_id,
+            details={
+                "artifact_ids": available_artifact_ids,
+                "next_tool": "extract_perfetto",
+            },
+            remediation=("Pass one execution-trace artifact_id from the run artifact list.",),
+        )
+
+    @staticmethod
+    def _normalized_phases(rows: list[object]) -> dict[int, str | None]:
+        row_by_id = {
+            int(row["id"]): row
+            for row in rows
+            if isinstance(row, dict) and row.get("id") is not None
+        }
+        normalized: dict[int, str | None] = {}
+        for event_id, row in row_by_id.items():
+            explicit = row.get("phase")
+            selected: str | None = str(explicit) if explicit is not None else None
+            cursor: int | None = event_id
+            seen: set[int] = set()
+            while selected is None and cursor is not None and cursor not in seen:
+                seen.add(cursor)
+                ancestor = row_by_id.get(cursor)
+                if ancestor is None:
+                    break
+                ancestor_name = str(ancestor.get("name") or "")
+                if ancestor_name.startswith("flameox.phase:"):
+                    candidate = ancestor_name.removeprefix("flameox.phase:")
+                    selected = candidate or None
+                    break
+                parent_id = ancestor.get("parent_id")
+                cursor = int(parent_id) if parent_id is not None else None
+            normalized[event_id] = selected
+        return normalized
 
     async def trace_window(
         self,

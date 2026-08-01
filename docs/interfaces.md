@@ -112,8 +112,8 @@ these actions runs a workload.
 ### Capture commands
 
 ```text
-flameox capture plan <adapter> --workload <name> [--parameters '<json>']
-flameox capture run <adapter> --workload <name> [--parameters '<json>']
+flameox capture plan <adapter> --workload <name> [--parameters '<json>'] [--adapter-options '<json>']
+flameox capture run <adapter> --workload <name> [--parameters '<json>'] [--adapter-options '<json>']
 flameox import <path> [--kind KIND]
 ```
 
@@ -161,6 +161,7 @@ flameox analyze hotspots <run-or-artifact>
 flameox analyze scaling <experiment-or-run-set>
 flameox analyze compare <baseline-run-set> <candidate-run-set>
 flameox analyze pytorch <run-or-artifact>
+flameox analyze accelerator-launches <run-or-artifact> [--compare-to RUN] [--phase PHASE]
 flameox analyze memory <run-or-artifact>
 flameox analyze execution <run-or-artifact> [--compare RUN]
 flameox analyze failures [filters]
@@ -323,7 +324,7 @@ The supported tools are grouped as follows:
 | Family | Tools |
 | --- | --- |
 | Workspace | `initialize_workspace`, `workspace_status`, `workload_configuration_status`, `configure_workload`, `list_capabilities`, `start_capability_setup`, `get_capability_setup`, `cancel_capability_setup`, `prepare_capabilities`, `prepare_adapter`, `prepare_workload_dependencies`, `validate_workspace` |
-| Capture and import | `plan_capture`, `execute_capture_plan`, `import_artifact`, `extract_pyperf`, `extract_python_startup`, `extract_pytest`, `extract_coverage`, `extract_memray`, `extract_perfetto`, `extract_observations` |
+| Capture and import | `plan_capture`, `execute_capture_plan`, `import_artifact`, `extract_benchmark_samples`, `extract_pyperf`, `extract_python_startup`, `extract_pytest`, `extract_coverage`, `extract_memray`, `extract_perfetto`, `extract_nsight_systems`, `extract_observations` |
 | Detached capture | `start_detached_capture`, `get_detached_capture`, `cancel_detached_capture` |
 | Discovery | `list_declared_workflows`, `get_declared_workflow`, `list_runs`, `list_findings` |
 | Investigations | `create_investigation`, `list_investigations`, `get_investigation`, `record_hypothesis`, `get_hypothesis` |
@@ -331,7 +332,7 @@ The supported tools are grouped as follows:
 | Runs and artifacts | `list_runs`, `get_run`, `list_artifacts`, `get_artifact`, `get_native_viewer_plan` |
 | Evidence products | `summarize_evidence`, `register_artifact_pipeline`, `compare_artifact_pipelines` |
 | Reductions | `plan_reduction`, `execute_reduction`, `get_reduction` |
-| Analysis | `analyze_hotspots`, `analyze_scaling`, `analyze_pytorch`, `analyze_memory`, `analyze_execution`, `analyze_failures`, `compare_run_sets`, `record_analysis`, `record_comparison` |
+| Analysis | `analyze_hotspots`, `analyze_scaling`, `analyze_pytorch`, `analyze_accelerator_launches`, `analyze_memory`, `analyze_execution`, `analyze_failures`, `compare_run_sets`, `record_analysis`, `record_comparison` |
 | Drill-down | `get_evidence`, `query_measurements`, `get_frame_callers`, `get_frame_callees`, `get_stack_examples`, `get_trace_window` |
 | Findings | `record_finding`, `list_findings`, `get_finding` |
 
@@ -598,6 +599,14 @@ They do not accept arbitrary SQL or caller-supplied result bodies.
 Read-only over a Perfetto-extracted trace. Returns operator and accelerator summaries.
 For imported Torch Chrome traces, run `extract_perfetto` first. If the trace has not been
 normalized, the tool returns the exact `run_id` and recovery action instead of an empty report.
+
+#### `analyze_accelerator_launches`
+
+Read-only over normalized `trace.event` evidence from Perfetto or the maintained Nsight
+Systems extractor. It reports direct and graph runtime launches, accelerator kernels,
+bounded per-stream idle-gap summaries with device/context/stream identity, and matched
+host-to-device correlation coverage. Missing runtime or accelerator tracks produce a
+typed partial result. Comparisons are descriptive and do not claim equivalent computation.
 
 #### `analyze_memory`
 

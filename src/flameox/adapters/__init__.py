@@ -1,3 +1,8 @@
+from flameox.adapters.benchmark_samples import (
+    BenchmarkSamplesExtractionResult,
+    BenchmarkSamplesExtractor,
+    BenchmarkSamplesV1,
+)
 from flameox.adapters.client_setup import (
     ALL_SETUP_CLIENTS,
     ClientConfigEdit,
@@ -8,6 +13,10 @@ from flameox.adapters.client_setup import (
 )
 from flameox.adapters.coverage import CoverageExtractionResult, CoverageExtractor
 from flameox.adapters.memray import MemrayExtractionResult, MemrayExtractor
+from flameox.adapters.nsight_systems import (
+    NsightSystemsExtractionResult,
+    NsightSystemsExtractor,
+)
 from flameox.adapters.observations import (
     ObservationExtractionResult,
     ObservationExtractor,
@@ -36,6 +45,10 @@ from flameox.adapters.setup_runtime import (
     TraceProcessorInstallation,
     install_trace_processor,
 )
+from flameox.adapters.torch_profiler import (
+    TorchProfilerCaptureOptions,
+    TorchProfilerSchedule,
+)
 
 __all__ = [
     "ALL_SETUP_CLIENTS",
@@ -43,6 +56,9 @@ __all__ = [
     "AdapterDescriptor",
     "AdapterDiscoveryResult",
     "AdapterRegistry",
+    "BenchmarkSamplesExtractionResult",
+    "BenchmarkSamplesExtractor",
+    "BenchmarkSamplesV1",
     "ClientConfigEdit",
     "ClientConfigRegistry",
     "ClientPlanAction",
@@ -52,6 +68,8 @@ __all__ = [
     "ManagedRuntime",
     "MemrayExtractionResult",
     "MemrayExtractor",
+    "NsightSystemsExtractionResult",
+    "NsightSystemsExtractor",
     "ObservationExtractionResult",
     "ObservationExtractor",
     "PerfettoExtractionResult",
@@ -64,6 +82,8 @@ __all__ = [
     "PythonStartupExtractor",
     "RuntimeInstallation",
     "SetupClient",
+    "TorchProfilerCaptureOptions",
+    "TorchProfilerSchedule",
     "TraceEvent",
     "TraceProcessorInstallation",
     "TraceWindowResult",

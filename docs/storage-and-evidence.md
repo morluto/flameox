@@ -92,7 +92,8 @@ intentional:
 `corpus/HEAD` contains one commit ID. A corpus commit is immutable and lists
 the exact generation manifests visible to a reader. Each generation manifest
 lists exact Parquet paths, hashes, row counts, Arrow schema versions, input
-artifacts and runs, extractor or publisher identity, and superseded
+artifacts and runs, extractor or publisher identity, an optional exact-operation
+digest for idempotent extraction, and superseded
 generations. A file not reachable from the pinned commit is not queryable,
 even if it exists beneath `evidence/`.
 
@@ -943,8 +944,9 @@ Every manifest, MCP result, and Parquet table carries an integer
 
 ### Extractor versions
 
-An extractor version changes whenever output semantics change. Re-extraction
-from the same native artifact creates new Parquet partitions or a new evidence
+An extractor version changes whenever output semantics change. Repeating the
+same operation identity over the same native artifact reuses its active
+generation. A changed extractor/tool/configuration identity creates a new
 generation and supersedes older derivations without deleting them immediately.
 
 ### Adapter compatibility

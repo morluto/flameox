@@ -16,6 +16,7 @@ import pyarrow.parquet as pq
 
 from flameox.atomic import atomic_write_json, fsync_directory
 from flameox.domain.errors import DomainError, ErrorCode
+from flameox.domain.identity import digest_model
 from flameox.domain.models import utc_now
 from flameox.evidence.schemas import SCHEMA_MAJOR, SCHEMA_MINOR, schema_for
 from flameox.observability import OperationLogger, elapsed_ms
@@ -55,6 +56,7 @@ class GenerationPublisher:
         publisher_version: str,
         input_run_ids: tuple[str, ...] = (),
         input_artifact_ids: tuple[str, ...] = (),
+        operation_digest: str | None = None,
         supersedes: tuple[str, ...] = (),
         expected_head: str | None = None,
     ) -> PublishedGeneration:
@@ -73,6 +75,7 @@ class GenerationPublisher:
                     publisher_version=publisher_version,
                     input_run_ids=input_run_ids,
                     input_artifact_ids=input_artifact_ids,
+                    operation_digest=operation_digest,
                     supersedes=supersedes,
                     expected_head=expected_head,
                 )
@@ -90,6 +93,64 @@ class GenerationPublisher:
         assert last_error is not None
         raise last_error
 
+    def publish_rows_idempotent(
+        self,
+        rows_by_table: Mapping[str, Sequence[Mapping[str, Any]]],
+        *,
+        publisher: str,
+        publisher_version: str,
+        input_run_ids: tuple[str, ...] = (),
+        input_artifact_ids: tuple[str, ...] = (),
+        operation_identity: Mapping[str, Any],
+    ) -> PublishedGeneration:
+        operation_digest = digest_model(
+            {
+                "publisher": publisher,
+                "publisher_version": publisher_version,
+                "input_run_ids": input_run_ids,
+                "input_artifact_ids": input_artifact_ids,
+                "operation": dict(operation_identity),
+            }
+        )
+        expected_tables = set(rows_by_table)
+        last_conflict: DomainError | None = None
+        for _ in range(32):
+            head = self.workspace.corpus.read_head()
+            matching: list[GenerationManifest] = []
+            for relative_path in head.generation_manifests:
+                manifest = GenerationManifest.model_validate_json(
+                    (self.workspace.paths.root / relative_path).read_text()
+                )
+                if (
+                    manifest.publisher == publisher
+                    and manifest.input_run_ids == input_run_ids
+                    and manifest.input_artifact_ids == input_artifact_ids
+                ):
+                    matching.append(manifest)
+            for manifest in matching:
+                if (
+                    manifest.operation_digest == operation_digest
+                    and {item.table for item in manifest.files} == expected_tables
+                ):
+                    return PublishedGeneration(manifest=manifest, commit=head)
+            try:
+                return self.publish_rows(
+                    rows_by_table,
+                    publisher=publisher,
+                    publisher_version=publisher_version,
+                    input_run_ids=input_run_ids,
+                    input_artifact_ids=input_artifact_ids,
+                    operation_digest=operation_digest,
+                    supersedes=tuple(manifest.generation_id for manifest in matching),
+                    expected_head=head.commit_id,
+                )
+            except DomainError as error:
+                if error.code is not ErrorCode.REVISION_CONFLICT:
+                    raise
+                last_conflict = error
+        assert last_conflict is not None
+        raise last_conflict
+
     def _publish_once(
         self,
         rows_by_table: Mapping[str, Sequence[Mapping[str, Any]]],
@@ -99,6 +160,7 @@ class GenerationPublisher:
         publisher_version: str,
         input_run_ids: tuple[str, ...] = (),
         input_artifact_ids: tuple[str, ...] = (),
+        operation_digest: str | None = None,
         supersedes: tuple[str, ...] = (),
         expected_head: str | None = None,
     ) -> PublishedGeneration:
@@ -179,6 +241,7 @@ class GenerationPublisher:
             input_artifact_ids=input_artifact_ids,
             publisher=publisher,
             publisher_version=publisher_version,
+            operation_digest=operation_digest,
             files=tuple(final_files),
             supersedes=supersedes,
         )

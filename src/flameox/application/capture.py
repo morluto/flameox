@@ -24,6 +24,7 @@ from flameox.adapters.builtins import (
     builtin_adapter,
 )
 from flameox.adapters.registry import AdapterRegistry
+from flameox.adapters.torch_profiler import torch_profiler_options
 from flameox.application.async_work import run_atomic_thread
 from flameox.application.capabilities import CapabilityService
 from flameox.application.environment import AcceleratorIdentityService, collect_environment
@@ -162,6 +163,7 @@ class _AdapterBinding:
     artifact_kinds: tuple[ArtifactKind, ...]
     expected_overhead: str
     limitations: tuple[str, ...]
+    environment: dict[str, str]
     limitation_details: tuple[LimitationDetail, ...]
     permissions: tuple[str, ...]
     version: str | None
@@ -385,6 +387,7 @@ class CaptureService:
         workload_name: str,
         adapter: str,
         parameters: dict[str, Scalar] | None = None,
+        adapter_options: dict[str, JsonValue] | None = None,
         execution_policy: ExecutionPolicy,
         preflight_mode: Literal["auto", "passive", "active"] = "auto",
         external_context: ExternalExecutionContext | None = None,
@@ -452,12 +455,25 @@ class CaptureService:
         collector_environment = {
             "FLAMEOX_OBSERVATIONS_PATH": str(output_root / "observations.jsonl")
         }
+        if adapter == "torch.profiler":
+            bound_adapter_options = torch_profiler_options(
+                cast(dict[str, object] | None, adapter_options)
+            ).model_dump(mode="json")
+        elif adapter_options:
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                f"Adapter {adapter!r} does not accept capture options.",
+            )
+        else:
+            bound_adapter_options = {}
         adapter_binding = await self._adapter_command(
             adapter,
             instance.command,
             output_root,
             capability=adapter_capability,
+            options=bound_adapter_options,
         )
+        collector_environment.update(adapter_binding.environment)
         collector_argv = adapter_binding.argv
         kinds = adapter_binding.artifact_kinds
         overhead = adapter_binding.expected_overhead
@@ -514,6 +530,7 @@ class CaptureService:
             "workload_definition_id": definition.workload_definition_id,
             "instance": instance.model_dump(mode="json"),
             "adapter": adapter,
+            "adapter_options": bound_adapter_options,
             "adapter_version": adapter_version,
             "adapter_execution_plan": (
                 adapter_binding.execution_plan.model_dump(mode="json")
@@ -550,6 +567,7 @@ class CaptureService:
             workload_definition_id=definition.workload_definition_id,
             workload_instance=instance,
             adapter=adapter,
+            adapter_options=bound_adapter_options,
             adapter_version=adapter_version,
             adapter_execution_plan=(
                 adapter_binding.execution_plan.model_dump(mode="json")
@@ -650,6 +668,7 @@ class CaptureService:
             measurement_protocol_id=digest_model(
                 {
                     "adapter": plan.adapter,
+                    "adapter_options": plan.adapter_options,
                     "adapter_version": plan.adapter_version,
                     "collector_executable_identity": plan.bound_identities.get(
                         "collector_executable"
@@ -803,12 +822,12 @@ class CaptureService:
                 if "process" in error.details
                 else None
             )
-            native = self._native_output_path(plan, output_root)
+            native_paths = self._native_output_paths(plan, output_root)
+            valid_native_paths = self._valid_native_output_paths(plan, output_root)
             if (
                 status is ExecutionStatus.TIMED_OUT
                 and partial_process is not None
-                and native is not None
-                and self._native_output_is_valid(plan, output_root)
+                and valid_native_paths
             ):
                 outcome = ExecutionOutcome(
                     process=partial_process,
@@ -865,8 +884,14 @@ class CaptureService:
             )
 
         collector_succeeded = outcome.process.exit_code == 0
-        native = self._native_output_path(plan, output_root)
-        native_valid = self._native_output_is_valid(plan, output_root)
+        native_paths = self._native_output_paths(plan, output_root)
+        valid_native_paths = self._valid_native_output_paths(plan, output_root)
+        unexpected_native_paths = self._unexpected_native_output_paths(plan, output_root)
+        native_complete = bool(native_paths) and (
+            len(valid_native_paths) == len(native_paths)
+            and not unexpected_native_paths
+            and self._native_output_manifest_is_valid(plan, output_root)
+        )
         native_definition = builtin_adapter(plan.adapter)
         preserve_nonzero_artifact = bool(
             native_definition is not None and native_definition.preserve_artifact_on_nonzero
@@ -880,7 +905,7 @@ class CaptureService:
                 )
             )
         if (
-            native is not None
+            native_paths
             and not collector_succeeded
             and not outcome.process.timed_out
             and not preserve_nonzero_artifact
@@ -896,12 +921,13 @@ class CaptureService:
             )
             if quarantined is not None:
                 collector_limitation_details.append(quarantined)
-            native_valid = False
-        elif native is not None and not native_valid:
+            valid_native_paths = ()
+            native_complete = False
+        elif native_paths and not native_complete and not outcome.process.timed_out:
             reason = (
-                "Collector completed without the expected native output."
-                if not native.exists()
-                else "Collector completed with an empty or non-regular native output."
+                "Collector completed without every expected native output."
+                if not any(path.exists() for path in native_paths)
+                else "Collector emitted an incomplete, extra, empty, or non-regular output set."
             )
             quarantined = await run_atomic_thread(
                 lambda: self._quarantine_native_output(plan, output_root, reason=reason)
@@ -911,7 +937,8 @@ class CaptureService:
             collector_limitation_details.append(
                 _limitation("artifact", "expected_output_invalid", reason)
             )
-        if native is not None and outcome.process.timed_out and native_valid:
+            valid_native_paths = ()
+        if native_paths and outcome.process.timed_out and valid_native_paths:
             collector_limitation_details.append(
                 _limitation(
                     "collector",
@@ -1166,16 +1193,45 @@ class CaptureService:
                                 )
                             )
             else:
-                if native is not None and native_valid:
+                for native in valid_native_paths:
+                    cycle_index = native_paths.index(native)
+                    if outcome.process.timed_out:
+                        role = (
+                            f"partial_cycle_{cycle_index:04d}"
+                            if len(native_paths) > 1
+                            else "partial"
+                        )
+                    elif len(native_paths) > 1:
+                        role = f"cycle_{cycle_index:04d}"
+                    else:
+                        role = "primary"
                     registrations.append(
                         await self._register_path_async(
                             run_id,
                             native,
                             kind=plan.expected_artifact_kinds[0],
-                            role=("partial" if outcome.process.timed_out else "primary"),
+                            role=role,
                             media_type=(
                                 mimetypes.guess_type(native.name)[0] or "application/octet-stream"
                             ),
+                            producer=plan.adapter,
+                            producer_version=plan.adapter_version,
+                        )
+                    )
+                manifest = output_root / "torch-profiler-cycles.json"
+                if (
+                    plan.adapter == "torch.profiler"
+                    and torch_profiler_options(cast(dict[str, object], plan.adapter_options)).mode
+                    == "sdk"
+                    and native_complete
+                ):
+                    registrations.append(
+                        await self._register_path_async(
+                            run_id,
+                            manifest,
+                            kind=ArtifactKind.COLLECTOR_METADATA,
+                            role="torch_profiler_cycle_manifest",
+                            media_type="application/json",
                             producer=plan.adapter,
                             producer_version=plan.adapter_version,
                         )
@@ -1304,9 +1360,9 @@ class CaptureService:
                 "capture_status": (
                     CaptureStatus.REGISTERED
                     if (
-                        (succeeded and (native is None or native_valid))
-                        or (preserve_nonzero_artifact and native_valid)
-                        or (timed_out and native_valid)
+                        (succeeded and (not native_paths or native_complete))
+                        or (preserve_nonzero_artifact and bool(valid_native_paths))
+                        or (timed_out and bool(valid_native_paths))
                     )
                     else CaptureStatus.FAILED
                 ),
@@ -1546,21 +1602,75 @@ class CaptureService:
             return False
         return True
 
-    def _native_output_path(self, plan: CapturePlan, output_root: Path) -> Path | None:
+    def _native_output_paths(self, plan: CapturePlan, output_root: Path) -> tuple[Path, ...]:
         definition = builtin_adapter(plan.adapter)
         if definition is None or plan.adapter == "command" or definition.output_filename is None:
-            return None
-        return output_root / definition.output_filename
+            return ()
+        if plan.adapter == "torch.profiler":
+            options = torch_profiler_options(cast(dict[str, object], plan.adapter_options))
+            return tuple(output_root / filename for filename in options.output_filenames)
+        return (output_root / definition.output_filename,)
 
-    def _native_output_is_valid(self, plan: CapturePlan, output_root: Path) -> bool:
-        path = self._native_output_path(plan, output_root)
-        if path is None:
-            return True
+    def _valid_native_output_paths(
+        self,
+        plan: CapturePlan,
+        output_root: Path,
+    ) -> tuple[Path, ...]:
+        return tuple(
+            path
+            for path in self._native_output_paths(plan, output_root)
+            if self._native_output_is_valid(path)
+        )
+
+    @staticmethod
+    def _native_output_is_valid(path: Path) -> bool:
         try:
             metadata = path.stat()
             return not path.is_symlink() and stat.S_ISREG(metadata.st_mode) and metadata.st_size > 0
         except OSError:
             return False
+
+    def _unexpected_native_output_paths(
+        self,
+        plan: CapturePlan,
+        output_root: Path,
+    ) -> tuple[Path, ...]:
+        if plan.adapter != "torch.profiler":
+            return ()
+        options = torch_profiler_options(cast(dict[str, object], plan.adapter_options))
+        if options.mode != "sdk":
+            return ()
+        expected = set(self._native_output_paths(plan, output_root))
+        return tuple(
+            path
+            for path in sorted(output_root.glob("torch-trace-cycle-*.json"))
+            if path not in expected
+        )
+
+    def _native_output_manifest_is_valid(
+        self,
+        plan: CapturePlan,
+        output_root: Path,
+    ) -> bool:
+        if plan.adapter != "torch.profiler":
+            return True
+        options = torch_profiler_options(cast(dict[str, object], plan.adapter_options))
+        if options.mode != "sdk":
+            return True
+        path = output_root / "torch-profiler-cycles.json"
+        try:
+            if path.is_symlink() or path.stat().st_size > 65_536:
+                return False
+            payload = json.loads(path.read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        if not isinstance(payload, dict):
+            return False
+        return payload == {
+            "schema_version": "flameox.torch-profiler-cycles.v1",
+            "expected_cycles": options.expected_cycles,
+            "files": list(options.output_filenames),
+        }
 
     def _quarantine_native_output(
         self,
@@ -1569,8 +1679,20 @@ class CaptureService:
         *,
         reason: str,
     ) -> LimitationDetail | None:
-        path = self._native_output_path(plan, output_root)
-        if path is None or not path.exists():
+        paths = tuple(
+            path
+            for path in (
+                *self._native_output_paths(plan, output_root),
+                *self._unexpected_native_output_paths(plan, output_root),
+                *(
+                    (output_root / "torch-profiler-cycles.json",)
+                    if plan.adapter == "torch.profiler"
+                    else ()
+                ),
+            )
+            if path.exists()
+        )
+        if not paths:
             return None
         definition = builtin_adapter(plan.adapter)
         expected_format = (
@@ -1578,20 +1700,23 @@ class CaptureService:
             if definition is not None and definition.supported_formats
             else None
         )
+        quarantine_ids: list[str] = []
         try:
-            manifest = QuarantineService(self.workspace).quarantine(
-                path,
-                operation="capture.native_output",
-                reason=reason,
-                expected_format=expected_format,
-                actual_format=(
-                    "symlink"
-                    if path.is_symlink()
-                    else ("regular_file" if path.is_file() else "non_regular_file")
-                ),
-                adapter=plan.adapter,
-                originating_run_id=plan.run_id,
-            )
+            for path in paths:
+                manifest = QuarantineService(self.workspace).quarantine(
+                    path,
+                    operation="capture.native_output",
+                    reason=reason,
+                    expected_format=expected_format,
+                    actual_format=(
+                        "symlink"
+                        if path.is_symlink()
+                        else ("regular_file" if path.is_file() else "non_regular_file")
+                    ),
+                    adapter=plan.adapter,
+                    originating_run_id=plan.run_id,
+                )
+                quarantine_ids.append(manifest.quarantine_id)
         except DomainError as error:
             return _limitation(
                 "artifact",
@@ -1601,7 +1726,8 @@ class CaptureService:
         return _limitation(
             "artifact",
             "native_output_quarantined",
-            f"Invalid {plan.adapter} output was quarantined ({manifest.quarantine_id}): {reason}",
+            f"Invalid {plan.adapter} output was quarantined "
+            f"({', '.join(quarantine_ids)}): {reason}",
         )
 
     def _quarantine_adapter_output(
@@ -1629,6 +1755,7 @@ class CaptureService:
         output_root: Path,
         *,
         capability: CapabilityReport | None = None,
+        options: dict[str, JsonValue] | None = None,
     ) -> _AdapterBinding:
         adapter_definition = builtin_adapter(adapter)
         if adapter_definition is not None:
@@ -1646,12 +1773,14 @@ class CaptureService:
                 workload.argv,
                 output_root,
                 executable=capability.executable,
+                options=cast(dict[str, object] | None, options),
             )
             return _AdapterBinding(
                 argv=invocation.argv,
                 artifact_kinds=invocation.artifact_kinds,
                 expected_overhead=invocation.expected_overhead,
                 limitations=invocation.limitations,
+                environment=invocation.environment,
                 limitation_details=tuple(
                     _limitation("adapter", "capture.limitation", message)
                     for message in invocation.limitations
@@ -1701,6 +1830,7 @@ class CaptureService:
             artifact_kinds=tuple(item.kind for item in execution_plan.artifacts),
             expected_overhead=execution_plan.expected_overhead,
             limitations=(*probe.limitations, *execution_plan.limitations),
+            environment={},
             limitation_details=tuple(
                 _limitation("adapter", "probe.limitation", message)
                 for message in (*probe.limitations, *execution_plan.limitations)
@@ -1932,6 +2062,7 @@ class CaptureService:
             "workload_definition_id": plan.workload_definition_id,
             "instance": plan.workload_instance.model_dump(mode="json"),
             "adapter": plan.adapter,
+            "adapter_options": plan.adapter_options,
             "adapter_version": plan.adapter_version,
             "adapter_execution_plan": plan.adapter_execution_plan,
             "execution_policy": plan.execution_policy,

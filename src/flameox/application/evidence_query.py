@@ -28,6 +28,7 @@ class MeasurementItem(ContractModel):
     variant_id: str | None
     order_in_block: int | None
     phase: str | None
+    dimensions: dict[str, str] = Field(default_factory=dict)
     evidence_level: str
 
 
@@ -120,7 +121,7 @@ class EvidenceQueryService:
                 "SELECT measurement_id, run_id, artifact_id, name, value_int, "
                 "value_float, unit, aggregation, scope, worker_id, "
                 "worker_run_index, value_index, loop_count, is_warmup, block_id, "
-                "variant_id, order_in_block, phase, evidence_level "
+                "variant_id, order_in_block, phase, dimensions, evidence_level "
                 "FROM measurements WHERE " + page_where + " ORDER BY measurement_id LIMIT ?",
                 (*page_parameters, bounded + 1),
             ).fetchall()
@@ -146,7 +147,8 @@ class EvidenceQueryService:
                 variant_id=row[15],
                 order_in_block=row[16],
                 phase=row[17],
-                evidence_level=row[18],
+                dimensions=dict(row[18] or {}),
+                evidence_level=row[19],
             )
             for row in selected
         )

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from flameox.adapters.torch_profiler import torch_profiler_options
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 
 DependencyKind = Literal["internal", "executable", "package"]
@@ -38,6 +40,7 @@ class CaptureInvocation:
     artifact_kinds: tuple[ArtifactKind, ...]
     expected_overhead: str
     limitations: tuple[str, ...]
+    environment: dict[str, str]
 
 
 BUILTIN_ADAPTERS = {
@@ -177,18 +180,25 @@ BUILTIN_ADAPTERS = {
             name="torch.profiler",
             dependency_kind="package",
             dependency="torch",
-            supported_modes=("trace_import", "launcher", "sdk"),
+            supported_modes=("trace_import", "whole_entrypoint", "sdk"),
             supported_formats=("chrome-trace",),
-            features=("operators", "input_shapes", "allocations", "stacks"),
+            features=(
+                "operators",
+                "input_shapes",
+                "allocations",
+                "stacks",
+                "bounded_schedules",
+                "multi_cycle_exports",
+            ),
             output_filename="torch-trace.json",
             artifact_kinds=(ArtifactKind.EXECUTION_TRACE,),
             expected_overhead=(
                 "Operator tracing with shapes, memory, and Python stacks has substantial overhead."
             ),
             capture_limitations=(
-                "Whole-entrypoint mode cannot distinguish application-specific "
-                "warm-up and steady-state phases.",
-                "FLOP estimates and module hierarchy are not enabled.",
+                "Evidence coverage and overhead depend on the feature flags bound into the "
+                "capture plan.",
+                "Scheduled SDK mode requires explicit workload step boundaries.",
             ),
             managed_extra="torch",
             managed_requirement="torch>=2.7",
@@ -240,6 +250,7 @@ def build_capture_invocation(
     output_root: Path,
     *,
     executable: str | None,
+    options: dict[str, object] | None = None,
 ) -> CaptureInvocation:
     adapter = BUILTIN_ADAPTERS.get(adapter_name)
     if (
@@ -252,7 +263,14 @@ def build_capture_invocation(
             ErrorCode.CAPABILITY_UNAVAILABLE,
             f"Adapter {adapter_name!r} does not support capture planning.",
         )
+    if options and adapter_name != "torch.profiler":
+        raise DomainError(
+            ErrorCode.INVALID_CAPTURE_PLAN,
+            f"Adapter {adapter_name!r} does not accept capture options.",
+        )
     output = str(output_root / adapter.output_filename)
+    environment: dict[str, str] = {}
+    limitations = adapter.capture_limitations
     if adapter_name == "command":
         argv = workload_argv
     elif adapter_name == "py-spy":
@@ -275,7 +293,7 @@ def build_capture_invocation(
             "--",
             *workload_argv,
         )
-    elif adapter_name in {"coverage", "memray", "torch.profiler"}:
+    elif adapter_name in {"coverage", "memray"}:
         python, target = _python_target(workload_argv)
         if adapter_name == "coverage":
             argv = (
@@ -297,23 +315,14 @@ def build_capture_invocation(
                 output,
                 *target,
             )
-        else:
-            if target[0] == "-m":
-                if len(target) < 2:
-                    raise DomainError(
-                        ErrorCode.INVALID_CAPTURE_PLAN,
-                        "The Python module name is missing.",
-                    )
-                launcher_target = ("--module", target[1], *target[2:])
-            else:
-                launcher_target = ("--script", target[0], *target[1:])
-            argv = (
-                python,
-                _launcher_path("torch_launcher.py"),
-                "--output",
-                output,
-                *launcher_target,
-            )
+    elif adapter_name == "torch.profiler":
+        return _torch_capture_invocation(
+            adapter,
+            workload_argv,
+            output_root,
+            output,
+            options=options,
+        )
     elif adapter_name == "pyperf":
         python, _ = _python_target(workload_argv)
         argv = (
@@ -366,7 +375,114 @@ def build_capture_invocation(
         argv=argv,
         artifact_kinds=adapter.artifact_kinds,
         expected_overhead=adapter.expected_overhead,
-        limitations=adapter.capture_limitations,
+        limitations=limitations,
+        environment=environment,
+    )
+
+
+def _torch_capture_invocation(
+    adapter: BuiltinAdapter,
+    workload_argv: tuple[str, ...],
+    output_root: Path,
+    output: str,
+    *,
+    options: dict[str, object] | None,
+) -> CaptureInvocation:
+    python, target = _python_target(workload_argv)
+    selected = torch_profiler_options(options)
+    config = selected.model_dump(mode="json")
+    config["expected_cycles"] = selected.expected_cycles
+    encoded_config = json.dumps(
+        config,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    feature_limitations = tuple(
+        message
+        for enabled, message in (
+            (selected.record_shapes, "Input shapes were not collected."),
+            (selected.profile_memory, "Profiler memory events were not collected."),
+            (selected.with_stack, "Python stacks were not collected."),
+            (selected.with_flops, "Operator-limited FLOP estimates were not collected."),
+            (selected.with_modules, "Module hierarchy was not collected."),
+        )
+        if not enabled
+    )
+    feature_limitations = (
+        *feature_limitations,
+        *(
+            ("FLOP estimates cover only operators supported by PyTorch's estimator.",)
+            if selected.with_flops
+            else ()
+        ),
+        *(
+            ("Module hierarchy coverage is limited by the active PyTorch execution mode.",)
+            if selected.with_modules
+            else ()
+        ),
+    )
+    expensive_features = tuple(
+        name
+        for name, enabled in (
+            ("shapes", selected.record_shapes),
+            ("memory", selected.profile_memory),
+            ("stacks", selected.with_stack),
+            ("FLOPs", selected.with_flops),
+            ("modules", selected.with_modules),
+        )
+        if enabled
+    )
+    expected_overhead = (
+        "Operator tracing with enabled expensive features: " + ", ".join(expensive_features) + "."
+        if expensive_features
+        else "Operator tracing without shapes, memory, stacks, FLOPs, or modules."
+    )
+    if selected.mode == "sdk":
+        return CaptureInvocation(
+            argv=workload_argv,
+            artifact_kinds=adapter.artifact_kinds,
+            expected_overhead=expected_overhead,
+            limitations=(
+                "The approved workload owns profiler context entry and must call "
+                "flameox.sdk.torch_profiler().step() at each declared step boundary.",
+                "The workload environment must be able to import flameox.sdk.",
+                "Schedule state is driven only by explicit workload step calls; Flameox does "
+                "not infer iteration boundaries.",
+                *feature_limitations,
+            ),
+            environment={
+                "FLAMEOX_TORCH_PROFILER_CONFIG": encoded_config,
+                "FLAMEOX_TORCH_PROFILER_OUTPUT_ROOT": str(output_root),
+            },
+        )
+    if target[0] == "-m":
+        if len(target) < 2:
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "The Python module name is missing.",
+            )
+        launcher_target = ("--module", target[1], *target[2:])
+    else:
+        launcher_target = ("--script", target[0], *target[1:])
+    return CaptureInvocation(
+        argv=(
+            python,
+            _launcher_path("torch_launcher.py"),
+            "--output",
+            output,
+            "--config",
+            encoded_config,
+            *launcher_target,
+        ),
+        artifact_kinds=adapter.artifact_kinds,
+        expected_overhead=expected_overhead,
+        limitations=(
+            "Whole-entrypoint mode cannot distinguish application-specific warm-up and "
+            "steady-state phases.",
+            *feature_limitations,
+        ),
+        environment={},
     )
 
 

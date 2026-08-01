@@ -148,7 +148,7 @@ async def test_mcp_inspect_instructions_match_initialize_metadata(tmp_path: Path
     inspected = json.loads(cli.stdout)
     assert inspected["schema_version"] == 1
     assert inspected["instructions"] == initialize_instructions
-    assert len(inspected["tools"]) == 66
+    assert len(inspected["tools"]) == 69
 
 
 @pytest.mark.anyio
