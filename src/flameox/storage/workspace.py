@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import errno
 import json
+import logging
 import os
+import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -12,6 +14,7 @@ from typing import Literal
 from uuid import uuid4
 
 import portalocker
+import tomli_w
 from pydantic import Field
 
 from flameox import __version__
@@ -21,6 +24,14 @@ from flameox.domain.errors import DomainError, ErrorCode
 from flameox.domain.models import utc_now
 from flameox.models import ContractModel
 from flameox.storage.corpus import CorpusStore
+
+logger = logging.getLogger(__name__)
+_REMOVED_EXECUTION_SETTING = "allow_mcp_ad_hoc_commands"
+
+
+def _has_removed_execution_setting(payload: dict[str, object]) -> bool:
+    execution = payload.get("execution")
+    return isinstance(execution, dict) and _REMOVED_EXECUTION_SETTING in execution
 
 
 class WorkspaceIdentity(ContractModel):
@@ -175,12 +186,54 @@ class Workspace:
     @property
     def config(self) -> WorkspaceConfig:
         try:
-            return WorkspaceConfig.from_path(self.paths.config)
+            return self._load_config()
         except (FileNotFoundError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
                 f"Invalid workspace configuration at {self.paths.config}.",
             ) from exc
+
+    def _load_config(self) -> WorkspaceConfig:
+        payload = self._read_config_payload()
+        if not _has_removed_execution_setting(payload):
+            return WorkspaceConfig.model_validate(payload)
+        with self.write_locked():
+            return self._load_config_locked()
+
+    def _load_config_locked(self) -> WorkspaceConfig:
+        payload = self._read_config_payload()
+        execution = payload.get("execution")
+        if not isinstance(execution, dict) or _REMOVED_EXECUTION_SETTING not in execution:
+            return WorkspaceConfig.model_validate(payload)
+
+        migrated_payload = {
+            **payload,
+            "execution": {
+                key: value for key, value in execution.items() if key != _REMOVED_EXECUTION_SETTING
+            },
+        }
+        config = WorkspaceConfig.model_validate(migrated_payload)
+        mode = self.paths.config.stat().st_mode & 0o777
+        atomic_write_text(
+            self.paths.config,
+            tomli_w.dumps(migrated_payload),
+            mode=mode,
+        )
+        logger.warning(
+            "Removed deprecated execution.%s from %s. "
+            "MCP ad-hoc commands are no longer supported; declare a named workload "
+            "before planning a capture.",
+            _REMOVED_EXECUTION_SETTING,
+            self.paths.config,
+        )
+        return config
+
+    def _read_config_payload(self) -> dict[str, object]:
+        with self.paths.config.open("rb") as stream:
+            payload = tomllib.load(stream)
+        if not isinstance(payload, dict):
+            raise ValueError("Workspace configuration must be a TOML table.")
+        return payload
 
     @classmethod
     def initialize(
@@ -234,7 +287,7 @@ class Workspace:
                 )
             if not workspace.paths.config.exists():
                 atomic_write_text(workspace.paths.config, WorkspaceConfig().to_toml())
-            _ = workspace.config
+            _ = workspace._load_config_locked()
             workspace.corpus.initialize()
 
         if root == project_root / ".diagnostics":

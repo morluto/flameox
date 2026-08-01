@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -25,18 +26,24 @@ def test_initialize_creates_static_identity_and_empty_corpus(tmp_path: Path) -> 
     assert WorkspaceConfig.from_path(workspace.paths.config) == WorkspaceConfig()
 
 
-def test_removed_ad_hoc_command_setting_is_rejected(
+def test_removed_ad_hoc_command_setting_is_migrated(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    path = tmp_path / "config.toml"
+    workspace = Workspace.initialize(tmp_path)
+    path = workspace.paths.config
     path.write_text(
         "schema_version = 1\n\n[execution]\nallow_mcp_ad_hoc_commands = true\n",
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="allow_mcp_ad_hoc_commands"):
-        WorkspaceConfig.from_path(path)
-    assert "allow_mcp_ad_hoc_commands" in path.read_text()
+    with caplog.at_level(logging.WARNING, logger="flameox.storage.workspace"):
+        config = workspace.config
+
+    assert config == WorkspaceConfig()
+    assert "allow_mcp_ad_hoc_commands" not in path.read_text()
+    assert "MCP ad-hoc commands are no longer supported" in caplog.text
+    assert workspace.config == config
 
 
 def test_initialize_maps_filesystem_quota_failures_to_domain_errors(
