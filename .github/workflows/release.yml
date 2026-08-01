@@ -310,6 +310,52 @@ jobs:
           ./mcp-publisher login github-oidc
           ./mcp-publisher publish server.json
 
+  verify-npm-latest:
+    name: Verify npm latest bootstrap
+    needs:
+      - build
+      - publish-npm
+    if: needs.build.outputs.publishing == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.15.0"
+          package-manager-cache: false
+
+      - name: Wait for npm latest to expose the release
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          latest=""
+          for attempt in {1..12}; do
+            latest=$(npm view flameox dist-tags.latest --registry https://registry.npmjs.org 2>/dev/null || true)
+            if [[ "$latest" == "$RELEASE_VERSION" ]]; then
+              break
+            fi
+            if [[ "$attempt" -lt 12 ]]; then
+              sleep 10
+            fi
+          done
+          if [[ "$latest" != "$RELEASE_VERSION" ]]; then
+            echo "npm latest is $latest, expected $RELEASE_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Verify the explicit latest npx bootstrap
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          resolved=$(npx --yes --prefer-online flameox@latest --version)
+          if [[ "$resolved" != "$RELEASE_VERSION" ]]; then
+            echo "npx flameox@latest resolved $resolved, expected $RELEASE_VERSION" >&2
+            exit 1
+          fi
+
   github-release:
     name: Create GitHub release
     needs:
@@ -317,12 +363,14 @@ jobs:
       - publish-pypi
       - publish-npm
       - publish-mcp-registry
+      - verify-npm-latest
     if: >-
       always() &&
       needs.build.outputs.publishing == 'true' &&
       needs.publish-pypi.result == 'success' &&
       needs.publish-npm.result == 'success' &&
-      needs.publish-mcp-registry.result == 'success'
+      needs.publish-mcp-registry.result == 'success' &&
+      needs.verify-npm-latest.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write # Create the release after both registry publishes succeed.

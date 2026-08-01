@@ -9,6 +9,7 @@ const { spawnSync } = require("node:child_process");
 
 const helper = path.resolve(__dirname, "../lib/jsonc-edit.cjs");
 const packageJson = require("../package.json");
+const bootstrap = path.resolve(__dirname, "../bin/flameox.cjs");
 
 function edit(request) {
   const result = spawnSync(process.execPath, [helper], {
@@ -18,6 +19,16 @@ function edit(request) {
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
 }
+
+test("bootstrap reports its packaged version", () => {
+  const result = spawnSync(process.execPath, [bootstrap, "--version"], {
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), packageJson.version);
+  assert.equal(result.stderr, "");
+});
 
 test("modifies one nested property without removing comments", () => {
   const source = '{\n  // keep this note\n  "mcp": {},\n}\n';
@@ -62,7 +73,6 @@ test("bootstrap launches the exactly matching Python release", () => {
     ].join("\n"),
     { mode: 0o700 },
   );
-  const bootstrap = path.resolve(__dirname, "../bin/flameox.cjs");
   const result = spawnSync(process.execPath, [bootstrap, "setup", "--codex", "--dry-run"], {
     encoding: "utf8",
     env: { ...process.env, FLAMEOX_UV_EXECUTABLE: fakeUvx, FLAMEOX_CAPTURE: capture },
@@ -94,7 +104,6 @@ test("bootstrap launches the exactly matching Python release", () => {
 
 test("bootstrap recovery points to the latest setup command when uv is missing", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "flameox-missing-uv-"));
-  const bootstrap = path.resolve(__dirname, "../bin/flameox.cjs");
   const result = spawnSync(process.execPath, [bootstrap, "setup"], {
     encoding: "utf8",
     env: {
@@ -122,7 +131,6 @@ test(
       ].join("\n"),
       { mode: 0o700 },
     );
-    const bootstrap = path.resolve(__dirname, "../bin/flameox.cjs");
     const result = spawnSync(process.execPath, [bootstrap, "setup"], {
       encoding: "utf8",
       env: { ...process.env, FLAMEOX_UV_EXECUTABLE: fakeUvx },
