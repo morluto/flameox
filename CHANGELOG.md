@@ -1,6 +1,16 @@
 # Changelog
 
 All notable changes to flameox are documented in this file.
+## [0.1.5] - 2026-08-01
+### Bug Fixes
+
+- **release:** Authenticate git-cliff metadata requests
+### Features
+
+- **npm:** Add end-to-end upgrade command
+### Testing
+
+- **npm:** Use packed fixture for upgrade e2e
 ## [0.1.4] - 2026-08-01
 ### Bug Fixes
 
