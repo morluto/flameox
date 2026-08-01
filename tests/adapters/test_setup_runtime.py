@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 import subprocess
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 
-from flameox.adapters import ManagedRuntime
+from flameox.adapters import ManagedRuntime, install_trace_processor
+from flameox.storage import Workspace
 
 
 class RecordingRuntime(ManagedRuntime):
@@ -64,9 +66,71 @@ async def test_runtime_install_uses_an_exact_isolated_uv_tool_environment(
     assert runtime.installed_versions() == ("0.1.1",)
 
 
+@pytest.mark.anyio
+async def test_runtime_install_carries_prepared_capabilities_into_new_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = RecordingRuntime(tmp_path)
+    (tmp_path / "capabilities.json").write_text(
+        '{"schema_version": 1, "extras": ["torch", "memory"]}\n'
+    )
+    recorded_command: list[str] = []
+
+    def install(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        recorded_command.extend(command)
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        bin_directory = Path(environment["UV_TOOL_BIN_DIR"])
+        bin_directory.mkdir(parents=True, exist_ok=True)
+        (bin_directory / "flameox").write_text("")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", install)
+
+    await runtime.install("0.1.1")
+
+    assert recorded_command[-1] == "flameox[memory,torch]==0.1.1"
+
+
 def test_installed_version_discovery_ignores_unmanaged_directories(tmp_path: Path) -> None:
     unmanaged = tmp_path / "runtimes" / "not-a-version"
     unmanaged.mkdir(parents=True)
     (unmanaged / "runtime.json").write_text("{}")
 
     assert ManagedRuntime(tmp_path).installed_versions() == ()
+
+
+def test_trace_processor_setup_stages_a_user_space_binary_and_updates_workspace_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    monkeypatch.setattr("flameox.adapters.setup_runtime.sys.platform", "linux")
+    monkeypatch.setattr("flameox.adapters.setup_runtime._machine", lambda: "x86_64")
+
+    class Response:
+        def __enter__(self) -> BytesIO:
+            return BytesIO(b"trace-processor-binary")
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "flameox.adapters.setup_runtime.urllib.request.urlopen", lambda *args, **kwargs: Response()
+    )
+    monkeypatch.setattr(
+        "flameox.adapters.setup_runtime.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args,
+            0,
+            "trace_processor_shell 55.1\n",
+            "",
+        ),
+    )
+
+    result = install_trace_processor(workspace)
+
+    assert result.installed is True
+    assert result.executable.is_file()
+    assert workspace.config.analysis.trace_processor_path == str(result.executable)

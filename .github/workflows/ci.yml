@@ -25,7 +25,7 @@ jobs:
           python-version: "3.12"
           enable-cache: true
           cache-suffix: full-extras
-      - run: uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
+      - run: uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu --extra torch
       - run: uv run ruff check src tests tools
       - run: uv run ruff format --check src tests tools
 
@@ -40,7 +40,7 @@ jobs:
           python-version: "3.12"
           enable-cache: true
           cache-suffix: full-extras
-      - run: uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
+      - run: uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu --extra torch
       - run: uv run mypy src tests tools
 
   test-lanes:
@@ -231,6 +231,7 @@ jobs:
       - run: uv run mypy src tests tools
       - run: uv run python tools/test.py ownership
       - run: uv run python tools/test.py collection
+      - run: uv run python tools/test.py capabilities
       - uses: actions/upload-artifact@v4
         if: always()
         with:

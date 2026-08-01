@@ -10,7 +10,13 @@ from flameox.application.artifacts import (
     ArtifactRegistrationSummary,
     ArtifactService,
 )
-from flameox.application.capabilities import CapabilityList, CapabilityService
+from flameox.application.capabilities import (
+    AdapterPreparationResult,
+    CapabilityList,
+    CapabilityService,
+    CapabilitySetupResult,
+    SetupVerification,
+)
 from flameox.application.capture import (
     CapturePlanRegistry,
     CaptureResult,
@@ -25,6 +31,10 @@ from flameox.application.comparisons import (
     FreezeRunSetRequest,
     ProfileChange,
     RunSetService,
+)
+from flameox.application.dependencies import (
+    WorkloadDependencyService,
+    WorkloadDependencySetupResult,
 )
 from flameox.application.detached import (
     DetachedCaptureManager,
@@ -173,6 +183,7 @@ from flameox.application.workloads import (
 
 __all__ = [
     "AdapterOption",
+    "AdapterPreparationResult",
     "AnalysisMaterializationService",
     "ArtifactListItem",
     "ArtifactListResult",
@@ -184,6 +195,7 @@ __all__ = [
     "CallEdgeResult",
     "CapabilityList",
     "CapabilityService",
+    "CapabilitySetupResult",
     "CapturePlanRegistry",
     "CaptureResult",
     "CaptureService",
@@ -292,6 +304,7 @@ __all__ = [
     "SetupPlan",
     "SetupReport",
     "SetupService",
+    "SetupVerification",
     "StackExample",
     "StackExamplesResult",
     "SummaryArtifact",
@@ -302,6 +315,8 @@ __all__ = [
     "WorkloadConfig",
     "WorkloadConfigurationResult",
     "WorkloadConfigurationStatus",
+    "WorkloadDependencyService",
+    "WorkloadDependencySetupResult",
     "WorkloadIdentityConfig",
     "WorkloadInspection",
     "WorkloadOracleConfig",

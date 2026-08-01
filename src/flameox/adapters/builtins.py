@@ -28,6 +28,8 @@ class BuiltinAdapter:
     expected_overhead: str | None = None
     capture_limitations: tuple[str, ...] = ()
     preserve_artifact_on_nonzero: bool = False
+    managed_extra: Literal["cpu", "execution", "memory", "test", "trace", "torch"] | None = None
+    managed_requirement: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +73,8 @@ BUILTIN_ADAPTERS = {
             capture_limitations=(
                 "GIL, native-frame, idle-thread, and subprocess modes are disabled.",
             ),
+            managed_extra="cpu",
+            managed_requirement="py-spy>=0.4.2,<0.5",
         ),
         BuiltinAdapter(
             name="perf",
@@ -96,8 +100,13 @@ BUILTIN_ADAPTERS = {
             supported_modes=("import", "query"),
             supported_formats=("perfetto", "chrome-trace", "pprof", "perf.data"),
             features=("trace_sql", "temporal_slices"),
-            remediation=("Install Perfetto Trace Processor or configure its local path.",),
+            remediation=(
+                "Call prepare_capabilities with adapter='perfetto' to stage the user-space "
+                "Trace Processor, or configure analysis.trace_processor_path explicitly.",
+            ),
             version_args=("--version",),
+            managed_extra="trace",
+            managed_requirement="perfetto>=0.57,<0.58",
         ),
         BuiltinAdapter(
             name="pyperf",
@@ -161,6 +170,8 @@ BUILTIN_ADAPTERS = {
                 "recovered into the primary artifact may be unavailable.",
             ),
             preserve_artifact_on_nonzero=True,
+            managed_extra="test",
+            managed_requirement="pytest>=8.3",
         ),
         BuiltinAdapter(
             name="torch.profiler",
@@ -179,6 +190,8 @@ BUILTIN_ADAPTERS = {
                 "warm-up and steady-state phases.",
                 "FLOP estimates and module hierarchy are not enabled.",
             ),
+            managed_extra="torch",
+            managed_requirement="torch>=2.7",
         ),
         BuiltinAdapter(
             name="memray",
@@ -188,6 +201,8 @@ BUILTIN_ADAPTERS = {
             supported_formats=("memray",),
             features=("allocations", "retained_memory", "stacks"),
             output_filename="memory.bin",
+            managed_extra="memory",
+            managed_requirement="memray>=1.17",
             artifact_kinds=(ArtifactKind.MEMORY_PROFILE,),
             expected_overhead=(
                 "Allocation tracing overhead; native traces are disabled by default."
@@ -205,6 +220,8 @@ BUILTIN_ADAPTERS = {
             supported_formats=("coverage-data",),
             features=("lines", "branches"),
             output_filename=".coverage",
+            managed_extra="execution",
+            managed_requirement="coverage>=7.14,<8",
             artifact_kinds=(ArtifactKind.EXECUTION_COVERAGE,),
             expected_overhead="Tracing overhead; branch collection is enabled.",
             capture_limitations=("Coverage records execution, not values or control-flow causes.",),

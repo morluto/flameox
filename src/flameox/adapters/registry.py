@@ -4,7 +4,7 @@ import hashlib
 import json
 from importlib.metadata import Distribution, EntryPoint, entry_points
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from flameox.atomic import atomic_write_json
 from flameox.domain import ADAPTER_API_VERSION, AdapterV1, DomainError, ErrorCode, digest_model
@@ -19,6 +19,7 @@ class AdapterApproval(ContractModel):
     distribution: str
     version: str
     package_identity: str
+    provenance: Literal["agent", "cli", "legacy"] = "legacy"
 
 
 class AdapterDescriptor(ContractModel):
@@ -102,9 +103,56 @@ class AdapterRegistry:
                 distribution=matches[0].distribution,
                 version=version,
                 package_identity=package_identity,
+                provenance="cli",
             )
             self._write_approvals(approvals)
         return self.discover()
+
+    def prepare(self, adapter: str, distribution_name: str) -> AdapterDescriptor:
+        """Approve one exact installed entry point with agent provenance."""
+        matches = [
+            descriptor
+            for descriptor in self.discover().adapters
+            if descriptor.adapter == adapter
+            and descriptor.distribution.casefold() == distribution_name.casefold()
+        ]
+        if not matches:
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                f"No installed adapter {adapter!r} belongs to distribution "
+                f"{distribution_name!r}.",
+                details={"next_tool": "list_capabilities", "adapter": adapter},
+                remediation=(
+                    "Use the adapter and distribution identity returned by list_capabilities, "
+                    "then retry prepare_adapter.",
+                ),
+            )
+        descriptor = matches[0]
+        if descriptor.package_identity.startswith("unverifiable:"):
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "The installed adapter distribution has no verifiable package identity.",
+                details={"adapter": adapter, "distribution": descriptor.distribution},
+                remediation=(
+                    "Reinstall the distribution with intact metadata, then retry "
+                    "prepare_adapter.",
+                ),
+            )
+        with self.workspace.write_locked():
+            approvals = self._approvals()
+            approvals[descriptor.distribution.casefold()] = AdapterApproval(
+                distribution=descriptor.distribution,
+                version=descriptor.version,
+                package_identity=descriptor.package_identity,
+                provenance="agent",
+            )
+            self._write_approvals(approvals)
+        refreshed = next(
+            item
+            for item in self.discover().adapters
+            if item.adapter == adapter and item.approved
+        )
+        return refreshed
 
     def revoke(self, distribution_name: str) -> AdapterDiscoveryResult:
         with self.workspace.write_locked():
@@ -181,6 +229,10 @@ class AdapterRegistry:
             ErrorCode.REVISION_CONFLICT,
             "The approved entry point changed after discovery.",
             retryable=True,
+            details={"next_tool": "list_capabilities", "adapter": descriptor.adapter},
+            remediation=(
+                "Refresh list_capabilities and use the currently reported adapter identity.",
+            ),
         )
 
     def _approvals(self) -> dict[str, AdapterApproval]:
