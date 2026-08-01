@@ -27,6 +27,7 @@ class BuiltinAdapter:
     artifact_kinds: tuple[ArtifactKind, ...] = ()
     expected_overhead: str | None = None
     capture_limitations: tuple[str, ...] = ()
+    preserve_artifact_on_nonzero: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +160,7 @@ BUILTIN_ADAPTERS = {
                 "If the entire pytest controller is forcibly terminated, sidecars not yet "
                 "recovered into the primary artifact may be unavailable.",
             ),
+            preserve_artifact_on_nonzero=True,
         ),
         BuiltinAdapter(
             name="torch.profiler",

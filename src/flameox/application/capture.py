@@ -7,6 +7,7 @@ import mimetypes
 import os
 import secrets
 import shutil
+import stat
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from typing import Any, Literal, cast
 from pydantic import JsonValue
 
 from flameox.adapters.builtins import (
+    BUILTIN_ADAPTERS,
     build_capture_invocation,
     builtin_adapter,
 )
@@ -28,12 +30,15 @@ from flameox.application.environment import AcceleratorIdentityService, collect_
 from flameox.application.evidence_rows import (
     artifact_registration_row,
     environment_row,
+    runtime_resource_summary_row,
+    runtime_writable_root_rows,
     source_state_row,
 )
 from flameox.application.execution_identity import ExecutionIdentityService
 from flameox.application.execution_policy import ExecutionPolicy
 from flameox.application.oracle_receipts import parse_oracle_receipt
 from flameox.application.preflight import PreflightService
+from flameox.application.quarantine import QuarantineService
 from flameox.application.run_rows import run_row
 from flameox.application.source import collect_source_state
 from flameox.application.workloads import Scalar, WorkloadService
@@ -47,6 +52,7 @@ from flameox.domain import (
     AdapterValidationResult,
     ArtifactKind,
     ArtifactRegistration,
+    CapabilityReport,
     CapabilityStatus,
     CaptureLease,
     CapturePlan,
@@ -57,8 +63,10 @@ from flameox.domain import (
     ExecutionStatus,
     ExternalExecutionContext,
     IdentityQuality,
+    LimitationDetail,
     OracleReceiptRecord,
     OracleStrength,
+    PreflightReport,
     ProcessResult,
     RunManifest,
     RunType,
@@ -79,6 +87,70 @@ from flameox.storage.atomic import atomic_write_bytes
 _MAX_PYTEST_SIDECAR_BYTES = 16 * 1024 * 1024
 
 
+def _limitation(
+    source: Literal[
+        "adapter",
+        "preflight",
+        "collector",
+        "artifact",
+        "resource",
+        "validation",
+    ],
+    code: str,
+    message: str,
+) -> LimitationDetail:
+    return LimitationDetail(source=source, code=code, message=message)
+
+
+def _merge_limitation_details(
+    *groups: tuple[LimitationDetail, ...],
+) -> tuple[LimitationDetail, ...]:
+    result: list[LimitationDetail] = []
+    seen: set[tuple[str, str, str]] = set()
+    for group in groups:
+        for detail in group:
+            key = (detail.source, detail.code, detail.message)
+            if key not in seen:
+                seen.add(key)
+                result.append(detail)
+    return tuple(result)
+
+
+def _limitation_projection(
+    details: tuple[LimitationDetail, ...],
+    legacy: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for message in (*legacy, *(item.message for item in details)):
+        if message not in seen:
+            seen.add(message)
+            result.append(message)
+    return tuple(result)
+
+
+def _preflight_limitation_details(preflight: PreflightReport) -> tuple[LimitationDetail, ...]:
+    details: list[LimitationDetail] = []
+    for item in preflight.requirements:
+        details.extend(
+            _limitation(
+                "preflight",
+                f"requirement.{item.status}",
+                f"{item.requirement}: {message}",
+            )
+            for message in item.limitations or (
+                (f"Requirement status is {item.status}.",)
+                if item.status != "available"
+                else ()
+            )
+        )
+    details.extend(
+        _limitation("preflight", "preflight.limitation", message)
+        for message in preflight.limitations
+    )
+    return _merge_limitation_details(tuple(details))
+
+
 class CaptureResult(ContractModel):
     schema_version: int = 1
     plan: CapturePlan
@@ -92,6 +164,7 @@ class _AdapterBinding:
     artifact_kinds: tuple[ArtifactKind, ...]
     expected_overhead: str
     limitations: tuple[str, ...]
+    limitation_details: tuple[LimitationDetail, ...]
     permissions: tuple[str, ...]
     version: str | None
     execution_plan: AdapterExecutionPlan | None = None
@@ -168,6 +241,7 @@ class _CaptureExecution:
         error_code: str,
         cleanup_complete: bool | None = None,
         process: ProcessResult | None = None,
+        limitation_details: tuple[LimitationDetail, ...] = (),
     ) -> RunManifest:
         if self.run is None:
             raise DomainError(ErrorCode.INTERNAL_ERROR, "capture run is not initialized")
@@ -191,6 +265,7 @@ class _CaptureExecution:
                     self.cleanup_complete if cleanup_complete is None else cleanup_complete
                 ),
                 process=process,
+                limitation_details=limitation_details,
             )
 
         try:
@@ -346,6 +421,7 @@ class CaptureService:
                     for remediation in item.remediation
                 ),
             )
+        adapter_capability = await self._adapter_capability(adapter, mode=preflight_mode)
         planned_execution_identity = ExecutionIdentityService(
             self.workspace,
             broker=self.broker,
@@ -370,11 +446,16 @@ class CaptureService:
             adapter,
             instance.command,
             output_root,
+            capability=adapter_capability,
         )
         collector_argv = adapter_binding.argv
         kinds = adapter_binding.artifact_kinds
         overhead = adapter_binding.expected_overhead
         warnings = adapter_binding.limitations
+        limitation_details = _merge_limitation_details(
+            _preflight_limitation_details(preflight),
+            adapter_binding.limitation_details,
+        )
         adapter_version = adapter_binding.version
         containment, network_contained, systemd_scope_unit, collector_argv = await self._contain(
             collector_argv,
@@ -418,6 +499,15 @@ class CaptureService:
             "collector_environment": collector_environment,
             "bound_identities": identities,
             "preflight": preflight.model_dump(mode="json"),
+            "adapter_capability": (
+                adapter_capability.model_dump(mode="json")
+                if adapter_capability is not None
+                else None
+            ),
+            "warnings": warnings,
+            "limitation_details": [
+                item.model_dump(mode="json") for item in limitation_details
+            ],
             "writable_roots": [item.model_dump(mode="json") for item in writable_roots],
             "external_context": (
                 external_context.model_dump(mode="json") if external_context is not None else None
@@ -456,6 +546,7 @@ class CaptureService:
             writable_roots=writable_roots,
             external_context=external_context,
             planned_execution_identity=planned_execution_identity,
+            adapter_capability=adapter_capability,
             bound_identities=identities,
             limits={
                 "timeout_seconds": instance.command.timeout_seconds,
@@ -473,6 +564,7 @@ class CaptureService:
                 ),
             },
             warnings=warnings,
+            limitation_details=limitation_details,
             created_at=created_at,
             expires_at=created_at + timedelta(seconds=self.plans.ttl_seconds),
         )
@@ -554,7 +646,8 @@ class CaptureService:
             writable_roots=plan.writable_roots,
             external_context=plan.external_context,
             execution_identity=plan.planned_execution_identity,
-            limitations=plan.preflight.limitations,
+            limitations=_limitation_projection(plan.limitation_details),
+            limitation_details=plan.limitation_details,
         )
         self.runs.create(initial)
         capture.run = initial
@@ -616,6 +709,7 @@ class CaptureService:
         self.runs.append(running, expected_revision=1)
         capture.run = running
         acquired_slot = False
+        collector_limitation_details: list[LimitationDetail] = []
 
         try:
             await self.plans.acquire_capture_slot()
@@ -686,27 +780,54 @@ class CaptureService:
                 if "process" in error.details
                 else None
             )
-            native = output_root / self._native_filename(plan.adapter)
+            native = self._native_output_path(plan, output_root)
             if (
                 status is ExecutionStatus.TIMED_OUT
                 and partial_process is not None
-                and native.is_file()
+                and native is not None
+                and self._native_output_is_valid(plan, output_root)
             ):
                 outcome = ExecutionOutcome(
                     process=partial_process,
-                    stdout=b"",
-                    stderr=b"",
+                    stdout=(partial_process.stdout or "").encode(),
+                    stderr=(partial_process.stderr or "").encode(),
                     resolved_executable=Path(plan.collector_argv[0]).resolve(),
                     containment=plan.containment,
                 )
+                collector_limitation_details.append(
+                    _limitation(
+                        "collector",
+                        "timeout_partial_artifact",
+                        "Collector timed out; the non-empty native output is partial evidence.",
+                    )
+                )
                 await capture.report(5, "Collector timed out; preserving partial evidence")
             else:
+                quarantined = await run_atomic_thread(
+                    lambda: self._quarantine_native_output(
+                        plan,
+                        output_root,
+                        reason=(
+                            "Collector timed out without a non-empty regular output."
+                            if status is ExecutionStatus.TIMED_OUT
+                            else "Collector failed; native output is not a completed profile."
+                        ),
+                    )
+                )
+                if quarantined is not None:
+                    collector_limitation_details.append(quarantined)
                 terminal = await capture.terminate(
                     execution=status,
                     message=error.message,
                     phase="collector execution failed",
                     error_code=error.code.value,
                     process=partial_process,
+                    limitation_details=tuple(
+                        [
+                            _limitation("collector", error.code.value.lower(), error.message),
+                            *collector_limitation_details,
+                        ]
+                    ),
                 )
                 error.run_id = terminal.run_id
                 raise
@@ -718,6 +839,63 @@ class CaptureService:
             raise DomainError(
                 ErrorCode.INTERNAL_ERROR,
                 "capture run disappeared after collector execution",
+            )
+
+        collector_succeeded = outcome.process.exit_code == 0
+        native = self._native_output_path(plan, output_root)
+        native_valid = self._native_output_is_valid(plan, output_root)
+        native_definition = builtin_adapter(plan.adapter)
+        preserve_nonzero_artifact = bool(
+            native_definition is not None and native_definition.preserve_artifact_on_nonzero
+        )
+        if not collector_succeeded and not outcome.process.timed_out:
+            collector_limitation_details.append(
+                _limitation(
+                    "collector",
+                    "nonzero_exit",
+                    f"Collector exited with status {outcome.process.exit_code}.",
+                )
+            )
+        if (
+            native is not None
+            and not collector_succeeded
+            and not outcome.process.timed_out
+            and not preserve_nonzero_artifact
+        ):
+            quarantined = await run_atomic_thread(
+                lambda: self._quarantine_native_output(
+                    plan,
+                    output_root,
+                    reason=(
+                        "Collector exited unsuccessfully; native output is not a completed "
+                        "profile."
+                    ),
+                )
+            )
+            if quarantined is not None:
+                collector_limitation_details.append(quarantined)
+            native_valid = False
+        elif native is not None and not native_valid:
+            reason = (
+                "Collector completed without the expected native output."
+                if not native.exists()
+                else "Collector completed with an empty or non-regular native output."
+            )
+            quarantined = await run_atomic_thread(
+                lambda: self._quarantine_native_output(plan, output_root, reason=reason)
+            )
+            if quarantined is not None:
+                collector_limitation_details.append(quarantined)
+            collector_limitation_details.append(
+                _limitation("artifact", "expected_output_invalid", reason)
+            )
+        if native is not None and outcome.process.timed_out and native_valid:
+            collector_limitation_details.append(
+                _limitation(
+                    "collector",
+                    "timeout_partial_artifact",
+                    "Collector timed out; the non-empty native output is partial evidence.",
+                )
             )
 
         registrations: list[tuple[ArtifactRegistration, int]] = []
@@ -920,7 +1098,7 @@ class CaptureService:
                         media_type=media_type,
                     )
                 )
-            if plan.adapter_execution_plan is not None:
+            if plan.adapter_execution_plan is not None and collector_succeeded:
                 (
                     plugin_registrations,
                     plugin_extractions,
@@ -929,15 +1107,47 @@ class CaptureService:
                 registrations.extend(plugin_registrations)
                 adapter_extraction_rows.extend(plugin_extractions)
                 validation_limitations.extend(plugin_limitations)
+            elif plan.adapter_execution_plan is not None:
+                for declaration in AdapterExecutionPlan.model_validate(
+                    plan.adapter_execution_plan
+                ).artifacts:
+                    candidate = output_root / declaration.relative_path
+                    if candidate.exists():
+                        try:
+                            quarantine_id = await run_atomic_thread(
+                                partial(
+                                    self._quarantine_adapter_output,
+                                    candidate,
+                                    expected_format=declaration.media_type,
+                                    run_id=plan.run_id,
+                                    adapter=plan.adapter,
+                                )
+                            )
+                        except DomainError as error:
+                            collector_limitation_details.append(
+                                _limitation(
+                                    "artifact",
+                                    "adapter_output_quarantine_failed",
+                                    error.message,
+                                )
+                            )
+                        else:
+                            collector_limitation_details.append(
+                                _limitation(
+                                    "artifact",
+                                    "adapter_output_quarantined",
+                                    "Declared adapter output was quarantined "
+                                    f"({quarantine_id}).",
+                                )
+                            )
             else:
-                native = output_root / self._native_filename(plan.adapter)
-                if native.is_file():
+                if native is not None and native_valid:
                     registrations.append(
                         await self._register_path_async(
                             run_id,
                             native,
                             kind=plan.expected_artifact_kinds[0],
-                            role="primary",
+                            role=("partial" if outcome.process.timed_out else "primary"),
                             media_type=(
                                 mimetypes.guess_type(native.name)[0] or "application/octet-stream"
                             ),
@@ -996,16 +1206,67 @@ class CaptureService:
             finally:
                 raise cancellation
         except DomainError as error:
+            quarantined = await run_atomic_thread(
+                lambda: self._quarantine_native_output(
+                    plan,
+                    output_root,
+                    reason=(
+                        "Artifact validation or registration failed; native output was not "
+                        "published."
+                    ),
+                )
+            )
+            details = [
+                _limitation("artifact", error.code.value.lower(), error.message),
+            ]
+            if quarantined is not None:
+                details.append(quarantined)
             terminal = await capture.terminate(
                 execution=ExecutionStatus.FAILED,
                 message=error.message,
                 phase="validation or artifact registration failed",
                 error_code=error.code.value,
+                limitation_details=tuple(details),
             )
             error.run_id = terminal.run_id
             raise
         succeeded = outcome.process.exit_code == 0
         timed_out = outcome.process.timed_out
+        detail_groups = [
+            tuple(collector_limitation_details),
+            tuple(
+                _limitation("validation", "validation.limitation", message)
+                for message in validation_limitations
+            ),
+            tuple(
+                _limitation(
+                    "resource",
+                    "resource_metric_unavailable",
+                    f"Runtime resource metric {metric!r} was unavailable.",
+                )
+                for metric in (
+                    outcome.process.resources.unavailable_metrics
+                    if outcome.process.resources is not None
+                    else ("resource_summary",)
+                )
+            ),
+            (
+                (
+                    _limitation(
+                        "resource",
+                        "storage_reserve_exceeded",
+                        "Runtime storage reserve terminated the collector.",
+                    ),
+                )
+                if outcome.process.resources is not None
+                and outcome.process.resources.policy_termination is not None
+                else ()
+            ),
+        ]
+        terminal_limitation_details = _merge_limitation_details(
+            running.limitation_details,
+            *detail_groups,
+        )
         terminal = running.model_copy(
             update={
                 "revision": running.revision + 1,
@@ -1017,15 +1278,21 @@ class CaptureService:
                 ),
                 "capture_status": (
                     CaptureStatus.REGISTERED
-                    if succeeded or (timed_out and registrations)
+                    if (
+                        (succeeded and (native is None or native_valid))
+                        or (preserve_nonzero_artifact and native_valid)
+                        or (timed_out and native_valid)
+                    )
                     else CaptureStatus.FAILED
                 ),
                 "validation_status": validation_status,
                 "process": outcome.process,
                 "artifacts": tuple(registration for registration, _ in registrations),
                 "oracle_receipt": oracle_receipt_record,
-                "limitations": tuple(
-                    list(running.limitations)
+                "limitations": _limitation_projection(
+                    terminal_limitation_details,
+                    tuple(
+                        list(running.limitations)
                     + (
                         []
                         if succeeded
@@ -1036,7 +1303,9 @@ class CaptureService:
                         )
                     )
                     + validation_limitations
+                    ),
                 ),
+                "limitation_details": terminal_limitation_details,
             }
         )
         self.runs.append(terminal, expected_revision=running.revision)
@@ -1084,6 +1353,19 @@ class CaptureService:
             "environments": [environment_row(environment)],
             "source_states": [source_state_row(source_state)],
             "measurements": measurement_rows,
+            "runtime_resource_summaries": [
+                runtime_resource_summary_row(
+                    terminal,
+                    sampling_interval_ms=cast(
+                        int,
+                        plan.limits["resource_sampling_interval_ms"],
+                    ),
+                )
+            ],
+            "runtime_writable_root_growth": runtime_writable_root_rows(
+                terminal,
+                project_root=self.workspace.project_root,
+            ),
         }
         try:
             published = await run_atomic_thread(
@@ -1140,20 +1422,189 @@ class CaptureService:
             corpus_commit_id=published.commit.commit_id,
         )
 
+    async def _adapter_capability(
+        self,
+        adapter: str,
+        *,
+        mode: Literal["passive", "active"],
+    ) -> CapabilityReport:
+        choices = self._capture_adapter_choices()
+        approved_third_party = self._is_approved_third_party(adapter)
+        if adapter not in choices and not approved_third_party:
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                f"Unknown or non-capture adapter {adapter!r}.",
+                details={
+                    "allowed_adapters": list(choices),
+                    "next_tool": "get_declared_workflow",
+                },
+                remediation=(
+                    "Choose one of the bounded adapter options returned by "
+                    "get_declared_workflow.",
+                ),
+            )
+        report = self.capabilities.get(adapter)
+        permission_sensitive = report.permission_status in {
+            "unknown_until_active_probe",
+            "not_exercised",
+        }
+        if permission_sensitive:
+            if mode != "active":
+                raise DomainError(
+                    ErrorCode.CAPABILITY_UNAVAILABLE,
+                    f"Adapter {adapter!r} requires an active permission probe before planning.",
+                    details={
+                        "next_tool": "list_capabilities",
+                        "required_preflight_mode": "active",
+                    },
+                    remediation=(
+                        "Call list_capabilities with mode='active_refresh', then re-plan "
+                        "with preflight_mode='active'.",
+                    ),
+                )
+            report = await self.capabilities.probe(adapter, refresh=True)
+        if (
+            report.status is not CapabilityStatus.AVAILABLE
+            and adapter != "command"
+            and not approved_third_party
+        ):
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                f"Adapter {adapter!r} is unavailable for capture planning.",
+                details={
+                    "next_tool": "get_declared_workflow",
+                    "adapter": adapter,
+                    "capability_status": report.status.value,
+                },
+                remediation=report.remediation
+                or ("Choose an available adapter option from get_declared_workflow.",),
+            )
+        return report
+
+    def _capture_adapter_choices(self) -> tuple[str, ...]:
+        builtins = tuple(
+            sorted(
+                adapter.name
+                for adapter in BUILTIN_ADAPTERS.values()
+                if adapter.artifact_kinds
+            )
+        )
+        approved = tuple(
+            sorted(
+                item.adapter
+                for item in AdapterRegistry(self.workspace).discover().adapters
+                if item.approved
+            )
+        )
+        return tuple(dict.fromkeys((*builtins, *approved)))[:64]
+
+    def _is_approved_third_party(self, adapter: str) -> bool:
+        if builtin_adapter(adapter) is not None:
+            return False
+        try:
+            AdapterRegistry(self.workspace).approved_descriptor(adapter)
+        except DomainError:
+            return False
+        return True
+
+    def _native_output_path(self, plan: CapturePlan, output_root: Path) -> Path | None:
+        definition = builtin_adapter(plan.adapter)
+        if definition is None or plan.adapter == "command" or definition.output_filename is None:
+            return None
+        return output_root / definition.output_filename
+
+    def _native_output_is_valid(self, plan: CapturePlan, output_root: Path) -> bool:
+        path = self._native_output_path(plan, output_root)
+        if path is None:
+            return True
+        try:
+            metadata = path.stat()
+            return not path.is_symlink() and stat.S_ISREG(metadata.st_mode) and metadata.st_size > 0
+        except OSError:
+            return False
+
+    def _quarantine_native_output(
+        self,
+        plan: CapturePlan,
+        output_root: Path,
+        *,
+        reason: str,
+    ) -> LimitationDetail | None:
+        path = self._native_output_path(plan, output_root)
+        if path is None or not path.exists():
+            return None
+        definition = builtin_adapter(plan.adapter)
+        expected_format = (
+            definition.supported_formats[0]
+            if definition is not None and definition.supported_formats
+            else None
+        )
+        try:
+            manifest = QuarantineService(self.workspace).quarantine(
+                path,
+                operation="capture.native_output",
+                reason=reason,
+                expected_format=expected_format,
+                actual_format=(
+                    "symlink"
+                    if path.is_symlink()
+                    else (
+                        "regular_file"
+                        if path.is_file()
+                        else "non_regular_file"
+                    )
+                ),
+                adapter=plan.adapter,
+                originating_run_id=plan.run_id,
+            )
+        except DomainError as error:
+            return _limitation(
+                "artifact",
+                "native_output_quarantine_failed",
+                f"Invalid {plan.adapter} output could not be quarantined: {error.message}",
+            )
+        return _limitation(
+            "artifact",
+            "native_output_quarantined",
+            f"Invalid {plan.adapter} output was quarantined ({manifest.quarantine_id}): {reason}",
+        )
+
+    def _quarantine_adapter_output(
+        self,
+        path: Path,
+        *,
+        expected_format: str,
+        run_id: str,
+        adapter: str,
+    ) -> str:
+        manifest = QuarantineService(self.workspace).quarantine(
+            path,
+            operation="capture.adapter_output",
+            reason="Collector failed; declared adapter output was not published.",
+            expected_format=expected_format,
+            adapter=adapter,
+            originating_run_id=run_id,
+        )
+        return manifest.quarantine_id
+
     async def _adapter_command(
         self,
         adapter: str,
         workload: CommandSpec,
         output_root: Path,
+        *,
+        capability: CapabilityReport | None = None,
     ) -> _AdapterBinding:
         adapter_definition = builtin_adapter(adapter)
         if adapter_definition is not None:
-            capability = self.capabilities.get(adapter)
+            capability = capability or self.capabilities.get(adapter)
             if adapter != "command" and capability.status is not CapabilityStatus.AVAILABLE:
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                     f"Adapter {adapter!r} is unavailable.",
-                    remediation=capability.remediation,
+                    details={"next_tool": "get_declared_workflow"},
+                    remediation=capability.remediation
+                    or ("Call list_capabilities and choose an available capture adapter.",),
                 )
             invocation = build_capture_invocation(
                 adapter,
@@ -1166,11 +1617,16 @@ class CaptureService:
                 artifact_kinds=invocation.artifact_kinds,
                 expected_overhead=invocation.expected_overhead,
                 limitations=invocation.limitations,
+                limitation_details=tuple(
+                    _limitation("adapter", "capture.limitation", message)
+                    for message in invocation.limitations
+                ),
                 permissions=adapter_definition.permissions,
                 version=capability.version,
             )
 
-        descriptor, contract = AdapterRegistry(self.workspace).load_contract(adapter)
+        registry = AdapterRegistry(self.workspace)
+        descriptor, contract = registry.load_contract(adapter)
         try:
             probe = AdapterProbeResult.model_validate(
                 await contract.probe(
@@ -1210,6 +1666,10 @@ class CaptureService:
             artifact_kinds=tuple(item.kind for item in execution_plan.artifacts),
             expected_overhead=execution_plan.expected_overhead,
             limitations=(*probe.limitations, *execution_plan.limitations),
+            limitation_details=tuple(
+                _limitation("adapter", "probe.limitation", message)
+                for message in (*probe.limitations, *execution_plan.limitations)
+            ),
             permissions=execution_plan.permissions,
             version=descriptor.version,
             execution_plan=execution_plan,
@@ -1428,6 +1888,15 @@ class CaptureService:
             "collector_environment": plan.collector_environment,
             "bound_identities": plan.bound_identities,
             "preflight": plan.preflight.model_dump(mode="json"),
+            "adapter_capability": (
+                plan.adapter_capability.model_dump(mode="json")
+                if plan.adapter_capability is not None
+                else None
+            ),
+            "warnings": plan.warnings,
+            "limitation_details": [
+                item.model_dump(mode="json") for item in plan.limitation_details
+            ],
             "writable_roots": [item.model_dump(mode="json") for item in plan.writable_roots],
             "external_context": (
                 plan.external_context.model_dump(mode="json")
@@ -1444,6 +1913,26 @@ class CaptureService:
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "Capture plan contents changed after authorization.",
             )
+        if plan.adapter_capability is not None and plan.adapter_capability.probe_kind == "active":
+            current_capability = await self.capabilities.probe(plan.adapter, refresh=True)
+            planned_capability = plan.adapter_capability.model_dump(
+                mode="json",
+                exclude={"probed_at"},
+            )
+            current_capability_data = current_capability.model_dump(
+                mode="json",
+                exclude={"probed_at"},
+            )
+            if current_capability_data != planned_capability:
+                raise DomainError(
+                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    "Adapter capability changed after active planning.",
+                    details={
+                        "adapter": plan.adapter,
+                        "planned_capability": planned_capability,
+                        "current_capability": current_capability_data,
+                    },
+                )
         if plan.adapter_execution_plan is not None:
             descriptor = AdapterRegistry(self.workspace).approved_descriptor(plan.adapter)
             if (
@@ -1524,6 +2013,7 @@ class CaptureService:
         message: str,
         cleanup_complete: bool | None = True,
         process: ProcessResult | None = None,
+        limitation_details: tuple[LimitationDetail, ...] = (),
     ) -> RunManifest:
         process = process or ProcessResult(
             timed_out=execution is ExecutionStatus.TIMED_OUT,
@@ -1533,6 +2023,37 @@ class CaptureService:
                 else ("timeout" if execution is ExecutionStatus.TIMED_OUT else "process_error")
             ),
             cleanup_complete=cleanup_complete,
+        )
+        process_details: list[LimitationDetail] = []
+        if process.resources is None:
+            process_details.append(
+                _limitation(
+                    "resource",
+                    "resource_summary_unavailable",
+                    "Runtime resource sampling did not produce a summary.",
+                )
+            )
+        else:
+            process_details.extend(
+                _limitation(
+                    "resource",
+                    "resource_metric_unavailable",
+                    f"Runtime resource metric {metric!r} was unavailable.",
+                )
+                for metric in process.resources.unavailable_metrics
+            )
+            if process.resources.policy_termination is not None:
+                process_details.append(
+                    _limitation(
+                        "resource",
+                        "storage_reserve_exceeded",
+                        "Runtime storage reserve terminated the collector.",
+                    )
+                )
+        details = _merge_limitation_details(
+            running.limitation_details,
+            limitation_details,
+            tuple(process_details),
         )
         terminal = running.model_copy(
             update={
@@ -1545,12 +2066,28 @@ class CaptureService:
                     else CaptureStatus.FAILED
                 ),
                 "process": process,
-                "limitations": (*running.limitations, message),
+                "limitations": _limitation_projection(
+                    details,
+                    (*running.limitations, message),
+                ),
+                "limitation_details": details,
             }
         )
         terminal = self.runs.append(terminal, expected_revision=running.revision)
         self.publisher.publish_rows(
-            {"runs": [run_row(terminal)]},
+            {
+                "runs": [run_row(terminal)],
+                "runtime_resource_summaries": [
+                    runtime_resource_summary_row(
+                        terminal,
+                        sampling_interval_ms=self.workspace.config.execution.resource_sampling_interval_ms,
+                    )
+                ],
+                "runtime_writable_root_growth": runtime_writable_root_rows(
+                    terminal,
+                    project_root=self.workspace.project_root,
+                ),
+            },
             publisher="flameox.capture",
             publisher_version="1",
             input_run_ids=(terminal.run_id,),
@@ -1779,14 +2316,6 @@ class CaptureService:
             for value in self.workspace.config.execution.allowed_working_roots
         )
         return (*roots, self.workspace.project_root)
-
-    def _native_filename(self, adapter: str) -> str:
-        definition = builtin_adapter(adapter)
-        return (
-            definition.output_filename
-            if definition is not None and definition.output_filename is not None
-            else "capture.bin"
-        )
 
     def _executable_identity(self, executable: str) -> dict[str, Any]:
         resolved = shutil.which(executable) if os.sep not in executable else executable
