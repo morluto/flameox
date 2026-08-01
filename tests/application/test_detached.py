@@ -12,7 +12,6 @@ from flameox.application import (
     CaptureService,
     DetachedCaptureManager,
     ExecutionPolicy,
-    WorkloadService,
 )
 from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode, ExecutionStatus
@@ -35,7 +34,6 @@ timeout_seconds = {timeout}
         }
     )
     workspace.paths.config.write_text(config.to_toml())
-    WorkloadService(workspace).approve("detached")
     return workspace
 
 

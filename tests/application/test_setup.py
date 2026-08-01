@@ -9,8 +9,8 @@ import pytest
 
 from flameox.adapters import RuntimeInstallation, SetupClient
 from flameox.application import SetupOperation, SetupService
+from flameox.atomic import atomic_write_bytes, atomic_write_json
 from flameox.domain import DomainError, ErrorCode
-from flameox.storage.atomic import atomic_write_bytes, atomic_write_json
 
 
 class FakeRuntime:

@@ -12,7 +12,6 @@ from flameox.application import (
     PlanReductionRequest,
     ReductionLimits,
     ReductionService,
-    WorkloadService,
 )
 from flameox.domain import ArtifactKind
 from flameox.storage import Workspace
@@ -32,12 +31,6 @@ cwd = "."
 timeout_seconds = 30
 """
     )
-
-
-def _approve(workspace: Workspace) -> None:
-    workloads = WorkloadService(workspace)
-    workloads.approve("reducer")
-    workloads.approve("predicate")
 
 
 def _original(workspace: Workspace, path: Path, content: str = "large FAIL input") -> str:
@@ -67,7 +60,6 @@ async def test_reduction_binds_predicate_and_revalidates_final_candidate(
     )
     workspace = Workspace.initialize(tmp_path)
     _configure(tmp_path, reducer, predicate)
-    _approve(workspace)
     service = ReductionService(workspace)
     plan = service.plan(
         PlanReductionRequest(
@@ -103,7 +95,6 @@ async def test_concurrent_reduction_execution_reconnects_to_one_result(
     predicate = "raise SystemExit(0)"
     workspace = Workspace.initialize(tmp_path)
     _configure(tmp_path, reducer, predicate)
-    _approve(workspace)
     service = ReductionService(workspace)
     plan = service.plan(
         PlanReductionRequest(
@@ -133,7 +124,6 @@ async def test_reduction_drains_accepted_predicate_requests_before_finalizing(
     predicate = "import time;time.sleep(.3);raise SystemExit(0)"
     workspace = Workspace.initialize(tmp_path)
     _configure(tmp_path, reducer, predicate)
-    _approve(workspace)
     service = ReductionService(workspace)
     plan = service.plan(
         PlanReductionRequest(
@@ -166,7 +156,6 @@ async def test_reduction_reports_contradictory_predicate_as_inconclusive(
     )
     workspace = Workspace.initialize(tmp_path)
     _configure(tmp_path, reducer, predicate)
-    _approve(workspace)
     service = ReductionService(workspace)
     plan = service.plan(
         PlanReductionRequest(
@@ -195,7 +184,6 @@ async def test_reduction_rejects_candidate_symlink(tmp_path: Path) -> None:
     predicate = "raise SystemExit(0)"
     workspace = Workspace.initialize(tmp_path)
     _configure(tmp_path, reducer, predicate)
-    _approve(workspace)
     service = ReductionService(workspace)
     plan = service.plan(
         PlanReductionRequest(
@@ -218,7 +206,6 @@ async def test_reduction_cancellation_publishes_terminal_result(tmp_path: Path) 
     predicate = "raise SystemExit(0)"
     workspace = Workspace.initialize(tmp_path)
     _configure(tmp_path, reducer, predicate)
-    _approve(workspace)
     service = ReductionService(workspace)
     plan = service.plan(
         PlanReductionRequest(

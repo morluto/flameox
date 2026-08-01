@@ -11,11 +11,11 @@ from flameox.application.recoverable_move import (
     resume_move,
     validate_manifest_id,
 )
+from flameox.atomic import atomic_write_json
 from flameox.domain import DomainError, ErrorCode
 from flameox.domain.models import utc_now
 from flameox.models import ContractModel
 from flameox.storage import Workspace
-from flameox.storage.atomic import atomic_write_json
 
 
 class QuarantineManifest(ContractModel):

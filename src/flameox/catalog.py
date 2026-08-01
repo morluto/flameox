@@ -14,10 +14,10 @@ import duckdb
 import pyarrow as pa
 from pydantic import BaseModel
 
+from flameox.atomic import fsync_directory
 from flameox.domain.errors import DomainError, ErrorCode
 from flameox.evidence.schemas import SCHEMA_MAJOR, SCHEMA_MINOR, schema_for, table_names
 from flameox.observability import OperationLogger, elapsed_ms
-from flameox.storage.atomic import fsync_directory
 from flameox.storage.corpus import CorpusCommit, GenerationManifest
 from flameox.storage.workspace import Workspace
 

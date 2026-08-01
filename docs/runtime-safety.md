@@ -139,8 +139,11 @@ named workload safe.
 - Accept only argument arrays.
 - Never invoke a shell.
 - Resolve executables through a documented policy.
-- By default, allow MCP execution only for named workloads declared in
-  `flameox.toml` and approved through the CLI by canonical definition hash.
+- By default, allow MCP execution only for named workloads declared through the
+  validated `flameox.toml` configuration path.
+- `configure_workload` may create or replace a typed named workload under the
+  workspace write lock, atomically updating only `flameox.toml`. It validates the
+  complete project and never executes the configured command.
 - Do not expose ad-hoc argument-array planning through MCP.
 - Bind MCP execution to the single-use plan invariants in [the MCP execution contract](interfaces.md#mcp-server-specification).
 - Restrict working directories to configured roots.

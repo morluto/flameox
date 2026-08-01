@@ -55,8 +55,9 @@ The following choices are settled for flameox:
 - content identity is separate from contextual artifact registration.
 - confirmatory comparisons operate on frozen run sets and preserve failed
   attempts.
-- named workloads require CLI approval and are not described as sandboxed
-  without active containment.
+- named workloads are validated and activated through the structured
+  configuration path and are not described as sandboxed without active
+  containment.
 - MCP does not expose unrestricted command execution, raw SQL, deletion, or
   sensitive artifact content.
 - the CLI and MCP share one domain and application layer; MCP adds a transport

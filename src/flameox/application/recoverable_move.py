@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from flameox.atomic import fsync_directory
 from flameox.domain import DomainError, ErrorCode
-from flameox.storage.atomic import fsync_directory
 
 
 def validate_manifest_id(value: str, *, kind: str) -> None:

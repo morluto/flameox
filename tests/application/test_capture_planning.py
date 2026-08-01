@@ -22,28 +22,20 @@ from flameox.storage import Workspace
 from tests.support.capture import write_workload
 
 
-def test_workload_approval_is_bound_to_canonical_definition(tmp_path: Path) -> None:
+def test_current_workload_definition_is_active_and_bound_to_plans(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     write_workload(tmp_path)
     service = WorkloadService(workspace)
 
     definition = service.definition("echo")
-    assert definition.approved_definition_digest is None
-    with pytest.raises(DomainError) as unapproved:
-        service.resolve("echo", require_approval=True)
-
-    approved = service.approve("echo")
     instance = service.resolve(
         "echo",
         {"message": "candidate"},
-        require_approval=True,
     )
     write_workload(tmp_path, message="changed")
 
-    assert unapproved.value.code is ErrorCode.EXECUTION_REFUSED
-    assert approved.approved_definition_digest == approved.workload_definition_id
     assert instance.command.argv[-1] == "print('candidate')"
-    assert service.definition("echo").approved_definition_digest is None
+    assert service.definition("echo").workload_definition_id != definition.workload_definition_id
 
 
 def test_declared_workflow_discovery_is_paginated_and_bound_to_configuration(
@@ -67,15 +59,12 @@ polarity = "lower_is_better"
 """
     )
     service = WorkloadService(workspace)
-    service.approve("alpha")
 
-    first = service.list_declared(kind="workload", approval="any", limit=1)
+    first = service.list_declared(kind="workload", limit=1)
     assert [item.name for item in first.workflows] == ["alpha"]
-    assert first.workflows[0].approval == "approved"
     assert first.next_cursor is not None
     second = service.list_declared(
         kind="workload",
-        approval="any",
         limit=1,
         cursor=first.next_cursor,
     )
@@ -92,7 +81,6 @@ polarity = "lower_is_better"
     with pytest.raises(DomainError) as stale:
         service.list_declared(
             kind="workload",
-            approval="any",
             limit=1,
             cursor=first.next_cursor,
         )

@@ -7,11 +7,11 @@ from typing import Annotated, Literal
 
 from pydantic import Field, StringConstraints
 
+from flameox.atomic import atomic_write_json, atomic_write_text
 from flameox.domain.errors import DomainError, ErrorCode
 from flameox.domain.identity import digest_model
 from flameox.domain.models import utc_now
 from flameox.models import ContractModel
-from flameox.storage.atomic import atomic_write_json, atomic_write_text
 
 Digest = Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
 

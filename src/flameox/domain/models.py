@@ -397,7 +397,6 @@ class WorkloadDefinition(ContractModel):
     command_template: tuple[str, ...]
     parameter_names: tuple[str, ...] = ()
     validation_spec_id: Digest | None = None
-    approved_definition_digest: Digest | None = None
 
 
 class WorkloadInstance(ContractModel):
@@ -526,7 +525,6 @@ class CapturePlan(ContractModel):
     workspace_id: Identifier
     workload_name: Identifier
     workload_definition_id: Digest
-    approval_digest: Digest
     workload_instance: WorkloadInstance
     adapter: Identifier
     execution_policy: Literal["trusted_local", "approved_agent"]

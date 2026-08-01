@@ -32,6 +32,19 @@ async def test_mcp_tools_use_explicit_envelopes_and_annotations(
     assert by_name["workspace_status"].annotations.read_only_hint is True
     assert by_name["import_artifact"].annotations is not None
     assert by_name["import_artifact"].annotations.read_only_hint is False
+    assert by_name["workload_configuration_status"].annotations is not None
+    assert by_name["workload_configuration_status"].annotations.read_only_hint is True
+    assert by_name["configure_workload"].annotations is not None
+    assert by_name["configure_workload"].annotations.read_only_hint is False
+    assert by_name["configure_workload"].annotations.destructive_hint is False
+    assert by_name["configure_workload"].annotations.idempotent_hint is True
+    assert by_name["configure_workload"].annotations.open_world_hint is False
+    assert by_name["configure_workload"].input_schema["required"] == [
+        "name",
+        "operation",
+        "argv",
+    ]
+    assert "never executes" in (by_name["configure_workload"].description or "")
     assert result.is_error is False
     assert result.structured_content is not None
     assert result.structured_content["ok"] is True
@@ -41,7 +54,9 @@ async def test_mcp_tools_use_explicit_envelopes_and_annotations(
     assert "list_declared_workflows" in instructions
     assert "consumed capture plan" in instructions
     assert "WORKSPACE_NOT_FOUND" in instructions
-    assert "verify that the server's fixed project root is the intended checkout" in instructions
+    assert "workload_configuration_status" in instructions
+    assert "configure_workload" in instructions
+    assert "never executes it" in instructions
 
 
 @pytest.mark.anyio
@@ -81,6 +96,7 @@ async def test_every_mcp_tool_has_bounded_object_schemas_and_annotations(
 async def test_mcp_domain_errors_remain_structured(tmp_path: Path) -> None:
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:
         result = await client.call_tool("workspace_status", {})
+        configuration = await client.call_tool("workload_configuration_status", {})
 
     assert result.is_error is True
     assert result.structured_content is not None
@@ -96,6 +112,12 @@ async def test_mcp_domain_errors_remain_structured(tmp_path: Path) -> None:
         "retry_after_ms": None,
         "next_tool": "initialize_workspace",
     }
+    assert configuration.is_error is True
+    assert configuration.structured_content is not None
+    assert configuration.structured_content["error"]["code"] == "WORKSPACE_NOT_FOUND"
+    assert configuration.structured_content["error"]["recovery"]["next_tool"] == (
+        "initialize_workspace"
+    )
 
 
 @pytest.mark.anyio

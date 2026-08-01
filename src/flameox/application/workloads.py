@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import string
@@ -8,11 +7,14 @@ import tomllib
 from pathlib import Path, PurePath
 from typing import Annotated, Literal, cast
 
+import tomlkit
 from pydantic import Field, JsonValue, model_validator
+from tomlkit.items import Table
 
 from flameox.adapters.builtins import BUILTIN_ADAPTERS
 from flameox.adapters.registry import AdapterRegistry
 from flameox.application.capabilities import CapabilityService
+from flameox.atomic import atomic_write_text
 from flameox.domain import (
     CapabilityReport,
     CapabilityStatus,
@@ -27,7 +29,6 @@ from flameox.domain import (
 )
 from flameox.models import ContractModel
 from flameox.storage import Workspace
-from flameox.storage.atomic import atomic_write_json
 
 Scalar = str | int | float | bool
 
@@ -203,9 +204,48 @@ class ProjectConfig(ContractModel):
         return self
 
 
-class ApprovalRecord(ContractModel):
+class ConfigureWorkloadRequest(ContractModel):
+    name: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=100,
+            pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        ),
+    ]
+    operation: Literal["create", "replace"]
+    config: WorkloadConfig
+    expected_configuration_id: str | None = None
+
+
+class WorkloadConfigurationStatus(ContractModel):
     schema_version: Literal[1] = 1
-    workloads: dict[str, str] = Field(default_factory=dict)
+    status: Literal["missing", "valid", "invalid"]
+    config_path: Literal["flameox.toml"] = "flameox.toml"
+    configuration_id: str | None = None
+    workload_names: Annotated[
+        tuple[Annotated[str, Field(max_length=100)], ...],
+        Field(max_length=1_000),
+    ] = ()
+    diagnostics: Annotated[
+        tuple[Annotated[str, Field(max_length=512)], ...],
+        Field(max_length=8),
+    ] = ()
+    next_tool: Literal["configure_workload", "list_declared_workflows"] | None = None
+
+
+class WorkloadConfigurationResult(ContractModel):
+    schema_version: Literal[1] = 1
+    action: Literal["created", "updated", "unchanged"]
+    name: str
+    configuration_id: str
+    workload_definition_id: str
+    configuration_source: Literal["agent"] = "agent"
+    changed_paths: Annotated[
+        tuple[Annotated[str, Field(max_length=200)], ...],
+        Field(max_length=8),
+    ]
+    next_tool: Literal["list_declared_workflows"] = "list_declared_workflows"
 
 
 class ResolvedOracle(ContractModel):
@@ -217,7 +257,6 @@ class ResolvedOracle(ContractModel):
 class DeclaredWorkflowSummary(ContractModel):
     kind: Literal["workload", "experiment"]
     name: str
-    approval: Literal["approved", "unapproved", "not_applicable"]
     definition_id: str
     parameter_names: tuple[str, ...] = ()
     oracle_strength: OracleStrength | None = None
@@ -326,7 +365,6 @@ class WorkloadService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
         self.project_config_path = workspace.project_root / "flameox.toml"
-        self.approvals_path = workspace.paths.root / "approvals.json"
 
     def load(self) -> ProjectConfig:
         try:
@@ -335,14 +373,46 @@ class WorkloadService:
         except FileNotFoundError as exc:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
-                f"Project workload configuration is missing: {self.project_config_path}",
-                remediation=("Create flameox.toml at the project root.",),
+                "Project workload configuration is missing: flameox.toml",
+                remediation=(
+                    "Call configure_workload with a named command definition, then retry "
+                    "discovery.",
+                ),
+                details={"next_tool": "configure_workload", "config_path": "flameox.toml"},
             ) from exc
         except (tomllib.TOMLDecodeError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
                 f"Project workload configuration is invalid: {exc}",
+                remediation=(
+                    "Repair flameox.toml, then call workload_configuration_status again.",
+                ),
+                details={"config_path": "flameox.toml"},
             ) from exc
+
+    def configuration_status(self) -> WorkloadConfigurationStatus:
+        if not self.project_config_path.exists():
+            return WorkloadConfigurationStatus(
+                status="missing",
+                diagnostics=("No named workload configuration exists yet.",),
+                next_tool="configure_workload",
+            )
+        try:
+            project = self.load()
+        except DomainError as error:
+            return WorkloadConfigurationStatus(
+                status="invalid",
+                diagnostics=(error.message[:512],),
+                next_tool=None,
+            )
+        has_workloads = bool(project.workloads)
+        return WorkloadConfigurationStatus(
+            status="valid",
+            configuration_id=digest_model(project),
+            workload_names=tuple(sorted(project.workloads)),
+            diagnostics=(("No named workloads are declared yet.",) if not has_workloads else ()),
+            next_tool=("list_declared_workflows" if has_workloads else "configure_workload"),
+        )
 
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self.load().workloads))
@@ -351,13 +421,12 @@ class WorkloadService:
         self,
         *,
         kind: Literal["workload", "experiment"],
-        approval: Literal["approved", "unapproved", "any"] = "any",
         limit: int,
         cursor: str | None = None,
     ) -> DeclaredWorkflowList:
         project = self.load()
         configuration_id = digest_model(project)
-        query_id = digest_model({"kind": kind, "approval": approval})
+        query_id = digest_model({"kind": kind})
         offset = 0
         if cursor is not None:
             position = CursorCodec.decode(
@@ -373,8 +442,6 @@ class WorkloadService:
 
         names = sorted(project.workloads if kind == "workload" else project.experiments)
         summaries = tuple(self._workflow_summary(project, kind, name) for name in names)
-        if kind == "workload" and approval != "any":
-            summaries = tuple(item for item in summaries if item.approval == approval)
         selected = summaries[offset : offset + limit]
         next_offset = offset + len(selected)
         next_cursor = (
@@ -560,11 +627,6 @@ class WorkloadService:
                 return DeclaredWorkflowSummary(
                     kind=kind,
                     name=name,
-                    approval=(
-                        "approved"
-                        if definition.approved_definition_digest is not None
-                        else "unapproved"
-                    ),
                     definition_id=definition.workload_definition_id,
                     parameter_names=tuple(sorted(workload_config.parameters)),
                     oracle_strength=(
@@ -578,7 +640,6 @@ class WorkloadService:
             return DeclaredWorkflowSummary(
                 kind=kind,
                 name=name,
-                approval="not_applicable",
                 definition_id=digest_model(experiment_config),
                 parameter_names=tuple(
                     sorted(project.workloads[experiment_config.workload].parameters)
@@ -596,8 +657,6 @@ class WorkloadService:
         config = self._selected(name)
         content = self._definition_content(name, config)
         definition_id = digest_model(content)
-        approvals = self._approvals()
-        approved = approvals.workloads.get(name)
         return WorkloadDefinition(
             workload_definition_id=definition_id,
             name=name,
@@ -608,40 +667,88 @@ class WorkloadService:
                 if config.oracle is not None
                 else None
             ),
-            approved_definition_digest=approved if approved == definition_id else None,
         )
 
-    def approve(self, name: str) -> WorkloadDefinition:
-        definition = self.definition(name)
-        approvals = self._approvals()
-        updated = ApprovalRecord(
-            workloads={
-                **approvals.workloads,
-                name: definition.workload_definition_id,
-            }
-        )
+    def configure(self, request: ConfigureWorkloadRequest) -> WorkloadConfigurationResult:
+        name = request.name
+        config = request.config
         with self.workspace.write_locked():
-            atomic_write_json(self.approvals_path, updated.model_dump(mode="json"))
-        return definition.model_copy(
-            update={"approved_definition_digest": definition.workload_definition_id}
+            existing_text = ""
+            current_id: str | None = None
+            if self.project_config_path.exists():
+                existing_text = self.project_config_path.read_text(encoding="utf-8")
+                project = self.load()
+                current_id = digest_model(project)
+            else:
+                project = ProjectConfig()
+
+            existing = project.workloads.get(name)
+            if request.operation == "create":
+                if existing is not None and existing != config:
+                    raise DomainError(
+                        ErrorCode.EXECUTION_REFUSED,
+                        f"Workload {name!r} already exists; use operation='replace'.",
+                        remediation=(
+                            "Retry with operation='replace' and the current configuration_id.",
+                        ),
+                        details={"configuration_id": current_id},
+                    )
+                action: Literal["created", "updated", "unchanged"] = (
+                    "unchanged" if existing is not None else "created"
+                )
+            else:
+                if current_id is None or existing is None:
+                    raise DomainError(
+                        ErrorCode.REVISION_CONFLICT,
+                        f"Cannot replace workload {name!r} because it is not declared.",
+                        remediation=("Retry with operation='create' for a new workload.",),
+                    )
+                if request.expected_configuration_id != current_id:
+                    raise DomainError(
+                        ErrorCode.REVISION_CONFLICT,
+                        "Workload configuration changed before replacement.",
+                        remediation=(
+                            "Refresh workload_configuration_status and retry with its "
+                            "configuration_id.",
+                        ),
+                        details={"configuration_id": current_id},
+                    )
+                action = "updated"
+
+            updated = ProjectConfig.model_validate(
+                {
+                    **project.model_dump(mode="python"),
+                    "workloads": {**project.workloads, name: config},
+                }
+            )
+            definition_id = digest_model(self._definition_content(name, config))
+            changed_paths: list[str] = []
+            if action != "unchanged":
+                rendered = self._render_project_config(existing_text, name, config)
+                mode = (
+                    self.project_config_path.stat().st_mode & 0o777
+                    if self.project_config_path.exists()
+                    else 0o644
+                )
+                atomic_write_text(self.project_config_path, rendered, mode=mode)
+                changed_paths.append("flameox.toml")
+
+        return WorkloadConfigurationResult(
+            action=action,
+            name=name,
+            configuration_id=digest_model(updated),
+            workload_definition_id=definition_id,
+            configuration_source="agent",
+            changed_paths=tuple(changed_paths),
         )
 
     def resolve(
         self,
         name: str,
         overrides: dict[str, Scalar] | None = None,
-        *,
-        require_approval: bool,
     ) -> WorkloadInstance:
         config = self._selected(name)
         definition = self.definition(name)
-        if require_approval and definition.approved_definition_digest is None:
-            raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                f"Workload {name!r} is not approved at its current definition hash.",
-                remediation=(f"Run `flameox workload approve {name}` after review.",),
-                details={"workload_definition_id": definition.workload_definition_id},
-            )
         selected = self._parameters(config, overrides or {})
         cwd = (self.workspace.project_root / _render(config.cwd, selected)).resolve()
         try:
@@ -817,13 +924,22 @@ class WorkloadService:
             "definition": config.model_dump(mode="json"),
         }
 
-    def _approvals(self) -> ApprovalRecord:
-        if not self.approvals_path.exists():
-            return ApprovalRecord()
-        try:
-            return ApprovalRecord.model_validate(json.loads(self.approvals_path.read_text()))
-        except (json.JSONDecodeError, ValueError) as exc:
-            raise DomainError(
-                ErrorCode.WORKSPACE_INVALID,
-                "Workload approval file is invalid.",
-            ) from exc
+    def _render_project_config(self, text: str, name: str, config: WorkloadConfig) -> str:
+        document = tomlkit.parse(text) if text else tomlkit.document()
+        if "schema_version" not in document:
+            document["schema_version"] = 1
+        workloads = document.get("workloads")
+        if workloads is None:
+            workloads = tomlkit.table()
+            document["workloads"] = workloads
+        values = config.model_dump(mode="python", exclude_none=True, exclude_defaults=True)
+        existing = workloads.get(name)
+        if isinstance(existing, Table):
+            for key in list(existing):
+                if key not in values:
+                    del existing[key]
+            for key, value in values.items():
+                existing[key] = tomlkit.item(value)
+        else:
+            workloads[name] = tomlkit.item(values)
+        return tomlkit.dumps(document)

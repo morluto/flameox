@@ -61,6 +61,7 @@ from flameox.application import (
     CompareRunSetsRequest,
     ComparisonResult,
     ComparisonService,
+    ConfigureWorkloadRequest,
     CreateInvestigationRequest,
     DeclaredWorkflowDetail,
     DeclaredWorkflowList,
@@ -106,6 +107,12 @@ from flameox.application import (
     RunSetService,
     Scalar,
     StackExamplesResult,
+    WorkloadConfig,
+    WorkloadConfigurationResult,
+    WorkloadConfigurationStatus,
+    WorkloadIdentityConfig,
+    WorkloadOracleConfig,
+    WorkloadRequirementsConfig,
     WorkloadService,
     WorkspaceStatus,
     workspace_status,
@@ -142,6 +149,12 @@ ADDITIVE = ToolAnnotations(
     idempotent_hint=False,
     open_world_hint=False,
 )
+CONFIGURE = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
 INITIALIZE = ToolAnnotations(
     read_only_hint=False,
     destructive_hint=False,
@@ -168,6 +181,7 @@ class RecoveryAction(ContractModel):
         "wait_then_repeat",
         "replan_capture",
         "initialize_workspace",
+        "configure_workload",
         "inspect_capabilities",
         "discover_workflows",
         "discover_runs",
@@ -441,6 +455,12 @@ def _recovery_for(error: DomainError) -> RecoveryAction:
             safe_to_repeat_same_call=False,
             next_tool="list_declared_workflows",
         )
+    if error.details.get("next_tool") == "configure_workload":
+        return RecoveryAction(
+            kind="configure_workload",
+            safe_to_repeat_same_call=False,
+            next_tool="configure_workload",
+        )
     if error.details.get("next_tool") == "get_declared_workflow":
         return RecoveryAction(
             kind="discover_workflows",
@@ -546,11 +566,14 @@ def create_server(
             "Do not use it to provision hosts, install dependencies, mutate source or GitHub, "
             "or prove static claims without runtime evidence. "
             "For a new project, call workspace_status first. If it returns "
-            "WORKSPACE_NOT_FOUND, verify that the server's fixed project root is the intended "
-            "checkout and, only when authorized, call initialize_workspace; then repeat "
-            "workspace_status. Initialization writes .diagnostics. After initialization, use "
-            "list_declared_workflows → get_declared_workflow → list_capabilities when "
-            "active probing is required → plan_capture → execute_capture_plan for short work, "
+            "WORKSPACE_NOT_FOUND, call initialize_workspace for the server's fixed project root; "
+            "then repeat "
+            "workspace_status. Initialization writes .diagnostics. Then call "
+            "workload_configuration_status. If flameox.toml is missing, call configure_workload "
+            "with the validated argument array; it writes the canonical project definition but "
+            "never executes it. After that, use list_declared_workflows → "
+            "get_declared_workflow → list_capabilities → plan_capture → execute_capture_plan "
+            "for short work, "
             "start_detached_capture for long work -> get_detached_capture -> get_run -> analyze. "
             "For existing evidence: list_runs and list_artifacts expose artifact_kinds; use "
             "extract_pyperf and query_measurements for benchmark_samples, "
@@ -558,7 +581,7 @@ def create_server(
             "test phases, fixtures, workers, and failure latency, analyze_memory for "
             "memory profiles, analyze_execution for coverage, and the other analyze_* tools "
             "only for their documented artifact kinds. Then use get_evidence, record_analysis, "
-            "or record_finding. Initialize a missing workspace only when authorized. A "
+            "or record_finding. A "
             "synchronous consumed capture plan is never retryable; detached starts are "
             "retryable only with the same idempotency key."
         ),
@@ -605,6 +628,97 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
+    @server.tool(name="workload_configuration_status", annotations=READ_ONLY)
+    async def workload_configuration_status_tool(
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[WorkloadConfigurationStatus]]:
+        """Inspect flameox.toml without writing or executing anything.
+
+        Use this after workspace initialization to decide whether to call configure_workload
+        or list_declared_workflows. Invalid configuration is reported without replacement.
+        """
+        try:
+            result = WorkloadService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).configuration_status()
+            return _success(result, f"Workload configuration status: {result.status}.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="configure_workload", annotations=CONFIGURE)
+    async def configure_workload_tool(
+        name: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=100,
+                pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                description=(
+                    "Stable named workload identifier used by later discovery and planning."
+                ),
+            ),
+        ],
+        operation: Literal["create", "replace"],
+        argv: Annotated[
+            tuple[str, ...],
+            Field(
+                min_length=1,
+                max_length=1_024,
+                description="Argument array; no shell parsing or command string is accepted.",
+            ),
+        ],
+        ctx: Context[AppContext],
+        cwd: Annotated[str, Field(min_length=1, max_length=4_096)] = ".",
+        timeout_seconds: Annotated[float, Field(gt=0, le=86_400)] = 300,
+        parameters: Annotated[
+            dict[str, tuple[Scalar, ...]],
+            Field(max_length=128),
+        ]
+        | None = None,
+        environment: Annotated[dict[str, str], Field(max_length=128)] | None = None,
+        oracle: WorkloadOracleConfig | None = None,
+        requirements: WorkloadRequirementsConfig | None = None,
+        writable_paths: Annotated[tuple[str, ...], Field(max_length=16)] = (),
+        identity: WorkloadIdentityConfig | None = None,
+        expected_configuration_id: Annotated[
+            str,
+            Field(pattern=r"^sha256:[0-9a-f]{64}$"),
+        ]
+        | None = None,
+    ) -> Annotated[CallToolResult, ToolPayload[WorkloadConfigurationResult]]:
+        """Write one validated named workload without executing it.
+
+        Writes only the project workload configuration, preserves existing workloads and
+        experiments, and returns the next discovery step. It never executes the command.
+        Use operation='replace' with the current configuration_id to update an existing workload.
+        """
+        try:
+            request = ConfigureWorkloadRequest(
+                name=name,
+                operation=operation,
+                config=WorkloadConfig(
+                    argv=argv,
+                    cwd=cwd,
+                    timeout_seconds=timeout_seconds,
+                    parameters=parameters or {},
+                    environment=environment or {},
+                    oracle=oracle,
+                    requirements=requirements or WorkloadRequirementsConfig(),
+                    writable_paths=writable_paths,
+                    identity=identity or WorkloadIdentityConfig(),
+                ),
+                expected_configuration_id=expected_configuration_id,
+            )
+            result = WorkloadService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).configure(request)
+            return _success(
+                result,
+                f"Workload {name!r} is {result.action}; call {result.next_tool} next.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
     @server.tool(name="list_capabilities", annotations=READ_ONLY)
     async def list_capabilities_tool(
         ctx: Context[AppContext],
@@ -627,17 +741,15 @@ def create_server(
     async def list_declared_workflows_tool(
         kind: Literal["workload", "experiment"],
         ctx: Context[AppContext],
-        approval: Literal["approved", "unapproved", "any"] = "any",
         limit: Annotated[int, Field(ge=1, le=100)] = 50,
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[DeclaredWorkflowList]]:
-        """Choose a declared workload or experiment before planning; this never approves or runs."""
+        """Discover current named workloads or experiments before planning; this never runs them."""
         try:
             result = WorkloadService(
                 ctx.request_context.lifespan_context.require_workspace()
             ).list_declared(
                 kind=kind,
-                approval=approval,
                 limit=limit,
                 cursor=cursor,
             )
@@ -669,7 +781,7 @@ def create_server(
             str,
             Field(
                 min_length=1,
-                description="Approved declared workload name from list_declared_workflows.",
+                description="Current declared workload name from list_declared_workflows.",
             ),
         ],
         adapter: Annotated[
@@ -684,7 +796,7 @@ def create_server(
         preflight_mode: Literal["passive", "active"] = "passive",
         external_context: ExternalExecutionContext | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[CapturePlan]]:
-        """After workflow and capability discovery, bind one approved capture without running it."""
+        """After workflow and capability discovery, bind one current capture without running it."""
         try:
             result = await ctx.request_context.lifespan_context.capture_service().plan(
                 workload_name=workload_name,
@@ -706,7 +818,7 @@ def create_server(
         plan_id: str,
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[CaptureReceipt]]:
-        """Run one approved plan with side effects; the token is single-use, then get_run."""
+        """Run one current plan with side effects; the token is single-use, then get_run."""
         try:
             await ctx.report_progress(0, 8, "Capture request accepted")
 
@@ -758,7 +870,7 @@ def create_server(
         ],
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[DetachedCaptureStatus]]:
-        """Start one approved plan once; reconnect by run_id without keeping this call open."""
+        """Start one current plan once; reconnect by run_id without keeping this call open."""
         try:
             result = await ctx.request_context.lifespan_context.detached_service().start(
                 plan_id,
@@ -799,7 +911,7 @@ def create_server(
     async def plan_experiment_tool(
         experiment_name: Annotated[
             str,
-            Field(min_length=1, description="Approved experiment from list_declared_workflows."),
+            Field(min_length=1, description="Current experiment from list_declared_workflows."),
         ],
         investigation_id: Annotated[
             str,
@@ -839,7 +951,7 @@ def create_server(
         plan_id: str,
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[ExperimentReceipt]]:
-        """Execute all approved trials from one single-use plan, then inspect get_experiment."""
+        """Execute all current trials from one single-use plan, then inspect get_experiment."""
         try:
 
             async def report(

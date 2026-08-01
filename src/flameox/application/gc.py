@@ -11,11 +11,11 @@ from flameox.application.recoverable_move import (
     resume_move,
     validate_manifest_id,
 )
+from flameox.atomic import atomic_write_json, fsync_directory
 from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode, digest_model
 from flameox.models import ContractModel
 from flameox.storage import GenerationManifest, Workspace, tree_bytes
-from flameox.storage.atomic import atomic_write_json, fsync_directory
 
 
 class GarbageEntry(ContractModel):

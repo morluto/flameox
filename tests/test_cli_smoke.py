@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from click import unstyle
 from typer.testing import CliRunner
 
 from flameox.cli import app
@@ -11,6 +12,29 @@ def test_help_lists_flameoxs_purpose() -> None:
 
     assert result.exit_code == 0
     assert "runtime evidence" in result.stdout
+
+
+def test_capture_help_uses_named_workload_syntax() -> None:
+    runner = CliRunner()
+
+    plan = runner.invoke(app, ["capture", "plan", "--help"])
+    run = runner.invoke(app, ["capture", "run", "--help"])
+
+    assert plan.exit_code == 0, plan.output
+    assert run.exit_code == 0, run.output
+    plan_help = unstyle(plan.stdout)
+    run_help = unstyle(run.stdout)
+    assert "--workload" in plan_help
+    assert "--workload" in run_help
+    assert "argv" not in plan_help.lower()
+    assert "argv" not in run_help.lower()
+
+
+def test_workload_help_has_no_inert_approval_command() -> None:
+    result = CliRunner().invoke(app, ["workload", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "approve" not in result.stdout.lower()
 
 
 def test_init_import_and_list_run_as_json(tmp_path: Path) -> None:

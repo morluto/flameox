@@ -11,9 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from flameox.atomic import atomic_write_json, fsync_directory
 from flameox.domain.errors import DomainError, ErrorCode
 from flameox.domain.models import ArtifactContent, Integrity, utc_now
-from flameox.storage.atomic import atomic_write_json, fsync_directory
 from flameox.storage.quotas import StorageQuota
 from flameox.storage.workspace import Workspace
 

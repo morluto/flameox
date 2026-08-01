@@ -9,9 +9,5 @@ class ExecutionPolicy(StrEnum):
     TRUSTED_LOCAL = "trusted_local"
     APPROVED_AGENT = "approved_agent"
 
-    @property
-    def requires_workload_approval(self) -> bool:
-        return self is ExecutionPolicy.APPROVED_AGENT
-
     def requires_containment(self, configured_mode: str) -> bool:
         return self is ExecutionPolicy.APPROVED_AGENT and configured_mode == "required_for_mcp"

@@ -42,6 +42,7 @@ from flameox.application.quarantine import QuarantineService
 from flameox.application.run_rows import run_row
 from flameox.application.source import collect_source_state
 from flameox.application.workloads import Scalar, WorkloadService
+from flameox.atomic import atomic_write_bytes
 from flameox.domain import (
     AcceleratorIdentityFacet,
     AdapterExecutionPlan,
@@ -82,7 +83,6 @@ from flameox.execution import ExecutionOutcome, ExecutionRequest, ResourcePolicy
 from flameox.models import ContractModel
 from flameox.observability import OperationLogger, elapsed_ms
 from flameox.storage import ArtifactStore, RunStore, StorageQuota, Workspace
-from flameox.storage.atomic import atomic_write_bytes
 
 _MAX_PYTEST_SIDECAR_BYTES = 16 * 1024 * 1024
 
@@ -391,15 +391,8 @@ class CaptureService:
         instance = self.workloads.resolve(
             workload_name,
             parameters,
-            require_approval=execution_policy.requires_workload_approval,
         )
         definition = self.workloads.definition(workload_name)
-        approval = definition.approved_definition_digest
-        if execution_policy.requires_workload_approval and approval is None:
-            raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                f"Workload {workload_name!r} is not approved.",
-            )
         preflight = await PreflightService(
             self.workspace,
             capabilities=self.capabilities,
@@ -481,8 +474,7 @@ class CaptureService:
             "workspace_id": self.workspace.identity.workspace_id,
             "run_id": run_id,
             "workload_name": workload_name,
-            "definition_id": definition.workload_definition_id,
-            "approval": approval or definition.workload_definition_id,
+            "workload_definition_id": definition.workload_definition_id,
             "instance": instance.model_dump(mode="json"),
             "adapter": adapter,
             "adapter_version": adapter_version,
@@ -519,7 +511,6 @@ class CaptureService:
             workspace_id=self.workspace.identity.workspace_id,
             workload_name=workload_name,
             workload_definition_id=definition.workload_definition_id,
-            approval_digest=approval or definition.workload_definition_id,
             workload_instance=instance,
             adapter=adapter,
             adapter_version=adapter_version,
@@ -1861,8 +1852,7 @@ class CaptureService:
             "workspace_id": plan.workspace_id,
             "run_id": plan.run_id,
             "workload_name": plan.workload_name,
-            "definition_id": plan.workload_definition_id,
-            "approval": plan.approval_digest,
+            "workload_definition_id": plan.workload_definition_id,
             "instance": plan.workload_instance.model_dump(mode="json"),
             "adapter": plan.adapter,
             "adapter_version": plan.adapter_version,
@@ -1941,16 +1931,10 @@ class CaptureService:
         if self.workspace.identity.workspace_id != plan.workspace_id:
             raise DomainError(ErrorCode.INVALID_CAPTURE_PLAN, "Workspace identity changed.")
         definition = self.workloads.definition(plan.workload_name)
-        current_approval = (
-            definition.approved_definition_digest or definition.workload_definition_id
-        )
-        if (
-            definition.workload_definition_id != plan.workload_definition_id
-            or current_approval != plan.approval_digest
-        ):
+        if definition.workload_definition_id != plan.workload_definition_id:
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
-                "Workload definition or approval changed after planning.",
+                "Workload definition changed after planning.",
             )
         expected_collector = plan.bound_identities.get("collector_executable")
         expected_workload = plan.bound_identities.get("workload_executable")

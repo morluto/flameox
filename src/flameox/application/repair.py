@@ -5,10 +5,10 @@ from pathlib import Path
 from typing import Literal
 
 from flameox.application.quarantine import QuarantineManifest, QuarantineService
+from flameox.atomic import atomic_write_bytes
 from flameox.domain import DomainError, ErrorCode, RunManifest, digest_model
 from flameox.models import ContractModel
 from flameox.storage import Workspace
-from flameox.storage.atomic import atomic_write_bytes
 
 logger = logging.getLogger(__name__)
 

@@ -70,9 +70,9 @@ MCP server, while the initialization request creates `.diagnostics/` in the
 checkout after you confirm that the client opened the intended project. The
 server does not initialize arbitrary launch directories automatically.
 
-flameox can initialize its `.diagnostics/` workspace through MCP. Before an agent
-can run your code, you must declare the command as a named workload in
-`flameox.toml`, inspect its canonical form, and approve it. See
+flameox can initialize its `.diagnostics/` workspace through MCP. An agent can
+create or update a validated named workload in `flameox.toml` through MCP, then
+plan and run it immediately. See
 [Named workloads and capture](#named-workloads-and-capture) for an example.
 
 ### Use the CLI from source
@@ -103,8 +103,8 @@ samples, and validate the program's output for both the baseline and candidate.
 
 ## How it works
 
-1. **Declare.** You name a repeatable workload and approve the exact command an
-   agent may run.
+1. **Declare.** An agent creates or updates a validated named workload and
+   Flameox binds its current definition to every plan and run.
 2. **Capture.** A maintained profiler or benchmark tool runs while flameox records
    the tool, command, environment, source revision, limits, and outcome.
 3. **Preserve.** flameox keeps the original artifact and publishes queryable
@@ -120,9 +120,9 @@ flameox runs on your machine and does not upload code or captures. It does not
 monitor production, provide accounts or synchronization, modify source code,
 install system tools, or delete artifacts automatically.
 
-Agents can run only the named workloads you approve. MCP does not provide
-arbitrary shell or SQL access, change approvals, delete evidence, return raw
-artifact bytes, or launch native viewers. When containment is unavailable,
+Agents can run only named workloads declared through the structured workload
+configuration path. MCP does not provide arbitrary shell or SQL access, delete
+evidence, return raw artifact bytes, or launch native viewers. When containment is unavailable,
 flameox reports the workload as `uncontained`.
 
 ## Setup and installation details
@@ -208,11 +208,19 @@ confidence_level = 0.95
 random_seed = 1984
 ```
 
-Inspect and approve the exact workload definition before exposing it through MCP:
+An agent can create this declaration directly through MCP with
+`configure_workload`. That operation validates the complete project, preserves
+unrelated workloads and experiments, and makes the workload immediately
+available; it never runs the command. The agent then follows
+`list_declared_workflows → get_declared_workflow → list_capabilities →
+plan_capture → execute_capture_plan`. A valid manually authored workload is
+also immediately active. There is no separate workload approval or human-check
+step: the canonical definition in `flameox.toml` is the execution binding.
+
+The equivalent CLI capture commands are:
 
 ```console
 uv run flameox workload show scan --json
-uv run flameox workload approve scan
 uv run flameox capture plan pyperf --workload scan \
   --parameters '{"implementation":"baseline"}' --json
 uv run flameox capture run pyperf --workload scan \
@@ -220,9 +228,10 @@ uv run flameox capture run pyperf --workload scan \
 ```
 
 Editing a command, environment, parameter domain, timeout, working directory,
-or oracle invalidates that approval. Execution uses argument arrays instead of
-shell strings, bounds command output, and cleans up after timeouts or
-cancellation. Linux users can configure bubblewrap containment; otherwise, the
+or oracle changes the workload definition and invalidates existing plans.
+Execution uses argument arrays instead of shell strings, bounds command output,
+and cleans up after timeouts or cancellation. Linux users can configure
+bubblewrap containment; otherwise, the
 result is reported as `uncontained`.
 
 ## Investigations and experiments
@@ -290,7 +299,7 @@ Start the stdio server with a fixed project root:
 uv run flameox mcp serve --project-root .
 ```
 
-Through MCP, agents can plan approved captures and experiments, query evidence,
+Through MCP, agents can configure workloads, plan captures and experiments, query evidence,
 preview analyses, and record results. Capture and experiment plans are
 short-lived and single-use; restarting the server invalidates them.
 
@@ -327,11 +336,11 @@ recoverable trash instead of deleting them immediately.
 - [Investigations and analysis](docs/investigations.md): workloads, experiments,
   recipes, statistics, and evidence quality
 - [Adapters and capabilities](docs/adapters.md): profiler integration,
-  compatibility, probing, and approval behavior
+  compatibility, probing, and adapter policy
 - [Runtime safety](docs/runtime-safety.md): concurrency, recovery, retention,
   integrity, security, privacy, and local observability
-- [CLI and MCP boundaries](docs/interfaces.md): human and agent interfaces and
-  their trust boundaries
+- [CLI and MCP boundaries](docs/interfaces.md): agent interfaces and execution
+  boundaries
 - [Architectural decisions](docs/architecture-decisions.md): settled choices and
   open design questions
 - [Acceptance and verification](docs/acceptance.md): completion criteria and

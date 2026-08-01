@@ -95,7 +95,6 @@ flameox status
 flameox capabilities [--refresh]
 flameox config show
 flameox validate
-flameox workload approve <name>
 ```
 
 `init` creates only local files and never installs collectors. `capabilities`
@@ -105,14 +104,15 @@ commands.
 ### Capture commands
 
 ```text
-flameox capture plan <adapter> [options] -- <argv...>
-flameox capture run <adapter> [options] -- <argv...>
+flameox capture plan <adapter> --workload <name> [--parameters '<json>']
+flameox capture run <adapter> --workload <name> [--parameters '<json>']
 flameox import <path> [--kind KIND]
 ```
 
 `capture plan` is side-effect free. `capture run` prints the plan before
 execution unless `--json` is used, in which case the plan is part of the result.
-Every import creates a new import run.
+Both commands require a named workload and reject `argv`, `cwd`, and trailing
+`-- <argv...>` arguments. Every import creates a new import run.
 
 ### Workload commands
 
@@ -130,6 +130,21 @@ flameox experiment run <name> [parameter overrides]
 flameox experiment show <experiment-id>
 flameox experiment trial <trial-id> [--experiment-id <experiment-id>]
 ```
+
+`flameox.toml` is the project-owned workload declaration. Its strict schema is
+`[workloads.<name>]` with an argument array `argv`, project-relative `cwd`,
+positive `timeout_seconds`, bounded `parameters` choices, an environment map,
+optional `oracle`, `requirements`, `writable_paths`, and `identity`. Templates
+may reference only plain scalar parameter names such as `{size}`; shell strings,
+shell expansion, and trailing `-- <argv...>` forms are unsupported.
+
+MCP's `configure_workload` is the direct agent path for this schema. It accepts
+the same typed fields, supports explicit `create` and `replace` operations, and
+uses the current configuration digest for replacement. It validates the whole
+project before atomically updating `flameox.toml`. The resulting workload is
+immediately active and reports `configuration_source = "agent"`; configuration
+never executes the workload. A manually authored, valid workload is also
+immediately active. There is no separate workload approval or human-check step.
 
 ### Analysis commands
 
@@ -197,8 +212,8 @@ flameox mcp inspect
 ```
 
 `serve` uses stdio exclusively. `--init` performs the additive workspace
-initialization before protocol startup and never approves project-controlled
-workloads. A network transport is outside the supported product contract.
+initialization before protocol startup and does not configure project workloads.
+A network transport is outside the supported product contract.
 
 ## MCP server specification
 
@@ -289,6 +304,10 @@ registration supplies explicit `ToolAnnotations`.
   non-idempotent, and closed-world:
   `read_only_hint=False`, `destructive_hint=False`,
   `idempotent_hint=False`, `open_world_hint=False`.
+- `configure_workload` is mutating, non-executing, idempotent for an identical
+  definition, and closed-world:
+  `read_only_hint=False`, `destructive_hint=False`,
+  `idempotent_hint=True`, `open_world_hint=False`.
 - Capture and experiment execution are mutating, non-idempotent, potentially
   destructive, and open-world:
   `read_only_hint=False`, `destructive_hint=True`,
@@ -303,7 +322,7 @@ The supported tools are grouped as follows:
 
 | Family | Tools |
 | --- | --- |
-| Workspace | `initialize_workspace`, `workspace_status`, `list_capabilities`, `validate_workspace` |
+| Workspace | `initialize_workspace`, `workspace_status`, `workload_configuration_status`, `configure_workload`, `list_capabilities`, `validate_workspace` |
 | Capture and import | `plan_capture`, `execute_capture_plan`, `import_artifact`, `extract_pyperf`, `extract_python_startup`, `extract_pytest`, `extract_coverage`, `extract_memray`, `extract_perfetto`, `extract_observations` |
 | Detached capture | `start_detached_capture`, `get_detached_capture`, `cancel_detached_capture` |
 | Discovery | `list_declared_workflows`, `get_declared_workflow`, `list_runs`, `list_findings` |
@@ -316,13 +335,55 @@ The supported tools are grouped as follows:
 | Drill-down | `get_evidence`, `query_measurements`, `get_frame_callers`, `get_frame_callees`, `get_stack_examples`, `get_trace_window` |
 | Findings | `record_finding`, `list_findings`, `get_finding` |
 
+The normal first-run sequence is:
+
+```text
+initialize_workspace
+  → workload_configuration_status
+  → configure_workload (when missing)
+  → list_declared_workflows
+  → get_declared_workflow
+  → list_capabilities
+  → plan_capture
+  → execute_capture_plan
+```
+
+Configuration and execution are separate operations. A configuration result
+never starts the declared command, and a capture plan never accepts replacement
+`argv` or `cwd` values.
+
 #### `initialize_workspace`
 
 Additive and idempotent. Initializes only the MCP server's fixed project root.
 If the server already owns an initialized workspace, the call returns its current
 status without replacing the detached-capture manager. It cannot select an
-external path or approve workloads. Hosts may instead start the server using
+external path or configure workloads. Hosts may instead start the server using
 `flameox mcp serve --init`.
+
+#### `workload_configuration_status`
+
+Read-only and bounded. Reports whether the fixed project's `flameox.toml` is
+`missing`, `valid`, or `invalid`, returns the relative path, valid configuration
+digest, existing workload names, bounded diagnostics, and a machine-readable
+`next_tool`. Missing configuration points to `configure_workload`; invalid
+configuration is reported without replacement so an agent cannot overwrite a
+file it has not successfully parsed.
+
+#### `configure_workload`
+
+Mutating but non-executing. Accepts a typed `name`, `argv`, `cwd`,
+`timeout_seconds`, `parameters`, `environment`, `requirements`,
+`writable_paths`, `identity`, and `oracle` definition. `operation="create"`
+adds a workload or is idempotent for the same definition. `operation="replace"`
+requires the current `configuration_id` from
+`workload_configuration_status`; a stale digest returns a revision conflict.
+The complete resulting `ProjectConfig` is validated, unrelated workloads,
+experiments, and comments are preserved, and `flameox.toml` is atomically
+updated under the workspace lock. The canonical workload is immediately active.
+This tool never runs
+the command; call `list_declared_workflows` next, then
+`get_declared_workflow`, `list_capabilities`, `plan_capture`, and finally
+`execute_capture_plan`.
 
 #### `workspace_status`
 
@@ -341,7 +402,7 @@ capabilities does not run a project-controlled binary found on `PATH`. The
 
 #### `list_declared_workflows` and `get_declared_workflow`
 
-Workflow discovery is the authoritative source for approved workload names,
+Workflow discovery is the authoritative source for current workload names,
 declared parameters, requirements, and adapter choices. A workflow detail
 returns each requirement's kind, required or optional status, and passive or
 active probe requirement. It also returns at most 64 deterministic adapter
@@ -353,7 +414,7 @@ remediation. Options that need a permission check are reported as
 
 #### `plan_capture`
 
-Read-only. Default inputs are an approved `workload_name`, declared scalar
+Read-only. Default inputs are a current `workload_name`, declared scalar
 parameter overrides, adapter, and requested features. Returns the exact
 resolved plan, expected artifacts, overhead, permissions, limits, containment
 state, warnings, request digest, and a short-lived `plan_id`. The ordinary
@@ -361,7 +422,7 @@ schema does not advertise `argv` or `cwd`. MCP does not expose ad-hoc capture
 planning.
 
 Plan IDs are 256-bit opaque random values held only in MCP-process memory. They
-are bound to workspace ID, workload approval hash, resolved executable and
+are bound to workspace ID, workload definition hash, resolved executable and
 identity, arguments, working directory, child-environment policy and overrides,
 adapter/version/capabilities, requested features, validator, source state,
 limits, containment decision, and policy generation. Expiry uses monotonic
@@ -373,13 +434,13 @@ A request digest is audit evidence, not an authorization boundary.
 
 Mutating and command-executing. Executes an unexpired `plan_id`, streams
 progress, observes cancellation, and returns a completed or failed run record.
-Every bound identity, capability, approval, and policy input is rechecked
+Every bound identity, capability, workload definition, and policy input is rechecked
 immediately before execution. It never accepts a shell string or replacement
 arguments.
 
 #### `plan_experiment` and `run_experiment`
 
-Planning is read-only over an approved named workload and experiment
+Planning is read-only over a current named workload and experiment
 definition. Execution runs the predeclared variants and blocks, registers every
 attempted trial, validates outputs, and returns the experiment plus initial
 analysis references. The execution receipt links to the immutable experiment

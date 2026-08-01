@@ -25,6 +25,20 @@ def test_initialize_creates_static_identity_and_empty_corpus(tmp_path: Path) -> 
     assert WorkspaceConfig.from_path(workspace.paths.config) == WorkspaceConfig()
 
 
+def test_removed_ad_hoc_command_setting_is_rejected(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "schema_version = 1\n\n[execution]\nallow_mcp_ad_hoc_commands = true\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="allow_mcp_ad_hoc_commands"):
+        WorkspaceConfig.from_path(path)
+    assert "allow_mcp_ad_hoc_commands" in path.read_text()
+
+
 def test_initialize_maps_filesystem_quota_failures_to_domain_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

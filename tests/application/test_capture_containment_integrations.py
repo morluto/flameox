@@ -10,7 +10,6 @@ import pytest
 from flameox.application import (
     CaptureService,
     ExecutionPolicy,
-    WorkloadService,
 )
 from flameox.domain import (
     ExecutionStatus,
@@ -118,7 +117,6 @@ PATH = {json.dumps(toolchain_bin + ":/usr/bin:/bin")}
 """
     )
     workspace = Workspace.initialize(tmp_path)
-    WorkloadService(workspace).approve("cargo_check")
     service = CaptureService(workspace)
     plan = await service.plan(
         workload_name="cargo_check",

@@ -13,11 +13,11 @@ import pyarrow.parquet as pq
 import pytest
 
 from flameox.application import CompactionService
+from flameox.atomic import atomic_write_json
 from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode
 from flameox.evidence import GenerationPublisher, schema_for
 from flameox.storage import CorpusCommit, Workspace
-from flameox.storage.atomic import atomic_write_json
 
 DIGEST = "sha256:" + ("a" * 64)
 

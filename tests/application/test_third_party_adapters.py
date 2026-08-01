@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from flameox.adapters import AdapterDescriptor
-from flameox.application import CaptureService, ExecutionPolicy, WorkloadService
+from flameox.application import CaptureService, ExecutionPolicy
 from flameox.catalog import Catalog
 from flameox.domain import (
     ADAPTER_API_VERSION,
@@ -127,7 +127,6 @@ timeout_seconds = 30
         }
     )
     workspace.paths.config.write_text(config.to_toml())
-    WorkloadService(workspace).approve("fixture")
     return workspace
 
 

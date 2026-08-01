@@ -21,7 +21,9 @@ symptom → capture or import → bounded evidence → hypothesis
 ```
 
 flameox is not a profiler, a generic bug finder, a hosted observability service,
-an unrestricted command or SQL gateway, or a source-code modification system.
+an unrestricted command or SQL gateway, or an arbitrary source-code modification
+system. Agents may create and update `flameox.toml` through the structured
+workload configuration tool.
 A feature belongs when it improves trustworthy collection, evidence
 preservation, cross-run analysis, experimental validity, or bounded agent
 drill-down without replacing an upstream tool.
@@ -34,6 +36,7 @@ When changing the product:
 - prefer bounded task-shaped operations over arbitrary commands or SQL;
 - keep DuckDB rebuildable and Parquet/manifests authoritative;
 - keep CLI and MCP as thin transports over the same application services;
+- let agents configure validated named workloads and proceed directly to planning;
 - expose coverage, limitations, compatibility, and containment truthfully;
 - optimize for investigation leverage, not integration count.
 
@@ -62,7 +65,7 @@ Read the relevant contract before changing product behavior:
   schema rules;
 - `docs/investigations.md` for experiments, recipes, statistics, and evidence
   quality;
-- `docs/adapters.md` for integration, compatibility, probing, and approval
+- `docs/adapters.md` for integration, compatibility, probing, and adapter policy
   behavior;
 - `docs/runtime-safety.md` for concurrency, recovery, retention, integrity,
   security, privacy, and observability;

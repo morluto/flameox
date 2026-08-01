@@ -347,6 +347,12 @@ paths = ["tests/application/test_capture_planning.py"]
 markers = ["integration"]
 
 [[ownership]]
+owner = "workload-configuration"
+lane = "application"
+paths = ["tests/application/test_workloads.py"]
+markers = ["integration"]
+
+[[ownership]]
 owner = "capture-environment"
 lane = "application"
 paths = ["tests/application/test_capture_environment.py"]
@@ -442,6 +448,12 @@ owner = "mcp-workflows"
 lane = "mcp"
 paths = ["tests/mcp/test_workflows.py"]
 markers = ["integration", "serial"]
+
+[[ownership]]
+owner = "mcp-agent-workflows"
+lane = "process"
+paths = ["tests/mcp/test_agent_workflows.py"]
+markers = ["integration", "process", "serial"]
 
 [[ownership]]
 owner = "mcp-stdio-transport"

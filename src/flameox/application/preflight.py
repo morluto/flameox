@@ -70,8 +70,8 @@ class PreflightService:
                         required=name not in requirements.optional,
                         probe_kind="active",
                         status="unknown",
-                        limitations=("Active probe was not approved for this planning call.",),
-                        remediation=("Re-plan with preflight_mode='active' after approval.",),
+                        limitations=("Active probe was not requested for this planning call.",),
+                        remediation=("Re-plan with preflight_mode='active' to request the probe.",),
                     )
                 )
                 continue

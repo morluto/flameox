@@ -9,7 +9,7 @@ from mcp import Client
 from mcp_types import TextResourceContents
 from typer.testing import CliRunner
 
-from flameox.application import WorkloadService, workspace_status
+from flameox.application import workspace_status
 from flameox.catalog import Catalog
 from flameox.cli import app
 from flameox.mcp import create_server
@@ -33,8 +33,63 @@ async def test_unknown_declared_workflow_routes_back_to_discovery(tmp_path: Path
 
 
 @pytest.mark.anyio
+async def test_missing_workload_configuration_routes_to_configure_workload(
+    tmp_path: Path,
+) -> None:
+    Workspace.initialize(tmp_path)
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        status = await client.call_tool("workload_configuration_status", {})
+        missing = await client.call_tool(
+            "list_declared_workflows",
+            {"kind": "workload"},
+        )
+        configured = await client.call_tool(
+            "configure_workload",
+            {
+                "name": "probe",
+                "operation": "create",
+                "argv": ["python", "-c", "print('ok')"],
+            },
+        )
+        discovered = await client.call_tool(
+            "list_declared_workflows",
+            {"kind": "workload"},
+        )
+
+    assert status.is_error is False
+    assert status.structured_content is not None
+    assert status.structured_content["result"] == {
+        "schema_version": 1,
+        "status": "missing",
+        "config_path": "flameox.toml",
+        "configuration_id": None,
+        "workload_names": [],
+        "diagnostics": ["No named workload configuration exists yet."],
+        "next_tool": "configure_workload",
+    }
+    assert missing.is_error is True
+    assert missing.structured_content is not None
+    assert missing.structured_content["error"]["recovery"] == {
+        "kind": "configure_workload",
+        "safe_to_repeat_same_call": False,
+        "retry_after_ms": None,
+        "next_tool": "configure_workload",
+    }
+    assert configured.is_error is False
+    assert configured.structured_content is not None
+    assert configured.structured_content["result"]["action"] == "created"
+    assert configured.structured_content["result"]["configuration_source"] == "agent"
+    assert configured.structured_content["result"]["changed_paths"] == [
+        "flameox.toml",
+    ]
+    assert discovered.is_error is False
+    assert discovered.structured_content is not None
+    assert discovered.structured_content["result"]["workflows"][0]["name"] == "probe"
+
+
+@pytest.mark.anyio
 async def test_invalid_capture_adapter_returns_bounded_workflow_recovery(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path)
+    Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
@@ -42,8 +97,6 @@ schema_version = 1
 argv = ["python", "-c", "print('ok')"]
 """
     )
-    WorkloadService(workspace).approve("probe")
-
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:
         result = await client.call_tool(
             "plan_capture",
@@ -95,7 +148,7 @@ async def test_mcp_inspect_instructions_match_initialize_metadata(tmp_path: Path
     inspected = json.loads(cli.stdout)
     assert inspected["schema_version"] == 1
     assert inspected["instructions"] == initialize_instructions
-    assert len(inspected["tools"]) == 58
+    assert len(inspected["tools"]) == 60
 
 
 @pytest.mark.anyio
