@@ -1,6 +1,31 @@
 # Changelog
 
 All notable changes to flameox are documented in this file.
+## [0.1.9] - 2026-08-01
+### Bug Fixes
+
+- **test:** Expect failed execution for missing torch steps
+- **capture:** Preserve launcher paths and setup cancellation
+- **lifecycle:** Close cross-process recovery gaps
+- **capture:** Support module workloads in separate environments
+- **analysis:** Preserve evidence availability states
+- **application:** Close lifecycle review gaps
+- **ci:** Refresh formatting and collection baseline
+- **capture:** Preserve detached idempotency after restart
+- **mcp:** Make profiler setup recovery actionable
+### Chores
+
+- **mcp:** Adopt stable 2.0 packages
+### Documentation
+
+- Add contributing guide
+- Clarify lifecycle retry recovery
+- Align lifecycle and discovery guidance
+### Features
+
+- Publish flameox MCP registry support
+- **accelerator:** Add structured launch evidence workflows
+- **mcp:** Standardize lifecycle and evidence contracts
 ## [0.1.8] - 2026-08-01
 ### Bug Fixes
 
