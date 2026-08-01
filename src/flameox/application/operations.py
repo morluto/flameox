@@ -77,6 +77,7 @@ class OperationRecord(ContractModel):
     item_outcomes: tuple[OperationItemOutcome, ...] = Field(default=(), max_length=64)
     failure_code: str | None = None
     failure_message: str | None = None
+    failure_details: dict[str, Any] | None = None
     cancellation_requested: bool = False
     cleanup_status: Literal["not_required", "pending", "complete", "incomplete"] = "not_required"
     terminal_receipt: dict[str, Any] | None = None
@@ -104,6 +105,7 @@ class OperationStatus(ContractModel):
     cleanup_status: Literal["not_required", "pending", "complete", "incomplete"]
     failure_code: str | None
     failure_message: str | None
+    failure_details: dict[str, Any] | None
     terminal_receipt: dict[str, Any] | None
     recovery: OperationRecovery | None
     created_at: datetime
@@ -400,13 +402,16 @@ class OperationRunner:
                 recovery=self._retry_recovery(self.store.read(operation_id)),
             )
         else:
+            failure_details = self._failure_details(error)
+            failure_phase = failure_details.get("phase")
             await self._update(
                 operation_id,
                 state="failed",
-                phase="failed",
+                phase=(failure_phase if isinstance(failure_phase, str) else "failed"),
                 cleanup_status="complete",
                 failure_code=error.code.value,
                 failure_message=error.message,
+                failure_details=failure_details,
                 item_outcomes=self._items(
                     operation_id,
                     "retryable" if error.retryable else "failed",
@@ -422,6 +427,21 @@ class OperationRunner:
                     )
                 ),
             )
+
+    @staticmethod
+    def _failure_details(error: DomainError) -> dict[str, Any]:
+        """Persist only bounded, recovery-relevant diagnostics from a domain failure."""
+        details: dict[str, Any] = {}
+        for key in ("phase", "failure_category", "adapter", "next_tool"):
+            value = error.details.get(key)
+            if isinstance(value, str) and value:
+                details[key] = value[:200]
+        detail = error.details.get("failure_detail") or error.details.get("error")
+        if detail is not None:
+            normalized = " ".join(str(detail).split())[:500]
+            if normalized:
+                details["failure_detail"] = normalized
+        return details
 
     async def _finish_unexpected_failure(self, operation_id: str, error: Exception) -> None:
         await self._update(

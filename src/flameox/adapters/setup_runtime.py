@@ -316,14 +316,21 @@ def install_trace_processor(
             )
             atomic_write_text(workspace.paths.config, updated.to_toml())
         temporary = None
-    except DomainError:
-        raise
+    except DomainError as exc:
+        raise _annotate_staging_error(exc) from exc
     except (OSError, urllib.error.URLError, ValueError) as exc:
+        category = _staging_failure_category(exc)
+        detail = _bounded_staging_detail(exc)
         raise DomainError(
             ErrorCode.PROCESS_FAILED,
             "FlameOx could not stage the managed Trace Processor.",
             retryable=True,
-            details={"next_tool": "prepare_capabilities", "adapter": "perfetto"},
+            details={
+                "next_tool": "prepare_capabilities",
+                "adapter": "perfetto",
+                "failure_category": category,
+                "failure_detail": detail,
+            },
             remediation=(
                 "Retry prepare_capabilities; if the download remains unavailable, install "
                 "the official user-space binary or configure analysis.trace_processor_path.",
@@ -333,6 +340,50 @@ def install_trace_processor(
         if temporary is not None:
             temporary.unlink(missing_ok=True)
     return TraceProcessorInstallation(TRACE_PROCESSOR_VERSION, target, True)
+
+
+def _annotate_staging_error(error: DomainError) -> DomainError:
+    """Retain a bounded cause when a staging helper already raised a domain error."""
+    details = dict(error.details)
+    details.setdefault("failure_category", _domain_failure_category(error))
+    details.setdefault(
+        "failure_detail",
+        _bounded_staging_detail(details.get("error") or error.message),
+    )
+    details.setdefault("phase", "staging_trace_processor")
+    return DomainError(
+        error.code,
+        error.message,
+        retryable=error.retryable,
+        details=details,
+        remediation=error.remediation,
+        run_id=error.run_id,
+    )
+
+
+def _domain_failure_category(error: DomainError) -> str:
+    if error.code is ErrorCode.PROCESS_CANCELLED:
+        return "cancelled"
+    if error.code is ErrorCode.PROCESS_TIMEOUT:
+        return "timeout"
+    if error.code is ErrorCode.ARTIFACT_TOO_LARGE:
+        return "download_limit"
+    if error.code is ErrorCode.CAPABILITY_UNAVAILABLE:
+        return "unsupported_platform"
+    return "verification"
+
+
+def _staging_failure_category(error: BaseException) -> str:
+    if isinstance(error, urllib.error.URLError):
+        return "network"
+    if isinstance(error, OSError):
+        return "filesystem"
+    return "verification"
+
+
+def _bounded_staging_detail(error: object) -> str:
+    detail = " ".join(str(error).split())
+    return detail[:500] or "The staging operation returned no diagnostic detail."
 
 
 def _verify_trace_processor(

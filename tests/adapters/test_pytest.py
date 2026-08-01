@@ -9,8 +9,15 @@ import pytest
 from flameox.adapters import PytestExtractor
 from flameox.application import ImportArtifactRequest, ImportService
 from flameox.catalog import Catalog
-from flameox.domain import ArtifactKind, DomainError, ErrorCode
-from flameox.storage import Workspace
+from flameox.domain import (
+    ArtifactKind,
+    ArtifactRegistration,
+    DomainError,
+    ErrorCode,
+    Sensitivity,
+    new_id,
+)
+from flameox.storage import ArtifactStore, RunStore, Workspace
 
 
 def _event(event: str, **fields: Any) -> str:
@@ -132,6 +139,82 @@ def test_pytest_extracts_fixture_cost_outcomes_and_failure_latency(tmp_path: Pat
     assert ("pytest.collection", 50, None, None) in rows
     assert ("pytest.tests.unexecuted", 1, None, None) in rows
     assert ("pytest.time_to_first_failure.reported", 1_800, None, None) in rows
+
+
+def test_pytest_marks_external_cuda_compile_failure_as_environment_blocked(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+    source = tmp_path / "pytest-events.jsonl"
+    source.write_text(
+        "\n".join(
+            (
+                _event(
+                    "run_started",
+                    run_started_at_ns=1_000,
+                    pytest_version="9.0",
+                    python_version="3.12",
+                    platform="test",
+                    scheduler="no",
+                    requested_workers="0",
+                ),
+                _event("collection_started"),
+                _event("test_collected", nodeid="test_gpu.py::test_compile"),
+                _event(
+                    "test_phase",
+                    nodeid="test_gpu.py::test_compile",
+                    worker_id="master",
+                    phase="setup",
+                    outcome="failed",
+                    duration_ns=10,
+                    started_at_ns=1_100,
+                    stopped_at_ns=1_110,
+                    controller_received_at_ns=1_120,
+                    wasxfail=False,
+                ),
+                _event("session_finished", exit_status=1),
+            )
+        )
+        + "\n"
+    )
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(path=source, kind=ArtifactKind.TEST_EXECUTION)
+    )
+    stderr = tmp_path / "stderr.bin"
+    stderr.write_text("fatal error: cuda_runtime.h: No such file or directory\n")
+    stored = ArtifactStore(workspace).import_path(
+        stderr,
+        allowed_roots=(tmp_path,),
+        max_bytes=workspace.config.capture.max_artifact_bytes,
+    )
+    run = RunStore(workspace).read(imported.run.run_id)
+    stderr_registration = ArtifactRegistration(
+        registration_id=new_id(),
+        run_id=run.run_id,
+        artifact_id=stored.content.artifact_id,
+        display_name="stderr.bin",
+        media_type="application/octet-stream",
+        kind=ArtifactKind.PROCESS_OUTPUT,
+        role="stderr",
+        sensitivity=Sensitivity.NORMAL,
+    )
+    RunStore(workspace).append(
+        run.model_copy(update={"revision": 2, "artifacts": (*run.artifacts, stderr_registration)}),
+        expected_revision=1,
+    )
+
+    result = PytestExtractor(workspace).extract(imported.run.run_id)
+
+    assert result.failed_count == 0
+    assert result.errored_count == 0
+    assert result.environment_blocked_count == 1
+    assert any("environment-blocked" in item for item in result.limitations)
+    with Catalog(workspace).open_snapshot() as snapshot:
+        row = snapshot.execute(
+            "SELECT value_int FROM measurements WHERE name = 'pytest.tests.environment_blocked'"
+        ).fetchone()
+    assert row == (1,)
 
 
 @pytest.mark.parametrize("payload", ("", "{}\n", "{broken\n"))
