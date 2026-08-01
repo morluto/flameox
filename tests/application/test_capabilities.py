@@ -515,7 +515,17 @@ python_distributions = ["agent-fixture>=2"]
     monkeypatch.setattr("flameox.application.dependencies.distribution", lookup)
     monkeypatch.setattr("flameox.application.preflight.distribution", lookup)
     monkeypatch.setattr("flameox.application.dependencies._uv_executable", lambda: "/usr/bin/uv")
-    monkeypatch.setattr("flameox.application.dependencies.subprocess.run", install)
+
+    async def install_async(
+        _: object,
+        command: list[str],
+    ) -> subprocess.CompletedProcess[str]:
+        return install(command)
+
+    monkeypatch.setattr(
+        "flameox.application.dependencies.WorkloadDependencyService._run_install",
+        install_async,
+    )
 
     result = await WorkloadDependencyService(Workspace(tmp_path / ".diagnostics")).prepare("probe")
 

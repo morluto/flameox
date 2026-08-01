@@ -66,6 +66,10 @@ async def test_capture_plan_is_single_use_and_publishes_process_evidence(
     memory = RecipeService(workspace).memory(result.run.run_id)
     assert memory.runtime_resource_totals is not None
     assert memory.runtime_resource_totals.run_count == 1
+    assert memory.evidence.status in {"available", "partial"}
+    if not memory.measurements and not memory.hotspots:
+        assert memory.evidence.status == "partial"
+        assert memory.evidence.reason == "no_memory_profile_artifact_runtime_evidence_present"
     assert memory.truncated is memory.runtime_resources_truncated
     hotspots = RecipeService(workspace).hotspots(result.run.run_id)
     assert hotspots.evidence_status == "unavailable"

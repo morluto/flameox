@@ -32,12 +32,19 @@ class DetachedCaptureRecord(ContractModel):
     revision: Annotated[int, Field(ge=0)] = 0
     idempotency_digest: str
     plan_digest: str
+    plan_request: dict[str, object] = Field(default_factory=dict)
     state: Literal["starting", "running", "terminal", "failed_to_start"] = "starting"
     progress: Annotated[tuple[DetachedProgress, ...], Field(max_length=16)] = ()
     failure_code: str | None = None
     failure_message: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class DetachedRecovery(ContractModel):
+    action: Literal["replan"] = "replan"
+    tool: Literal["plan_capture"] = "plan_capture"
+    arguments: dict[str, object]
 
 
 class DetachedCaptureStatus(ContractModel):
@@ -57,6 +64,7 @@ class DetachedCaptureStatus(ContractModel):
     failure_code: str | None = None
     failure_message: str | None = None
     limitations: tuple[str, ...] = ()
+    recovery: DetachedRecovery | None = None
 
 
 class DetachedCaptureManager:
@@ -85,25 +93,65 @@ class DetachedCaptureManager:
                 "idempotency_key": idempotency_key,
             }
         )
+        plan_digest = digest_model({"plan_id": plan_id})
         async with self._start_lock:
             existing_run_id = self._idempotency.get(idempotency_digest)
+            existing_record = None
+            if existing_run_id is None:
+                existing_record = next(
+                    (
+                        record
+                        for record in self.records.list()
+                        if record.idempotency_digest == idempotency_digest
+                    ),
+                    None,
+                )
+                if existing_record is not None:
+                    existing_run_id = existing_record.run_id
+
             if existing_run_id is not None:
-                record = self.records.read(existing_run_id)
-                if record.plan_digest != digest_model({"plan_id": plan_id}):
+                record = existing_record or self.records.read(existing_run_id)
+                if record.plan_digest != plan_digest:
                     raise DomainError(
                         ErrorCode.INVALID_CAPTURE_PLAN,
                         "The detached idempotency key is already bound to another plan.",
                     )
-                return self.status(existing_run_id)
+                self._idempotency[idempotency_digest] = record.run_id
+                return self.status(record.run_id)
 
             plan = await self.captures.plans.inspect(plan_id)
-            plan_digest = digest_model({"plan_id": plan_id})
             record = DetachedCaptureRecord(
                 run_id=plan.run_id,
                 idempotency_digest=idempotency_digest,
                 plan_digest=plan_digest,
+                plan_request={
+                    "workload_name": plan.workload_name,
+                    "adapter": plan.adapter,
+                    "parameters": plan.workload_instance.parameters,
+                    "preflight_mode": "auto",
+                    "capture_mode": (
+                        "managed" if plan.execution_policy == "approved_agent" else "trusted_local"
+                    ),
+                },
             )
-            self.records.create(record)
+            with self.workspace.write_locked():
+                existing_record = next(
+                    (
+                        item
+                        for item in self.records.list()
+                        if item.idempotency_digest == idempotency_digest
+                    ),
+                    None,
+                )
+                if existing_record is not None:
+                    if existing_record.plan_digest != plan_digest:
+                        raise DomainError(
+                            ErrorCode.INVALID_CAPTURE_PLAN,
+                            "The detached idempotency key is already bound to another plan.",
+                        )
+                    self._idempotency[idempotency_digest] = existing_record.run_id
+                    return self.status(existing_record.run_id)
+                self.records.create_locked(record)
             self._idempotency[idempotency_digest] = plan.run_id
             task = asyncio.create_task(
                 self._run(plan_id, plan.run_id),
@@ -118,12 +166,26 @@ class DetachedCaptureManager:
         try:
             run = self.runs.read(run_id)
         except DomainError:
+            managed = run_id in self._tasks and not self._tasks[run_id].done()
             return DetachedCaptureStatus(
                 run_id=run_id,
-                state=record.state,
+                state="starting" if managed else "failed_to_start",
                 progress=record.progress,
                 failure_code=record.failure_code,
                 failure_message=record.failure_message,
+                limitations=(
+                    (
+                        "The server stopped before publishing a run manifest. Re-plan the "
+                        "capture and start it with a new idempotency key.",
+                    )
+                    if not managed
+                    else ()
+                ),
+                recovery=(
+                    DetachedRecovery(arguments=record.plan_request)
+                    if not managed and record.plan_request
+                    else None
+                ),
             )
         terminal = run.execution_status in {
             ExecutionStatus.SUCCEEDED,

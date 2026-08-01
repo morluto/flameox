@@ -11,10 +11,12 @@ from flameox.application import (
     CapturePlanRegistry,
     CaptureService,
     DetachedCaptureManager,
+    DetachedCaptureRecord,
+    DetachedCaptureStatus,
     ExecutionPolicy,
 )
 from flameox.catalog import Catalog
-from flameox.domain import DomainError, ErrorCode, ExecutionStatus
+from flameox.domain import DomainError, ErrorCode, ExecutionStatus, digest_model
 from flameox.storage import Workspace
 
 
@@ -100,6 +102,73 @@ async def test_detached_idempotency_key_cannot_authorize_another_plan(
 
     assert reused.value.code is ErrorCode.INVALID_CAPTURE_PLAN
     await manager.cancel(first.run_id)
+
+
+@pytest.mark.anyio
+async def test_detached_idempotency_creation_is_atomic_across_managers(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path, "import time; time.sleep(10)")
+    first_captures, first_manager = _manager(workspace)
+    second_captures, second_manager = _manager(workspace)
+    first_plan = await first_captures.plan(
+        workload_name="detached",
+        adapter="command",
+        execution_policy=ExecutionPolicy.APPROVED_AGENT,
+    )
+    second_plan = await second_captures.plan(
+        workload_name="detached",
+        adapter="command",
+        execution_policy=ExecutionPolicy.APPROVED_AGENT,
+    )
+
+    results = await asyncio.gather(
+        first_manager.start(first_plan.plan_id, "cross-process-key"),
+        second_manager.start(second_plan.plan_id, "cross-process-key"),
+        return_exceptions=True,
+    )
+
+    assert sum(isinstance(result, DomainError) for result in results) == 1
+    assert len(first_manager.records.list()) == 1
+    winner = next(result for result in results if not isinstance(result, DomainError))
+    assert isinstance(winner, DetachedCaptureStatus)
+    assert winner.run_id in {first_plan.run_id, second_plan.run_id}
+    owner = first_manager if winner.run_id == first_plan.run_id else second_manager
+    await owner.cancel(winner.run_id)
+
+
+@pytest.mark.anyio
+async def test_detached_startup_crash_returns_replan_recovery(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path, "print('done')")
+    captures, manager = _manager(workspace)
+    plan = await captures.plan(
+        workload_name="detached",
+        adapter="command",
+        execution_policy=ExecutionPolicy.APPROVED_AGENT,
+    )
+    manager.records.create(
+        DetachedCaptureRecord(
+            run_id=plan.run_id,
+            idempotency_digest="sha256:startup-crash",
+            plan_digest=digest_model({"plan_id": plan.plan_id}),
+            plan_request={
+                "workload_name": "detached",
+                "adapter": "command",
+                "parameters": {},
+                "preflight_mode": "auto",
+                "capture_mode": "managed",
+            },
+        )
+    )
+
+    status = manager.status(plan.run_id)
+
+    assert status.state == "failed_to_start"
+    assert status.recovery is not None
+    assert status.recovery.tool == "plan_capture"
+    assert status.recovery.arguments["workload_name"] == "detached"
 
 
 @pytest.mark.anyio
@@ -205,9 +274,12 @@ async def test_restart_reconnect_is_truthfully_read_only(tmp_path: Path) -> None
     )
     await manager.start(plan.plan_id, "review-restart-001")
 
-    replacement = DetachedCaptureManager(workspace, captures)
+    replacement_captures = CaptureService(workspace)
+    replacement = DetachedCaptureManager(workspace, replacement_captures)
+    repeated = await replacement.start(plan.plan_id, "review-restart-001")
     status = replacement.status(plan.run_id)
 
+    assert repeated.run_id == plan.run_id
     assert status.state == "unmanaged_after_restart"
     assert status.limitations
     with pytest.raises(DomainError) as cancellation:

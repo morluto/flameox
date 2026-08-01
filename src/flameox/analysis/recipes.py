@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Literal, cast
 
 import numpy as np
+from pydantic import Field
 from scipy.stats import bootstrap, spearmanr
 from statsmodels.api import OLS
 from statsmodels.stats.multitest import multipletests
@@ -17,6 +18,11 @@ from statsmodels.stats.stattools import durbin_watson
 from flameox.catalog import Catalog, Snapshot
 from flameox.domain import DomainError, ErrorCode, digest_model
 from flameox.evidence_scope import EvidenceScope, resolve_evidence_scope
+from flameox.evidence_status import (
+    EvidenceAvailability,
+    available_availability,
+    empty_availability,
+)
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
@@ -43,8 +49,11 @@ class HotspotResult(ContractModel):
     truncated: bool
     coverage: dict[str, int]
     limitations: tuple[str, ...]
-    evidence_status: Literal["available", "unavailable"] = "available"
+    evidence_status: Literal["available", "empty", "unavailable", "partial", "unknown"] = (
+        "available"
+    )
     unavailable_reason: str | None = None
+    evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
 
 class MeasurementSummary(ContractModel):
@@ -71,6 +80,7 @@ class MemoryAnalysisResult(ContractModel):
     writable_root_observations: tuple[WritableRootObservation, ...] = ()
     policy_termination: str | None = None
     unavailable_metrics: tuple[str, ...] = ()
+    evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
 
 class RuntimeResourceObservation(ContractModel):
@@ -134,6 +144,7 @@ class ExecutionAnalysisResult(ContractModel):
     returned: int
     truncated: bool
     limitations: tuple[str, ...]
+    evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
 
 class ExecutionObservationChange(ContractModel):
@@ -177,6 +188,7 @@ class PyTorchAnalysisResult(ContractModel):
     warmup_time_ns: int = 0
     allocation_bytes: int | None = None
     limitations: tuple[str, ...]
+    evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
 
 class FailureCluster(ContractModel):
@@ -220,6 +232,7 @@ class FailureAnalysisResult(ContractModel):
         "Clusters use lifecycle status and exit code; native crash signatures "
         "require a specialized extractor.",
     )
+    evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
 
 class ScalingPoint(ContractModel):
@@ -304,6 +317,7 @@ class ScalingAnalysisResult(ContractModel):
     limitations: tuple[str, ...] = (
         "Points are per-trial medians; statistical decisions belong to frozen run-set comparisons.",
     )
+    evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
 
 class RecipeService:
@@ -352,6 +366,10 @@ class RecipeService:
                     ),
                     evidence_status="unavailable",
                     unavailable_reason="no_profile_artifact",
+                    evidence=EvidenceAvailability(
+                        status="unavailable",
+                        reason="no_profile_artifact",
+                    ),
                 )
             count_row = snapshot.execute(
                 "SELECT count(*) FROM frame_measurements fm WHERE " + where,
@@ -404,7 +422,12 @@ class RecipeService:
                 "Complete stacks remain in native artifacts; this result is a bounded "
                 "frame aggregate.",
             ),
-            evidence_status="available",
+            evidence_status="available" if hotspots else "empty",
+            evidence=(
+                empty_availability("no_matching_hotspots")
+                if not hotspots
+                else available_availability()
+            ),
         )
 
     @staticmethod
@@ -466,6 +489,13 @@ class RecipeService:
                 "GROUP BY phase, name ORDER BY phase_order, phase, name",
                 parameters,
             ).fetchall()
+            profile_where, profile_parameters = self._memory_profile_artifact_predicate(scope)
+            profile_row = snapshot.execute(
+                "SELECT count(*) FROM artifact_registrations ar WHERE " + profile_where,
+                profile_parameters,
+            ).fetchone()
+            assert profile_row is not None
+            has_memory_profile = int(profile_row[0]) > 0
             hotspot_result = RecipeService(
                 self.workspace,
                 snapshot=snapshot,
@@ -516,6 +546,59 @@ class RecipeService:
             limitations.append(
                 "Runtime resource summary was not published for this evidence generation."
             )
+        memory_run_id = scope.run_ids[0] if len(scope.run_ids) == 1 else None
+        memory_hotspots = tuple(
+            item for item in hotspot_result.hotspots if item.metric.startswith("memory.")
+        )
+        has_runtime_evidence = bool(
+            resource_rows
+            or writable_rows
+            or policy_termination is not None
+            or (resource_total is not None and resource_total.run_count > 0)
+        )
+        evidence = (
+            EvidenceAvailability(
+                status="unavailable",
+                reason=(
+                    "memory_profile_not_extracted"
+                    if has_memory_profile
+                    else "no_memory_profile_artifact"
+                ),
+                next_tool="extract_memray" if has_memory_profile and memory_run_id else None,
+                next_arguments=(
+                    {"run_id": memory_run_id} if has_memory_profile and memory_run_id else None
+                ),
+            )
+            if (
+                not rows
+                and not memory_hotspots
+                and not phase_growth
+                and has_memory_profile
+                and not has_runtime_evidence
+            )
+            else (
+                EvidenceAvailability(
+                    status="partial" if has_runtime_evidence else "unavailable",
+                    reason=(
+                        (
+                            "memory_profile_not_extracted_runtime_evidence_present"
+                            if has_memory_profile
+                            else "no_memory_profile_artifact_runtime_evidence_present"
+                        )
+                        if has_runtime_evidence
+                        else "no_memory_profile_artifact"
+                    ),
+                )
+                if not rows and not memory_hotspots and not phase_growth
+                else (
+                    available_availability()
+                    if memory_hotspots or phase_growth
+                    else empty_availability("no_memory_measurements")
+                )
+                if not rows
+                else available_availability()
+            )
+        )
         return MemoryAnalysisResult(
             corpus_commit_id=snapshot.commit.commit_id,
             input_id=input_id,
@@ -530,9 +613,7 @@ class RecipeService:
                 )
                 for row in rows
             ),
-            hotspots=tuple(
-                item for item in hotspot_result.hotspots if item.metric.startswith("memory.")
-            ),
+            hotspots=memory_hotspots,
             phase_growth=tuple(phase_growth),
             limitations=tuple(limitations),
             runtime_resources=resource_rows,
@@ -542,7 +623,24 @@ class RecipeService:
             writable_root_observations=writable_rows,
             policy_termination=policy_termination,
             unavailable_metrics=unavailable_metrics,
+            evidence=evidence,
         )
+
+    @staticmethod
+    def _memory_profile_artifact_predicate(scope: EvidenceScope) -> tuple[str, tuple[object, ...]]:
+        predicates: list[str] = []
+        parameters: list[object] = []
+        if scope.run_ids:
+            placeholders = ", ".join("?" for _ in scope.run_ids)
+            predicates.append(f"(ar.run_id IN ({placeholders}) AND ar.kind = 'memory_profile')")
+            parameters.extend(scope.run_ids)
+        if scope.artifact_ids:
+            placeholders = ", ".join("?" for _ in scope.artifact_ids)
+            predicates.append(
+                f"(ar.artifact_id IN ({placeholders}) AND ar.kind = 'memory_profile')"
+            )
+            parameters.extend(scope.artifact_ids)
+        return " OR ".join(predicates) or "FALSE", tuple(parameters)
 
     def _runtime_resources(
         self,
@@ -728,6 +826,11 @@ class RecipeService:
             returned=len(observations),
             truncated=total > len(observations),
             limitations=tuple(limitations),
+            evidence=(
+                empty_availability("no_execution_observations")
+                if not (total or added or removed or changed)
+                else available_availability()
+            ),
         )
 
     def pytorch(
@@ -753,15 +856,20 @@ class RecipeService:
             assert count_row is not None
             total = int(count_row[0])
             if total == 0:
-                run_rows = snapshot.execute(
-                    "SELECT DISTINCT run_id FROM artifact_registrations WHERE artifact_id IN ("
-                    + ", ".join("?" for _ in scope.artifact_ids)
-                    + ") ORDER BY run_id",
-                    scope.artifact_ids,
-                ).fetchall()
-                run_ids = tuple(str(row[0]) for row in run_rows)
+                if scope.run_ids:
+                    run_ids = scope.run_ids
+                elif scope.artifact_ids:
+                    run_rows = snapshot.execute(
+                        "SELECT DISTINCT run_id FROM artifact_registrations WHERE artifact_id IN ("
+                        + ", ".join("?" for _ in scope.artifact_ids)
+                        + ") ORDER BY run_id",
+                        scope.artifact_ids,
+                    ).fetchall()
+                    run_ids = tuple(str(row[0]) for row in run_rows)
+                else:
+                    run_ids = ()
                 details: dict[str, object] = {"next_tool": "extract_perfetto"}
-                if len(run_ids) == 1:
+                if run_ids:
                     details["run_id"] = run_ids[0]
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
@@ -966,6 +1074,11 @@ class RecipeService:
             warmup_time_ns=warmup_time_ns,
             allocation_bytes=allocation_bytes,
             limitations=tuple(limitations),
+            evidence=(
+                empty_availability("no_normalized_torch_operators")
+                if total == 0
+                else available_availability()
+            ),
         )
 
     def failures(
@@ -1187,6 +1300,11 @@ class RecipeService:
                 "symbolized_frames": int(coverage_row[3]) / denominator,
             },
             competing_hypotheses=tuple(hypotheses),
+            evidence=(
+                empty_availability(empty_reason or "no_failures")
+                if not failures
+                else available_availability()
+            ),
         )
 
     def scaling(
@@ -1381,22 +1499,66 @@ class RecipeService:
         environment_stable = all(point.environment_count == 1 for point in points)
         if not environment_stable:
             warnings.append("Environment identity varies within at least one scaling point.")
+        attempted_trials = int(trial_row[0])
+        succeeded_trials = int(trial_row[1])
+        failed_trials = int(trial_row[2])
+        evidence, measurement_warning = self._scaling_evidence(
+            points,
+            attempted_trials=attempted_trials,
+            succeeded_trials=succeeded_trials,
+            measured_trials=len(trials),
+        )
+        if measurement_warning is not None:
+            warnings.append(measurement_warning)
         return ScalingAnalysisResult(
             corpus_commit_id=snapshot.commit.commit_id,
             experiment_id=experiment_id,
             metric=metric,
             points=points,
             trials=tuple(trials),
-            attempted_trials=int(trial_row[0]),
-            succeeded_trials=int(trial_row[1]),
-            failed_trials=int(trial_row[2]),
+            attempted_trials=attempted_trials,
+            succeeded_trials=succeeded_trials,
+            failed_trials=failed_trials,
             complete_blocks=int(complete_row[0]),
             fits=fits,
             correlated_hotspots=correlated_hotspots,
             conclusion=conclusion,
             environment_stable=environment_stable,
             warnings=tuple(warnings),
+            evidence=evidence,
         )
+
+    @staticmethod
+    def _scaling_evidence(
+        points: tuple[ScalingPoint, ...],
+        *,
+        attempted_trials: int,
+        succeeded_trials: int,
+        measured_trials: int,
+    ) -> tuple[EvidenceAvailability, str | None]:
+        if points and succeeded_trials > measured_trials:
+            return (
+                EvidenceAvailability(
+                    status="partial",
+                    reason="primary_metric_measurements_partial",
+                ),
+                "Some succeeded trials published no measurements matching the experiment's "
+                "primary metric.",
+            )
+        if points:
+            return available_availability(), None
+        if succeeded_trials:
+            return (
+                EvidenceAvailability(
+                    status="unavailable",
+                    reason="primary_metric_measurements_unavailable",
+                ),
+                "Succeeded trials published no measurements matching the experiment's "
+                "primary metric.",
+            )
+        if attempted_trials:
+            return empty_availability("no_succeeded_trials"), None
+        return empty_availability("no_scaling_trials"), None
 
     def _scaling_fits(
         self,

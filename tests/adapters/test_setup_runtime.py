@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from flameox.adapters import ManagedRuntime, install_trace_processor
+from flameox.application.capabilities import CapabilityService
 from flameox.storage import Workspace
 
 
@@ -91,6 +92,22 @@ async def test_runtime_install_carries_prepared_capabilities_into_new_runtime(
     await runtime.install("0.1.1")
 
     assert recorded_command[-1] == "flameox[memory,torch]==0.1.1"
+
+
+def test_workspace_capability_setup_is_visible_to_runtime_upgrades(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setattr(
+        "flameox.application.capabilities.user_data_path",
+        lambda *_args, **_kwargs: runtime_root,
+    )
+
+    CapabilityService(workspace)._record_managed_extras(("torch",))
+
+    assert ManagedRuntime(runtime_root)._managed_extras() == ("torch",)
 
 
 def test_installed_version_discovery_ignores_unmanaged_directories(tmp_path: Path) -> None:

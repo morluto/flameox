@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import platform
@@ -7,7 +8,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Sequence
+import threading
+import time
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
@@ -20,6 +23,7 @@ from platformdirs import user_data_path
 from flameox.adapters.builtins import BUILTIN_ADAPTERS, BuiltinAdapter, builtin_adapter
 from flameox.adapters.registry import AdapterRegistry
 from flameox.adapters.setup_runtime import install_trace_processor
+from flameox.application.operations import OperationFailure, OperationRunner, OperationStatus
 from flameox.atomic import atomic_write_json
 from flameox.domain import (
     AdapterSetup,
@@ -94,6 +98,8 @@ _CONTAINMENT_VERSION_ARGS = {
     "containment.systemd": ("--version",),
 }
 
+_CAPABILITY_INSTALL_TIMEOUT_SECONDS = 1_800
+
 
 class CapabilityService:
     """Passive discovery plus explicit, brokered, process-lifetime active probes."""
@@ -107,8 +113,13 @@ class CapabilityService:
     ) -> None:
         self.workspace = workspace
         self.broker = broker or SubprocessBroker()
+        self._uses_default_workspace_manifest = (
+            capability_manifest is None and workspace is not None
+        )
         self.capability_manifest = capability_manifest or (
-            Path(user_data_path("flameox", appauthor=False)) / "capabilities.json"
+            workspace.paths.records / "capabilities.json"
+            if workspace is not None
+            else Path(user_data_path("flameox", appauthor=False)) / "capabilities.json"
         )
         self.setup_receipt_path = self.capability_manifest.with_name("capability-setup.json")
         self._active_cache: dict[str, CapabilityReport] = {}
@@ -546,7 +557,12 @@ class CapabilityService:
             remediation=("Choose one of flameox's registered adapters.",),
         )
 
-    def prepare(self, adapters: tuple[str, ...]) -> CapabilitySetupResult:
+    def prepare(
+        self,
+        adapters: tuple[str, ...],
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> CapabilitySetupResult:
         """Install only declared FlameOx-managed providers into this runtime."""
         reports = {item.adapter: item for item in self.list().capabilities}
         requested = tuple(dict.fromkeys(adapters))
@@ -625,14 +641,26 @@ class CapabilityService:
         try:
             if pending_managed:
                 with portalocker.Lock(lock_path, mode="a", timeout=30):
-                    completed = subprocess.run(
-                        [str(uv), "pip", "install", "--python", sys.executable, *requirements],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        timeout=1_800,
-                        env={**os.environ, "UV_NO_PROGRESS": "1"},
-                    )
+                    self._check_cancelled(cancel_event)
+                    command = [
+                        str(uv),
+                        "pip",
+                        "install",
+                        "--python",
+                        sys.executable,
+                        *requirements,
+                    ]
+                    if cancel_event is None:
+                        completed = subprocess.run(
+                            command,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            timeout=_CAPABILITY_INSTALL_TIMEOUT_SECONDS,
+                            env={**os.environ, "UV_NO_PROGRESS": "1"},
+                        )
+                    else:
+                        completed = self._run_cancellable_install(command, cancel_event)
                 if completed.returncode != 0:
                     detail = (completed.stderr.strip() or completed.stdout.strip())[:500]
                     raise DomainError(
@@ -651,13 +679,15 @@ class CapabilityService:
                     phase=("staging_trace_processor" if pending_trace else "completed"),
                 )
             if pending_trace:
+                self._check_cancelled(cancel_event)
                 if self.workspace is None:
                     raise DomainError(
                         ErrorCode.WORKSPACE_NOT_FOUND,
                         "A workspace is required to stage the managed Trace Processor.",
                         details={"next_tool": "initialize_workspace"},
                     )
-                install_trace_processor(self.workspace)
+                install_trace_processor(self.workspace, cancel_event=cancel_event)
+                self._check_cancelled(cancel_event)
         except DomainError as exc:
             self._record_setup_receipt(
                 requested,
@@ -721,6 +751,69 @@ class CapabilityService:
             installed=pending,
             already_available=already_available,
             setup_verification=self._verification(requested, refreshed),
+        )
+
+    @staticmethod
+    def _check_cancelled(cancel_event: threading.Event | None) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise DomainError(
+                ErrorCode.PROCESS_CANCELLED,
+                "Capability setup was cancelled before the next side effect.",
+                retryable=True,
+                details={"next_tool": "start_capability_setup"},
+                remediation=("Retry the exact capability setup request when ready.",),
+            )
+
+    @classmethod
+    def _run_cancellable_install(
+        cls,
+        command: Sequence[str],
+        cancel_event: threading.Event,
+    ) -> subprocess.CompletedProcess[str]:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ, "UV_NO_PROGRESS": "1"},
+        )
+        deadline = time.monotonic() + _CAPABILITY_INSTALL_TIMEOUT_SECONDS
+
+        def terminate() -> None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+        while process.poll() is None:
+            if cancel_event.wait(0.1):
+                terminate()
+                raise DomainError(
+                    ErrorCode.PROCESS_CANCELLED,
+                    "Capability setup was cancelled and its installer was terminated.",
+                    retryable=True,
+                    details={"next_tool": "start_capability_setup"},
+                )
+            if time.monotonic() >= deadline:
+                terminate()
+                raise DomainError(
+                    ErrorCode.PROCESS_TIMEOUT,
+                    "Capability setup installer exceeded its 1800 second timeout.",
+                    retryable=True,
+                    details={"next_tool": "start_capability_setup"},
+                    remediation=(
+                        "Retry capability setup after checking package-index access and the "
+                        "managed runtime.",
+                    ),
+                )
+        stdout, stderr = process.communicate()
+        return subprocess.CompletedProcess(
+            command,
+            process.returncode,
+            stdout,
+            stderr,
         )
 
     def prepare_adapter(self, adapter: str, distribution: str) -> AdapterPreparationResult:
@@ -857,10 +950,31 @@ class CapabilityService:
                 }
         except (OSError, ValueError):
             pass
-        atomic_write_json(
-            self.capability_manifest,
-            {"schema_version": 1, "extras": sorted(existing | values)},
-        )
+        payload = {"schema_version": 1, "extras": sorted(existing | values)}
+        atomic_write_json(self.capability_manifest, payload)
+        if self.workspace is not None and self._uses_default_workspace_manifest:
+            runtime_manifest = (
+                Path(user_data_path("flameox", appauthor=False)) / "capabilities.json"
+            )
+            if runtime_manifest != self.capability_manifest:
+                runtime_existing: set[str] = set()
+                try:
+                    runtime_payload = json.loads(runtime_manifest.read_text())
+                    if isinstance(runtime_payload, dict) and isinstance(
+                        runtime_payload.get("extras"), list
+                    ):
+                        runtime_existing = {
+                            value
+                            for value in runtime_payload["extras"]
+                            if isinstance(value, str)
+                            and value in {"cpu", "execution", "memory", "test", "trace", "torch"}
+                        }
+                except (OSError, ValueError):
+                    pass
+                atomic_write_json(
+                    runtime_manifest,
+                    {"schema_version": 1, "extras": sorted(runtime_existing | values)},
+                )
 
     def _containment_reports(
         self,
@@ -940,3 +1054,68 @@ class CapabilityService:
         except OSError:
             return (f"{path.name}=unknown",)
         return (f"{path.name}={value}",)
+
+
+class CapabilitySetupManager:
+    """Durable MCP lifecycle for package and Trace Processor provisioning."""
+
+    def __init__(self, workspace: Workspace, service: CapabilityService) -> None:
+        self.workspace = workspace
+        self.service = service
+        self.runner = OperationRunner(workspace, "capability.setup")
+
+    async def start(
+        self,
+        adapters: tuple[str, ...],
+        idempotency_key: str,
+    ) -> OperationStatus:
+        requested = tuple(dict.fromkeys(adapters))
+        return await self.runner.start(
+            {"adapters": requested},
+            idempotency_key,
+            self._run,
+            items=requested,
+        )
+
+    async def status(self, operation_id: str) -> OperationStatus:
+        return await self.runner.status(operation_id)
+
+    async def cancel(self, operation_id: str) -> OperationStatus:
+        return await self.runner.cancel(operation_id)
+
+    async def shutdown(self) -> None:
+        await self.runner.shutdown()
+
+    async def _run(
+        self,
+        operation_id: str,
+        progress: Callable[[str, float | None, float | None, str], Awaitable[None]],
+    ) -> dict[str, object]:
+        await progress("validating_request", 0, 3, "Validating managed capability request.")
+        await progress("installing_packages", 1, 3, "Installing declared optional providers.")
+        cancel_event = threading.Event()
+        self.runner.set_cancel_hook(operation_id, cancel_event.set)
+        try:
+            try:
+                result = await asyncio.to_thread(
+                    self.service.prepare,
+                    self._requested(operation_id),
+                    cancel_event=cancel_event,
+                )
+            except DomainError as error:
+                receipt = self.service._read_setup_receipt()
+                raise OperationFailure(
+                    error,
+                    completed_items=receipt.completed if receipt is not None else (),
+                ) from error
+            await progress("verifying", 2, 3, "Refreshing and verifying requested capabilities.")
+            await progress("completed", 3, 3, "Capability setup complete.")
+            return {"setup": result.model_dump(mode="json")}
+        finally:
+            self.runner.clear_cancel_hook(operation_id)
+
+    def _requested(self, operation_id: str) -> tuple[str, ...]:
+        record = self.runner.store.read(operation_id)
+        # Item identities retain the exact bounded request without exposing
+        # package-manager arguments or host paths to the protocol.
+        return tuple(item.item for item in record.item_outcomes)

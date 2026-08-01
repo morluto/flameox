@@ -14,7 +14,9 @@ from flameox.application import (
     InvestigationService,
 )
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
+from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
+from tests.support.analysis import run_row
 
 
 def test_measurement_query_uses_bounded_snapshot_cursors(tmp_path: Path) -> None:
@@ -63,3 +65,45 @@ def test_measurement_query_uses_bounded_snapshot_cursors(tmp_path: Path) -> None
     with pytest.raises(DomainError) as stale:
         service.measurements(cursor=first.next_cursor)
     assert stale.value.code is ErrorCode.STALE_CURSOR
+
+
+def test_measurement_query_reports_filtered_warmups_as_empty(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "runs": [run_row("warmup-only")],
+            "measurements": [
+                {
+                    "measurement_id": "warmup-measurement",
+                    "run_id": "warmup-only",
+                    "artifact_id": None,
+                    "name": "benchmark.duration",
+                    "value_int": None,
+                    "value_float": 1.0,
+                    "unit": "seconds",
+                    "aggregation": "single",
+                    "scope": "process",
+                    "trial_id": None,
+                    "worker_id": None,
+                    "worker_run_index": 0,
+                    "value_index": 0,
+                    "loop_count": None,
+                    "is_warmup": True,
+                    "block_id": None,
+                    "variant_id": None,
+                    "order_in_block": None,
+                    "phase": None,
+                    "dimensions": {},
+                    "evidence_level": "observed",
+                }
+            ],
+        },
+        publisher="warmup-fixture",
+        publisher_version="1",
+    )
+
+    result = EvidenceQueryService(workspace).measurements(run_id="warmup-only")
+
+    assert result.measurements == ()
+    assert result.evidence.status == "empty"
+    assert result.evidence.reason == "no_matching_measurements"

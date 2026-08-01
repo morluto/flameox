@@ -1862,6 +1862,20 @@ class CaptureService:
             if Path(path).exists():
                 wrapped.extend(("--ro-bind", path, path))
         wrapped.extend(("--ro-bind", str(project_root), str(project_root)))
+        diagnostics = diagnostics.resolve()
+        launcher_paths = {
+            Path(argument).resolve().parent
+            for argument in argv
+            if os.path.isabs(argument)
+            and Path(argument).name.endswith("_launcher.py")
+            and Path(argument).is_file()
+            and diagnostics not in Path(argument).resolve().parents
+        }
+        for launcher_path in sorted(launcher_paths):
+            try:
+                launcher_path.relative_to(project_root)
+            except ValueError:
+                wrapped.extend(("--ro-bind", str(launcher_path), str(launcher_path)))
         for binding in writable_roots:
             wrapped.extend(("--bind", binding.storage_path, binding.target_path))
         executable = Path(argv[0])

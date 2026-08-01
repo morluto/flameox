@@ -217,10 +217,13 @@ disabled.
 ### Network behavior
 
 The flameox control process performs no network calls during capture or analysis.
-The explicit MCP `prepare_capabilities` operation may fetch and install only the
-allowlisted FlameOx optional providers into the managed runtime; it never
-executes a workload and records the selected extras for future runtime
-upgrades. Host executables and permissions remain manual limitations.
+The explicit MCP `start_capability_setup` operation may fetch and install only
+the allowlisted FlameOx optional providers into the managed runtime; poll
+`get_capability_setup` for its durable receipt or use `cancel_capability_setup`
+for cleanup. The compatibility `prepare_capabilities` wrapper follows the same
+policy. Setup never executes a workload and records the selected extras for
+future runtime upgrades. Host executables and permissions remain manual
+limitations.
 Symbol-server or debuginfod access is disabled unless explicitly enabled
 in local configuration and invoked through the CLI. Child workloads may use
 the network unless an active containment backend denies it; this is displayed

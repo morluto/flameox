@@ -25,7 +25,7 @@ class ArtifactRegistrationSummary(ContractModel):
 class ArtifactMetadataResult(ContractModel):
     schema_version: int = 1
     content: ArtifactContent
-    local_handle: str
+    resource_uri: str
     registrations: tuple[ArtifactRegistrationSummary, ...]
     total_registrations: int
     effective_sensitivity: Sensitivity
@@ -91,7 +91,7 @@ class ArtifactService:
         )
         return ArtifactMetadataResult(
             content=stored.content,
-            local_handle=str(stored.payload_path),
+            resource_uri=f"flameox://artifacts/{artifact_id}",
             registrations=registrations,
             total_registrations=int(count_row[0]),
             effective_sensitivity=max(

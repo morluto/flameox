@@ -14,6 +14,7 @@ from flameox.application.capabilities import (
     AdapterPreparationResult,
     CapabilityList,
     CapabilityService,
+    CapabilitySetupManager,
     CapabilitySetupResult,
     SetupVerification,
 )
@@ -65,6 +66,7 @@ from flameox.application.evidence_query import (
     MeasurementItem,
     MeasurementQueryResult,
 )
+from flameox.application.evidence_status import EvidenceAvailability, EvidenceStatus
 from flameox.application.execution_identity import ExecutionIdentityService
 from flameox.application.execution_policy import ExecutionPolicy
 from flameox.application.experiments import (
@@ -92,6 +94,16 @@ from flameox.application.integrity import (
     IntegrityIssue,
     IntegrityResult,
     IntegrityService,
+)
+from flameox.application.operations import (
+    OperationFailure,
+    OperationItemOutcome,
+    OperationProgress,
+    OperationRecord,
+    OperationRecovery,
+    OperationRunner,
+    OperationState,
+    OperationStatus,
 )
 from flameox.application.pipelines import (
     ArtifactPipeline,
@@ -195,6 +207,7 @@ __all__ = [
     "CallEdgeResult",
     "CapabilityList",
     "CapabilityService",
+    "CapabilitySetupManager",
     "CapabilitySetupResult",
     "CapturePlanRegistry",
     "CaptureResult",
@@ -217,10 +230,12 @@ __all__ = [
     "DetachedProgress",
     "DiscoveryCoverage",
     "DrilldownService",
+    "EvidenceAvailability",
     "EvidenceInput",
     "EvidenceLookupResult",
     "EvidenceLookupService",
     "EvidenceQueryService",
+    "EvidenceStatus",
     "EvidenceSummary",
     "EvidenceSummaryBundle",
     "EvidenceSummaryRequest",
@@ -262,6 +277,14 @@ __all__ = [
     "NativeViewerLaunchResult",
     "NativeViewerPlan",
     "NativeViewerService",
+    "OperationFailure",
+    "OperationItemOutcome",
+    "OperationProgress",
+    "OperationRecord",
+    "OperationRecovery",
+    "OperationRunner",
+    "OperationState",
+    "OperationStatus",
     "OutcomeCount",
     "OutcomeExperimentResult",
     "PipelineComparison",

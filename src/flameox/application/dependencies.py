@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -74,7 +75,7 @@ class WorkloadDependencyService:
             lock_path = Path(sys.executable).parent / ".flameox-workload-dependencies.lock"
             try:
                 with portalocker.Lock(lock_path, mode="a", timeout=30):
-                    completed = subprocess.run(
+                    completed = await self._run_install(
                         [
                             uv,
                             "pip",
@@ -82,12 +83,7 @@ class WorkloadDependencyService:
                             "--python",
                             sys.executable,
                             *(str(item) for item in missing),
-                        ],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        timeout=1_800,
-                        env={**os.environ, "UV_NO_PROGRESS": "1"},
+                        ]
                     )
             except (
                 OSError,
@@ -148,6 +144,39 @@ class WorkloadDependencyService:
             preflight=preflight,
             status=preflight.disposition,
             next_tool=next_tool,
+        )
+
+    @staticmethod
+    async def _run_install(command: list[str]) -> subprocess.CompletedProcess[str]:
+        """Run the installer as an owned subprocess that cancellation can terminate."""
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "UV_NO_PROGRESS": "1"},
+        )
+        communication = asyncio.create_task(process.communicate())
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                asyncio.shield(communication),
+                timeout=1_800,
+            )
+        except (asyncio.CancelledError, TimeoutError) as error:
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(asyncio.shield(communication), timeout=5)
+                except TimeoutError:
+                    process.kill()
+                    await asyncio.shield(communication)
+            if isinstance(error, asyncio.CancelledError):
+                raise
+            raise subprocess.TimeoutExpired(command, 1_800) from error
+        return subprocess.CompletedProcess(
+            command,
+            process.returncode if process.returncode is not None else -1,
+            stdout.decode(errors="replace"),
+            stderr.decode(errors="replace"),
         )
 
     @staticmethod

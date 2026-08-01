@@ -59,7 +59,7 @@ from flameox.application import (
     CallEdgeResult,
     CapabilityList,
     CapabilityService,
-    CapabilitySetupResult,
+    CapabilitySetupManager,
     CapturePlanRegistry,
     CaptureService,
     CompareRunSetsRequest,
@@ -124,6 +124,7 @@ from flameox.application import (
     workspace_status,
 )
 from flameox.application.async_work import run_atomic_thread
+from flameox.application.operations import OperationStatus
 from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,
@@ -199,8 +200,15 @@ class ManualConfigurationRecoveryContext(ContractModel):
     verification_tool: Literal["workload_configuration_status"] = "workload_configuration_status"
 
 
+class ExtractPerfettoRecoveryContext(ContractModel):
+    kind: Literal["extract_perfetto"]
+    run_id: str = Field(min_length=1)
+
+
 type RecoveryContext = Annotated[
-    ConfigureWorkloadRecoveryContext | ManualConfigurationRecoveryContext,
+    ConfigureWorkloadRecoveryContext
+    | ManualConfigurationRecoveryContext
+    | ExtractPerfettoRecoveryContext,
     Field(discriminator="kind"),
 ]
 
@@ -221,6 +229,7 @@ class RecoveryAction(ContractModel):
         "discover_runs",
         "discover_artifacts",
         "import_artifact",
+        "extract_perfetto",
         "manual",
     ]
     safe_to_repeat_same_call: bool
@@ -370,6 +379,7 @@ class AppContext:
     capture_plans: CapturePlanRegistry
     experiment_plans: ExperimentPlanRegistry
     detached_captures: DetachedCaptureManager | None = None
+    capability_setup: CapabilitySetupManager | None = None
 
     def require_workspace(self) -> Workspace:
         if self.workspace is None:
@@ -404,6 +414,12 @@ class AppContext:
                 self.capture_service(),
             )
         return self.detached_captures
+
+    def capability_setup_service(self) -> CapabilitySetupManager:
+        if self.capability_setup is None:
+            workspace = self.require_workspace()
+            self.capability_setup = CapabilitySetupManager(workspace, self.capabilities)
+        return self.capability_setup
 
 
 def _success[T: BaseModel](
@@ -586,6 +602,19 @@ def _recovery_for(error: DomainError) -> RecoveryAction:
             safe_to_repeat_same_call=False,
             next_tool="import_artifact",
         )
+    if error.details.get("next_tool") == "extract_perfetto":
+        run_id = error.details.get("run_id")
+        context = (
+            ExtractPerfettoRecoveryContext(kind="extract_perfetto", run_id=run_id)
+            if isinstance(run_id, str)
+            else None
+        )
+        return RecoveryAction(
+            kind="extract_perfetto",
+            safe_to_repeat_same_call=True,
+            next_tool="extract_perfetto",
+            context=context,
+        )
     if error.details.get("next_tool") == "list_capabilities":
         return RecoveryAction(
             kind="inspect_capabilities",
@@ -699,12 +728,15 @@ def create_server(
                 workspace,
                 state.capture_service(),
             )
+            state.capability_setup = CapabilitySetupManager(workspace, state.capabilities)
         lifespan_state.append(state)
         try:
             yield state
         finally:
             if state.detached_captures is not None:
                 await state.detached_captures.shutdown()
+            if state.capability_setup is not None:
+                await state.capability_setup.shutdown()
             lifespan_state.clear()
 
     server = StrictMCPServer(
@@ -715,7 +747,8 @@ def create_server(
             "Use Flameox to collect, preserve, compare, and inspect local runtime evidence "
             "when source, environment, command, and artifact provenance must be reproducible. "
             "Do not provision hosts or install undeclared packages. If list_capabilities reports "
-            "a managed setup action, call prepare_capabilities; it installs only the declared "
+            "a managed setup action, call start_capability_setup (or the compatibility "
+            "prepare_capabilities wrapper); it installs only the declared "
             "FlameOx optional providers into the active managed runtime, verifies them, and "
             "does not execute a workload. Host containment is not required for the agent path: "
             "plan_capture(capture_mode='auto') followed by execute_capture_plan runs the "
@@ -729,8 +762,9 @@ def create_server(
             "workspace_status. Initialization writes .diagnostics. Then call "
             "workload_configuration_status. If flameox.toml is missing, call configure_workload "
             "with the validated argument array; it writes the canonical project definition but "
-            "never executes it. After that, use list_declared_workflows → "
-            "get_declared_workflow → list_capabilities → prepare_capabilities (when the result "
+            "never executes it. After that, use list_declared_workflows (no arguments lists "
+            "workloads) → "
+            "get_declared_workflow → list_capabilities → start_capability_setup (when the result "
             "names setup_adapters) → prepare_adapter (for an unapproved installed third-party "
             "adapter) → prepare_workload_dependencies (when a named workload declares missing "
             "Python distributions) → list_capabilities → plan_capture(preflight_mode='auto', "
@@ -743,8 +777,10 @@ def create_server(
             "extract_python_startup for Python startup/import evidence, extract_pytest for "
             "test phases, fixtures, workers, and failure latency, analyze_memory for "
             "memory profiles, analyze_execution for coverage, and the other analyze_* tools "
-            "only for their documented artifact kinds. Then use get_evidence, record_analysis, "
-            "or record_finding. A "
+            "only for their documented artifact kinds. Imported Torch traces require "
+            "extract_perfetto before analyze_pytorch; absent normalized rows are recovery, not "
+            "an empty operator report. Then use get_evidence, record_analysis, "
+            "or record_finding. Poll get_capability_setup after setup starts. A "
             "synchronous consumed capture plan is never retryable; detached starts are "
             "retryable only with the same idempotency key."
         ),
@@ -775,6 +811,7 @@ def create_server(
             state.capture_plans = capture_plans
             state.experiment_plans = ExperimentPlanRegistry()
             state.detached_captures = detached_captures
+            state.capability_setup = CapabilitySetupManager(workspace, state.capabilities)
             result = workspace_status(workspace)
             return _success(result, f"Initialized workspace {result.workspace_id}.")
         except DomainError as error:
@@ -931,29 +968,97 @@ def create_server(
             ),
         ],
         ctx: Context[AppContext],
-    ) -> Annotated[CallToolResult, ToolPayload[CapabilitySetupResult]]:
-        """Install and verify selected FlameOx-managed optional providers.
+        idempotency_key: str | None = None,
+    ) -> Annotated[CallToolResult, ToolPayload[OperationStatus]]:
+        """Compatibility entry point for managed capability setup.
 
-        This action is limited to the explicit adapter enum, changes only the active managed
-        runtime or stages the user-space Trace Processor under .diagnostics/tools, and never
-        executes a project workload. Call list_capabilities again before planning or after a
-        cancelled request to inspect the durable setup receipt. It does not change host
-        permissions or install privileged collectors.
+        Starts durable setup and returns immediately with an operation ID. Poll
+        get_capability_setup, or use start_capability_setup for an explicit idempotency key.
+        Setup changes only the active managed runtime or stages Trace Processor; it never
+        executes a project workload or installs privileged collectors.
         """
         try:
-            service = ctx.request_context.lifespan_context.capabilities
-            await ctx.report_progress(
-                0,
-                2,
-                "Capability setup started; refresh capabilities for receipt",
+            key = idempotency_key or "compat:" + ",".join(dict.fromkeys(adapters))
+            result = await ctx.request_context.lifespan_context.capability_setup_service().start(
+                tuple(adapters),
+                key,
             )
-            result = await run_atomic_thread(lambda: service.prepare(tuple(adapters)))
-            await ctx.report_progress(1, 2, "Capability setup verified")
-            await ctx.report_progress(2, 2, "Capability setup complete")
             return _success(
                 result,
-                "Prepared requested capabilities; call list_capabilities before planning.",
+                f"Capability setup operation {result.operation_id} is {result.state}; "
+                "poll get_capability_setup before planning.",
             )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(annotations=CONFIGURE)
+    async def start_capability_setup(
+        adapters: Annotated[
+            tuple[
+                Literal["coverage", "memray", "perfetto", "py-spy", "pytest", "torch.profiler"],
+                ...,
+            ],
+            Field(
+                min_length=1,
+                max_length=5,
+                description="Managed adapters from list_capabilities to install or stage.",
+            ),
+        ],
+        idempotency_key: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=200,
+                description="Stable key for replaying this exact request.",
+            ),
+        ],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[OperationStatus]]:
+        """Start detached capability provisioning and return its durable operation ID.
+
+        Use the same idempotency key to reconnect after a lost request. Poll
+        get_capability_setup for named phases, item outcomes, and the terminal receipt;
+        cancel_capability_setup requests cleanup of owned work.
+        """
+        try:
+            result = await ctx.request_context.lifespan_context.capability_setup_service().start(
+                tuple(adapters), idempotency_key
+            )
+            return _success(
+                result,
+                f"Started capability setup {result.operation_id} ({result.state}).",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="get_capability_setup", annotations=READ_ONLY)
+    async def get_capability_setup(
+        operation_id: Annotated[str, Field(min_length=4, max_length=100)],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[OperationStatus]]:
+        """Read durable capability setup state after the original request disappears."""
+        try:
+            result = await ctx.request_context.lifespan_context.capability_setup_service().status(
+                operation_id
+            )
+            return _success(
+                result,
+                f"Capability setup {operation_id} is {result.state} ({result.phase}).",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="cancel_capability_setup", annotations=CONFIGURE)
+    async def cancel_capability_setup(
+        operation_id: Annotated[str, Field(min_length=4, max_length=100)],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[OperationStatus]]:
+        """Request cancellation and cleanup of a server-owned capability setup operation."""
+        try:
+            result = await ctx.request_context.lifespan_context.capability_setup_service().cancel(
+                operation_id
+            )
+            return _success(result, f"Capability setup {operation_id} is {result.state}.")
         except DomainError as error:
             return _failure(error)
 
@@ -1031,12 +1136,15 @@ def create_server(
 
     @server.tool(name="list_declared_workflows", annotations=READ_ONLY)
     async def list_declared_workflows_tool(
-        kind: Literal["workload", "experiment"],
         ctx: Context[AppContext],
+        kind: Literal["workload", "experiment"] = "workload",
         limit: Annotated[int, Field(ge=1, le=100)] = 50,
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[DeclaredWorkflowList]]:
-        """Discover current named workloads or experiments before planning; this never runs them."""
+        """Discover declared workflows before planning; this never runs them.
+
+        With no arguments, list workloads. Pass kind='experiment' to list declared experiments.
+        """
         try:
             result = WorkloadService(
                 ctx.request_context.lifespan_context.require_workspace()
@@ -1489,15 +1597,16 @@ def create_server(
         try:
             state = ctx.request_context.lifespan_context
             workspace = state.require_workspace()
-            result = ImportService(workspace).import_artifact(
-                ImportArtifactRequest(
-                    path=_safe_import_path(state.project_root, path, source_root),
-                    kind=kind,
-                    sensitivity=sensitivity,
-                    producer=None if producer == "auto" else producer,
-                    producer_version=producer_version,
-                    allow_external_path=source_root == "temp",
-                )
+            request = ImportArtifactRequest(
+                path=_safe_import_path(state.project_root, path, source_root),
+                kind=kind,
+                sensitivity=sensitivity,
+                producer=None if producer == "auto" else producer,
+                producer_version=producer_version,
+                allow_external_path=source_root == "temp",
+            )
+            result = await run_atomic_thread(
+                lambda: ImportService(workspace).import_artifact(request)
             )
             run_uri = f"flameox://runs/{result.run.run_id}"
             artifact_uri = f"flameox://artifacts/{result.artifact_id}"
@@ -1563,12 +1672,24 @@ def create_server(
         artifact_id: str,
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[ArtifactMetadataResult]]:
-        """Return bounded artifact metadata, never binary content."""
+        """Return bounded metadata and an opaque resource URI, never a host path or bytes."""
         try:
             result = ArtifactService(ctx.request_context.lifespan_context.require_workspace()).get(
                 artifact_id
             )
-            return _success(result, f"Artifact {artifact_id} is metadata-only.")
+            return _success(
+                result,
+                f"Artifact {artifact_id} is metadata-only; read {result.resource_uri} for the "
+                "canonical resource.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Artifact {artifact_id}",
+                        uri=result.resource_uri,
+                        description="Opaque artifact metadata resource; no host path is exposed.",
+                        mime_type="application/json",
+                    ),
+                ),
+            )
         except DomainError as error:
             return _failure(error)
 
@@ -2032,7 +2153,11 @@ def create_server(
         ],
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[PyTorchAnalysisResult]]:
-        """Summarize one Perfetto-extracted torch.profiler run or artifact."""
+        """Summarize normalized Perfetto evidence from a torch.profiler run or artifact.
+
+        This read-only tool never extracts implicitly. If normalized rows are absent, follow
+        the typed recovery result and call extract_perfetto for the exact run.
+        """
         try:
             workspace = ctx.request_context.lifespan_context.require_workspace()
             await ctx.report_progress(0, 2, "PyTorch snapshot pinned")
@@ -2300,9 +2425,11 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[IntegrityResult]]:
         """Validate manifests and schemas; optionally hash every payload."""
         try:
-            result = IntegrityService(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).validate(full=mode == "full")
+            result = await run_atomic_thread(
+                lambda: IntegrityService(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).validate(full=mode == "full")
+            )
             outcome = "passed" if result.valid else "failed"
             issue_suffix = f" with {len(result.issues)} reported issues" if result.issues else ""
             return _success(result, f"Workspace validation {outcome}{issue_suffix}.")
@@ -2316,9 +2443,11 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[PyPerfExtractionResult]]:
         """Extract public pyperf run, warmup, loop, and value evidence."""
         try:
-            result = PyPerfExtractor(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).extract(run_id)
+            result = await run_atomic_thread(
+                lambda: PyPerfExtractor(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).extract(run_id)
+            )
             return _success(
                 result,
                 f"Extracted {result.measurement_count} measured values.",
@@ -2333,9 +2462,11 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[PythonStartupExtractionResult]]:
         """Extract repeated startup, peak RSS, and package-grouped import evidence."""
         try:
-            result = PythonStartupExtractor(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).extract(run_id)
+            result = await run_atomic_thread(
+                lambda: PythonStartupExtractor(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).extract(run_id)
+            )
             return _success(
                 result,
                 f"Extracted {result.measurement_count} startup measurements.",
@@ -2350,9 +2481,11 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[PytestExtractionResult]]:
         """Extract pytest phase, fixture, worker, outcome, and failure-latency evidence."""
         try:
-            result = PytestExtractor(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).extract(run_id)
+            result = await run_atomic_thread(
+                lambda: PytestExtractor(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).extract(run_id)
+            )
             return _success(
                 result,
                 f"Extracted {result.measurement_count} pytest measurements.",
@@ -2367,9 +2500,11 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[CoverageExtractionResult]]:
         """Extract bounded execution-path evidence through coverage.py's public API."""
         try:
-            result = CoverageExtractor(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).extract(run_id)
+            result = await run_atomic_thread(
+                lambda: CoverageExtractor(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).extract(run_id)
+            )
             return _success(
                 result,
                 f"Extracted {result.line_count} lines and {result.arc_count} arcs.",
@@ -2384,9 +2519,11 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[MemrayExtractionResult]]:
         """Extract supported memory concepts through Memray's public FileReader."""
         try:
-            result = MemrayExtractor(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).extract(run_id)
+            result = await run_atomic_thread(
+                lambda: MemrayExtractor(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).extract(run_id)
+            )
             return _success(
                 result,
                 f"Peak memory was {result.peak_memory_bytes} bytes; "
@@ -2420,9 +2557,11 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[ObservationExtractionResult]]:
         """Extract bounded semantic observations emitted through flameox.sdk."""
         try:
-            result = ObservationExtractor(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).extract(run_id)
+            result = await run_atomic_thread(
+                lambda: ObservationExtractor(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).extract(run_id)
+            )
             return _success(
                 result,
                 f"Extracted {result.observation_count} semantic observations.",

@@ -2,9 +2,16 @@ from __future__ import annotations
 
 from typing import Literal
 
+from pydantic import Field
+
 from flameox.catalog import Catalog, Snapshot
 from flameox.domain import CursorCodec, DomainError, ErrorCode, digest_model
 from flameox.evidence_scope import resolve_evidence_scope
+from flameox.evidence_status import (
+    EvidenceAvailability,
+    available_availability,
+    empty_availability,
+)
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
@@ -34,6 +41,7 @@ class CallEdgeResult(ContractModel):
     limitations: tuple[str, ...] = (
         "Edges represent syntactic nesting in the captured trace, not causal dependence.",
     )
+    evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
 
 class StackExample(ContractModel):
@@ -58,6 +66,7 @@ class StackExamplesResult(ContractModel):
     limitations: tuple[str, ...] = (
         "Examples are representative leaf stacks retained during extraction.",
     )
+    evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
 
 class DrilldownService:
@@ -192,7 +201,12 @@ class DrilldownService:
             total=total,
             returned=len(examples),
             truncated=has_more,
-            coverage=(len(examples) / total if total else 1.0),
+            coverage=(len(examples) / total if total else 0.0),
+            evidence=(
+                empty_availability("no_matching_stacks")
+                if not examples
+                else EvidenceAvailability(status="available", reason="stacks_present")
+            ),
             next_cursor=next_cursor,
         )
 
@@ -312,7 +326,12 @@ class DrilldownService:
             total=total,
             returned=len(frames),
             truncated=has_more,
-            coverage=(len(frames) / total if total else 1.0),
+            coverage=(len(frames) / total if total else 0.0),
+            evidence=(
+                empty_availability("no_matching_edges")
+                if not frames
+                else EvidenceAvailability(status="available", reason="edges_present")
+            ),
             next_cursor=next_cursor,
         )
 

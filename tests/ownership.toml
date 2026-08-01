@@ -73,6 +73,12 @@ lane = "application"
 paths = ["tests/application/test_async_work.py"]
 markers = ["unit"]
 
+[[ownership]]
+owner = "durable-operations"
+lane = "application"
+paths = ["tests/application/test_operations.py"]
+markers = ["unit"]
+
 
 [[ownership]]
 owner = "capabilities"

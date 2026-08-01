@@ -102,9 +102,12 @@ flameox validate
 
 `init` creates only local files and never installs collectors. `capabilities`
 reports installed tools, versions, supported modes, permissions, and exact
-managed setup actions. MCP agents use `prepare_capabilities` for FlameOx-managed
-providers and the typed `prepare_adapter` action for an installed third-party
-entry point; neither action runs a workload.
+managed setup actions. MCP agents use `start_capability_setup` with an explicit
+idempotency key for FlameOx-managed providers, then poll
+`get_capability_setup` or cancel with `cancel_capability_setup`. The older
+`prepare_capabilities` entry point remains a compatibility wrapper. The typed
+`prepare_adapter` action handles an installed third-party entry point; none of
+these actions runs a workload.
 
 ### Capture commands
 
@@ -319,7 +322,7 @@ The supported tools are grouped as follows:
 
 | Family | Tools |
 | --- | --- |
-| Workspace | `initialize_workspace`, `workspace_status`, `workload_configuration_status`, `configure_workload`, `list_capabilities`, `prepare_capabilities`, `prepare_adapter`, `prepare_workload_dependencies`, `validate_workspace` |
+| Workspace | `initialize_workspace`, `workspace_status`, `workload_configuration_status`, `configure_workload`, `list_capabilities`, `start_capability_setup`, `get_capability_setup`, `cancel_capability_setup`, `prepare_capabilities`, `prepare_adapter`, `prepare_workload_dependencies`, `validate_workspace` |
 | Capture and import | `plan_capture`, `execute_capture_plan`, `import_artifact`, `extract_pyperf`, `extract_python_startup`, `extract_pytest`, `extract_coverage`, `extract_memray`, `extract_perfetto`, `extract_observations` |
 | Detached capture | `start_detached_capture`, `get_detached_capture`, `cancel_detached_capture` |
 | Discovery | `list_declared_workflows`, `get_declared_workflow`, `list_runs`, `list_findings` |
@@ -338,10 +341,10 @@ The normal first-run sequence is:
 initialize_workspace
   → workload_configuration_status
   → configure_workload (when missing)
-  → list_declared_workflows
+  → list_declared_workflows (no arguments lists workloads; use kind='experiment' for experiments)
   → get_declared_workflow
   → list_capabilities
-  → prepare_capabilities (when setup_adapters is non-empty)
+  → start_capability_setup (when setup_adapters is non-empty)
   → prepare_adapter (when setup_third_party_adapters is non-empty)
   → prepare_workload_dependencies (when the workload declares missing Python distributions)
   → list_capabilities
@@ -393,8 +396,8 @@ experiments, and comments are preserved, and `flameox.toml` is atomically
 updated under the workspace lock. The canonical workload is immediately active.
 This tool never runs
 the command; call `list_declared_workflows` next, then
-`get_declared_workflow`, `list_capabilities`, `prepare_capabilities` when
-needed, `list_capabilities` again, `plan_capture`, and finally
+`get_declared_workflow`, `list_capabilities`, `start_capability_setup` when
+needed, `get_capability_setup`, `list_capabilities` again, `plan_capture`, and finally
 `execute_capture_plan`.
 
 #### `workspace_status`
@@ -427,18 +430,23 @@ decide whether to refresh discovery before planning.
 
 #### `prepare_capabilities`
 
-Mutating but non-executing. Accepts only adapter names reported by
+Mutating but non-executing. This compatibility entry point starts a durable
+operation and returns its operation ID instead of holding an MCP request open.
+Use `start_capability_setup` with an explicit idempotency key for new callers,
+`get_capability_setup` to reconnect and poll, and `cancel_capability_setup` to
+request cleanup. The operation accepts only adapter names reported by
 `list_capabilities` as managed setup actions: `coverage`, `memray`, `perfetto`,
 `py-spy`, `pytest`, and `torch.profiler`. It installs the published FlameOx
 extra into the active managed Python runtime and stages the pinned user-space
-Trace Processor under `.diagnostics/tools` for `perfetto`. It verifies
-availability, persists selected extras for the next FlameOx runtime upgrade,
-and returns `next_tool="list_capabilities"`. `list_capabilities` also reports the latest
-durable setup receipt, including the requested adapters, completed adapters, and phase after a
-cancelled or failed request. It never runs the declared
-workload, mutates source, installs arbitrary packages, changes host
-permissions, or provisions privileged collectors. A failed install returns a
-bounded installer diagnostic and a retryable recovery action.
+Trace Processor under `.diagnostics/tools` for `perfetto`. Its receipt includes
+the workspace identity, exact request digest, named phase, bounded progress,
+item outcomes, cancellation/cleanup state, and next recovery action. It never
+runs the declared workload, mutates source, installs arbitrary packages,
+changes host permissions, or provisions privileged collectors.
+
+`prepare_workload_dependencies` follows the same side-effect rule and remains a
+short compatibility entry point; its installer runs behind a worker boundary,
+and its preflight result names the exact missing distributions and next action.
 
 #### `prepare_adapter`
 
@@ -471,6 +479,10 @@ remediation. Options that need a permission check are reported as
 `active_probe_required`; discovery remains passive until the caller requests
 `list_capabilities(mode="active_refresh")`.
 
+`list_declared_workflows` accepts an argument-free call. It defaults to
+`kind="workload"`; pass `kind="experiment"` when the experiment namespace is
+needed.
+
 #### `plan_capture`
 
 Read-only. Default inputs are a current `workload_name`, declared scalar
@@ -496,6 +508,10 @@ progress, observes cancellation, and returns a completed or failed run record.
 Every bound identity, capability, workload definition, and policy input is rechecked
 immediately before execution. It never accepts a shell string or replacement
 arguments.
+Python profiler adapters keep the declared workload interpreter and working
+directory, including for `python -m` workloads, while invoking FlameOx's
+standalone launcher directly. They do not require FlameOx to be importable from
+the workload virtualenv and do not enable `PYTHONPATH` overrides.
 
 #### `plan_experiment` and `run_experiment`
 
@@ -633,7 +649,8 @@ flameox://run-sets/{run_set_id}
 ```
 
 Resources return JSON or text summaries. Large native artifacts are represented
-by metadata and local handles, not injected into model context. Template
+by metadata and opaque resource references, never host storage paths and never
+injected into model context. Template
 resources declare `mime_type="application/json"`, percent-encode identifiers,
 and resolve services through a server-local lifespan closure. In the exact
 `2.0.0b2` wheel, template-handler `Context` is reconstructed by Pydantic and
@@ -676,6 +693,34 @@ phase boundary. A default operation uses fixed phase work units, for example
 interval. Unknown-duration work reports phase transitions and uses MCP logging
 for elapsed time rather than inventing percentages. Reporting is best-effort:
 `ctx.report_progress()` is a no-op when the client supplied no progress token.
+
+Detached operations persist the same phase transitions and retain only a bounded
+progress history. Percentage values are monotonic when work units are known;
+unknown-duration phases report a phase with `completed` and `total` omitted.
+Operations using the shared lifecycle record their exact request digest,
+workspace identity, idempotency digest, item-level outcomes, cancellation and
+cleanup state, and terminal receipt before they are reported complete.
+The original idempotency key always reconnects to the same operation, including
+after a restart. A retryable failure or cancellation therefore advertises a
+`retry_new_operation` recovery with a fresh key; reusing the original key never
+starts duplicate side effects.
+
+### Lifecycle matrix
+
+| Operation family | Side effect | Expected duration | Recovery |
+| --- | --- | --- | --- |
+| Workspace/configuration reads | none | bounded | reread the pinned workspace on stale state |
+| Capability setup | package install or tool staging | long | poll status; reconnect with the same key, or use the receipt's fresh key for a new retry |
+| Workload dependency setup | declared package install | bounded to long | retry the exact workload name and inspect preflight |
+| Import and extraction | copy, external parser, or publication | bounded to long | identify the affected run and required extractor |
+| Capture and experiments | external process and/or multiple trials | long | use the durable operation/run identity and poll |
+| Analysis and measurement queries | read-only catalog access | bounded | inspect the evidence status and next tool |
+| Full validation and reductions | large reads or generated evidence | long | poll the terminal receipt for the declared scope |
+
+An empty array is not evidence of a complete negative result. Analysis and
+query results carry an `evidence` object with status `available`, `empty`,
+`unavailable`, `partial`, or `unknown`, a stable reason, and exact next-tool
+arguments when recovery is possible.
 
 ### Cancellation
 
