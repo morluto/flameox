@@ -162,6 +162,8 @@ jobs:
         if: steps.version.outputs.skip != 'true'
         env:
           BASELINE: ${{ steps.version.outputs.baseline }}
+          GITHUB_REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           git cliff \
             --config cliff.toml \
