@@ -41,7 +41,7 @@ async def test_missing_workload_configuration_routes_to_configure_workload(
         status = await client.call_tool("workload_configuration_status", {})
         missing = await client.call_tool(
             "list_declared_workflows",
-            {"kind": "workload"},
+            {},
         )
         configured = await client.call_tool(
             "configure_workload",
@@ -53,7 +53,7 @@ async def test_missing_workload_configuration_routes_to_configure_workload(
         )
         discovered = await client.call_tool(
             "list_declared_workflows",
-            {"kind": "workload"},
+            {},
         )
 
     assert status.is_error is False
@@ -148,7 +148,7 @@ async def test_mcp_inspect_instructions_match_initialize_metadata(tmp_path: Path
     inspected = json.loads(cli.stdout)
     assert inspected["schema_version"] == 1
     assert inspected["instructions"] == initialize_instructions
-    assert len(inspected["tools"]) == 63
+    assert len(inspected["tools"]) == 66
 
 
 @pytest.mark.anyio

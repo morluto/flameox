@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from pydantic import JsonValue
+from pydantic import Field, JsonValue
 
 from flameox.atomic import atomic_write_json
 from flameox.domain import (
@@ -19,6 +19,7 @@ from flameox.domain import (
     digest_model,
 )
 from flameox.evidence import GenerationPublisher
+from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
 from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
@@ -64,6 +65,7 @@ class TraceWindowResult(ContractModel):
     limitations: tuple[str, ...] = (
         "The window includes slices that overlap the requested interval.",
     )
+    evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
 
 class PerfettoExtractor:
@@ -476,9 +478,14 @@ class PerfettoExtractor:
             total=total,
             returned=len(events),
             truncated=has_more,
-            coverage=(len(events) / total if total else 1.0),
+            coverage=(len(events) / total if total else 0.0),
             next_cursor=next_cursor,
             trace_processor_path=str(binary),
+            evidence=(
+                empty_availability("no_events_in_window")
+                if not events
+                else available_availability()
+            ),
         )
 
     async def _run_worker(

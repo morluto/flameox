@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from pydantic import Field
+
 from flameox.catalog import Catalog
 from flameox.domain import CursorCodec, DomainError, ErrorCode, digest_model
+from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
@@ -36,6 +39,7 @@ class MeasurementQueryResult(ContractModel):
     returned: int
     truncated: bool
     next_cursor: str | None
+    evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
 
 class EvidenceQueryService:
@@ -87,12 +91,14 @@ class EvidenceQueryService:
         if artifact_id is not None:
             predicates.append("artifact_id = ?")
             parameters.append(artifact_id)
+        if not include_warmups:
+            predicates.append("is_warmup = false")
+        population_where = " AND ".join(predicates)
+        population_parameters = tuple(parameters)
         if name_prefix is not None:
             predicates.append("name LIKE ? ESCAPE '^'")
             escaped = name_prefix.replace("^", "^^").replace("%", "^%").replace("_", "^_")
             parameters.append(f"{escaped}%")
-        if not include_warmups:
-            predicates.append("is_warmup = false")
         where = " AND ".join(predicates)
         with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
             count_row = snapshot.execute(
@@ -100,6 +106,11 @@ class EvidenceQueryService:
                 tuple(parameters),
             ).fetchone()
             assert count_row is not None
+            population_count_row = snapshot.execute(
+                "SELECT count(*) FROM measurements WHERE " + population_where,
+                population_parameters,
+            ).fetchone()
+            assert population_count_row is not None
             page_where = where
             page_parameters = list(parameters)
             if after is not None:
@@ -156,4 +167,16 @@ class EvidenceQueryService:
             returned=len(measurements),
             truncated=has_more,
             next_cursor=next_cursor,
+            evidence=(
+                EvidenceAvailability(
+                    status="unavailable",
+                    reason="measurements_not_published",
+                )
+                if not measurements and int(population_count_row[0]) == 0
+                else (
+                    empty_availability("no_matching_measurements")
+                    if not measurements
+                    else EvidenceAvailability(status="available", reason="measurements_present")
+                )
+            ),
         )

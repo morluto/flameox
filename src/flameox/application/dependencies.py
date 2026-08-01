@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -74,7 +75,8 @@ class WorkloadDependencyService:
             lock_path = Path(sys.executable).parent / ".flameox-workload-dependencies.lock"
             try:
                 with portalocker.Lock(lock_path, mode="a", timeout=30):
-                    completed = subprocess.run(
+                    completed = await asyncio.to_thread(
+                        subprocess.run,
                         [
                             uv,
                             "pip",
