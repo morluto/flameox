@@ -90,6 +90,7 @@ _MAX_PYTEST_SIDECAR_BYTES = 16 * 1024 * 1024
 def _limitation(
     source: Literal[
         "adapter",
+        "containment",
         "preflight",
         "collector",
         "artifact",
@@ -385,7 +386,7 @@ class CaptureService:
         adapter: str,
         parameters: dict[str, Scalar] | None = None,
         execution_policy: ExecutionPolicy,
-        preflight_mode: Literal["passive", "active"] = "passive",
+        preflight_mode: Literal["auto", "passive", "active"] = "auto",
         external_context: ExternalExecutionContext | None = None,
     ) -> CapturePlan:
         instance = self.workloads.resolve(
@@ -393,17 +394,36 @@ class CaptureService:
             parameters,
         )
         definition = self.workloads.definition(workload_name)
+        inspection_mode: Literal["passive", "active"] = (
+            "active" if preflight_mode == "auto" else preflight_mode
+        )
         preflight = await PreflightService(
             self.workspace,
             capabilities=self.capabilities,
-        ).inspect(workload_name, mode=preflight_mode)
+        ).inspect(workload_name, mode=inspection_mode)
         if preflight.disposition == "blocked":
+            missing_distributions = tuple(
+                item.requirement
+                for item in preflight.requirements
+                if item.kind == "python_distribution" and item.status == "absent"
+            )
+            next_tool = "get_declared_workflow"
+            if missing_distributions:
+                next_tool = "prepare_workload_dependencies"
+            elif any(item.next_tool == "prepare_adapter" for item in preflight.requirements):
+                next_tool = "prepare_adapter"
+            elif any(item.next_tool == "prepare_capabilities" for item in preflight.requirements):
+                next_tool = "prepare_capabilities"
+            elif any(item.kind == "capability" for item in preflight.requirements):
+                next_tool = "list_capabilities"
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 f"Required preflight checks failed for workload {workload_name!r}.",
                 details={
                     "preflight": preflight.model_dump(mode="json"),
-                    "next_tool": "get_declared_workflow",
+                    "next_tool": next_tool,
+                    "workload_name": workload_name,
+                    "missing_python_distributions": list(missing_distributions),
                 },
                 remediation=tuple(
                     remediation
@@ -447,6 +467,7 @@ class CaptureService:
             adapter_binding.limitation_details,
         )
         adapter_version = adapter_binding.version
+        use_containment = execution_policy is not ExecutionPolicy.TRUSTED_LOCAL
         containment, network_contained, systemd_scope_unit, collector_argv = await self._contain(
             collector_argv,
             cwd=Path(instance.command.cwd),
@@ -456,7 +477,23 @@ class CaptureService:
             required=(
                 execution_policy.requires_containment(self.workspace.config.execution.containment)
             ),
+            use_containment=use_containment,
         )
+        if execution_policy is ExecutionPolicy.TRUSTED_LOCAL:
+            warnings = (
+                *warnings,
+                "Trusted-local execution selected; the workload runs directly without enforced "
+                "descendant containment.",
+            )
+            limitation_details = (
+                *limitation_details,
+                _limitation(
+                    "containment",
+                    "trusted_local_execution",
+                    "The workload runs directly; descendant cleanup and resource isolation are "
+                    "not enforced by a containment backend.",
+                ),
+            )
         identities: dict[str, JsonValue] = {
             "collector_executable": cast(
                 JsonValue,
@@ -908,6 +945,10 @@ class CaptureService:
                         unit_name=f"flameox-validation-{plan.plan_id[:21]}.scope",
                         required=ExecutionPolicy(plan.execution_policy).requires_containment(
                             self.workspace.config.execution.containment
+                        ),
+                        use_containment=(
+                            ExecutionPolicy(plan.execution_policy)
+                            is not ExecutionPolicy.TRUSTED_LOCAL
                         ),
                     )
                     if plan.containment in {"active", "degraded"} and oracle_containment not in {
@@ -1410,7 +1451,7 @@ class CaptureService:
         self,
         adapter: str,
         *,
-        mode: Literal["passive", "active"],
+        mode: Literal["auto", "passive", "active"],
     ) -> CapabilityReport:
         choices = self._capture_adapter_choices()
         approved_third_party = self._is_approved_third_party(adapter)
@@ -1432,17 +1473,17 @@ class CaptureService:
             "not_exercised",
         }
         if permission_sensitive:
-            if mode != "active":
+            if mode == "passive":
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                     f"Adapter {adapter!r} requires an active permission probe before planning.",
                     details={
-                        "next_tool": "list_capabilities",
+                        "next_tool": "plan_capture",
                         "required_preflight_mode": "active",
                     },
                     remediation=(
-                        "Call list_capabilities with mode='active_refresh', then re-plan "
-                        "with preflight_mode='active'.",
+                        "Re-plan with preflight_mode='auto' so FlameOx can perform the bounded "
+                        "active permission probe during planning.",
                     ),
                 )
             report = await self.capabilities.probe(adapter, refresh=True)
@@ -1451,16 +1492,35 @@ class CaptureService:
             and adapter != "command"
             and not approved_third_party
         ):
+            setup_pending = report.setup is not None
+            fallback_adapters = tuple(
+                choice
+                for choice in choices
+                if choice != adapter
+                and self.capabilities.get(choice).status is CapabilityStatus.AVAILABLE
+            )
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 f"Adapter {adapter!r} is unavailable for capture planning.",
                 details={
-                    "next_tool": "get_declared_workflow",
+                    "next_tool": "prepare_capabilities" if setup_pending else "list_capabilities",
                     "adapter": adapter,
                     "capability_status": report.status.value,
+                    "setup_adapters": [adapter] if setup_pending else [],
+                    "fallback_adapters": list(fallback_adapters),
                 },
                 remediation=report.remediation
-                or ("Choose an available adapter option from get_declared_workflow.",),
+                or (
+                    (
+                        f"Call prepare_capabilities with adapters=['{adapter}'], then "
+                        "call list_capabilities again.",
+                    )
+                    if setup_pending
+                    else (
+                        "Choose an available adapter option from get_declared_workflow; "
+                        "the fallback changes the evidence collected.",
+                    )
+                ),
             )
         return report
 
@@ -1660,12 +1720,15 @@ class CaptureService:
         writable_roots: tuple[WritableRootBinding, ...],
         unit_name: str,
         required: bool,
+        use_containment: bool = True,
     ) -> tuple[
         Literal["active", "degraded", "uncontained", "unavailable"],
         bool,
         str | None,
         tuple[str, ...],
     ]:
+        if not use_containment:
+            return "uncontained", False, None, argv
         if self.workspace.config.execution.containment == "disabled":
             if required:
                 raise DomainError(
@@ -1678,7 +1741,7 @@ class CaptureService:
             if required:
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
-                    "MCP capture requires Linux bubblewrap containment.",
+                    "Managed MCP capture requires Linux bubblewrap containment.",
                     remediation=("Install bubblewrap or change the trusted local policy.",),
                 )
             return "unavailable", False, None, argv
@@ -1694,7 +1757,7 @@ class CaptureService:
             if required:
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
-                    "MCP capture requires a systemd user scope for descendant containment.",
+                    "Managed MCP capture requires a systemd user scope for descendant containment.",
                     remediation=(
                         "Run under a systemd user manager or use the trusted local policy.",
                     ),
