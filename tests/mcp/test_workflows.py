@@ -132,6 +132,29 @@ async def test_cli_json_and_mcp_result_are_same_domain_model(tmp_path: Path) -> 
 
 
 @pytest.mark.anyio
+async def test_mcp_can_bind_an_explicit_external_workspace_root(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    workspace_root = tmp_path / "evidence"
+    project_root.mkdir()
+
+    async with Client(
+        create_server(
+            project_root,
+            initialize=True,
+            workspace_root=workspace_root,
+        ),
+        raise_exceptions=True,
+    ) as client:
+        result = await client.call_tool("workspace_status", {})
+
+    assert result.is_error is False
+    assert result.structured_content is not None
+    assert result.structured_content["result"]["project_root"] == str(project_root.resolve())
+    assert (workspace_root / "workspace.json").is_file()
+    assert not (project_root / ".diagnostics").exists()
+
+
+@pytest.mark.anyio
 async def test_mcp_inspect_instructions_match_initialize_metadata(tmp_path: Path) -> None:
     Workspace.initialize(tmp_path)
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:

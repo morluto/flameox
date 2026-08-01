@@ -701,20 +701,31 @@ def create_server(
     project_root: Path,
     *,
     initialize: bool = False,
+    workspace_root: Path | None = None,
 ) -> StrictMCPServer[AppContext]:
     project_root = project_root.resolve()
+    if workspace_root is not None and "\x00" in str(workspace_root):
+        raise DomainError(
+            ErrorCode.WORKSPACE_INVALID,
+            "The MCP workspace root cannot contain NUL bytes.",
+            remediation=("Provide a valid local workspace directory path.",),
+        )
+    selected_workspace_root = workspace_root.resolve() if workspace_root is not None else None
     lifespan_state: list[AppContext] = []
 
     @asynccontextmanager
     async def lifespan(_: MCPServer[AppContext]) -> AsyncIterator[AppContext]:
         workspace: Workspace | None
         if initialize:
-            workspace = Workspace.initialize(project_root)
+            workspace = Workspace.initialize(
+                project_root,
+                workspace_root=selected_workspace_root,
+            )
         else:
             try:
                 workspace = Workspace.discover(
                     project_root,
-                    explicit=project_root / ".diagnostics",
+                    explicit=selected_workspace_root,
                 )
             except DomainError:
                 workspace = None
@@ -804,7 +815,10 @@ def create_server(
                 result = workspace_status(state.workspace)
                 return _success(result, f"Workspace is already initialized: {result.workspace_id}.")
 
-            workspace = Workspace.initialize(state.project_root)
+            workspace = Workspace.initialize(
+                state.project_root,
+                workspace_root=selected_workspace_root,
+            )
             capture_plans = CapturePlanRegistry(
                 max_parallel_captures=workspace.config.capture.max_parallel_captures
             )
@@ -2821,5 +2835,14 @@ def _active_state(states: list[AppContext]) -> AppContext:
     return states[0]
 
 
-def run_server(project_root: Path, *, initialize: bool = False) -> None:
-    create_server(project_root, initialize=initialize).run()
+def run_server(
+    project_root: Path,
+    *,
+    initialize: bool = False,
+    workspace_root: Path | None = None,
+) -> None:
+    create_server(
+        project_root,
+        initialize=initialize,
+        workspace_root=workspace_root,
+    ).run()

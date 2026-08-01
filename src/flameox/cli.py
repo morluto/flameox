@@ -1921,9 +1921,16 @@ def mcp_serve(
         bool,
         typer.Option("--init", help="Initialize .diagnostics before protocol startup."),
     ] = False,
+    workspace: Annotated[
+        Path | None,
+        typer.Option(
+            "--workspace",
+            help="Explicit workspace root; keeps the project root as the workload root.",
+        ),
+    ] = None,
 ) -> None:
     """Serve flameox over stdio; stdout is reserved for protocol messages."""
-    run_server(project_root, initialize=initialize)
+    run_server(project_root, initialize=initialize, workspace_root=workspace)
 
 
 @mcp_app.command("inspect")
@@ -1932,12 +1939,19 @@ def mcp_inspect(
         Path,
         typer.Option("--project-root", help="Fixed project root exposed to MCP."),
     ] = Path("."),
+    workspace: Annotated[
+        Path | None,
+        typer.Option("--workspace", help="Explicit workspace root used by the inspected server."),
+    ] = None,
     json_output: JsonOption = False,
 ) -> None:
     """List the schemas and annotations exposed by the MCP adapter."""
 
     async def inspect_server() -> dict[str, Any]:
-        async with Client(create_server(project_root), raise_exceptions=True) as client:
+        async with Client(
+            create_server(project_root, workspace_root=workspace),
+            raise_exceptions=True,
+        ) as client:
             tools = await client.list_tools()
             resources = await client.list_resource_templates()
             instructions = client.instructions
