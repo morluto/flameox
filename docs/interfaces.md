@@ -696,13 +696,17 @@ unknown-duration phases report a phase with `completed` and `total` omitted.
 Operations using the shared lifecycle record their exact request digest,
 workspace identity, idempotency digest, item-level outcomes, cancellation and
 cleanup state, and terminal receipt before they are reported complete.
+The original idempotency key always reconnects to the same operation, including
+after a restart. A retryable failure or cancellation therefore advertises a
+`retry_new_operation` recovery with a fresh key; reusing the original key never
+starts duplicate side effects.
 
 ### Lifecycle matrix
 
 | Operation family | Side effect | Expected duration | Recovery |
 | --- | --- | --- | --- |
 | Workspace/configuration reads | none | bounded | reread the pinned workspace on stale state |
-| Capability setup | package install or tool staging | long | poll status; retry the exact request or failed items |
+| Capability setup | package install or tool staging | long | poll status; reconnect with the same key, or use the receipt's fresh key for a new retry |
 | Workload dependency setup | declared package install | bounded to long | retry the exact workload name and inspect preflight |
 | Import and extraction | copy, external parser, or publication | bounded to long | identify the affected run and required extractor |
 | Capture and experiments | external process and/or multiple trials | long | use the durable operation/run identity and poll |

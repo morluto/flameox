@@ -318,7 +318,9 @@ preview analyses, and record results. Capture and experiment plans are
 short-lived and single-use; restarting the server invalidates those plan tokens.
 Detached capture records persist across a manager restart: retry the same
 `idempotency_key` to reconnect to the original run rather than starting another
-capture.
+capture. Capability setup uses the same rule; after a retryable failure or
+cancellation, follow the returned recovery arguments with their fresh
+`idempotency_key` to start a new attempt.
 
 Inspect the protocol surface with a real stdio client:
 
