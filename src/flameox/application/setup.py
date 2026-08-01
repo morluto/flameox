@@ -304,7 +304,7 @@ class SetupService:
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                     "No active flameox runtime is configured.",
-                    remediation=("Run `npx flameox setup` first.",),
+                    remediation=("Run `npx flameox@latest setup` first.",),
                 )
             if public.version is None:
                 raise DomainError(
@@ -323,7 +323,7 @@ class SetupService:
                     f"Configured MCP launchers do not match the active runtime: {names}.",
                     details={"clients": [client.value for client in mismatched]},
                     remediation=(
-                        "Run `npx flameox setup` and choose Connect or update MCP clients.",
+                        "Run `npx flameox@latest setup` and choose Connect or update MCP clients.",
                     ),
                 )
             await self.runtime.verify(executable, public.version)

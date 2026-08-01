@@ -182,7 +182,9 @@ jobs:
 
   publish-npm:
     name: Publish to npm
-    needs: build
+    needs:
+      - build
+      - publish-pypi
     if: needs.build.outputs.publishing == 'true'
     runs-on: ubuntu-latest
     permissions:

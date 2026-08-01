@@ -21,7 +21,7 @@ def test_npm_bootstrap_pty_reaches_first_python_prompt(tmp_path: Path) -> None:
         f"""#!{sys.executable}
 import os, sys
 arguments = sys.argv[1:]
-handoff = arguments.index("flameox")
+handoff = max(index for index, argument in enumerate(arguments) if argument == "flameox")
 os.execv({str(flameox)!r}, [{str(flameox)!r}, *arguments[handoff + 1:]])
 """
     )

@@ -2,7 +2,7 @@
 
 ## Local client setup
 
-`npx flameox setup` is the supported interactive path for connecting local MCP
+`npx flameox@latest setup` is the supported interactive path for connecting local MCP
 clients. The npm package and Python distribution share an exact release
 version. npm supplies a thin launcher and the upstream `jsonc-parser` editor;
 the Python application service owns discovery, planning, runtime installation,
@@ -10,7 +10,7 @@ verification, locking, activation, rollback, and structured results. The same
 setup service is available from `flameox setup` for standard JSON and TOML
 clients.
 
-`npx flameox upgrade` is the non-interactive npm shorthand for updating the
+`npx flameox@latest upgrade` is the non-interactive npm shorthand for updating the
 detected clients to the bootstrap package's matching Python runtime. It keeps
 the same managed-runtime verification and atomic launcher activation as setup.
 

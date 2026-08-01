@@ -29,7 +29,7 @@
   <a href="#documentation">Documentation</a>
 </p>
 
-<p align="center"><strong>Connect your agent:</strong> <code>npx flameox setup</code></p>
+<p align="center"><strong>Connect your agent:</strong> <code>npx flameox@latest setup</code></p>
 
 ---
 
@@ -51,7 +51,7 @@ back to the measurements that support them.
 Run the guided setup:
 
 ```console
-npx flameox setup
+npx flameox@latest setup
 ```
 
 The wizard detects Claude Code, Cursor, OpenCode, Codex, Gemini CLI, and
@@ -129,15 +129,15 @@ flameox reports the workload as `uncontained`.
 
 Run setup again to connect or disconnect clients, verify that connected clients
 launch the active runtime, update to the npm package's matching version, or roll
-back to a previously installed version. `npx flameox@latest setup` resolves the
-newest setup release. Automation can select clients and inspect the plan
-explicitly:
+back to a previously installed version. Always use `npx flameox@latest` for
+setup and upgrades: an unqualified `npx flameox` invocation can reuse an older
+cached bootstrap. Automation can select clients and inspect the plan explicitly:
 
 ```console
-npx flameox setup --codex --claude --yes
-npx flameox setup --all --dry-run --json
-npx flameox setup --verify --yes --json
-npx flameox upgrade
+npx flameox@latest setup --codex --claude --yes
+npx flameox@latest setup --all --dry-run --json
+npx flameox@latest setup --verify --yes --json
+npx flameox@latest upgrade
 ```
 
 The npm package installs the matching `flameox` Python release. MCP clients then

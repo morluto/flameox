@@ -140,7 +140,7 @@ import os
 import sys
 
 arguments = sys.argv[1:]
-handoff = arguments.index("flameox")
+handoff = max(index for index, argument in enumerate(arguments) if argument == "flameox")
 os.execv({str(python_cli)!r}, [{str(python_cli)!r}, *arguments[handoff + 1:]])
 """
     )

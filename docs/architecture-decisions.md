@@ -3,7 +3,7 @@
 ## Versioned MCP setup runtimes
 
 flameox's npm package is a bootstrap, not a second implementation or the runtime
-used by MCP clients. `npx flameox setup` launches the exactly matching
+used by MCP clients. `npx flameox@latest setup` launches the exactly matching
 `flameox` release through `uvx`. The Python setup service installs
 that release into a version-addressed user-data directory with
 `uv tool install --no-config --no-sources`, verifies both the CLI and an actual
@@ -25,7 +25,7 @@ The Python distribution is published before the npm bootstrap for a release.
 Both package manifests must carry the same version, which is enforced by a
 repository test. The Python artifact should be installable and pass the managed
 runtime handshake before its matching npm package is published; otherwise
-`npx flameox setup` would resolve a bootstrap whose required runtime does not yet
+`npx flameox@latest setup` would resolve a bootstrap whose required runtime does not yet
 exist.
 
 These choices constrain flameox's design and implementation. Revisit a settled

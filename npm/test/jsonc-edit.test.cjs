@@ -77,6 +77,8 @@ test("bootstrap launches the exactly matching Python release", () => {
   assert.deepEqual(JSON.parse(fs.readFileSync(capture, "utf8")), [
     "--no-config",
     "--no-sources",
+    "--refresh-package",
+    "flameox",
     "--prerelease",
     "allow",
     "--python",

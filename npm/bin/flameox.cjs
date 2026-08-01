@@ -14,7 +14,7 @@ if (args.length === 1 && (args[0] === "--version" || args[0] === "-V")) {
 const command = args[0];
 if (command !== "setup" && command !== "upgrade") {
   process.stderr.write(
-    "The npm package is the setup bootstrap. Run `npx flameox setup` or `npx flameox upgrade`.\n" +
+    "The npm package is the setup bootstrap. Run `npx flameox@latest setup` or `npx flameox@latest upgrade`.\n" +
       "After setup, use flameox through a connected MCP client or the Python CLI.\n",
   );
   process.exit(2);
@@ -36,6 +36,8 @@ const child = spawn(
   [
     "--no-config",
     "--no-sources",
+    "--refresh-package",
+    "flameox",
     "--prerelease",
     "allow",
     "--python",

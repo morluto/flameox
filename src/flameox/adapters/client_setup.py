@@ -268,7 +268,7 @@ class ClientConfigRegistry:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 f"Editing {definition.path} requires the flameox npm JSONC helper.",
-                remediation=("Run setup through `npx flameox setup`.",),
+                remediation=("Run setup through `npx flameox@latest setup`.",),
             )
         json_document = self._parse_json(definition, text)
         section = json_document.get(definition.config_key)
@@ -305,7 +305,7 @@ class ClientConfigRegistry:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 f"Editing {definition.path} requires the flameox npm JSONC helper.",
-                remediation=("Run setup through `npx flameox setup`.",),
+                remediation=("Run setup through `npx flameox@latest setup`.",),
             )
         document = self._parse_json(definition, text) if text else {}
         section = document.setdefault(definition.config_key, {})
@@ -353,7 +353,7 @@ class ClientConfigRegistry:
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                     f"Editing {definition.path} requires the flameox npm JSONC helper.",
-                    remediation=("Run setup through `npx flameox setup`.",),
+                    remediation=("Run setup through `npx flameox@latest setup`.",),
                 )
             result = self._run_jsonc_helper(
                 {"operation": "parse", "text": text},
@@ -412,7 +412,9 @@ class ClientConfigRegistry:
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 "The flameox JSONC editor could not be started.",
                 details={"path": str(path), "error": str(exc)},
-                remediation=("Run setup through `npx flameox setup` with Node.js available.",),
+                remediation=(
+                    "Run setup through `npx flameox@latest setup` with Node.js available.",
+                ),
             ) from exc
         if completed.returncode != 0:
             message = completed.stderr.strip() or "unknown JSONC parser failure"
