@@ -1,6 +1,17 @@
 # Changelog
 
 All notable changes to flameox are documented in this file.
+## [0.1.6] - 2026-08-01
+### Bug Fixes
+
+- **npm:** Refresh pinned runtime metadata before setup
+### Features
+
+- **mcp:** Add direct named workload workflow
+### Testing
+
+- **cli:** Assert rendered help semantics
+- **cli:** Make help assertions color independent
 ## [0.1.5] - 2026-08-01
 ### Bug Fixes
 
