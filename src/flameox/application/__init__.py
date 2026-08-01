@@ -151,8 +151,10 @@ from flameox.application.viewers import (
     NativeViewerService,
 )
 from flameox.application.workloads import (
+    AdapterOption,
     DeclaredWorkflowDetail,
     DeclaredWorkflowList,
+    DeclaredWorkflowRequirement,
     DeclaredWorkflowSummary,
     ExperimentConfig,
     ProjectConfig,
@@ -160,11 +162,13 @@ from flameox.application.workloads import (
     Scalar,
     WorkloadConfig,
     WorkloadIdentityConfig,
+    WorkloadInspection,
     WorkloadRequirementsConfig,
     WorkloadService,
 )
 
 __all__ = [
+    "AdapterOption",
     "AnalysisMaterializationService",
     "ArtifactListItem",
     "ArtifactListResult",
@@ -188,6 +192,7 @@ __all__ = [
     "CreateInvestigationRequest",
     "DeclaredWorkflowDetail",
     "DeclaredWorkflowList",
+    "DeclaredWorkflowRequirement",
     "DeclaredWorkflowSummary",
     "DetachedCaptureManager",
     "DetachedCaptureRecord",
@@ -291,6 +296,7 @@ __all__ = [
     "TrashManifest",
     "WorkloadConfig",
     "WorkloadIdentityConfig",
+    "WorkloadInspection",
     "WorkloadRequirementsConfig",
     "WorkloadService",
     "WorkspaceStatus",

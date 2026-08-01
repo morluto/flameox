@@ -16,7 +16,7 @@ from statsmodels.stats.stattools import durbin_watson
 
 from flameox.catalog import Catalog, Snapshot
 from flameox.domain import DomainError, ErrorCode, digest_model
-from flameox.evidence_scope import resolve_evidence_scope
+from flameox.evidence_scope import EvidenceScope, resolve_evidence_scope
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
@@ -43,6 +43,8 @@ class HotspotResult(ContractModel):
     truncated: bool
     coverage: dict[str, int]
     limitations: tuple[str, ...]
+    evidence_status: Literal["available", "unavailable"] = "available"
+    unavailable_reason: str | None = None
 
 
 class MeasurementSummary(ContractModel):
@@ -62,6 +64,39 @@ class MemoryAnalysisResult(ContractModel):
     hotspots: tuple[Hotspot, ...]
     phase_growth: tuple[MemoryPhaseGrowth, ...] = ()
     limitations: tuple[str, ...]
+    runtime_resources: tuple[RuntimeResourceObservation, ...] = ()
+    runtime_resource_totals: RuntimeResourceTotals | None = None
+    runtime_resources_truncated: bool = False
+    truncated: bool = False
+    writable_root_observations: tuple[WritableRootObservation, ...] = ()
+    policy_termination: str | None = None
+    unavailable_metrics: tuple[str, ...] = ()
+
+
+class RuntimeResourceObservation(ContractModel):
+    run_id: str
+    sampling_interval_ms: int
+    minimum_free_bytes: int | None
+    staging_growth_bytes: int | None
+    peak_rss_bytes: int | None
+    policy_termination: str | None
+    unavailable_metrics: tuple[str, ...] = ()
+
+
+class RuntimeResourceTotals(ContractModel):
+    run_count: int = 0
+    minimum_free_bytes: int | None = None
+    total_staging_growth_bytes: int | None = None
+    maximum_peak_rss_bytes: int | None = None
+
+
+class WritableRootObservation(ContractModel):
+    run_id: str
+    writable_root_identity: str
+    target_path: str
+    growth_bytes: int | None
+    available: bool
+    unavailable_reason: str | None = None
 
 
 class MemoryPhaseGrowth(ContractModel):
@@ -296,6 +331,28 @@ class RecipeService:
                 run_column="fm.run_id",
                 artifact_column="fm.artifact_id",
             )
+            profile_where, profile_parameters = self._profile_artifact_predicate(scope)
+            profile_row = snapshot.execute(
+                "SELECT count(*) FROM artifact_registrations ar WHERE " + profile_where,
+                profile_parameters,
+            ).fetchone()
+            assert profile_row is not None
+            if int(profile_row[0]) == 0:
+                return HotspotResult(
+                    corpus_commit_id=snapshot.commit.commit_id,
+                    input_id=input_id,
+                    hotspots=(),
+                    total=0,
+                    returned=0,
+                    truncated=False,
+                    coverage={"frame_measurements": 0, "completely_symbolized": 0},
+                    limitations=(
+                        "No registered profile artifact is available for this input; "
+                        "profile parsing is extractor-owned.",
+                    ),
+                    evidence_status="unavailable",
+                    unavailable_reason="no_profile_artifact",
+                )
             count_row = snapshot.execute(
                 "SELECT count(*) FROM frame_measurements fm WHERE " + where,
                 parameters,
@@ -347,7 +404,32 @@ class RecipeService:
                 "Complete stacks remain in native artifacts; this result is a bounded "
                 "frame aggregate.",
             ),
+            evidence_status="available",
         )
+
+    @staticmethod
+    def _profile_artifact_predicate(scope: EvidenceScope) -> tuple[str, tuple[object, ...]]:
+        # The scope is deliberately converted here rather than exposing host paths or
+        # asking callers to provide an artifact kind filter.
+        run_ids = scope.run_ids
+        artifact_ids = scope.artifact_ids
+        predicates: list[str] = []
+        parameters: list[object] = []
+        if run_ids:
+            placeholders = ", ".join("?" for _ in run_ids)
+            predicates.append(
+                f"(ar.run_id IN ({placeholders}) AND ar.kind IN "
+                "('sample_profile', 'memory_profile', 'execution_trace'))"
+            )
+            parameters.extend(run_ids)
+        if artifact_ids:
+            placeholders = ", ".join("?" for _ in artifact_ids)
+            predicates.append(
+                f"(ar.artifact_id IN ({placeholders}) AND ar.kind IN "
+                "('sample_profile', 'memory_profile', 'execution_trace'))"
+            )
+            parameters.extend(artifact_ids)
+        return " OR ".join(predicates) or "FALSE", tuple(parameters)
 
     def memory(
         self,
@@ -392,6 +474,23 @@ class RecipeService:
                 limit=bounded,
                 corpus_commit_id=corpus_commit_id,
             )
+            resource_rows, resource_total, resource_truncated = self._runtime_resources(
+                snapshot,
+                scope,
+                bounded,
+            )
+            writable_rows = self._writable_root_observations(snapshot, scope, bounded)
+            unavailable_metrics = tuple(
+                sorted({metric for item in resource_rows for metric in item.unavailable_metrics})
+            )
+            policy_termination = next(
+                (
+                    item.policy_termination
+                    for item in resource_rows
+                    if item.policy_termination is not None
+                ),
+                None,
+            )
         previous_by_metric: dict[str, float] = {}
         phase_growth: list[MemoryPhaseGrowth] = []
         for phase, metric, value, sample_count, unit, _ in phase_rows:
@@ -409,6 +508,14 @@ class RecipeService:
                 )
             )
             previous_by_metric[str(metric)] = numeric
+        limitations = [
+            "High-water-mark, retained-end, and allocation volume are distinct "
+            "concepts and are not substituted for one another."
+        ]
+        if not resource_rows:
+            limitations.append(
+                "Runtime resource summary was not published for this evidence generation."
+            )
         return MemoryAnalysisResult(
             corpus_commit_id=snapshot.commit.commit_id,
             input_id=input_id,
@@ -427,11 +534,106 @@ class RecipeService:
                 item for item in hotspot_result.hotspots if item.metric.startswith("memory.")
             ),
             phase_growth=tuple(phase_growth),
-            limitations=(
-                "High-water-mark, retained-end, and allocation volume are distinct "
-                "concepts and are not substituted for one another.",
-            ),
+            limitations=tuple(limitations),
+            runtime_resources=resource_rows,
+            runtime_resource_totals=resource_total,
+            runtime_resources_truncated=resource_truncated,
+            truncated=resource_truncated,
+            writable_root_observations=writable_rows,
+            policy_termination=policy_termination,
+            unavailable_metrics=unavailable_metrics,
         )
+
+    def _runtime_resources(
+        self,
+        snapshot: Snapshot,
+        scope: EvidenceScope,
+        limit: int,
+    ) -> tuple[tuple[RuntimeResourceObservation, ...], RuntimeResourceTotals, bool]:
+        where, parameters = self._run_scope_predicate(scope, "rr.run_id")
+        rows = snapshot.execute(
+            "SELECT run_id, sampling_interval_ms, minimum_free_bytes, staging_growth_bytes, "
+            "peak_rss_bytes, policy_termination, unavailable_metrics "
+            "FROM runtime_resource_summaries rr WHERE "
+            + where
+            + " ORDER BY run_id, published_at DESC LIMIT ?",
+            (*parameters, limit + 1),
+        ).fetchall()
+        total_row = snapshot.execute(
+            "SELECT count(*), min(minimum_free_bytes), sum(staging_growth_bytes), "
+            "max(peak_rss_bytes) FROM runtime_resource_summaries rr WHERE " + where,
+            parameters,
+        ).fetchone()
+        assert total_row is not None
+        observations = tuple(
+            RuntimeResourceObservation(
+                run_id=str(row[0]),
+                sampling_interval_ms=int(row[1]),
+                minimum_free_bytes=int(row[2]) if row[2] is not None else None,
+                staging_growth_bytes=int(row[3]) if row[3] is not None else None,
+                peak_rss_bytes=int(row[4]) if row[4] is not None else None,
+                policy_termination=str(row[5]) if row[5] is not None else None,
+                unavailable_metrics=tuple(str(item) for item in (row[6] or ())),
+            )
+            for row in rows[:limit]
+        )
+        return (
+            observations,
+            RuntimeResourceTotals(
+                run_count=int(total_row[0]),
+                minimum_free_bytes=(int(total_row[1]) if total_row[1] is not None else None),
+                total_staging_growth_bytes=(
+                    int(total_row[2]) if total_row[2] is not None else None
+                ),
+                maximum_peak_rss_bytes=(int(total_row[3]) if total_row[3] is not None else None),
+            ),
+            len(rows) > limit,
+        )
+
+    def _writable_root_observations(
+        self,
+        snapshot: Snapshot,
+        scope: EvidenceScope,
+        limit: int,
+    ) -> tuple[WritableRootObservation, ...]:
+        where, parameters = self._run_scope_predicate(scope, "rw.run_id")
+        rows = snapshot.execute(
+            "SELECT run_id, writable_root_identity, target_path, growth_bytes, available, "
+            "unavailable_reason FROM runtime_writable_root_growth rw WHERE "
+            + where
+            + " ORDER BY run_id, target_path LIMIT ?",
+            (*parameters, limit),
+        ).fetchall()
+        return tuple(
+            WritableRootObservation(
+                run_id=str(row[0]),
+                writable_root_identity=str(row[1]),
+                target_path=str(row[2]),
+                growth_bytes=int(row[3]) if row[3] is not None else None,
+                available=bool(row[4]),
+                unavailable_reason=str(row[5]) if row[5] is not None else None,
+            )
+            for row in rows
+        )
+
+    @staticmethod
+    def _run_scope_predicate(scope: EvidenceScope, column: str) -> tuple[str, tuple[object, ...]]:
+        run_ids = scope.run_ids
+        artifact_ids = scope.artifact_ids
+        predicates: list[str] = []
+        parameters: list[object] = []
+        if run_ids:
+            placeholders = ", ".join("?" for _ in run_ids)
+            predicates.append(f"{column} IN ({placeholders})")
+            parameters.extend(run_ids)
+        if artifact_ids:
+            placeholders = ", ".join("?" for _ in artifact_ids)
+            predicates.append(
+                f"{column} IN (SELECT run_id FROM artifact_registrations "
+                f"WHERE artifact_id IN ({placeholders}))"
+            )
+            parameters.extend(artifact_ids)
+        return " OR ".join(f"({item})" for item in predicates) or "FALSE", tuple(parameters)
 
     def execution(
         self,

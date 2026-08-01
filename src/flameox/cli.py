@@ -824,7 +824,7 @@ def workload_show(
 ) -> None:
     """Show a workload's canonical identity and approval state."""
     try:
-        result = WorkloadService(_workspace(workspace)).definition(name)
+        result = WorkloadService(_workspace(workspace)).inspect(name)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -1859,8 +1859,10 @@ def mcp_inspect(
         async with Client(create_server(project_root), raise_exceptions=True) as client:
             tools = await client.list_tools()
             resources = await client.list_resource_templates()
+            instructions = client.instructions
         return {
             "schema_version": 1,
+            "instructions": instructions,
             "tools": [tool.model_dump(mode="json") for tool in tools.tools],
             "resource_templates": [
                 resource.model_dump(mode="json") for resource in resources.resource_templates

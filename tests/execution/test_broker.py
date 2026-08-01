@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
+import psutil
 import pytest
 
 from flameox.domain import DomainError, ErrorCode
@@ -163,6 +164,43 @@ async def test_resource_policy_records_descendant_rss_disk_floor_and_root_growth
     assert resources.writable_root_growth_bytes[str(output)] == 4096
     assert resources.policy_termination is None
     assert outcome.process.peak_rss_bytes == resources.peak_rss_bytes
+
+
+@pytest.mark.anyio
+async def test_resource_policy_marks_short_process_samples_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable_disk_usage(_path: object) -> SimpleNamespace:
+        raise OSError("disk usage unavailable")
+
+    def unavailable_process(_pid: int) -> object:
+        raise psutil.NoSuchProcess(_pid)
+
+    monkeypatch.setattr("flameox.execution.shutil.disk_usage", unavailable_disk_usage)
+    monkeypatch.setattr("flameox.execution.psutil.Process", unavailable_process)
+
+    outcome = await SubprocessBroker().run(
+        request(
+            tmp_path,
+            "-c",
+            "import time; time.sleep(0.08)",
+            resource_policy=ResourcePolicy(
+                filesystem_path=tmp_path,
+                minimum_free_bytes=0,
+                sampling_interval_ms=25,
+            ),
+        )
+    )
+
+    resources = outcome.process.resources
+    assert resources is not None
+    assert resources.minimum_free_bytes is None
+    assert resources.peak_rss_bytes is None
+    assert set(resources.unavailable_metrics) >= {
+        "minimum_free_bytes",
+        "peak_rss_bytes",
+    }
 
 
 @pytest.mark.anyio

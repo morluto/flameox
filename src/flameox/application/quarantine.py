@@ -29,7 +29,8 @@ class QuarantineManifest(ContractModel):
     reason: str
     expected_format: str | None
     actual_format: str | None
-    originating_run_id: str | None
+    adapter: str | None = None
+    originating_run_id: str | None = None
     sha256: str
     recovery_options: tuple[Literal["restore"], ...] = ("restore",)
 
@@ -54,6 +55,7 @@ class QuarantineService:
         operation: str,
         expected_format: str | None = None,
         actual_format: str | None = None,
+        adapter: str | None = None,
         originating_run_id: str | None = None,
     ) -> QuarantineManifest:
         with (
@@ -66,6 +68,7 @@ class QuarantineService:
                 operation=operation,
                 expected_format=expected_format,
                 actual_format=actual_format,
+                adapter=adapter,
                 originating_run_id=originating_run_id,
             )
 
@@ -77,6 +80,7 @@ class QuarantineService:
         operation: str,
         expected_format: str | None = None,
         actual_format: str | None = None,
+        adapter: str | None = None,
         originating_run_id: str | None = None,
     ) -> QuarantineManifest:
         source, relative = self._workspace_path(source)
@@ -99,6 +103,7 @@ class QuarantineService:
             reason=reason,
             expected_format=expected_format,
             actual_format=actual_format,
+            adapter=adapter,
             originating_run_id=originating_run_id,
             sha256=_tree_digest(source),
         )

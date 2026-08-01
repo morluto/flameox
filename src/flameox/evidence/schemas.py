@@ -5,7 +5,7 @@ from typing import Any
 import pyarrow as pa
 
 SCHEMA_MAJOR = 1
-SCHEMA_MINOR = 4
+SCHEMA_MINOR = 5
 UTC_TIMESTAMP = pa.timestamp("us", tz="UTC")
 
 COMMON_FIELDS: tuple[Any, ...] = (
@@ -55,7 +55,33 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("execution_identity_id", pa.string()),
             pa.field("execution_identity_quality", pa.string()),
             pa.field("execution_identity_json", pa.string()),
+            pa.field("limitations", pa.list_(pa.string())),
+            pa.field("limitation_details_json", pa.string()),
+            pa.field("resource_availability", pa.string()),
             pa.field("manifest_path", pa.string(), nullable=False),
+        ),
+    ),
+    "runtime_resource_summaries": _schema(
+        "runtime_resource_summaries",
+        (
+            pa.field("run_id", pa.string(), nullable=False),
+            pa.field("sampling_interval_ms", pa.int32(), nullable=False),
+            pa.field("minimum_free_bytes", pa.uint64()),
+            pa.field("staging_growth_bytes", pa.uint64()),
+            pa.field("peak_rss_bytes", pa.uint64()),
+            pa.field("policy_termination", pa.string()),
+            pa.field("unavailable_metrics", pa.list_(pa.string()), nullable=False),
+        ),
+    ),
+    "runtime_writable_root_growth": _schema(
+        "runtime_writable_root_growth",
+        (
+            pa.field("run_id", pa.string(), nullable=False),
+            pa.field("writable_root_identity", pa.string(), nullable=False),
+            pa.field("target_path", pa.string(), nullable=False),
+            pa.field("growth_bytes", pa.uint64()),
+            pa.field("available", pa.bool_(), nullable=False),
+            pa.field("unavailable_reason", pa.string()),
         ),
     ),
     "artifact_registrations": _schema(

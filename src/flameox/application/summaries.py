@@ -13,6 +13,7 @@ from flameox.domain import (
     ArtifactKind,
     Finding,
     FindingAssessment,
+    LimitationDetail,
     Sensitivity,
     digest_model,
 )
@@ -21,6 +22,25 @@ from flameox.storage import ArtifactStore, JsonRecordStore, RunStore, Workspace
 
 _ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _unique_limitation_details(
+    details: tuple[LimitationDetail, ...] | list[LimitationDetail],
+) -> tuple[LimitationDetail, ...]:
+    result: list[LimitationDetail] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in details:
+        key = (item.source, item.code, item.message)
+        if key not in seen:
+            seen.add(key)
+            result.append(item)
+    return tuple(result)
+
+
+def _summary_limitation_details(
+    runs: tuple[SummaryRun, ...],
+) -> tuple[LimitationDetail, ...]:
+    return _unique_limitation_details([item for run in runs for item in run.limitation_details])
 
 
 class EvidenceSummaryRequest(ContractModel):
@@ -85,6 +105,7 @@ class SummaryRun(ContractModel):
     artifacts: tuple[SummaryArtifact, ...]
     attempts: tuple[SummaryAttempt, ...] = ()
     limitations: tuple[str, ...] = ()
+    limitation_details: tuple[LimitationDetail, ...] = ()
 
 
 class SummaryReference(ContractModel):
@@ -118,6 +139,7 @@ class EvidenceSummary(ContractModel):
     references: tuple[SummaryReference, ...]
     claims: tuple[SummaryClaim, ...]
     limitations: tuple[str, ...]
+    limitation_details: tuple[LimitationDetail, ...] = ()
     truncation: tuple[str, ...] = ()
 
 
@@ -184,6 +206,7 @@ class EvidenceSummaryService:
                 self._claim(snapshot, finding_id, request) for finding_id in request.finding_ids
             )
         limitations = self._limitations(request, runs, references, claims)
+        limitation_details = _summary_limitation_details(runs)
         payload = {
             "corpus_commit_id": head.commit_id,
             "proof_shape": self._proof_shape(request),
@@ -191,6 +214,7 @@ class EvidenceSummaryService:
             "references": [item.model_dump(mode="json") for item in references],
             "claims": [claim.model_dump(mode="json") for claim in claims],
             "limitations": limitations,
+            "limitation_details": [item.model_dump(mode="json") for item in limitation_details],
             "truncation": truncation,
         }
         summary = EvidenceSummary(
@@ -201,6 +225,7 @@ class EvidenceSummaryService:
             references=references,
             claims=claims,
             limitations=limitations,
+            limitation_details=limitation_details,
             truncation=tuple(truncation),
         )
         return EvidenceSummaryBundle(
@@ -290,6 +315,7 @@ class EvidenceSummaryService:
                 external_context[field] = "[redacted]"
         argv = run.command.argv if run.command is not None else ()
         run_limitations = list(run.limitations)
+        run_limitation_details = list(run.limitation_details)
         if len(argv) > 1 and request.sensitive_context == "redact":
             argv = (
                 argv[0],
@@ -298,6 +324,13 @@ class EvidenceSummaryService:
             run_limitations.append(
                 "Command arguments are redacted by default; request sensitive context "
                 "explicitly to include them."
+            )
+            run_limitation_details.append(
+                LimitationDetail(
+                    source="validation",
+                    code="sensitive_context_redacted",
+                    message=run_limitations[-1],
+                )
             )
         return SummaryRun(
             run_id=run_id,
@@ -318,6 +351,7 @@ class EvidenceSummaryService:
             artifacts=tuple(artifacts),
             attempts=attempts,
             limitations=tuple(run_limitations),
+            limitation_details=_unique_limitation_details(run_limitation_details),
         )
 
     @staticmethod

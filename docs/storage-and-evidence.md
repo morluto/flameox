@@ -313,7 +313,8 @@ The run manifest is the complete provenance record. Required top-level fields:
   "execution_status": "succeeded",
   "capture_status": "registered",
   "validation_status": "passed",
-  "limitations": []
+  "limitations": [],
+  "limitation_details": []
 }
 ```
 
@@ -374,6 +375,24 @@ Record:
 - child process cleanup result.
 
 Stdout and stderr are size-limited and redacted according to configuration.
+
+`limitation_details` is the typed additive form of `limitations`. Each detail
+has a bounded `source` (`adapter`, `preflight`, `collector`, `artifact`,
+`resource`, or `validation`), stable code, and human-readable message. The
+string field remains a deterministic, de-duplicated compatibility projection;
+older manifests containing only strings remain readable. Runtime resource
+summaries preserve sampling interval, minimum free bytes, staging growth, peak
+RSS, storage-policy termination, and explicitly unavailable metrics.
+
+Capture publication writes runtime-resource evidence into two dedicated tables:
+`runtime_resource_summaries` contains one bounded observation per terminal run,
+and `runtime_writable_root_growth` contains one observation per declared
+writable root. The latter stores a stable writable-root identity and a
+project-relative target path; it never publishes the host storage path. A
+short-lived process or a failed sampler publishes a nullable metric plus an
+explicit unavailable marker rather than silently substituting zero. Storage
+reserve termination is preserved in the summary and in the run's typed
+limitations.
 
 ## Artifact model
 
@@ -446,9 +465,13 @@ registration context and avoids ambiguous producer or sensitivity claims.
 - Units are explicit.
 - High-cardinality, collector-specific details remain in native artifacts unless
   needed by a supported query.
-- Schema evolution is additive only for declared nullable fields within a major
+- The current Arrow schema is major 1, minor 5. Schema evolution is additive only for declared nullable fields within a major
   schema version. `union_by_name = true` implements that declared evolution; it
   is not itself the evolution policy.
+- Evidence generations written with minor 1.4 remain authoritative and are
+  never rewritten. The catalog projects the two new runtime-resource tables as
+  empty typed views for those generations, and read results report that the
+  resource summary was not published.
 - Typed dimension columns are used for comparison-critical fields. A bounded
   map may carry collector-specific descriptive dimensions but cannot determine
   pairing, compatibility, or treatment assignment.

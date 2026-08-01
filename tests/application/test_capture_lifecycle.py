@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import pytest
 
+from flameox.analysis import RecipeService
 from flameox.application import (
     CaptureService,
     ExecutionPolicy,
@@ -47,8 +48,28 @@ async def test_capture_plan_is_single_use_and_publishes_process_evidence(
     assert result.run.capture_status is CaptureStatus.REGISTERED
     assert result.run.source_state_id is not None
     assert result.run.artifacts
+    assert any(item.source == "adapter" for item in result.run.limitation_details)
+    assert any(item.message in result.run.limitations for item in result.run.limitation_details)
     payload = ArtifactStore(workspace).get(result.run.artifacts[0].artifact_id)
     assert payload.payload_path.read_text().strip() == "candidate"
+    with Catalog(workspace).open_snapshot() as snapshot:
+        resource_row = snapshot.execute(
+            "SELECT run_id, sampling_interval_ms, minimum_free_bytes, "
+            "staging_growth_bytes, peak_rss_bytes, unavailable_metrics "
+            "FROM runtime_resource_summaries WHERE run_id = ?",
+            (result.run.run_id,),
+        ).fetchone()
+    assert resource_row is not None
+    assert resource_row[0] == result.run.run_id
+    assert resource_row[1] > 0
+    assert isinstance(resource_row[5], list)
+    memory = RecipeService(workspace).memory(result.run.run_id)
+    assert memory.runtime_resource_totals is not None
+    assert memory.runtime_resource_totals.run_count == 1
+    assert memory.truncated is memory.runtime_resources_truncated
+    hotspots = RecipeService(workspace).hotspots(result.run.run_id)
+    assert hotspots.evidence_status == "unavailable"
+    assert hotspots.unavailable_reason == "no_profile_artifact"
     events = [
         json.loads(line)
         for line in workspace.paths.operation_log.read_text().splitlines()
@@ -59,6 +80,46 @@ async def test_capture_plan_is_single_use_and_publishes_process_evidence(
     with pytest.raises(DomainError) as replay:
         await service.execute(plan.plan_id)
     assert replay.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+
+
+@pytest.mark.anyio
+@pytest.mark.process
+async def test_capture_publishes_project_relative_writable_root_growth(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "target").mkdir()
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.build]
+argv = ["python", "-c", "from pathlib import Path; Path('target/output.bin').write_bytes(b'build')"]
+writable_paths = ["target"]
+"""
+    )
+    disable_containment(workspace)
+
+    service = CaptureService(workspace)
+    plan = await service.plan(
+        workload_name="build",
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    result = await service.execute(plan.plan_id)
+
+    with Catalog(workspace).open_snapshot() as snapshot:
+        row = snapshot.execute(
+            "SELECT writable_root_identity, target_path, growth_bytes, available, "
+            "unavailable_reason FROM runtime_writable_root_growth WHERE run_id = ?",
+            (result.run.run_id,),
+        ).fetchone()
+    assert row is not None
+    assert row[0]
+    assert row[1] == "target"
+    assert row[2] >= 0
+    assert row[3] is True
+    assert row[4] is None
+    assert str(tmp_path) not in " ".join(str(item) for item in row)
 
 
 @pytest.mark.anyio

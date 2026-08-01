@@ -121,6 +121,7 @@ from flameox.domain import (
     Finding,
     Hypothesis,
     Investigation,
+    LimitationDetail,
     RunManifest,
     RunSet,
     Sensitivity,
@@ -272,6 +273,7 @@ class CaptureReceipt(ContractModel):
     environment_id: str
     artifact_ids: tuple[str, ...]
     limitations: tuple[str, ...]
+    limitation_details: tuple[LimitationDetail, ...] = ()
     corpus_commit_id: str
     resource_uri: str
 
@@ -439,6 +441,12 @@ def _recovery_for(error: DomainError) -> RecoveryAction:
             safe_to_repeat_same_call=False,
             next_tool="list_declared_workflows",
         )
+    if error.details.get("next_tool") == "get_declared_workflow":
+        return RecoveryAction(
+            kind="discover_workflows",
+            safe_to_repeat_same_call=False,
+            next_tool="get_declared_workflow",
+        )
     if error.code is ErrorCode.WORKSPACE_NOT_FOUND:
         return RecoveryAction(
             kind="initialize_workspace",
@@ -541,8 +549,8 @@ def create_server(
             "WORKSPACE_NOT_FOUND, verify that the server's fixed project root is the intended "
             "checkout and, only when authorized, call initialize_workspace; then repeat "
             "workspace_status. Initialization writes .diagnostics. After initialization, use "
-            "list_declared_workflows -> list_capabilities -> plan_capture -> "
-            "execute_capture_plan for short work, or "
+            "list_declared_workflows → get_declared_workflow → list_capabilities when "
+            "active probing is required → plan_capture → execute_capture_plan for short work, "
             "start_detached_capture for long work -> get_detached_capture -> get_run -> analyze. "
             "For existing evidence: list_runs and list_artifacts expose artifact_kinds; use "
             "extract_pyperf and query_measurements for benchmark_samples, "
@@ -722,6 +730,7 @@ def create_server(
                 environment_id=result.run.environment_id,
                 artifact_ids=tuple(item.artifact_id for item in result.run.artifacts),
                 limitations=result.run.limitations,
+                limitation_details=result.run.limitation_details,
                 corpus_commit_id=result.corpus_commit_id,
                 resource_uri=resource_uri,
             )

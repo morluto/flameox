@@ -21,6 +21,28 @@ Digest = Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
 ShortText = Annotated[str, StringConstraints(min_length=1, max_length=500)]
 
 
+class LimitationDetail(ContractModel):
+    """A bounded, machine-readable explanation of an evidence limitation."""
+
+    source: Literal[
+        "adapter",
+        "preflight",
+        "collector",
+        "artifact",
+        "resource",
+        "validation",
+    ]
+    code: Annotated[
+        str,
+        StringConstraints(
+            min_length=1,
+            max_length=100,
+            pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+        ),
+    ]
+    message: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+
+
 def utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -522,9 +544,11 @@ class CapturePlan(ContractModel):
     writable_roots: tuple[WritableRootBinding, ...] = ()
     external_context: ExternalExecutionContext | None = None
     planned_execution_identity: WorkloadExecutionIdentity
+    adapter_capability: CapabilityReport | None = None
     bound_identities: dict[str, JsonValue] = Field(default_factory=dict)
     limits: dict[str, JsonValue] = Field(default_factory=dict)
     warnings: tuple[str, ...] = ()
+    limitation_details: tuple[LimitationDetail, ...] = ()
     created_at: datetime = Field(default_factory=utc_now)
     expires_at: datetime
 
@@ -596,6 +620,7 @@ class RunManifest(ContractModel):
     lease: CaptureLease | None = None
     artifacts: tuple[ArtifactRegistration, ...] = ()
     limitations: tuple[str, ...] = ()
+    limitation_details: tuple[LimitationDetail, ...] = ()
     preflight: PreflightReport | None = None
     writable_roots: tuple[WritableRootBinding, ...] = ()
     external_context: ExternalExecutionContext | None = None

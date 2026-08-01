@@ -8,7 +8,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import psutil
 from pydantic import Field, field_validator
@@ -152,10 +152,10 @@ class SubprocessBroker:
         try:
             async with asyncio.timeout(request.timeout_seconds):
                 stdout, stderr, _, resources = await asyncio.gather(
-                    stdout_task,
-                    stderr_task,
+                    asyncio.shield(stdout_task),
+                    asyncio.shield(stderr_task),
                     process.wait(),
-                    resource_task,
+                    asyncio.shield(resource_task),
                 )
         except TimeoutError as exc:
             timed_out = True
@@ -163,8 +163,11 @@ class SubprocessBroker:
             cleanup_complete = await asyncio.shield(self._terminate(process, request))
             if on_cleanup is not None:
                 await asyncio.shield(on_cleanup(cleanup_complete))
-            await self._settle_readers(stdout_task, stderr_task)
-            await self._settle_resource(resource_task)
+            partial_stdout, partial_stderr = await self._collect_readers(
+                stdout_task,
+                stderr_task,
+            )
+            resources = await self._collect_resource(resource_task)
             timeout_process = ProcessResult(
                 exit_code=None,
                 terminating_signal=(
@@ -176,6 +179,10 @@ class SubprocessBroker:
                 timed_out=True,
                 cancellation_cause=cancellation_cause,
                 cleanup_complete=cleanup_complete,
+                peak_rss_bytes=resources.peak_rss_bytes if resources is not None else None,
+                resources=resources,
+                stdout=partial_stdout.decode(errors="replace"),
+                stderr=partial_stderr.decode(errors="replace"),
             )
             raise DomainError(
                 ErrorCode.PROCESS_TIMEOUT,
@@ -269,6 +276,8 @@ class SubprocessBroker:
         interval = policy.sampling_interval_ms / 1_000
         minimum_free: int | None = None
         peak_rss = 0
+        free_sampled = False
+        rss_sampled = False
         unavailable: set[str] = set()
         initial_sizes = {
             str(root): self._bounded_tree_size(
@@ -283,8 +292,18 @@ class SubprocessBroker:
             else None
         )
         while process.returncode is None:
-            free = shutil.disk_usage(policy.filesystem_path).free
-            minimum_free = free if minimum_free is None else min(minimum_free, free)
+            try:
+                free = shutil.disk_usage(policy.filesystem_path).free
+            except OSError:
+                unavailable.add("minimum_free_bytes")
+                free = None
+            else:
+                free_sampled = True
+                previous_free = minimum_free
+                if previous_free is None:
+                    minimum_free = free
+                else:
+                    minimum_free = min(previous_free, cast(int, free))
             try:
                 parent = psutil.Process(process.pid)
                 processes = (parent, *parent.children(recursive=True))
@@ -294,10 +313,11 @@ class SubprocessBroker:
                         rss += observed.memory_info().rss
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         continue
+                rss_sampled = True
                 peak_rss = max(peak_rss, rss)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
-                unavailable.add("descendant_peak_rss")
-            if free < policy.minimum_free_bytes:
+                unavailable.add("peak_rss_bytes")
+            if free is not None and free < policy.minimum_free_bytes:
                 summary = self._resource_summary(
                     policy,
                     initial_sizes=initial_sizes,
@@ -309,6 +329,10 @@ class SubprocessBroker:
                 )
                 raise _ResourcePolicyExceeded(summary)
             await asyncio.sleep(interval)
+        if not free_sampled:
+            unavailable.add("minimum_free_bytes")
+        if not rss_sampled or peak_rss == 0:
+            unavailable.add("peak_rss_bytes")
         return self._resource_summary(
             policy,
             initial_sizes=initial_sizes,
@@ -345,7 +369,7 @@ class SubprocessBroker:
                 max_files=policy.max_observed_files,
             )
             if initial_staging is None or final_staging is None:
-                unavailable.add("staging_growth")
+                unavailable.add("staging_growth_bytes")
             else:
                 nested_growth = sum(growth.values())
                 staging_growth = max(0, final_staging - initial_staging - nested_growth)
@@ -469,6 +493,14 @@ class SubprocessBroker:
         stdout = values[0] if isinstance(values[0], bytes) else b""
         stderr = values[1] if isinstance(values[1], bytes) else b""
         return stdout, stderr
+
+    async def _collect_resource(
+        self,
+        task: asyncio.Task[RuntimeResourceSummary | None],
+    ) -> RuntimeResourceSummary | None:
+        values = await asyncio.gather(task, return_exceptions=True)
+        value = values[0]
+        return value if isinstance(value, RuntimeResourceSummary) else None
 
     async def _settle_resource(
         self,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -8,7 +9,7 @@ from mcp import Client
 from mcp_types import TextResourceContents
 from typer.testing import CliRunner
 
-from flameox.application import workspace_status
+from flameox.application import WorkloadService, workspace_status
 from flameox.catalog import Catalog
 from flameox.cli import app
 from flameox.mcp import create_server
@@ -32,6 +33,35 @@ async def test_unknown_declared_workflow_routes_back_to_discovery(tmp_path: Path
 
 
 @pytest.mark.anyio
+async def test_invalid_capture_adapter_returns_bounded_workflow_recovery(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.probe]
+argv = ["python", "-c", "print('ok')"]
+"""
+    )
+    WorkloadService(workspace).approve("probe")
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        result = await client.call_tool(
+            "plan_capture",
+            {
+                "workload_name": "probe",
+                "adapter": "not-a-capture-adapter",
+                "parameters": {},
+            },
+        )
+
+    assert result.is_error is True
+    assert result.structured_content is not None
+    error = result.structured_content["error"]
+    assert error["details"]["allowed_adapters"]
+    assert error["recovery"]["next_tool"] == "get_declared_workflow"
+
+
+@pytest.mark.anyio
 async def test_cli_json_and_mcp_result_are_same_domain_model(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     expected = workspace_status(workspace).model_dump(mode="json")
@@ -46,6 +76,26 @@ async def test_cli_json_and_mcp_result_are_same_domain_model(tmp_path: Path) -> 
     assert mcp.structured_content is not None
     assert json.loads(cli.stdout) == expected
     assert mcp.structured_content["result"] == expected
+
+
+@pytest.mark.anyio
+async def test_mcp_inspect_instructions_match_initialize_metadata(tmp_path: Path) -> None:
+    Workspace.initialize(tmp_path)
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        await client.list_tools()
+        initialize_instructions = client.instructions
+
+    cli = await asyncio.to_thread(
+        CliRunner().invoke,
+        app,
+        ["mcp", "inspect", "--project-root", str(tmp_path), "--json"],
+    )
+
+    assert cli.exit_code == 0, cli.output
+    inspected = json.loads(cli.stdout)
+    assert inspected["schema_version"] == 1
+    assert inspected["instructions"] == initialize_instructions
+    assert len(inspected["tools"]) == 58
 
 
 @pytest.mark.anyio

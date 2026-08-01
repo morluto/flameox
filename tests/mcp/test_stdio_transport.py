@@ -10,8 +10,10 @@ from mcp import Client, StdioServerParameters
 from mcp.client.session import ClientSession
 from mcp.client.stdio import stdio_client
 from mcp_types import TextContent, TextResourceContents
+from typer.testing import CliRunner
 
 from flameox.application import WorkloadService
+from flameox.cli import app
 from flameox.domain import DomainError, RunManifest
 from flameox.storage import RunStore, Workspace
 
@@ -37,6 +39,7 @@ async def test_real_stdio_server_keeps_protocol_on_stdout(tmp_path: Path) -> Non
 
     async with Client(stdio_client(parameters), raise_exceptions=True) as client:
         tools = await client.list_tools()
+        instructions = client.instructions
         status = await client.call_tool("workspace_status", {})
         capabilities = await client.call_tool("list_capabilities", {})
         imported = await client.call_tool(
@@ -56,6 +59,15 @@ async def test_real_stdio_server_keeps_protocol_on_stdout(tmp_path: Path) -> Non
         )
 
     assert "workspace_status" in {tool.name for tool in tools.tools}
+    assert instructions is not None
+    assert "get_declared_workflow" in instructions
+    inspected = await asyncio.to_thread(
+        CliRunner().invoke,
+        app,
+        ["mcp", "inspect", "--project-root", str(tmp_path), "--json"],
+    )
+    assert inspected.exit_code == 0, inspected.output
+    assert json.loads(inspected.stdout)["instructions"] == instructions
     assert status.is_error is False
     assert status.structured_content is not None
     assert status.structured_content["result"]["workspace_id"]

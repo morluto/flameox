@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import platform
 import shutil
+import sys
+import tempfile
 from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
 from pathlib import Path
@@ -10,7 +12,7 @@ from flameox.adapters.builtins import BUILTIN_ADAPTERS, BuiltinAdapter, builtin_
 from flameox.adapters.registry import AdapterRegistry
 from flameox.domain import CapabilityReport, CapabilityStatus, DomainError, ErrorCode
 from flameox.domain.models import utc_now
-from flameox.execution import ExecutionRequest, SubprocessBroker
+from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
@@ -209,12 +211,33 @@ class CapabilityService:
         )
         if not version_args:
             return passive
+        version_report = await self._probe_version(passive, version_args)
+        if version_report.status is not CapabilityStatus.AVAILABLE:
+            self._active_cache[adapter] = version_report
+            return version_report
+        if adapter == "perf":
+            result = await self._probe_perf(passive)
+            result = result.model_copy(update={"version": version_report.version})
+            self._active_cache[adapter] = result
+            return result
+        result = version_report
+        if adapter == "py-spy":
+            result = result.model_copy(update={"permission_status": "not_exercised"})
+        self._active_cache[adapter] = result
+        return result
+
+    async def _probe_version(
+        self,
+        passive: CapabilityReport,
+        version_args: tuple[str, ...],
+    ) -> CapabilityReport:
+        if passive.executable is None:
+            return passive
         cwd = self.workspace.project_root if self.workspace is not None else Path.cwd()
-        executable = Path(passive.executable)
         try:
             outcome = await self.broker.run(
                 ExecutionRequest(
-                    argv=(str(executable), *version_args),
+                    argv=(passive.executable, *version_args),
                     cwd=cwd,
                     environment_allowlist=(),
                     allowed_working_roots=(cwd,),
@@ -228,19 +251,12 @@ class CapabilityService:
             )
             first_line = next((line.strip() for line in output.splitlines() if line.strip()), None)
             succeeded = outcome.process.exit_code == 0
-            status = CapabilityStatus.AVAILABLE if succeeded else CapabilityStatus.DEGRADED
-            restrictions = passive.restrictions
-            permission_status = passive.permission_status
-            if adapter == "perf":
-                restrictions = (*restrictions, "Sampling permissions were not exercised.")
-            if adapter == "py-spy":
-                permission_status = "not_exercised"
-            result = passive.model_copy(
+            return passive.model_copy(
                 update={
-                    "status": status,
+                    "status": CapabilityStatus.AVAILABLE
+                    if succeeded
+                    else CapabilityStatus.DEGRADED,
                     "version": first_line or passive.version,
-                    "permission_status": permission_status,
-                    "restrictions": restrictions,
                     "limitations": (
                         ()
                         if succeeded
@@ -251,16 +267,139 @@ class CapabilityService:
                 }
             )
         except (DomainError, OSError, ValueError) as exc:
-            result = passive.model_copy(
+            return passive.model_copy(
                 update={
                     "status": CapabilityStatus.DEGRADED,
-                    "limitations": (f"Active probe failed with {type(exc).__name__}.",),
+                    "limitations": (f"Active version probe failed with {type(exc).__name__}.",),
                     "probe_kind": "active",
                     "probed_at": utc_now(),
                 }
             )
-        self._active_cache[adapter] = result
-        return result
+
+    async def _probe_perf(self, passive: CapabilityReport) -> CapabilityReport:
+        """Exercise one bounded recording so availability includes event permissions."""
+        if self.workspace is None or passive.executable is None:
+            return passive
+        staging_root = self.workspace.paths.staging
+        staging_root.mkdir(parents=True, exist_ok=True)
+        try:
+            with tempfile.TemporaryDirectory(
+                dir=staging_root,
+                prefix="capability-perf-",
+            ) as temporary:
+                output = Path(temporary) / "perf.data"
+                request = ExecutionRequest(
+                    argv=(
+                        passive.executable,
+                        "record",
+                        "-B",
+                        "-N",
+                        "--max-size=1M",
+                        "-o",
+                        str(output),
+                        "--",
+                        sys.executable,
+                        "-I",
+                        "-S",
+                        "-c",
+                        "pass",
+                    ),
+                    cwd=self.workspace.project_root,
+                    environment_allowlist=(),
+                    allowed_working_roots=(self.workspace.project_root,),
+                    timeout_seconds=5,
+                    max_output_bytes=self.workspace.config.execution.max_output_bytes,
+                    resource_policy=ResourcePolicy(
+                        filesystem_path=self.workspace.paths.root,
+                        staging_root=Path(temporary),
+                        minimum_free_bytes=self.workspace.config.storage.min_free_bytes,
+                        sampling_interval_ms=(
+                            self.workspace.config.execution.resource_sampling_interval_ms
+                        ),
+                        max_observed_files=self.workspace.config.execution.max_resource_observed_files,
+                    ),
+                )
+                try:
+                    outcome = await self.broker.run(request)
+                except DomainError as error:
+                    diagnostic = self._bounded_diagnostic(error.message)
+                    process = error.details.get("process")
+                    if isinstance(process, dict):
+                        diagnostic = self._bounded_diagnostic(
+                            " ".join(
+                                str(value)
+                                for value in (process.get("stdout"), process.get("stderr"))
+                                if value
+                            )
+                            or diagnostic
+                        )
+                    return self._perf_failure(passive, diagnostic)
+        except (OSError, ValueError) as error:
+            return self._perf_failure(passive, f"Active perf probe failed: {type(error).__name__}.")
+
+        diagnostic = self._bounded_diagnostic(
+            (outcome.stdout + b"\n" + outcome.stderr).decode("utf-8", errors="replace")
+        )
+        if outcome.process.exit_code == 0:
+            return passive.model_copy(
+                update={
+                    "status": CapabilityStatus.AVAILABLE,
+                    "permission_status": "granted",
+                    "limitations": (),
+                    "remediation": (),
+                    "probe_kind": "active",
+                    "probed_at": utc_now(),
+                }
+            )
+        if self._is_perf_permission_denial(diagnostic):
+            return passive.model_copy(
+                update={
+                    "status": CapabilityStatus.PERMISSION_REQUIRED,
+                    "permission_status": "denied",
+                    "limitations": (diagnostic or "perf event access was denied.",),
+                    "remediation": (
+                        "Lower the kernel perf_event_paranoid policy or grant the process "
+                        "perf event access, then refresh capabilities.",
+                    ),
+                    "probe_kind": "active",
+                    "probed_at": utc_now(),
+                }
+            )
+        return self._perf_failure(passive, diagnostic or "perf sampling probe failed.")
+
+    def _perf_failure(self, passive: CapabilityReport, diagnostic: str) -> CapabilityReport:
+        return passive.model_copy(
+            update={
+                "status": CapabilityStatus.DEGRADED,
+                "permission_status": "unknown",
+                "limitations": (diagnostic,),
+                "remediation": (
+                    "Inspect the bounded perf probe diagnostic and refresh capabilities.",
+                ),
+                "probe_kind": "active",
+                "probed_at": utc_now(),
+            }
+        )
+
+    @staticmethod
+    def _is_perf_permission_denial(diagnostic: str) -> bool:
+        lowered = diagnostic.casefold()
+        return any(
+            marker in lowered
+            for marker in (
+                "permission denied",
+                "operation not permitted",
+                "no permission",
+                "perf_event_open",
+                "perf_event_paranoid",
+                "access denied",
+            )
+        )
+
+    @staticmethod
+    def _bounded_diagnostic(value: str) -> str:
+        normalized = " ".join(value.split())
+        return normalized[:500] or "Active perf probe returned no diagnostic output."
 
     def get(self, adapter: str) -> CapabilityReport:
         for report in self.list().capabilities:

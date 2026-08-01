@@ -291,7 +291,10 @@ registration supplies explicit `ToolAnnotations`.
   `idempotent_hint=False`, `open_world_hint=True`, because an uncontained
   workload may modify files or use the network.
 
-`flameox mcp inspect --json` returns the exact installed schemas and annotations.
+`flameox mcp inspect --json` returns the exact installed schemas, annotations,
+and the server `instructions` string returned by MCP initialize. The CLI
+inspection is additive at schema version 1; in-process and real stdio clients
+must observe the same instructions.
 The supported tools are grouped as follows:
 
 | Family | Tools |
@@ -328,7 +331,21 @@ Read-only. Returns adapter capabilities, installed versions, required
 permissions, unavailable features, and remediation. The default call performs
 only passive inspection. Active executable probes are separately requested,
 bounded, and executed through the subprocess broker; merely listing
-capabilities does not run a project-controlled binary found on `PATH`.
+capabilities does not run a project-controlled binary found on `PATH`. The
+`active_cached` mode uses a previously completed probe, while
+`active_refresh` explicitly reruns it.
+
+#### `list_declared_workflows` and `get_declared_workflow`
+
+Workflow discovery is the authoritative source for approved workload names,
+declared parameters, requirements, and adapter choices. A workflow detail
+returns each requirement's kind, required or optional status, and passive or
+active probe requirement. It also returns at most 64 deterministic adapter
+options with capability status, planning disposition, required preflight mode,
+permission status, supported modes and formats, features, limitations, and
+remediation. Options that need a permission check are reported as
+`active_probe_required`; discovery remains passive until the caller requests
+`list_capabilities(mode="active_refresh")`.
 
 #### `plan_capture`
 
@@ -393,7 +410,9 @@ manifests.
 #### `get_run`
 
 Read-only. Returns one run manifest summary, artifact references, validation,
-and limitations.
+string limitations, typed `limitation_details`, and runtime-resource
+availability. Resource observations remain bounded and are available through
+`analyze_memory`; host storage paths are not exposed.
 
 #### `get_artifact`
 
