@@ -489,6 +489,13 @@ class RecipeService:
                 "GROUP BY phase, name ORDER BY phase_order, phase, name",
                 parameters,
             ).fetchall()
+            profile_where, profile_parameters = self._memory_profile_artifact_predicate(scope)
+            profile_row = snapshot.execute(
+                "SELECT count(*) FROM artifact_registrations ar WHERE " + profile_where,
+                profile_parameters,
+            ).fetchone()
+            assert profile_row is not None
+            has_memory_profile = int(profile_row[0]) > 0
             hotspot_result = RecipeService(
                 self.workspace,
                 snapshot=snapshot,
@@ -540,6 +547,31 @@ class RecipeService:
                 "Runtime resource summary was not published for this evidence generation."
             )
         memory_run_id = scope.run_ids[0] if len(scope.run_ids) == 1 else None
+        evidence = (
+            EvidenceAvailability(
+                status="unavailable",
+                reason=(
+                    "memory_profile_not_extracted"
+                    if has_memory_profile
+                    else "no_memory_profile_artifact"
+                ),
+                next_tool="extract_memray" if has_memory_profile and memory_run_id else None,
+                next_arguments=(
+                    {"run_id": memory_run_id} if has_memory_profile and memory_run_id else None
+                ),
+            )
+            if not rows and has_memory_profile
+            else (
+                EvidenceAvailability(
+                    status="unavailable",
+                    reason="no_memory_profile_artifact",
+                )
+                if not rows and hotspot_result.evidence_status == "unavailable"
+                else empty_availability("no_memory_measurements")
+                if not rows
+                else available_availability()
+            )
+        )
         return MemoryAnalysisResult(
             corpus_commit_id=snapshot.commit.commit_id,
             input_id=input_id,
@@ -566,23 +598,24 @@ class RecipeService:
             writable_root_observations=writable_rows,
             policy_termination=policy_termination,
             unavailable_metrics=unavailable_metrics,
-            evidence=(
-                EvidenceAvailability(
-                    status="unavailable",
-                    reason=hotspot_result.unavailable_reason or "memory_facet_unavailable",
-                    next_tool="extract_memray" if memory_run_id is not None else None,
-                    next_arguments=(
-                        {"run_id": memory_run_id} if memory_run_id is not None else None
-                    ),
-                )
-                if hotspot_result.evidence_status == "unavailable"
-                else (
-                    empty_availability("no_memory_measurements")
-                    if not rows
-                    else available_availability()
-                )
-            ),
+            evidence=evidence,
         )
+
+    @staticmethod
+    def _memory_profile_artifact_predicate(scope: EvidenceScope) -> tuple[str, tuple[object, ...]]:
+        predicates: list[str] = []
+        parameters: list[object] = []
+        if scope.run_ids:
+            placeholders = ", ".join("?" for _ in scope.run_ids)
+            predicates.append(f"(ar.run_id IN ({placeholders}) AND ar.kind = 'memory_profile')")
+            parameters.extend(scope.run_ids)
+        if scope.artifact_ids:
+            placeholders = ", ".join("?" for _ in scope.artifact_ids)
+            predicates.append(
+                f"(ar.artifact_id IN ({placeholders}) AND ar.kind = 'memory_profile')"
+            )
+            parameters.extend(scope.artifact_ids)
+        return " OR ".join(predicates) or "FALSE", tuple(parameters)
 
     def _runtime_resources(
         self,
@@ -770,7 +803,7 @@ class RecipeService:
             limitations=tuple(limitations),
             evidence=(
                 empty_availability("no_execution_observations")
-                if total == 0
+                if not (total or added or removed or changed)
                 else available_availability()
             ),
         )

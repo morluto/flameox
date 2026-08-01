@@ -91,10 +91,10 @@ class EvidenceQueryService:
         if artifact_id is not None:
             predicates.append("artifact_id = ?")
             parameters.append(artifact_id)
+        published_where = " AND ".join(predicates)
+        published_parameters = tuple(parameters)
         if not include_warmups:
             predicates.append("is_warmup = false")
-        population_where = " AND ".join(predicates)
-        population_parameters = tuple(parameters)
         if name_prefix is not None:
             predicates.append("name LIKE ? ESCAPE '^'")
             escaped = name_prefix.replace("^", "^^").replace("%", "^%").replace("_", "^_")
@@ -106,11 +106,11 @@ class EvidenceQueryService:
                 tuple(parameters),
             ).fetchone()
             assert count_row is not None
-            population_count_row = snapshot.execute(
-                "SELECT count(*) FROM measurements WHERE " + population_where,
-                population_parameters,
+            published_count_row = snapshot.execute(
+                "SELECT count(*) FROM measurements WHERE " + published_where,
+                published_parameters,
             ).fetchone()
-            assert population_count_row is not None
+            assert published_count_row is not None
             page_where = where
             page_parameters = list(parameters)
             if after is not None:
@@ -172,7 +172,7 @@ class EvidenceQueryService:
                     status="unavailable",
                     reason="measurements_not_published",
                 )
-                if not measurements and int(population_count_row[0]) == 0
+                if not measurements and int(published_count_row[0]) == 0
                 else (
                     empty_availability("no_matching_measurements")
                     if not measurements

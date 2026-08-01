@@ -1,4 +1,4 @@
-expected_test_count = 374
+expected_test_count = 375
 
 # New files are normalized to their pre-split path so this receipt proves
 # test identity and parametrized case preservation across the decomposition.
@@ -55,7 +55,7 @@ expected_test_count = 374
 'tests/application/test_detached.py' = { count = 6, digest = 'b9ea1ff9369428a415da45feb03f7a5fbb2cab4acbde71339a258f10921b47ee' }
 'tests/application/test_discovery.py' = { count = 2, digest = '154e2545ae8110e6e72d19cd62a1734779f7bf2f6b14180f57ea2852365e8fd2' }
 'tests/application/test_environment_identity.py' = { count = 10, digest = '22a3e3a5af0f747fcf9a680ba01e2d05dab7362ed5ac558d774e788826fb62c6' }
-'tests/application/test_evidence_query.py' = { count = 1, digest = '452c19dca4b8844e095364946fdf74c0c3076809f11c7d730acceeb5c6b53e39' }
+'tests/application/test_evidence_query.py' = { count = 2, digest = '9773c3030eed6d98646628197d0aa81bb7fcfefe6bc75c72a294cf1dac0a77dd' }
 'tests/application/test_evidence_scope.py' = { count = 2, digest = 'e3e51e28f67c6512e3943f88f469d937f88d5f7f88317a34868640e55b9f590b' }
 'tests/application/test_experiments.py' = { count = 11, digest = 'ef1d24a47a9ed83b4e069315bdf7057f7e2028ef840bcbd22b662d1442dae3ad' }
 'tests/application/test_gc.py' = { count = 5, digest = '366b7ea2fd9e0790315e1a20a7b23700861c0d2a6eadba968f75702cd8d16d5a' }
