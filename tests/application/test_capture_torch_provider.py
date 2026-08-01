@@ -207,6 +207,6 @@ timeout_seconds = 30
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
     missing_steps = await service.execute(missing_steps_plan.plan_id)
-    assert missing_steps.run.execution_status is ExecutionStatus.SUCCEEDED
+    assert missing_steps.run.execution_status is ExecutionStatus.FAILED
     assert missing_steps.run.capture_status is CaptureStatus.FAILED
     assert all(item.kind.value != "execution_trace" for item in missing_steps.run.artifacts)
