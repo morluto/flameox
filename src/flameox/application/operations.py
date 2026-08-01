@@ -68,9 +68,7 @@ class OperationRecord(ContractModel):
     failure_code: str | None = None
     failure_message: str | None = None
     cancellation_requested: bool = False
-    cleanup_status: Literal["not_required", "pending", "complete", "incomplete"] = (
-        "not_required"
-    )
+    cleanup_status: Literal["not_required", "pending", "complete", "incomplete"] = "not_required"
     terminal_receipt: dict[str, Any] | None = None
     recovery: OperationRecovery | None = None
     created_at: datetime = Field(default_factory=utc_now)

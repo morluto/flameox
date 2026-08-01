@@ -1457,9 +1457,7 @@ class RecipeService:
             environment_stable=environment_stable,
             warnings=tuple(warnings),
             evidence=(
-                empty_availability("no_scaling_trials")
-                if not points
-                else available_availability()
+                empty_availability("no_scaling_trials") if not points else available_availability()
             ),
         )
 
