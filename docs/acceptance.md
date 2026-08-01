@@ -261,7 +261,7 @@ the presence of schemas alone:
 | #20 | Canonical evidence summaries, proof roles, compatibility limitations, redaction, structural truncation, and safe Markdown rendering | `tests/application/test_summaries.py` |
 | #27 | Ordered pipeline lineage, content-addressed reuse, structural comparison, skipped/incompatible stages, first observed divergence, and immutable catalog rows | `tests/application/test_pipelines.py` |
 | #28 | Approved reducer/predicate binding, coordinator-owned bounded predicate attempts, contradictory outcomes, final revalidation, malicious candidate rejection, terminal cancellation, immutable artifacts, and cleanup | `tests/application/test_reductions.py` |
-| #16 | Visible npm/runtime/wizard handoff and a real PTY reaching the first Python prompt | `npm/test/jsonc-edit.test.cjs`, `tests/test_cli_setup.py`, `tests/cli/test_setup_process.py` |
+| #16 | Visible npm/runtime/wizard handoff and a real PTY reaching the first Python prompt | `npm/test/jsonc-edit.test.cjs`, `tests/test_cli_setup.py`, `tests/cli/test_setup_process.py`, `tests/cli/test_npx_upgrade.py` |
 
 Pipeline structural summaries are supplied through the versioned declaration
 contract in the first implementation. A future adapter convenience API may

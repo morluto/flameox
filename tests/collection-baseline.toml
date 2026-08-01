@@ -1,4 +1,4 @@
-expected_test_count = 331
+expected_test_count = 332
 
 # New files are normalized to their pre-split path so this receipt proves
 # test identity and parametrized case preservation across the decomposition.
@@ -88,6 +88,7 @@ expected_test_count = 331
 'tests/storage/test_artifacts_and_runs.py' = { count = 14, digest = '0f27557254a46c2635bf5cfd47766e05d84e3bb38becf8d8bf6271cd2ebbfc2e' }
 'tests/storage/test_workspace.py' = { count = 7, digest = '1739a16010d438210cad3beadd3d08271b16200e3673f2756ab5b53786435615' }
 'tests/test_cli_setup.py' = { count = 6, digest = '2e1c3a607b7b4cefecb44f98c88c2e65ccbc0afaae39201c2c443eef0204c561' }
+'tests/cli/test_npx_upgrade.py' = { count = 1, digest = '10737afa18cdcf5261c2ee91adf930f36bf8147ecb984c38fa5be8fcf938274d' }
 'tests/test_cli_smoke.py' = { count = 4, digest = '7744e017596d6e7b50b425e639af57396a25a99e9c4ac98a6cd24473f7ce3473' }
 'tests/test_release_metadata.py' = { count = 2, digest = '6235e23370243d1e45fa84e75a6b8f1699af1d5d8a01b59d783a1b882bd077a9' }
 'tests/test_setup_ui.py' = { count = 1, digest = '24035fdd0bc224d58c3df8944d9c16f2525cabc217c3682fe93ffea1ac2204ab' }

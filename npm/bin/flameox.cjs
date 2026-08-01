@@ -11,9 +11,10 @@ if (args.length === 1 && (args[0] === "--version" || args[0] === "-V")) {
   process.stdout.write(`${packageJson.version}\n`);
   process.exit(0);
 }
-if (args[0] !== "setup") {
+const command = args[0];
+if (command !== "setup" && command !== "upgrade") {
   process.stderr.write(
-    "The npm package is the setup bootstrap. Run `npx flameox setup`.\n" +
+    "The npm package is the setup bootstrap. Run `npx flameox setup` or `npx flameox upgrade`.\n" +
       "After setup, use flameox through a connected MCP client or the Python CLI.\n",
   );
   process.exit(2);
@@ -26,6 +27,7 @@ const environment = {
   FLAMEOX_NPM_BOOTSTRAP: "1",
 };
 const pythonPackage = `flameox==${packageJson.version}`;
+const pythonArgs = command === "upgrade" ? ["setup", "--refresh", "--yes", ...args.slice(1)] : args;
 process.stderr.write(
   "Preparing flameox's cached managed Python runtime; this does not add packages to your project.\n",
 );
@@ -41,7 +43,7 @@ const child = spawn(
     "--from",
     pythonPackage,
     "flameox",
-    ...args,
+    ...pythonArgs,
   ],
   { env: environment, stdio: "inherit" },
 );

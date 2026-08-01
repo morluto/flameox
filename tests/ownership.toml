@@ -502,3 +502,9 @@ owner = "cli-process-setup"
 lane = "process"
 paths = ["tests/cli/test_setup_process.py"]
 markers = ["integration", "process", "serial"]
+
+[[ownership]]
+owner = "cli-process-upgrade"
+lane = "process"
+paths = ["tests/cli/test_npx_upgrade.py"]
+markers = ["integration", "process", "serial"]

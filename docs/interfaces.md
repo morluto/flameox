@@ -10,6 +10,10 @@ verification, locking, activation, rollback, and structured results. The same
 setup service is available from `flameox setup` for standard JSON and TOML
 clients.
 
+`npx flameox upgrade` is the non-interactive npm shorthand for updating the
+detected clients to the bootstrap package's matching Python runtime. It keeps
+the same managed-runtime verification and atomic launcher activation as setup.
+
 The first run requires an explicit multi-select. Detection preselects detected
 clients for connection, while the user can adjust the selection before applying
 it. Every mutation has a complete preview and a confirmation whose default is

@@ -137,6 +137,7 @@ explicitly:
 npx flameox setup --codex --claude --yes
 npx flameox setup --all --dry-run --json
 npx flameox setup --verify --yes --json
+npx flameox upgrade
 ```
 
 The npm package installs the matching `flameox` Python release. MCP clients then
