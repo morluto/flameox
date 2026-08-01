@@ -206,7 +206,9 @@ class ManagedRuntime:
             ErrorCode.PROCESS_FAILED,
             f"Could not install flameox {version} with uv.",
             details={"error": detail, "distribution": self.distribution},
-            remediation=("Install uv, check network access, and run setup again.",),
+            remediation=(
+                "Install uv, check network access, then run `npx flameox@latest setup` again.",
+            ),
         )
 
     @staticmethod

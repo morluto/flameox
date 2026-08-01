@@ -28,6 +28,7 @@ class _SelectQuestion:
 
 def test_stale_bootstrap_does_not_offer_or_select_a_runtime_downgrade(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     selected: list[Choice] = []
 
@@ -44,6 +45,11 @@ def test_stale_bootstrap_does_not_offer_or_select_a_runtime_downgrade(
         detected_clients=(),
         installed_versions=("0.1.5",),
     )
+
+    setup_ui.print_banner(inspection, bootstrap_version="0.1.1")
+    banner = capsys.readouterr().out
+    assert "this setup bootstrap (0.1.1) is older than the active runtime (0.1.5)" in banner
+    assert "npx flameox@latest setup" in banner
 
     assert setup_ui.choose_action(inspection, "0.1.1") == "configure"
     assert [choice.title for choice in selected] == [

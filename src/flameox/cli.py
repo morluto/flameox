@@ -449,7 +449,7 @@ def setup(
                     "Interactive setup requires a terminal.",
                     remediation=("Select clients explicitly and pass --yes or --dry-run.",),
                 )
-            setup_ui.print_banner(inspection)
+            setup_ui.print_banner(inspection, bootstrap_version=__version__)
             if remove:
                 action = SetupOperation.REMOVE.value
             elif inspection.active_version is None:

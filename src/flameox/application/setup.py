@@ -360,7 +360,9 @@ class SetupService:
                     ErrorCode.REVISION_CONFLICT,
                     f"Rollback runtime {public.version} is no longer installed.",
                     retryable=True,
-                    remediation=("Review installed versions and run setup again.",),
+                    remediation=(
+                        "Review installed versions, then run `npx flameox@latest setup` again.",
+                    ),
                 )
             installation = await self.runtime.install(public.version)
 
@@ -414,7 +416,9 @@ class SetupService:
                         ErrorCode.REVISION_CONFLICT,
                         f"Configuration changed during setup: {mutation.path}",
                         retryable=True,
-                        remediation=("Review the file and run setup again.",),
+                        remediation=(
+                            "Review the file, then run `npx flameox@latest setup` again.",
+                        ),
                     )
                 atomic_write_bytes(
                     mutation.path,
@@ -458,7 +462,9 @@ class SetupService:
                     ErrorCode.REVISION_CONFLICT,
                     f"Client configuration changed after the setup preview: {edit.path}",
                     retryable=True,
-                    remediation=("Review the new configuration and run setup again.",),
+                    remediation=(
+                        "Review the new configuration, then run `npx flameox@latest setup` again.",
+                    ),
                 )
         manifest, manifest_mode = self._snapshot_file(self.install_manifest)
         if (
@@ -469,7 +475,9 @@ class SetupService:
                 ErrorCode.REVISION_CONFLICT,
                 "flameox setup metadata changed after the setup preview.",
                 retryable=True,
-                remediation=("Review the active runtime and run setup again.",),
+                remediation=(
+                    "Review the active runtime, then run `npx flameox@latest setup` again.",
+                ),
             )
 
     @staticmethod

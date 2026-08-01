@@ -68,7 +68,8 @@ child.on("error", (error) => {
   removeSignalHandlers();
   if (error.code === "ENOENT") {
     process.stderr.write(
-      "flameox setup requires uv. Install it from https://docs.astral.sh/uv/ and retry.\n",
+      "flameox setup requires uv. Install it from https://docs.astral.sh/uv/ and then " +
+        "run `npx flameox@latest setup`.\n",
     );
   } else {
     process.stderr.write(`Could not start flameox setup: ${error.message}\n`);

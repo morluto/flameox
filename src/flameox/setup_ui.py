@@ -13,12 +13,26 @@ from flameox.application.setup import SetupInspection, SetupPlan, SetupReport
 from flameox.domain import DomainError, ErrorCode
 
 
-def print_banner(inspection: SetupInspection) -> None:
+def print_banner(
+    inspection: SetupInspection,
+    *,
+    bootstrap_version: str | None = None,
+) -> None:
     typer.echo()
     typer.secho("  flameox setup", bold=True)
     typer.echo("  Connect local coding agents to a versioned flameox MCP runtime.")
     typer.echo()
     if inspection.active_version is not None:
+        if bootstrap_version is not None and _is_newer(
+            inspection.active_version, bootstrap_version
+        ):
+            typer.secho(
+                f"  Warning: this setup bootstrap ({bootstrap_version}) is older than the "
+                f"active runtime ({inspection.active_version}).",
+                fg=typer.colors.YELLOW,
+            )
+            typer.echo("  Run `npx flameox@latest setup` to refresh the bootstrap.")
+            typer.echo()
         clients = ", ".join(client.display_name for client in inspection.configured_clients)
         typer.echo(f"  Active runtime: {inspection.active_version}")
         typer.echo(f"  Connected: {clients or 'none'}")

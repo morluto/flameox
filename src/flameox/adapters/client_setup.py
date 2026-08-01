@@ -465,7 +465,7 @@ class ClientConfigRegistry:
             ErrorCode.EXECUTION_REFUSED,
             f"Refusing to overwrite malformed client configuration {path}.",
             details={"error": str(error)},
-            remediation=("Repair the configuration and run setup again.",),
+            remediation=("Repair the configuration, then run `npx flameox@latest setup` again.",),
         )
 
 

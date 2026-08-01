@@ -92,6 +92,21 @@ test("bootstrap launches the exactly matching Python release", () => {
   ]);
 });
 
+test("bootstrap recovery points to the latest setup command when uv is missing", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "flameox-missing-uv-"));
+  const bootstrap = path.resolve(__dirname, "../bin/flameox.cjs");
+  const result = spawnSync(process.execPath, [bootstrap, "setup"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      FLAMEOX_UV_EXECUTABLE: path.join(directory, "missing-uvx"),
+    },
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /npx flameox@latest setup/);
+});
+
 test(
   "bootstrap terminates when its child exits from a signal",
   { skip: process.platform === "win32" },
