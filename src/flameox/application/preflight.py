@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import tempfile
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from typing import Literal
@@ -17,6 +18,7 @@ from flameox.domain import (
     RequirementResult,
     digest_model,
 )
+from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.storage import Workspace
 
 
@@ -26,10 +28,12 @@ class PreflightService:
         workspace: Workspace,
         *,
         capabilities: CapabilityService | None = None,
+        broker: SubprocessBroker | None = None,
     ) -> None:
         self.workspace = workspace
         self.workloads = WorkloadService(workspace)
         self.capabilities = capabilities or CapabilityService(workspace)
+        self.broker = broker or SubprocessBroker()
 
     async def inspect(
         self,
@@ -41,7 +45,11 @@ class PreflightService:
         requirements = config.requirements
         results: list[RequirementResult] = []
         for name in requirements.executables:
-            results.append(self._executable(name, required=name not in requirements.optional))
+            required = name not in requirements.optional
+            if name == "nvcc":
+                results.append(await self._cuda_toolkit(required=required, mode=mode))
+            else:
+                results.append(self._executable(name, required=required))
         for name in requirements.python_distributions:
             results.append(self._distribution(name, required=name not in requirements.optional))
         passive = {item.adapter: item for item in self.capabilities.list().capabilities}
@@ -147,6 +155,181 @@ class PreflightService:
             identity=str(path),
             evidence=(str(path),),
         )
+
+    async def _cuda_toolkit(
+        self,
+        *,
+        required: bool,
+        mode: Literal["passive", "active"],
+    ) -> RequirementResult:
+        resolved = shutil.which("nvcc")
+        if resolved is None:
+            return self._executable("nvcc", required=required)
+        path = Path(resolved).resolve()
+        try:
+            path.relative_to(self.workspace.project_root.resolve())
+        except ValueError:
+            pass
+        else:
+            return RequirementResult(
+                requirement="nvcc",
+                kind="executable",
+                required=required,
+                probe_kind="active" if mode == "active" else "passive",
+                status="unsupported",
+                evidence=(str(path),),
+                limitations=(
+                    "Repository-controlled nvcc is not used for CUDA toolkit readiness checks.",
+                ),
+            )
+        if mode == "passive":
+            return RequirementResult(
+                requirement="nvcc",
+                kind="executable",
+                required=required,
+                probe_kind="active",
+                status="unknown",
+                identity=str(path),
+                evidence=(str(path),),
+                limitations=(
+                    "nvcc is installed, but CUDA headers and host/device compilation were not "
+                    "checked in passive preflight mode.",
+                ),
+                remediation=(
+                    "Re-plan with preflight_mode='active' to run the bounded CUDA toolkit probe.",
+                ),
+            )
+
+        try:
+            with tempfile.TemporaryDirectory(
+                dir=self.workspace.paths.staging,
+                prefix="cuda-preflight-",
+            ) as temporary:
+                root = Path(temporary)
+                source = root / "header_probe.cu"
+                output = root / "header_probe.o"
+                source.write_text(
+                    "#include <cuda_runtime.h>\n"
+                    "__global__ void flameox_probe_kernel() {}\n"
+                    "int main() { return 0; }\n",
+                    encoding="ascii",
+                )
+                outcome = await self.broker.run(
+                    ExecutionRequest(
+                        argv=(
+                            str(path),
+                            "-x",
+                            "cu",
+                            "-c",
+                            str(source),
+                            "-o",
+                            str(output),
+                        ),
+                        cwd=self.workspace.project_root,
+                        environment_allowlist=("PATH",),
+                        allowed_working_roots=(self.workspace.project_root, root),
+                        timeout_seconds=30,
+                        max_output_bytes=64 * 1024,
+                    )
+                )
+                diagnostic = self._bounded_diagnostic(
+                    (outcome.stdout + b"\n" + outcome.stderr).decode(
+                        "utf-8",
+                        errors="replace",
+                    )
+                )
+                if outcome.process.exit_code == 0 and output.is_file() and output.stat().st_size:
+                    return RequirementResult(
+                        requirement="nvcc",
+                        kind="executable",
+                        required=required,
+                        probe_kind="active",
+                        status="available",
+                        identity=str(path),
+                        evidence=(str(path), "bounded_cuda_header_compile"),
+                    )
+                return self._cuda_compile_failure(
+                    required=required,
+                    path=path,
+                    diagnostic=diagnostic,
+                )
+        except DomainError as error:
+            process = error.details.get("process")
+            diagnostic = error.message
+            if isinstance(process, dict):
+                diagnostic = (
+                    " ".join(
+                        str(value)
+                        for value in (process.get("stdout"), process.get("stderr"))
+                        if value
+                    )
+                    or diagnostic
+                )
+            return self._cuda_compile_failure(
+                required=required,
+                path=path,
+                diagnostic=self._bounded_diagnostic(diagnostic),
+            )
+        except (OSError, ValueError) as error:
+            return self._cuda_compile_failure(
+                required=required,
+                path=path,
+                diagnostic=self._bounded_diagnostic(f"{type(error).__name__}: {error}"),
+            )
+
+    @classmethod
+    def _cuda_compile_failure(
+        cls,
+        *,
+        required: bool,
+        path: Path,
+        diagnostic: str,
+    ) -> RequirementResult:
+        lowered = diagnostic.casefold()
+        permission_denied = any(
+            marker in lowered
+            for marker in ("permission denied", "operation not permitted", "access denied")
+        )
+        missing_header = "cuda_runtime.h" in lowered and any(
+            marker in lowered for marker in ("no such file", "not found", "cannot open")
+        )
+        if permission_denied:
+            status: Literal["permission_denied", "environment_blocked"] = "permission_denied"
+            limitation = "The bounded CUDA toolkit compile was denied by the host environment."
+            remediation = (
+                "Grant the configured process permission to invoke nvcc and access the CUDA "
+                "toolkit, then refresh preflight.",
+            )
+        else:
+            status = "environment_blocked"
+            limitation = (
+                "The CUDA toolkit is environment-blocked: the bounded nvcc compile did not "
+                "produce an object file."
+            )
+            remediation = (
+                "Install the CUDA development toolkit, including cuda_runtime.h, and ensure "
+                "nvcc can find its include roots, then refresh preflight.",
+            )
+            if missing_header:
+                limitation = (
+                    "The CUDA toolkit is environment-blocked: cuda_runtime.h is missing from "
+                    "nvcc's include path."
+                )
+        return RequirementResult(
+            requirement="nvcc",
+            kind="executable",
+            required=required,
+            probe_kind="active",
+            status=status,
+            identity=str(path),
+            evidence=(str(path), diagnostic),
+            limitations=(limitation,),
+            remediation=remediation,
+        )
+
+    @staticmethod
+    def _bounded_diagnostic(value: str) -> str:
+        return " ".join(value.split())[:500] or "nvcc returned no diagnostic output."
 
     def _distribution(self, name: str, *, required: bool) -> RequirementResult:
         try:

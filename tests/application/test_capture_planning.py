@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -17,9 +18,22 @@ from flameox.domain import (
     CapabilityStatus,
     DomainError,
     ErrorCode,
+    ProcessResult,
 )
+from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
 from flameox.storage import Workspace
 from tests.support.capture import write_workload
+
+
+class _NvccProbeBroker(SubprocessBroker):
+    async def run(self, request: ExecutionRequest, **_: Any) -> ExecutionOutcome:
+        return ExecutionOutcome(
+            process=ProcessResult(exit_code=1, cleanup_complete=True),
+            stdout=b"",
+            stderr=b"fatal error: cuda_runtime.h: No such file or directory\n",
+            resolved_executable=Path(request.argv[0]),
+            containment="process_group",
+        )
 
 
 def test_current_workload_definition_is_active_and_bound_to_plans(tmp_path: Path) -> None:
@@ -203,6 +217,36 @@ active = ["permission.probe"]
     assert result.disposition == "blocked"
     assert result.requirements[0].status == "permission_denied"
     assert result.requirements[0].probe_kind == "active"
+
+
+@pytest.mark.anyio
+async def test_active_nvcc_preflight_classifies_missing_cuda_headers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.gpu]
+argv = ["python", "-c", "print('gpu')"]
+[workloads.gpu.requirements]
+executables = ["nvcc"]
+"""
+    )
+    monkeypatch.setattr("flameox.application.preflight.shutil.which", lambda _: "/usr/bin/nvcc")
+
+    result = await PreflightService(
+        workspace,
+        broker=_NvccProbeBroker(),
+    ).inspect("gpu", mode="active")
+
+    requirement = result.requirements[0]
+    assert result.disposition == "blocked"
+    assert requirement.status == "environment_blocked"
+    assert "cuda_runtime.h" in requirement.limitations[0]
+    assert "cuda_runtime.h" in requirement.remediation[0]
+    assert "cuda_runtime.h" in requirement.evidence[1]
 
 
 @pytest.mark.anyio

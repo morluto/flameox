@@ -268,7 +268,17 @@ disabled. A successful probe reports granted permission; a recognized
 remediation; other failures remain `degraded` with bounded diagnostics. Passive
 capability discovery therefore reports that an active probe is required, and a
 capture plan must bind and recheck the active report immediately before running
-the workload.
+the workload. A denied probe is reported as `permission_required`, which is
+unusable for sampling until the host's `perf_event_open` policy is changed;
+the report includes the observed kernel restriction and a remediation to grant
+the required event access before refreshing capabilities.
+
+Workloads that declare `nvcc` receive a separate bounded CUDA toolkit preflight.
+It compiles a tiny header probe and distinguishes an installed compiler from a
+usable development toolkit. Missing `cuda_runtime.h` is recorded as
+`environment_blocked` with the compiler diagnostic and a remediation to install
+the CUDA development headers. Flameox does not build the workload during this
+check.
 
 #### `perfetto`
 
