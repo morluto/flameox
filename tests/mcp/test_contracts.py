@@ -57,6 +57,18 @@ async def test_mcp_tools_use_explicit_envelopes_and_annotations(
     assert "workload_configuration_status" in instructions
     assert "configure_workload" in instructions
     assert "never executes it" in instructions
+    assert "capture_mode='auto'" in instructions
+    assert "execute_capture_plan" in instructions
+    assert "producer" in by_name["import_artifact"].input_schema["properties"]
+    assert (
+        "torch.profiler"
+        in by_name["import_artifact"].input_schema["properties"]["producer"]["enum"]
+    )
+    assert "temp" in by_name["import_artifact"].input_schema["properties"]["source_root"]["enum"]
+    assert "prepare_adapter" in by_name
+    assert "prepare_workload_dependencies" in by_name
+    assert "exact installed package identity" in (by_name["prepare_adapter"].description or "")
+    assert "never executes" in (by_name["prepare_workload_dependencies"].description or "")
 
 
 @pytest.mark.anyio
@@ -139,6 +151,85 @@ async def test_mcp_workspace_initialization_failures_remain_structured(
     assert result.structured_content["error"]["remediation"] == [
         "Free local storage or increase the filesystem quota, then retry initialization."
     ]
+
+
+@pytest.mark.anyio
+async def test_mcp_invalid_configuration_exposes_typed_recovery_context(tmp_path: Path) -> None:
+    Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        "schema_version = 1\n[experiments.broken]\nworkload = 'missing'\nvariants = ['a', 'b']\n"
+    )
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        status = await client.call_tool("workload_configuration_status", {})
+        failed = await client.call_tool("list_declared_workflows", {"kind": "workload"})
+
+    assert status.structured_content is not None
+    assert status.structured_content["result"]["next_tool"] == "configure_workload"
+    assert failed.is_error is True
+    assert failed.structured_content is not None
+    assert failed.structured_content["error"]["recovery"] == {
+        "kind": "configure_workload",
+        "safe_to_repeat_same_call": False,
+        "retry_after_ms": None,
+        "next_tool": "configure_workload",
+        "context": {
+            "kind": "configure_workload",
+            "operation": "create",
+            "config_path": "flameox.toml",
+        },
+    }
+
+
+@pytest.mark.anyio
+async def test_mcp_invalid_configuration_falls_back_to_typed_manual_recovery(
+    tmp_path: Path,
+) -> None:
+    Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text("schema_version =\n")
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        failed = await client.call_tool(
+            "configure_workload",
+            {
+                "name": "probe",
+                "operation": "create",
+                "argv": ["python", "-c", "print('ok')"],
+            },
+        )
+
+    assert failed.is_error is True
+    assert failed.structured_content is not None
+    recovery = failed.structured_content["error"]["recovery"]
+    assert recovery == {
+        "kind": "manual",
+        "safe_to_repeat_same_call": False,
+        "retry_after_ms": None,
+        "next_tool": None,
+        "context": {
+            "kind": "manual_configuration",
+            "config_path": "flameox.toml",
+            "diagnostic": recovery["context"]["diagnostic"],
+            "verification_tool": "workload_configuration_status",
+        },
+    }
+    assert recovery["context"]["diagnostic"]
+    assert len(recovery["context"]["diagnostic"]) <= 500
+
+
+@pytest.mark.anyio
+async def test_mcp_capability_reports_include_provisioning_and_setup_verification(
+    tmp_path: Path,
+) -> None:
+    Workspace.initialize(tmp_path)
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        result = await client.call_tool("list_capabilities", {"mode": "passive"})
+
+    assert result.structured_content is not None
+    capabilities = result.structured_content["result"]["capabilities"]
+    assert all("provisioning" in item for item in capabilities)
+    assert all("setup_verification" in item for item in capabilities)
 
 
 @pytest.mark.anyio

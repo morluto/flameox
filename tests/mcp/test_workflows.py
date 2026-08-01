@@ -148,7 +148,7 @@ async def test_mcp_inspect_instructions_match_initialize_metadata(tmp_path: Path
     inspected = json.loads(cli.stdout)
     assert inspected["schema_version"] == 1
     assert inspected["instructions"] == initialize_instructions
-    assert len(inspected["tools"]) == 60
+    assert len(inspected["tools"]) == 63
 
 
 @pytest.mark.anyio
@@ -302,3 +302,26 @@ async def test_mcp_run_discovery_filters_pages_and_rejects_stale_cursor(tmp_path
     assert stale.is_error is True
     assert stale.structured_content is not None
     assert stale.structured_content["error"]["code"] == "STALE_CURSOR"
+
+
+@pytest.mark.anyio
+async def test_mcp_import_accepts_an_absolute_path_inside_the_explicit_temp_root(
+    tmp_path: Path,
+) -> None:
+    external = tmp_path.parent / "flameox-agent-trace.json"
+    external.write_text('{"traceEvents": []}')
+    Workspace.initialize(tmp_path)
+    try:
+        async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+            imported = await client.call_tool(
+                "import_artifact",
+                {
+                    "path": str(external),
+                    "source_root": "temp",
+                    "kind": "execution_trace",
+                    "sensitivity": "normal",
+                },
+            )
+        assert imported.is_error is False
+    finally:
+        external.unlink(missing_ok=True)

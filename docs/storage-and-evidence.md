@@ -22,7 +22,8 @@ If none exists, commands that mutate state fail with a remediation suggesting
 An explicit `--workspace` overrides discovery. The resolved workspace must be
 inside the selected project root unless the user explicitly supplies an
 external absolute path through the CLI. MCP tools cannot choose an arbitrary
-external workspace.
+external workspace, but artifact import explicitly permits the fixed project
+root or the system temporary directory as bounded source roots.
 
 In a Git repository, `flameox init` adds `.diagnostics/` to
 `.git/info/exclude` when it is not already ignored. It does not edit the

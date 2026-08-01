@@ -4,15 +4,19 @@
 
 flameox's npm package is a bootstrap, not a second implementation or the runtime
 used by MCP clients. `npx flameox@latest setup` launches the exactly matching
-`flameox` release through `uvx`. The Python setup service installs
-that release into a version-addressed user-data directory with
-`uv tool install --no-config --no-sources`, verifies both the CLI and an actual
-MCP stdio handshake, and only then changes client launchers.
+`flameox` release through `uvx`. The Python setup service installs that release
+into a version-addressed user-data directory with `uv tool install --no-config
+--no-sources`, verifies both the CLI and an actual MCP stdio handshake, and only
+then changes client launchers. Optional providers are an explicit, locked
+capability setup operation against the selected managed runtime; the selected
+extras are recorded so future runtime upgrades carry them forward.
 
-Client configs point directly at that immutable runtime. This avoids network
-access and package resolution during agent startup, permits deterministic
-rollback, and leaves the previous working runtime active if staging or
-verification fails. Old versions are retained until a future explicit
+Client configs point directly at that verified, version-addressed runtime. The
+base setup avoids network access and package resolution during agent startup,
+permits deterministic rollback, and leaves the previous working runtime active
+if staging or verification fails. Explicit capability preparation is the
+exception: it may resolve only the allowlisted providers and records that state
+for the next upgrade. Old versions are retained until a future explicit
 retention command exists.
 
 JSON and TOML editing use maintained format libraries. TOML Kit preserves Codex
@@ -58,12 +62,16 @@ The following choices are settled for flameox:
 - named workloads are validated and activated through the structured
   configuration path and are not described as sandboxed without active
   containment.
+- MCP's default agent capture policy is trusted-local direct execution; managed
+  descendant containment is opt-in and never a prerequisite for the normal
+  agent workflow.
 - MCP does not expose unrestricted command execution, raw SQL, deletion, or
   sensitive artifact content.
 - the CLI and MCP share one domain and application layer; MCP adds a transport
   envelope.
-- third-party adapter loading is disabled until the exact
-  distribution identity is explicitly approved through the CLI.
+- third-party adapter loading is disabled until the exact distribution identity
+  is explicitly approved. MCP `prepare_adapter` is the agent path and records
+  agent-created provenance; the CLI remains an administrative path.
 - existing profilers and viewers are reused rather than reimplemented.
 
 ## Open decisions
@@ -81,5 +89,6 @@ These choices should be made only with implementation evidence:
   or export contract;
 - whether detached background captures are necessary. The default remains
   synchronous progress and cancellation;
-- which platform-specific Trace Processor provisioning method gives the best
-  auditable installation experience. Runtime download remains disallowed.
+- the pinned platform-specific Trace Processor staging path is the managed
+  user-space setup; host privilege and kernel-permission provisioning remain
+  outside FlameOx.

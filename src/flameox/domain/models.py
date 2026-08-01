@@ -26,6 +26,7 @@ class LimitationDetail(ContractModel):
 
     source: Literal[
         "adapter",
+        "containment",
         "preflight",
         "collector",
         "artifact",
@@ -416,10 +417,42 @@ class CapabilityStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class CapabilityProvisioning(StrEnum):
+    """Who can make a capability usable in the current environment."""
+
+    BUNDLED = "bundled"
+    MANAGED_RUNTIME = "managed_runtime"
+    HOST = "host"
+    THIRD_PARTY_APPROVAL = "third_party_approval"
+    UNSUPPORTED = "unsupported"
+
+
+class CapabilitySetup(ContractModel):
+    """The bounded setup action FlameOx can take for one capability."""
+
+    method: Literal["prepare_capabilities"]
+    extra: Literal["cpu", "execution", "memory", "test", "trace", "torch"]
+    requirement: str
+    next_tool: Literal["prepare_capabilities", "list_capabilities"]
+    verification_tool: Literal["list_capabilities"] = "list_capabilities"
+
+
+class AdapterSetup(ContractModel):
+    """The agent-owned setup action for an installed third-party adapter."""
+
+    method: Literal["prepare_adapter"]
+    adapter: Identifier
+    distribution: Identifier
+    package_identity: str
+    next_tool: Literal["prepare_adapter", "list_capabilities"]
+    verification_tool: Literal["list_capabilities"] = "list_capabilities"
+
+
 class CapabilityReport(ContractModel):
     schema_version: Literal[1] = 1
     adapter: Identifier
     status: CapabilityStatus
+    provisioning: CapabilityProvisioning = CapabilityProvisioning.HOST
     executable: str | None = None
     import_location: str | None = None
     version: str | None = None
@@ -433,6 +466,13 @@ class CapabilityReport(ContractModel):
     features: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     remediation: tuple[str, ...] = ()
+    setup: CapabilitySetup | AdapterSetup | None = None
+    setup_verification: Literal[
+        "not_required",
+        "pending",
+        "passive",
+        "active",
+    ] = "not_required"
     probe_kind: Literal["passive", "active"] = "passive"
     probed_at: datetime | None = None
 
@@ -454,6 +494,16 @@ class RequirementResult(ContractModel):
     evidence: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     remediation: tuple[str, ...] = ()
+    next_tool: (
+        Literal[
+            "prepare_adapter",
+            "prepare_capabilities",
+            "prepare_workload_dependencies",
+            "list_capabilities",
+            "plan_capture",
+        ]
+        | None
+    ) = None
 
 
 class PreflightReport(ContractModel):

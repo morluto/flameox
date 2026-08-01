@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import mimetypes
 from pathlib import Path
 
@@ -34,7 +35,7 @@ class ImportArtifactRequest(ContractModel):
     media_type: str | None = None
     sensitivity: Sensitivity = Sensitivity.INTERNAL
     role: str = "primary"
-    producer: str = "flameox.import"
+    producer: str | None = None
     producer_version: str | None = None
     allow_external_path: bool = False
 
@@ -97,6 +98,7 @@ class ImportService:
             raise
 
         media_type = request.media_type or mimetypes.guess_type(request.path.name)[0]
+        producer = request.producer or self._infer_producer(request.path, request.kind)
         registration = ArtifactRegistration(
             registration_id=new_id(),
             run_id=run_id,
@@ -105,7 +107,7 @@ class ImportService:
             media_type=media_type or "application/octet-stream",
             kind=request.kind,
             role=request.role,
-            producer=request.producer,
+            producer=producer,
             producer_version=request.producer_version,
             sensitivity=request.sensitivity,
         )
@@ -139,3 +141,47 @@ class ImportService:
             artifact_id=stored.content.artifact_id,
             corpus_commit_id=published.commit.commit_id,
         )
+
+    @staticmethod
+    def _infer_producer(path: Path, kind: ArtifactKind) -> str:
+        """Recover common producer identity before analysis routing loses it."""
+        if kind is not ArtifactKind.EXECUTION_TRACE:
+            return "flameox.import"
+        try:
+            with path.open("rb") as stream:
+                raw = stream.read(8 * 1024 * 1024)
+        except OSError:
+            return "flameox.import"
+        lowered = raw.lower()
+        if any(
+            marker in lowered
+            for marker in (
+                b'"cpu_op"',
+                b'"cuda_runtime"',
+                b'"profilerstep',
+                b"torch-compiled region",
+            )
+        ):
+            return "torch.profiler"
+        try:
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            return "flameox.import"
+        if not isinstance(payload, dict):
+            return "flameox.import"
+        events = payload.get("traceEvents")
+        if not isinstance(events, list):
+            return "flameox.import"
+        for event in events[:10_000]:
+            if not isinstance(event, dict):
+                continue
+            category = str(event.get("cat", "")).casefold()
+            name = str(event.get("name", "")).casefold()
+            if (
+                "cpu_op" in category
+                or "cuda_runtime" in category
+                or "profilerstep" in name
+                or "torch-compiled region" in name
+            ):
+                return "torch.profiler"
+        return "flameox.import"

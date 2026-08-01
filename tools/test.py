@@ -36,6 +36,7 @@ PROVIDER_LANES = {
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from flameox.adapters.builtins import BUILTIN_ADAPTERS  # noqa: E402
 from tests.support.ownership import Ownership, load_ownership  # noqa: E402
 from tests.support.providers import PROVIDER_MARKERS, provider_inventory  # noqa: E402
 
@@ -218,6 +219,30 @@ def print_provider_inventory() -> int:
     return 0
 
 
+def validate_capability_contract() -> int:
+    """Verify managed capability setup metadata matches published extras."""
+    with (ROOT / "pyproject.toml").open("rb") as stream:
+        project = tomllib.load(stream)
+    extras = project["project"]["optional-dependencies"]
+    managed: dict[str, str] = {}
+    for adapter in BUILTIN_ADAPTERS.values():
+        if adapter.managed_extra is None or adapter.managed_requirement is None:
+            continue
+        if adapter.name in managed:
+            raise SystemExit(f"Duplicate managed capability metadata: {adapter.name}")
+        requirements = extras.get(adapter.managed_extra, [])
+        if adapter.managed_requirement not in requirements:
+            raise SystemExit(
+                f"{adapter.name}: {adapter.managed_requirement!r} is missing from "
+                f"[project.optional-dependencies].{adapter.managed_extra}"
+            )
+        managed[adapter.name] = adapter.managed_extra
+    print("Managed capability contract:")
+    for adapter_name, extra in sorted(managed.items()):
+        print(f"  {adapter_name:20} flameox[{extra}]")
+    return 0
+
+
 def run_lane(lane: str, records: tuple[Ownership, ...]) -> int:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     command = command_for(lane, records)
@@ -258,6 +283,7 @@ def main() -> int:
             "ownership",
             "collection",
             "providers",
+            "capabilities",
             "core",
             "process",
             "optional",
@@ -284,6 +310,8 @@ def main() -> int:
         return verify_collection(records)
     if args.command == "providers":
         return print_provider_inventory()
+    if args.command == "capabilities":
+        return validate_capability_contract()
     if args.command == "list":
         print("Available test lanes:")
         for lane in (
@@ -297,6 +325,7 @@ def main() -> int:
             "cli",
             "security",
             "golden",
+            "capabilities",
             "optional",
             *PROVIDER_LANES,
             "performance",

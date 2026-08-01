@@ -201,16 +201,20 @@ The CLI is a short-lived process. The MCP server is a long-lived local process
 using stdio by default. Both call the same application services.
 
 Transport composition selects a named execution policy. The CLI uses
-`trusted_local`; MCP uses `approved_agent`. Application services receive that
-policy rather than a transport boolean, and plans bind the selected policy for
-execution-time revalidation.
+`trusted_local`. MCP's default `capture_mode='auto'` runs the named workload
+directly and records the absence of enforced descendant containment;
+`capture_mode='managed'` binds `approved_agent` and refuses a plan without the
+required containment when the project policy requires it. Application services
+receive that policy rather than a transport boolean, and plans bind the selected
+policy for execution-time revalidation.
 
 Collectors run as child processes or explicitly selected in-process adapters.
 External commands are always executed as argument arrays with `shell=False`.
-On Linux, flameox uses a cgroup v2 or systemd scope when available so cancellation,
+The default trusted-local agent path runs directly without a containment backend.
+The managed policy can use a cgroup v2 or systemd scope on Linux so cancellation,
 timeouts, and resource limits apply to descendants even if they create a new
-process group. A process-group fallback is reported as degraded containment,
-not as an equivalent guarantee.
+process group; when that policy is not available, planning refuses rather than
+claiming equivalent guarantees.
 
 `flameox.execution` owns subprocess creation through
 `asyncio.create_subprocess_exec` behind a single broker. Collectors, validators,
@@ -262,11 +266,20 @@ flameox[dev]          test, lint, type-check, and fixture tooling
 flameox[all]          all non-vendor optional integrations
 ```
 
-System executables such as `perf`, `py-spy`, `trace_processor_shell`,
-`llvm-symbolizer`, Bubblewrap, GDB, or LLDB are detected at runtime and are not
-silently downloaded. Trace Processor is either an explicitly provisioned
-binary whose version and digest are recorded, or a deliberately bundled,
-platform-specific package. Its convenience network download path is disabled.
+The MCP setup actions are the agent-facing installers. `prepare_capabilities`
+accepts an explicit managed adapter enum and resolves the matching published
+extra; `prepare_adapter` records an exact installed third-party identity; and
+`prepare_workload_dependencies` installs only Python distributions already
+declared by a named workload. Selected extras are recorded in the user-local
+managed-runtime manifest so a later runtime upgrade does not silently remove
+them. None of these actions runs a workload.
+
+System and privileged executables such as `perf`, `llvm-symbolizer`, Bubblewrap,
+GDB, or LLDB are detected at runtime and are not provisioned by FlameOx. The
+non-privileged Trace Processor is the exception: `prepare_capabilities` stages a
+pinned platform-specific binary under `.diagnostics/tools`, verifies its bounded
+version command, and records the configured path. Permission requirements such
+as `perf_event_open` remain explicit.
 
 ### Application services
 

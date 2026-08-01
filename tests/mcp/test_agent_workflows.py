@@ -157,7 +157,7 @@ async def _run_case(case: TraceCase, root: Path) -> tuple[TraceMetrics, bool]:
                 status.is_error is False
                 and status.structured_content is not None
                 and status.structured_content["result"]["status"] == "invalid"
-                and status.structured_content["result"]["next_tool"] is None
+                and status.structured_content["result"]["next_tool"] == "configure_workload"
             )
         elif case["name"] == "attempted_adhoc_capture":
             result = await call(

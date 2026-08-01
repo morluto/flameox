@@ -128,7 +128,7 @@ variants = ["one", "two"]
     assert status.status == "invalid"
     assert status.config_path == "flameox.toml"
     assert status.configuration_id is None
-    assert status.next_tool is None
+    assert status.next_tool == "configure_workload"
     assert len(status.diagnostics) == 1
     assert len(status.diagnostics[0]) <= 512
 
@@ -137,3 +137,27 @@ variants = ["one", "two"]
 
     assert refused.value.code is ErrorCode.WORKSPACE_INVALID
     assert (tmp_path / "flameox.toml").read_text() == invalid
+
+
+def test_structured_workload_recovery_repairs_semantically_invalid_configuration(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "flameox.toml").write_text(
+        """# preserve this note
+schema_version = 1
+
+[experiments.broken]
+workload = "missing"
+variants = ["one", "two"]
+"""
+    )
+    workspace = Workspace.initialize(tmp_path)
+    service = WorkloadService(workspace)
+
+    result = service.configure(_request("missing"))
+
+    assert result.action == "created"
+    repaired = (tmp_path / "flameox.toml").read_text()
+    assert "# preserve this note" in repaired
+    assert "[workloads.missing]" in repaired
+    assert service.configuration_status().status == "valid"

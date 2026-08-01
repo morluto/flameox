@@ -4,6 +4,10 @@ import json
 import os
 import shutil
 import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,8 +16,9 @@ from mcp import Client, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from packaging.version import InvalidVersion, Version
 
-from flameox.atomic import atomic_write_json
+from flameox.atomic import atomic_write_json, atomic_write_text
 from flameox.domain import DomainError, ErrorCode
+from flameox.storage import Workspace
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,8 +28,15 @@ class RuntimeInstallation:
     installed: bool
 
 
+@dataclass(frozen=True, slots=True)
+class TraceProcessorInstallation:
+    version: str
+    executable: Path
+    installed: bool
+
+
 class ManagedRuntime:
-    """Install and verify immutable, version-addressed flameox tool environments."""
+    """Install and verify version-addressed flameox tool environments."""
 
     distribution = "flameox"
 
@@ -74,6 +86,10 @@ class ManagedRuntime:
         environment["UV_TOOL_DIR"] = str(runtime_root / "tools")
         environment["UV_TOOL_BIN_DIR"] = str(runtime_root / "bin")
         try:
+            extras = self._managed_extras()
+            distribution = (
+                f"{self.distribution}[{','.join(extras)}]" if extras else self.distribution
+            )
             completed = subprocess.run(
                 [
                     self.uv_executable,
@@ -86,7 +102,7 @@ class ManagedRuntime:
                     "allow",
                     "--python",
                     "3.12",
-                    f"{self.distribution}=={version}",
+                    f"{distribution}=={version}",
                 ],
                 capture_output=True,
                 text=True,
@@ -115,6 +131,23 @@ class ManagedRuntime:
             },
         )
         return RuntimeInstallation(version, executable, True)
+
+    def _managed_extras(self) -> tuple[str, ...]:
+        """Carry agent-prepared providers into the next versioned runtime."""
+        path = self.root / "capabilities.json"
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return ()
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            return ()
+        extras = payload.get("extras")
+        if not isinstance(extras, list):
+            return ()
+        allowed = {"cpu", "execution", "memory", "test", "trace", "torch"}
+        return tuple(
+            sorted(value for value in extras if isinstance(value, str) and value in allowed)
+        )
 
     async def verify(self, executable: Path, version: str) -> None:
         try:
@@ -199,3 +232,121 @@ class ManagedRuntime:
             details={"executable": str(executable), "error": detail},
             remediation=("The previous configured runtime remains active.",),
         )
+
+
+TRACE_PROCESSOR_VERSION = "v55.1"
+
+
+def install_trace_processor(workspace: Workspace) -> TraceProcessorInstallation:
+    """Stage the pinned user-space Trace Processor without requiring host privileges."""
+    platform_key = {
+        ("linux", "x86_64"): "linux-amd64",
+        ("linux", "amd64"): "linux-amd64",
+        ("linux", "aarch64"): "linux-arm64",
+        ("darwin", "x86_64"): "mac-amd64",
+        ("darwin", "arm64"): "mac-arm64",
+    }.get((sys.platform, _machine()))
+    if platform_key is None:
+        raise DomainError(
+            ErrorCode.CAPABILITY_UNAVAILABLE,
+            "FlameOx has no managed Trace Processor binary for this platform.",
+            details={"next_tool": "list_capabilities"},
+            remediation=(
+                "Install the official Perfetto Trace Processor for this platform or set "
+                "analysis.trace_processor_path in the workspace policy.",
+            ),
+        )
+
+    target = workspace.paths.root / "tools" / "trace_processor_shell"
+    if target.is_file() and os.access(target, os.X_OK):
+        _verify_trace_processor(target)
+        return TraceProcessorInstallation(TRACE_PROCESSOR_VERSION, target, False)
+
+    url = (
+        "https://commondatastorage.googleapis.com/perfetto-luci-artifacts/"
+        f"{TRACE_PROCESSOR_VERSION}/{platform_key}/trace_processor_shell"
+    )
+    staging = workspace.paths.staging
+    staging.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=staging,
+            prefix="trace-processor-",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            with urllib.request.urlopen(url, timeout=120) as response:
+                total = 0
+                while chunk := response.read(1024 * 1024):
+                    total += len(chunk)
+                    if total > 512 * 1024 * 1024:
+                        raise DomainError(
+                            ErrorCode.ARTIFACT_TOO_LARGE,
+                            "The managed Trace Processor download exceeded 512 MiB.",
+                            details={"next_tool": "prepare_capabilities", "adapter": "perfetto"},
+                        )
+                    stream.write(chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(0o755)
+        _verify_trace_processor(temporary)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with workspace.write_locked():
+            os.replace(temporary, target)
+            config = workspace.config
+            updated = config.model_copy(
+                update={
+                    "analysis": config.analysis.model_copy(
+                        update={"trace_processor_path": str(target)}
+                    )
+                }
+            )
+            atomic_write_text(workspace.paths.config, updated.to_toml())
+        temporary = None
+    except DomainError:
+        raise
+    except (OSError, urllib.error.URLError, ValueError) as exc:
+        raise DomainError(
+            ErrorCode.PROCESS_FAILED,
+            "FlameOx could not stage the managed Trace Processor.",
+            retryable=True,
+            details={"next_tool": "prepare_capabilities", "adapter": "perfetto"},
+            remediation=(
+                "Retry prepare_capabilities; if the download remains unavailable, install "
+                "the official user-space binary or configure analysis.trace_processor_path.",
+            ),
+        ) from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return TraceProcessorInstallation(TRACE_PROCESSOR_VERSION, target, True)
+
+
+def _verify_trace_processor(executable: Path) -> None:
+    try:
+        completed = subprocess.run(
+            [str(executable), "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise DomainError(
+            ErrorCode.PROCESS_FAILED,
+            "The staged Trace Processor failed its bounded version check.",
+            details={"next_tool": "prepare_capabilities", "adapter": "perfetto"},
+        ) from exc
+    output = f"{completed.stdout}\n{completed.stderr}"
+    if completed.returncode != 0 or TRACE_PROCESSOR_VERSION.removeprefix("v") not in output:
+        raise DomainError(
+            ErrorCode.PROCESS_FAILED,
+            "The staged Trace Processor failed its bounded version check.",
+            details={"next_tool": "prepare_capabilities", "adapter": "perfetto"},
+            remediation=(completed.stderr.strip()[:500] or "Retry the managed setup.",),
+        )
+
+
+def _machine() -> str:
+    return os.uname().machine.lower() if hasattr(os, "uname") else ""

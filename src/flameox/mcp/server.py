@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from pathlib import Path, PurePath
+from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
+import anyio
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
@@ -20,6 +22,7 @@ from mcp_types import (
 )
 from pydantic import BaseModel, Field, RootModel, ValidationError
 
+from flameox import __version__
 from flameox.adapters import (
     CoverageExtractionResult,
     CoverageExtractor,
@@ -47,6 +50,7 @@ from flameox.analysis import (
     ScalingAnalysisResult,
 )
 from flameox.application import (
+    AdapterPreparationResult,
     AnalysisMaterializationService,
     ArtifactListResult,
     ArtifactMetadataResult,
@@ -56,6 +60,7 @@ from flameox.application import (
     CallEdgeResult,
     CapabilityList,
     CapabilityService,
+    CapabilitySetupResult,
     CapturePlanRegistry,
     CaptureService,
     CompareRunSetsRequest,
@@ -110,6 +115,8 @@ from flameox.application import (
     WorkloadConfig,
     WorkloadConfigurationResult,
     WorkloadConfigurationStatus,
+    WorkloadDependencyService,
+    WorkloadDependencySetupResult,
     WorkloadIdentityConfig,
     WorkloadOracleConfig,
     WorkloadRequirementsConfig,
@@ -175,6 +182,29 @@ IDEMPOTENT_EXECUTE = ToolAnnotations(
 )
 
 
+class ConfigureWorkloadRecoveryContext(ContractModel):
+    """Typed arguments for the safe structured configuration recovery."""
+
+    kind: Literal["configure_workload"]
+    operation: Literal["create"] = "create"
+    config_path: Literal["flameox.toml"] = "flameox.toml"
+
+
+class ManualConfigurationRecoveryContext(ContractModel):
+    """Typed context for configuration that cannot be safely rewritten by MCP."""
+
+    kind: Literal["manual_configuration"]
+    config_path: Literal["flameox.toml"] = "flameox.toml"
+    diagnostic: str = Field(max_length=500)
+    verification_tool: Literal["workload_configuration_status"] = "workload_configuration_status"
+
+
+type RecoveryContext = Annotated[
+    ConfigureWorkloadRecoveryContext | ManualConfigurationRecoveryContext,
+    Field(discriminator="kind"),
+]
+
+
 class RecoveryAction(ContractModel):
     kind: Literal[
         "repeat_same_call",
@@ -182,15 +212,21 @@ class RecoveryAction(ContractModel):
         "replan_capture",
         "initialize_workspace",
         "configure_workload",
+        "inspect_workload_configuration",
+        "prepare_capabilities",
+        "prepare_adapter",
+        "prepare_workload_dependencies",
         "inspect_capabilities",
         "discover_workflows",
         "discover_runs",
         "discover_artifacts",
+        "import_artifact",
         "manual",
     ]
     safe_to_repeat_same_call: bool
     retry_after_ms: int | None = Field(default=None, ge=0)
     next_tool: str | None = None
+    context: RecoveryContext | None = None
 
 
 class ErrorDetail(ContractModel):
@@ -376,24 +412,43 @@ def _success[T: BaseModel](
     *,
     resource_links: tuple[ResourceLink, ...] = (),
 ) -> CallToolResult:
-    payload = SuccessPayload[T](result=result)
     return CallToolResult(
         content=[TextContent(type="text", text=summary), *resource_links],
-        structured_content=payload.model_dump(mode="json"),
+        # MCPServer's v2 converter validates this against ToolPayload[T] exactly once.
+        # The application result is already a typed Pydantic model; constructing the
+        # envelope here would validate the same payload a second time.
+        structured_content={
+            "schema_version": 1,
+            "ok": True,
+            "result": result.model_dump(mode="json"),
+            "error": None,
+        },
     )
 
 
 def _failure(error: DomainError) -> CallToolResult:
-    detail = ErrorDetail.model_validate(
-        {
-            **error.to_detail(),
-            "recovery": _recovery_for(error).model_dump(mode="json"),
-        }
-    )
-    payload = FailurePayload(error=detail)
+    recovery = _recovery_for(error)
+    visible_message = error.message
+    if recovery.next_tool is not None:
+        visible_message += f" Next tool: {recovery.next_tool}."
+    if error.remediation:
+        visible_message += f" {error.remediation[0]}"
+    recovery_payload = recovery.model_dump(mode="json")
+    if recovery.context is None:
+        recovery_payload.pop("context", None)
     return CallToolResult(
-        content=[TextContent(type="text", text=error.message)],
-        structured_content=payload.model_dump(mode="json"),
+        content=[TextContent(type="text", text=visible_message)],
+        # As with success, the SDK output model is the single wire-boundary
+        # validation point for this structured result.
+        structured_content={
+            "schema_version": 1,
+            "ok": False,
+            "result": None,
+            "error": {
+                **error.to_detail(),
+                "recovery": recovery_payload,
+            },
+        },
         is_error=True,
     )
 
@@ -404,23 +459,35 @@ def _invalid_arguments(
 ) -> CallToolResult:
     field_summary = "; ".join(f"{item['field']}: {item['message']}" for item in fields)
     message = f"Invalid arguments for {tool_name}: {field_summary}"
-    payload = FailurePayload(
-        error=ErrorDetail(
-            code="INVALID_ARGUMENTS",
-            message=message,
-            retryable=False,
-            details={"fields": list(fields)},
-            remediation=[f"Match the {tool_name} inputSchema and retry."],
-            run_id=None,
-            recovery=RecoveryAction(
-                kind="manual",
-                safe_to_repeat_same_call=False,
-            ),
+    remediation = [f"Match the {tool_name} inputSchema and retry."]
+    if tool_name == "import_artifact" and any(item["field"] == "kind" for item in fields):
+        remediation.insert(
+            0,
+            "For a Chrome or Torch profiler trace use kind='execution_trace'; the imported "
+            "trace can then be analyzed with analyze_pytorch.",
         )
-    )
+    message = f"{message} {remediation[0]}"
     return CallToolResult(
         content=[TextContent(type="text", text=message)],
-        structured_content=payload.model_dump(mode="json"),
+        structured_content={
+            "schema_version": 1,
+            "ok": False,
+            "result": None,
+            "error": {
+                "code": "INVALID_ARGUMENTS",
+                "message": message,
+                "retryable": False,
+                "details": {"fields": list(fields)},
+                "remediation": remediation,
+                "run_id": None,
+                "recovery": {
+                    "kind": "manual",
+                    "safe_to_repeat_same_call": False,
+                    "retry_after_ms": None,
+                    "next_tool": None,
+                },
+            },
+        },
         is_error=True,
     )
 
@@ -437,6 +504,22 @@ def _validation_fields(error: ValidationError) -> tuple[dict[str, str], ...]:
 
 
 def _recovery_for(error: DomainError) -> RecoveryAction:
+    if error.details.get("invalid_configuration") is True:
+        if error.details.get("next_tool") == "configure_workload":
+            return RecoveryAction(
+                kind="configure_workload",
+                safe_to_repeat_same_call=False,
+                next_tool="configure_workload",
+                context=ConfigureWorkloadRecoveryContext(kind="configure_workload"),
+            )
+        return RecoveryAction(
+            kind="manual",
+            safe_to_repeat_same_call=False,
+            context=ManualConfigurationRecoveryContext(
+                kind="manual_configuration",
+                diagnostic=str(error.details.get("diagnostic", error.message))[:500],
+            ),
+        )
     if error.code is ErrorCode.RUN_NOT_FOUND or error.details.get("missing_entity") == "run":
         return RecoveryAction(
             kind="discover_runs",
@@ -461,11 +544,53 @@ def _recovery_for(error: DomainError) -> RecoveryAction:
             safe_to_repeat_same_call=False,
             next_tool="configure_workload",
         )
+    if error.details.get("next_tool") == "workload_configuration_status":
+        return RecoveryAction(
+            kind="inspect_workload_configuration",
+            safe_to_repeat_same_call=False,
+            next_tool="workload_configuration_status",
+        )
+    if error.details.get("next_tool") == "prepare_capabilities":
+        return RecoveryAction(
+            kind="prepare_capabilities",
+            safe_to_repeat_same_call=True,
+            next_tool="prepare_capabilities",
+        )
+    if error.details.get("next_tool") == "prepare_adapter":
+        return RecoveryAction(
+            kind="prepare_adapter",
+            safe_to_repeat_same_call=True,
+            next_tool="prepare_adapter",
+        )
+    if error.details.get("next_tool") == "prepare_workload_dependencies":
+        return RecoveryAction(
+            kind="prepare_workload_dependencies",
+            safe_to_repeat_same_call=True,
+            next_tool="prepare_workload_dependencies",
+        )
     if error.details.get("next_tool") == "get_declared_workflow":
         return RecoveryAction(
             kind="discover_workflows",
             safe_to_repeat_same_call=False,
             next_tool="get_declared_workflow",
+        )
+    if error.details.get("next_tool") == "plan_capture":
+        return RecoveryAction(
+            kind="replan_capture",
+            safe_to_repeat_same_call=False,
+            next_tool="plan_capture",
+        )
+    if error.details.get("next_tool") == "import_artifact":
+        return RecoveryAction(
+            kind="import_artifact",
+            safe_to_repeat_same_call=False,
+            next_tool="import_artifact",
+        )
+    if error.details.get("next_tool") == "list_capabilities":
+        return RecoveryAction(
+            kind="inspect_capabilities",
+            safe_to_repeat_same_call=False,
+            next_tool="list_capabilities",
         )
     if error.code is ErrorCode.WORKSPACE_NOT_FOUND:
         return RecoveryAction(
@@ -493,8 +618,9 @@ def _recovery_for(error: DomainError) -> RecoveryAction:
         )
     if error.retryable:
         return RecoveryAction(
-            kind="manual",
-            safe_to_repeat_same_call=False,
+            kind="repeat_same_call",
+            safe_to_repeat_same_call=True,
+            retry_after_ms=250,
         )
     return RecoveryAction(
         kind="manual",
@@ -502,21 +628,45 @@ def _recovery_for(error: DomainError) -> RecoveryAction:
     )
 
 
-def _safe_project_path(project_root: Path, value: str) -> Path:
-    candidate = PurePath(value)
-    if candidate.is_absolute() or ".." in candidate.parts or "\x00" in value:
+def _safe_import_path(
+    project_root: Path,
+    value: str,
+    source_root: Literal["project", "temp"],
+) -> Path:
+    root = (
+        project_root.resolve()
+        if source_root == "project"
+        else Path(tempfile.gettempdir()).resolve()
+    )
+    raw = Path(value)
+    candidate = raw if raw.is_absolute() else root / raw
+    if "\x00" in value:
         raise DomainError(
             code=ErrorCode.EXECUTION_REFUSED,
-            message="MCP artifact paths must be relative to the fixed project root.",
+            message="MCP artifact paths cannot contain NUL bytes.",
+            details={"next_tool": "import_artifact"},
+            remediation=(f"Provide a regular file beneath source_root={source_root!r}.",),
         )
-    return project_root / Path(candidate)
+    try:
+        candidate.parent.resolve().relative_to(root)
+    except ValueError as exc:
+        raise DomainError(
+            code=ErrorCode.EXECUTION_REFUSED,
+            message="MCP artifact path is outside the selected local import root.",
+            details={"next_tool": "import_artifact", "source_root": source_root},
+            remediation=(
+                f"Use a path beneath source_root={source_root!r}; project and temporary roots "
+                "are the only MCP import roots.",
+            ),
+        ) from exc
+    return candidate
 
 
 def create_server(
     project_root: Path,
     *,
     initialize: bool = False,
-) -> MCPServer[AppContext]:
+) -> StrictMCPServer[AppContext]:
     project_root = project_root.resolve()
     lifespan_state: list[AppContext] = []
 
@@ -557,13 +707,21 @@ def create_server(
                 await state.detached_captures.shutdown()
             lifespan_state.clear()
 
-    server: MCPServer[AppContext] = StrictMCPServer(
+    server = StrictMCPServer(
         "flameox",
+        version=__version__,
         description="Query and collect local runtime evidence.",
         instructions=(
             "Use Flameox to collect, preserve, compare, and inspect local runtime evidence "
             "when source, environment, command, and artifact provenance must be reproducible. "
-            "Do not use it to provision hosts, install dependencies, mutate source or GitHub, "
+            "Do not provision hosts or install undeclared packages. If list_capabilities reports "
+            "a managed setup action, call prepare_capabilities; it installs only the declared "
+            "FlameOx optional providers into the active managed runtime, verifies them, and "
+            "does not execute a workload. Host containment is not required for the agent path: "
+            "plan_capture(capture_mode='auto') followed by execute_capture_plan runs the "
+            "declared workload directly and records the execution limitation. Use "
+            "capture_mode='managed' only when the project explicitly requires containment. "
+            "Do not mutate source or GitHub, "
             "or prove static claims without runtime evidence. "
             "For a new project, call workspace_status first. If it returns "
             "WORKSPACE_NOT_FOUND, call initialize_workspace for the server's fixed project root; "
@@ -572,7 +730,12 @@ def create_server(
             "workload_configuration_status. If flameox.toml is missing, call configure_workload "
             "with the validated argument array; it writes the canonical project definition but "
             "never executes it. After that, use list_declared_workflows → "
-            "get_declared_workflow → list_capabilities → plan_capture → execute_capture_plan "
+            "get_declared_workflow → list_capabilities → prepare_capabilities (when the result "
+            "names setup_adapters) → prepare_adapter (for an unapproved installed third-party "
+            "adapter) → prepare_workload_dependencies (when a named workload declares missing "
+            "Python distributions) → list_capabilities → plan_capture(preflight_mode='auto', "
+            "capture_mode='auto') "
+            "→ execute_capture_plan "
             "for short work, "
             "start_detached_capture for long work -> get_detached_capture -> get_run -> analyze. "
             "For existing evidence: list_runs and list_artifacts expose artifact_kinds; use "
@@ -724,7 +887,13 @@ def create_server(
         ctx: Context[AppContext],
         mode: Literal["passive", "active_cached", "active_refresh"] = "passive",
     ) -> Annotated[CallToolResult, ToolPayload[CapabilityList]]:
-        """List capabilities; use passive, active_cached, or active_refresh mode explicitly."""
+        """List capabilities and exact managed setup actions.
+
+        If setup_adapters is non-empty, call prepare_capabilities with those adapter names. If
+        setup_third_party_adapters is non-empty, call prepare_adapter with the exact
+        adapter/distribution identity from the capability report. Then call list_capabilities
+        again. Managed setup never executes a workload.
+        """
         service = ctx.request_context.lifespan_context.capabilities
         result = (
             service.list()
@@ -734,8 +903,123 @@ def create_server(
         return _success(
             result,
             f"Found {sum(item.status.value == 'available' for item in result.capabilities)} of "
-            f"{len(result.capabilities)} available capabilities.",
+            f"{len(result.capabilities)} available capabilities. "
+            + (
+                "Call prepare_capabilities for: " + ", ".join(result.setup_adapters) + "."
+                if result.setup_adapters
+                else (
+                    "Call prepare_adapter for the reported adapter/distribution pairs."
+                    if result.setup_third_party_adapters
+                    else "No managed capability setup is pending."
+                )
+            ),
         )
+
+    @server.tool(name="prepare_capabilities", annotations=CONFIGURE)
+    async def prepare_capabilities_tool(
+        adapters: Annotated[
+            tuple[
+                Literal["coverage", "memray", "perfetto", "py-spy", "pytest", "torch.profiler"],
+                ...,
+            ],
+            Field(
+                min_length=1,
+                max_length=5,
+                description=(
+                    "Adapter names from list_capabilities that expose a managed setup action."
+                ),
+            ),
+        ],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[CapabilitySetupResult]]:
+        """Install and verify selected FlameOx-managed optional providers.
+
+        This action is limited to the explicit adapter enum, changes only the active managed
+        runtime or stages the user-space Trace Processor under .diagnostics/tools, and never
+        executes a project workload. Call list_capabilities again before planning. It does not
+        change host permissions or install privileged collectors.
+        """
+        try:
+            service = ctx.request_context.lifespan_context.capabilities
+            result = await anyio.to_thread.run_sync(service.prepare, tuple(adapters))
+            return _success(
+                result,
+                "Prepared requested capabilities; call list_capabilities before planning.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="prepare_adapter", annotations=CONFIGURE)
+    async def prepare_adapter_tool(
+        adapter: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=200,
+                pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+                description="Third-party adapter name returned by list_capabilities.",
+            ),
+        ],
+        distribution: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=200,
+                pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                description="Exact installed distribution name reported for this adapter.",
+            ),
+        ],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[AdapterPreparationResult]]:
+        """Approve one installed third-party adapter by exact installed package identity.
+
+        This records agent-created provenance under the workspace lock; it does not install a
+        package, import plugin code, or execute a workload. Call list_capabilities again.
+        """
+        try:
+            result = ctx.request_context.lifespan_context.capabilities.prepare_adapter(
+                adapter,
+                distribution,
+            )
+            return _success(
+                result,
+                f"Prepared adapter {adapter!r} from {distribution!r}; call list_capabilities next.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="prepare_workload_dependencies", annotations=CONFIGURE)
+    async def prepare_workload_dependencies_tool(
+        workload_name: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=100,
+                pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                description=(
+                    "Declared workload whose Python distribution requirements are installed."
+                ),
+            ),
+        ],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[WorkloadDependencySetupResult]]:
+        """Install declared workload Python distributions into the active managed runtime.
+
+        Only requirements already present in the named workload's flameox.toml definition are
+        installed. The tool never executes a workload. The result includes an active preflight and
+        tells the agent whether to plan or inspect a remaining host capability.
+        """
+        try:
+            result = await WorkloadDependencyService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).prepare(workload_name)
+            return _success(
+                result,
+                f"Prepared dependencies for {workload_name!r}; call "
+                f"{result.next_tool or 'list_capabilities'} next.",
+            )
+        except DomainError as error:
+            return _failure(error)
 
     @server.tool(name="list_declared_workflows", annotations=READ_ONLY)
     async def list_declared_workflows_tool(
@@ -793,16 +1077,28 @@ def create_server(
             Field(description="Declared workload parameters; inspect get_declared_workflow first."),
         ],
         ctx: Context[AppContext],
-        preflight_mode: Literal["passive", "active"] = "passive",
+        preflight_mode: Literal["auto", "passive", "active"] = "auto",
+        capture_mode: Literal["auto", "managed", "trusted_local"] = "auto",
         external_context: ExternalExecutionContext | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[CapturePlan]]:
-        """After workflow and capability discovery, bind one current capture without running it."""
+        """Bind one current capture without running it.
+
+        The default auto mode runs the declared workload directly in the local environment and
+        records that no enforced descendant containment was used. Use managed only when the
+        project policy explicitly requires containment, and use trusted_local to request the
+        same direct local execution explicitly. This tool never executes the workload.
+        """
         try:
+            execution_policy = (
+                ExecutionPolicy.APPROVED_AGENT
+                if capture_mode == "managed"
+                else ExecutionPolicy.TRUSTED_LOCAL
+            )
             result = await ctx.request_context.lifespan_context.capture_service().plan(
                 workload_name=workload_name,
                 adapter=adapter,
                 parameters=parameters,
-                execution_policy=ExecutionPolicy.APPROVED_AGENT,
+                execution_policy=execution_policy,
                 preflight_mode=preflight_mode,
                 external_context=external_context,
             )
@@ -811,6 +1107,16 @@ def create_server(
                 f"Planned {adapter} capture with {result.containment} containment.",
             )
         except DomainError as error:
+            if capture_mode == "managed" and error.code in {
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                ErrorCode.EXECUTION_REFUSED,
+            }:
+                error.details.update({"next_tool": "plan_capture", "capture_mode": "auto"})
+                error.remediation = (
+                    "Re-plan with capture_mode='auto' to run directly and record the missing "
+                    "containment as an execution limitation.",
+                    *error.remediation,
+                )
             return _failure(error)
 
     @server.tool(name="execute_capture_plan", annotations=EXECUTE)
@@ -936,7 +1242,7 @@ def create_server(
                 hypothesis_id=hypothesis_id,
                 adapter=adapter,
                 parameter_overrides=parameters,
-                execution_policy=ExecutionPolicy.APPROVED_AGENT,
+                execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
             )
             return _success(
                 result,
@@ -1127,7 +1433,10 @@ def create_server(
         path: Annotated[
             str,
             Field(
-                description="Project-relative artifact path; absolute and parent paths are refused."
+                description=(
+                    "Artifact path relative to source_root, or an absolute path already inside "
+                    "that bounded root."
+                )
             ),
         ],
         kind: Annotated[
@@ -1139,17 +1448,47 @@ def create_server(
             Field(description="Sensitivity classification: normal, internal, or sensitive."),
         ],
         ctx: Context[AppContext],
+        source_root: Literal["project", "temp"] = "project",
+        producer: Annotated[
+            Literal[
+                "auto",
+                "torch.profiler",
+                "perfetto",
+                "py-spy",
+                "memray",
+                "coverage",
+                "pyperf",
+                "pytest",
+            ],
+            Field(
+                description=(
+                    "Producer identity. Use auto for common trace detection; use "
+                    "torch.profiler when importing an ambiguous Torch trace."
+                )
+            ),
+        ] = "auto",
+        producer_version: Annotated[
+            str | None,
+            Field(description="Optional producer version, at most 100 characters.", max_length=100),
+        ] = None,
     ) -> Annotated[CallToolResult, ToolPayload[ImportReceipt]]:
-        """Import one project-local artifact as an immutable run; follow returned resource links."""
+        """Import one project-local artifact and preserve producer identity.
+
+        Chrome traces with Torch profiler markers are identified automatically, so an external
+        Torch trace can be sent directly to analyze_pytorch after import. Use kind='execution_trace'
+        for Chrome/Torch traces. If detection is ambiguous, set producer='torch.profiler'.
+        """
         try:
             state = ctx.request_context.lifespan_context
             workspace = state.require_workspace()
             result = ImportService(workspace).import_artifact(
                 ImportArtifactRequest(
-                    path=_safe_project_path(state.project_root, path),
+                    path=_safe_import_path(state.project_root, path, source_root),
                     kind=kind,
                     sensitivity=sensitivity,
-                    allow_external_path=False,
+                    producer=None if producer == "auto" else producer,
+                    producer_version=producer_version,
+                    allow_external_path=source_root == "temp",
                 )
             )
             run_uri = f"flameox://runs/{result.run.run_id}"

@@ -12,6 +12,7 @@ from mcp.client.stdio import stdio_client
 from mcp_types import TextContent, TextResourceContents
 from typer.testing import CliRunner
 
+from flameox import __version__
 from flameox.cli import app
 from flameox.domain import DomainError, RunManifest
 from flameox.storage import RunStore, Workspace
@@ -58,8 +59,10 @@ async def test_real_stdio_server_keeps_protocol_on_stdout(tmp_path: Path) -> Non
         )
 
     assert "workspace_status" in {tool.name for tool in tools.tools}
+    assert "prepare_capabilities" in {tool.name for tool in tools.tools}
     assert instructions is not None
     assert "get_declared_workflow" in instructions
+    assert "prepare_capabilities" in instructions
     inspected = await asyncio.to_thread(
         CliRunner().invoke,
         app,
@@ -106,14 +109,37 @@ async def test_strict_mcp_client_can_decode_tools_list_output_schemas(tmp_path: 
     )
 
     async with stdio_client(parameters) as streams, ClientSession(*streams) as session:
-        await session.initialize()
+        initialized = await session.initialize()
         result = await session.list_tools()
 
     assert len(result.tools) >= 40
+    assert initialized.server_info.version == __version__
     assert all(tool.output_schema is not None for tool in result.tools)
     for tool in result.tools:
         assert tool.output_schema is not None
         assert tool.output_schema["type"] == "object"
+
+
+@pytest.mark.anyio
+@pytest.mark.process
+@pytest.mark.serial
+async def test_fresh_stdio_connections_negotiate_the_flameox_runtime_version(
+    tmp_path: Path,
+) -> None:
+    parameters = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "flameox", "mcp", "serve", "--project-root", str(tmp_path)],
+        cwd=tmp_path,
+    )
+
+    for _ in range(2):
+        async with stdio_client(parameters) as streams, ClientSession(*streams) as session:
+            initialized = await session.initialize()
+            tools = await session.list_tools()
+
+        assert initialized.server_info.version == __version__
+        assert initialized.protocol_version
+        assert tools.tools
 
 
 @pytest.mark.anyio
@@ -192,6 +218,15 @@ async def test_real_stdio_discovers_then_plans_and_executes_declared_workload(
     assert configured.is_error is False
     assert configured.structured_content is not None
     assert configured.structured_content["result"]["configuration_source"] == "agent"
+    assert planned.structured_content["result"]["execution_policy"] == "trusted_local"
+    assert any(
+        "Trusted-local execution selected" in warning
+        for warning in planned.structured_content["result"]["warnings"]
+    )
+    assert any(
+        item["code"] == "trusted_local_execution"
+        for item in planned.structured_content["result"]["limitation_details"]
+    )
     assert executed.is_error is False
     assert executed.structured_content is not None
     assert executed.structured_content["result"]["execution_status"] == "succeeded"
@@ -250,12 +285,28 @@ async def test_real_stdio_server_returns_structured_schema_validation_errors(
 
     async with Client(stdio_client(parameters), raise_exceptions=True) as client:
         result = await client.call_tool("list_runs", {"limit": 0})
+        unmanaged = await client.call_tool(
+            "prepare_capabilities",
+            {"adapters": ["perf"]},
+        )
+        invalid_kind = await client.call_tool(
+            "import_artifact",
+            {"path": "profile.json", "kind": "normal", "sensitivity": "normal"},
+        )
 
     assert result.is_error is True
     assert result.structured_content is not None
     assert result.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
     assert result.structured_content["error"]["details"]["fields"][0]["field"] == "limit"
     assert "greater than or equal to 1" in result.structured_content["error"]["message"]
+    assert unmanaged.is_error is True
+    assert unmanaged.structured_content is not None
+    assert unmanaged.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
+    assert invalid_kind.is_error is True
+    assert invalid_kind.structured_content is not None
+    assert "execution_trace" in invalid_kind.structured_content["error"]["remediation"][0]
+    assert isinstance(invalid_kind.content[0], TextContent)
+    assert "execution_trace" in invalid_kind.content[0].text
 
 
 @pytest.mark.anyio

@@ -39,7 +39,7 @@ writable_paths = [{json.dumps(value)}]
 
 
 @pytest.mark.anyio
-async def test_capture_plan_reports_degraded_when_systemd_user_manager_is_unavailable(
+async def test_trusted_local_capture_does_not_require_systemd_user_manager(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -53,11 +53,11 @@ async def test_capture_plan_reports_degraded_when_systemd_user_manager_is_unavai
             return "/usr/bin/true"
         return real_which(name)
 
-    async def unavailable_user_manager(_systemd_run: str) -> bool:
-        return False
+    async def unexpected_user_manager_probe(_systemd_run: str) -> bool:
+        raise AssertionError("trusted-local execution must not probe containment")
 
     monkeypatch.setattr("flameox.application.capture.shutil.which", available_executable)
-    monkeypatch.setattr(service, "_systemd_user_scope_available", unavailable_user_manager)
+    monkeypatch.setattr(service, "_systemd_user_scope_available", unexpected_user_manager_probe)
 
     plan = await service.plan(
         workload_name="echo",
@@ -65,7 +65,8 @@ async def test_capture_plan_reports_degraded_when_systemd_user_manager_is_unavai
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    assert plan.containment == "degraded"
+    assert plan.containment == "uncontained"
+    assert any("runs directly" in warning for warning in plan.warnings)
     assert plan.systemd_scope_unit is None
 
 

@@ -30,7 +30,12 @@ from flameox.adapters.registry import (
     AdapterDiscoveryResult,
     AdapterRegistry,
 )
-from flameox.adapters.setup_runtime import ManagedRuntime, RuntimeInstallation
+from flameox.adapters.setup_runtime import (
+    ManagedRuntime,
+    RuntimeInstallation,
+    TraceProcessorInstallation,
+    install_trace_processor,
+)
 
 __all__ = [
     "ALL_SETUP_CLIENTS",
@@ -60,5 +65,7 @@ __all__ = [
     "RuntimeInstallation",
     "SetupClient",
     "TraceEvent",
+    "TraceProcessorInstallation",
     "TraceWindowResult",
+    "install_trace_processor",
 ]

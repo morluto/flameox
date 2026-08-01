@@ -232,6 +232,20 @@ python_distributions = ["flameox-missing-distribution"]
 
 
 @pytest.mark.anyio
+async def test_capture_planning_defaults_to_bounded_active_preflight(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    write_workload(tmp_path)
+
+    plan = await CaptureService(workspace).plan(
+        workload_name="echo",
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    assert plan.preflight.mode == "active"
+
+
+@pytest.mark.anyio
 async def test_invalid_capture_adapter_reports_bounded_recovery_choices(
     tmp_path: Path,
 ) -> None:
@@ -251,6 +265,36 @@ async def test_invalid_capture_adapter_reports_bounded_recovery_choices(
     assert len(choices) <= 64
     assert choices == sorted(choices)
     assert refused.value.details["next_tool"] == "get_declared_workflow"
+
+
+@pytest.mark.anyio
+async def test_missing_managed_adapter_points_to_setup_before_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    write_workload(tmp_path)
+    service = CaptureService(workspace)
+    original_get = service.capabilities.get
+    missing = original_get("torch.profiler").model_copy(
+        update={"status": CapabilityStatus.UNAVAILABLE}
+    )
+    monkeypatch.setattr(
+        service.capabilities,
+        "get",
+        lambda adapter: missing if adapter == "torch.profiler" else original_get(adapter),
+    )
+
+    with pytest.raises(DomainError) as refused:
+        await service.plan(
+            workload_name="echo",
+            adapter="torch.profiler",
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
+
+    assert refused.value.details["next_tool"] == "prepare_capabilities"
+    assert refused.value.details["setup_adapters"] == ["torch.profiler"]
+    assert "command" in refused.value.details["fallback_adapters"]
 
 
 @pytest.mark.anyio

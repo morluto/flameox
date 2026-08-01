@@ -1695,6 +1695,16 @@ class RecipeService:
         raise DomainError(
             ErrorCode.COMPARISON_INVALID,
             "PyTorch operator analysis requires a torch.profiler-produced trace.",
+            details={
+                "next_tool": "import_artifact",
+                "required_kind": "execution_trace",
+                "required_producer": "torch.profiler",
+            },
+            remediation=(
+                "Re-import the trace with kind='execution_trace'; Torch markers are detected "
+                "automatically.",
+                "If detection is ambiguous, set producer='torch.profiler' on import_artifact.",
+            ),
         )
 
     def _limit(self, value: int | None) -> int:

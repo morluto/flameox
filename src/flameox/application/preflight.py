@@ -5,6 +5,8 @@ from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from typing import Literal
 
+from packaging.requirements import InvalidRequirement, Requirement
+
 from flameox.application.capabilities import CapabilityService
 from flameox.application.workloads import WorkloadService
 from flameox.domain import (
@@ -116,7 +118,10 @@ class PreflightService:
                 required=required,
                 probe_kind="passive",
                 status="absent",
-                remediation=(f"Install executable {name!r} outside Flameox.",),
+                remediation=(
+                    f"FlameOx cannot install host executable {name!r}; install it in the local "
+                    "environment or configure a workload that uses an available executable.",
+                ),
             )
         path = Path(resolved).resolve()
         try:
@@ -145,7 +150,21 @@ class PreflightService:
 
     def _distribution(self, name: str, *, required: bool) -> RequirementResult:
         try:
-            value = distribution(name)
+            requirement = Requirement(name)
+        except InvalidRequirement:
+            return RequirementResult(
+                requirement=name,
+                kind="python_distribution",
+                required=required,
+                probe_kind="passive",
+                status="unsupported",
+                remediation=(
+                    "Use a package name with an optional version specifier in the workload "
+                    "requirements.",
+                ),
+            )
+        try:
+            value = distribution(requirement.name)
         except PackageNotFoundError:
             return RequirementResult(
                 requirement=name,
@@ -153,9 +172,27 @@ class PreflightService:
                 required=required,
                 probe_kind="passive",
                 status="absent",
-                remediation=(f"Install Python distribution {name!r} outside Flameox.",),
+                remediation=(
+                    f"Call prepare_workload_dependencies for workload dependencies including "
+                    f"{name!r}.",
+                ),
+                next_tool="prepare_workload_dependencies",
             )
         identity = f"{value.metadata['Name']}=={value.version}"
+        if not requirement.specifier.contains(value.version, prereleases=True):
+            return RequirementResult(
+                requirement=name,
+                kind="python_distribution",
+                required=required,
+                probe_kind="passive",
+                status="absent",
+                identity=identity,
+                evidence=(identity,),
+                remediation=(
+                    f"Call prepare_workload_dependencies to install a version matching {name!r}.",
+                ),
+                next_tool="prepare_workload_dependencies",
+            )
         return RequirementResult(
             requirement=name,
             kind="python_distribution",
@@ -183,6 +220,7 @@ class PreflightService:
                 probe_kind="active" if active else "passive",
                 status="unknown",
                 limitations=("Flameox does not own a probe for this capability.",),
+                next_tool="list_capabilities",
             )
         statuses: dict[
             CapabilityStatus,
@@ -216,4 +254,17 @@ class PreflightService:
             ),
             limitations=report.limitations,
             remediation=report.remediation,
+            next_tool=(
+                "prepare_adapter"
+                if getattr(report.setup, "method", None) == "prepare_adapter"
+                else (
+                    "prepare_capabilities"
+                    if report.setup is not None
+                    else (
+                        "list_capabilities"
+                        if report.status is not CapabilityStatus.AVAILABLE
+                        else None
+                    )
+                )
+            ),
         )

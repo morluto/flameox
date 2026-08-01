@@ -5,9 +5,27 @@ from pathlib import Path
 import pytest
 
 from flameox.adapters import PyPerfExtractor
-from flameox.application import CaptureService, ExecutionPolicy
-from flameox.domain import ExecutionStatus
+from flameox.application import (
+    CaptureService,
+    ExecutionPolicy,
+    ImportArtifactRequest,
+    ImportService,
+)
+from flameox.domain import ArtifactKind, ExecutionStatus
 from flameox.storage import Workspace
+
+
+def test_import_detects_torch_profiler_trace_for_analysis_routing(tmp_path: Path) -> None:
+    trace = tmp_path / "torch-trace.json"
+    trace.write_text('{"traceEvents":[{"cat":"cpu_op","name":"aten::add"}]}')
+    workspace = Workspace.initialize(tmp_path)
+
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(path=trace, kind=ArtifactKind.EXECUTION_TRACE)
+    )
+
+    registration = imported.run.artifacts[0]
+    assert registration.producer == "torch.profiler"
 
 
 @pytest.mark.anyio
