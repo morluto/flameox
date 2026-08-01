@@ -129,6 +129,41 @@ argv = ["python", "-c", "print('ok')"]
 
 
 @pytest.mark.anyio
+async def test_mcp_plan_missing_dependency_routes_to_managed_preparation(tmp_path: Path) -> None:
+    Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.probe]
+argv = ["python", "-c", "print('ok')"]
+[workloads.probe.requirements]
+python_distributions = ["flameox-agent-fixture>=99"]
+"""
+    )
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        result = await client.call_tool(
+            "plan_capture",
+            {"workload_name": "probe", "adapter": "command", "parameters": {}},
+        )
+
+    assert result.is_error is True
+    assert result.structured_content is not None
+    error = result.structured_content["error"]
+    assert error["code"] == "CAPABILITY_UNAVAILABLE"
+    assert error["details"]["next_tool"] == "prepare_workload_dependencies"
+    assert error["details"]["missing_python_distributions"] == [
+        "flameox-agent-fixture>=99"
+    ]
+    assert error["recovery"] == {
+        "kind": "prepare_workload_dependencies",
+        "safe_to_repeat_same_call": True,
+        "retry_after_ms": None,
+        "next_tool": "prepare_workload_dependencies",
+    }
+
+
+@pytest.mark.anyio
 @pytest.mark.process
 @pytest.mark.serial
 async def test_mcp_cancellation_propagates_to_terminal_run_state(

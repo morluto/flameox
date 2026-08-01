@@ -9,6 +9,7 @@ from typing import Annotated, Literal, cast
 
 import tomlkit
 from pydantic import Field, JsonValue, model_validator
+from tomlkit.exceptions import ParseError
 from tomlkit.items import Table
 
 from flameox.adapters.builtins import BUILTIN_ADAPTERS
@@ -385,9 +386,14 @@ class WorkloadService:
                 ErrorCode.WORKSPACE_INVALID,
                 f"Project workload configuration is invalid: {exc}",
                 remediation=(
-                    "Repair flameox.toml, then call workload_configuration_status again.",
+                    "Use configure_workload with a complete named definition; FlameOx will "
+                    "replace the file only if the resulting project validates.",
                 ),
-                details={"config_path": "flameox.toml"},
+                details={
+                    "config_path": "flameox.toml",
+                    "invalid_configuration": True,
+                    "next_tool": "configure_workload",
+                },
             ) from exc
 
     def configuration_status(self) -> WorkloadConfigurationStatus:
@@ -403,7 +409,7 @@ class WorkloadService:
             return WorkloadConfigurationStatus(
                 status="invalid",
                 diagnostics=(error.message[:512],),
-                next_tool=None,
+                next_tool="configure_workload",
             )
         has_workloads = bool(project.workloads)
         return WorkloadConfigurationStatus(
@@ -675,10 +681,36 @@ class WorkloadService:
         with self.workspace.write_locked():
             existing_text = ""
             current_id: str | None = None
+            recovered_invalid = False
+            recovered_text: str | None = None
             if self.project_config_path.exists():
                 existing_text = self.project_config_path.read_text(encoding="utf-8")
-                project = self.load()
-                current_id = digest_model(project)
+                try:
+                    project = self.load()
+                    current_id = digest_model(project)
+                except DomainError as error:
+                    if request.operation != "create":
+                        raise
+                    try:
+                        recovered_text = self._render_project_config(existing_text, name, config)
+                        project = ProjectConfig.model_validate(tomllib.loads(recovered_text))
+                    except (ParseError, tomllib.TOMLDecodeError, ValueError) as candidate_error:
+                        raise DomainError(
+                            ErrorCode.WORKSPACE_INVALID,
+                            "The existing flameox.toml is invalid and the proposed workload "
+                            "does not produce a valid project configuration.",
+                            remediation=(
+                                "Repair flameox.toml manually, then call "
+                                "workload_configuration_status again.",
+                            ),
+                            details={
+                                "config_path": "flameox.toml",
+                                "invalid_configuration": True,
+                                "next_tool": "manual",
+                                "diagnostic": str(candidate_error)[:500],
+                            },
+                        ) from error
+                    recovered_invalid = True
             else:
                 project = ProjectConfig()
 
@@ -691,10 +723,15 @@ class WorkloadService:
                         remediation=(
                             "Retry with operation='replace' and the current configuration_id.",
                         ),
-                        details={"configuration_id": current_id},
-                    )
+                        details={
+                            "configuration_id": current_id,
+                            "next_tool": "workload_configuration_status",
+                        },
+                )
                 action: Literal["created", "updated", "unchanged"] = (
-                    "unchanged" if existing is not None else "created"
+                    "created"
+                    if recovered_invalid
+                    else ("unchanged" if existing is not None else "created")
                 )
             else:
                 if current_id is None or existing is None:
@@ -702,6 +739,7 @@ class WorkloadService:
                         ErrorCode.REVISION_CONFLICT,
                         f"Cannot replace workload {name!r} because it is not declared.",
                         remediation=("Retry with operation='create' for a new workload.",),
+                        details={"next_tool": "configure_workload"},
                     )
                 if request.expected_configuration_id != current_id:
                     raise DomainError(
@@ -711,7 +749,10 @@ class WorkloadService:
                             "Refresh workload_configuration_status and retry with its "
                             "configuration_id.",
                         ),
-                        details={"configuration_id": current_id},
+                        details={
+                            "configuration_id": current_id,
+                            "next_tool": "workload_configuration_status",
+                        },
                     )
                 action = "updated"
 
@@ -724,7 +765,12 @@ class WorkloadService:
             definition_id = digest_model(self._definition_content(name, config))
             changed_paths: list[str] = []
             if action != "unchanged":
-                rendered = self._render_project_config(existing_text, name, config)
+                rendered = (
+                    recovered_text
+                    if recovered_invalid
+                    else self._render_project_config(existing_text, name, config)
+                )
+                assert rendered is not None
                 mode = (
                     self.project_config_path.stat().st_mode & 0o777
                     if self.project_config_path.exists()
@@ -867,6 +913,15 @@ class WorkloadService:
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                     f"Workload executable {value!r} is unavailable.",
+                    details={
+                        "next_tool": "get_declared_workflow",
+                        "missing_executable": value,
+                        "requirement_kind": "workload_executable",
+                    },
+                    remediation=(
+                        f"Install executable {value!r} in the local environment or configure a "
+                        "named workload using an available executable, then retry planning.",
+                    ),
                 )
             resolved = Path(located).absolute()
         if not resolved.is_file() or not os.access(resolved, os.X_OK):
