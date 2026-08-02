@@ -127,7 +127,10 @@ async def test_perf_probe_exercises_permissions_and_cleans_staging(
             _probe_outcome(
                 exit_code=1,
                 stdout=b"",
-                stderr=b"Error: perf_event_open: Operation not permitted\n",
+                stderr=(
+                    b"Error: perf_event_open: Operation not permitted\n"
+                    b"perf_event_paranoid setting is 4\n"
+                ),
             ),
             _probe_outcome(exit_code=0),
             _probe_outcome(exit_code=1, stdout=b"", stderr=b"unexpected perf failure\n"),
@@ -149,7 +152,8 @@ async def test_perf_probe_exercises_permissions_and_cleans_staging(
     assert cached == granted
     assert refreshed.status is CapabilityStatus.PERMISSION_REQUIRED
     assert refreshed.permission_status == "denied"
-    assert refreshed.remediation
+    assert "perf_event_paranoid=4" in refreshed.remediation[0]
+    assert "active_refresh" in refreshed.remediation[0]
     assert len(broker.requests) == 4
     record_request = broker.requests[1]
     assert record_request.argv[1:8] == (
@@ -389,6 +393,59 @@ def test_prepare_capabilities_records_failure_when_uv_is_missing(
     assert receipt["error"] == "uv is missing from PATH."
 
 
+def test_trace_processor_staging_preserves_phase_and_bounded_cause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    service = CapabilityService(
+        workspace,
+        capability_manifest=tmp_path / "capabilities.json",
+    )
+    report = CapabilityReport(
+        adapter="perfetto",
+        status=CapabilityStatus.UNAVAILABLE,
+        setup=CapabilitySetup(
+            extra="trace",
+            method="prepare_capabilities",
+            next_tool="prepare_capabilities",
+            requirement="perfetto>=0.57,<0.58",
+        ),
+    )
+    monkeypatch.setattr(service, "list", lambda: CapabilityList(capabilities=(report,)))
+    monkeypatch.setattr("flameox.application.capabilities.shutil.which", lambda _: "/usr/bin/uv")
+    monkeypatch.setattr(
+        "flameox.application.capabilities.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "", ""),
+    )
+
+    def fail_staging(*args: object, **kwargs: object) -> object:
+        raise DomainError(
+            ErrorCode.PROCESS_FAILED,
+            "FlameOx could not stage the managed Trace Processor.",
+            retryable=True,
+            details={
+                "next_tool": "prepare_capabilities",
+                "adapter": "perfetto",
+                "failure_category": "network",
+                "failure_detail": "synthetic TLS failure",
+            },
+        )
+
+    monkeypatch.setattr("flameox.application.capabilities.install_trace_processor", fail_staging)
+    phases: list[str] = []
+
+    with pytest.raises(DomainError):
+        service.prepare(("perfetto",), phase_callback=phases.append)
+
+    receipt = json.loads((tmp_path / "capability-setup.json").read_text())
+    assert phases == ["staging_trace_processor"]
+    assert receipt["phase"] == "failed"
+    assert "phase=staging_trace_processor" in receipt["error"]
+    assert "network" in receipt["error"]
+    assert "synthetic TLS failure" in receipt["error"]
+
+
 def test_prepare_capabilities_is_idempotent_when_provider_is_available(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -451,8 +508,10 @@ async def test_capability_setup_manager_persists_progress_and_final_receipt(
             adapters: tuple[str, ...],
             *,
             cancel_event: object,
+            phase_callback: Any,
         ) -> CapabilitySetupResult:
             del cancel_event
+            del phase_callback
             return CapabilitySetupResult(
                 requested=adapters,
                 installed=adapters,
@@ -496,6 +555,67 @@ async def test_capability_setup_manager_persists_progress_and_final_receipt(
         replay = await manager.start(("torch.profiler", "perfetto"), "proof-key")
         assert replay.operation_id == terminal.operation_id
         assert replay.request_digest == terminal.request_digest
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.anyio
+async def test_capability_setup_failure_keeps_staging_phase_and_diagnostics(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+
+    class FailingCapabilityService:
+        def prepare(
+            self,
+            adapters: tuple[str, ...],
+            *,
+            cancel_event: object,
+            phase_callback: Any,
+        ) -> CapabilitySetupResult:
+            del adapters, cancel_event
+            phase_callback("staging_trace_processor")
+            raise DomainError(
+                ErrorCode.PROCESS_FAILED,
+                "FlameOx could not stage the managed Trace Processor.",
+                retryable=True,
+                details={
+                    "adapter": "perfetto",
+                    "phase": "staging_trace_processor",
+                    "failure_category": "network",
+                    "failure_detail": "synthetic TLS failure",
+                },
+            )
+
+        def _read_setup_receipt(self) -> None:
+            return None
+
+    manager = CapabilitySetupManager(
+        workspace,
+        cast(CapabilityService, FailingCapabilityService()),
+    )
+    try:
+        started = await manager.start(("perfetto",), "staging-failure-proof")
+        failed = started
+        for _ in range(100):
+            failed = await manager.status(started.operation_id)
+            if failed.state == "failed":
+                break
+            await asyncio.sleep(0.01)
+
+        assert failed.state == "failed"
+        assert failed.phase == "staging_trace_processor"
+        assert [item.phase for item in failed.progress] == [
+            "validating_request",
+            "installing_packages",
+            "staging_trace_processor",
+        ]
+        assert failed.failure_details == {
+            "phase": "staging_trace_processor",
+            "failure_category": "network",
+            "adapter": "perfetto",
+            "failure_detail": "synthetic TLS failure",
+        }
     finally:
         await manager.shutdown()
 

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -476,6 +477,8 @@ class CapabilityService:
                             )
                             or diagnostic
                         )
+                    if self._is_perf_permission_denial(diagnostic):
+                        return self._perf_permission_failure(passive, diagnostic)
                     return self._perf_failure(passive, diagnostic)
         except (OSError, ValueError) as error:
             return self._perf_failure(passive, f"Active perf probe failed: {type(error).__name__}.")
@@ -495,20 +498,24 @@ class CapabilityService:
                 }
             )
         if self._is_perf_permission_denial(diagnostic):
-            return passive.model_copy(
-                update={
-                    "status": CapabilityStatus.PERMISSION_REQUIRED,
-                    "permission_status": "denied",
-                    "limitations": (diagnostic or "perf event access was denied.",),
-                    "remediation": (
-                        "Lower the kernel perf_event_paranoid policy or grant the process "
-                        "perf event access, then refresh capabilities.",
-                    ),
-                    "probe_kind": "active",
-                    "probed_at": utc_now(),
-                }
-            )
+            return self._perf_permission_failure(passive, diagnostic)
         return self._perf_failure(passive, diagnostic or "perf sampling probe failed.")
+
+    def _perf_permission_failure(
+        self,
+        passive: CapabilityReport,
+        diagnostic: str,
+    ) -> CapabilityReport:
+        return passive.model_copy(
+            update={
+                "status": CapabilityStatus.PERMISSION_REQUIRED,
+                "permission_status": "denied",
+                "limitations": (diagnostic or "perf event access was denied.",),
+                "remediation": (self._perf_remediation(diagnostic),),
+                "probe_kind": "active",
+                "probed_at": utc_now(),
+            }
+        )
 
     def _perf_failure(self, passive: CapabilityReport, diagnostic: str) -> CapabilityReport:
         return passive.model_copy(
@@ -540,6 +547,19 @@ class CapabilityService:
         )
 
     @staticmethod
+    def _perf_remediation(diagnostic: str) -> str:
+        lowered = diagnostic.casefold()
+        match = re.search(r"perf_event_paranoid(?: setting is|=)\s*(\d+)", lowered)
+        setting = match.group(1) if match is not None else None
+        current = f" (observed perf_event_paranoid={setting})" if setting else ""
+        return (
+            "perf sampling is unusable because the kernel denied perf_event_open"
+            f"{current}. Lower kernel.perf_event_paranoid to a policy value that permits "
+            "this process, or grant CAP_PERFMON/CAP_SYS_ADMIN according to local policy, "
+            "then call list_capabilities(mode='active_refresh') before planning."
+        )
+
+    @staticmethod
     def _bounded_diagnostic(value: str) -> str:
         normalized = " ".join(value.split())
         return normalized[:500] or "Active perf probe returned no diagnostic output."
@@ -562,6 +582,7 @@ class CapabilityService:
         adapters: tuple[str, ...],
         *,
         cancel_event: threading.Event | None = None,
+        phase_callback: Callable[[str], None] | None = None,
     ) -> CapabilitySetupResult:
         """Install only declared FlameOx-managed providers into this runtime."""
         reports = {item.adapter: item for item in self.list().capabilities}
@@ -686,22 +707,32 @@ class CapabilityService:
                         "A workspace is required to stage the managed Trace Processor.",
                         details={"next_tool": "initialize_workspace"},
                     )
+                self._record_setup_receipt(
+                    requested,
+                    completed=self._available_requested(requested),
+                    phase="staging_trace_processor",
+                )
+                if phase_callback is not None:
+                    phase_callback("staging_trace_processor")
                 install_trace_processor(self.workspace, cancel_event=cancel_event)
                 self._check_cancelled(cancel_event)
         except DomainError as exc:
+            failure = self._annotate_setup_phase(exc, pending_trace=pending_trace)
             self._record_setup_receipt(
                 requested,
                 completed=self._available_requested(requested),
                 phase="failed",
-                error=exc.message,
+                error=self._setup_failure_message(failure),
             )
-            raise
+            if failure is exc:
+                raise
+            raise failure from exc
         except (OSError, subprocess.SubprocessError, portalocker.exceptions.LockException) as exc:
             self._record_setup_receipt(
                 requested,
                 completed=self._available_requested(requested),
                 phase="failed",
-                error=str(exc)[:500],
+                error=self._bounded_setup_detail(exc),
             )
             raise DomainError(
                 ErrorCode.PROCESS_FAILED,
@@ -752,6 +783,36 @@ class CapabilityService:
             already_available=already_available,
             setup_verification=self._verification(requested, refreshed),
         )
+
+    @staticmethod
+    def _bounded_setup_detail(error: object) -> str:
+        detail = " ".join(str(error).split())
+        return detail[:500] or "Capability setup returned no diagnostic detail."
+
+    @staticmethod
+    def _annotate_setup_phase(error: DomainError, *, pending_trace: bool) -> DomainError:
+        if not pending_trace or isinstance(error.details.get("phase"), str):
+            return error
+        details = dict(error.details)
+        details["phase"] = "staging_trace_processor"
+        return DomainError(
+            error.code,
+            error.message,
+            retryable=error.retryable,
+            details=details,
+            remediation=error.remediation,
+            run_id=error.run_id,
+        )
+
+    @classmethod
+    def _setup_failure_message(cls, error: DomainError) -> str:
+        phase = error.details.get("phase")
+        category = error.details.get("failure_category")
+        detail = error.details.get("failure_detail") or error.details.get("error")
+        if not isinstance(category, str) or not isinstance(detail, str):
+            return error.message
+        phase_label = f" [phase={phase}]" if isinstance(phase, str) else ""
+        return f"{error.message}{phase_label} [{category}] {cls._bounded_setup_detail(detail)}"
 
     @staticmethod
     def _check_cancelled(cancel_event: threading.Event | None) -> None:
@@ -1095,12 +1156,26 @@ class CapabilitySetupManager:
         await progress("installing_packages", 1, 3, "Installing declared optional providers.")
         cancel_event = threading.Event()
         self.runner.set_cancel_hook(operation_id, cancel_event.set)
+        loop = asyncio.get_running_loop()
+
+        def report_phase(phase: str) -> None:
+            if phase != "staging_trace_processor":
+                return
+
+            async def emit_progress() -> None:
+                await progress(phase, 2, 3, "Staging the managed Trace Processor.")
+
+            future = asyncio.run_coroutine_threadsafe(emit_progress(), loop)
+            future.result()
+
         try:
             try:
+                requested = self._requested(operation_id)
                 result = await asyncio.to_thread(
                     self.service.prepare,
-                    self._requested(operation_id),
+                    requested,
                     cancel_event=cancel_event,
+                    phase_callback=report_phase,
                 )
             except DomainError as error:
                 receipt = self.service._read_setup_receipt()

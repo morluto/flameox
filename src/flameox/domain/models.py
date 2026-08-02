@@ -486,6 +486,7 @@ class RequirementResult(ContractModel):
         "available",
         "absent",
         "permission_denied",
+        "environment_blocked",
         "unsupported",
         "unknown",
         "probe_failed",

@@ -22,6 +22,7 @@ class PytestExtractionResult(ContractModel):
     executed_count: int
     passed_count: int
     failed_count: int
+    environment_blocked_count: int
     skipped_count: int
     errored_count: int
     unexecuted_count: int
@@ -168,6 +169,20 @@ class PytestExtractor:
         outcome_counts = _test_outcomes(phases)
         executed = set(phases)
         unexecuted = collected - executed
+        compiler_diagnostic = self._external_compiler_diagnostic(run)
+        environment_blocked_nodes, environment_blocked_count, classified_counts = (
+            self._classify_external_compiler_outcomes(
+                phases,
+                unexecuted,
+                compiler_diagnostic is not None,
+            )
+        )
+        self._apply_external_compiler_evidence(
+            rows,
+            limitations,
+            environment_blocked_nodes,
+            compiler_diagnostic,
+        )
         first_observed = min(failure_observed, default=None)
         first_reported = min(failure_reported, default=None)
         collection_started = [
@@ -189,9 +204,10 @@ class PytestExtractor:
             ("pytest.tests.collected", len(collected)),
             ("pytest.tests.executed", len(executed)),
             ("pytest.tests.passed", outcome_counts["passed"]),
-            ("pytest.tests.failed", outcome_counts["failed"]),
-            ("pytest.tests.skipped", outcome_counts["skipped"]),
-            ("pytest.tests.errored", outcome_counts["errored"]),
+            ("pytest.tests.failed", classified_counts["failed"]),
+            ("pytest.tests.environment_blocked", environment_blocked_count),
+            ("pytest.tests.skipped", classified_counts["skipped"]),
+            ("pytest.tests.errored", classified_counts["errored"]),
             ("pytest.tests.unexecuted", len(unexecuted)),
             ("pytest.fixture_setup.total", fixture_setup_ns),
         ):
@@ -273,9 +289,10 @@ class PytestExtractor:
             collected_count=len(collected),
             executed_count=len(executed),
             passed_count=outcome_counts["passed"],
-            failed_count=outcome_counts["failed"],
-            skipped_count=outcome_counts["skipped"],
-            errored_count=outcome_counts["errored"],
+            failed_count=classified_counts["failed"],
+            environment_blocked_count=environment_blocked_count,
+            skipped_count=classified_counts["skipped"],
+            errored_count=classified_counts["errored"],
             unexecuted_count=len(unexecuted),
             fixture_setup_count=fixture_setup_count,
             fixture_setup_ns=fixture_setup_ns,
@@ -290,6 +307,92 @@ class PytestExtractor:
             corpus_commit_id=published.commit.commit_id,
             limitations=tuple(limitations),
         )
+
+    def _external_compiler_diagnostic(self, run: RunManifest) -> str | None:
+        outputs: list[str] = []
+        for registration in run.artifacts:
+            if registration.kind is not ArtifactKind.PROCESS_OUTPUT:
+                continue
+            if registration.role not in {"stdout", "stderr"}:
+                continue
+            try:
+                payload = ArtifactStore(self.workspace).get(registration.artifact_id)
+                outputs.append(
+                    payload.payload_path.read_bytes()[: 64 * 1024].decode(errors="replace")
+                )
+            except (DomainError, OSError, UnicodeError):
+                continue
+        combined = " ".join(outputs)
+        lowered = combined.casefold()
+        markers = (
+            "cuda_runtime.h: no such file or directory",
+            "fatal error: cuda_runtime.h",
+            "nvcc fatal",
+            "cannot find -lcudart",
+            "hip_runtime.h: no such file or directory",
+            "clang: error: no such file or directory",
+            "gcc: fatal error",
+        )
+        if not any(marker in lowered for marker in markers):
+            return None
+        return (
+            " ".join(combined.split())[:500] or "External compiler returned no diagnostic detail."
+        )
+
+    @staticmethod
+    def _apply_external_compiler_evidence(
+        rows: list[dict[str, Any]],
+        limitations: list[str],
+        environment_blocked_nodes: set[str],
+        compiler_diagnostic: str | None,
+    ) -> None:
+        if environment_blocked_nodes:
+            for row in rows:
+                dimensions = row.get("dimensions")
+                nodeid = dimensions.get("nodeid") if isinstance(dimensions, dict) else None
+                if nodeid in environment_blocked_nodes:
+                    assert isinstance(dimensions, dict)
+                    dimensions["classification"] = "environment_blocked"
+                    dimensions["original_outcome"] = dimensions.get("outcome", "unknown")
+        if compiler_diagnostic is not None:
+            limitations.extend(
+                (
+                    "An external compiler prerequisite failure was detected; affected pytest "
+                    "outcomes are environment-blocked evidence, not a confirmed application "
+                    "defect.",
+                    f"External compiler diagnostic: {compiler_diagnostic}",
+                )
+            )
+
+    @staticmethod
+    def _classify_external_compiler_outcomes(
+        phases: dict[str, dict[str, str]],
+        unexecuted: set[str],
+        compiler_failed: bool,
+    ) -> tuple[set[str], int, dict[str, int]]:
+        outcome_counts = _test_outcomes(phases)
+        environment_blocked_nodes = {
+            nodeid
+            for nodeid, reports in phases.items()
+            if compiler_failed and _test_outcome(reports) in {"failed", "errored"}
+        }
+        environment_blocked_count = len(environment_blocked_nodes)
+        if compiler_failed and not environment_blocked_nodes:
+            environment_blocked_count = len(unexecuted)
+        blocked_outcomes = {
+            outcome: sum(
+                1
+                for nodeid in environment_blocked_nodes
+                if _test_outcome(phases[nodeid]) == outcome
+            )
+            for outcome in ("failed", "errored")
+        }
+        classified_counts = {
+            **outcome_counts,
+            "failed": outcome_counts["failed"] - blocked_outcomes["failed"],
+            "errored": outcome_counts["errored"] - blocked_outcomes["errored"],
+        }
+        return environment_blocked_nodes, environment_blocked_count, classified_counts
 
     def _registration(self, run: RunManifest) -> Any:
         matches = [item for item in run.artifacts if item.kind is ArtifactKind.TEST_EXECUTION]
@@ -389,6 +492,18 @@ def _test_outcomes(phases: dict[str, dict[str, str]]) -> dict[str, int]:
         else:
             counts["errored"] += 1
     return counts
+
+
+def _test_outcome(reports: dict[str, str]) -> str:
+    if reports.get("setup") == "failed" or reports.get("teardown") == "failed":
+        return "errored"
+    if reports.get("call") == "failed":
+        return "failed"
+    if "skipped" in reports.values():
+        return "skipped"
+    if reports.get("call") == "passed":
+        return "passed"
+    return "errored"
 
 
 def _completion(

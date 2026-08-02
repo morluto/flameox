@@ -33,7 +33,9 @@ the exact active executable and fixed launcher arguments. It is read-only and
 fails on configuration drift instead of repairing it implicitly.
 
 Client launchers contain the absolute path of a verified managed runtime and
-the fixed arguments `mcp serve --project-root .`. Setup never passes `--init`.
+the fixed arguments `mcp serve --project-root .`. Setup never passes `--init` or
+an external workspace; hosts that need one can add `--workspace PATH` to an
+explicit server invocation.
 Each MCP client therefore binds flameox's project root to the client's launch
 directory. Client setup is complete when the launcher is verified; each checkout
 still requires deliberate project initialization through `flameox init`,
@@ -236,8 +238,8 @@ manifest.
 ### MCP
 
 ```text
-flameox mcp serve [--init]
-flameox mcp inspect
+flameox mcp serve [--init] [--workspace PATH]
+flameox mcp inspect [--workspace PATH]
 ```
 
 `serve` uses stdio exclusively. `--init` performs the additive workspace
@@ -386,11 +388,12 @@ execution explicitly. Planning still does not execute the workload;
 
 #### `initialize_workspace`
 
-Additive and idempotent. Initializes only the MCP server's fixed project root.
+Additive and idempotent. Initializes only the MCP server's fixed project root,
+or the explicit workspace root selected when the server started.
 If the server already owns an initialized workspace, the call returns its current
-status without replacing the detached-capture manager. It cannot select an
-external path or configure workloads. Hosts may instead start the server using
-`flameox mcp serve --init`.
+status without replacing the detached-capture manager. It cannot switch to a
+different path or configure workloads. Hosts may instead start the server using
+`flameox mcp serve --init --workspace PATH`.
 
 #### `workload_configuration_status`
 
@@ -459,7 +462,10 @@ request cleanup. The operation accepts only adapter names reported by
 `list_capabilities` as managed setup actions: `coverage`, `memray`, `perfetto`,
 `py-spy`, `pytest`, and `torch.profiler`. It installs the published FlameOx
 extra into the active managed Python runtime and stages the pinned user-space
-Trace Processor under `.diagnostics/tools` for `perfetto`. Its receipt includes
+Trace Processor under the active workspace's `tools/` directory for `perfetto`.
+Setup progress uses `validating_request`, `installing_packages`,
+`staging_trace_processor`, `verifying`, and `completed`; a staging failure keeps
+the staging phase and bounded cause in its durable status. Its receipt includes
 the workspace identity, exact request digest, named phase, bounded progress,
 item outcomes, cancellation/cleanup state, and next recovery action. It never
 runs the declared workload, mutates source, installs arbitrary packages,

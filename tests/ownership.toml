@@ -424,6 +424,12 @@ paths = ["tests/application/test_capture_torch_provider.py"]
 markers = ["integration", "optional", "process", "serial", "requires_torch"]
 
 [[ownership]]
+owner = "torch-launcher"
+lane = "process"
+paths = ["tests/collectors/test_torch_launcher.py"]
+markers = ["unit"]
+
+[[ownership]]
 owner = "investigation-revisions"
 lane = "application"
 paths = ["tests/application/test_investigation_revisions.py"]

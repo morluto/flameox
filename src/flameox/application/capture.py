@@ -1122,6 +1122,34 @@ class CaptureService:
                     validation_status = ValidationStatus.ERROR
                     validation_limitations.append(error.message)
             await capture.report(6, "Validation complete")
+            torch_diagnostics = output_root / "torch-profiler-diagnostics.json"
+            if plan.adapter == "torch.profiler" and torch_diagnostics.is_file():
+                try:
+                    diagnostic_payload = json.loads(torch_diagnostics.read_text(encoding="utf-8"))
+                    diagnostic_phase = diagnostic_payload.get("phase")
+                    diagnostic_status = diagnostic_payload.get("status")
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                    diagnostic_phase = None
+                    diagnostic_status = None
+                if diagnostic_status == "failed" and isinstance(diagnostic_phase, str):
+                    collector_limitation_details.append(
+                        _limitation(
+                            "collector",
+                            "failure_phase",
+                            f"Torch profiler collector failed during {diagnostic_phase}.",
+                        )
+                    )
+                registrations.append(
+                    await self._register_path_async(
+                        run_id,
+                        torch_diagnostics,
+                        kind=ArtifactKind.COLLECTOR_METADATA,
+                        role="torch_profiler_diagnostics",
+                        media_type="application/json",
+                        producer=plan.adapter,
+                        producer_version=plan.adapter_version,
+                    )
+                )
             for name, payload, kind, role, media_type in (
                 (
                     "stdout.bin",
@@ -1138,7 +1166,9 @@ class CaptureService:
                     "application/octet-stream",
                 ),
             ):
-                if not payload:
+                if not payload and not (
+                    plan.adapter == "torch.profiler" and not collector_succeeded
+                ):
                     continue
                 path = output_root / name
                 atomic_write_bytes(path, payload)
