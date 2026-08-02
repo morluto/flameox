@@ -247,38 +247,38 @@ def install_trace_processor(
     cancel_event: threading.Event | None = None,
 ) -> TraceProcessorInstallation:
     """Stage the pinned user-space Trace Processor without requiring host privileges."""
-    platform_key = {
-        ("linux", "x86_64"): "linux-amd64",
-        ("linux", "amd64"): "linux-amd64",
-        ("linux", "aarch64"): "linux-arm64",
-        ("darwin", "x86_64"): "mac-amd64",
-        ("darwin", "arm64"): "mac-arm64",
-    }.get((sys.platform, _machine()))
-    if platform_key is None:
-        raise DomainError(
-            ErrorCode.CAPABILITY_UNAVAILABLE,
-            "FlameOx has no managed Trace Processor binary for this platform.",
-            details={"next_tool": "list_capabilities"},
-            remediation=(
-                "Install the official Perfetto Trace Processor for this platform or set "
-                "analysis.trace_processor_path in the workspace policy.",
-            ),
-        )
-
-    target = workspace.paths.root / "tools" / "trace_processor_shell"
-    if target.is_file() and os.access(target, os.X_OK):
-        _check_staging_cancelled(cancel_event)
-        _verify_trace_processor(target, cancel_event=cancel_event)
-        return TraceProcessorInstallation(TRACE_PROCESSOR_VERSION, target, False)
-
-    url = (
-        "https://commondatastorage.googleapis.com/perfetto-luci-artifacts/"
-        f"{TRACE_PROCESSOR_VERSION}/{platform_key}/trace_processor_shell"
-    )
-    staging = workspace.paths.staging
-    staging.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
     try:
+        platform_key = {
+            ("linux", "x86_64"): "linux-amd64",
+            ("linux", "amd64"): "linux-amd64",
+            ("linux", "aarch64"): "linux-arm64",
+            ("darwin", "x86_64"): "mac-amd64",
+            ("darwin", "arm64"): "mac-arm64",
+        }.get((sys.platform, _machine()))
+        if platform_key is None:
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "FlameOx has no managed Trace Processor binary for this platform.",
+                details={"next_tool": "list_capabilities"},
+                remediation=(
+                    "Install the official Perfetto Trace Processor for this platform or set "
+                    "analysis.trace_processor_path in the workspace policy.",
+                ),
+            )
+
+        target = workspace.paths.root / "tools" / "trace_processor_shell"
+        if target.is_file() and os.access(target, os.X_OK):
+            _check_staging_cancelled(cancel_event)
+            _verify_trace_processor(target, cancel_event=cancel_event)
+            return TraceProcessorInstallation(TRACE_PROCESSOR_VERSION, target, False)
+
+        url = (
+            "https://commondatastorage.googleapis.com/perfetto-luci-artifacts/"
+            f"{TRACE_PROCESSOR_VERSION}/{platform_key}/trace_processor_shell"
+        )
+        staging = workspace.paths.staging
+        staging.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             dir=staging,
             prefix="trace-processor-",

@@ -200,12 +200,14 @@ class PreflightService:
                 ),
             )
 
+        temporary_root: str | None = None
         try:
             with tempfile.TemporaryDirectory(
                 dir=self.workspace.paths.staging,
                 prefix="cuda-preflight-",
             ) as temporary:
                 root = Path(temporary)
+                temporary_root = str(root)
                 source = root / "header_probe.cu"
                 output = root / "header_probe.o"
                 source.write_text(
@@ -236,7 +238,8 @@ class PreflightService:
                     (outcome.stdout + b"\n" + outcome.stderr).decode(
                         "utf-8",
                         errors="replace",
-                    )
+                    ),
+                    temporary_root=temporary_root,
                 )
                 if outcome.process.exit_code == 0 and output.is_file() and output.stat().st_size:
                     return RequirementResult(
@@ -265,17 +268,49 @@ class PreflightService:
                     )
                     or diagnostic
                 )
-            return self._cuda_compile_failure(
+            return self._cuda_probe_failure(
                 required=required,
                 path=path,
-                diagnostic=self._bounded_diagnostic(diagnostic),
+                diagnostic=self._bounded_diagnostic(
+                    diagnostic,
+                    temporary_root=temporary_root,
+                ),
             )
         except (OSError, ValueError) as error:
-            return self._cuda_compile_failure(
+            return self._cuda_probe_failure(
                 required=required,
                 path=path,
-                diagnostic=self._bounded_diagnostic(f"{type(error).__name__}: {error}"),
+                diagnostic=self._bounded_diagnostic(
+                    f"{type(error).__name__}: {error}",
+                    temporary_root=temporary_root,
+                ),
             )
+
+    @classmethod
+    def _cuda_probe_failure(
+        cls,
+        *,
+        required: bool,
+        path: Path,
+        diagnostic: str,
+    ) -> RequirementResult:
+        return RequirementResult(
+            requirement="nvcc",
+            kind="executable",
+            required=required,
+            probe_kind="active",
+            status="probe_failed",
+            identity=str(path),
+            evidence=(str(path), diagnostic),
+            limitations=(
+                "The bounded CUDA toolkit probe could not complete, so toolkit readiness "
+                "could not be classified from compiler evidence.",
+            ),
+            remediation=(
+                "Retry active preflight after checking the execution broker, temporary "
+                "workspace, and nvcc availability.",
+            ),
+        )
 
     @classmethod
     def _cuda_compile_failure(
@@ -328,7 +363,9 @@ class PreflightService:
         )
 
     @staticmethod
-    def _bounded_diagnostic(value: str) -> str:
+    def _bounded_diagnostic(value: str, *, temporary_root: str | None = None) -> str:
+        if temporary_root is not None:
+            value = value.replace(temporary_root, "<cuda-preflight-root>")
         return " ".join(value.split())[:500] or "nvcc returned no diagnostic output."
 
     def _distribution(self, name: str, *, required: bool) -> RequirementResult:

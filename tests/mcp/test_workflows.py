@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 from flameox.application import workspace_status
 from flameox.catalog import Catalog
 from flameox.cli import app
+from flameox.domain import DomainError
 from flameox.mcp import create_server
 from flameox.storage import Workspace
 
@@ -152,6 +153,37 @@ async def test_mcp_can_bind_an_explicit_external_workspace_root(tmp_path: Path) 
     assert result.structured_content["result"]["project_root"] == str(project_root.resolve())
     assert (workspace_root / "workspace.json").is_file()
     assert not (project_root / ".diagnostics").exists()
+
+
+@pytest.mark.anyio
+async def test_mcp_default_workspace_does_not_walk_to_an_ancestor(tmp_path: Path) -> None:
+    Workspace.initialize(tmp_path)
+    nested = tmp_path / "nested"
+    nested.mkdir()
+
+    async with Client(create_server(nested), raise_exceptions=True) as client:
+        result = await client.call_tool("workspace_status", {})
+
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["error"]["code"] == "WORKSPACE_NOT_FOUND"
+
+
+@pytest.mark.anyio
+async def test_mcp_rejects_external_workspace_bound_to_another_project(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    evidence = tmp_path / "evidence"
+    first.mkdir()
+    second.mkdir()
+    Workspace.initialize(first, workspace_root=evidence)
+
+    with pytest.raises(DomainError, match="different project root"):
+        async with Client(
+            create_server(second, workspace_root=evidence),
+            raise_exceptions=True,
+        ):
+            pass
 
 
 @pytest.mark.anyio

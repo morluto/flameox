@@ -161,11 +161,24 @@ def test_pytest_marks_external_cuda_compile_failure_as_environment_blocked(
                 ),
                 _event("collection_started"),
                 _event("test_collected", nodeid="test_gpu.py::test_compile"),
+                _event("test_collected", nodeid="test_gpu.py::test_unrelated"),
                 _event(
                     "test_phase",
                     nodeid="test_gpu.py::test_compile",
                     worker_id="master",
                     phase="setup",
+                    outcome="failed",
+                    duration_ns=10,
+                    started_at_ns=1_100,
+                    stopped_at_ns=1_110,
+                    controller_received_at_ns=1_120,
+                    wasxfail=False,
+                ),
+                _event(
+                    "test_phase",
+                    nodeid="test_gpu.py::test_unrelated",
+                    worker_id="master",
+                    phase="call",
                     outcome="failed",
                     duration_ns=10,
                     started_at_ns=1_100,
@@ -182,7 +195,9 @@ def test_pytest_marks_external_cuda_compile_failure_as_environment_blocked(
         ImportArtifactRequest(path=source, kind=ArtifactKind.TEST_EXECUTION)
     )
     stderr = tmp_path / "stderr.bin"
-    stderr.write_text("fatal error: cuda_runtime.h: No such file or directory\n")
+    stderr.write_text(
+        "test_gpu.py::test_compile: fatal error: cuda_runtime.h: No such file or directory\n"
+    )
     stored = ArtifactStore(workspace).import_path(
         stderr,
         allowed_roots=(tmp_path,),
@@ -206,7 +221,7 @@ def test_pytest_marks_external_cuda_compile_failure_as_environment_blocked(
 
     result = PytestExtractor(workspace).extract(imported.run.run_id)
 
-    assert result.failed_count == 0
+    assert result.failed_count == 1
     assert result.errored_count == 0
     assert result.environment_blocked_count == 1
     assert any("environment-blocked" in item for item in result.limitations)
@@ -215,6 +230,12 @@ def test_pytest_marks_external_cuda_compile_failure_as_environment_blocked(
             "SELECT value_int FROM measurements WHERE name = 'pytest.tests.environment_blocked'"
         ).fetchone()
     assert row == (1,)
+    with Catalog(workspace).open_snapshot() as snapshot:
+        classifications = snapshot.execute(
+            "SELECT dimensions['nodeid'], dimensions['classification'] "
+            "FROM measurements WHERE dimensions['classification'] IS NOT NULL"
+        ).fetchall()
+    assert classifications == [("test_gpu.py::test_compile", "environment_blocked")]
 
 
 @pytest.mark.parametrize("payload", ("", "{}\n", "{broken\n"))

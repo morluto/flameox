@@ -642,6 +642,7 @@ class CapabilityService:
             completed=already_available,
             phase="installing_packages",
         )
+        staging_started = False
         lock_path = Path(sys.executable).parent / ".flameox-capability-setup.lock"
         uv = shutil.which("uv") if pending_managed else None
         if pending_managed and uv is None:
@@ -707,6 +708,7 @@ class CapabilityService:
                         "A workspace is required to stage the managed Trace Processor.",
                         details={"next_tool": "initialize_workspace"},
                     )
+                staging_started = True
                 self._record_setup_receipt(
                     requested,
                     completed=self._available_requested(requested),
@@ -717,7 +719,7 @@ class CapabilityService:
                 install_trace_processor(self.workspace, cancel_event=cancel_event)
                 self._check_cancelled(cancel_event)
         except DomainError as exc:
-            failure = self._annotate_setup_phase(exc, pending_trace=pending_trace)
+            failure = self._annotate_setup_phase(exc, staging_started=staging_started)
             self._record_setup_receipt(
                 requested,
                 completed=self._available_requested(requested),
@@ -790,8 +792,8 @@ class CapabilityService:
         return detail[:500] or "Capability setup returned no diagnostic detail."
 
     @staticmethod
-    def _annotate_setup_phase(error: DomainError, *, pending_trace: bool) -> DomainError:
-        if not pending_trace or isinstance(error.details.get("phase"), str):
+    def _annotate_setup_phase(error: DomainError, *, staging_started: bool) -> DomainError:
+        if not staging_started or isinstance(error.details.get("phase"), str):
             return error
         details = dict(error.details)
         details["phase"] = "staging_trace_processor"

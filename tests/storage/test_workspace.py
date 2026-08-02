@@ -112,6 +112,25 @@ def test_discovery_selects_nearest_workspace(tmp_path: Path) -> None:
     assert Workspace.discover(tmp_path).identity.workspace_id == outer.identity.workspace_id
 
 
+def test_explicit_workspace_rejects_a_different_project_root(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    workspace = Workspace.initialize(first, workspace_root=tmp_path / "evidence")
+
+    with pytest.raises(DomainError) as error:
+        Workspace.discover(
+            second,
+            explicit=workspace.paths.root,
+            project_root=second,
+        )
+
+    assert error.value.code is ErrorCode.WORKSPACE_INVALID
+    assert error.value.details["bound_project_root"] == str(first.resolve())
+    assert error.value.details["requested_project_root"] == str(second.resolve())
+
+
 def test_config_rejects_unknown_keys(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     workspace.paths.config.write_text("schema_version = 1\nunknown = true\n")

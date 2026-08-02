@@ -85,6 +85,35 @@ async def test_operation_runner_cancellation_persists_cleanup_and_is_replayable(
 
 
 @pytest.mark.anyio
+async def test_operation_runner_cancellation_preserves_failure_details(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    runner = OperationRunner(workspace, "test.operation")
+
+    async def run(
+        operation_id: str,
+        progress: object,
+    ) -> dict[str, object]:
+        del progress
+        cancel_event = asyncio.Event()
+        runner.set_cancel_hook(operation_id, cancel_event.set)
+        await cancel_event.wait()
+        raise DomainError(
+            ErrorCode.PROCESS_TIMEOUT,
+            "The operation was interrupted during staging.",
+            details={"phase": "staging", "failure_category": "timeout"},
+        )
+
+    started = await runner.start({"value": 1}, "cancel-details-key", run)
+    cancelled = await runner.cancel(started.operation_id)
+
+    assert cancelled.state == "cancelled"
+    assert cancelled.failure_details == {
+        "phase": "staging",
+        "failure_category": "timeout",
+    }
+
+
+@pytest.mark.anyio
 async def test_operation_runner_idempotency_is_shared_by_runners(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     first_runner = OperationRunner(workspace, "test.operation")

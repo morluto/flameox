@@ -13,7 +13,7 @@ from flameox.storage import ArtifactStore, RunStore, Workspace
 
 
 class PytestExtractionResult(ContractModel):
-    schema_version: int = 1
+    schema_version: int = 2
     run_id: str
     artifact_id: str
     complete: bool
@@ -42,7 +42,7 @@ class PytestExtractionResult(ContractModel):
 
 class PytestExtractor:
     name = "pytest"
-    version = "1"
+    version = "2"
 
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
@@ -169,12 +169,15 @@ class PytestExtractor:
         outcome_counts = _test_outcomes(phases)
         executed = set(phases)
         unexecuted = collected - executed
-        compiler_diagnostic = self._external_compiler_diagnostic(run)
+        compiler_diagnostic, compiler_nodes = self._external_compiler_evidence(
+            run,
+            collected,
+        )
         environment_blocked_nodes, environment_blocked_count, classified_counts = (
             self._classify_external_compiler_outcomes(
                 phases,
                 unexecuted,
-                compiler_diagnostic is not None,
+                compiler_nodes,
             )
         )
         self._apply_external_compiler_evidence(
@@ -182,6 +185,8 @@ class PytestExtractor:
             limitations,
             environment_blocked_nodes,
             compiler_diagnostic,
+            run_id=run_id,
+            artifact_id=registration.artifact_id,
         )
         first_observed = min(failure_observed, default=None)
         first_reported = min(failure_reported, default=None)
@@ -308,8 +313,12 @@ class PytestExtractor:
             limitations=tuple(limitations),
         )
 
-    def _external_compiler_diagnostic(self, run: RunManifest) -> str | None:
-        outputs: list[str] = []
+    def _external_compiler_evidence(
+        self,
+        run: RunManifest,
+        collected: set[str],
+    ) -> tuple[str | None, set[str]]:
+        outputs: list[tuple[str, str]] = []
         for registration in run.artifacts:
             if registration.kind is not ArtifactKind.PROCESS_OUTPUT:
                 continue
@@ -317,13 +326,11 @@ class PytestExtractor:
                 continue
             try:
                 payload = ArtifactStore(self.workspace).get(registration.artifact_id)
-                outputs.append(
-                    payload.payload_path.read_bytes()[: 64 * 1024].decode(errors="replace")
-                )
+                with payload.payload_path.open("rb") as stream:
+                    bounded = stream.read(64 * 1024)
+                outputs.append((registration.role, bounded.decode(errors="replace")))
             except (DomainError, OSError, UnicodeError):
                 continue
-        combined = " ".join(outputs)
-        lowered = combined.casefold()
         markers = (
             "cuda_runtime.h: no such file or directory",
             "fatal error: cuda_runtime.h",
@@ -333,11 +340,36 @@ class PytestExtractor:
             "clang: error: no such file or directory",
             "gcc: fatal error",
         )
-        if not any(marker in lowered for marker in markers):
-            return None
-        return (
-            " ".join(combined.split())[:500] or "External compiler returned no diagnostic detail."
-        )
+        affected_nodes: set[str] = set()
+        for _, output in outputs:
+            lowered = output.casefold()
+            if any(marker in lowered for marker in markers):
+                affected_nodes.update(nodeid for nodeid in collected if nodeid in output)
+        diagnostic = self._compiler_diagnostic_window(outputs, markers)
+        return diagnostic, affected_nodes
+
+    @staticmethod
+    def _compiler_diagnostic_window(
+        outputs: list[tuple[str, str]],
+        markers: tuple[str, ...],
+    ) -> str | None:
+        for role, output in outputs:
+            lowered = output.casefold()
+            marker_positions = [
+                (lowered.find(marker), marker)
+                for marker in markers
+                if lowered.find(marker) >= 0
+            ]
+            if not marker_positions:
+                continue
+            position, _ = min(marker_positions)
+            start = max(0, position - 250)
+            end = min(len(output), position + 250)
+            detail = f"{role}: {output[start:end]}"
+            return " ".join(detail.split())[:500] or (
+                "External compiler returned no diagnostic detail."
+            )
+        return None
 
     @staticmethod
     def _apply_external_compiler_evidence(
@@ -345,6 +377,9 @@ class PytestExtractor:
         limitations: list[str],
         environment_blocked_nodes: set[str],
         compiler_diagnostic: str | None,
+        *,
+        run_id: str,
+        artifact_id: str,
     ) -> None:
         if environment_blocked_nodes:
             for row in rows:
@@ -354,6 +389,16 @@ class PytestExtractor:
                     assert isinstance(dimensions, dict)
                     dimensions["classification"] = "environment_blocked"
                     dimensions["original_outcome"] = dimensions.get("outcome", "unknown")
+                    row["measurement_id"] = digest_model(
+                        {
+                            "run_id": run_id,
+                            "artifact_id": artifact_id,
+                            "name": row["name"],
+                            "value_index": row["value_index"],
+                            "worker_id": row["worker_id"],
+                            "dimensions": dimensions,
+                        }
+                    )
         if compiler_diagnostic is not None:
             limitations.extend(
                 (
@@ -368,17 +413,16 @@ class PytestExtractor:
     def _classify_external_compiler_outcomes(
         phases: dict[str, dict[str, str]],
         unexecuted: set[str],
-        compiler_failed: bool,
+        compiler_nodes: set[str],
     ) -> tuple[set[str], int, dict[str, int]]:
         outcome_counts = _test_outcomes(phases)
         environment_blocked_nodes = {
             nodeid
             for nodeid, reports in phases.items()
-            if compiler_failed and _test_outcome(reports) in {"failed", "errored"}
+            if nodeid in compiler_nodes and _test_outcome(reports) in {"failed", "errored"}
         }
+        environment_blocked_nodes.update(compiler_nodes & unexecuted)
         environment_blocked_count = len(environment_blocked_nodes)
-        if compiler_failed and not environment_blocked_nodes:
-            environment_blocked_count = len(unexecuted)
         blocked_outcomes = {
             outcome: sum(
                 1

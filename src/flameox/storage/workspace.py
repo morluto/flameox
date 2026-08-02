@@ -296,7 +296,7 @@ class Workspace:
 
         with workspace.write_locked():
             if workspace.paths.identity.exists():
-                _ = workspace.identity
+                cls._validate_project_binding(workspace, project_root)
             else:
                 relative_project_root = os.path.relpath(project_root, root)
                 identity = WorkspaceIdentity(
@@ -323,10 +323,17 @@ class Workspace:
         return workspace
 
     @classmethod
-    def discover(cls, start: Path, *, explicit: Path | None = None) -> Workspace:
+    def discover(
+        cls,
+        start: Path,
+        *,
+        explicit: Path | None = None,
+        project_root: Path | None = None,
+    ) -> Workspace:
         if explicit is not None:
             workspace = cls(explicit)
-            _ = workspace.identity
+            if project_root is not None:
+                cls._validate_project_binding(workspace, project_root)
             return workspace
         current = start.resolve()
         for directory in (current, *current.parents):
@@ -339,6 +346,26 @@ class Workspace:
             ErrorCode.WORKSPACE_NOT_FOUND,
             "No .diagnostics workspace was found.",
             remediation=("Run `flameox init` from the project root.",),
+        )
+
+    @staticmethod
+    def _validate_project_binding(workspace: Workspace, project_root: Path) -> None:
+        expected = project_root.resolve()
+        actual = workspace.project_root
+        if actual == expected:
+            return
+        raise DomainError(
+            ErrorCode.WORKSPACE_INVALID,
+            "The selected workspace is bound to a different project root.",
+            details={
+                "workspace_root": str(workspace.paths.root),
+                "bound_project_root": str(actual),
+                "requested_project_root": str(expected),
+            },
+            remediation=(
+                "Select the workspace that belongs to this project, or initialize a new "
+                "explicit workspace root for it.",
+            ),
         )
 
     @contextmanager

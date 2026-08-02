@@ -710,7 +710,9 @@ def create_server(
             "The MCP workspace root cannot contain NUL bytes.",
             remediation=("Provide a valid local workspace directory path.",),
         )
-    selected_workspace_root = workspace_root.resolve() if workspace_root is not None else None
+    selected_workspace_root = (
+        workspace_root.resolve() if workspace_root is not None else project_root / ".diagnostics"
+    )
     lifespan_state: list[AppContext] = []
 
     @asynccontextmanager
@@ -726,8 +728,11 @@ def create_server(
                 workspace = Workspace.discover(
                     project_root,
                     explicit=selected_workspace_root,
+                    project_root=project_root,
                 )
             except DomainError:
+                if workspace_root is not None:
+                    raise
                 workspace = None
         state = AppContext(
             project_root=project_root,

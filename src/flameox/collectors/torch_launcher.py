@@ -78,7 +78,7 @@ def main() -> None:
         target_name = options.module or options.script
         assert target_name is not None
         sys.argv = [target_name, *options.arguments]
-        phase = "workload_execution"
+        phase = "profiler_initialization"
         _write_diagnostic(diagnostic_path, phase=phase, status="running")
         with torch.profiler.profile(
             activities=activities,
@@ -88,11 +88,15 @@ def main() -> None:
             with_flops=config["with_flops"],
             with_modules=config["with_modules"],
         ) as profile:
+            phase = "workload_execution"
+            _write_diagnostic(diagnostic_path, phase=phase, status="running")
             if options.module is not None:
                 runpy.run_module(options.module, run_name="__main__", alter_sys=True)
             else:
                 assert script_path is not None
                 runpy.run_path(str(script_path), run_name="__main__")
+            phase = "profiler_finalization"
+            _write_diagnostic(diagnostic_path, phase=phase, status="running")
         phase = "trace_finalization"
         _write_diagnostic(diagnostic_path, phase=phase, status="running")
         profile.export_chrome_trace(str(output))

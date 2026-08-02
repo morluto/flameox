@@ -36,6 +36,33 @@ class _NvccProbeBroker(SubprocessBroker):
         )
 
 
+class _NvccProbeFailureBroker(SubprocessBroker):
+    async def run(self, request: ExecutionRequest, **_: Any) -> ExecutionOutcome:
+        raise DomainError(
+            ErrorCode.PROCESS_TIMEOUT,
+            "The bounded CUDA probe exceeded its execution budget.",
+            details={
+                "process": {
+                    "stdout": "",
+                    "stderr": f"timed out while reading {request.argv[4]}",
+                }
+            },
+        )
+
+
+class _PathReportingNvccProbeBroker(SubprocessBroker):
+    async def run(self, request: ExecutionRequest, **_: Any) -> ExecutionOutcome:
+        return ExecutionOutcome(
+            process=ProcessResult(exit_code=1, cleanup_complete=True),
+            stdout=b"",
+            stderr=(
+                f"{request.argv[4]}: fatal error: cuda_runtime.h: No such file or directory\n"
+            ).encode(),
+            resolved_executable=Path(request.argv[0]),
+            containment="process_group",
+        )
+
+
 def test_current_workload_definition_is_active_and_bound_to_plans(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     write_workload(tmp_path)
@@ -247,6 +274,61 @@ executables = ["nvcc"]
     assert "cuda_runtime.h" in requirement.limitations[0]
     assert "cuda_runtime.h" in requirement.remediation[0]
     assert "cuda_runtime.h" in requirement.evidence[1]
+
+
+@pytest.mark.anyio
+async def test_active_nvcc_probe_failure_is_not_classified_as_compile_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.gpu]
+argv = ["python", "-c", "print('gpu')"]
+[workloads.gpu.requirements]
+executables = ["nvcc"]
+"""
+    )
+    monkeypatch.setattr("flameox.application.preflight.shutil.which", lambda _: "/usr/bin/nvcc")
+
+    result = await PreflightService(
+        workspace,
+        broker=_NvccProbeFailureBroker(),
+    ).inspect("gpu", mode="active")
+
+    requirement = result.requirements[0]
+    assert requirement.status == "probe_failed"
+    assert "Retry active preflight" in requirement.remediation[0]
+
+
+@pytest.mark.anyio
+async def test_cuda_preflight_id_ignores_ephemeral_probe_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.gpu]
+argv = ["python", "-c", "print('gpu')"]
+[workloads.gpu.requirements]
+executables = ["nvcc"]
+"""
+    )
+    monkeypatch.setattr("flameox.application.preflight.shutil.which", lambda _: "/usr/bin/nvcc")
+    service = PreflightService(workspace, broker=_PathReportingNvccProbeBroker())
+
+    first = await service.inspect("gpu", mode="active")
+    second = await service.inspect("gpu", mode="active")
+
+    assert first.preflight_id == second.preflight_id
+    assert first.requirements[0].evidence[1] == (
+        "<cuda-preflight-root>/header_probe.cu: fatal error: cuda_runtime.h: "
+        "No such file or directory"
+    )
 
 
 @pytest.mark.anyio

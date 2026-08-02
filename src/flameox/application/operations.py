@@ -398,6 +398,7 @@ class OperationRunner:
                 cleanup_status="complete",
                 failure_code=error.code.value,
                 failure_message=error.message,
+                failure_details=self._failure_details(error),
                 item_outcomes=self._items(operation_id, "pending", completed_items),
                 recovery=self._retry_recovery(self.store.read(operation_id)),
             )

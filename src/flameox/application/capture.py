@@ -242,6 +242,7 @@ class _CaptureExecution:
         cleanup_complete: bool | None = None,
         process: ProcessResult | None = None,
         limitation_details: tuple[LimitationDetail, ...] = (),
+        artifacts: tuple[ArtifactRegistration, ...] = (),
     ) -> RunManifest:
         if self.run is None:
             raise DomainError(ErrorCode.INTERNAL_ERROR, "capture run is not initialized")
@@ -266,6 +267,7 @@ class _CaptureExecution:
                 ),
                 process=process,
                 limitation_details=limitation_details,
+                artifacts=artifacts,
             )
 
         try:
@@ -858,6 +860,47 @@ class CaptureService:
                 )
                 if quarantined is not None:
                     collector_limitation_details.append(quarantined)
+                early_artifacts: list[ArtifactRegistration] = []
+                torch_diagnostics = output_root / "torch-profiler-diagnostics.json"
+                if plan.adapter == "torch.profiler" and torch_diagnostics.is_file():
+                    try:
+                        diagnostic_payload = json.loads(
+                            torch_diagnostics.read_text(encoding="utf-8")
+                        )
+                        diagnostic_phase = diagnostic_payload.get("phase")
+                        diagnostic_status = diagnostic_payload.get("status")
+                        if diagnostic_status == "failed" and isinstance(diagnostic_phase, str):
+                            collector_limitation_details.append(
+                                _limitation(
+                                    "collector",
+                                    "failure_phase",
+                                    f"Torch profiler collector failed during {diagnostic_phase}.",
+                                )
+                            )
+                        diagnostic_registration = await self._register_path_async(
+                            run_id,
+                            torch_diagnostics,
+                            kind=ArtifactKind.COLLECTOR_METADATA,
+                            role="torch_profiler_diagnostics",
+                            media_type="application/json",
+                            producer=plan.adapter,
+                            producer_version=plan.adapter_version,
+                        )
+                        early_artifacts.append(diagnostic_registration[0])
+                    except (
+                        DomainError,
+                        OSError,
+                        UnicodeDecodeError,
+                        json.JSONDecodeError,
+                    ) as diagnostic_error:
+                        collector_limitation_details.append(
+                            _limitation(
+                                "collector",
+                                "diagnostics_registration_failed",
+                                "Torch profiler diagnostics could not be registered: "
+                                f"{diagnostic_error}",
+                            )
+                        )
                 terminal = await capture.terminate(
                     execution=status,
                     message=error.message,
@@ -870,6 +913,7 @@ class CaptureService:
                             *collector_limitation_details,
                         ]
                     ),
+                    artifacts=tuple(early_artifacts),
                 )
                 error.run_id = terminal.run_id
                 raise
@@ -2220,6 +2264,7 @@ class CaptureService:
         cleanup_complete: bool | None = True,
         process: ProcessResult | None = None,
         limitation_details: tuple[LimitationDetail, ...] = (),
+        artifacts: tuple[ArtifactRegistration, ...] = (),
     ) -> RunManifest:
         process = process or ProcessResult(
             timed_out=execution is ExecutionStatus.TIMED_OUT,
@@ -2272,6 +2317,7 @@ class CaptureService:
                     else CaptureStatus.FAILED
                 ),
                 "process": process,
+                "artifacts": (*running.artifacts, *artifacts),
                 "limitations": _limitation_projection(
                     details,
                     (*running.limitations, message),
