@@ -1,0 +1,419 @@
+from __future__ import annotations
+
+from flameox.analysis.recipe_context import RecipeContext
+from flameox.analysis.recipe_models import (
+    Hotspot,
+    HotspotResult,
+    MeasurementSummary,
+    MemoryAnalysisResult,
+    MemoryPhaseGrowth,
+    RuntimeResourceObservation,
+    RuntimeResourceTotals,
+    WritableRootObservation,
+)
+from flameox.catalog import Snapshot
+from flameox.evidence_scope import EvidenceScope, resolve_evidence_scope
+from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
+
+
+class HotspotRecipes(RecipeContext):
+    def hotspots(
+        self,
+        input_id: str,
+        *,
+        limit: int | None = None,
+        corpus_commit_id: str | None = None,
+    ) -> HotspotResult:
+        corpus_commit_id = self._pinned_commit_id(corpus_commit_id)
+        bounded = self._limit(limit)
+        with self._open_snapshot(corpus_commit_id) as snapshot:
+            scope = resolve_evidence_scope(snapshot, input_id)
+            where, parameters = scope.predicate(
+                run_column="fm.run_id",
+                artifact_column="fm.artifact_id",
+            )
+            profile_where, profile_parameters = self._profile_artifact_predicate(scope)
+            profile_row = snapshot.execute(
+                "SELECT count(*) FROM artifact_registrations ar WHERE " + profile_where,
+                profile_parameters,
+            ).fetchone()
+            assert profile_row is not None
+            if int(profile_row[0]) == 0:
+                return HotspotResult(
+                    corpus_commit_id=snapshot.commit.commit_id,
+                    input_id=input_id,
+                    hotspots=(),
+                    total=0,
+                    returned=0,
+                    truncated=False,
+                    coverage={"frame_measurements": 0, "completely_symbolized": 0},
+                    limitations=(
+                        "No registered profile artifact is available for this input; "
+                        "profile parsing is extractor-owned.",
+                    ),
+                    evidence_status="unavailable",
+                    unavailable_reason="no_profile_artifact",
+                    evidence=EvidenceAvailability(
+                        status="unavailable",
+                        reason="no_profile_artifact",
+                    ),
+                )
+            count_row = snapshot.execute(
+                "SELECT count(*) FROM frame_measurements fm WHERE " + where,
+                parameters,
+            ).fetchone()
+            assert count_row is not None
+            total = int(count_row[0])
+            rows = snapshot.execute(
+                "SELECT fm.frame_id, f.function, f.file, f.line, fm.metric, "
+                "fm.self_value, fm.inclusive_value, fm.unit, fm.sample_count "
+                "FROM frame_measurements fm LEFT JOIN frames f "
+                "ON f.frame_id = fm.frame_id WHERE "
+                + where
+                + " ORDER BY coalesce(fm.inclusive_value, fm.self_value, 0) DESC, "
+                "fm.frame_id LIMIT ?",
+                (*parameters, bounded),
+            ).fetchall()
+            symbolized_row = snapshot.execute(
+                "SELECT count(*) FROM frame_measurements fm JOIN frames f "
+                "ON f.frame_id = fm.frame_id WHERE " + where + " AND f.symbolization = 'complete'",
+                parameters,
+            ).fetchone()
+            assert symbolized_row is not None
+        hotspots = tuple(
+            Hotspot(
+                frame_id=row[0],
+                function=row[1],
+                file=row[2],
+                line=row[3],
+                metric=row[4],
+                self_value=row[5],
+                inclusive_value=row[6],
+                unit=row[7],
+                sample_count=row[8],
+            )
+            for row in rows
+        )
+        return HotspotResult(
+            corpus_commit_id=snapshot.commit.commit_id,
+            input_id=input_id,
+            hotspots=hotspots,
+            total=total,
+            returned=len(hotspots),
+            truncated=total > len(hotspots),
+            coverage={
+                "frame_measurements": total,
+                "completely_symbolized": int(symbolized_row[0]),
+            },
+            limitations=(
+                "Complete stacks remain in native artifacts; this result is a bounded "
+                "frame aggregate.",
+            ),
+            evidence_status="available" if hotspots else "empty",
+            evidence=(
+                empty_availability("no_matching_hotspots")
+                if not hotspots
+                else available_availability()
+            ),
+        )
+
+    @staticmethod
+    def _profile_artifact_predicate(scope: EvidenceScope) -> tuple[str, tuple[object, ...]]:
+        run_ids = scope.run_ids
+        artifact_ids = scope.artifact_ids
+        predicates: list[str] = []
+        parameters: list[object] = []
+        if run_ids:
+            placeholders = ", ".join("?" for _ in run_ids)
+            predicates.append(
+                f"(ar.run_id IN ({placeholders}) AND ar.kind IN "
+                "('sample_profile', 'memory_profile', 'execution_trace'))"
+            )
+            parameters.extend(run_ids)
+        if artifact_ids:
+            placeholders = ", ".join("?" for _ in artifact_ids)
+            predicates.append(
+                f"(ar.artifact_id IN ({placeholders}) AND ar.kind IN "
+                "('sample_profile', 'memory_profile', 'execution_trace'))"
+            )
+            parameters.extend(artifact_ids)
+        return " OR ".join(predicates) or "FALSE", tuple(parameters)
+
+    def memory(
+        self,
+        input_id: str,
+        *,
+        limit: int | None = None,
+        corpus_commit_id: str | None = None,
+    ) -> MemoryAnalysisResult:
+        corpus_commit_id = self._pinned_commit_id(corpus_commit_id)
+        bounded = self._limit(limit)
+        with self._open_snapshot(corpus_commit_id) as snapshot:
+            scope = resolve_evidence_scope(snapshot, input_id)
+            where, parameters = scope.predicate(
+                run_column="run_id",
+                artifact_column="artifact_id",
+            )
+            rows = snapshot.execute(
+                "SELECT name, value_int, value_float, unit, aggregation, scope "
+                "FROM measurements WHERE "
+                + where
+                + " AND name LIKE 'memory.%' ORDER BY name LIMIT ?",
+                (*parameters, bounded),
+            ).fetchall()
+            phase_rows = snapshot.execute(
+                "SELECT phase, name, "
+                "median(coalesce(CAST(value_int AS DOUBLE), value_float)), "
+                "count(*), any_value(unit), "
+                "min(coalesce(worker_run_index, 0) * 1000000 "
+                "+ coalesce(value_index, 0)) AS phase_order "
+                "FROM measurements WHERE "
+                + where
+                + " AND name LIKE 'memory.%' AND phase IS NOT NULL "
+                "AND coalesce(CAST(value_int AS DOUBLE), value_float) IS NOT NULL "
+                "GROUP BY phase, name ORDER BY phase_order, phase, name",
+                parameters,
+            ).fetchall()
+            profile_where, profile_parameters = self._memory_profile_artifact_predicate(scope)
+            profile_row = snapshot.execute(
+                "SELECT count(*) FROM artifact_registrations ar WHERE " + profile_where,
+                profile_parameters,
+            ).fetchone()
+            assert profile_row is not None
+            has_memory_profile = int(profile_row[0]) > 0
+            hotspot_result = HotspotRecipes(
+                self.workspace,
+                snapshot=snapshot,
+            ).hotspots(
+                input_id,
+                limit=bounded,
+                corpus_commit_id=corpus_commit_id,
+            )
+            resource_rows, resource_total, resource_truncated = self._runtime_resources(
+                snapshot,
+                scope,
+                bounded,
+            )
+            writable_rows = self._writable_root_observations(snapshot, scope, bounded)
+            unavailable_metrics = tuple(
+                sorted({metric for item in resource_rows for metric in item.unavailable_metrics})
+            )
+            policy_termination = next(
+                (
+                    item.policy_termination
+                    for item in resource_rows
+                    if item.policy_termination is not None
+                ),
+                None,
+            )
+        previous_by_metric: dict[str, float] = {}
+        phase_growth: list[MemoryPhaseGrowth] = []
+        for phase, metric, value, sample_count, unit, _ in phase_rows:
+            numeric = float(value)
+            previous = previous_by_metric.get(str(metric))
+            phase_growth.append(
+                MemoryPhaseGrowth(
+                    phase=str(phase),
+                    metric=str(metric),
+                    value=numeric,
+                    previous_value=previous,
+                    delta=numeric - previous if previous is not None else None,
+                    unit=str(unit),
+                    sample_count=int(sample_count),
+                )
+            )
+            previous_by_metric[str(metric)] = numeric
+        limitations = [
+            "High-water-mark, retained-end, and allocation volume are distinct "
+            "concepts and are not substituted for one another."
+        ]
+        if not resource_rows:
+            limitations.append(
+                "Runtime resource summary was not published for this evidence generation."
+            )
+        memory_run_id = scope.run_ids[0] if len(scope.run_ids) == 1 else None
+        memory_hotspots = tuple(
+            item for item in hotspot_result.hotspots if item.metric.startswith("memory.")
+        )
+        has_runtime_evidence = bool(
+            resource_rows
+            or writable_rows
+            or policy_termination is not None
+            or (resource_total is not None and resource_total.run_count > 0)
+        )
+        evidence = (
+            EvidenceAvailability(
+                status="unavailable",
+                reason=(
+                    "memory_profile_not_extracted"
+                    if has_memory_profile
+                    else "no_memory_profile_artifact"
+                ),
+                next_tool="extract_memray" if has_memory_profile and memory_run_id else None,
+                next_arguments=(
+                    {"run_id": memory_run_id} if has_memory_profile and memory_run_id else None
+                ),
+            )
+            if (
+                not rows
+                and not memory_hotspots
+                and not phase_growth
+                and has_memory_profile
+                and not has_runtime_evidence
+            )
+            else (
+                EvidenceAvailability(
+                    status="partial" if has_runtime_evidence else "unavailable",
+                    reason=(
+                        (
+                            "memory_profile_not_extracted_runtime_evidence_present"
+                            if has_memory_profile
+                            else "no_memory_profile_artifact_runtime_evidence_present"
+                        )
+                        if has_runtime_evidence
+                        else "no_memory_profile_artifact"
+                    ),
+                )
+                if not rows and not memory_hotspots and not phase_growth
+                else (
+                    available_availability()
+                    if memory_hotspots or phase_growth
+                    else empty_availability("no_memory_measurements")
+                )
+                if not rows
+                else available_availability()
+            )
+        )
+        return MemoryAnalysisResult(
+            corpus_commit_id=snapshot.commit.commit_id,
+            input_id=input_id,
+            measurements=tuple(
+                MeasurementSummary(
+                    name=row[0],
+                    value_int=row[1],
+                    value_float=row[2],
+                    unit=row[3],
+                    aggregation=row[4],
+                    scope=row[5],
+                )
+                for row in rows
+            ),
+            hotspots=memory_hotspots,
+            phase_growth=tuple(phase_growth),
+            limitations=tuple(limitations),
+            runtime_resources=resource_rows,
+            runtime_resource_totals=resource_total,
+            runtime_resources_truncated=resource_truncated,
+            truncated=resource_truncated,
+            writable_root_observations=writable_rows,
+            policy_termination=policy_termination,
+            unavailable_metrics=unavailable_metrics,
+            evidence=evidence,
+        )
+
+    @staticmethod
+    def _memory_profile_artifact_predicate(scope: EvidenceScope) -> tuple[str, tuple[object, ...]]:
+        predicates: list[str] = []
+        parameters: list[object] = []
+        if scope.run_ids:
+            placeholders = ", ".join("?" for _ in scope.run_ids)
+            predicates.append(f"(ar.run_id IN ({placeholders}) AND ar.kind = 'memory_profile')")
+            parameters.extend(scope.run_ids)
+        if scope.artifact_ids:
+            placeholders = ", ".join("?" for _ in scope.artifact_ids)
+            predicates.append(
+                f"(ar.artifact_id IN ({placeholders}) AND ar.kind = 'memory_profile')"
+            )
+            parameters.extend(scope.artifact_ids)
+        return " OR ".join(predicates) or "FALSE", tuple(parameters)
+
+    def _runtime_resources(
+        self,
+        snapshot: Snapshot,
+        scope: EvidenceScope,
+        limit: int,
+    ) -> tuple[tuple[RuntimeResourceObservation, ...], RuntimeResourceTotals, bool]:
+        where, parameters = self._run_scope_predicate(scope, "rr.run_id")
+        rows = snapshot.execute(
+            "SELECT run_id, sampling_interval_ms, minimum_free_bytes, staging_growth_bytes, "
+            "peak_rss_bytes, policy_termination, unavailable_metrics "
+            "FROM runtime_resource_summaries rr WHERE "
+            + where
+            + " ORDER BY run_id, published_at DESC LIMIT ?",
+            (*parameters, limit + 1),
+        ).fetchall()
+        total_row = snapshot.execute(
+            "SELECT count(*), min(minimum_free_bytes), sum(staging_growth_bytes), "
+            "max(peak_rss_bytes) FROM runtime_resource_summaries rr WHERE " + where,
+            parameters,
+        ).fetchone()
+        assert total_row is not None
+        observations = tuple(
+            RuntimeResourceObservation(
+                run_id=str(row[0]),
+                sampling_interval_ms=int(row[1]),
+                minimum_free_bytes=int(row[2]) if row[2] is not None else None,
+                staging_growth_bytes=int(row[3]) if row[3] is not None else None,
+                peak_rss_bytes=int(row[4]) if row[4] is not None else None,
+                policy_termination=str(row[5]) if row[5] is not None else None,
+                unavailable_metrics=tuple(str(item) for item in (row[6] or ())),
+            )
+            for row in rows[:limit]
+        )
+        return (
+            observations,
+            RuntimeResourceTotals(
+                run_count=int(total_row[0]),
+                minimum_free_bytes=(int(total_row[1]) if total_row[1] is not None else None),
+                total_staging_growth_bytes=(
+                    int(total_row[2]) if total_row[2] is not None else None
+                ),
+                maximum_peak_rss_bytes=(int(total_row[3]) if total_row[3] is not None else None),
+            ),
+            len(rows) > limit,
+        )
+
+    def _writable_root_observations(
+        self,
+        snapshot: Snapshot,
+        scope: EvidenceScope,
+        limit: int,
+    ) -> tuple[WritableRootObservation, ...]:
+        where, parameters = self._run_scope_predicate(scope, "rw.run_id")
+        rows = snapshot.execute(
+            "SELECT run_id, writable_root_identity, target_path, growth_bytes, available, "
+            "unavailable_reason FROM runtime_writable_root_growth rw WHERE "
+            + where
+            + " ORDER BY run_id, target_path LIMIT ?",
+            (*parameters, limit),
+        ).fetchall()
+        return tuple(
+            WritableRootObservation(
+                run_id=str(row[0]),
+                writable_root_identity=str(row[1]),
+                target_path=str(row[2]),
+                growth_bytes=int(row[3]) if row[3] is not None else None,
+                available=bool(row[4]),
+                unavailable_reason=str(row[5]) if row[5] is not None else None,
+            )
+            for row in rows
+        )
+
+    @staticmethod
+    def _run_scope_predicate(scope: EvidenceScope, column: str) -> tuple[str, tuple[object, ...]]:
+        run_ids = scope.run_ids
+        artifact_ids = scope.artifact_ids
+        predicates: list[str] = []
+        parameters: list[object] = []
+        if run_ids:
+            placeholders = ", ".join("?" for _ in run_ids)
+            predicates.append(f"{column} IN ({placeholders})")
+            parameters.extend(run_ids)
+        if artifact_ids:
+            placeholders = ", ".join("?" for _ in artifact_ids)
+            predicates.append(
+                f"{column} IN (SELECT run_id FROM artifact_registrations "
+                f"WHERE artifact_id IN ({placeholders}))"
+            )
+            parameters.extend(artifact_ids)
+        return " OR ".join(f"({item})" for item in predicates) or "FALSE", tuple(parameters)
