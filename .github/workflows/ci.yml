@@ -333,7 +333,7 @@ jobs:
           enable-cache: true
           cache-suffix: dev-only
       - run: uv sync --extra dev
-      - run: uv run deptry src --optional-dependencies-dev-groups dev,test --per-rule-ignores 'DEP002=py-spy|pytest-xdist'
+      - run: uv run deptry src --optional-dependencies-dev-groups dev,test --per-rule-ignores 'DEP002=pytz|py-spy|pytest-xdist'
 
   security-audit:
     name: Security Audit
