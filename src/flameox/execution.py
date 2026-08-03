@@ -611,7 +611,7 @@ class SubprocessBroker:
         *,
         force: bool,
     ) -> bool:
-        if process.poll() is not None:
+        if process.returncode is not None:
             return True
         if os.name == "posix":
             try:
