@@ -48,6 +48,7 @@ def make_service(tmp_path: Path) -> tuple[SetupService, FakeRuntime, Path]:
 @pytest.mark.anyio
 async def test_setup_connects_only_explicitly_selected_clients(tmp_path: Path) -> None:
     service, runtime, home = make_service(tmp_path)
+    assert service.registry.broker is service.broker
     (home / ".claude").mkdir()
     (home / ".cursor").mkdir()
 

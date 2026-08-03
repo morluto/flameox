@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import stat
-import subprocess
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -11,6 +10,7 @@ from typing import Any
 import tomlkit
 
 from flameox.domain import DomainError, ErrorCode
+from flameox.execution import ExecutionRequest, SubprocessBroker
 
 
 class SetupClient(StrEnum):
@@ -78,10 +78,12 @@ class ClientConfigRegistry:
         home: Path,
         jsonc_helper: Path | None = None,
         node_executable: str = "node",
+        broker: SubprocessBroker | None = None,
     ) -> None:
         self.home = home
         self.jsonc_helper = jsonc_helper
         self.node_executable = node_executable
+        self.broker = broker or SubprocessBroker()
 
     def definition(self, client: SetupClient) -> _ClientDefinition:
         if client is SetupClient.CLAUDE:
@@ -398,16 +400,29 @@ class ClientConfigRegistry:
     def _run_jsonc_helper(self, request: dict[str, Any], path: Path) -> dict[str, Any]:
         assert self.jsonc_helper is not None
         try:
-            completed = subprocess.run(
-                [self.node_executable, str(self.jsonc_helper)],
-                input=json.dumps(request),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=False,
-                timeout=10,
+            outcome = self.broker.run_sync(
+                ExecutionRequest(
+                    argv=(self.node_executable, str(self.jsonc_helper)),
+                    cwd=path.parent,
+                    stdin_bytes=json.dumps(request).encode("utf-8"),
+                    environment_allowlist=("PATH",),
+                    allowed_working_roots=(path.parent.resolve(),),
+                    timeout_seconds=10,
+                    max_output_bytes=16 * 1024 * 1024,
+                )
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except DomainError as exc:
+            if exc.code is not ErrorCode.PROCESS_TIMEOUT:
+                raise
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "The flameox JSONC editor timed out.",
+                details={"path": str(path)},
+                remediation=(
+                    "Run setup through `npx flameox@latest setup` with Node.js available.",
+                ),
+            ) from exc
+        except OSError as exc:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 "The flameox JSONC editor could not be started.",
@@ -416,11 +431,12 @@ class ClientConfigRegistry:
                     "Run setup through `npx flameox@latest setup` with Node.js available.",
                 ),
             ) from exc
-        if completed.returncode != 0:
-            message = completed.stderr.strip() or "unknown JSONC parser failure"
+        if outcome.process.exit_code != 0:
+            message = outcome.stderr.decode("utf-8", errors="replace").strip()
+            message = message or "unknown JSONC parser failure"
             raise self._invalid_config(path, message)
         try:
-            result = json.loads(completed.stdout)
+            result = json.loads(outcome.stdout.decode("utf-8", errors="replace"))
         except json.JSONDecodeError as exc:
             raise self._invalid_config(path, "JSONC helper returned invalid output") from exc
         if not isinstance(result, dict):

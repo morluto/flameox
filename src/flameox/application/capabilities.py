@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import platform
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
-import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -36,7 +33,7 @@ from flameox.domain import (
     ErrorCode,
 )
 from flameox.domain.models import utc_now
-from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
+from flameox.execution import ExecutionOutcome, ExecutionRequest, ResourcePolicy, SubprocessBroker
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
@@ -672,19 +669,25 @@ class CapabilityService:
                         sys.executable,
                         *requirements,
                     ]
-                    if cancel_event is None:
-                        completed = subprocess.run(
-                            command,
-                            capture_output=True,
-                            text=True,
-                            check=False,
-                            timeout=_CAPABILITY_INSTALL_TIMEOUT_SECONDS,
-                            env={**os.environ, "UV_NO_PROGRESS": "1"},
-                        )
-                    else:
-                        completed = self._run_cancellable_install(command, cancel_event)
-                if completed.returncode != 0:
-                    detail = (completed.stderr.strip() or completed.stdout.strip())[:500]
+                    outcome = _run_brokered_sync(
+                        self.broker,
+                        ExecutionRequest(
+                            argv=tuple(command),
+                            cwd=Path.cwd(),
+                            environment_allowlist=("PATH",),
+                            environment_overrides={"UV_NO_PROGRESS": "1"},
+                            allowed_working_roots=(Path.cwd(),),
+                            timeout_seconds=_CAPABILITY_INSTALL_TIMEOUT_SECONDS,
+                            max_output_bytes=16 * 1024 * 1024,
+                        ),
+                        cancel_event=cancel_event,
+                        cancellation_message=(
+                            "Capability setup was cancelled and its installer was terminated."
+                        ),
+                        cancellation_details={"next_tool": "start_capability_setup"},
+                    )
+                if outcome.process.exit_code != 0:
+                    detail = _output_detail(outcome)[:500]
                     raise DomainError(
                         ErrorCode.PROCESS_FAILED,
                         "FlameOx could not prepare the requested optional capabilities.",
@@ -716,7 +719,11 @@ class CapabilityService:
                 )
                 if phase_callback is not None:
                     phase_callback("staging_trace_processor")
-                install_trace_processor(self.workspace, cancel_event=cancel_event)
+                install_trace_processor(
+                    self.workspace,
+                    cancel_event=cancel_event,
+                    broker=self.broker,
+                )
                 self._check_cancelled(cancel_event)
         except DomainError as exc:
             failure = self._annotate_setup_phase(exc, staging_started=staging_started)
@@ -729,7 +736,7 @@ class CapabilityService:
             if failure is exc:
                 raise
             raise failure from exc
-        except (OSError, subprocess.SubprocessError, portalocker.exceptions.LockException) as exc:
+        except (OSError, portalocker.exceptions.LockException) as exc:
             self._record_setup_receipt(
                 requested,
                 completed=self._available_requested(requested),
@@ -826,58 +833,6 @@ class CapabilityService:
                 details={"next_tool": "start_capability_setup"},
                 remediation=("Retry the exact capability setup request when ready.",),
             )
-
-    @classmethod
-    def _run_cancellable_install(
-        cls,
-        command: Sequence[str],
-        cancel_event: threading.Event,
-    ) -> subprocess.CompletedProcess[str]:
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env={**os.environ, "UV_NO_PROGRESS": "1"},
-        )
-        deadline = time.monotonic() + _CAPABILITY_INSTALL_TIMEOUT_SECONDS
-
-        def terminate() -> None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-
-        while process.poll() is None:
-            if cancel_event.wait(0.1):
-                terminate()
-                raise DomainError(
-                    ErrorCode.PROCESS_CANCELLED,
-                    "Capability setup was cancelled and its installer was terminated.",
-                    retryable=True,
-                    details={"next_tool": "start_capability_setup"},
-                )
-            if time.monotonic() >= deadline:
-                terminate()
-                raise DomainError(
-                    ErrorCode.PROCESS_TIMEOUT,
-                    "Capability setup installer exceeded its 1800 second timeout.",
-                    retryable=True,
-                    details={"next_tool": "start_capability_setup"},
-                    remediation=(
-                        "Retry capability setup after checking package-index access and the "
-                        "managed runtime.",
-                    ),
-                )
-        stdout, stderr = process.communicate()
-        return subprocess.CompletedProcess(
-            command,
-            process.returncode,
-            stdout,
-            stderr,
-        )
 
     def prepare_adapter(self, adapter: str, distribution: str) -> AdapterPreparationResult:
         if self.workspace is None:
@@ -1196,3 +1151,83 @@ class CapabilitySetupManager:
         # Item identities retain the exact bounded request without exposing
         # package-manager arguments or host paths to the protocol.
         return tuple(item.item for item in record.item_outcomes)
+
+
+async def _run_brokered(
+    broker: SubprocessBroker,
+    request: ExecutionRequest,
+    *,
+    cancel_event: threading.Event | None,
+    cancellation_message: str,
+    cancellation_details: dict[str, str],
+) -> ExecutionOutcome:
+    execution = asyncio.create_task(broker.run(request))
+    if cancel_event is None:
+        return await execution
+
+    cancellation = asyncio.create_task(_wait_for_cancellation(cancel_event))
+    done, _ = await asyncio.wait(
+        (execution, cancellation),
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if cancellation in done and execution not in done:
+        execution.cancel()
+        await asyncio.gather(execution, return_exceptions=True)
+        raise DomainError(
+            ErrorCode.PROCESS_CANCELLED,
+            cancellation_message,
+            retryable=True,
+            details=cancellation_details,
+        )
+    cancellation.cancel()
+    await asyncio.gather(cancellation, return_exceptions=True)
+    return await execution
+
+
+async def _wait_for_cancellation(cancel_event: threading.Event) -> None:
+    while not cancel_event.is_set():
+        await asyncio.sleep(0.05)
+
+
+def _run_brokered_sync(
+    broker: SubprocessBroker,
+    request: ExecutionRequest,
+    *,
+    cancel_event: threading.Event | None,
+    cancellation_message: str,
+    cancellation_details: dict[str, str],
+) -> ExecutionOutcome:
+    coroutine = _run_brokered(
+        broker,
+        request,
+        cancel_event=cancel_event,
+        cancellation_message=cancellation_message,
+        cancellation_details=cancellation_details,
+    )
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+
+    result: list[ExecutionOutcome] = []
+    error: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            result.append(asyncio.run(coroutine))
+        except BaseException as exc:
+            error.append(exc)
+
+    thread = threading.Thread(target=run, name="flameox-broker-bridge")
+    thread.start()
+    thread.join()
+    if error:
+        raise error[0]
+    return result[0]
+
+
+def _output_detail(outcome: ExecutionOutcome) -> str:
+    return (
+        outcome.stderr.decode("utf-8", errors="replace").strip()
+        or outcome.stdout.decode("utf-8", errors="replace").strip()
+    )

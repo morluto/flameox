@@ -371,14 +371,15 @@ class CaptureService:
         *,
         plans: CapturePlanRegistry | None = None,
         broker: SubprocessBroker | None = None,
+        capabilities: CapabilityService | None = None,
     ) -> None:
         self.workspace = workspace
         self.workloads = WorkloadService(workspace)
-        self.capabilities = CapabilityService(workspace)
+        self.capabilities = capabilities or CapabilityService(workspace, broker=broker)
         self.plans = plans or CapturePlanRegistry(
             max_parallel_captures=workspace.config.capture.max_parallel_captures
         )
-        self.broker = broker or SubprocessBroker()
+        self.broker = broker or self.capabilities.broker
         self.runs = RunStore(workspace)
         self.artifacts = ArtifactStore(workspace)
         self.publisher = GenerationPublisher(workspace)

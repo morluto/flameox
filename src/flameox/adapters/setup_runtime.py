@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
-import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -20,6 +19,7 @@ from packaging.version import InvalidVersion, Version
 
 from flameox.atomic import atomic_write_json, atomic_write_text
 from flameox.domain import DomainError, ErrorCode
+from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
 from flameox.storage import Workspace
 
 
@@ -42,9 +42,16 @@ class ManagedRuntime:
 
     distribution = "flameox"
 
-    def __init__(self, root: Path, *, uv_executable: str = "uv") -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        uv_executable: str = "uv",
+        broker: SubprocessBroker | None = None,
+    ) -> None:
         self.root = root
         self.uv_executable = uv_executable
+        self.broker = broker or SubprocessBroker()
 
     def executable(self, version: str) -> Path:
         self._validated_version(version)
@@ -84,38 +91,41 @@ class ManagedRuntime:
 
         runtime_root = executable.parent.parent
         runtime_root.mkdir(parents=True, exist_ok=True)
-        environment = os.environ.copy()
-        environment["UV_TOOL_DIR"] = str(runtime_root / "tools")
-        environment["UV_TOOL_BIN_DIR"] = str(runtime_root / "bin")
         try:
             extras = self._managed_extras()
             distribution = (
                 f"{self.distribution}[{','.join(extras)}]" if extras else self.distribution
             )
-            completed = subprocess.run(
-                [
-                    self.uv_executable,
-                    "tool",
-                    "install",
-                    "--force",
-                    "--no-config",
-                    "--no-sources",
-                    "--prerelease",
-                    "allow",
-                    "--python",
-                    "3.12",
-                    f"{distribution}=={version}",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=600,
-                env=environment,
+            outcome = await self.broker.run(
+                ExecutionRequest(
+                    argv=(
+                        self.uv_executable,
+                        "tool",
+                        "install",
+                        "--force",
+                        "--no-config",
+                        "--no-sources",
+                        "--prerelease",
+                        "allow",
+                        "--python",
+                        "3.12",
+                        f"{distribution}=={version}",
+                    ),
+                    cwd=Path.cwd(),
+                    environment_allowlist=("PATH",),
+                    environment_overrides={
+                        "UV_TOOL_DIR": str(runtime_root / "tools"),
+                        "UV_TOOL_BIN_DIR": str(runtime_root / "bin"),
+                    },
+                    allowed_working_roots=(Path.cwd(),),
+                    timeout_seconds=600,
+                    max_output_bytes=16 * 1024 * 1024,
+                )
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (DomainError, OSError) as exc:
             raise self._installation_error(version, str(exc)) from exc
-        if completed.returncode != 0 or not executable.is_file():
-            detail = completed.stderr.strip() or completed.stdout.strip()
+        if outcome.process.exit_code != 0 or not executable.is_file():
+            detail = _output_detail(outcome)
             raise self._installation_error(version, detail or "uv produced no launcher")
 
         try:
@@ -153,24 +163,28 @@ class ManagedRuntime:
 
     async def verify(self, executable: Path, version: str) -> None:
         try:
-            completed = subprocess.run(
-                [str(executable), "--version"],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=30,
+            outcome = await self.broker.run(
+                ExecutionRequest(
+                    argv=(str(executable), "--version"),
+                    cwd=Path.cwd(),
+                    environment_allowlist=("PATH",),
+                    allowed_working_roots=(Path.cwd(),),
+                    timeout_seconds=30,
+                    max_output_bytes=1024 * 1024,
+                )
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (DomainError, OSError) as exc:
             raise self._verification_error(executable, str(exc)) from exc
-        if completed.returncode != 0:
+        if outcome.process.exit_code != 0:
             raise self._verification_error(
                 executable,
-                completed.stderr.strip() or "the version command failed",
+                _output_detail(outcome) or "the version command failed",
             )
-        if completed.stdout.strip() != version:
+        stdout = outcome.stdout.decode("utf-8", errors="replace").strip()
+        if stdout != version:
             raise self._verification_error(
                 executable,
-                f"expected version {version}, got {completed.stdout.strip()!r}",
+                f"expected version {version}, got {stdout!r}",
             )
 
         parameters = StdioServerParameters(
@@ -245,6 +259,7 @@ def install_trace_processor(
     workspace: Workspace,
     *,
     cancel_event: threading.Event | None = None,
+    broker: SubprocessBroker | None = None,
 ) -> TraceProcessorInstallation:
     """Stage the pinned user-space Trace Processor without requiring host privileges."""
     temporary: Path | None = None
@@ -270,7 +285,7 @@ def install_trace_processor(
         target = workspace.paths.root / "tools" / "trace_processor_shell"
         if target.is_file() and os.access(target, os.X_OK):
             _check_staging_cancelled(cancel_event)
-            _verify_trace_processor(target, cancel_event=cancel_event)
+            _verify_trace_processor(target, cancel_event=cancel_event, broker=broker)
             return TraceProcessorInstallation(TRACE_PROCESSOR_VERSION, target, False)
 
         url = (
@@ -301,7 +316,7 @@ def install_trace_processor(
             os.fsync(stream.fileno())
         temporary.chmod(0o755)
         _check_staging_cancelled(cancel_event)
-        _verify_trace_processor(temporary, cancel_event=cancel_event)
+        _verify_trace_processor(temporary, cancel_event=cancel_event, broker=broker)
         target.parent.mkdir(parents=True, exist_ok=True)
         with workspace.write_locked():
             _check_staging_cancelled(cancel_event)
@@ -390,68 +405,124 @@ def _verify_trace_processor(
     executable: Path,
     *,
     cancel_event: threading.Event | None = None,
+    broker: SubprocessBroker | None = None,
 ) -> None:
-    if cancel_event is None:
-        _verify_trace_processor_with_run(executable)
-        return
-    process = subprocess.Popen(
-        [str(executable), "--version"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    deadline = time.monotonic() + 30
-    while process.poll() is None:
-        if cancel_event.wait(0.1):
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-            raise DomainError(
-                ErrorCode.PROCESS_CANCELLED,
-                "Trace Processor staging was cancelled before publication.",
-                retryable=True,
-                details={"next_tool": "start_capability_setup", "adapter": "perfetto"},
-            )
-        if time.monotonic() >= deadline:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-            raise DomainError(
-                ErrorCode.PROCESS_TIMEOUT,
-                "The staged Trace Processor exceeded its 30 second verification timeout.",
-                retryable=True,
-                details={"next_tool": "start_capability_setup", "adapter": "perfetto"},
-            )
-    stdout, stderr = process.communicate()
-    _validate_trace_processor_result(process.returncode, stdout, stderr)
-
-
-def _verify_trace_processor_with_run(executable: Path) -> None:
+    execution_broker = broker or SubprocessBroker()
     try:
-        completed = subprocess.run(
-            [str(executable), "--version"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        outcome = _run_brokered_sync(
+            execution_broker,
+            ExecutionRequest(
+                argv=(str(executable), "--version"),
+                cwd=Path.cwd(),
+                environment_allowlist=(),
+                allowed_working_roots=(Path.cwd(),),
+                timeout_seconds=30,
+                max_output_bytes=1024 * 1024,
+            ),
+            cancel_event=cancel_event,
+            cancellation_message="Trace Processor staging was cancelled before publication.",
+            cancellation_details={"next_tool": "start_capability_setup", "adapter": "perfetto"},
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (DomainError, OSError) as exc:
+        if isinstance(exc, DomainError) and exc.code in {
+            ErrorCode.PROCESS_CANCELLED,
+            ErrorCode.PROCESS_TIMEOUT,
+        }:
+            raise
         raise DomainError(
             ErrorCode.PROCESS_FAILED,
             "The staged Trace Processor failed its bounded version check.",
             details={"next_tool": "prepare_capabilities", "adapter": "perfetto"},
         ) from exc
-    _validate_trace_processor_result(completed.returncode, completed.stdout, completed.stderr)
+    _validate_trace_processor_result(
+        outcome.process.exit_code,
+        outcome.stdout.decode("utf-8", errors="replace"),
+        outcome.stderr.decode("utf-8", errors="replace"),
+    )
+
+
+async def _run_brokered(
+    broker: SubprocessBroker,
+    request: ExecutionRequest,
+    *,
+    cancel_event: threading.Event | None,
+    cancellation_message: str,
+    cancellation_details: dict[str, str],
+) -> ExecutionOutcome:
+    execution = asyncio.create_task(broker.run(request))
+    if cancel_event is None:
+        return await execution
+
+    cancellation = asyncio.create_task(_wait_for_cancellation(cancel_event))
+    done, _ = await asyncio.wait(
+        (execution, cancellation),
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if cancellation in done and execution not in done:
+        execution.cancel()
+        await asyncio.gather(execution, return_exceptions=True)
+        raise DomainError(
+            ErrorCode.PROCESS_CANCELLED,
+            cancellation_message,
+            retryable=True,
+            details=cancellation_details,
+        )
+    cancellation.cancel()
+    await asyncio.gather(cancellation, return_exceptions=True)
+    return await execution
+
+
+async def _wait_for_cancellation(cancel_event: threading.Event) -> None:
+    while not cancel_event.is_set():
+        await asyncio.sleep(0.05)
+
+
+def _run_brokered_sync(
+    broker: SubprocessBroker,
+    request: ExecutionRequest,
+    *,
+    cancel_event: threading.Event | None,
+    cancellation_message: str,
+    cancellation_details: dict[str, str],
+) -> ExecutionOutcome:
+    coroutine = _run_brokered(
+        broker,
+        request,
+        cancel_event=cancel_event,
+        cancellation_message=cancellation_message,
+        cancellation_details=cancellation_details,
+    )
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+
+    result: list[ExecutionOutcome] = []
+    error: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            result.append(asyncio.run(coroutine))
+        except BaseException as exc:
+            error.append(exc)
+
+    thread = threading.Thread(target=run, name="flameox-broker-bridge")
+    thread.start()
+    thread.join()
+    if error:
+        raise error[0]
+    return result[0]
+
+
+def _output_detail(outcome: ExecutionOutcome) -> str:
+    return (
+        outcome.stderr.decode("utf-8", errors="replace").strip()
+        or outcome.stdout.decode("utf-8", errors="replace").strip()
+    )
 
 
 def _validate_trace_processor_result(
-    returncode: int,
+    returncode: int | None,
     stdout: str,
     stderr: str,
 ) -> None:

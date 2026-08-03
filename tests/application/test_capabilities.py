@@ -4,6 +4,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, cast
@@ -33,6 +34,7 @@ from flameox.storage import Workspace
 class _ProbeBroker(SubprocessBroker):
     def __init__(self) -> None:
         self.calls = 0
+        self.requests: list[ExecutionRequest] = []
 
     async def run(
         self,
@@ -40,6 +42,7 @@ class _ProbeBroker(SubprocessBroker):
         **_: Any,
     ) -> ExecutionOutcome:
         self.calls += 1
+        self.requests.append(request)
         return ExecutionOutcome(
             process=ProcessResult(exit_code=0, cleanup_complete=True),
             stdout=b"trace_processor_shell 99.1\n",
@@ -61,6 +64,17 @@ class _PerfProbeBroker(SubprocessBroker):
     ) -> ExecutionOutcome:
         self.requests.append(request)
         return self.outcomes.pop(0)
+
+
+class _BlockingBroker(SubprocessBroker):
+    def __init__(self) -> None:
+        self.started = threading.Event()
+
+    async def run(self, request: ExecutionRequest, **_: Any) -> ExecutionOutcome:
+        del request
+        self.started.set()
+        await asyncio.Future()
+        raise AssertionError("unreachable")
 
 
 def _probe_outcome(
@@ -279,7 +293,12 @@ def test_prepare_capabilities_installs_only_declared_missing_providers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    service = CapabilityService(workspace, capability_manifest=tmp_path / "capabilities.json")
+    broker = _ProbeBroker()
+    service = CapabilityService(
+        workspace,
+        broker=broker,
+        capability_manifest=tmp_path / "capabilities.json",
+    )
     setup = CapabilitySetup(
         extra="torch",
         method="prepare_capabilities",
@@ -311,14 +330,6 @@ def test_prepare_capabilities_installs_only_declared_missing_providers(
     monkeypatch.setattr("flameox.application.capabilities.shutil.which", lambda _: "/usr/bin/uv")
     monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
     (tmp_path / "bin").mkdir()
-    calls: list[list[str]] = []
-
-    def run(command: list[str], **_: object) -> object:
-        calls.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    monkeypatch.setattr("flameox.application.capabilities.subprocess.run", run)
-
     result = service.prepare(("torch.profiler",))
 
     assert result.installed == ("torch.profiler",)
@@ -337,7 +348,7 @@ def test_prepare_capabilities_installs_only_declared_missing_providers(
     assert (tmp_path / "capabilities.json").read_text() == (
         '{\n  "extras": [\n    "torch"\n  ],\n  "schema_version": 1\n}\n'
     )
-    assert calls == [
+    assert [list(request.argv) for request in broker.requests] == [
         [
             "/usr/bin/uv",
             "pip",
@@ -360,6 +371,52 @@ def test_prepare_capabilities_rejects_unmanaged_provider(tmp_path: Path) -> None
 
     assert refused.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
     assert refused.value.details["next_tool"] == "list_capabilities"
+
+
+def test_prepare_capabilities_cancellation_cleans_up_brokered_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    broker = _BlockingBroker()
+    service = CapabilityService(
+        workspace,
+        broker=broker,
+        capability_manifest=tmp_path / "capabilities.json",
+    )
+    report = CapabilityReport(
+        adapter="torch.profiler",
+        status=CapabilityStatus.UNAVAILABLE,
+        setup=CapabilitySetup(
+            extra="torch",
+            method="prepare_capabilities",
+            next_tool="prepare_capabilities",
+            requirement="torch>=2.7",
+        ),
+    )
+    monkeypatch.setattr(service, "list", lambda: CapabilityList(capabilities=(report,)))
+    monkeypatch.setattr("flameox.application.capabilities.shutil.which", lambda _: "/usr/bin/uv")
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
+    (tmp_path / "bin").mkdir()
+    cancel_event = threading.Event()
+    failures: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            service.prepare(("torch.profiler",), cancel_event=cancel_event)
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert broker.started.wait(1)
+    cancel_event.set()
+    thread.join(2)
+
+    assert not thread.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], DomainError)
+    assert failures[0].code is ErrorCode.PROCESS_CANCELLED
 
 
 def test_prepare_capabilities_records_failure_when_uv_is_missing(
@@ -400,6 +457,7 @@ def test_trace_processor_staging_preserves_phase_and_bounded_cause(
     workspace = Workspace.initialize(tmp_path)
     service = CapabilityService(
         workspace,
+        broker=_ProbeBroker(),
         capability_manifest=tmp_path / "capabilities.json",
     )
     report = CapabilityReport(
@@ -414,10 +472,6 @@ def test_trace_processor_staging_preserves_phase_and_bounded_cause(
     )
     monkeypatch.setattr(service, "list", lambda: CapabilityList(capabilities=(report,)))
     monkeypatch.setattr("flameox.application.capabilities.shutil.which", lambda _: "/usr/bin/uv")
-    monkeypatch.setattr(
-        "flameox.application.capabilities.subprocess.run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "", ""),
-    )
 
     def fail_staging(*args: object, **kwargs: object) -> object:
         raise DomainError(

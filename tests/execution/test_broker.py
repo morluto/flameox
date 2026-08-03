@@ -49,6 +49,21 @@ async def test_shell_metacharacters_remain_literal_arguments(tmp_path: Path) -> 
 
 
 @pytest.mark.anyio
+async def test_broker_passes_bounded_stdin_to_jsonc_style_helpers(tmp_path: Path) -> None:
+    outcome = await SubprocessBroker().run(
+        request(
+            tmp_path,
+            "-c",
+            "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())",
+            stdin_bytes=b'{"operation":"modify"}',
+        )
+    )
+
+    assert outcome.stdout == b'{"operation":"modify"}'
+    assert outcome.process.exit_code == 0
+
+
+@pytest.mark.anyio
 async def test_environment_is_allowlisted_and_dangerous_overrides_fail(
     tmp_path: Path,
 ) -> None:
@@ -70,6 +85,35 @@ async def test_environment_is_allowlisted_and_dangerous_overrides_fail(
                 environment_overrides={"PYTHONPATH": "/tmp/unsafe"},
             )
         )
+    assert error.value.code is ErrorCode.EXECUTION_REFUSED
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "name",
+    [
+        "LD_AUDIT",
+        "DYLD_INSERT_LIBRARIES",
+        "NODE_OPTIONS",
+        "PYTHONSTARTUP",
+        "GDBINIT",
+        "AWS_SECRET_ACCESS_KEY",
+    ],
+)
+async def test_pattern_dangerous_environment_overrides_fail(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    with pytest.raises(DomainError) as error:
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                "pass",
+                environment_overrides={name: "unsafe"},
+            )
+        )
+
     assert error.value.code is ErrorCode.EXECUTION_REFUSED
 
 

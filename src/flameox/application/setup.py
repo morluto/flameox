@@ -25,6 +25,7 @@ from flameox.adapters.client_setup import (
 from flameox.adapters.setup_runtime import ManagedRuntime, RuntimeInstallation
 from flameox.atomic import atomic_write_bytes, atomic_write_json, fsync_directory
 from flameox.domain import DomainError, ErrorCode
+from flameox.execution import SubprocessBroker
 from flameox.models import ContractModel
 
 
@@ -135,15 +136,22 @@ class SetupService:
         node_executable: str = "node",
         uv_executable: str = "uv",
         runtime: RuntimeManager | None = None,
+        broker: SubprocessBroker | None = None,
     ) -> None:
         resolved_home = home or Path.home()
         self.data_root = data_root or Path(user_data_path("flameox", appauthor=False))
+        self.broker = broker or SubprocessBroker()
         self.registry = ClientConfigRegistry(
             home=resolved_home,
             jsonc_helper=jsonc_helper,
             node_executable=node_executable,
+            broker=self.broker,
         )
-        self.runtime = runtime or ManagedRuntime(self.data_root, uv_executable=uv_executable)
+        self.runtime = runtime or ManagedRuntime(
+            self.data_root,
+            uv_executable=uv_executable,
+            broker=self.broker,
+        )
         self.install_manifest = self.data_root / "install.json"
         self.journal_path = self.data_root / "setup-journal.json"
         self.lock_path = self.data_root / "setup.lock"

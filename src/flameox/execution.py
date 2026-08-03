@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import signal
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -28,6 +30,47 @@ _DANGEROUS_ENVIRONMENT = {
     "PYTHONPATH",
     "SSH_ASKPASS",
 }
+_DANGEROUS_ENVIRONMENT_PREFIXES = (
+    "DYLD_",
+    "GDB_",
+    "GIT_CONFIG_",
+    "LD_",
+    "LLDB_",
+    "PYTHON",
+)
+_DANGEROUS_ENVIRONMENT_NAMES = {
+    "JAVA_TOOL_OPTIONS",
+    "NODE_EXTRA_CA_CERTS",
+    "NODE_OPTIONS",
+    "PERL5LIB",
+    "PERL5OPT",
+    "RUBYLIB",
+    "RUBYOPT",
+    "GDBINIT",
+    "GDBHISTFILE",
+    "PYTHONSTARTUP",
+}
+_CREDENTIAL_ENVIRONMENT = re.compile(
+    r"(?:^|_)(?:TOKEN|PASSWORD|PASSWD|SECRET|KEY|CREDENTIALS?|COOKIES?)(?:_|$)"
+)
+_SAFE_CONTROL_OVERRIDES = {
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+}
+
+
+def _is_dangerous_environment_name(name: str) -> bool:
+    normalized = name.upper()
+    return (
+        normalized in _DANGEROUS_ENVIRONMENT
+        or normalized in _DANGEROUS_ENVIRONMENT_NAMES
+        or normalized.startswith(_DANGEROUS_ENVIRONMENT_PREFIXES)
+        or _CREDENTIAL_ENVIRONMENT.search(normalized) is not None
+    )
+
+
+def _is_safe_control_override(name: str, value: str) -> bool:
+    return _SAFE_CONTROL_OVERRIDES.get(name.upper()) == value
 
 
 class ResourcePolicy(ContractModel):
@@ -42,6 +85,7 @@ class ResourcePolicy(ContractModel):
 class ExecutionRequest(ContractModel):
     argv: tuple[str, ...]
     cwd: Path
+    stdin_bytes: bytes | None = None
     environment_allowlist: tuple[str, ...] = ("PATH",)
     environment_overrides: dict[str, str] = Field(default_factory=dict)
     allowed_working_roots: tuple[Path, ...]
@@ -99,6 +143,41 @@ class _OutputBudget:
 
 
 class SubprocessBroker:
+    def run_sync(
+        self,
+        request: ExecutionRequest,
+        *,
+        on_started: Callable[[int], Awaitable[None]] | None = None,
+        on_cleanup: Callable[[bool], Awaitable[None]] | None = None,
+    ) -> ExecutionOutcome:
+        """Run through the async broker while preserving synchronous adapter APIs."""
+
+        async def execute() -> ExecutionOutcome:
+            return await self.run(request, on_started=on_started, on_cleanup=on_cleanup)
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(execute())
+
+        result: list[ExecutionOutcome] = []
+        failure: list[BaseException] = []
+
+        def run_in_thread() -> None:
+            try:
+                result.append(asyncio.run(execute()))
+            except BaseException as exc:
+                failure.append(exc)
+
+        thread = threading.Thread(target=run_in_thread, name="flameox-subprocess", daemon=True)
+        thread.start()
+        thread.join()
+        if failure:
+            raise failure[0]
+        if not result:
+            raise RuntimeError("subprocess broker did not return an outcome")
+        return result[0]
+
     async def run(
         self,
         request: ExecutionRequest,
@@ -116,7 +195,11 @@ class SubprocessBroker:
                 *argv,
                 cwd=cwd,
                 env=environment,
-                stdin=asyncio.subprocess.DEVNULL,
+                stdin=(
+                    asyncio.subprocess.PIPE
+                    if request.stdin_bytes is not None
+                    else asyncio.subprocess.DEVNULL
+                ),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=os.name == "posix",
@@ -140,6 +223,12 @@ class SubprocessBroker:
                 raise
         assert process.stdout is not None
         assert process.stderr is not None
+
+        if request.stdin_bytes is not None:
+            assert process.stdin is not None
+            process.stdin.write(request.stdin_bytes)
+            await process.stdin.drain()
+            process.stdin.close()
 
         output_budget = _OutputBudget(request.max_output_bytes)
         stdout_task = asyncio.create_task(self._read_bounded(process.stdout, output_budget))
@@ -532,14 +621,14 @@ class SubprocessBroker:
         environment = {
             name: os.environ[name]
             for name in request.environment_allowlist
-            if name in os.environ and name not in _DANGEROUS_ENVIRONMENT
+            if name in os.environ and not _is_dangerous_environment_name(name)
         }
         if request.systemd_scope_unit is not None:
             for name in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"):
                 if name in os.environ:
                     environment[name] = os.environ[name]
         for name, value in request.environment_overrides.items():
-            if name in _DANGEROUS_ENVIRONMENT:
+            if _is_dangerous_environment_name(name) and not _is_safe_control_override(name, value):
                 raise DomainError(
                     ErrorCode.EXECUTION_REFUSED,
                     f"Environment override {name!r} is blocked by policy.",

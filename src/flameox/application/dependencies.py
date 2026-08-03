@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import os
 import subprocess
 import sys
@@ -14,6 +13,7 @@ from packaging.requirements import InvalidRequirement, Requirement
 from flameox.application.preflight import PreflightService
 from flameox.application.workloads import WorkloadService
 from flameox.domain import DomainError, ErrorCode, PreflightReport
+from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
@@ -33,9 +33,15 @@ class WorkloadDependencySetupResult(ContractModel):
 class WorkloadDependencyService:
     """Install only Python distributions declared by one named workload."""
 
-    def __init__(self, workspace: Workspace) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        *,
+        broker: SubprocessBroker | None = None,
+    ) -> None:
         self.workspace = workspace
         self.workloads = WorkloadService(workspace)
+        self.broker = broker or SubprocessBroker()
 
     async def prepare(self, workload_name: str) -> WorkloadDependencySetupResult:
         config = self.workloads.load().workloads.get(workload_name)
@@ -146,37 +152,23 @@ class WorkloadDependencyService:
             next_tool=next_tool,
         )
 
-    @staticmethod
-    async def _run_install(command: list[str]) -> subprocess.CompletedProcess[str]:
-        """Run the installer as an owned subprocess that cancellation can terminate."""
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env={**os.environ, "UV_NO_PROGRESS": "1"},
-        )
-        communication = asyncio.create_task(process.communicate())
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                asyncio.shield(communication),
-                timeout=1_800,
+    async def _run_install(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        """Run installation through the shared bounded execution policy."""
+        outcome = await self.broker.run(
+            ExecutionRequest(
+                argv=tuple(command),
+                cwd=self.workspace.project_root,
+                allowed_working_roots=(self.workspace.project_root,),
+                environment_allowlist=("PATH",),
+                environment_overrides={"UV_NO_PROGRESS": "1"},
+                timeout_seconds=1_800,
             )
-        except (asyncio.CancelledError, TimeoutError) as error:
-            if process.returncode is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(asyncio.shield(communication), timeout=5)
-                except TimeoutError:
-                    process.kill()
-                    await asyncio.shield(communication)
-            if isinstance(error, asyncio.CancelledError):
-                raise
-            raise subprocess.TimeoutExpired(command, 1_800) from error
+        )
         return subprocess.CompletedProcess(
             command,
-            process.returncode if process.returncode is not None else -1,
-            stdout.decode(errors="replace"),
-            stderr.decode(errors="replace"),
+            outcome.process.exit_code if outcome.process.exit_code is not None else -1,
+            outcome.stdout.decode(errors="replace"),
+            outcome.stderr.decode(errors="replace"),
         )
 
     @staticmethod

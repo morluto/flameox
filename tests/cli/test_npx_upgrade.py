@@ -176,7 +176,8 @@ version = next(
     for argument in sys.argv
     if argument.startswith("flameox==")
 )
-Path(os.environ["FLAMEOX_UV_CAPTURE"]).write_text(json.dumps(sys.argv[1:]))
+capture = Path(os.environ["UV_TOOL_BIN_DIR"]).parents[3] / "uv-arguments.json"
+capture.write_text(json.dumps(sys.argv[1:]))
 runtime = Path(os.environ["UV_TOOL_BIN_DIR"]) / "flameox"
 runtime.parent.mkdir(parents=True, exist_ok=True)
 runtime.write_text(
@@ -201,7 +202,6 @@ runtime.chmod(0o700)
             "FLAMEOX_SETUP_DATA_ROOT": str(data),
             "FLAMEOX_SETUP_UV": str(fake_uv),
             "FLAMEOX_UV_EXECUTABLE": str(fake_uvx),
-            "FLAMEOX_UV_CAPTURE": str(tmp_path / "uv-arguments.json"),
         },
         capture_output=True,
         text=True,
