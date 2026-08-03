@@ -1,4 +1,4 @@
-expected_test_count = 429
+expected_test_count = 452
 
 # New files are normalized to their pre-split path so this receipt proves
 # test identity and parametrized case preservation across the decomposition.
@@ -84,7 +84,7 @@ expected_test_count = 429
 'tests/domain/test_identity.py' = { count = 3, digest = '0dd4b644c18a6e8d07d56f9feb07c9af53da4791f465627d4c0f0fe6060a71e5' }
 'tests/domain/test_models.py' = { count = 11, digest = '3c66f63c2bd90a4d7af1393bd59fe08072fe9872cf2a3c0d101095ba6280e016' }
 'tests/evidence/test_publication_and_catalog.py' = { count = 18, digest = 'c2041778f149b58dd083ca85ca0a2f0d3fd588b01b214dc0febb9cd8f4179a4f' }
-'tests/execution/test_broker.py' = { count = 16, digest = 'a72e3a52cbc89863bd91b7011fc0e9803073f88335d28ff67112be18b534cb61' }
+'tests/execution/test_broker.py' = { count = 20, digest = '9984adeb919f55bd3c10361782ccc15a11b7521cba40e575da6e30c00ad551a0' }
 'tests/golden/test_configuration_observations.py' = { count = 1, digest = '5cd37d54fc034cd103b3acbad18e1a9771b64e76fe4ec892c068ef36c94179f4' }
 'tests/golden/test_memory_regression.py' = { count = 1, digest = '7898013cd64ec203e28d00b6549f002586a2d23f0c06eba6f1c979478f1aac1e' }
 'tests/golden/test_reverse_scan.py' = { count = 1, digest = '11e8db62d67d86b3e2be63a8e3425dbd7927329f4d405a3d6718251286a20bea' }
@@ -100,5 +100,5 @@ expected_test_count = 429
 'tests/test_cli_smoke.py' = { count = 6, digest = '651c7d2e6e4cc20a01957613755d81d2a44f7c3feac77d45d990c9651298df47' }
 'tests/test_release_metadata.py' = { count = 3, digest = '83591570ba43893617d18cef840660f50d8c9420e4ca86cec97a16170f00bd23' }
 'tests/test_setup_ui.py' = { count = 2, digest = '9b80453c3b4df6c3744f2d8e750d794bf6f0dc1d568ca987a39739a124a48e45' }
-'tests/test_test_runner.py' = { count = 1, digest = 'c404b805a19d2f841f2fbdd95a42ea434d43b5cc2adc16fa3d9f950aad0c95f5' }
+'tests/test_test_runner.py' = { count = 20, digest = '611e021007ebb616cd60d5c0d664e050f2a82cd9c3cdc6e82524df133ee875d8' }
 'tests/golden/test_semantic_matrix.py' = { count = 1, digest = 'ad3ee0c218bcfa4a2badc24faed4b456b281234589cb6f05721ef14f8c4acee3' }
