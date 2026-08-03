@@ -47,20 +47,7 @@ class ArtifactStore:
     ) -> StoredArtifact:
         source = source.absolute()
         self._require_allowed_parent(source, allowed_roots)
-        flags = os.O_RDONLY
-        if hasattr(os, "O_CLOEXEC"):
-            flags |= os.O_CLOEXEC
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        try:
-            source_fd = os.open(source, flags)
-        except OSError as exc:
-            if exc.errno in {errno.ELOOP, errno.ENOENT}:
-                raise DomainError(
-                    ErrorCode.EXECUTION_REFUSED,
-                    "Artifact import source is missing or is a symbolic link.",
-                ) from exc
-            raise
+        source_fd = self._open_source(source, allowed_roots)
 
         staging_root = self.workspace.paths.staging / f"import-{uuid4().hex}"
         staging_root.mkdir(parents=True, exist_ok=False)
@@ -164,6 +151,59 @@ class ArtifactStore:
             shutil.rmtree(staging_root, ignore_errors=True)
 
         return StoredArtifact(content=content, payload_path=payload_path)
+
+    def _open_source(
+        self,
+        source: Path,
+        allowed_roots: tuple[Path, ...],
+    ) -> int:
+        source_absolute = Path(os.path.abspath(source))
+        for allowed_root in allowed_roots:
+            root_absolute = Path(os.path.abspath(allowed_root))
+            try:
+                relative_source = source_absolute.relative_to(root_absolute)
+            except ValueError:
+                continue
+            if not relative_source.parts:
+                continue
+            try:
+                return self._open_beneath(root_absolute, relative_source)
+            except OSError as exc:
+                if exc.errno in {errno.ELOOP, errno.ENOENT, errno.ENOTDIR}:
+                    raise DomainError(
+                        ErrorCode.EXECUTION_REFUSED,
+                        "Artifact import source is missing or is a symbolic link.",
+                    ) from exc
+                raise
+        raise DomainError(
+            ErrorCode.EXECUTION_REFUSED,
+            "Artifact import source is outside the allowed roots.",
+        )
+
+    @staticmethod
+    def _open_beneath(root: Path, relative_source: Path) -> int:
+        directory_flags = os.O_RDONLY
+        source_flags = os.O_RDONLY
+        for flags_name in ("O_CLOEXEC", "O_NOFOLLOW"):
+            flag = getattr(os, flags_name, 0)
+            directory_flags |= flag
+            source_flags |= flag
+        directory_flags |= getattr(os, "O_DIRECTORY", 0)
+
+        directory_fd = os.open(root, directory_flags)
+        try:
+            components = relative_source.parts
+            for component in components[:-1]:
+                next_directory_fd = os.open(
+                    component,
+                    directory_flags,
+                    dir_fd=directory_fd,
+                )
+                os.close(directory_fd)
+                directory_fd = next_directory_fd
+            return os.open(components[-1], source_flags, dir_fd=directory_fd)
+        finally:
+            os.close(directory_fd)
 
     def get(self, artifact_id: str) -> StoredArtifact:
         hexadecimal = artifact_id.removeprefix("sha256:")

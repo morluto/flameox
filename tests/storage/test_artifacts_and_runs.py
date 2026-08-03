@@ -78,6 +78,46 @@ def test_artifact_import_rejects_symlinks_and_hard_links(tmp_path: Path) -> None
     assert hardlink_error.value.code is ErrorCode.EXECUTION_REFUSED
 
 
+def test_artifact_import_pins_parent_directories_before_source_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source_root = tmp_path / "safe"
+    source_root.mkdir()
+    source = source_root / "source.bin"
+    source.write_bytes(b"approved bytes")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / source.name).write_bytes(b"outside bytes")
+    store = ArtifactStore(workspace)
+    real_open = os.open
+    swapped = False
+
+    def raced_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        path_value = Path(os.fsdecode(path))
+        if not swapped and (
+            path_value == source or (dir_fd is not None and path_value == Path(source.name))
+        ):
+            source_root.rename(tmp_path / "safe-original")
+            source_root.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", raced_open)
+    stored = store.import_path(source, allowed_roots=(tmp_path,), max_bytes=100)
+
+    assert swapped
+    assert stored.payload_path.read_bytes() == b"approved bytes"
+
+
 def test_artifact_import_enforces_size_and_root(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "project")
     source = tmp_path / "source.bin"
