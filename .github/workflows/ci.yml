@@ -14,8 +14,46 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  plan:
+    name: Plan affected checks
+    runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.plan.outputs.full }}
+      test_lanes: ${{ steps.plan.outputs.test_lanes }}
+      optional_lanes: ${{ steps.plan.outputs.optional_lanes }}
+      run_quality: ${{ steps.plan.outputs.run_quality }}
+      run_deep_checks: ${{ steps.plan.outputs.run_deep_checks }}
+      run_coverage: ${{ steps.plan.outputs.run_coverage }}
+      run_collection: ${{ steps.plan.outputs.run_collection }}
+      run_npm: ${{ steps.plan.outputs.run_npm }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${BASE_SHA}" ]]; then
+            plan_json=$(python tools/test.py affected --base "${BASE_SHA}")
+          else
+            plan_json=$(python tools/test.py affected)
+          fi
+          echo "${plan_json}"
+          echo "full=$(jq -r '.full' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
+          echo "test_lanes=$(jq -c '.lanes' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
+          echo "optional_lanes=$(jq -c '.optional_lanes' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
+          echo "run_quality=$(jq -r '.run_quality' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
+          echo "run_deep_checks=$(jq -r '.run_deep_checks' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
+          echo "run_coverage=$(jq -r '.run_coverage' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
+          echo "run_collection=$(jq -r '.run_collection' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
+          echo "run_npm=$(jq -r '.run_npm' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
+
   lint:
     name: Lint & Format
+    needs: plan
+    if: needs.plan.outputs.run_quality == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -31,6 +69,8 @@ jobs:
 
   type-check:
     name: Type Check
+    needs: plan
+    if: needs.plan.outputs.run_quality == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -45,22 +85,14 @@ jobs:
 
   test-lanes:
     name: Test (${{ matrix.lane }})
+    needs: plan
+    if: needs.plan.outputs.test_lanes != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        lane:
-          - core
-          - storage
-          - application
-          - analysis
-          - mcp
-          - process
-          - adapters
-          - cli
-          - security
-          - golden
+        lane: ${{ fromJSON(needs.plan.outputs.test_lanes) }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -69,47 +101,54 @@ jobs:
           enable-cache: true
           cache-suffix: test-lanes
       - run: uv sync --extra dev
-      - run: uv run python tools/test.py ${{ matrix.lane }}
-      - uses: codecov/codecov-action@v5
-        if: github.event_name == 'pull_request' && matrix.lane == 'core'
-        with:
-          files: .test-results/core-coverage.xml
+      - name: Run lane with coverage fragment
+        if: needs.plan.outputs.run_coverage == 'true'
+        env:
+          COVERAGE_FILE: .coverage-${{ matrix.lane }}
+        run: uv run python tools/test.py ${{ matrix.lane }} --coverage
+      - name: Run lane
+        if: needs.plan.outputs.run_coverage != 'true'
+        run: uv run python tools/test.py ${{ matrix.lane }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: test-results-${{ matrix.lane }}
           include-hidden-files: true
-          path: .test-results/
+          path: |
+            .test-results/
+            .coverage-*
 
   optional-providers:
     name: Optional provider (${{ matrix.provider }})
+    needs: plan
+    if: needs.plan.outputs.optional_lanes != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - provider: coverage
-            extra: execution
-          - provider: memray
-            extra: memory
-          - provider: perfetto
-            extra: trace
-          - provider: pyspy
-            extra: cpu
-          - provider: torch
-            extra: torch
-          - provider: host
-            extra: dev
+        provider: ${{ fromJSON(needs.plan.outputs.optional_lanes) }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
           enable-cache: true
-          cache-suffix: optional-${{ matrix.extra }}
-      - run: uv sync --extra dev --extra ${{ matrix.extra }}
-      - run: uv run python tools/test.py optional-${{ matrix.provider }}
+          cache-suffix: optional-${{ matrix.provider }}
+      - name: Install provider dependencies
+        run: |
+          set -euo pipefail
+          case "${{ matrix.provider }}" in
+            optional-coverage) extra=execution ;;
+            optional-memray) extra=memory ;;
+            optional-perfetto) extra=trace ;;
+            optional-pyspy) extra=cpu ;;
+            optional-torch) extra=torch ;;
+            optional-host) extra=dev ;;
+            *) echo "Unknown provider lane" >&2; exit 2 ;;
+          esac
+          uv sync --extra dev --extra "${extra}"
+      - run: uv run python tools/test.py ${{ matrix.provider }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -117,8 +156,43 @@ jobs:
           include-hidden-files: true
           path: .test-results/
 
+  coverage:
+    name: Combined coverage
+    needs:
+      - plan
+      - test-lanes
+    if: needs.plan.outputs.run_coverage == 'true' && needs.test-lanes.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-suffix: coverage
+      - run: uv sync --extra dev
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          merge-multiple: true
+      - run: uv run coverage combine .coverage-*
+      - run: uv run coverage report --fail-under=60
+      - run: mkdir -p .test-results && uv run coverage xml -o .test-results/coverage.xml
+      - uses: codecov/codecov-action@v5
+        if: github.event_name == 'pull_request'
+        with:
+          files: .test-results/coverage.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-coverage
+          include-hidden-files: true
+          path: .test-results/
+
   performance:
     name: Performance acceptance
+    needs: plan
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -140,6 +214,8 @@ jobs:
 
   dead-code:
     name: Dead Code
+    needs: plan
+    if: needs.plan.outputs.run_deep_checks == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -154,6 +230,8 @@ jobs:
 
   import-boundaries:
     name: Import Boundaries
+    needs: plan
+    if: needs.plan.outputs.run_deep_checks == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -168,6 +246,8 @@ jobs:
 
   unused-deps:
     name: Unused Dependencies
+    needs: plan
+    if: needs.plan.outputs.run_deep_checks == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -179,10 +259,11 @@ jobs:
           cache-suffix: dev-only
       - run: uv sync --extra dev
       - run: uv run deptry src
-        continue-on-error: true
 
   security-audit:
     name: Security Audit
+    needs: plan
+    if: needs.plan.outputs.run_deep_checks == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -197,6 +278,8 @@ jobs:
 
   npm:
     name: npm (lint & test)
+    needs: plan
+    if: needs.plan.outputs.run_npm == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     defaults:
@@ -216,6 +299,8 @@ jobs:
 
   collection:
     name: Collection & ownership
+    needs: plan
+    if: needs.plan.outputs.run_collection == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -227,8 +312,7 @@ jobs:
           cache-suffix: collection
       - run: uv sync --extra dev
       - run: uv run flameox --help
-      - run: uv run ruff check src tests tools
-      - run: uv run mypy src tests tools
+      - run: uv run python tools/test.py list
       - run: uv run python tools/test.py ownership
       - run: uv run python tools/test.py collection
       - run: uv run python tools/test.py capabilities
@@ -243,9 +327,11 @@ jobs:
     name: Build Performance Summary
     runs-on: ubuntu-latest
     needs:
+      - plan
       - lint
       - type-check
       - test-lanes
+      - coverage
       - optional-providers
       - performance
       - dead-code

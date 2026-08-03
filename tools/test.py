@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -32,11 +33,43 @@ PROVIDER_LANES = {
         "and not requires_perfetto and not requires_pyspy and not requires_torch"
     ),
 }
+TEST_LANES = (
+    "core",
+    "storage",
+    "application",
+    "analysis",
+    "mcp",
+    "process",
+    "adapters",
+    "cli",
+    "security",
+    "golden",
+)
+# These are the non-optional, non-performance paths previously covered by the
+# repository-wide core invocation. Each is now executed once as its owned lane.
+COVERAGE_LANES = (
+    "core",
+    "storage",
+    "application",
+    "analysis",
+    "mcp",
+    "adapters",
+    "cli",
+    "golden",
+)
+AGGREGATE_LANES = {"optional", "performance", "full"} | set(PROVIDER_LANES)
+FULL_CHANGE_PATHS = {
+    "AGENTS.md",
+    "pyproject.toml",
+    "uv.lock",
+    "tests/conftest.py",
+    "tests/ownership.toml",
+    "tests/collection-baseline.toml",
+}
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from flameox.adapters.builtins import BUILTIN_ADAPTERS  # noqa: E402
 from tests.support.ownership import Ownership, load_ownership  # noqa: E402
 from tests.support.providers import PROVIDER_MARKERS, provider_inventory  # noqa: E402
 
@@ -102,9 +135,9 @@ def marker_expression(lane: str) -> str | None:
     raise SystemExit(f"Unknown test lane: {lane}")
 
 
-def command_for(lane: str, records: tuple[Ownership, ...]) -> list[str]:
+def command_for(lane: str, records: tuple[Ownership, ...], *, coverage: bool = False) -> list[str]:
     paths = [str(ROOT / path) for path in lane_paths(records, lane)]
-    if lane in {"core", "optional", "performance", "full"} | set(PROVIDER_LANES):
+    if lane in AGGREGATE_LANES:
         paths = [str(ROOT / "tests")]
     command = [
         sys.executable,
@@ -121,12 +154,12 @@ def command_for(lane: str, records: tuple[Ownership, ...]) -> list[str]:
     expression = marker_expression(lane)
     if expression is not None:
         command.extend(["-m", expression])
-    if lane == "core":
+    if coverage:
         command.extend(
             [
                 "--cov=flameox",
-                "--cov-report=xml:.test-results/core-coverage.xml",
-                "--cov-report=term",
+                "--cov-report=",
+                "--cov-fail-under=0",
             ]
         )
     return command
@@ -221,6 +254,8 @@ def print_provider_inventory() -> int:
 
 def validate_capability_contract() -> int:
     """Verify managed capability setup metadata matches published extras."""
+    from flameox.adapters.builtins import BUILTIN_ADAPTERS
+
     with (ROOT / "pyproject.toml").open("rb") as stream:
         project = tomllib.load(stream)
     extras = project["project"]["optional-dependencies"]
@@ -243,9 +278,105 @@ def validate_capability_contract() -> int:
     return 0
 
 
-def run_lane(lane: str, records: tuple[Ownership, ...]) -> int:
+def changed_paths(base: str | None) -> tuple[set[str], bool]:
+    """Return changed paths and whether an unavailable base requires a full run."""
+    if not base or set(base) == {"0"}:
+        return set(), True
+    result = subprocess.run(
+        ["git", "diff", "--name-only", f"{base}...HEAD", "--"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return set(), True
+    return {line for line in result.stdout.splitlines() if line}, False
+
+
+def affected_plan(records: tuple[Ownership, ...], base: str | None) -> dict[str, object]:
+    """Build a conservative ownership-driven CI plan from a git merge base."""
+    paths, unavailable_base = changed_paths(base)
+    by_path = {path: record for record in records for path in record.paths}
+    full = unavailable_base
+    lanes: set[str] = set()
+    optional_lanes: set[str] = set()
+    coverage_needed = unavailable_base
+    quality = full
+    collection = full
+    npm = full
+
+    for path in paths:
+        if path in FULL_CHANGE_PATHS or path.startswith(("src/", ".github/", "tools/")):
+            full = True
+        elif path.startswith("npm/"):
+            full = True
+            npm = True
+        elif path.startswith("tests/"):
+            record = by_path.get(path)
+            if record is None:
+                full = True
+            else:
+                is_optional = "optional" in record.markers
+                is_performance = "performance" in record.markers
+                if not is_optional and not is_performance:
+                    lanes.add(record.lane)
+                    coverage_needed = True
+                has_provider_marker = False
+                for marker, provider_lane in (
+                    ("requires_coverage", "optional-coverage"),
+                    ("requires_memray", "optional-memray"),
+                    ("requires_perfetto", "optional-perfetto"),
+                    ("requires_pyspy", "optional-pyspy"),
+                    ("requires_torch", "optional-torch"),
+                ):
+                    if marker in record.markers:
+                        optional_lanes.add(provider_lane)
+                        has_provider_marker = True
+                if "optional" in record.markers and not has_provider_marker:
+                    optional_lanes.add("optional-host")
+        elif path.startswith(("docs/", ".github/", "README", "CHANGELOG", "LICENSE")):
+            continue
+        else:
+            full = True
+
+    if full:
+        lanes.update(TEST_LANES)
+        optional_lanes.update(PROVIDER_LANES)
+        coverage_needed = True
+    elif coverage_needed:
+        lanes.update(COVERAGE_LANES)
+
+    if full:
+        quality = True
+        collection = True
+        npm = True
+    else:
+        quality = bool(lanes)
+        collection = bool(lanes)
+
+    return {
+        "base_available": not unavailable_base,
+        "changed_paths": sorted(paths),
+        "full": full,
+        "lanes": [lane for lane in TEST_LANES if lane in lanes],
+        "optional_lanes": sorted(optional_lanes),
+        "run_quality": quality,
+        "run_deep_checks": full,
+        "run_coverage": coverage_needed,
+        "run_collection": collection,
+        "run_npm": npm,
+    }
+
+
+def print_affected_plan(records: tuple[Ownership, ...], base: str | None) -> int:
+    print(json.dumps(affected_plan(records, base), sort_keys=True))
+    return 0
+
+
+def run_lane(lane: str, records: tuple[Ownership, ...], *, coverage: bool = False) -> int:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    command = command_for(lane, records)
+    command = command_for(lane, records, coverage=coverage)
     junit = RESULTS_DIR / f"{lane}.xml"
     log_path = RESULTS_DIR / f"{lane}.log"
     command_path = RESULTS_DIR / f"{lane}.command.txt"
@@ -284,6 +415,7 @@ def main() -> int:
             "collection",
             "providers",
             "capabilities",
+            "affected",
             "core",
             "process",
             "optional",
@@ -300,6 +432,15 @@ def main() -> int:
             "security",
         ),
     )
+    parser.add_argument(
+        "--base",
+        help="git base revision for the affected CI plan; unavailable revisions select all lanes",
+    )
+    parser.add_argument(
+        "--coverage",
+        action="store_true",
+        help="collect coverage without enforcing the threshold (for CI aggregation)",
+    )
     args = parser.parse_args()
     records = load_ownership(OWNERSHIP_PATH)
     validate_ownership(records)
@@ -314,31 +455,23 @@ def main() -> int:
         return validate_capability_contract()
     if args.command == "list":
         print("Available test lanes:")
-        for lane in (
-            "core",
-            "storage",
-            "application",
-            "analysis",
-            "mcp",
-            "process",
-            "adapters",
-            "cli",
-            "security",
-            "golden",
-            "capabilities",
-            "optional",
-            *PROVIDER_LANES,
-            "performance",
-            "full",
-        ):
+        for lane in (*TEST_LANES, "optional", *PROVIDER_LANES, "performance", "full"):
             expression = marker_expression(lane)
-            all_paths = lane in {"core", "optional", "performance", "full"} | set(PROVIDER_LANES)
+            all_paths = lane in AGGREGATE_LANES
             scope = "all test paths" if all_paths else ", ".join(lane_paths(records, lane))
             scope = scope or "no paths"
             print(f"  {lane:12} markers={expression or 'all'} paths={scope}")
+        print("\nMetadata commands:")
+        print("  ownership    validate tests/ownership.toml coverage")
+        print("  collection   compare collected node IDs with the baseline")
+        print("  providers    report optional provider availability")
+        print("  capabilities validate managed setup metadata against extras")
+        print("  affected     print a conservative ownership-driven CI plan")
         print("\nEach run writes .test-results/<lane>.xml, .log, and .command.txt.")
         return 0
-    return run_lane(args.command, records)
+    if args.command == "affected":
+        return print_affected_plan(records, args.base)
+    return run_lane(args.command, records, coverage=args.coverage)
 
 
 if __name__ == "__main__":
