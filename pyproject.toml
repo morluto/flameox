@@ -19,7 +19,6 @@ dependencies = [
     "portalocker>=3.2,<4",
     "platformdirs>=4.3,<5",
     "pyperf>=2.9",
-    "pytz>=2024.2",
     "pyarrow>=20,<26",
     "pydantic>=2.13.4,<2.14",
     "questionary>=2.1,<3",
