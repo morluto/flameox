@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -27,6 +28,14 @@ def request(tmp_path: Path, *arguments: str, **overrides: object) -> ExecutionRe
     }
     values.update(overrides)
     return ExecutionRequest.model_validate(values)
+
+
+def _process_is_alive(pid: int) -> bool:
+    try:
+        process = psutil.Process(pid)
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except psutil.Error:
+        return False
 
 
 @pytest.mark.anyio
@@ -61,6 +70,117 @@ async def test_broker_passes_bounded_stdin_to_jsonc_style_helpers(tmp_path: Path
 
     assert outcome.stdout == b'{"operation":"modify"}'
     assert outcome.process.exit_code == 0
+
+
+def test_observed_run_preserves_streams_exit_status_and_peak_rss(tmp_path: Path) -> None:
+    outcome = SubprocessBroker().run_sync(
+        request(
+            tmp_path,
+            "-c",
+            (
+                "import sys; value = bytearray(2_000_000); "
+                "print('observed stdout', flush=True); "
+                "print('observed stderr', file=sys.stderr, flush=True); "
+                "raise SystemExit(7)"
+            ),
+            observation="child_peak_rss",
+        )
+    )
+
+    assert outcome.stdout == b"observed stdout\n"
+    assert outcome.stderr == b"observed stderr\n"
+    assert outcome.process.exit_code == 7
+    assert outcome.process.peak_rss_bytes is not None
+    assert outcome.peak_rss_backend == (
+        "wait4_ru_maxrss" if hasattr(os, "wait4") else "psutil_polling"
+    )
+
+
+def test_observed_output_budget_terminates_the_process(tmp_path: Path) -> None:
+    with pytest.raises(DomainError) as error:
+        SubprocessBroker().run_sync(
+            request(
+                tmp_path,
+                "-c",
+                "import sys; sys.stdout.write('x' * 100_000); sys.stdout.flush()",
+                observation="child_peak_rss",
+                max_output_bytes=1_000,
+            )
+        )
+
+    assert error.value.code is ErrorCode.QUERY_BUDGET_EXCEEDED
+
+
+def test_observed_timeout_cleans_up_the_process_group(tmp_path: Path) -> None:
+    pid_path = tmp_path / "observed.pid"
+    code = (
+        "import pathlib, subprocess, sys, time; "
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+        "time.sleep(30)"
+    )
+
+    with pytest.raises(DomainError) as error:
+        SubprocessBroker().run_sync(
+            request(
+                tmp_path,
+                "-c",
+                code,
+                str(pid_path),
+                observation="child_peak_rss",
+                timeout_seconds=0.1,
+            )
+        )
+
+    assert error.value.code is ErrorCode.PROCESS_TIMEOUT
+    details = error.value.details["process"]
+    assert isinstance(details, dict)
+    assert details["cleanup_complete"] is True
+    assert pid_path.is_file()
+    child_pid = int(pid_path.read_text())
+    for _ in range(100):
+        if not _process_is_alive(child_pid):
+            break
+        time.sleep(0.01)
+    assert not _process_is_alive(child_pid)
+
+
+@pytest.mark.anyio
+async def test_observed_cancellation_cleans_up_before_propagating(
+    tmp_path: Path,
+) -> None:
+    pid_path = tmp_path / "observed-cancel.pid"
+    code = (
+        "import pathlib, sys, time; "
+        "pathlib.Path(sys.argv[1]).write_text(str(__import__('os').getpid())); "
+        "time.sleep(30)"
+    )
+    task = asyncio.create_task(
+        SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                code,
+                str(pid_path),
+                observation="child_peak_rss",
+            )
+        )
+    )
+    for _ in range(100):
+        if pid_path.is_file():
+            break
+        await asyncio.sleep(0.01)
+    assert pid_path.is_file()
+    process_pid = int(pid_path.read_text())
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    for _ in range(100):
+        if not _process_is_alive(process_pid):
+            break
+        await asyncio.sleep(0.01)
+    assert not _process_is_alive(process_pid)
 
 
 @pytest.mark.anyio
