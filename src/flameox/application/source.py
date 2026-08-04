@@ -180,9 +180,30 @@ async def _git_bytes(
 def _resolve_executable(value: str, cwd: Path) -> Path:
     if os.sep in value:
         candidate = Path(value)
-        return (candidate if candidate.is_absolute() else cwd / candidate).resolve()
-    located = shutil.which(value)
-    return Path(located or sys.executable).resolve()
+        resolved = (candidate if candidate.is_absolute() else cwd / candidate).resolve()
+    else:
+        located = shutil.which(value)
+        if located is None:
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "The workload executable could not be resolved.",
+                details={"executable": value},
+                remediation=(
+                    "Install the workload executable or declare a resolvable path, then retry "
+                    "capture.",
+                ),
+            )
+        resolved = Path(located).resolve()
+    if not resolved.is_file():
+        raise DomainError(
+            ErrorCode.INVALID_CAPTURE_PLAN,
+            "The workload executable could not be resolved.",
+            details={"executable": value},
+            remediation=(
+                "Install the workload executable or declare a resolvable path, then retry capture.",
+            ),
+        )
+    return resolved
 
 
 def _hash_untracked(project_root: Path, output: bytes) -> list[dict[str, JsonValue]]:
