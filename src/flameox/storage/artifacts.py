@@ -244,7 +244,10 @@ class ArtifactStore:
 
     @staticmethod
     def _reject_windows_reparse_points(root: Path, relative_source: Path) -> None:
-        paths = (root, *(root / component for component in relative_source.parts))
+        ancestors: list[Path] = [root]
+        for component in relative_source.parts:
+            ancestors.append(ancestors[-1] / component)
+        paths = tuple(ancestors)
         for index, path in enumerate(paths):
             metadata = os.lstat(path)
             reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)

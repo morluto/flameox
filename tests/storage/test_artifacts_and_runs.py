@@ -142,6 +142,32 @@ def test_windows_artifact_import_fallback_opens_regular_source(
     assert stored.payload_path.read_bytes() == b"windows-compatible bytes"
 
 
+def test_windows_artifact_import_fallback_opens_nested_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    nested = tmp_path / "nested" / "directory"
+    nested.mkdir(parents=True)
+    source = nested / "source.bin"
+    source.write_bytes(b"nested windows-compatible bytes")
+    store = ArtifactStore(workspace)
+    monkeypatch.setattr(
+        ArtifactStore,
+        "_open_beneath",
+        staticmethod(ArtifactStore._open_windows_beneath),
+    )
+    monkeypatch.setattr(
+        ArtifactStore,
+        "_windows_final_path",
+        staticmethod(lambda descriptor: source),
+    )
+
+    stored = store.import_path(source, allowed_roots=(tmp_path,), max_bytes=100)
+
+    assert stored.payload_path.read_bytes() == b"nested windows-compatible bytes"
+
+
 def test_windows_artifact_import_fallback_rejects_reparse_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

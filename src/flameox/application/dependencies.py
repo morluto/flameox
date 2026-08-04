@@ -13,27 +13,13 @@ from packaging.requirements import InvalidRequirement, Requirement
 from flameox.application.preflight import PreflightService
 from flameox.application.workloads import WorkloadService
 from flameox.domain import DomainError, ErrorCode, PreflightReport
-from flameox.execution import ExecutionRequest, SubprocessBroker
+from flameox.execution import (
+    INSTALLER_ENVIRONMENT_ALLOWLIST,
+    ExecutionRequest,
+    SubprocessBroker,
+)
 from flameox.models import ContractModel
 from flameox.storage import Workspace
-
-_INSTALLER_ENVIRONMENT_ALLOWLIST = (
-    "PATH",
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "ALL_PROXY",
-    "NO_PROXY",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-    "REQUESTS_CA_BUNDLE",
-    "CURL_CA_BUNDLE",
-    "UV_INDEX_URL",
-    "UV_EXTRA_INDEX_URL",
-    "UV_INDEX",
-    "UV_NATIVE_TLS",
-    "PIP_INDEX_URL",
-    "PIP_EXTRA_INDEX_URL",
-)
 
 
 class WorkloadDependencySetupResult(ContractModel):
@@ -200,7 +186,7 @@ class WorkloadDependencyService:
                 argv=tuple(command),
                 cwd=self.workspace.project_root,
                 allowed_working_roots=(self.workspace.project_root,),
-                environment_allowlist=_INSTALLER_ENVIRONMENT_ALLOWLIST,
+                environment_allowlist=INSTALLER_ENVIRONMENT_ALLOWLIST,
                 environment_overrides={"UV_NO_PROGRESS": "1"},
                 timeout_seconds=1_800,
             )

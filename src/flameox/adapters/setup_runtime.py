@@ -19,7 +19,12 @@ from packaging.version import InvalidVersion, Version
 
 from flameox.atomic import atomic_write_json, atomic_write_text
 from flameox.domain import DomainError, ErrorCode
-from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
+from flameox.execution import (
+    INSTALLER_ENVIRONMENT_ALLOWLIST,
+    ExecutionOutcome,
+    ExecutionRequest,
+    SubprocessBroker,
+)
 from flameox.storage import Workspace
 
 
@@ -112,7 +117,7 @@ class ManagedRuntime:
                         f"{distribution}=={version}",
                     ),
                     cwd=Path.cwd(),
-                    environment_allowlist=("PATH",),
+                    environment_allowlist=INSTALLER_ENVIRONMENT_ALLOWLIST,
                     environment_overrides={
                         "UV_TOOL_DIR": str(runtime_root / "tools"),
                         "UV_TOOL_BIN_DIR": str(runtime_root / "bin"),

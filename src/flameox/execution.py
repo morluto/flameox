@@ -60,6 +60,23 @@ _SAFE_CONTROL_OVERRIDES = {
     "GIT_CONFIG_GLOBAL": os.devnull,
     "GIT_CONFIG_NOSYSTEM": "1",
 }
+INSTALLER_ENVIRONMENT_ALLOWLIST = (
+    "PATH",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "UV_INDEX_URL",
+    "UV_EXTRA_INDEX_URL",
+    "UV_INDEX",
+    "UV_NATIVE_TLS",
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+)
 
 
 def _is_dangerous_environment_name(name: str) -> bool:

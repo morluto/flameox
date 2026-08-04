@@ -33,7 +33,13 @@ from flameox.domain import (
     ErrorCode,
 )
 from flameox.domain.models import utc_now
-from flameox.execution import ExecutionOutcome, ExecutionRequest, ResourcePolicy, SubprocessBroker
+from flameox.execution import (
+    INSTALLER_ENVIRONMENT_ALLOWLIST,
+    ExecutionOutcome,
+    ExecutionRequest,
+    ResourcePolicy,
+    SubprocessBroker,
+)
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
@@ -674,7 +680,7 @@ class CapabilityService:
                         ExecutionRequest(
                             argv=tuple(command),
                             cwd=Path.cwd(),
-                            environment_allowlist=("PATH",),
+                            environment_allowlist=INSTALLER_ENVIRONMENT_ALLOWLIST,
                             environment_overrides={"UV_NO_PROGRESS": "1"},
                             allowed_working_roots=(Path.cwd(),),
                             timeout_seconds=_CAPABILITY_INSTALL_TIMEOUT_SECONDS,

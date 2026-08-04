@@ -358,6 +358,10 @@ def test_prepare_capabilities_installs_only_declared_missing_providers(
             "torch>=2.7",
         ]
     ]
+    assert "HTTPS_PROXY" in broker.requests[0].environment_allowlist
+    assert "NO_PROXY" in broker.requests[0].environment_allowlist
+    assert "UV_INDEX_URL" in broker.requests[0].environment_allowlist
+    assert "SSL_CERT_FILE" in broker.requests[0].environment_allowlist
 
 
 def test_prepare_capabilities_rejects_unmanaged_provider(tmp_path: Path) -> None:
