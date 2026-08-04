@@ -118,6 +118,107 @@ def test_artifact_import_pins_parent_directories_before_source_open(
     assert stored.payload_path.read_bytes() == b"approved bytes"
 
 
+def test_windows_artifact_import_fallback_opens_regular_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"windows-compatible bytes")
+    store = ArtifactStore(workspace)
+    monkeypatch.setattr(
+        ArtifactStore,
+        "_open_beneath",
+        staticmethod(ArtifactStore._open_windows_beneath),
+    )
+    monkeypatch.setattr(
+        ArtifactStore,
+        "_windows_final_path",
+        staticmethod(lambda descriptor: source),
+    )
+
+    stored = store.import_path(source, allowed_roots=(tmp_path,), max_bytes=100)
+
+    assert stored.payload_path.read_bytes() == b"windows-compatible bytes"
+
+
+def test_windows_artifact_import_fallback_rejects_reparse_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    target = tmp_path / "target.bin"
+    target.write_bytes(b"target")
+    source = tmp_path / "source.bin"
+    source.symlink_to(target)
+    store = ArtifactStore(workspace)
+    monkeypatch.setattr(
+        ArtifactStore,
+        "_open_beneath",
+        staticmethod(ArtifactStore._open_windows_beneath),
+    )
+
+    with pytest.raises(DomainError) as error:
+        store.import_path(source, allowed_roots=(tmp_path,), max_bytes=100)
+
+    assert error.value.code is ErrorCode.EXECUTION_REFUSED
+
+
+def test_windows_artifact_import_fallback_rejects_hard_link_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    original = tmp_path / "original.bin"
+    original.write_bytes(b"mutable source")
+    source = tmp_path / "source.bin"
+    os.link(original, source)
+    store = ArtifactStore(workspace)
+    monkeypatch.setattr(
+        ArtifactStore,
+        "_open_beneath",
+        staticmethod(ArtifactStore._open_windows_beneath),
+    )
+    monkeypatch.setattr(
+        ArtifactStore,
+        "_windows_final_path",
+        staticmethod(lambda descriptor: source),
+    )
+
+    with pytest.raises(DomainError) as error:
+        store.import_path(source, allowed_roots=(tmp_path,), max_bytes=100)
+
+    assert error.value.code is ErrorCode.EXECUTION_REFUSED
+
+
+def test_windows_artifact_import_fallback_checks_open_handle_containment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"source")
+    outside = tmp_path.parent / "outside.bin"
+    outside.write_bytes(b"outside")
+    store = ArtifactStore(workspace)
+    monkeypatch.setattr(
+        ArtifactStore,
+        "_open_beneath",
+        staticmethod(ArtifactStore._open_windows_beneath),
+    )
+    monkeypatch.setattr(
+        ArtifactStore,
+        "_windows_final_path",
+        staticmethod(lambda descriptor: outside),
+    )
+
+    with pytest.raises(DomainError) as error:
+        store.import_path(source, allowed_roots=(tmp_path,), max_bytes=100)
+
+    assert error.value.code is ErrorCode.EXECUTION_REFUSED
+    assert not list(workspace.paths.staging.iterdir())
+
+
 def test_artifact_import_enforces_size_and_root(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "project")
     source = tmp_path / "source.bin"
