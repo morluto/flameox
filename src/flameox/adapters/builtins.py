@@ -518,7 +518,26 @@ def _require_executable(adapter: str, executable: str | None) -> str:
 
 
 def _python_executable_for_launcher(workload_argv: tuple[str, ...]) -> str:
+    if not workload_argv:
+        raise DomainError(
+            ErrorCode.INVALID_CAPTURE_PLAN,
+            "The pytest workload command is missing.",
+            remediation=("Declare `pytest` or `python -m pytest` as the workload command.",),
+        )
     executable = Path(workload_argv[0]).name
+    if executable.startswith("python"):
+        if len(workload_argv) < 3 or workload_argv[1:3] != ("-m", "pytest"):
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "The pytest adapter requires `pytest` or `python -m pytest`.",
+                remediation=("Declare `pytest` or `python -m pytest` as the workload command.",),
+            )
+    elif not executable.startswith("pytest"):
+        raise DomainError(
+            ErrorCode.INVALID_CAPTURE_PLAN,
+            "The pytest adapter requires `pytest` or `python -m pytest`.",
+            remediation=("Declare `pytest` or `python -m pytest` as the workload command.",),
+        )
     if executable.startswith("python"):
         return workload_argv[0]
     return sys.executable

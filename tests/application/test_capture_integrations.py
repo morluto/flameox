@@ -34,6 +34,19 @@ def test_python_startup_invocation_uses_declared_workload_timeout(tmp_path: Path
     assert invocation.argv[timeout_index + 1] == "7.5"
 
 
+def test_pytest_capture_plan_rejects_non_pytest_workload(tmp_path: Path) -> None:
+    with pytest.raises(DomainError) as failure:
+        build_capture_invocation(
+            "pytest",
+            ("not-pytest", "-m", "pytest", "-q"),
+            tmp_path,
+            executable=None,
+        )
+
+    assert failure.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+    assert "pytest" in failure.value.message
+
+
 def test_torch_capture_launcher_does_not_require_flameox_in_workload_venv(
     tmp_path: Path,
 ) -> None:

@@ -55,8 +55,18 @@ class WorkspaceIdentity(ContractModel):
     flameox_version: str
 
 
-def _workspace_initialization_error(error: OSError) -> DomainError:
+def _workspace_initialization_error(error: OSError | ValueError) -> DomainError:
     details: dict[str, int | str] = {"operation": "workspace_initialization"}
+    if isinstance(error, ValueError):
+        return DomainError(
+            ErrorCode.WORKSPACE_INVALID,
+            "The project root and workspace root must share a filesystem path root.",
+            details=details,
+            remediation=(
+                "Choose a workspace root on the same filesystem path root as the project, "
+                "then retry initialization.",
+            ),
+        )
     if error.errno is not None:
         details["errno"] = error.errno
 
@@ -268,7 +278,7 @@ class Workspace:
     ) -> Workspace:
         try:
             return cls._initialize(project_root, workspace_root=workspace_root)
-        except OSError as error:
+        except (OSError, ValueError) as error:
             raise _workspace_initialization_error(error) from error
 
     @classmethod

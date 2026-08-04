@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from flameox.application.source import collect_source_state
-from flameox.domain import IdentityQuality
+from flameox.domain import DomainError, ErrorCode, IdentityQuality
 from flameox.execution import SubprocessBroker
 from flameox.storage import Workspace
 
@@ -54,3 +54,18 @@ async def test_git_source_identity_includes_dirty_and_untracked_content(
     assert clean.source_state_id != dirty.source_state_id
     assert clean.diff_digest != dirty.diff_digest
     assert dirty.fields["untracked_inputs"]
+
+
+@pytest.mark.anyio
+async def test_source_identity_rejects_missing_workload_executable(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+
+    with pytest.raises(DomainError) as failure:
+        await collect_source_state(
+            workspace,
+            workload_executable="definitely-missing-flameox-workload",
+            broker=SubprocessBroker(),
+        )
+
+    assert failure.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+    assert failure.value.details == {"executable": "definitely-missing-flameox-workload"}

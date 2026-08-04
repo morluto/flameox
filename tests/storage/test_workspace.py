@@ -100,6 +100,22 @@ def test_initialize_maps_filesystem_quota_failures_to_domain_errors(
     )
 
 
+def test_initialize_maps_cross_root_relpath_failures_to_domain_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_relpath(*args: object, **kwargs: object) -> str:
+        raise ValueError("path roots differ")
+
+    monkeypatch.setattr("flameox.storage.workspace.os.path.relpath", fail_relpath)
+
+    with pytest.raises(DomainError) as error:
+        Workspace.initialize(tmp_path, workspace_root=tmp_path / "evidence")
+
+    assert error.value.code is ErrorCode.WORKSPACE_INVALID
+    assert error.value.details == {"operation": "workspace_initialization"}
+
+
 def test_discovery_selects_nearest_workspace(tmp_path: Path) -> None:
     outer = Workspace.initialize(tmp_path)
     nested_project = tmp_path / "packages" / "child"
