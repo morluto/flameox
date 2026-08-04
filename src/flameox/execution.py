@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import signal
+import subprocess
+import sys
+import tempfile
+import threading
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import IO, Any, Literal, cast
 
 import psutil
 from pydantic import Field, field_validator
@@ -28,6 +34,63 @@ _DANGEROUS_ENVIRONMENT = {
     "PYTHONPATH",
     "SSH_ASKPASS",
 }
+_DANGEROUS_ENVIRONMENT_PREFIXES = (
+    "DYLD_",
+    "GDB_",
+    "GIT_CONFIG_",
+    "LD_",
+    "LLDB_",
+)
+_DANGEROUS_ENVIRONMENT_NAMES = {
+    "JAVA_TOOL_OPTIONS",
+    "NODE_EXTRA_CA_CERTS",
+    "NODE_OPTIONS",
+    "PERL5LIB",
+    "PERL5OPT",
+    "RUBYLIB",
+    "RUBYOPT",
+    "GDBINIT",
+    "GDBHISTFILE",
+    "PYTHONSTARTUP",
+}
+_CREDENTIAL_ENVIRONMENT = re.compile(
+    r"(?:^|_)(?:TOKEN|PASSWORD|PASSWD|SECRET|KEY|CREDENTIALS?|COOKIES?)(?:_|$)"
+)
+_SAFE_CONTROL_OVERRIDES = {
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+}
+INSTALLER_ENVIRONMENT_ALLOWLIST = (
+    "PATH",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "UV_INDEX_URL",
+    "UV_EXTRA_INDEX_URL",
+    "UV_INDEX",
+    "UV_NATIVE_TLS",
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+)
+
+
+def _is_dangerous_environment_name(name: str) -> bool:
+    normalized = name.upper()
+    return (
+        normalized in _DANGEROUS_ENVIRONMENT
+        or normalized in _DANGEROUS_ENVIRONMENT_NAMES
+        or normalized.startswith(_DANGEROUS_ENVIRONMENT_PREFIXES)
+        or _CREDENTIAL_ENVIRONMENT.search(normalized) is not None
+    )
+
+
+def _is_safe_control_override(name: str, value: str) -> bool:
+    return _SAFE_CONTROL_OVERRIDES.get(name.upper()) == value
 
 
 class ResourcePolicy(ContractModel):
@@ -42,12 +105,14 @@ class ResourcePolicy(ContractModel):
 class ExecutionRequest(ContractModel):
     argv: tuple[str, ...]
     cwd: Path
+    stdin_bytes: bytes | None = None
     environment_allowlist: tuple[str, ...] = ("PATH",)
     environment_overrides: dict[str, str] = Field(default_factory=dict)
     allowed_working_roots: tuple[Path, ...]
     timeout_seconds: float = Field(default=300, gt=0, le=86_400)
     graceful_shutdown_seconds: float = Field(default=5, ge=0, le=60)
     max_output_bytes: int = Field(default=16_777_216, gt=0)
+    observation: Literal["child_peak_rss"] | None = None
     systemd_scope_unit: str | None = None
     resource_policy: ResourcePolicy | None = None
 
@@ -77,6 +142,7 @@ class ExecutionOutcome:
     stderr: bytes
     resolved_executable: Path
     containment: str
+    peak_rss_backend: str | None = None
 
 
 class _OutputLimitExceeded(Exception):
@@ -86,6 +152,14 @@ class _OutputLimitExceeded(Exception):
 class _ResourcePolicyExceeded(Exception):
     def __init__(self, summary: RuntimeResourceSummary) -> None:
         self.summary = summary
+
+
+@dataclass(frozen=True, slots=True)
+class _ObservedWait:
+    returncode: int
+    peak_rss_bytes: int | None
+    peak_rss_backend: str
+    cancellation_cause: Literal["timeout", "caller_cancelled", "output_limit"] | None = None
 
 
 @dataclass(slots=True)
@@ -99,6 +173,74 @@ class _OutputBudget:
 
 
 class SubprocessBroker:
+    def run_sync(
+        self,
+        request: ExecutionRequest,
+        *,
+        on_started: Callable[[int], Awaitable[None]] | None = None,
+        on_cleanup: Callable[[bool], Awaitable[None]] | None = None,
+    ) -> ExecutionOutcome:
+        """Run through the async broker while preserving synchronous adapter APIs."""
+
+        if request.observation == "child_peak_rss":
+            if on_started is not None or on_cleanup is not None:
+                raise DomainError(
+                    ErrorCode.EXECUTION_REFUSED,
+                    "Child peak-RSS observation does not support async lifecycle callbacks.",
+                )
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return self._run_observed_sync(request)
+
+            observed_result: list[ExecutionOutcome] = []
+            observed_failure: list[BaseException] = []
+
+            def observe_in_thread() -> None:
+                try:
+                    observed_result.append(self._run_observed_sync(request))
+                except BaseException as exc:
+                    observed_failure.append(exc)
+
+            thread = threading.Thread(
+                target=observe_in_thread,
+                name="flameox-observed-subprocess",
+                daemon=True,
+            )
+            thread.start()
+            thread.join()
+            if observed_failure:
+                raise observed_failure[0]
+            if not observed_result:
+                raise RuntimeError("observed subprocess did not return an outcome")
+            return observed_result[0]
+
+        async def execute() -> ExecutionOutcome:
+            return await self.run(request, on_started=on_started, on_cleanup=on_cleanup)
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(execute())
+
+        result: list[ExecutionOutcome] = []
+        failure: list[BaseException] = []
+
+        def run_in_thread() -> None:
+            try:
+                result.append(asyncio.run(execute()))
+            except BaseException as exc:
+                failure.append(exc)
+
+        thread = threading.Thread(target=run_in_thread, name="flameox-subprocess", daemon=True)
+        thread.start()
+        thread.join()
+        if failure:
+            raise failure[0]
+        if not result:
+            raise RuntimeError("subprocess broker did not return an outcome")
+        return result[0]
+
     async def run(
         self,
         request: ExecutionRequest,
@@ -106,6 +248,9 @@ class SubprocessBroker:
         on_started: Callable[[int], Awaitable[None]] | None = None,
         on_cleanup: Callable[[bool], Awaitable[None]] | None = None,
     ) -> ExecutionOutcome:
+        if request.observation == "child_peak_rss":
+            return await self._run_observed_async(request, on_started, on_cleanup)
+
         cwd = self._resolve_cwd(request.cwd, request.allowed_working_roots)
         environment = self._build_environment(request)
         executable = self._resolve_executable(request.argv[0], cwd, environment)
@@ -116,7 +261,11 @@ class SubprocessBroker:
                 *argv,
                 cwd=cwd,
                 env=environment,
-                stdin=asyncio.subprocess.DEVNULL,
+                stdin=(
+                    asyncio.subprocess.PIPE
+                    if request.stdin_bytes is not None
+                    else asyncio.subprocess.DEVNULL
+                ),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=os.name == "posix",
@@ -147,16 +296,24 @@ class SubprocessBroker:
         resource_task = asyncio.create_task(
             self._observe_resources(process, request.resource_policy)
         )
+        stdin_task: asyncio.Task[None] | None = None
+        if request.stdin_bytes is not None:
+            assert process.stdin is not None
+            stdin_task = asyncio.create_task(self._write_stdin(process.stdin, request.stdin_bytes))
         timed_out = False
         cancellation_cause: str | None = None
         try:
             async with asyncio.timeout(request.timeout_seconds):
-                stdout, stderr, _, resources = await asyncio.gather(
+                results = await asyncio.gather(
                     asyncio.shield(stdout_task),
                     asyncio.shield(stderr_task),
                     process.wait(),
                     asyncio.shield(resource_task),
+                    *([asyncio.shield(stdin_task)] if stdin_task is not None else []),
                 )
+                stdout = cast(bytes, results[0])
+                stderr = cast(bytes, results[1])
+                resources = cast(RuntimeResourceSummary | None, results[3])
         except TimeoutError as exc:
             timed_out = True
             cancellation_cause = "timeout"
@@ -168,6 +325,7 @@ class SubprocessBroker:
                 stderr_task,
             )
             resources = await self._collect_resource(resource_task)
+            await self._settle_task(stdin_task)
             timeout_process = ProcessResult(
                 exit_code=None,
                 terminating_signal=(
@@ -197,6 +355,7 @@ class SubprocessBroker:
                 await asyncio.shield(on_cleanup(cleanup_complete))
             await self._settle_readers(stdout_task, stderr_task)
             await self._settle_resource(resource_task)
+            await self._settle_task(stdin_task)
             raise DomainError(
                 ErrorCode.QUERY_BUDGET_EXCEEDED,
                 f"Process output exceeded {request.max_output_bytes} bytes.",
@@ -210,6 +369,7 @@ class SubprocessBroker:
                 stdout_task,
                 stderr_task,
             )
+            await self._settle_task(stdin_task)
             raise DomainError(
                 ErrorCode.STORAGE_QUOTA_EXCEEDED,
                 "Runtime storage reserve was exceeded.",
@@ -231,6 +391,7 @@ class SubprocessBroker:
                 await asyncio.shield(on_cleanup(cleanup_complete))
             await self._settle_readers(stdout_task, stderr_task)
             await self._settle_resource(resource_task)
+            await self._settle_task(stdin_task)
             raise
 
         finished = time.monotonic_ns()
@@ -263,6 +424,274 @@ class SubprocessBroker:
                 else ("process_group" if os.name == "posix" else "process")
             ),
         )
+
+    async def _run_observed_async(
+        self,
+        request: ExecutionRequest,
+        on_started: Callable[[int], Awaitable[None]] | None,
+        on_cleanup: Callable[[bool], Awaitable[None]] | None,
+    ) -> ExecutionOutcome:
+        if on_started is not None:
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "Child peak-RSS observation does not support an on_started callback.",
+            )
+        cancellation = threading.Event()
+        observation = asyncio.create_task(
+            asyncio.to_thread(self._run_observed_sync, request, cancellation)
+        )
+        try:
+            return await asyncio.shield(observation)
+        except asyncio.CancelledError:
+            cancellation.set()
+            outcome = await asyncio.shield(observation)
+            if on_cleanup is not None:
+                await asyncio.shield(on_cleanup(outcome.process.cleanup_complete is True))
+            raise
+
+    def _run_observed_sync(
+        self,
+        request: ExecutionRequest,
+        cancellation: threading.Event | None = None,
+    ) -> ExecutionOutcome:
+        """Run a workload while retaining wait4's child-observation semantics.
+
+        The normal async path cannot use ``wait4`` because the event loop's child
+        watcher owns ``waitpid``.  This explicit path keeps spawning, output capture,
+        timeout, and group cleanup inside the broker while reaping the child itself.
+        """
+
+        cwd = self._resolve_cwd(request.cwd, request.allowed_working_roots)
+        environment = self._build_environment(request)
+        executable = self._resolve_executable(request.argv[0], cwd, environment)
+        argv = (str(executable), *request.argv[1:])
+        started = time.monotonic_ns()
+        process: subprocess.Popen[bytes] | None = None
+        cleanup_complete = True
+        with tempfile.TemporaryFile() as stdout_stream, tempfile.TemporaryFile() as stderr_stream:
+            try:
+                process = subprocess.Popen(
+                    argv,
+                    cwd=cwd,
+                    env=environment,
+                    stdin=(
+                        subprocess.PIPE if request.stdin_bytes is not None else subprocess.DEVNULL
+                    ),
+                    stdout=stdout_stream,
+                    stderr=stderr_stream,
+                    start_new_session=os.name == "posix",
+                )
+                if request.stdin_bytes is not None:
+                    assert process.stdin is not None
+                    try:
+                        process.stdin.write(request.stdin_bytes)
+                        process.stdin.flush()
+                    except BrokenPipeError:
+                        pass
+                    finally:
+                        process.stdin.close()
+
+                observed = self._wait_observed(
+                    process,
+                    request,
+                    stdout_stream=stdout_stream,
+                    stderr_stream=stderr_stream,
+                    cancellation=cancellation,
+                )
+                cleanup_complete = self._terminate_observed_group(process, force=True)
+                stdout_stream.seek(0)
+                stderr_stream.seek(0)
+                stdout = stdout_stream.read()
+                stderr = stderr_stream.read()
+            except BaseException:
+                if process is not None and process.poll() is None:
+                    cleanup_complete = self._terminate_observed_group(process, force=True)
+                    self._reap_observed(process)
+                raise
+
+        finished = time.monotonic_ns()
+        if observed.cancellation_cause == "output_limit":
+            raise DomainError(
+                ErrorCode.QUERY_BUDGET_EXCEEDED,
+                f"Process output exceeded {request.max_output_bytes} bytes.",
+            )
+        if observed.cancellation_cause == "timeout":
+            timeout_process = ProcessResult(
+                exit_code=None,
+                terminating_signal=(-observed.returncode if observed.returncode < 0 else None),
+                wall_time_ns=finished - started,
+                timed_out=True,
+                cancellation_cause="timeout",
+                cleanup_complete=cleanup_complete,
+                peak_rss_bytes=observed.peak_rss_bytes,
+                stdout=stdout.decode(errors="replace"),
+                stderr=stderr.decode(errors="replace"),
+            )
+            raise DomainError(
+                ErrorCode.PROCESS_TIMEOUT,
+                f"Process exceeded {request.timeout_seconds} seconds.",
+                details={"process": timeout_process.model_dump(mode="json")},
+                retryable=True,
+            )
+
+        process_result = ProcessResult(
+            exit_code=observed.returncode if observed.returncode >= 0 else None,
+            terminating_signal=(-observed.returncode if observed.returncode < 0 else None),
+            wall_time_ns=finished - started,
+            cancellation_cause=observed.cancellation_cause,
+            cleanup_complete=cleanup_complete,
+            peak_rss_bytes=observed.peak_rss_bytes,
+        )
+        return ExecutionOutcome(
+            process=process_result,
+            stdout=stdout,
+            stderr=stderr,
+            resolved_executable=executable,
+            containment=("process_group" if os.name == "posix" else "process"),
+            peak_rss_backend=observed.peak_rss_backend,
+        )
+
+    def _wait_observed(
+        self,
+        process: subprocess.Popen[bytes],
+        request: ExecutionRequest,
+        *,
+        stdout_stream: IO[bytes],
+        stderr_stream: IO[bytes],
+        cancellation: threading.Event | None,
+    ) -> _ObservedWait:
+        deadline = time.monotonic() + request.timeout_seconds
+        terminating: Literal["timeout", "caller_cancelled", "output_limit"] | None = None
+        wait4 = getattr(os, "wait4", None)
+        if wait4 is not None:
+            while True:
+                if terminating is None:
+                    if cancellation is not None and cancellation.is_set():
+                        terminating = "caller_cancelled"
+                        self._terminate_observed_group(process, force=True)
+                    elif self._observed_output_exceeded(
+                        stdout_stream, stderr_stream, request.max_output_bytes
+                    ):
+                        terminating = "output_limit"
+                        self._terminate_observed_group(process, force=True)
+                    elif time.monotonic() >= deadline:
+                        terminating = "timeout"
+                        self._terminate_observed_group(process, force=True)
+                waited_pid, status, usage = wait4(process.pid, os.WNOHANG)
+                if waited_pid == process.pid:
+                    process.returncode = os.waitstatus_to_exitcode(status)
+                    peak_rss = int(usage.ru_maxrss)
+                    if sys.platform != "darwin":
+                        peak_rss *= 1024
+                    return _ObservedWait(
+                        returncode=process.returncode,
+                        peak_rss_bytes=peak_rss or None,
+                        peak_rss_backend="wait4_ru_maxrss",
+                        cancellation_cause=terminating,
+                    )
+                time.sleep(0.005)
+
+        peak = 0
+        while process.poll() is None:
+            peak = max(peak, self._observed_peak_rss(process.pid))
+            if terminating is None:
+                if cancellation is not None and cancellation.is_set():
+                    terminating = "caller_cancelled"
+                    self._terminate_observed_group(process, force=True)
+                elif self._observed_output_exceeded(
+                    stdout_stream, stderr_stream, request.max_output_bytes
+                ):
+                    terminating = "output_limit"
+                    self._terminate_observed_group(process, force=True)
+                elif time.monotonic() >= deadline:
+                    terminating = "timeout"
+                    self._terminate_observed_group(process, force=True)
+            time.sleep(0.005)
+        peak = max(peak, self._observed_peak_rss(process.pid))
+        return _ObservedWait(
+            returncode=process.returncode if process.returncode is not None else 0,
+            peak_rss_bytes=peak or None,
+            peak_rss_backend="psutil_polling",
+            cancellation_cause=terminating,
+        )
+
+    def _observed_peak_rss(self, pid: int) -> int:
+        peak = 0
+        try:
+            parent = psutil.Process(pid)
+            processes = (parent, *parent.children(recursive=True))
+            peak = sum(
+                observed.memory_info().rss for observed in processes if observed.is_running()
+            )
+        except (psutil.Error, OSError):
+            pass
+        return peak
+
+    def _terminate_observed_group(
+        self,
+        process: subprocess.Popen[bytes],
+        *,
+        force: bool,
+    ) -> bool:
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return True
+            if force:
+                time.sleep(0.05)
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+            return True
+
+        if process.returncode is not None:
+            return True
+        if process.poll() is None:
+            process.terminate()
+            if force:
+                time.sleep(0.05)
+                if process.poll() is None:
+                    process.kill()
+        return True
+
+    async def _write_stdin(
+        self,
+        stream: asyncio.StreamWriter,
+        stdin_bytes: bytes,
+    ) -> None:
+        try:
+            stream.write(stdin_bytes)
+            await stream.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            stream.close()
+            with suppress(Exception):
+                await stream.wait_closed()
+
+    @staticmethod
+    def _observed_output_exceeded(
+        stdout_stream: IO[bytes],
+        stderr_stream: IO[bytes],
+        max_output_bytes: int,
+    ) -> bool:
+        try:
+            size = (
+                os.fstat(stdout_stream.fileno()).st_size + os.fstat(stderr_stream.fileno()).st_size
+            )
+        except OSError:
+            return False
+        return size > max_output_bytes
+
+    def _reap_observed(self, process: subprocess.Popen[bytes]) -> None:
+        if process.returncode is not None:
+            return
+        wait4 = getattr(os, "wait4", None)
+        if wait4 is not None:
+            _, status, _ = wait4(process.pid, 0)
+            process.returncode = os.waitstatus_to_exitcode(status)
+        else:
+            process.wait()
 
     async def _observe_resources(
         self,
@@ -510,6 +939,13 @@ class SubprocessBroker:
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
+    async def _settle_task(self, task: asyncio.Task[Any] | None) -> None:
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
     def _resolve_cwd(self, cwd: Path, allowed_roots: tuple[Path, ...]) -> Path:
         resolved = cwd.resolve()
         if not resolved.is_dir():
@@ -532,14 +968,14 @@ class SubprocessBroker:
         environment = {
             name: os.environ[name]
             for name in request.environment_allowlist
-            if name in os.environ and name not in _DANGEROUS_ENVIRONMENT
+            if name in os.environ and not _is_dangerous_environment_name(name)
         }
         if request.systemd_scope_unit is not None:
             for name in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"):
                 if name in os.environ:
                     environment[name] = os.environ[name]
         for name, value in request.environment_overrides.items():
-            if name in _DANGEROUS_ENVIRONMENT:
+            if _is_dangerous_environment_name(name) and not _is_safe_control_override(name, value):
                 raise DomainError(
                     ErrorCode.EXECUTION_REFUSED,
                     f"Environment override {name!r} is blocked by policy.",

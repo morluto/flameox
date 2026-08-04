@@ -5,15 +5,12 @@ import json
 import os
 import re
 import signal
-import subprocess
 import sys
-import tempfile
 import time
-from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-import psutil
+from flameox.execution import ExecutionRequest, SubprocessBroker
 
 _IMPORT_TIME = re.compile(
     r"^import time:\s+(?P<self>\d+)\s+\|\s+(?P<cumulative>\d+)\s+\|\s+(?P<module>.+)$"
@@ -28,86 +25,50 @@ def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--samples", type=int, default=5)
+    parser.add_argument("--timeout-seconds", type=float, default=300)
     parser.add_argument("workload", nargs=argparse.REMAINDER)
     arguments = parser.parse_args()
     if arguments.workload[:1] == ["--"]:
         arguments.workload = arguments.workload[1:]
-    if not arguments.workload or arguments.samples < 1:
-        parser.error("a workload and at least one sample are required")
+    if not arguments.workload or arguments.samples < 1 or arguments.timeout_seconds <= 0:
+        parser.error("a workload, at least one sample, and a positive timeout are required")
     return arguments
-
-
-def _poll_peak_rss(process: subprocess.Popen[bytes]) -> int | None:
-    peak = 0
-    ps_process = psutil.Process(process.pid)
-    while process.poll() is None:
-        try:
-            processes = (ps_process, *ps_process.children(recursive=True))
-            peak = max(
-                peak,
-                sum(item.memory_info().rss for item in processes if item.is_running()),
-            )
-        except (psutil.Error, OSError):
-            pass
-        time.sleep(0.005)
-    return peak or None
-
-
-def _wait4_peak_rss(process: subprocess.Popen[bytes]) -> int:
-    _, status, usage = os.wait4(process.pid, 0)
-    process.returncode = os.waitstatus_to_exitcode(status)
-    peak_rss = int(usage.ru_maxrss)
-    if sys.platform != "darwin":
-        peak_rss *= 1024
-    return peak_rss
-
-
-def _terminate_process_group(pid: int) -> None:
-    if os.name != "posix":
-        return
-    try:
-        os.killpg(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    time.sleep(0.05)
-    with suppress(ProcessLookupError):
-        os.killpg(pid, signal.SIGKILL)
 
 
 def _execute(
     command: tuple[str, ...],
+    *,
+    timeout_seconds: float,
 ) -> tuple[bytes, bytes, int | None, str, int, int]:
-    before_ns = time.perf_counter_ns()
-    with tempfile.TemporaryFile() as stdout_stream, tempfile.TemporaryFile() as stderr_stream:
-        process = subprocess.Popen(
-            command,
-            stdout=stdout_stream,
-            stderr=stderr_stream,
-            start_new_session=os.name == "posix",
+    cwd = Path.cwd().resolve()
+    outcome = SubprocessBroker().run_sync(
+        ExecutionRequest(
+            argv=command,
+            cwd=cwd,
+            allowed_working_roots=(cwd,),
+            environment_allowlist=tuple(os.environ),
+            observation="child_peak_rss",
+            timeout_seconds=timeout_seconds,
         )
-        try:
-            peak_rss: int | None
-            if hasattr(os, "wait4"):
-                peak_rss = _wait4_peak_rss(process)
-                rss_backend = "wait4_ru_maxrss"
-            else:
-                peak_rss = _poll_peak_rss(process)
-                rss_backend = "psutil_polling"
-        finally:
-            _terminate_process_group(process.pid)
-        stdout_stream.seek(0)
-        stderr_stream.seek(0)
-        stdout = stdout_stream.read()
-        stderr = stderr_stream.read()
-    if process.returncode is None:
-        raise RuntimeError("child process did not report an exit status")
+    )
+    if outcome.peak_rss_backend is None:
+        raise RuntimeError("child peak-RSS observation did not report a backend")
+    if outcome.process.wall_time_ns is None:
+        raise RuntimeError("observed child process did not report a duration")
+    if outcome.process.cleanup_complete is not True:
+        raise RuntimeError("observed child process cleanup was incomplete")
+    sample_exit_code = outcome.process.exit_code
+    if sample_exit_code is None:
+        if outcome.process.terminating_signal is None:
+            raise RuntimeError("child process did not report an exit status")
+        sample_exit_code = -outcome.process.terminating_signal
     return (
-        stdout,
-        stderr,
-        peak_rss,
-        rss_backend,
-        time.perf_counter_ns() - before_ns,
-        process.returncode,
+        outcome.stdout,
+        outcome.stderr,
+        outcome.process.peak_rss_bytes,
+        outcome.peak_rss_backend,
+        outcome.process.wall_time_ns,
+        sample_exit_code,
     )
 
 
@@ -171,7 +132,7 @@ def main() -> int:
             peak_rss_backend,
             duration_ns,
             sample_exit_code,
-        ) = _execute(workload)
+        ) = _execute(workload, timeout_seconds=arguments.timeout_seconds)
         if stdout:
             sys.stdout.buffer.write(stdout)
         if stderr:
@@ -193,7 +154,10 @@ def main() -> int:
             exit_code = sample_exit_code
 
     import_command = (workload[0], "-X", "importtime", *workload[1:])
-    trace_stdout, trace_stderr_bytes, _, _, _, trace_exit_code = _execute(import_command)
+    trace_stdout, trace_stderr_bytes, _, _, _, trace_exit_code = _execute(
+        import_command,
+        timeout_seconds=arguments.timeout_seconds,
+    )
     trace_stderr = trace_stderr_bytes.decode("utf-8", errors="replace")
     raw_importtime, packages, ignored_lines = _group_imports(trace_stderr)
     non_import_stderr = "\n".join(

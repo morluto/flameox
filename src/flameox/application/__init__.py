@@ -1,197 +1,81 @@
-from flameox.application.analysis_records import (
-    AnalysisMaterializationService,
-    MaterializeAnalysisRequest,
-    MaterializedAnalysisResult,
+from __future__ import annotations
+
+from importlib import import_module
+from typing import TYPE_CHECKING
+
+# The conditional imports below exist only for static type checkers; runtime
+# exports are resolved lazily to keep short-lived transports lightweight.
+# ruff: noqa: F405
+
+if TYPE_CHECKING:
+    from flameox.application.analysis_records import *  # noqa: F403
+    from flameox.application.artifacts import *  # noqa: F403
+    from flameox.application.capabilities import *  # noqa: F403
+    from flameox.application.capture import *  # noqa: F403
+    from flameox.application.compaction import *  # noqa: F403
+    from flameox.application.comparisons import *  # noqa: F403
+    from flameox.application.dependencies import *  # noqa: F403
+    from flameox.application.detached import *  # noqa: F403
+    from flameox.application.discovery import *  # noqa: F403
+    from flameox.application.drilldown import *  # noqa: F403
+    from flameox.application.evidence_lookup import *  # noqa: F403
+    from flameox.application.evidence_query import *  # noqa: F403
+    from flameox.application.evidence_status import *  # noqa: F403
+    from flameox.application.execution_identity import *  # noqa: F403
+    from flameox.application.execution_policy import *  # noqa: F403
+    from flameox.application.experiments import *  # noqa: F403
+    from flameox.application.gc import *  # noqa: F403
+    from flameox.application.imports import *  # noqa: F403
+    from flameox.application.integrity import *  # noqa: F403
+    from flameox.application.operations import *  # noqa: F403
+    from flameox.application.pipelines import *  # noqa: F403
+    from flameox.application.preflight import *  # noqa: F403
+    from flameox.application.quarantine import *  # noqa: F403
+    from flameox.application.records import *  # noqa: F403
+    from flameox.application.recovery import *  # noqa: F403
+    from flameox.application.reductions import *  # noqa: F403
+    from flameox.application.repair import *  # noqa: F403
+    from flameox.application.setup import *  # noqa: F403
+    from flameox.application.status import *  # noqa: F403
+    from flameox.application.summaries import *  # noqa: F403
+    from flameox.application.viewers import *  # noqa: F403
+    from flameox.application.workloads import *  # noqa: F403
+
+_MODULES = (
+    "analysis_records",
+    "artifacts",
+    "capabilities",
+    "capture",
+    "compaction",
+    "comparisons",
+    "dependencies",
+    "detached",
+    "discovery",
+    "drilldown",
+    "evidence_lookup",
+    "evidence_query",
+    "evidence_status",
+    "execution_identity",
+    "execution_policy",
+    "experiments",
+    "gc",
+    "imports",
+    "integrity",
+    "operations",
+    "pipelines",
+    "preflight",
+    "quarantine",
+    "records",
+    "recovery",
+    "reductions",
+    "repair",
+    "setup",
+    "status",
+    "summaries",
+    "viewers",
+    "workloads",
 )
-from flameox.application.artifacts import (
-    ArtifactListItem,
-    ArtifactListResult,
-    ArtifactMetadataResult,
-    ArtifactRegistrationSummary,
-    ArtifactService,
-)
-from flameox.application.capabilities import (
-    AdapterPreparationResult,
-    CapabilityList,
-    CapabilityService,
-    CapabilitySetupManager,
-    CapabilitySetupResult,
-    SetupVerification,
-)
-from flameox.application.capture import (
-    CapturePlanRegistry,
-    CaptureResult,
-    CaptureService,
-)
-from flameox.application.compaction import CompactionResult, CompactionService
-from flameox.application.comparisons import (
-    CompareRunSetsRequest,
-    ComparisonResult,
-    ComparisonService,
-    FreezeRunSetMember,
-    FreezeRunSetRequest,
-    ProfileChange,
-    RunSetService,
-)
-from flameox.application.dependencies import (
-    WorkloadDependencyService,
-    WorkloadDependencySetupResult,
-)
-from flameox.application.detached import (
-    DetachedCaptureManager,
-    DetachedCaptureRecord,
-    DetachedCaptureStatus,
-    DetachedProgress,
-)
-from flameox.application.discovery import (
-    DiscoveryCoverage,
-    RunDiscoveryService,
-    RunFilter,
-    RunListResult,
-    RunSummary,
-)
-from flameox.application.drilldown import (
-    CallEdgeResult,
-    DrilldownService,
-    FrameDetail,
-    StackExample,
-    StackExamplesResult,
-)
-from flameox.application.evidence_lookup import (
-    EvidenceLookupResult,
-    EvidenceLookupService,
-)
-from flameox.application.evidence_query import (
-    EvidenceQueryService,
-    MeasurementItem,
-    MeasurementQueryResult,
-)
-from flameox.application.evidence_status import EvidenceAvailability, EvidenceStatus
-from flameox.application.execution_identity import ExecutionIdentityService
-from flameox.application.execution_policy import ExecutionPolicy
-from flameox.application.experiments import (
-    ExperimentBlock,
-    ExperimentCell,
-    ExperimentPlan,
-    ExperimentPlanRegistry,
-    ExperimentRunResult,
-    ExperimentService,
-    ExperimentTrialCollection,
-    OutcomeCount,
-    OutcomeExperimentResult,
-)
-from flameox.application.gc import (
-    GarbageApplyResult,
-    GarbageCollector,
-    GarbageEntry,
-    GarbagePlan,
-    GarbagePurgeResult,
-    GarbageRestoreResult,
-    TrashManifest,
-)
-from flameox.application.imports import ImportArtifactRequest, ImportResult, ImportService
-from flameox.application.integrity import (
-    IntegrityIssue,
-    IntegrityResult,
-    IntegrityService,
-)
-from flameox.application.operations import (
-    OperationFailure,
-    OperationItemOutcome,
-    OperationProgress,
-    OperationRecord,
-    OperationRecovery,
-    OperationRunner,
-    OperationState,
-    OperationStatus,
-)
-from flameox.application.pipelines import (
-    ArtifactPipeline,
-    ArtifactPipelineService,
-    PipelineComparison,
-    PipelineStage,
-    PipelineStageComparison,
-    PipelineStageDeclaration,
-    RegisterPipelineRequest,
-)
-from flameox.application.preflight import PreflightService
-from flameox.application.quarantine import (
-    QuarantineManifest,
-    QuarantineRestoreResult,
-    QuarantineService,
-)
-from flameox.application.records import (
-    CreateInvestigationRequest,
-    EvidenceInput,
-    FindingListResult,
-    FindingResult,
-    FindingService,
-    InvestigationListResult,
-    InvestigationService,
-    RecordFindingRequest,
-    RecordHypothesisRequest,
-)
-from flameox.application.recovery import (
-    RecoveryInspection,
-    RecoveryResult,
-    RecoveryService,
-)
-from flameox.application.reductions import (
-    PlanReductionRequest,
-    ReductionAttemptSummary,
-    ReductionLimits,
-    ReductionPlan,
-    ReductionResult,
-    ReductionService,
-)
-from flameox.application.repair import RepairEntry, RepairPlan, RepairResult, RepairService
-from flameox.application.setup import (
-    ClientSetupPlan,
-    ResolvedSetupPlan,
-    RuntimeAction,
-    SetupInspection,
-    SetupOperation,
-    SetupPlan,
-    SetupReport,
-    SetupService,
-)
-from flameox.application.status import WorkspaceStatus, workspace_status
-from flameox.application.summaries import (
-    EvidenceSummary,
-    EvidenceSummaryBundle,
-    EvidenceSummaryRequest,
-    EvidenceSummaryService,
-    SummaryArtifact,
-    SummaryClaim,
-    SummaryReference,
-    SummaryRun,
-    render_evidence_summary_markdown,
-)
-from flameox.application.viewers import (
-    NativeViewerLaunchResult,
-    NativeViewerPlan,
-    NativeViewerService,
-)
-from flameox.application.workloads import (
-    AdapterOption,
-    ConfigureWorkloadRequest,
-    DeclaredWorkflowDetail,
-    DeclaredWorkflowList,
-    DeclaredWorkflowRequirement,
-    DeclaredWorkflowSummary,
-    ExperimentConfig,
-    ProjectConfig,
-    ResolvedOracle,
-    Scalar,
-    WorkloadConfig,
-    WorkloadConfigurationResult,
-    WorkloadConfigurationStatus,
-    WorkloadIdentityConfig,
-    WorkloadInspection,
-    WorkloadOracleConfig,
-    WorkloadRequirementsConfig,
-    WorkloadService,
-)
+
 
 __all__ = [
     "AdapterOption",
@@ -349,3 +233,21 @@ __all__ = [
     "render_evidence_summary_markdown",
     "workspace_status",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name not in __all__:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    for module_name in _MODULES:
+        module = import_module(f"{__name__}.{module_name}")
+        try:
+            value = getattr(module, name)
+        except AttributeError:
+            continue
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))

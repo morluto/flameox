@@ -98,7 +98,7 @@ class ImportService:
             raise
 
         media_type = request.media_type or mimetypes.guess_type(request.path.name)[0]
-        producer = request.producer or self._infer_producer(request.path, request.kind)
+        producer = request.producer or self._infer_producer(stored.payload_path, request.kind)
         registration = ArtifactRegistration(
             registration_id=new_id(),
             run_id=run_id,

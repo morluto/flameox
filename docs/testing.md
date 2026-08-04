@@ -4,8 +4,11 @@ flameox's tests are organized by the behavior they prove, not by the amount of
 code in a module. The checked-in [ownership manifest](../tests/ownership.toml)
 assigns every test file one semantic owner and one primary lane. Pytest applies
 the declared markers during collection, and `tools/test.py` uses the same
-manifest for local commands and CI. Process, provider, and performance markers
-describe requirements; they do not silently move a test into a second lane.
+manifest for local commands and CI. Each named lane runs its manifest-owned
+paths; aggregate lanes (`full`, `optional`, `performance`, and the
+`optional-*` provider lanes) are the only commands that intentionally select
+the whole test tree. Process, provider, and performance markers describe
+requirements; they do not silently move a test into a second lane.
 
 ## Fast local workflow
 
@@ -26,20 +29,24 @@ uv run python tools/test.py capabilities  # check managed setup metadata vs extr
 Useful focused commands are:
 
 ```console
-uv run python tools/test.py core          # deterministic unit and service tests
+uv run python tools/test.py core          # foundational core-owned tests
 uv run python tools/test.py storage       # storage, publication, recovery, integrity
-uv run python tools/test.py application   # application services without process tests
+uv run python tools/test.py application   # application-owned service composition
 uv run python tools/test.py analysis      # recipes and statistical comparisons
 uv run python tools/test.py mcp           # in-process MCP contracts
 uv run python tools/test.py process       # core subprocess, stdio, and cancellation paths
 uv run python tools/test.py adapters      # deterministic adapter parsing
 uv run python tools/test.py cli           # CLI and setup behavior
 uv run python tools/test.py security      # offline control-process checks
+uv run python tools/test.py golden        # representative investigation fixtures
 ```
 
-The default `uv run pytest -q` command has the same no-retry policy and runs the
-deterministic core, excluding process, performance, and optional-provider
-tests. Use the explicit `process` lane for subprocess and transport boundaries.
+The direct `uv run pytest -q` command follows the repository-wide pytest
+default in `pyproject.toml`; it excludes process, performance, and optional
+provider tests but is not the same thing as the manifest-owned `core` lane.
+In particular, direct pytest can include non-optional golden tests. Use
+`tools/test.py` when you need an explicit lane, and use `golden` or `process`
+when you intentionally want those slower boundaries.
 The runner prints the exact pytest command, disk and temporary-directory
 telemetry, and writes a JUnit report, log, and command receipt under
 `.test-results/`.
@@ -49,6 +56,7 @@ Before moving or consolidating tests, run the ownership and collection checks:
 ```console
 uv run python tools/test.py ownership
 uv run python tools/test.py collection
+uv run python tools/test.py affected --base origin/main
 ```
 
 The collection check compares normalized node IDs and parametrized case counts
@@ -97,11 +105,26 @@ scheduled and manually dispatched CI lane enables that flag. Run it on a quiet
 machine with the declared Python version and record the generated JUnit and log
 files.
 
+## CI selection
+
+CI uses `tools/test.py affected` to select primary lanes from changed test
+paths. Changes to source, tooling, ownership metadata, dependency locks,
+workflow configuration, or an unknown path conservatively select every
+required test and optional-provider lane. A non-optional test change runs the
+coverage-owned standard lanes (`core`, `storage`, `application`, `analysis`,
+`mcp`, `adapters`, `cli`, and `golden`) once, plus any explicit process/security lane,
+while an optional or performance-only change selects its provider or explicit
+lane. Documentation changes do not schedule code tests. The planner falls back
+to the full matrix when the git base revision is unavailable, so shallow
+checkouts and unusual event payloads cannot silently reduce coverage. Standard
+lanes emit coverage fragments that the separate coverage gate combines, so the
+existing threshold is not applied to a partial suite.
+
 ## Lane ownership
 
 | Lane | Owns | Typical evidence |
 | --- | --- | --- |
-| `core` | domain, deterministic services, and read-only analysis | invariants and bounded results |
+| `core` | foundational domain and release metadata | invariants and compatibility contracts |
 | `storage` | workspace, artifacts, publication, recovery, integrity | durability and rebuild behavior |
 | `application` | orchestration and compatibility services | service composition and lifecycle |
 | `analysis` | recipes and comparisons | estimands, limitations, and pinned inputs |
@@ -109,6 +132,7 @@ files.
 | `process` | brokers, stdio, capture, and cancellation | process ownership and cleanup |
 | `adapters` | native-format parsing and setup | preserved artifacts and normalized extraction |
 | `cli` | CLI, setup, and user-facing JSON | command behavior and recovery guidance |
+| `golden` | representative investigation fixtures | end-to-end semantic behavior |
 | `optional` | provider-specific integrations | capability-dependent evidence |
 | `performance` | scale and throughput acceptance | reproducible budgets and methodology |
 

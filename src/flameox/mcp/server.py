@@ -384,6 +384,7 @@ class AppContext:
     capabilities: CapabilityService
     capture_plans: CapturePlanRegistry
     experiment_plans: ExperimentPlanRegistry
+    capture: CaptureService | None = None
     detached_captures: DetachedCaptureManager | None = None
     capability_setup: CapabilitySetupManager | None = None
 
@@ -400,10 +401,13 @@ class AppContext:
         return self.workspace
 
     def capture_service(self) -> CaptureService:
-        return CaptureService(
-            self.require_workspace(),
-            plans=self.capture_plans,
-        )
+        if self.capture is None:
+            self.capture = CaptureService(
+                self.require_workspace(),
+                plans=self.capture_plans,
+                capabilities=self.capabilities,
+            )
+        return self.capture
 
     def experiment_service(self) -> ExperimentService:
         return ExperimentService(
@@ -1149,7 +1153,8 @@ def create_server(
         """
         try:
             result = await WorkloadDependencyService(
-                ctx.request_context.lifespan_context.require_workspace()
+                ctx.request_context.lifespan_context.require_workspace(),
+                broker=ctx.request_context.lifespan_context.capabilities.broker,
             ).prepare(workload_name)
             return _success(
                 result,

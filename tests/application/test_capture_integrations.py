@@ -18,6 +18,20 @@ from flameox.application import (
 )
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, ExecutionStatus
 from flameox.storage import Workspace
+from flameox.storage.artifacts import StoredArtifact
+
+
+def test_python_startup_invocation_uses_declared_workload_timeout(tmp_path: Path) -> None:
+    invocation = build_capture_invocation(
+        "python-startup",
+        (sys.executable, "startup_target.py"),
+        tmp_path,
+        executable=sys.executable,
+        timeout_seconds=7.5,
+    )
+
+    timeout_index = invocation.argv.index("--timeout-seconds")
+    assert invocation.argv[timeout_index + 1] == "7.5"
 
 
 def test_torch_capture_launcher_does_not_require_flameox_in_workload_venv(
@@ -111,6 +125,35 @@ def test_import_detects_torch_profiler_trace_for_analysis_routing(tmp_path: Path
     workspace = Workspace.initialize(tmp_path)
 
     imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(path=trace, kind=ArtifactKind.EXECUTION_TRACE)
+    )
+
+    registration = imported.run.artifacts[0]
+    assert registration.producer == "torch.profiler"
+
+
+def test_import_infers_producer_from_staged_artifact_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trace = tmp_path / "torch-trace.json"
+    trace.write_text('{"traceEvents":[{"cat":"cpu_op","name":"aten::add"}]}')
+    workspace = Workspace.initialize(tmp_path)
+    service = ImportService(workspace)
+    import_path = service.artifacts.import_path
+
+    def import_and_mutate_source(
+        source: Path,
+        *,
+        allowed_roots: tuple[Path, ...],
+        max_bytes: int,
+    ) -> StoredArtifact:
+        stored = import_path(source, allowed_roots=allowed_roots, max_bytes=max_bytes)
+        trace.write_text("replacement bytes")
+        return stored
+
+    monkeypatch.setattr(service.artifacts, "import_path", import_and_mutate_source)
+    imported = service.import_artifact(
         ImportArtifactRequest(path=trace, kind=ArtifactKind.EXECUTION_TRACE)
     )
 

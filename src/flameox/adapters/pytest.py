@@ -356,9 +356,7 @@ class PytestExtractor:
         for role, output in outputs:
             lowered = output.casefold()
             marker_positions = [
-                (lowered.find(marker), marker)
-                for marker in markers
-                if lowered.find(marker) >= 0
+                (lowered.find(marker), marker) for marker in markers if lowered.find(marker) >= 0
             ]
             if not marker_positions:
                 continue
