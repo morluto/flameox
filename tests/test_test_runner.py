@@ -48,12 +48,13 @@ def test_affected_plan_no_changes_is_valid_and_explicitly_empty(
     plan = _plan(monkeypatch, set())
 
     assert runner.validate_affected_plan(plan, RECORDS) == plan
-    assert plan["schema_version"] == 2
+    assert plan["schema_version"] == 3
     assert plan["fallback_reason"] == "none"
     assert plan["full"] is False
     assert plan["lanes"] == []
     assert plan["optional_lanes"] == []
     assert plan["selected_lanes"] == []
+    assert plan["run_performance"] is False
     assert len(plan["unselected_lanes"]) == len(runner.ALL_PLANNED_LANES)
 
 
@@ -97,6 +98,18 @@ def test_direct_ownership_does_not_pass_through_unknown_path_fallback(
     )
 
 
+def test_performance_marked_test_selects_performance_lane_on_pull_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _plan(monkeypatch, {"tests/performance/test_catalog_scale.py"}, event="pull_request")
+
+    assert plan["full"] is False
+    assert plan["lanes"] == []
+    assert plan["run_performance"] is True
+    assert any(item["lane"] == "performance" for item in plan["selected_lanes"])
+    assert all(item["lane"] != "performance" for item in plan["unselected_lanes"])
+
+
 @pytest.mark.parametrize(
     "event",
     ["local", "pull_request", "merge_group", "push", "schedule", "workflow_dispatch"],
@@ -111,6 +124,7 @@ def test_affected_plan_records_event_policy(
     assert plan["provenance"]["event"] == event
     if event in runner.FULL_RUN_EVENTS:
         assert plan["full"] is True
+        assert plan["run_performance"] is True
         assert "event_requires_full_validation" in plan["fallback_reason"]
 
 
@@ -183,6 +197,6 @@ def test_affected_cli_emits_json_contract_for_merge_group() -> None:
 
     assert result.returncode == 0, result.stderr
     plan = json.loads(result.stdout)
-    assert plan["schema_version"] == 2
+    assert plan["schema_version"] == 3
     assert plan["event"] == "merge_group"
     runner.validate_affected_plan(plan, RECORDS)

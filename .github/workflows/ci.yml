@@ -30,6 +30,7 @@ jobs:
       run_coverage: ${{ steps.plan.outputs.run_coverage }}
       run_collection: ${{ steps.plan.outputs.run_collection }}
       run_npm: ${{ steps.plan.outputs.run_npm }}
+      run_performance: ${{ steps.plan.outputs.run_performance }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -48,12 +49,13 @@ jobs:
           echo "${plan_json}"
           if ! jq -e '
             def test_lanes: ["core", "storage", "application", "analysis", "mcp", "process", "adapters", "cli", "security", "golden"];
+            def performance_lanes: ["performance"];
             def provider_lanes: ["optional-coverage", "optional-memray", "optional-perfetto", "optional-pyspy", "optional-torch", "optional-host"];
             def allowed_strings($allowed):
               type == "array" and all(.[]; . as $lane | type == "string" and ($allowed | index($lane)) != null) and
               (length == (unique | length));
             def decisions($allowed):
-              type == "array" and length <= 16 and
+              type == "array" and length <= ($allowed | length) and
               all(.[]; . as $item |
                 (($item | keys | sort) == ["lane", "reason"]) and
                 ($item.lane | type == "string") and
@@ -67,21 +69,21 @@ jobs:
                 ($item.lane | type == "string") and
                 ($allowed | index($item.lane)) != null) and
               ([.[].lane] | unique | length) == length;
-            . as $plan | (test_lanes + provider_lanes) as $all |
+            . as $plan | (test_lanes + performance_lanes + provider_lanes) as $all |
             (keys | sort) == [
               "base_available", "base_revision", "changed_paths", "contract", "event",
               "fallback_reason", "full", "head_available", "head_revision", "lanes", "matrix",
               "optional_lanes", "planner_digest", "planner_version", "provenance", "run_collection",
-              "run_coverage", "run_deep_checks", "run_npm", "run_quality", "schema_version",
+              "run_coverage", "run_deep_checks", "run_npm", "run_performance", "run_quality", "schema_version",
               "selected_lanes", "topology_digest", "unselected_lanes"
             ] and
-            (.schema_version == 2) and (.contract == "flameox.affected-plan") and
-            (.planner_version == "affected-plan-v2") and
+            (.schema_version == 3) and (.contract == "flameox.affected-plan") and
+            (.planner_version == "affected-plan-v3") and
             (.event | type == "string" and test("^(local|pull_request|merge_group|push|schedule|workflow_dispatch)$")) and
             ((.base_revision == null) or (.base_revision | type == "string")) and
             ((.head_revision == null) or (.head_revision | type == "string")) and
             (.changed_paths | type == "array" and all(.[]; type == "string" and (startswith("/") | not) and (startswith("\\") | not) and (split("/") | all(. != "." and . != ".."))) and (. == (sort | unique))) and
-            ([.base_available, .head_available, .full, .run_quality, .run_deep_checks, .run_coverage, .run_collection, .run_npm] | all(type == "boolean")) and
+            ([.base_available, .head_available, .full, .run_quality, .run_deep_checks, .run_coverage, .run_collection, .run_npm, .run_performance] | all(type == "boolean")) and
             (.planner_digest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
             (.topology_digest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
             (.fallback_reason | type == "string" and length > 0) and
@@ -90,7 +92,7 @@ jobs:
             (.optional_lanes | allowed_strings(provider_lanes)) and
             (.selected_lanes | decisions($all)) and
             (.unselected_lanes | decisions($all)) and
-            (([.selected_lanes[].lane] | sort) == ((.lanes + .optional_lanes) | sort)) and
+            (([.selected_lanes[].lane] | sort) == ((.lanes + (if .run_performance then ["performance"] else [] end) + .optional_lanes) | sort)) and
             (([.selected_lanes[].lane] + [.unselected_lanes[].lane] | unique | sort) == ($all | sort)) and
             (.matrix | type == "object" and (keys | sort) == ["lanes", "optional_lanes"]) and
             (.matrix.lanes | matrix_lanes(test_lanes)) and
@@ -101,6 +103,7 @@ jobs:
             (.run_coverage == (.full or (.lanes | length > 0))) and
             (.run_collection == (.full or (.lanes | length > 0))) and
             (.run_npm == .full) and
+            (([.selected_lanes[].lane] | index("performance") != null) == .run_performance) and
             (.provenance | type == "object" and (keys | sort) == ["base_available", "base_revision", "base_source", "changed_paths", "event", "event_source", "fallback_reason", "head_available", "head_revision", "head_source", "planner_digest", "topology_digest"]) and
             (.provenance.event == .event) and (.provenance.base_revision == .base_revision) and
             (.provenance.head_revision == .head_revision) and (.provenance.base_available == .base_available) and
@@ -124,6 +127,7 @@ jobs:
           echo "run_coverage=$(jq -r '.run_coverage' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
           echo "run_collection=$(jq -r '.run_collection' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
           echo "run_npm=$(jq -r '.run_npm' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
+          echo "run_performance=$(jq -r '.run_performance' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
 
   lint:
     name: Lint & Format
@@ -268,7 +272,7 @@ jobs:
   performance:
     name: Performance acceptance
     needs: plan
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: needs.plan.outputs.run_performance == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -279,7 +283,10 @@ jobs:
           enable-cache: true
           cache-suffix: performance
       - run: uv sync --extra dev
-      - run: FLAMEOX_RUN_PERFORMANCE=1 uv run python tools/test.py performance
+      - name: Run performance tests
+        env:
+          FLAMEOX_RUN_PERFORMANCE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '1' || '' }}
+        run: uv run python tools/test.py performance
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -447,12 +454,13 @@ jobs:
             failures+=("planner did not publish a plan receipt")
           elif ! jq -e '
             def test_lanes: ["core", "storage", "application", "analysis", "mcp", "process", "adapters", "cli", "security", "golden"];
+            def performance_lanes: ["performance"];
             def provider_lanes: ["optional-coverage", "optional-memray", "optional-perfetto", "optional-pyspy", "optional-torch", "optional-host"];
             def allowed_strings($allowed):
               type == "array" and all(.[]; . as $lane | type == "string" and ($allowed | index($lane)) != null) and
               (length == (unique | length));
             def decisions($allowed):
-              type == "array" and length <= 16 and
+              type == "array" and length <= ($allowed | length) and
               all(.[]; . as $item |
                 (($item | keys | sort) == ["lane", "reason"]) and
                 ($item.lane | type == "string") and ($item.reason | type == "string" and length > 0) and
@@ -463,27 +471,29 @@ jobs:
                 (($item | keys | sort) == ["lane"]) and ($item.lane | type == "string") and
                 ($allowed | index($item.lane)) != null) and
               ([.[].lane] | unique | length) == length;
-            . as $plan | (test_lanes + provider_lanes) as $all |
+            . as $plan | (test_lanes + performance_lanes + provider_lanes) as $all |
             (keys | sort) == [
               "base_available", "base_revision", "changed_paths", "contract", "event",
               "fallback_reason", "full", "head_available", "head_revision", "lanes", "matrix",
               "optional_lanes", "planner_digest", "planner_version", "provenance", "run_collection",
-              "run_coverage", "run_deep_checks", "run_npm", "run_quality", "schema_version",
+              "run_coverage", "run_deep_checks", "run_npm", "run_performance", "run_quality", "schema_version",
               "selected_lanes", "topology_digest", "unselected_lanes"
-            ] and .schema_version == 2 and .contract == "flameox.affected-plan" and
-            .planner_version == "affected-plan-v2" and
+            ] and .schema_version == 3 and .contract == "flameox.affected-plan" and
+            .planner_version == "affected-plan-v3" and
             (.event | type == "string" and test("^(local|pull_request|merge_group|push|schedule|workflow_dispatch)$")) and
             (.lanes | allowed_strings(test_lanes)) and (.optional_lanes | allowed_strings(provider_lanes)) and
             (.selected_lanes | decisions($all)) and (.unselected_lanes | decisions($all)) and
-            ([.selected_lanes[].lane] | sort) == ((.lanes + .optional_lanes) | sort) and
+            ([.selected_lanes[].lane] | sort) == ((.lanes + (if .run_performance then ["performance"] else [] end) + .optional_lanes) | sort) and
             ([.selected_lanes[].lane] + [.unselected_lanes[].lane] | unique | sort) == ($all | sort) and
             (.matrix | type == "object" and (keys | sort) == ["lanes", "optional_lanes"]) and
             (.matrix.lanes | matrix_lanes(test_lanes)) and (.matrix.optional_lanes | matrix_lanes(provider_lanes)) and
             ([.matrix.lanes[].lane] == .lanes) and ([.matrix.optional_lanes[].lane] == .optional_lanes) and
-            ([.base_available, .head_available, .full, .run_quality, .run_deep_checks, .run_coverage, .run_collection, .run_npm] | all(type == "boolean")) and
+            ([.base_available, .head_available, .full, .run_quality, .run_deep_checks, .run_coverage, .run_collection, .run_npm, .run_performance] | all(type == "boolean")) and
             (.run_deep_checks == .full) and (.run_quality == (.full or (.lanes | length > 0))) and
             (.run_coverage == (.full or (.lanes | length > 0))) and (.run_collection == (.full or (.lanes | length > 0))) and
-            (.run_npm == .full) and (.provenance | type == "object")
+            (.run_npm == .full) and
+            (([.selected_lanes[].lane] | index("performance") != null) == .run_performance) and
+            (.provenance | type == "object")
           ' <<<"${PLAN_JSON}" >/dev/null; then
             failures+=("planner receipt failed the required-check contract")
           fi
@@ -551,10 +561,7 @@ jobs:
           check_job "npm" "${npm_selected}" "${NPM_RESULT}"
           check_job "collection" "${collection_selected}" "${COLLECTION_RESULT}"
 
-          performance_selected=false
-          if [[ "${EVENT_NAME}" == "schedule" || "${EVENT_NAME}" == "workflow_dispatch" ]]; then
-            performance_selected=true
-          fi
+          performance_selected=$(jq -r '.run_performance' <<<"${PLAN_JSON}")
           check_job "performance" "${performance_selected}" "${PERFORMANCE_RESULT}"
 
           echo "## Required checks" >> "${GITHUB_STEP_SUMMARY}"

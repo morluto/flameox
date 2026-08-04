@@ -24,8 +24,8 @@ OWNERSHIP_PATH = ROOT / "tests" / "ownership.toml"
 COLLECTION_BASELINE_PATH = ROOT / "tests" / "collection-baseline.toml"
 RESULTS_DIR = ROOT / ".test-results"
 PLAN_CONTRACT = "flameox.affected-plan"
-PLAN_SCHEMA_VERSION = 2
-PLANNER_VERSION = "affected-plan-v2"
+PLAN_SCHEMA_VERSION = 3
+PLANNER_VERSION = "affected-plan-v3"
 PLAN_MAX_MATRIX_ITEMS = 256
 SUPPORTED_EVENTS = (
     "local",
@@ -62,6 +62,7 @@ PLAN_KEYS = {
     "run_coverage",
     "run_collection",
     "run_npm",
+    "run_performance",
 }
 PROVIDER_LANES = {
     "optional-coverage": "optional and requires_coverage",
@@ -107,7 +108,7 @@ FULL_CHANGE_PATHS = {
     "tests/ownership.toml",
     "tests/collection-baseline.toml",
 }
-ALL_PLANNED_LANES = TEST_LANES + tuple(PROVIDER_LANES)
+ALL_PLANNED_LANES = (*TEST_LANES, "performance", *PROVIDER_LANES)
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -326,7 +327,14 @@ def _validate_plan_lanes(plan: Mapping[str, object]) -> list[str]:
 
 
 def _validate_plan_flags(plan: Mapping[str, object], lanes: list[str]) -> None:
-    for field in ("run_quality", "run_deep_checks", "run_coverage", "run_collection", "run_npm"):
+    for field in (
+        "run_quality",
+        "run_deep_checks",
+        "run_coverage",
+        "run_collection",
+        "run_npm",
+        "run_performance",
+    ):
         _boolean(plan[field], field)
     if plan["run_deep_checks"] != plan["full"]:
         raise PlanValidationError("run_deep_checks must match full")
@@ -338,6 +346,10 @@ def _validate_plan_flags(plan: Mapping[str, object], lanes: list[str]) -> None:
         raise PlanValidationError("run_collection is inconsistent")
     if plan["run_npm"] != plan["full"]:
         raise PlanValidationError("run_npm must match full")
+    selected_decisions = _lane_decisions(plan["selected_lanes"], "selected_lanes")
+    performance_selected = any(item["lane"] == "performance" for item in selected_decisions)
+    if plan["run_performance"] != performance_selected:
+        raise PlanValidationError("run_performance is inconsistent")
 
 
 def validate_affected_plan(
@@ -655,6 +667,7 @@ def affected_plan(  # noqa: C901
     optional_lanes: set[str] = set()
     coverage = revision_reason is not None
     npm = revision_reason is not None
+    performance = False
     lane_reasons: dict[str, list[str]] = {}
     optional_reasons: dict[str, list[str]] = {}
 
@@ -681,6 +694,9 @@ def affected_plan(  # noqa: C901
                 full = True
                 fallback_reasons.append("unowned_test_path")
                 continue
+            if "performance" in record.markers:
+                performance = True
+                _reason_map_add(lane_reasons, "performance", f"owned performance test path: {path}")
             if "optional" not in record.markers and "performance" not in record.markers:
                 lanes.add(record.lane)
                 coverage = True
@@ -716,11 +732,13 @@ def affected_plan(  # noqa: C901
     if full:
         lanes.update(TEST_LANES)
         optional_lanes.update(PROVIDER_LANES)
+        performance = True
         coverage = True
         npm = True
         reason = _fallback_reason(fallback_reasons)
         for lane in TEST_LANES:
             _reason_map_add(lane_reasons, lane, f"conservative full plan: {reason}")
+        _reason_map_add(lane_reasons, "performance", f"conservative full plan: {reason}")
         for lane in PROVIDER_LANES:
             _reason_map_add(optional_reasons, lane, f"conservative full plan: {reason}")
     elif coverage:
@@ -731,19 +749,36 @@ def affected_plan(  # noqa: C901
     ordered_lanes = [lane for lane in TEST_LANES if lane in lanes]
     ordered_optional = [lane for lane in PROVIDER_LANES if lane in optional_lanes]
     fallback = _fallback_reason(fallback_reasons)
-    selected = [
-        {
-            "lane": lane,
-            "reason": "; ".join(lane_reasons.get(lane, ["selected by ownership policy"])),
-        }
-        for lane in ordered_lanes
-    ] + [
-        {
-            "lane": lane,
-            "reason": "; ".join(optional_reasons.get(lane, ["selected by provider ownership"])),
-        }
-        for lane in ordered_optional
-    ]
+    selected = (
+        [
+            {
+                "lane": lane,
+                "reason": "; ".join(lane_reasons.get(lane, ["selected by ownership policy"])),
+            }
+            for lane in ordered_lanes
+        ]
+        + (
+            [
+                {
+                    "lane": "performance",
+                    "reason": "; ".join(
+                        lane_reasons.get(
+                            "performance", ["selected by performance ownership policy"]
+                        )
+                    ),
+                }
+            ]
+            if performance
+            else []
+        )
+        + [
+            {
+                "lane": lane,
+                "reason": "; ".join(optional_reasons.get(lane, ["selected by provider ownership"])),
+            }
+            for lane in ordered_optional
+        ]
+    )
     selected_names = {item["lane"] for item in selected}
     unselected = [
         {
@@ -786,6 +821,7 @@ def affected_plan(  # noqa: C901
         "run_coverage": full or bool(ordered_lanes),
         "run_collection": full or bool(ordered_lanes),
         "run_npm": npm,
+        "run_performance": performance,
     }
     plan["provenance"] = {
         "event": resolved_event,
