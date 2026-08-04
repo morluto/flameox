@@ -17,6 +17,24 @@ from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
+_INSTALLER_ENVIRONMENT_ALLOWLIST = (
+    "PATH",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "UV_INDEX_URL",
+    "UV_EXTRA_INDEX_URL",
+    "UV_INDEX",
+    "UV_NATIVE_TLS",
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+)
+
 
 class WorkloadDependencySetupResult(ContractModel):
     schema_version: int = 1
@@ -109,6 +127,29 @@ class WorkloadDependencyService:
                         "access.",
                     ),
                 ) from exc
+            except DomainError as exc:
+                details = {
+                    **exc.details,
+                    "next_tool": "prepare_workload_dependencies",
+                    "workload_name": workload_name,
+                }
+                remediation = tuple(
+                    dict.fromkeys(
+                        (
+                            *exc.remediation,
+                            "Retry prepare_workload_dependencies after checking uv and "
+                            "package-index access.",
+                        )
+                    )
+                )
+                raise DomainError(
+                    exc.code,
+                    "FlameOx could not install the declared workload distributions.",
+                    retryable=exc.retryable,
+                    details=details,
+                    remediation=remediation,
+                    run_id=exc.run_id,
+                ) from exc
             if completed.returncode != 0:
                 detail = (completed.stderr.strip() or completed.stdout.strip())[:500]
                 raise DomainError(
@@ -159,7 +200,7 @@ class WorkloadDependencyService:
                 argv=tuple(command),
                 cwd=self.workspace.project_root,
                 allowed_working_roots=(self.workspace.project_root,),
-                environment_allowlist=("PATH",),
+                environment_allowlist=_INSTALLER_ENVIRONMENT_ALLOWLIST,
                 environment_overrides={"UV_NO_PROGRESS": "1"},
                 timeout_seconds=1_800,
             )

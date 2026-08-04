@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Literal, cast
+from typing import IO, Any, Literal, cast
 
 import psutil
 from pydantic import Field, field_validator
@@ -40,7 +40,6 @@ _DANGEROUS_ENVIRONMENT_PREFIXES = (
     "GIT_CONFIG_",
     "LD_",
     "LLDB_",
-    "PYTHON",
 )
 _DANGEROUS_ENVIRONMENT_NAMES = {
     "JAVA_TOOL_OPTIONS",
@@ -274,28 +273,30 @@ class SubprocessBroker:
         assert process.stdout is not None
         assert process.stderr is not None
 
-        if request.stdin_bytes is not None:
-            assert process.stdin is not None
-            process.stdin.write(request.stdin_bytes)
-            await process.stdin.drain()
-            process.stdin.close()
-
         output_budget = _OutputBudget(request.max_output_bytes)
         stdout_task = asyncio.create_task(self._read_bounded(process.stdout, output_budget))
         stderr_task = asyncio.create_task(self._read_bounded(process.stderr, output_budget))
         resource_task = asyncio.create_task(
             self._observe_resources(process, request.resource_policy)
         )
+        stdin_task: asyncio.Task[None] | None = None
+        if request.stdin_bytes is not None:
+            assert process.stdin is not None
+            stdin_task = asyncio.create_task(self._write_stdin(process.stdin, request.stdin_bytes))
         timed_out = False
         cancellation_cause: str | None = None
         try:
             async with asyncio.timeout(request.timeout_seconds):
-                stdout, stderr, _, resources = await asyncio.gather(
+                results = await asyncio.gather(
                     asyncio.shield(stdout_task),
                     asyncio.shield(stderr_task),
                     process.wait(),
                     asyncio.shield(resource_task),
+                    *([asyncio.shield(stdin_task)] if stdin_task is not None else []),
                 )
+                stdout = cast(bytes, results[0])
+                stderr = cast(bytes, results[1])
+                resources = cast(RuntimeResourceSummary | None, results[3])
         except TimeoutError as exc:
             timed_out = True
             cancellation_cause = "timeout"
@@ -307,6 +308,7 @@ class SubprocessBroker:
                 stderr_task,
             )
             resources = await self._collect_resource(resource_task)
+            await self._settle_task(stdin_task)
             timeout_process = ProcessResult(
                 exit_code=None,
                 terminating_signal=(
@@ -336,6 +338,7 @@ class SubprocessBroker:
                 await asyncio.shield(on_cleanup(cleanup_complete))
             await self._settle_readers(stdout_task, stderr_task)
             await self._settle_resource(resource_task)
+            await self._settle_task(stdin_task)
             raise DomainError(
                 ErrorCode.QUERY_BUDGET_EXCEEDED,
                 f"Process output exceeded {request.max_output_bytes} bytes.",
@@ -349,6 +352,7 @@ class SubprocessBroker:
                 stdout_task,
                 stderr_task,
             )
+            await self._settle_task(stdin_task)
             raise DomainError(
                 ErrorCode.STORAGE_QUOTA_EXCEEDED,
                 "Runtime storage reserve was exceeded.",
@@ -370,6 +374,7 @@ class SubprocessBroker:
                 await asyncio.shield(on_cleanup(cleanup_complete))
             await self._settle_readers(stdout_task, stderr_task)
             await self._settle_resource(resource_task)
+            await self._settle_task(stdin_task)
             raise
 
         finished = time.monotonic_ns()
@@ -611,8 +616,6 @@ class SubprocessBroker:
         *,
         force: bool,
     ) -> bool:
-        if process.returncode is not None:
-            return True
         if os.name == "posix":
             try:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -624,6 +627,8 @@ class SubprocessBroker:
                     os.killpg(process.pid, signal.SIGKILL)
             return True
 
+        if process.returncode is not None:
+            return True
         if process.poll() is None:
             process.terminate()
             if force:
@@ -631,6 +636,21 @@ class SubprocessBroker:
                 if process.poll() is None:
                     process.kill()
         return True
+
+    async def _write_stdin(
+        self,
+        stream: asyncio.StreamWriter,
+        stdin_bytes: bytes,
+    ) -> None:
+        try:
+            stream.write(stdin_bytes)
+            await stream.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            stream.close()
+            with suppress(Exception):
+                await stream.wait_closed()
 
     @staticmethod
     def _observed_output_exceeded(
@@ -898,6 +918,13 @@ class SubprocessBroker:
         self,
         task: asyncio.Task[RuntimeResourceSummary | None],
     ) -> None:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def _settle_task(self, task: asyncio.Task[Any] | None) -> None:
+        if task is None:
+            return
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)

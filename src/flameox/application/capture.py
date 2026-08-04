@@ -1848,6 +1848,7 @@ class CaptureService:
                 workload.argv,
                 output_root,
                 executable=capability.executable,
+                timeout_seconds=workload.timeout_seconds,
                 options=cast(dict[str, object] | None, options),
             )
             return _AdapterBinding(

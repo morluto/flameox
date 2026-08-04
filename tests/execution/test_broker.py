@@ -72,6 +72,24 @@ async def test_broker_passes_bounded_stdin_to_jsonc_style_helpers(tmp_path: Path
     assert outcome.process.exit_code == 0
 
 
+@pytest.mark.anyio
+async def test_broker_bounds_stdin_transfer_when_child_does_not_read(tmp_path: Path) -> None:
+    started = time.monotonic()
+    with pytest.raises(DomainError) as error:
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                "import time; time.sleep(30)",
+                stdin_bytes=b"x" * 10_000_000,
+                timeout_seconds=0.1,
+            )
+        )
+
+    assert error.value.code is ErrorCode.PROCESS_TIMEOUT
+    assert time.monotonic() - started < 2
+
+
 def test_observed_run_preserves_streams_exit_status_and_peak_rss(tmp_path: Path) -> None:
     outcome = SubprocessBroker().run_sync(
         request(
@@ -145,6 +163,28 @@ def test_observed_timeout_cleans_up_the_process_group(tmp_path: Path) -> None:
     assert not _process_is_alive(child_pid)
 
 
+def test_observed_run_cleans_up_descendants_after_parent_exits(tmp_path: Path) -> None:
+    pid_path = tmp_path / "observed-parent-exit.pid"
+    code = (
+        "import pathlib, subprocess, sys; "
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid))"
+    )
+
+    outcome = SubprocessBroker().run_sync(
+        request(tmp_path, "-c", code, str(pid_path), observation="child_peak_rss")
+    )
+
+    assert outcome.process.exit_code == 0
+    assert pid_path.is_file()
+    child_pid = int(pid_path.read_text())
+    for _ in range(100):
+        if not _process_is_alive(child_pid):
+            break
+        time.sleep(0.01)
+    assert not _process_is_alive(child_pid)
+
+
 @pytest.mark.anyio
 async def test_observed_cancellation_cleans_up_before_propagating(
     tmp_path: Path,
@@ -206,6 +246,25 @@ async def test_environment_is_allowlisted_and_dangerous_overrides_fail(
             )
         )
     assert error.value.code is ErrorCode.EXECUTION_REFUSED
+
+
+@pytest.mark.anyio
+async def test_benign_python_runtime_controls_can_be_overridden(tmp_path: Path) -> None:
+    outcome = await SubprocessBroker().run(
+        request(
+            tmp_path,
+            "-c",
+            "import os; print([os.environ[name] for name in ('PYTHONHASHSEED', "
+            "'PYTHONUNBUFFERED', 'PYTHONIOENCODING')])",
+            environment_overrides={
+                "PYTHONHASHSEED": "random",
+                "PYTHONUNBUFFERED": "1",
+                "PYTHONIOENCODING": "utf-8",
+            },
+        )
+    )
+
+    assert outcome.stdout == b"['random', '1', 'utf-8']\n"
 
 
 @pytest.mark.anyio

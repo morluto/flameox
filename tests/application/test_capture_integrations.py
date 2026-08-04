@@ -21,6 +21,19 @@ from flameox.storage import Workspace
 from flameox.storage.artifacts import StoredArtifact
 
 
+def test_python_startup_invocation_uses_declared_workload_timeout(tmp_path: Path) -> None:
+    invocation = build_capture_invocation(
+        "python-startup",
+        (sys.executable, "startup_target.py"),
+        tmp_path,
+        executable=sys.executable,
+        timeout_seconds=7.5,
+    )
+
+    timeout_index = invocation.argv.index("--timeout-seconds")
+    assert invocation.argv[timeout_index + 1] == "7.5"
+
+
 def test_torch_capture_launcher_does_not_require_flameox_in_workload_venv(
     tmp_path: Path,
 ) -> None:

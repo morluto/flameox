@@ -250,6 +250,7 @@ def build_capture_invocation(
     output_root: Path,
     *,
     executable: str | None,
+    timeout_seconds: float = 300,
     options: dict[str, object] | None = None,
 ) -> CaptureInvocation:
     adapter = BUILTIN_ADAPTERS.get(adapter_name)
@@ -353,6 +354,8 @@ def build_capture_invocation(
             output,
             "--samples",
             "5",
+            "--timeout-seconds",
+            str(timeout_seconds),
             "--",
             *workload_argv,
         )

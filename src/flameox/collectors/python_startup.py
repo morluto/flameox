@@ -25,17 +25,20 @@ def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--samples", type=int, default=5)
+    parser.add_argument("--timeout-seconds", type=float, default=300)
     parser.add_argument("workload", nargs=argparse.REMAINDER)
     arguments = parser.parse_args()
     if arguments.workload[:1] == ["--"]:
         arguments.workload = arguments.workload[1:]
-    if not arguments.workload or arguments.samples < 1:
-        parser.error("a workload and at least one sample are required")
+    if not arguments.workload or arguments.samples < 1 or arguments.timeout_seconds <= 0:
+        parser.error("a workload, at least one sample, and a positive timeout are required")
     return arguments
 
 
 def _execute(
     command: tuple[str, ...],
+    *,
+    timeout_seconds: float,
 ) -> tuple[bytes, bytes, int | None, str, int, int]:
     cwd = Path.cwd().resolve()
     outcome = SubprocessBroker().run_sync(
@@ -45,6 +48,7 @@ def _execute(
             allowed_working_roots=(cwd,),
             environment_allowlist=tuple(os.environ),
             observation="child_peak_rss",
+            timeout_seconds=timeout_seconds,
         )
     )
     if outcome.peak_rss_backend is None:
@@ -128,7 +132,7 @@ def main() -> int:
             peak_rss_backend,
             duration_ns,
             sample_exit_code,
-        ) = _execute(workload)
+        ) = _execute(workload, timeout_seconds=arguments.timeout_seconds)
         if stdout:
             sys.stdout.buffer.write(stdout)
         if stderr:
@@ -150,7 +154,10 @@ def main() -> int:
             exit_code = sample_exit_code
 
     import_command = (workload[0], "-X", "importtime", *workload[1:])
-    trace_stdout, trace_stderr_bytes, _, _, _, trace_exit_code = _execute(import_command)
+    trace_stdout, trace_stderr_bytes, _, _, _, trace_exit_code = _execute(
+        import_command,
+        timeout_seconds=arguments.timeout_seconds,
+    )
     trace_stderr = trace_stderr_bytes.decode("utf-8", errors="replace")
     raw_importtime, packages, ignored_lines = _group_imports(trace_stderr)
     non_import_stderr = "\n".join(
