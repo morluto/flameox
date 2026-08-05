@@ -19,12 +19,13 @@ def _request(
     *,
     operation: Literal["create", "replace"] = "create",
     argv: tuple[str, ...] = ("python", "-c", "print('ok')"),
+    parameters: dict[str, tuple[str | int | float | bool, ...]] | None = None,
     expected_configuration_id: str | None = None,
 ) -> ConfigureWorkloadRequest:
     return ConfigureWorkloadRequest(
         name=name,
         operation=operation,
-        config=WorkloadConfig(argv=argv),
+        config=WorkloadConfig(argv=argv, parameters=parameters or {}),
         expected_configuration_id=expected_configuration_id,
     )
 
@@ -47,6 +48,32 @@ def test_configure_workload_is_idempotent_and_records_configuration_source(tmp_p
     assert second.changed_paths == ()
     assert (tmp_path / "flameox.toml").read_text() == config_text
     assert service.list_declared(kind="workload", limit=10).workflows[0].name == "probe"
+
+
+def test_literal_braces_round_trip_while_declared_placeholders_render(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    service = WorkloadService(workspace)
+    service.configure(
+        _request(
+            "json",
+            argv=("python", "-c", 'print({"key": "{size}"})'),
+            parameters={"size": (4,)},
+        )
+    )
+
+    instance = service.resolve("json", {"size": 4})
+
+    assert instance.command.argv[-1] == 'print({"key": "4"})'
+
+
+def test_unknown_plain_placeholder_is_still_rejected(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    service = WorkloadService(workspace)
+
+    with pytest.raises(ValueError, match="template fields are not declared parameters"):
+        service.configure(_request("unknown", argv=("python", "-c", "print({missing})")))
 
 
 def test_replace_requires_current_configuration_digest_and_preserves_unrelated_state(

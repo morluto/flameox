@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
-import string
 import tomllib
 from pathlib import Path, PurePath
 from typing import Annotated, Literal, cast
@@ -330,36 +330,47 @@ class WorkloadInspection(WorkloadDefinition):
     adapter_options_truncated: bool = False
 
 
+_TEMPLATE_FIELD = re.compile(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_]*)\}(?!\})")
+
+
 def _template_fields(value: str) -> set[str]:
-    fields: set[str] = set()
-    try:
-        parsed = string.Formatter().parse(value)
-        for _, field_name, format_spec, conversion in parsed:
-            if field_name is None:
-                continue
-            if (
-                not field_name.isidentifier()
-                or format_spec
-                or conversion is not None
-                or "." in field_name
-                or "[" in field_name
-            ):
-                raise ValueError("only plain scalar placeholders such as {length} are allowed")
-            fields.add(field_name)
-    except ValueError as exc:
-        raise ValueError(f"invalid workload template {value!r}: {exc}") from exc
-    return fields
+    """Return only the explicit scalar placeholders in a workload value.
+
+    Workload arguments are ordinary argv strings, so braces that are not an
+    exact ``{parameter}`` token remain literal. Doubled braces retain the
+    formatter-compatible escape for existing declarations.
+    """
+    return set(_TEMPLATE_FIELD.findall(value))
 
 
 def _render(value: str, parameters: dict[str, Scalar]) -> str:
-    _template_fields(value)
-    try:
-        return value.format_map(parameters)
-    except KeyError as exc:
+    fields = _template_fields(value)
+    missing = fields - set(parameters)
+    if missing:
         raise DomainError(
             ErrorCode.INVALID_CAPTURE_PLAN,
-            f"Missing workload parameter {exc.args[0]!r}.",
-        ) from exc
+            f"Missing workload parameter {sorted(missing)[0]!r}.",
+        )
+
+    rendered: list[str] = []
+    index = 0
+    while index < len(value):
+        if value.startswith("{{", index):
+            rendered.append("{")
+            index += 2
+            continue
+        if value.startswith("}}", index):
+            rendered.append("}")
+            index += 2
+            continue
+        match = _TEMPLATE_FIELD.match(value, index)
+        if match is not None:
+            rendered.append(str(parameters[match.group(1)]))
+            index = match.end()
+            continue
+        rendered.append(value[index])
+        index += 1
+    return "".join(rendered)
 
 
 class WorkloadService:

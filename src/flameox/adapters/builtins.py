@@ -391,7 +391,7 @@ def _torch_capture_invocation(
     *,
     options: dict[str, object] | None,
 ) -> CaptureInvocation:
-    python, target = _python_target(workload_argv)
+    python, target = _torch_python_target(workload_argv)
     selected = torch_profiler_options(options)
     config = selected.model_dump(mode="json")
     config["expected_cycles"] = selected.expected_cycles
@@ -459,7 +459,9 @@ def _torch_capture_invocation(
                 "FLAMEOX_TORCH_PROFILER_OUTPUT_ROOT": str(output_root),
             },
         )
-    if target[0] == "-m":
+    if target[0] == "-c":
+        launcher_target = (f"--inline-code={target[1]}", *target[2:])
+    elif target[0] == "-m":
         if len(target) < 2:
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
@@ -505,6 +507,37 @@ def _python_target(
             "Inline Python commands cannot be wrapped by this adapter.",
             remediation=("Declare a script or `python -m module` workload.",),
         )
+    return workload_argv[0], arguments
+
+
+def _torch_python_target(
+    workload_argv: tuple[str, ...],
+) -> tuple[str, tuple[str, ...]]:
+    """Resolve Python targets supported by the torch whole-entrypoint launcher."""
+    if not workload_argv:
+        raise DomainError(
+            ErrorCode.INVALID_CAPTURE_PLAN,
+            "The declared Python workload command is missing.",
+        )
+    executable = Path(workload_argv[0]).name
+    if not executable.startswith("python"):
+        raise DomainError(
+            ErrorCode.INVALID_CAPTURE_PLAN,
+            "This adapter can launch only a declared Python script, module, or inline command.",
+        )
+    arguments = workload_argv[1:]
+    if not arguments:
+        raise DomainError(
+            ErrorCode.INVALID_CAPTURE_PLAN,
+            "The declared Python workload target is missing.",
+        )
+    if arguments[0] == "-c" and len(arguments) < 2:
+        raise DomainError(
+            ErrorCode.INVALID_CAPTURE_PLAN,
+            "The inline Python program is missing.",
+        )
+    if arguments[0] != "-c":
+        return _python_target(workload_argv)
     return workload_argv[0], arguments
 
 
