@@ -218,7 +218,8 @@ evidence completeness. Separate compilation/warm-up from steady state.
 The adapter has three explicit capability tiers:
 
 - trace import for an existing Chrome/Perfetto-compatible export;
-- whole-entrypoint launcher mode for a declared Python script or module, with no
+- whole-entrypoint launcher mode for a declared Python script, module, or inline
+  `python -c` program, with no
   promise of application-specific phase separation;
 - SDK/recipe mode for user-instrumented steps, phases, schedules, and semantic
   annotations.
@@ -236,7 +237,9 @@ artifact ID; cycle roles survive normalization and keep regions separate.
 
 Arbitrary non-Python commands cannot be transparently wrapped by
 `torch.profiler`; the adapter must report that limitation instead of pretending
-to provide operator evidence. `with_modules` is treated as a TorchScript-only
+to provide operator evidence. Declared inline programs run through a stable
+synthetic filename and remain bound to the workload's exact argv; callers do
+not need to create a checkout script. `with_modules` is treated as a TorchScript-only
 capability unless current upstream behavior proves otherwise; FLOP coverage is
 operator-limited. Scheduled captures must register every exported cycle or
 explicitly state that only the final cycle was retained.

@@ -37,13 +37,17 @@ def main() -> None:
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--module")
     target.add_argument("--script")
+    target.add_argument("--inline-code")
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     options = parser.parse_args()
+    workload_arguments = list(options.arguments)
+    if workload_arguments[:1] == ["--"]:
+        workload_arguments = workload_arguments[1:]
     diagnostic_path = Path(options.output).resolve().parent / "torch-profiler-diagnostics.json"
     _write_diagnostic(diagnostic_path, phase="wrapper_startup", status="started")
     phase = "wrapper_startup"
     try:
-        if options.module is not None:
+        if options.module is not None or options.inline_code is not None:
             sys.path.insert(0, str(Path.cwd()))
             script_path = None
         else:
@@ -76,8 +80,11 @@ def main() -> None:
         output = Path(options.output)
         output.parent.mkdir(parents=True, exist_ok=True)
         target_name = options.module or options.script
+        if options.inline_code is not None:
+            target_name = "<flameox-inline-python>"
         assert target_name is not None
-        sys.argv = [target_name, *options.arguments]
+        argv0 = "-c" if options.inline_code is not None else target_name
+        sys.argv = [argv0, *workload_arguments]
         phase = "profiler_initialization"
         _write_diagnostic(diagnostic_path, phase=phase, status="running")
         with torch.profiler.profile(
@@ -92,6 +99,14 @@ def main() -> None:
             _write_diagnostic(diagnostic_path, phase=phase, status="running")
             if options.module is not None:
                 runpy.run_module(options.module, run_name="__main__", alter_sys=True)
+            elif options.inline_code is not None:
+                namespace = {
+                    "__name__": "__main__",
+                    "__file__": target_name,
+                    "__package__": None,
+                    "__cached__": None,
+                }
+                exec(compile(options.inline_code, target_name, "exec"), namespace, namespace)
             else:
                 assert script_path is not None
                 runpy.run_path(str(script_path), run_name="__main__")

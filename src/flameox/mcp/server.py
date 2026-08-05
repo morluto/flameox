@@ -790,10 +790,13 @@ def create_server(
             "with the validated argument array; it writes the canonical project definition but "
             "never executes it. After that, use list_declared_workflows (no arguments lists "
             "workloads) → "
-            "get_declared_workflow → list_capabilities → start_capability_setup (when the result "
-            "names setup_adapters) → prepare_adapter (for an unapproved installed third-party "
+            "get_declared_workflow → list_capabilities(adapter='<selected adapter>') → "
+            "start_capability_setup (when the scoped result names setup_adapters) → "
+            "prepare_adapter "
+            "(for an unapproved installed third-party "
             "adapter) → prepare_workload_dependencies (when a named workload declares missing "
-            "Python distributions) → list_capabilities → plan_capture(preflight_mode='auto', "
+            "Python distributions) → list_capabilities(adapter='<selected adapter>') → "
+            "plan_capture(preflight_mode='auto', "
             "capture_mode='auto') "
             "→ execute_capture_plan "
             "for short work, "
@@ -952,20 +955,33 @@ def create_server(
     async def list_capabilities_tool(
         ctx: Context[AppContext],
         mode: Literal["passive", "active_cached", "active_refresh"] = "passive",
+        adapter: Annotated[
+            str | None,
+            Field(
+                min_length=1,
+                max_length=100,
+                description=(
+                    "Selected capture adapter whose setup recommendation should be returned. "
+                    "Omit this for the read-only global inventory."
+                ),
+            ),
+        ] = None,
     ) -> Annotated[CallToolResult, ToolPayload[CapabilityList]]:
-        """List capabilities and exact managed setup actions.
+        """List capabilities and setup actions scoped to a selected capture adapter.
 
-        If setup_adapters is non-empty, call prepare_capabilities with those adapter names. If
-        setup_third_party_adapters is non-empty, call prepare_adapter with the exact
-        adapter/distribution identity from the capability report. Then call list_capabilities
-        again. Managed setup never executes a workload.
+        Omit adapter for a complete read-only inventory. In that mode, the per-capability setup
+        fields and available_setup_adapters are informational only; select an adapter and call
+        this tool again before mutating the managed environment. Managed setup never executes a
+        workload.
         """
         service = ctx.request_context.lifespan_context.capabilities
-        result = (
-            service.list()
-            if mode == "passive"
-            else await service.list_active(refresh=mode == "active_refresh")
-        )
+        if mode == "passive":
+            result = service.list() if adapter is None else service.list_for_adapter(adapter)
+        else:
+            result = await service.list_active(
+                refresh=mode == "active_refresh",
+                recommendation_adapter=adapter,
+            )
         return _success(
             result,
             f"Found {sum(item.status.value == 'available' for item in result.capabilities)} of "
@@ -976,7 +992,11 @@ def create_server(
                 else (
                     "Call prepare_adapter for the reported adapter/distribution pairs."
                     if result.setup_third_party_adapters
-                    else "No managed capability setup is pending."
+                    else (
+                        "Select an adapter and call list_capabilities(adapter=...) before setup."
+                        if adapter is None
+                        else "No managed capability setup is pending for this adapter."
+                    )
                 )
             ),
         )

@@ -164,9 +164,11 @@ flameox experiment trial <trial-id> [--experiment-id <experiment-id>]
 `flameox.toml` is the project-owned workload declaration. Its strict schema is
 `[workloads.<name>]` with an argument array `argv`, project-relative `cwd`,
 positive `timeout_seconds`, bounded `parameters` choices, an environment map,
-optional `oracle`, `requirements`, `writable_paths`, and `identity`. Templates
-may reference only plain scalar parameter names such as `{size}`; shell strings,
-shell expansion, and trailing `-- <argv...>` forms are unsupported.
+optional `oracle`, `requirements`, `writable_paths`, and `identity`. An exact
+plain scalar token such as `{size}` renders from a declared parameter; other
+braces in an argument, including JSON and Python literals, remain literal.
+Unknown exact tokens such as `{missing}` are rejected. Shell strings, shell
+expansion, and trailing `-- <argv...>` forms are unsupported.
 
 MCP's `configure_workload` is the direct agent path for this schema. It accepts
 the same typed fields, supports explicit `create` and `replace` operations, and
@@ -366,11 +368,11 @@ initialize_workspace
   → configure_workload (when missing)
   → list_declared_workflows (no arguments lists workloads; use kind='experiment' for experiments)
   → get_declared_workflow
-  → list_capabilities
-  → start_capability_setup (when setup_adapters is non-empty)
-  → prepare_adapter (when setup_third_party_adapters is non-empty)
+  → list_capabilities(adapter='<selected adapter>')
+  → start_capability_setup (when the scoped setup_adapters is non-empty)
+  → prepare_adapter (when the scoped setup_third_party_adapters is non-empty)
   → prepare_workload_dependencies (when the workload declares missing Python distributions)
-  → list_capabilities
+  → list_capabilities(adapter='<selected adapter>')
   → plan_capture (preflight_mode='auto')
   → execute_capture_plan
 ```
@@ -433,11 +435,19 @@ usage, active captures, and warnings.
 
 Read-only. Returns adapter capabilities, installed versions, required
 permissions, unavailable features, remediation, and typed managed setup
-actions. `setup_adapters` is the bounded list of missing providers FlameOx can
-install; `setup_third_party_adapters` identifies installed entry points that
-need exact identity approval through `prepare_adapter`. Call the relevant setup
-tool and then call `list_capabilities` again. The default call performs only
-passive inspection.
+actions. Pass the adapter selected for the capture or analysis workflow to
+scope mutation guidance to that goal. In a scoped result, `setup_adapters` is
+the bounded list of missing providers FlameOx can install and
+`setup_third_party_adapters` identifies installed entry points that need exact
+identity approval through `prepare_adapter`. Call the relevant setup tool and
+then call `list_capabilities(adapter=...)` again.
+
+Omit `adapter` for a complete inventory. The inventory keeps
+`available_setup_adapters` and `available_setup_third_party_adapters` as
+informational lists, but returns no `next_tool` or prescriptive setup list;
+each capability's own setup field remains the source of the exact action. This
+prevents broad discovery from turning into an instruction to install unrelated
+providers.
 Active executable probes are separately requested, bounded, and executed
 through the subprocess broker; merely listing capabilities does not run a
 project-controlled binary found on `PATH`. The `active_cached` mode uses a
@@ -458,7 +468,11 @@ Mutating but non-executing. This compatibility entry point starts a durable
 operation and returns its operation ID instead of holding an MCP request open.
 Use `start_capability_setup` with an explicit idempotency key for new callers,
 `get_capability_setup` to reconnect and poll, and `cancel_capability_setup` to
-request cleanup. The operation accepts only adapter names reported by
+request cleanup. While setup is `starting` or `running`, its status includes a
+bounded `poll_after_ms` and a `recovery` action with the exact
+`get_capability_setup(operation_id=...)` call. Follow that delay and action;
+terminal states omit polling guidance and retain their terminal recovery. The
+operation accepts only adapter names reported by
 `list_capabilities` as managed setup actions: `coverage`, `memray`, `perfetto`,
 `py-spy`, `pytest`, and `torch.profiler`. It installs the published FlameOx
 extra into the active managed Python runtime and stages the pinned user-space
@@ -538,7 +552,17 @@ arguments.
 Python profiler adapters keep the declared workload interpreter and working
 directory, including for `python -m` workloads, while invoking FlameOx's
 standalone launcher directly. They do not require FlameOx to be importable from
-the workload virtualenv and do not enable `PYTHONPATH` overrides.
+the workload virtualenv and do not enable `PYTHONPATH` overrides. The
+`torch.profiler` whole-entrypoint adapter also accepts declared `python -c`
+workloads; it executes the exact inline program through a FlameOx-owned
+synthetic filename and records that bound argv in the plan. Undeclared commands
+and arbitrary replacement argv remain unsupported.
+
+Workload templates recognize only exact plain scalar tokens such as `{size}`.
+Other braces in an argv item, including JSON and Python literals, are passed
+through unchanged. An exact `{unknown}` token is still rejected unless that
+parameter is declared. Existing doubled-brace escapes continue to collapse to a
+single literal brace.
 
 #### `plan_experiment` and `run_experiment`
 

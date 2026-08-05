@@ -72,6 +72,72 @@ def test_torch_capture_launcher_does_not_require_flameox_in_workload_venv(
     )
 
 
+def test_torch_capture_launcher_binds_declared_inline_python(tmp_path: Path) -> None:
+    invocation = build_capture_invocation(
+        "torch.profiler",
+        (sys.executable, "-c", "print('inline')", "argument"),
+        tmp_path,
+        executable=None,
+    )
+
+    assert invocation.argv[6:] == (
+        "--inline-code=print('inline')",
+        "--",
+        "argument",
+    )
+
+
+@pytest.mark.process
+def test_torch_capture_launcher_runs_declared_inline_python(tmp_path: Path) -> None:
+    (tmp_path / "torch.py").write_text(
+        "from pathlib import Path\n"
+        "class ProfilerActivity:\n"
+        "    CPU = 'cpu'\n"
+        "    CUDA = 'cuda'\n"
+        "class _Profile:\n"
+        "    def __enter__(self): return self\n"
+        "    def __exit__(self, *_): return False\n"
+        "    def export_chrome_trace(self, path): Path(path).write_text('trace')\n"
+        "class profiler:\n"
+        "    ProfilerActivity = ProfilerActivity\n"
+        "    @staticmethod\n"
+        "    def profile(**_): return _Profile()\n"
+        "class cuda:\n"
+        "    @staticmethod\n"
+        "    def is_available(): return False\n"
+    )
+    invocation = build_capture_invocation(
+        "torch.profiler",
+        (
+            sys.executable,
+            "-c",
+            "import json, sys; from pathlib import Path; "
+            "Path('ran').write_text(json.dumps({'file': __file__, "
+            "'argv0': sys.argv[0], 'args': sys.argv[1:]}))",
+            "--size",
+            "4",
+        ),
+        tmp_path,
+        executable=None,
+    )
+
+    completed = subprocess.run(
+        invocation.argv,
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((tmp_path / "ran").read_text()) == {
+        "file": "<flameox-inline-python>",
+        "argv0": "-c",
+        "args": ["--size", "4"],
+    }
+    assert (tmp_path / "torch-trace.json").read_text() == "trace"
+
+
 def test_torch_capture_rejects_schedule_without_explicit_sdk_steps(tmp_path: Path) -> None:
     with pytest.raises(DomainError) as failure:
         build_capture_invocation(
