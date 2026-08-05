@@ -1,6 +1,42 @@
 # Changelog
 
 All notable changes to flameox are documented in this file.
+## [0.1.10] - 2026-08-05
+### Bug Fixes
+
+- **capture:** Preserve inline workload argument semantics
+- Validate workload and workspace boundaries
+- **setup:** Preserve installer environment and nested Windows paths
+- **security:** Update cryptography past known CVE
+- **storage:** Preserve artifact imports on Windows
+- **execution:** Bound brokered workloads and preserve recovery context
+- **execution:** Avoid reaping observed children twice
+- **cli:** Retain DuckDB timezone runtime dependency
+- **storage:** Harden artifact staging and provenance
+- Preserve failure evidence across capture boundaries
+- **evidence:** Preserve adapter and setup failure diagnostics
+### Continuous Integration
+
+- **test:** Route performance changes through the planner
+- Make dependency audit classify optional tooling
+- **test:** Formalize affected plans and required checks
+- **test:** Make lanes ownership-driven and coverage-aware
+### Features
+
+- **mcp:** Make setup lifecycle guidance goal-scoped
+- **capture:** Support inline Python and literal workload arguments
+- **mcp:** Support explicit external workspaces
+- **preflight:** Classify unavailable perf and CUDA toolchains
+### Refactoring
+
+- **execution:** Centralize observed child execution
+- **analysis:** Decompose recipe service and lazy-load barrels
+- **execution:** Centralize bounded subprocess setup
+### Testing
+
+- Refresh collection baseline
+- Refresh collection preservation baseline
+- **release:** Verify published npm bootstrap freshness
 ## [0.1.9] - 2026-08-01
 ### Bug Fixes
 
