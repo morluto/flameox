@@ -108,12 +108,31 @@ class OperationStatus(ContractModel):
     failure_details: dict[str, Any] | None
     terminal_receipt: dict[str, Any] | None
     recovery: OperationRecovery | None
+    poll_after_ms: int | None = Field(default=None, ge=100, le=30_000)
     created_at: datetime
     updated_at: datetime
 
     @classmethod
     def from_record(cls, record: OperationRecord) -> OperationStatus:
-        return cls.model_validate(record.model_dump(exclude={"owner_id", "owner_heartbeat_at"}))
+        payload = record.model_dump(exclude={"owner_id", "owner_heartbeat_at"})
+        if record.operation == "capability.setup" and record.state in {"starting", "running"}:
+            payload["poll_after_ms"] = _capability_setup_poll_after_ms(record.phase)
+            payload["recovery"] = OperationRecovery(
+                action="poll",
+                tool="get_capability_setup",
+                arguments={"operation_id": record.operation_id},
+            ).model_dump()
+        else:
+            payload["poll_after_ms"] = None
+        return cls.model_validate(payload)
+
+
+def _capability_setup_poll_after_ms(phase: str) -> int:
+    if phase == "validating_request":
+        return 250
+    if phase == "verifying":
+        return 500
+    return 1_000
 
 
 class OperationStore:

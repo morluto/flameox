@@ -19,6 +19,7 @@ from flameox.application.capabilities import (
     SetupVerification,
 )
 from flameox.application.dependencies import WorkloadDependencyService
+from flameox.application.operations import OperationRecord, OperationStatus
 from flameox.domain import (
     CapabilityReport,
     CapabilitySetup,
@@ -552,6 +553,63 @@ def test_list_capabilities_exposes_latest_setup_receipt(tmp_path: Path) -> None:
     assert result.latest_setup.requested == ("torch.profiler", "perfetto")
     assert result.latest_setup.completed == ("torch.profiler",)
     assert result.latest_setup.phase == "staging_trace_processor"
+
+
+def test_capability_recommendations_are_scoped_to_selected_adapter(tmp_path: Path) -> None:
+    service = CapabilityService(Workspace.initialize(tmp_path))
+    torch = CapabilityReport(
+        adapter="torch.profiler",
+        status=CapabilityStatus.UNAVAILABLE,
+        setup=CapabilitySetup(
+            extra="torch",
+            method="prepare_capabilities",
+            next_tool="prepare_capabilities",
+            requirement="torch>=2.7",
+        ),
+    )
+    assert isinstance(torch.setup, CapabilitySetup)
+    pyspy = torch.model_copy(
+        update={
+            "adapter": "py-spy",
+            "setup": torch.setup.model_copy(update={"extra": "cpu", "requirement": "py-spy"}),
+        }
+    )
+
+    inventory = service._finish((torch, pyspy))
+    selected = service._finish((torch, pyspy), recommendation_adapter="torch.profiler")
+
+    assert inventory.setup_adapters == ()
+    assert inventory.available_setup_adapters == ("py-spy", "torch.profiler")
+    assert inventory.next_tool is None
+    assert selected.recommendation_scope == "torch.profiler"
+    assert selected.setup_adapters == ("torch.profiler",)
+    assert selected.next_tool == "prepare_capabilities"
+
+
+def test_running_capability_setup_status_contains_exact_poll_action(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    record = OperationRecord(
+        operation_id="op-1234",
+        operation="capability.setup",
+        workspace_id=workspace.identity.workspace_id,
+        request_digest="sha256:" + "1" * 64,
+        request={"adapters": ["perfetto"]},
+        idempotency_digest="sha256:" + "2" * 64,
+        state="running",
+        phase="staging_trace_processor",
+    )
+
+    status = OperationStatus.from_record(record)
+
+    assert status.poll_after_ms == 1_000
+    assert status.recovery is not None
+    assert status.recovery.action == "poll"
+    assert status.recovery.tool == "get_capability_setup"
+    assert status.recovery.arguments == {"operation_id": "op-1234"}
+
+    terminal = OperationStatus.from_record(record.model_copy(update={"state": "terminal"}))
+    assert terminal.poll_after_ms is None
+    assert terminal.recovery is None
 
 
 @pytest.mark.anyio

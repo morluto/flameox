@@ -49,6 +49,9 @@ class CapabilityList(ContractModel):
     capabilities: tuple[CapabilityReport, ...]
     setup_adapters: tuple[str, ...] = ()
     setup_third_party_adapters: tuple[str, ...] = ()
+    available_setup_adapters: tuple[str, ...] = ()
+    available_setup_third_party_adapters: tuple[str, ...] = ()
+    recommendation_scope: str | None = None
     latest_setup: CapabilitySetupReceipt | None = None
     next_tool: Literal["prepare_capabilities", "prepare_adapter", "list_capabilities"] | None = None
 
@@ -129,6 +132,12 @@ class CapabilityService:
         self._active_cache: dict[str, CapabilityReport] = {}
 
     def list(self) -> CapabilityList:
+        return self._list()
+
+    def list_for_adapter(self, adapter: str) -> CapabilityList:
+        return self._list(recommendation_adapter=adapter)
+
+    def _list(self, *, recommendation_adapter: str | None = None) -> CapabilityList:
         system = platform.system().lower()
         architecture = platform.machine().lower()
         reports: list[CapabilityReport] = []
@@ -324,23 +333,36 @@ class CapabilityService:
                         setup_verification=("pending" if not descriptor.approved else "passive"),
                     )
                 )
-        return self._finish(reports, latest_setup=self._read_setup_receipt())
+        return self._finish(
+            reports,
+            latest_setup=self._read_setup_receipt(),
+            recommendation_adapter=recommendation_adapter,
+        )
 
-    async def list_active(self, *, refresh: bool = False) -> CapabilityList:
+    async def list_active(
+        self,
+        *,
+        refresh: bool = False,
+        recommendation_adapter: str | None = None,
+    ) -> CapabilityList:
         passive = self.list()
         reports: list[CapabilityReport] = []
         for report in passive.capabilities:
-            adapter = builtin_adapter(report.adapter)
+            definition = builtin_adapter(report.adapter)
             version_args = (
-                adapter.version_args
-                if adapter is not None
+                definition.version_args
+                if definition is not None
                 else _CONTAINMENT_VERSION_ARGS.get(report.adapter, ())
             )
             if not version_args or report.executable is None:
                 reports.append(report)
                 continue
             reports.append(await self.probe(report.adapter, refresh=refresh))
-        return self._finish(reports, latest_setup=passive.latest_setup)
+        return self._finish(
+            reports,
+            latest_setup=passive.latest_setup,
+            recommendation_adapter=recommendation_adapter,
+        )
 
     async def probe(self, adapter: str, *, refresh: bool = False) -> CapabilityReport:
         if not refresh and adapter in self._active_cache:
@@ -865,8 +887,9 @@ class CapabilityService:
         reports: Sequence[CapabilityReport],
         *,
         latest_setup: CapabilitySetupReceipt | None = None,
+        recommendation_adapter: str | None = None,
     ) -> CapabilityList:
-        setup_adapters = tuple(
+        available_setup_adapters = tuple(
             sorted(
                 item.adapter
                 for item in reports
@@ -874,7 +897,7 @@ class CapabilityService:
                 and isinstance(item.setup, CapabilitySetup)
             )
         )
-        setup_third_party_adapters = tuple(
+        available_setup_third_party_adapters = tuple(
             sorted(
                 item.adapter
                 for item in reports
@@ -882,10 +905,30 @@ class CapabilityService:
                 and isinstance(item.setup, AdapterSetup)
             )
         )
+        scoped_reports = (
+            tuple(item for item in reports if item.adapter == recommendation_adapter)
+            if recommendation_adapter is not None
+            else ()
+        )
+        setup_adapters = tuple(
+            item.adapter
+            for item in scoped_reports
+            if item.status is not CapabilityStatus.AVAILABLE
+            and isinstance(item.setup, CapabilitySetup)
+        )
+        setup_third_party_adapters = tuple(
+            item.adapter
+            for item in scoped_reports
+            if item.status is not CapabilityStatus.AVAILABLE
+            and isinstance(item.setup, AdapterSetup)
+        )
         return CapabilityList(
             capabilities=tuple(reports),
             setup_adapters=setup_adapters,
             setup_third_party_adapters=setup_third_party_adapters,
+            available_setup_adapters=available_setup_adapters,
+            available_setup_third_party_adapters=available_setup_third_party_adapters,
+            recommendation_scope=recommendation_adapter,
             latest_setup=latest_setup,
             next_tool=(
                 "prepare_capabilities"

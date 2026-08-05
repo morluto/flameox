@@ -344,14 +344,25 @@ async def test_mcp_modes_make_capability_and_integrity_choices_explicit(tmp_path
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:
         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
         passive = await client.call_tool("list_capabilities", {"mode": "passive"})
+        scoped = await client.call_tool(
+            "list_capabilities",
+            {"mode": "passive", "adapter": "torch.profiler"},
+        )
         invalid = await client.call_tool("list_capabilities", {"refresh": True})
         standard = await client.call_tool("validate_workspace", {"mode": "standard"})
 
     capability_mode = tools["list_capabilities"].input_schema["properties"]["mode"]
+    assert "adapter" in tools["list_capabilities"].input_schema["properties"]
     integrity_mode = tools["validate_workspace"].input_schema["properties"]["mode"]
     assert capability_mode["enum"] == ["passive", "active_cached", "active_refresh"]
     assert integrity_mode["enum"] == ["standard", "full"]
     assert passive.is_error is False
+    assert passive.structured_content is not None
+    assert passive.structured_content["result"]["setup_adapters"] == []
+    assert passive.structured_content["result"]["next_tool"] is None
+    assert scoped.is_error is False
+    assert scoped.structured_content is not None
+    assert scoped.structured_content["result"]["recommendation_scope"] == "torch.profiler"
     assert invalid.is_error is True
     assert isinstance(invalid.content[0], TextContent)
     assert "refresh" in invalid.content[0].text
