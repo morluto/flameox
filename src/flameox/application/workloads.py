@@ -330,7 +330,7 @@ class WorkloadInspection(WorkloadDefinition):
     adapter_options_truncated: bool = False
 
 
-_TEMPLATE_FIELD = re.compile(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_]*)\}(?!\})")
+_TEMPLATE_FIELD = re.compile(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def _template_fields(value: str) -> set[str]:

@@ -40,6 +40,9 @@ def main() -> None:
     target.add_argument("--inline-code")
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     options = parser.parse_args()
+    workload_arguments = list(options.arguments)
+    if workload_arguments[:1] == ["--"]:
+        workload_arguments = workload_arguments[1:]
     diagnostic_path = Path(options.output).resolve().parent / "torch-profiler-diagnostics.json"
     _write_diagnostic(diagnostic_path, phase="wrapper_startup", status="started")
     phase = "wrapper_startup"
@@ -80,7 +83,8 @@ def main() -> None:
         if options.inline_code is not None:
             target_name = "<flameox-inline-python>"
         assert target_name is not None
-        sys.argv = [target_name, *options.arguments]
+        argv0 = "-c" if options.inline_code is not None else target_name
+        sys.argv = [argv0, *workload_arguments]
         phase = "profiler_initialization"
         _write_diagnostic(diagnostic_path, phase=phase, status="running")
         with torch.profiler.profile(

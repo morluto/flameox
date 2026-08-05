@@ -68,6 +68,22 @@ def test_literal_braces_round_trip_while_declared_placeholders_render(
     assert instance.command.argv[-1] == 'print({"key": "4"})'
 
 
+def test_placeholder_renders_before_escaped_closing_brace(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    service = WorkloadService(workspace)
+    service.configure(
+        _request(
+            "json",
+            argv=("python", "-c", 'print({{"batch": {batch}}})'),
+            parameters={"batch": (4,)},
+        )
+    )
+
+    instance = service.resolve("json", {"batch": 4})
+
+    assert instance.command.argv[-1] == 'print({"batch": 4})'
+
+
 def test_unknown_plain_placeholder_is_still_rejected(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     service = WorkloadService(workspace)

@@ -1,4 +1,4 @@
-expected_test_count = 473
+expected_test_count = 474
 
 # New files are normalized to their pre-split path so this receipt proves
 # test identity and parametrized case preservation across the decomposition.
@@ -78,7 +78,7 @@ expected_test_count = 473
 'tests/application/test_summaries.py' = { count = 4, digest = '350d1cb8ae547c947cf6e5b492f01a2c75e832af5d239731a87d6b30daa04905' }
 'tests/application/test_third_party_adapters.py' = { count = 7, digest = 'd169c20bdbb6f514887e75fe045f1a8950f946d915abc6d22d6836ac1959ab0c' }
 'tests/application/test_viewers.py' = { count = 8, digest = '17e9b4ec485fff59f49c11bc9a513e28da97e4d6d0af6e945ba548ab72aef663' }
-'tests/application/test_workloads.py' = { count = 6, digest = 'd32f77c2accbe8d0ade7aaccf72e764ad1f8a0f7945f9e783a12768f1fdf46d1' }
+'tests/application/test_workloads.py' = { count = 7, digest = '565d1709a0fc0498d41f687c030e641af5db5664557b591b4f2cc85bce07cd84' }
 'tests/application/test_workloads_and_capture.py' = { count = 54, digest = 'd56c5777dc9316d79faa2feb95a39b049a37397963d95e03a913a0105b145f1b' }
 'tests/application/test_operations.py' = { count = 6, digest = 'e380fb2d3b13d1814af7bce5428a549fd6bdf0f08ce5e5d2c28709ae4da7fd51' }
 'tests/domain/test_identity.py' = { count = 3, digest = '0dd4b644c18a6e8d07d56f9feb07c9af53da4791f465627d4c0f0fe6060a71e5' }

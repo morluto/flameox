@@ -82,6 +82,7 @@ def test_torch_capture_launcher_binds_declared_inline_python(tmp_path: Path) -> 
 
     assert invocation.argv[6:] == (
         "--inline-code=print('inline')",
+        "--",
         "argument",
     )
 
@@ -107,7 +108,15 @@ def test_torch_capture_launcher_runs_declared_inline_python(tmp_path: Path) -> N
     )
     invocation = build_capture_invocation(
         "torch.profiler",
-        (sys.executable, "-c", "from pathlib import Path; Path('ran').write_text(__file__)"),
+        (
+            sys.executable,
+            "-c",
+            "import json, sys; from pathlib import Path; "
+            "Path('ran').write_text(json.dumps({'file': __file__, "
+            "'argv0': sys.argv[0], 'args': sys.argv[1:]}))",
+            "--size",
+            "4",
+        ),
         tmp_path,
         executable=None,
     )
@@ -121,7 +130,11 @@ def test_torch_capture_launcher_runs_declared_inline_python(tmp_path: Path) -> N
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert (tmp_path / "ran").read_text() == "<flameox-inline-python>"
+    assert json.loads((tmp_path / "ran").read_text()) == {
+        "file": "<flameox-inline-python>",
+        "argv0": "-c",
+        "args": ["--size", "4"],
+    }
     assert (tmp_path / "torch-trace.json").read_text() == "trace"
 
 

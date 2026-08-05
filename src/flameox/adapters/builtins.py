@@ -460,7 +460,7 @@ def _torch_capture_invocation(
             },
         )
     if target[0] == "-c":
-        launcher_target = (f"--inline-code={target[1]}", *target[2:])
+        launcher_target = (f"--inline-code={target[1]}", "--", *target[2:])
     elif target[0] == "-m":
         if len(target) < 2:
             raise DomainError(
