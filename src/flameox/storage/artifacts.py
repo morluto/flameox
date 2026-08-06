@@ -322,36 +322,63 @@ class ArtifactStore:
                 "Artifact metadata contains an invalid payload name.",
             )
         payload_path = object_root / content.payload_name
-        if payload_path.is_symlink():
+        # Open with O_NOFOLLOW to prevent TOCTOU symlink attacks between
+        # the is_symlink() check above and the actual open().
+        # On Windows O_NOFOLLOW is absent, so we explicitly reject reparse
+        # points (symlinks, junctions) before the open.
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        if os.name == "nt" and payload_path.is_symlink():
             raise DomainError(
                 ErrorCode.ARTIFACT_INTEGRITY_FAILED,
                 "Artifact payload must not be a symbolic link.",
             )
-        if not payload_path.is_file():
+        try:
+            # O_NONBLOCK prevents blocking on FIFOs; combined with O_RDONLY
+            # it returns immediately for regular files and fails on FIFOs
+            # on most POSIX systems.
+            nonblock = getattr(os, "O_NONBLOCK", 0)
+            payload_fd = os.open(payload_path, os.O_RDONLY | nofollow | nonblock)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                    "Artifact payload must not be a symbolic link.",
+                ) from exc
             raise DomainError(
                 ErrorCode.ARTIFACT_INTEGRITY_FAILED,
                 "Artifact payload is missing on disk.",
-            )
-        # Defense-in-depth: re-verify the stored payload against the recorded
-        # integrity digest and length so that corruption or tampering that
-        # occurred after import is detected on retrieval rather than silently
-        # returned to the caller.
-        actual_size = payload_path.stat().st_size
-        if actual_size != content.byte_length:
-            raise DomainError(
-                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                "Artifact payload length does not match recorded metadata.",
-                details={"expected": content.byte_length, "actual": actual_size},
-            )
-        digest = hashlib.sha256()
-        with payload_path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            ) from exc
+        try:
+            stat_info = os.fstat(payload_fd)
+            if not stat.S_ISREG(stat_info.st_mode):
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                    "Artifact payload must be a regular file.",
+                )
+            # Defense-in-depth: re-verify the stored payload against the recorded
+            # integrity digest and length so that corruption or tampering that
+            # occurred after import is detected on retrieval rather than silently
+            # returned to the caller.
+            actual_size = stat_info.st_size
+            if actual_size != content.byte_length:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                    "Artifact payload length does not match recorded metadata.",
+                    details={"expected": content.byte_length, "actual": actual_size},
+                )
+            digest = hashlib.sha256()
+            while True:
+                chunk = os.read(payload_fd, 1024 * 1024)
+                if not chunk:
+                    break
                 digest.update(chunk)
-        if digest.hexdigest() != content.integrity.sha256:
-            raise DomainError(
-                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                "Artifact payload digest does not match recorded metadata.",
-            )
+            if digest.hexdigest() != content.integrity.sha256:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                    "Artifact payload digest does not match recorded metadata.",
+                )
+        finally:
+            os.close(payload_fd)
         return StoredArtifact(
             content=content,
             payload_path=payload_path,

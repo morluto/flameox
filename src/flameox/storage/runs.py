@@ -76,7 +76,14 @@ class RunStore:
         return manifest
 
     def _run_root(self, run_id: str) -> Path:
-        if not run_id or "/" in run_id or "\\" in run_id or "\x00" in run_id:
+        if (
+            not run_id
+            or "/" in run_id
+            or "\\" in run_id
+            or "\x00" in run_id
+            or run_id == ".."
+            or run_id.startswith(".")
+        ):
             raise DomainError(ErrorCode.WORKSPACE_INVALID, "Invalid run identifier.")
         return self.workspace.paths.runs / run_id
 

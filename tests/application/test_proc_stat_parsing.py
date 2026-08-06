@@ -121,3 +121,45 @@ def test_lease_returns_none_when_proc_missing() -> None:
         lease = service._lease(99999)
 
     assert lease is None
+
+
+def test_lease_parses_starttime_for_comm_with_closing_paren() -> None:
+    """Regression: comm containing ')' must not confuse the parser.
+
+    The old code used rindex(")") which would find the ')' inside the
+    comm name rather than the one that closes it, misaligning all fields.
+    """
+    import tempfile
+
+    workspace = Workspace.initialize(Path(tempfile.mkdtemp()))
+    service = CaptureService(workspace)
+    pid = 11111
+    expected_starttime = 555
+    # The kernel escapes ')' to '?' in /proc/[pid]/stat comm.
+    stat_content = _stat_line(pid, "a?b", expected_starttime).encode()
+
+    def fake_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if str(self) == "/proc/sys/kernel/random/boot_id":
+            return "boot-id-1111\n"
+        raise FileNotFoundError(str(self))
+
+    def fake_open(path: str, flags: int, *args: object, **kwargs: object) -> int:
+        if path == f"/proc/{pid}/stat":
+            return 777
+        raise FileNotFoundError(path)
+
+    def fake_read(fd: int, n: int) -> bytes:
+        if fd == 777:
+            return stat_content
+        raise OSError(fd)
+
+    with (
+        patch.object(Path, "read_text", fake_read_text),
+        patch("os.open", fake_open),
+        patch("os.read", fake_read),
+        patch("os.close", lambda fd: 0),
+    ):
+        lease = service._lease(pid)
+
+    assert lease is not None
+    assert lease.process_start_identity == str(expected_starttime)
