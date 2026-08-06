@@ -133,14 +133,15 @@ containment; a project can explicitly require managed containment.
 Run setup again to connect or disconnect clients, verify that connected clients
 launch the active runtime, update to the npm package's matching version, or roll
 back to a previously installed version. Always use `npx flameox@latest` for
-setup and upgrades: an unqualified `npx flameox` invocation can reuse an older
-cached bootstrap. Automation can select clients and inspect the plan explicitly:
+setup flow: an unqualified `npx flameox setup` invocation can reuse an older
+cached bootstrap. `npx flameox upgrade` resolves `flameox@latest` itself.
+Automation can select clients and inspect the plan explicitly:
 
 ```console
 npx flameox@latest setup --codex --claude --yes
 npx flameox@latest setup --all --dry-run --json
 npx flameox@latest setup --verify --yes --json
-npx flameox@latest upgrade
+npx flameox upgrade
 ```
 
 The npm package installs the matching `flameox` Python release. MCP clients then

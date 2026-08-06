@@ -10,12 +10,15 @@ verification, locking, activation, rollback, and structured results. The same
 setup service is available from `flameox setup` for standard JSON and TOML
 clients.
 
-Keep `@latest` in this command. An unqualified `npx flameox` invocation may reuse
-an older cached bootstrap and offer stale runtime choices.
+Keep `@latest` in the interactive setup command. An unqualified `npx flameox
+setup` invocation may reuse an older cached bootstrap and offer stale runtime
+choices. The `upgrade` command resolves `flameox@latest` before changing the
+managed runtime, even when its own bootstrap was started from an older cache.
 
-`npx flameox@latest upgrade` is the non-interactive npm shorthand for updating the
-detected clients to the bootstrap package's matching Python runtime. It keeps
-the same managed-runtime verification and atomic launcher activation as setup.
+`npx flameox upgrade` is the non-interactive npm shorthand for updating the
+detected clients to the latest bootstrap package's matching Python runtime. It
+keeps the same managed-runtime verification and atomic launcher activation as
+setup.
 
 The first run requires an explicit multi-select. Detection preselects detected
 clients for connection, while the user can adjust the selection before applying

@@ -10,13 +10,13 @@ For a non-interactive update of the detected MCP clients and their managed
 runtime, run:
 
 ```console
-npx flameox@latest upgrade
+npx flameox upgrade
 ```
 
-It launches the matching `flameox` Python package with `uvx`. The
-wizard installs a persistent, versioned local runtime and writes only the MCP
-client configurations you approve. Keep `@latest` in the command: an
-unqualified `npx flameox` invocation may reuse an older cached bootstrap. The
-bootstrap refreshes uv metadata for the pinned Python package before resolving
-it, so a newly published runtime is visible even when uv has cached an older
-package index.
+`upgrade` first resolves `flameox@latest`, then launches its matching Python
+package with `uvx`. The wizard installs a persistent, versioned local runtime
+and writes only the MCP client configurations you approve. For the interactive
+setup flow, keep `@latest` in the command: an unqualified `npx flameox setup`
+invocation may reuse an older cached bootstrap. The bootstrap refreshes uv
+metadata for the pinned Python package before resolving it, so a newly
+published runtime is visible even when uv has cached an older package index.

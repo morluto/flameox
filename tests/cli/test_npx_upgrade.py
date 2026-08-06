@@ -202,6 +202,9 @@ runtime.chmod(0o700)
             "FLAMEOX_SETUP_DATA_ROOT": str(data),
             "FLAMEOX_SETUP_UV": str(fake_uv),
             "FLAMEOX_UV_EXECUTABLE": str(fake_uvx),
+            # Exercise the already-resolved bootstrap; the npm unit test covers
+            # the outer `upgrade` handoff to flameox@latest.
+            "FLAMEOX_NPM_UPGRADE_HANDOFF": "1",
         },
         capture_output=True,
         text=True,

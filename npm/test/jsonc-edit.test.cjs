@@ -102,6 +102,38 @@ test("bootstrap launches the exactly matching Python release", () => {
   ]);
 });
 
+test("upgrade resolves the latest bootstrap before starting setup", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "flameox-upgrade-latest-"));
+  const capture = path.join(directory, "args.json");
+  const fakeNpx = path.join(directory, "npx");
+  fs.writeFileSync(
+    fakeNpx,
+    [
+      "#!/usr/bin/env node",
+      '"use strict";',
+      'require("node:fs").writeFileSync(process.env.FLAMEOX_CAPTURE, JSON.stringify(process.argv.slice(2)));',
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+  const result = spawnSync(process.execPath, [bootstrap, "upgrade", "--yes"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      FLAMEOX_NPX_EXECUTABLE: fakeNpx,
+      FLAMEOX_CAPTURE: capture,
+    },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(fs.readFileSync(capture, "utf8")), [
+    "--yes",
+    "--prefer-online",
+    "flameox@latest",
+    "upgrade",
+    "--yes",
+  ]);
+});
+
 test("bootstrap recovery points to the latest setup command when uv is missing", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "flameox-missing-uv-"));
   const result = spawnSync(process.execPath, [bootstrap, "setup"], {

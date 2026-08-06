@@ -28,27 +28,35 @@ const environment = {
 };
 const pythonPackage = `flameox==${packageJson.version}`;
 const pythonArgs = command === "upgrade" ? ["setup", "--refresh", "--yes", ...args.slice(1)] : args;
+const resolveLatest = command === "upgrade" && process.env.FLAMEOX_NPM_UPGRADE_HANDOFF !== "1";
+const executable = resolveLatest
+  ? process.env.FLAMEOX_NPX_EXECUTABLE || "npx"
+  : process.env.FLAMEOX_UV_EXECUTABLE || "uvx";
+const childArgs = resolveLatest
+  ? ["--yes", "--prefer-online", "flameox@latest", "upgrade", ...args.slice(1)]
+  : [
+      "--no-config",
+      "--no-sources",
+      "--refresh-package",
+      "flameox",
+      "--prerelease",
+      "allow",
+      "--python",
+      "3.12",
+      "--from",
+      pythonPackage,
+      "flameox",
+      ...pythonArgs,
+    ];
+const childEnvironment = resolveLatest
+  ? { ...environment, FLAMEOX_NPM_UPGRADE_HANDOFF: "1" }
+  : environment;
 process.stderr.write(
-  "Preparing flameox's cached managed Python runtime; this does not add packages to your project.\n",
+  resolveLatest
+    ? "Resolving the latest flameox bootstrap before upgrading the managed runtime.\n"
+    : "Preparing flameox's cached managed Python runtime; this does not add packages to your project.\n",
 );
-const child = spawn(
-  process.env.FLAMEOX_UV_EXECUTABLE || "uvx",
-  [
-    "--no-config",
-    "--no-sources",
-    "--refresh-package",
-    "flameox",
-    "--prerelease",
-    "allow",
-    "--python",
-    "3.12",
-    "--from",
-    pythonPackage,
-    "flameox",
-    ...pythonArgs,
-  ],
-  { env: environment, stdio: "inherit" },
-);
+const child = spawn(executable, childArgs, { env: childEnvironment, stdio: "inherit" });
 
 const signals = ["SIGINT", "SIGTERM", "SIGHUP"];
 const signalHandlers = new Map();
