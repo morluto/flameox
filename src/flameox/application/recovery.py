@@ -115,7 +115,8 @@ class RecoveryService:
         )
 
     def _lease_is_live(self, run: RunManifest) -> bool:
-        assert run.lease is not None
+        if run.lease is None:
+            return False
         try:
             boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
             fields = Path("/proc").joinpath(str(run.lease.process_id), "stat").read_text().split()

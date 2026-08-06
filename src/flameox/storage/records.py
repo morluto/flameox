@@ -56,11 +56,29 @@ class JsonRecordStore[RecordT: BaseModel]:
         self._write_projection(record)
         return record
 
+    def _any_ancestor_is_symlink(self, path: Path) -> bool:
+        """Check whether any ancestor of path (up to the workspace root) is a symlink."""
+        workspace_root = self.workspace.paths.root
+        for ancestor in path.parents:
+            if ancestor == workspace_root:
+                break
+            if ancestor.is_symlink():
+                return True
+        return False
+
     def read(self, identifier: str) -> RecordT:
-        try:
-            return self.model.model_validate_json(
-                (self._root(identifier) / "record.json").read_text()
+        record_path = self._root(identifier) / "record.json"
+        if (
+            record_path.is_symlink()
+            or record_path.parent.is_symlink()
+            or self._any_ancestor_is_symlink(record_path)
+        ):
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                f"{self.kind} {identifier!r} record path contains a symbolic link.",
             )
+        try:
+            return self.model.model_validate_json(record_path.read_text())
         except (FileNotFoundError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
@@ -71,8 +89,18 @@ class JsonRecordStore[RecordT: BaseModel]:
         root = self.workspace.paths.records / self.kind
         if not root.exists():
             return ()
+        if root.is_symlink() or self._any_ancestor_is_symlink(root):
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                f"{self.kind} records root is a symbolic link.",
+            )
         records: list[RecordT] = []
         for path in sorted(root.glob("*/record.json")):
+            if path.is_symlink() or path.parent.is_symlink() or self._any_ancestor_is_symlink(path):
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                    f"Invalid {self.kind} record at {path}: contains a symbolic link.",
+                )
             try:
                 records.append(self.model.model_validate_json(path.read_text()))
             except ValueError as exc:
@@ -132,7 +160,11 @@ class JsonRecordStore[RecordT: BaseModel]:
         return value
 
     def _revision(self, record: RecordT) -> int:
-        assert self.revision_field is not None
+        if self.revision_field is None:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                "Record revision field is not configured.",
+            )
         value = getattr(record, self.revision_field, None)
         if not isinstance(value, int):
             raise DomainError(ErrorCode.WORKSPACE_INVALID, "Record revision is invalid.")
