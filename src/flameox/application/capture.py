@@ -226,7 +226,15 @@ class _CaptureExecution:
         try:
             self.run = await asyncio.shield(lease_write)
         except asyncio.CancelledError:
-            self.run = await asyncio.shield(lease_write)
+            try:
+                self.run = await asyncio.shield(lease_write)
+            except Exception as lease_error:
+                import logging
+
+                logging.getLogger("flameox.capture").warning(
+                    "Lease write after cancellation raised: %s",
+                    lease_error,
+                )
             raise
 
     async def record_cleanup(self, complete: bool) -> None:
@@ -345,7 +353,11 @@ class CapturePlanRegistry:
                     "Capture plan has already been consumed.",
                 )
             entry.consumed = True
-            return entry.plan
+            plan = entry.plan
+            # Evict immediately after consumption to prevent unbounded
+            # memory growth when capture frequency exceeds TTL expiry.
+            del self._plans[plan_id]
+            return plan
 
     async def inspect(self, plan_id: str) -> CapturePlan:
         async with self._lock:
@@ -729,8 +741,14 @@ class CaptureService:
                         error_code="cancelled",
                     )
                 )
-            finally:
-                raise cancellation
+            except Exception as terminate_error:
+                import logging
+
+                logging.getLogger("flameox.capture").warning(
+                    "Cleanup after cancellation raised: %s",
+                    terminate_error,
+                )
+            raise cancellation
         prepared = initial.model_copy(
             update={
                 "revision": 1,
@@ -812,8 +830,14 @@ class CaptureService:
                         error_code="cancelled",
                     )
                 )
-            finally:
-                raise cancellation
+            except Exception as terminate_error:
+                import logging
+
+                logging.getLogger("flameox.capture").warning(
+                    "Cleanup after cancellation raised: %s",
+                    terminate_error,
+                )
+            raise cancellation
         except DomainError as error:
             status = (
                 ExecutionStatus.TIMED_OUT
@@ -865,11 +889,24 @@ class CaptureService:
                 torch_diagnostics = output_root / "torch-profiler-diagnostics.json"
                 if plan.adapter == "torch.profiler" and torch_diagnostics.is_file():
                     try:
-                        diagnostic_payload = json.loads(
-                            torch_diagnostics.read_text(encoding="utf-8")
-                        )
-                        diagnostic_phase = diagnostic_payload.get("phase")
-                        diagnostic_status = diagnostic_payload.get("status")
+                        # Bound diagnostic read to prevent memory exhaustion.
+                        max_diagnostics_bytes = 1 * 1024 * 1024  # 1 MiB
+                        if torch_diagnostics.stat().st_size > max_diagnostics_bytes:
+                            collector_limitation_details.append(
+                                _limitation(
+                                    "collector",
+                                    "diagnostics_oversized",
+                                    "Torch profiler diagnostics exceed 1 MiB; skipping parse.",
+                                )
+                            )
+                            diagnostic_phase = None
+                            diagnostic_status = None
+                        else:
+                            diagnostic_payload = json.loads(
+                                torch_diagnostics.read_text(encoding="utf-8")
+                            )
+                            diagnostic_phase = diagnostic_payload.get("phase")
+                            diagnostic_status = diagnostic_payload.get("status")
                         if diagnostic_status == "failed" and isinstance(diagnostic_phase, str):
                             collector_limitation_details.append(
                                 _limitation(
@@ -1170,9 +1207,25 @@ class CaptureService:
             torch_diagnostics = output_root / "torch-profiler-diagnostics.json"
             if plan.adapter == "torch.profiler" and torch_diagnostics.is_file():
                 try:
-                    diagnostic_payload = json.loads(torch_diagnostics.read_text(encoding="utf-8"))
-                    diagnostic_phase = diagnostic_payload.get("phase")
-                    diagnostic_status = diagnostic_payload.get("status")
+                    # Bound diagnostic read to prevent memory exhaustion from
+                    # a malicious or corrupted multi-gigabyte diagnostics file.
+                    max_diagnostics_bytes = 1 * 1024 * 1024  # 1 MiB
+                    if torch_diagnostics.stat().st_size > max_diagnostics_bytes:
+                        collector_limitation_details.append(
+                            _limitation(
+                                "collector",
+                                "diagnostics_oversized",
+                                "Torch profiler diagnostics exceed 1 MiB; skipping parse.",
+                            )
+                        )
+                        diagnostic_phase = None
+                        diagnostic_status = None
+                    else:
+                        diagnostic_payload = json.loads(
+                            torch_diagnostics.read_text(encoding="utf-8")
+                        )
+                        diagnostic_phase = diagnostic_payload.get("phase")
+                        diagnostic_status = diagnostic_payload.get("status")
                 except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                     diagnostic_phase = None
                     diagnostic_status = None
@@ -1359,8 +1412,14 @@ class CaptureService:
                         error_code="cancelled",
                     )
                 )
-            finally:
-                raise cancellation
+            except Exception as terminate_error:
+                import logging
+
+                logging.getLogger("flameox.capture").warning(
+                    "Cleanup after cancellation raised: %s",
+                    terminate_error,
+                )
+            raise cancellation
         except DomainError as error:
             quarantined = await run_atomic_thread(
                 lambda: self._quarantine_native_output(
@@ -1536,15 +1595,23 @@ class CaptureService:
                 )
             )
         except asyncio.CancelledError as cancellation:
-            await asyncio.shield(
-                capture.terminate(
-                    execution=ExecutionStatus.CANCELLED,
-                    message="Capture cancelled during atomic evidence publication.",
-                    phase="capture cancelled during evidence publication",
-                    error_code="cancelled",
-                    cleanup_complete=True,
+            try:
+                await asyncio.shield(
+                    capture.terminate(
+                        execution=ExecutionStatus.CANCELLED,
+                        message="Capture cancelled during atomic evidence publication.",
+                        phase="capture cancelled during evidence publication",
+                        error_code="cancelled",
+                        cleanup_complete=True,
+                    )
                 )
-            )
+            except Exception as terminate_error:
+                import logging
+
+                logging.getLogger("flameox.capture").warning(
+                    "Cleanup after cancellation raised: %s",
+                    terminate_error,
+                )
             raise cancellation
         except Exception as error:
             message = (
