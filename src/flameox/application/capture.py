@@ -2612,13 +2612,38 @@ class CaptureService:
             # starts at field 3.
             stat_fd = os.open(str(stat_path), os.O_RDONLY)
             try:
-                stat_raw = os.read(stat_fd, 8192)
+                # os.read may return fewer bytes than requested; loop to
+                # collect the full line (well under 8 KiB for valid stat).
+                chunks: list[bytes] = []
+                while True:
+                    chunk = os.read(stat_fd, 8192)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    if len(chunk) < 8192:
+                        break
+                stat_raw = b"".join(chunks)
             finally:
                 os.close(stat_fd)
             stat_text = stat_raw.decode("utf-8", errors="replace")
-            comm_end = stat_text.rindex(")")
+            # Find the first "(" to locate the start of comm, then the
+            # last ")" that closes it. The last ")" is always the comm
+            # delimiter because the kernel escapes any ")" inside comm
+            # to "?". Using index(")", start) would be wrong if comm
+            # somehow contained an unescaped ")".
+            try:
+                comm_start = stat_text.index("(")
+            except ValueError as exc:
+                raise ValueError("Missing '(' in /proc stat line") from exc
+            try:
+                comm_end = stat_text.rindex(")")
+            except ValueError as exc:
+                raise ValueError("Missing ')' in /proc stat line") from exc
+            if comm_end < comm_start:
+                raise ValueError("Malformed /proc stat line: ')' before '('")
             stat_fields = stat_text[comm_end + 1 :].split()
-
+            if len(stat_fields) < 20:
+                raise IndexError(f"Insufficient fields after comm: {len(stat_fields)}")
             process_start_identity = stat_fields[19]
         except FileNotFoundError:
             return None

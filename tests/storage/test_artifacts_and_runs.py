@@ -360,3 +360,53 @@ def test_run_revisions_use_compare_and_swap(tmp_path: Path) -> None:
     assert store.read("run") == completed
     revisions = list((workspace.paths.runs / "run" / "revisions").glob("*.json"))
     assert len(revisions) == 2
+
+
+def test_artifact_get_rejects_race_symlink_swap(tmp_path: Path) -> None:
+    """Regression: O_NOFOLLOW must block a symlink swapped in after the
+    is_symlink() check but before open()."""
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"evidence")
+    store = ArtifactStore(workspace)
+    stored = store.import_path(source, allowed_roots=(tmp_path,), max_bytes=100)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+    # Replace the payload with a symlink *after* it was imported.
+    stored.payload_path.unlink()
+    stored.payload_path.symlink_to(outside)
+
+    with pytest.raises(DomainError) as error:
+        store.get(stored.content.artifact_id)
+
+    assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+
+
+def test_record_store_rejects_dotdot_identifier(tmp_path: Path) -> None:
+    """Regression: JsonRecordStore._root must reject '..' to prevent
+    directory traversal outside the records directory."""
+    from flameox.domain.models import RunManifest
+    from flameox.storage.records import JsonRecordStore
+
+    workspace = Workspace.initialize(tmp_path)
+    store = JsonRecordStore(workspace, kind="test", model=RunManifest, id_field="run_id")
+
+    with pytest.raises(DomainError) as error:
+        store.read("..")
+
+    assert error.value.code is ErrorCode.WORKSPACE_INVALID
+
+
+def test_record_store_rejects_dot_prefix_identifier(tmp_path: Path) -> None:
+    """Regression: JsonRecordStore._root must reject dot-prefixed names
+    to prevent hidden-file traversal and .dotfile access."""
+    from flameox.domain.models import RunManifest
+    from flameox.storage.records import JsonRecordStore
+
+    workspace = Workspace.initialize(tmp_path)
+    store = JsonRecordStore(workspace, kind="test", model=RunManifest, id_field="run_id")
+
+    with pytest.raises(DomainError) as error:
+        store.read(".hidden")
+
+    assert error.value.code is ErrorCode.WORKSPACE_INVALID

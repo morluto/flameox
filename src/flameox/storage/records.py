@@ -44,12 +44,13 @@ class JsonRecordStore[RecordT: BaseModel]:
         """
         identifier = self._identifier(record)
         root = self._root(identifier)
-        if root.exists():
+        try:
+            root.mkdir(parents=True)
+        except FileExistsError:
             raise DomainError(
                 ErrorCode.REVISION_CONFLICT,
                 f"{self.kind} {identifier!r} already exists.",
-            )
-        root.mkdir(parents=True)
+            ) from None
         if self.revision_field is not None:
             (root / "revisions").mkdir()
             self._write_revision(record)
@@ -149,7 +150,14 @@ class JsonRecordStore[RecordT: BaseModel]:
         return record
 
     def _root(self, identifier: str) -> Path:
-        if not identifier or "/" in identifier or "\\" in identifier or "\x00" in identifier:
+        if (
+            not identifier
+            or "/" in identifier
+            or "\\" in identifier
+            or "\x00" in identifier
+            or identifier == ".."
+            or identifier.startswith(".")
+        ):
             raise DomainError(ErrorCode.WORKSPACE_INVALID, "Invalid record identifier.")
         return self.workspace.paths.records / self.kind / identifier
 
