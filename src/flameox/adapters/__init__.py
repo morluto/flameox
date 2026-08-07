@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from flameox.adapters.benchmark_samples import *  # noqa: F403
     from flameox.adapters.client_setup import *  # noqa: F403
     from flameox.adapters.coverage import *  # noqa: F403
+    from flameox.adapters.inference import *  # noqa: F403
     from flameox.adapters.memray import *  # noqa: F403
     from flameox.adapters.nsight_systems import *  # noqa: F403
     from flameox.adapters.observations import *  # noqa: F403
@@ -26,6 +27,7 @@ _MODULES = (
     "benchmark_samples",
     "client_setup",
     "coverage",
+    "inference",
     "memray",
     "nsight_systems",
     "observations",
@@ -41,6 +43,9 @@ _MODULES = (
 
 __all__ = [
     "ALL_SETUP_CLIENTS",
+    "AIPerfCorrelationSummary",
+    "AIPerfInputsIndex",
+    "AIPerfRecordParser",
     "AdapterApproval",
     "AdapterDescriptor",
     "AdapterDiscoveryResult",
@@ -53,10 +58,15 @@ __all__ = [
     "ClientPlanAction",
     "CoverageExtractionResult",
     "CoverageExtractor",
+    "InferenceArtifactExtractor",
+    "InferenceExtractionResult",
     "Launcher",
     "ManagedRuntime",
     "MemrayExtractionResult",
     "MemrayExtractor",
+    "MooncakeRequestRow",
+    "MooncakeTraceParser",
+    "MooncakeTraceSummary",
     "NsightSystemsExtractionResult",
     "NsightSystemsExtractor",
     "ObservationExtractionResult",
@@ -80,6 +90,10 @@ __all__ = [
     "TraceEvent",
     "TraceProcessorInstallation",
     "TraceWindowResult",
+    "VllmAggregateMetrics",
+    "VllmMeasurementRow",
+    "VllmResultDocument",
+    "VllmResultParser",
     "install_trace_processor",
 ]
 

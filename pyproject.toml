@@ -12,6 +12,7 @@ requires-python = ">=3.12"
 dependencies = [
     "anyio>=4.9,<5",
     "duckdb>=1.5.4,<1.6",
+    "ijson>=3.4,<4",
     "mcp==2.0.0",
     "mcp-types==2.0.0",
     "numpy>=2.2,<3",
@@ -28,7 +29,7 @@ dependencies = [
     "tomli-w>=1.2,<2",
     "tomlkit>=0.13,<1",
     "typer>=0.16,<1",
-    "psutil>=7.2,<8",
+    "psutil>=7.0,<8",
 ]
 
 [project.urls]
@@ -41,11 +42,13 @@ python = ["pyperf>=2.9"]
 memory = ["memray>=1.17"]
 torch = ["torch>=2.7"]
 execution = ["coverage>=7.14,<8"]
+inference = ["aiperf>=0.12,<0.13"]
 test = ["pytest>=8.3", "pytest-xdist>=3.6"]
 trace = ["perfetto>=0.57,<0.58", "opentelemetry-proto>=1.44,<1.45", "protobuf>=5,<7"]
 cpu = ["py-spy>=0.4.2,<0.5"]
 all = [
     "coverage>=7.14,<8",
+    "aiperf>=0.12,<0.13",
     "memray>=1.17",
     "perfetto>=0.57,<0.58",
     "opentelemetry-proto>=1.44,<1.45",
@@ -143,6 +146,8 @@ packages = ["flameox"]
 
 [[tool.mypy.overrides]]
 module = [
+    "ijson",
+    "ijson.*",
     "memray",
     "memray.*",
     "perfetto",

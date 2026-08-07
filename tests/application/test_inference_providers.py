@@ -1,0 +1,149 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from flameox.application.inference_providers import (
+    AIPerfProfileRequest,
+    VllmBenchServeRequest,
+    discover_inference_tool,
+    probe_existing_vllm_server,
+)
+
+
+def test_aiperf_replay_argv_preserves_fixed_original_schedule(tmp_path: Path) -> None:
+    request = AIPerfProfileRequest(
+        executable=Path("/tools/aiperf"),
+        base_url="http://127.0.0.1:8000",
+        model="model",
+        tokenizer="tokenizer",
+        trace_path=tmp_path / "trace.jsonl",
+        output_dir=tmp_path / "output",
+        request_count=None,
+    )
+
+    assert request.argv() == (
+        "/tools/aiperf",
+        "profile",
+        "--url",
+        "http://127.0.0.1:8000",
+        "--model",
+        "model",
+        "--endpoint-type",
+        "chat",
+        "--output-artifact-dir",
+        str(tmp_path / "output"),
+        "--export-level",
+        "records",
+        "--tokenizer",
+        "tokenizer",
+        "--streaming",
+        "--input-file",
+        str(tmp_path / "trace.jsonl"),
+        "--custom-dataset-type",
+        "mooncake_trace",
+        "--fixed-schedule",
+        "--random-seed",
+        "0",
+    )
+
+
+def test_provider_requests_refuse_non_loopback_servers(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="loopback"):
+        VllmBenchServeRequest(
+            executable=Path("/tools/vllm"),
+            base_url="http://example.test:8000",
+            model="model",
+            result_path=tmp_path / "result.json",
+            num_prompts=1,
+        )
+
+
+def test_aiperf_synthetic_argv_bounds_request_count(tmp_path: Path) -> None:
+    request = AIPerfProfileRequest(
+        executable=Path("/tools/aiperf"),
+        base_url="http://127.0.0.1:8000",
+        model="model",
+        trace_path=None,
+        fixed_schedule=False,
+        output_dir=tmp_path / "output",
+        request_count=12,
+    )
+
+    assert request.argv()[request.argv().index("--request-count") + 1] == "12"
+
+
+def test_vllm_bench_argv_requires_structured_result_file(tmp_path: Path) -> None:
+    request = VllmBenchServeRequest(
+        executable=Path("/tools/vllm"),
+        base_url="http://localhost:8000",
+        model="model",
+        result_path=tmp_path / "results.json",
+        num_prompts=5,
+    )
+
+    assert "--save-result" in request.argv()
+    assert "--save-detailed" not in request.argv()
+    assert "results.json" in request.argv()
+    assert request.argv()[request.argv().index("--backend") + 1] == "openai-chat"
+    assert request.argv()[request.argv().index("--endpoint") + 1] == "/v1/chat/completions"
+    assert "--endpoint-type" not in request.argv()
+    assert "--streaming" not in request.argv()
+
+
+def test_vllm_bench_refuses_unsupported_non_streaming_mode(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="non-streaming"):
+        VllmBenchServeRequest(
+            executable=Path("/tools/vllm"),
+            base_url="http://localhost:8000",
+            model="model",
+            result_path=tmp_path / "results.json",
+            num_prompts=5,
+            streaming=False,
+        )
+
+
+def test_existing_server_probe_uses_only_read_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, *_args: object) -> bytes:
+            return json.dumps({"data": [{"id": "model"}]}).encode()
+
+    def fake_urlopen(request: object, *, timeout: float) -> Response:
+        calls.append(request.full_url)  # type: ignore[attr-defined]
+        return Response()
+
+    monkeypatch.setattr("flameox.application.inference_providers.urlopen", fake_urlopen)
+
+    assert probe_existing_vllm_server("http://127.0.0.1:8000").model_ids == ("model",)
+    assert calls == ["http://127.0.0.1:8000/health", "http://127.0.0.1:8000/v1/models"]
+
+
+def test_aiperf_discovery_rejects_unsupported_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "aiperf"
+    executable.write_bytes(b"executable")
+    monkeypatch.setattr(
+        "flameox.application.inference_providers.shutil.which", lambda _tool: str(executable)
+    )
+    monkeypatch.setattr("flameox.application.inference_providers.version", lambda _tool: "0.13.0")
+
+    result = discover_inference_tool("aiperf")
+
+    assert result.available is False
+    assert result.compatible is False
+    assert result.executable_digest is not None
+    assert result.compatibility_reason is not None

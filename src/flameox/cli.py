@@ -13,13 +13,14 @@ from typing import Annotated, Any, Literal, NoReturn, cast
 import anyio
 import typer
 from mcp import Client
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from flameox import __version__, setup_ui
 from flameox.adapters import (
     AdapterRegistry,
     BenchmarkSamplesExtractor,
     CoverageExtractor,
+    InferenceArtifactExtractor,
     MemrayExtractor,
     NsightSystemsExtractor,
     ObservationExtractor,
@@ -38,6 +39,8 @@ from flameox.application import (
     CompactionService,
     CompareRunSetsRequest,
     ComparisonService,
+    ConfigureInferenceScenarioRequest,
+    ConfigureInferenceServerRequest,
     CreateInvestigationRequest,
     DrilldownService,
     EvidenceLookupService,
@@ -52,6 +55,10 @@ from flameox.application import (
     GarbageCollector,
     ImportArtifactRequest,
     ImportService,
+    InferenceProfilingService,
+    InferenceReplayService,
+    InferenceScenarioConfig,
+    InferenceServerConfig,
     IntegrityService,
     InvestigationService,
     LifecycleEvidenceService,
@@ -64,6 +71,8 @@ from flameox.application import (
     RecoveryService,
     RepairPlan,
     RepairService,
+    RunDiscoveryService,
+    RunFilter,
     RunSetService,
     SetupOperation,
     SetupService,
@@ -97,6 +106,7 @@ measurements_app = typer.Typer(help="Run bounded curated measurement queries.")
 evidence_app = typer.Typer(help="Retrieve one typed immutable evidence reference.")
 experiment_app = typer.Typer(help="Plan, run, and inspect controlled experiments.")
 fault_app = typer.Typer(help="Plan, run, and inspect loopback Toxiproxy fault experiments.")
+inference_app = typer.Typer(help="Configure, plan, and run local inference scenarios.")
 stacks_app = typer.Typer(help="Inspect bounded call relationships and stacks.")
 trace_app = typer.Typer(help="Inspect bounded temporal trace windows.")
 adapters_app = typer.Typer(help="Discover and approve third-party adapter entry points.")
@@ -117,6 +127,7 @@ app.add_typer(measurements_app, name="measurements")
 app.add_typer(evidence_app, name="evidence")
 app.add_typer(experiment_app, name="experiment")
 app.add_typer(fault_app, name="fault")
+app.add_typer(inference_app, name="inference")
 app.add_typer(stacks_app, name="stacks")
 app.add_typer(trace_app, name="trace")
 app.add_typer(adapters_app, name="adapters")
@@ -270,11 +281,31 @@ def _request[RequestT: BaseModel](model: type[RequestT], value: str) -> RequestT
         raise typer.BadParameter(f"Structured input is invalid: {exc}") from exc
 
 
-def _fail(error: DomainError) -> NoReturn:
-    typer.echo(f"{error.code.value}: {_terminal_text(error.message)}", err=True)
-    for remediation in error.remediation:
-        typer.echo(f"  {_terminal_text(remediation)}", err=True)
+def _fail(error: DomainError, *, as_json: bool = False) -> NoReturn:
+    if as_json or _cli_defaults().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "ok": False,
+                    "result": None,
+                    "error": error.to_detail(),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        typer.echo(f"{error.code.value}: {_terminal_text(error.message)}", err=True)
+        if error.run_id is not None:
+            typer.echo(f"  run_id: {_terminal_text(error.run_id)}", err=True)
+        for key in ("partial_artifact_ids", "partial_artifact_run_ids"):
+            if key in error.details:
+                typer.echo(f"  {key}: {_terminal_text(error.details[key])}", err=True)
+        for remediation in error.remediation:
+            typer.echo(f"  {_terminal_text(remediation)}", err=True)
     exit_codes = {
+        ErrorCode.INVALID_ARGUMENTS: 2,
         ErrorCode.WORKSPACE_NOT_FOUND: 2,
         ErrorCode.WORKSPACE_INVALID: 5,
         ErrorCode.RUN_NOT_FOUND: 1,
@@ -299,6 +330,23 @@ def _fail(error: DomainError) -> NoReturn:
     raise typer.Exit(exit_codes.get(error.code, 1))
 
 
+def _validation_error(error: ValidationError) -> DomainError:
+    fields = [
+        {
+            "field": ".".join(str(part) for part in item["loc"]),
+            "message": item["msg"],
+            "type": item["type"],
+        }
+        for item in error.errors()
+    ]
+    return DomainError(
+        ErrorCode.INVALID_ARGUMENTS,
+        "Inference configuration input is invalid.",
+        details={"validation_errors": fields},
+        remediation=("Correct the reported fields and retry the same configuration command.",),
+    )
+
+
 @app.command("init")
 def initialize(
     project_root: Annotated[
@@ -316,7 +364,7 @@ def initialize(
         )
         result = workspace_status(initialized)
     except DomainError as error:
-        _fail(error)
+        _fail(error, as_json=json_output)
     _emit(result, as_json=json_output)
 
 
@@ -520,7 +568,7 @@ def status(
     try:
         result = workspace_status(_workspace(workspace))
     except DomainError as error:
-        _fail(error)
+        _fail(error, as_json=json_output)
     _emit(result, as_json=json_output)
 
 
@@ -572,7 +620,7 @@ def adapters_list(
     try:
         result = AdapterRegistry(_workspace(workspace)).discover()
     except DomainError as error:
-        _fail(error)
+        _fail(error, as_json=json_output)
     _emit(result, as_json=json_output)
 
 
@@ -586,7 +634,7 @@ def adapters_approve(
     try:
         result = AdapterRegistry(_workspace(workspace)).approve(distribution)
     except DomainError as error:
-        _fail(error)
+        _fail(error, as_json=json_output)
     _emit(result, as_json=json_output)
 
 
@@ -600,7 +648,7 @@ def adapters_revoke(
     try:
         result = AdapterRegistry(_workspace(workspace)).revoke(distribution)
     except DomainError as error:
-        _fail(error)
+        _fail(error, as_json=json_output)
     _emit(result, as_json=json_output)
 
 
@@ -757,6 +805,8 @@ def import_artifact(
         Sensitivity,
         typer.Option("--sensitivity", case_sensitive=False),
     ] = Sensitivity.INTERNAL,
+    producer: Annotated[str | None, typer.Option("--producer")] = None,
+    producer_version: Annotated[str | None, typer.Option("--producer-version")] = None,
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
@@ -768,6 +818,8 @@ def import_artifact(
                 kind=kind,
                 media_type=media_type,
                 sensitivity=sensitivity,
+                producer=producer,
+                producer_version=producer_version,
                 allow_external_path=True,
             )
         )
@@ -864,6 +916,241 @@ def workload_run(
         result = _run_async(run)
     except DomainError as error:
         _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@inference_app.command("list")
+def inference_list(
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """List declared inference servers and replay scenarios."""
+    try:
+        result = WorkloadService(_workspace(workspace)).list_inference()
+    except DomainError as error:
+        _fail(error, as_json=json_output)
+    _emit(result, as_json=json_output)
+
+
+@inference_app.command("configure-server")
+def inference_configure_server(
+    name: str,
+    mode: Literal["managed", "existing_local"],
+    model: str,
+    operation: Literal["create", "replace"] = "create",
+    workload: Annotated[str | None, typer.Option("--workload")] = None,
+    base_url: Annotated[str, typer.Option("--base-url")] = "http://127.0.0.1:8000",
+    model_revision: Annotated[str | None, typer.Option("--model-revision")] = None,
+    tokenizer: Annotated[str | None, typer.Option("--tokenizer")] = None,
+    tokenizer_revision: Annotated[str | None, typer.Option("--tokenizer-revision")] = None,
+    quantization: Annotated[str | None, typer.Option("--quantization")] = None,
+    expected_configuration_id: Annotated[
+        str | None, typer.Option("--expected-configuration-id")
+    ] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Create or replace a typed vLLM server declaration."""
+    try:
+        result = WorkloadService(_workspace(workspace)).configure_inference_server(
+            ConfigureInferenceServerRequest(
+                name=name,
+                operation=operation,
+                expected_configuration_id=expected_configuration_id,
+                config=InferenceServerConfig(
+                    mode=mode,
+                    workload=workload,
+                    base_url=base_url,
+                    model=model,
+                    model_revision=model_revision,
+                    tokenizer=tokenizer,
+                    tokenizer_revision=tokenizer_revision,
+                    quantization=quantization,
+                ),
+            )
+        )
+    except ValidationError as error:
+        _fail(_validation_error(error), as_json=json_output)
+    except DomainError as error:
+        _fail(error, as_json=json_output)
+    _emit(result, as_json=json_output)
+
+
+@inference_app.command("configure-scenario")
+def inference_configure_scenario(
+    name: str,
+    server: str,
+    provider: Literal["aiperf", "vllm_bench"],
+    operation: Literal["create", "replace"] = "create",
+    endpoint_type: Literal["chat", "completions"] = "chat",
+    streaming: bool = True,
+    trace_artifact_id: Annotated[str | None, typer.Option("--trace-artifact-id")] = None,
+    num_prompts: Annotated[int, typer.Option("--num-prompts", min=1)] = 1,
+    concurrency: Annotated[int | None, typer.Option("--concurrency", min=1)] = None,
+    request_rate: Annotated[float | None, typer.Option("--request-rate", min=0.001)] = None,
+    burstiness: Annotated[float | None, typer.Option("--burstiness", min=0.001)] = None,
+    warmup_request_count: Annotated[int, typer.Option("--warmup-request-count", min=0)] = 0,
+    seed: Annotated[int, typer.Option("--seed", min=0)] = 0,
+    speedup_ratio: Annotated[float, typer.Option("--speedup-ratio", min=0.001)] = 1.0,
+    semantic_oracle_workload: Annotated[
+        str | None, typer.Option("--semantic-oracle-workload")
+    ] = None,
+    expected_configuration_id: Annotated[
+        str | None, typer.Option("--expected-configuration-id")
+    ] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Create or replace a typed inference scenario declaration."""
+    try:
+        result = WorkloadService(_workspace(workspace)).configure_inference_scenario(
+            ConfigureInferenceScenarioRequest(
+                name=name,
+                operation=operation,
+                expected_configuration_id=expected_configuration_id,
+                config=InferenceScenarioConfig(
+                    server=server,
+                    provider=provider,
+                    endpoint_type=endpoint_type,
+                    streaming=streaming,
+                    trace_artifact_id=trace_artifact_id,
+                    num_prompts=num_prompts,
+                    concurrency=concurrency,
+                    request_rate=request_rate,
+                    burstiness=burstiness,
+                    warmup_request_count=warmup_request_count,
+                    seed=seed,
+                    speedup_ratio=speedup_ratio,
+                    semantic_oracle_workload=semantic_oracle_workload,
+                ),
+            )
+        )
+    except ValidationError as error:
+        _fail(_validation_error(error), as_json=json_output)
+    except DomainError as error:
+        _fail(error, as_json=json_output)
+    _emit(result, as_json=json_output)
+
+
+@inference_app.command("plan")
+def inference_plan(
+    name: Annotated[str, typer.Argument(help="Declared inference scenario name.")],
+    timeout_seconds: Annotated[float | None, typer.Option("--timeout")] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Probe a local server and construct a replay command without executing it."""
+    try:
+        result = InferenceReplayService(_workspace(workspace)).plan(
+            name, timeout_seconds=timeout_seconds
+        )
+    except DomainError as error:
+        _fail(error, as_json=json_output)
+    _emit(result, as_json=json_output)
+
+
+@inference_app.command("run")
+def inference_run(
+    name: Annotated[str, typer.Argument(help="Declared inference scenario name.")],
+    timeout_seconds: Annotated[float | None, typer.Option("--timeout")] = None,
+    expected_plan_id: Annotated[str | None, typer.Option("--expected-plan-id")] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Run one planned replay through the bounded subprocess broker."""
+
+    async def run() -> BaseModel:
+        service = InferenceReplayService(_workspace(workspace))
+        return await service.run(
+            service.plan(
+                name,
+                timeout_seconds=timeout_seconds,
+                expected_plan_id=expected_plan_id,
+            )
+        )
+
+    try:
+        result = _run_async(run)
+    except DomainError as error:
+        _fail(error, as_json=json_output)
+    _emit(result, as_json=json_output)
+
+
+@inference_app.command("requests")
+def inference_requests(
+    run_id: Annotated[str, typer.Argument(help="Run with published inference requests.")],
+    limit: Annotated[int | None, typer.Option("--limit", min=1)] = None,
+    cursor: Annotated[str | None, typer.Option("--cursor")] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Page through bounded prompt-free inference request evidence."""
+    try:
+        result = EvidenceQueryService(_workspace(workspace)).inference_requests(
+            run_id=run_id, limit=limit, cursor=cursor
+        )
+    except DomainError as error:
+        _fail(error, as_json=json_output)
+    _emit(result, as_json=json_output)
+
+
+@inference_app.command("profile-plan")
+def inference_profile_plan(
+    server: Annotated[str, typer.Argument(help="Managed inference server name.")],
+    profiler: Annotated[Literal["torch_profiler", "nsight_systems"], typer.Option("--profiler")],
+    nsys_executable: Annotated[Path | None, typer.Option("--nsys-executable")] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Build a diagnostic-only managed vLLM profiling plan."""
+    try:
+        result = InferenceProfilingService(_workspace(workspace)).plan(
+            server, profiler=profiler, nsys_executable=nsys_executable
+        )
+    except DomainError as error:
+        _fail(error, as_json=json_output)
+    _emit(result, as_json=json_output)
+
+
+@inference_app.command("profile-run")
+def inference_profile_run(
+    server: Annotated[str, typer.Argument(help="Managed inference server name.")],
+    scenario: Annotated[str, typer.Argument(help="Declared inference scenario name.")],
+    profiler: Annotated[Literal["torch_profiler", "nsight_systems"], typer.Option("--profiler")],
+    measurement_run_id: Annotated[
+        str,
+        typer.Option(
+            "--measurement-run-id",
+            help="Successful compatible unprofiled inference run to link.",
+        ),
+    ],
+    timeout_seconds: Annotated[float, typer.Option("--timeout", min=1)] = 300,
+    nsys_executable: Annotated[Path | None, typer.Option("--nsys-executable")] = None,
+    expected_plan_id: Annotated[str | None, typer.Option("--expected-plan-id")] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Run one diagnostic profile window linked to a declared scenario."""
+
+    async def run() -> BaseModel:
+        service = InferenceProfilingService(_workspace(workspace))
+        plan = service.plan(
+            server,
+            profiler=profiler,
+            nsys_executable=nsys_executable,
+            expected_plan_id=expected_plan_id,
+        )
+        return await service.capture(
+            plan,
+            scenario_name=scenario,
+            measurement_run_id=measurement_run_id,
+            timeout_seconds=timeout_seconds,
+        )
+
+    try:
+        result = _run_async(run)
+    except DomainError as error:
+        _fail(error, as_json=json_output)
     _emit(result, as_json=json_output)
 
 
@@ -1218,28 +1505,7 @@ def runs_list(
 ) -> None:
     """List runs from one pinned corpus snapshot."""
     try:
-        catalog = Catalog(_workspace(workspace))
-        with catalog.open_snapshot() as snapshot:
-            rows = snapshot.execute(
-                "SELECT run_id, created_at, run_type, capture_status "
-                "FROM runs ORDER BY created_at DESC, run_id LIMIT ?",
-                (limit,),
-            ).fetchall()
-            result = {
-                "schema_version": 1,
-                "corpus_commit_id": snapshot.commit.commit_id,
-                "runs": [
-                    {
-                        "run_id": row[0],
-                        "created_at": row[1].isoformat(),
-                        "run_type": row[2],
-                        "capture_status": row[3],
-                    }
-                    for row in rows
-                ],
-                "returned": len(rows),
-                "limit": limit,
-            }
+        result = RunDiscoveryService(_workspace(workspace)).list(filter=RunFilter(), limit=limit)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -1949,6 +2215,43 @@ def extract_benchmark_samples(
         result = BenchmarkSamplesExtractor(_workspace(workspace)).extract(run_id)
     except DomainError as error:
         _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@extract_app.command("inference-trace")
+def extract_inference_trace(
+    run_id: Annotated[str, typer.Argument(help="Import run containing Mooncake JSONL.")],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Extract bounded prompt-free request schedule evidence."""
+    try:
+        result = InferenceArtifactExtractor(_workspace(workspace)).extract_trace(run_id)
+    except DomainError as error:
+        _fail(error, as_json=json_output)
+    _emit(result, as_json=json_output)
+
+
+@extract_app.command("inference-result")
+def extract_inference_result(
+    run_id: Annotated[str, typer.Argument(help="Import run containing provider result data.")],
+    provider: Annotated[
+        Literal["aiperf", "vllm_bench"],
+        typer.Option("--provider", help="Maintained provider artifact schema."),
+    ],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Extract prompt-free AIPerf request rows or vLLM aggregate measurements."""
+    try:
+        extractor = InferenceArtifactExtractor(_workspace(workspace))
+        result = (
+            extractor.extract_aiperf_result(run_id)
+            if provider == "aiperf"
+            else extractor.extract_vllm_result(run_id)
+        )
+    except DomainError as error:
+        _fail(error, as_json=json_output)
     _emit(result, as_json=json_output)
 
 

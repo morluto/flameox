@@ -392,6 +392,42 @@ paths = ["tests/application/test_workloads.py"]
 markers = ["integration"]
 
 [[ownership]]
+owner = "inference-providers"
+lane = "application"
+paths = ["tests/application/test_inference_providers.py"]
+markers = ["unit"]
+
+[[ownership]]
+owner = "inference-replay"
+lane = "application"
+paths = ["tests/application/test_inference.py"]
+markers = ["unit"]
+
+[[ownership]]
+owner = "inference-comparison"
+lane = "application"
+paths = ["tests/application/test_inference_comparison.py"]
+markers = ["unit"]
+
+[[ownership]]
+owner = "inference-profiling"
+lane = "application"
+paths = ["tests/application/test_inference_profiling.py"]
+markers = ["unit"]
+
+[[ownership]]
+owner = "inference-configuration"
+lane = "application"
+paths = ["tests/application/test_inference_configuration.py"]
+markers = ["unit"]
+
+[[ownership]]
+owner = "inference-artifacts"
+lane = "adapters"
+paths = ["tests/adapters/test_inference_artifacts.py"]
+markers = ["unit"]
+
+[[ownership]]
 owner = "capture-environment"
 lane = "application"
 paths = ["tests/application/test_capture_environment.py"]
@@ -571,6 +607,12 @@ owner = "recipe-invariants"
 lane = "analysis"
 paths = ["tests/analysis/test_recipe_invariants.py"]
 markers = ["integration"]
+
+[[ownership]]
+owner = "inference-protocol"
+lane = "analysis"
+paths = ["tests/analysis/test_inference_protocol.py"]
+markers = ["unit"]
 
 [[ownership]]
 owner = "cli-process-setup"

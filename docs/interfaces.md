@@ -146,6 +146,26 @@ execution unless `--json` is used, in which case the plan is part of the result.
 Both commands require a named workload and reject `argv`, `cwd`, and trailing
 `-- <argv...>` arguments. Every import creates a new import run.
 
+### Inference commands
+
+```text
+flameox inference list
+flameox inference configure-server <name> <managed|existing_local> <model> [options]
+flameox inference configure-scenario <name> <server> <aiperf|vllm_bench> [options]
+flameox inference plan <scenario> [--timeout SECONDS]
+flameox inference run <scenario> [--timeout SECONDS] [--expected-plan-id DIGEST]
+flameox inference profile-plan <server> --profiler <torch_profiler|nsight_systems>
+flameox inference profile-run <server> <scenario> --profiler <torch_profiler|nsight_systems> \
+  --measurement-run-id <unprofiled-run-id> [--expected-plan-id DIGEST]
+flameox inference requests <run-id> [--limit N] [--cursor CURSOR]
+flameox extract inference-trace <run-id>
+flameox extract inference-result <run-id> --provider <aiperf|vllm_bench>
+```
+
+The MCP surface provides matching structured configuration, list, plan, run, extraction, and
+bounded request-pagination tools. See [Inference replay and profiling](inference.md) for the
+evidence and safety boundaries.
+
 ### Workload commands
 
 ```text

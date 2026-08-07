@@ -26,6 +26,9 @@ if TYPE_CHECKING:
     from flameox.application.faults import *  # noqa: F403
     from flameox.application.gc import *  # noqa: F403
     from flameox.application.imports import *  # noqa: F403
+    from flameox.application.inference import *  # noqa: F403
+    from flameox.application.inference_profiling import *  # noqa: F403
+    from flameox.application.inference_providers import *  # noqa: F403
     from flameox.application.integrity import *  # noqa: F403
     from flameox.application.lifecycle import *  # noqa: F403
     from flameox.application.native_reducer import *  # noqa: F403
@@ -63,10 +66,13 @@ _MODULES = (
     "faults",
     "gc",
     "imports",
+    "inference",
+    "inference_profiling",
     "lifecycle",
     "native_reducer",
     "otlp",
     "integrity",
+    "inference_providers",
     "operations",
     "pipelines",
     "preflight",
@@ -84,6 +90,7 @@ _MODULES = (
 
 
 __all__ = [
+    "AIPerfProfileRequest",
     "AdapterOption",
     "AdapterPreparationResult",
     "AnalysisMaterializationService",
@@ -109,6 +116,8 @@ __all__ = [
     "CompareRunSetsRequest",
     "ComparisonResult",
     "ComparisonService",
+    "ConfigureInferenceScenarioRequest",
+    "ConfigureInferenceServerRequest",
     "ConfigureWorkloadRequest",
     "CreateInvestigationRequest",
     "DeclaredWorkflowDetail",
@@ -131,6 +140,7 @@ __all__ = [
     "EvidenceSummaryService",
     "ExecutionIdentityService",
     "ExecutionPolicy",
+    "ExistingServerProbe",
     "ExperimentBlock",
     "ExperimentCell",
     "ExperimentConfig",
@@ -158,6 +168,19 @@ __all__ = [
     "ImportArtifactRequest",
     "ImportResult",
     "ImportService",
+    "InferenceConfigurationList",
+    "InferenceConfigurationResult",
+    "InferenceProfilingPlan",
+    "InferenceProfilingResult",
+    "InferenceProfilingService",
+    "InferenceReplayPlan",
+    "InferenceReplayResult",
+    "InferenceReplayService",
+    "InferenceRequestItem",
+    "InferenceRequestQueryResult",
+    "InferenceScenarioConfig",
+    "InferenceServerConfig",
+    "InferenceToolDiscovery",
     "IntegrityIssue",
     "IntegrityResult",
     "IntegrityService",
@@ -245,6 +268,8 @@ __all__ = [
     "SummaryRun",
     "TimeoutFault",
     "TrashManifest",
+    "VllmBenchServeRequest",
+    "VllmProfilerControlClient",
     "WorkloadConfig",
     "WorkloadConfigurationResult",
     "WorkloadConfigurationStatus",
@@ -256,6 +281,8 @@ __all__ = [
     "WorkloadRequirementsConfig",
     "WorkloadService",
     "WorkspaceStatus",
+    "discover_inference_tool",
+    "probe_existing_vllm_server",
     "render_evidence_summary_markdown",
     "workspace_status",
 ]

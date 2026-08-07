@@ -63,6 +63,155 @@ async def test_shell_metacharacters_remain_literal_arguments(tmp_path: Path) -> 
 
 
 @pytest.mark.anyio
+async def test_managed_inference_lease_uses_absolute_readiness_deadline(
+    tmp_path: Path,
+) -> None:
+    ready_calls = 0
+
+    async def readiness() -> bool:
+        nonlocal ready_calls
+        ready_calls += 1
+        return ready_calls >= 2
+
+    lease = await SubprocessBroker().start_inference_server(
+        request(tmp_path, "-c", "import time; time.sleep(60)", timeout_seconds=60),
+        host="127.0.0.1",
+        port=8123,
+        readiness=readiness,
+        absolute_deadline=time.monotonic() + 2,
+    )
+    outcome = await lease.close()
+
+    assert ready_calls == 2
+    assert outcome.process.cleanup_complete is True
+    assert outcome.process.wall_time_ns is not None
+
+
+@pytest.mark.anyio
+async def test_managed_inference_lease_refuses_expired_deadline(tmp_path: Path) -> None:
+    async def readiness() -> bool:
+        return True
+
+    with pytest.raises(DomainError) as caught:
+        await SubprocessBroker().start_inference_server(
+            request(tmp_path, "-c", "pass"),
+            host="127.0.0.1",
+            port=8123,
+            readiness=readiness,
+            absolute_deadline=time.monotonic() - 1,
+        )
+
+    assert caught.value.code is ErrorCode.PROCESS_TIMEOUT
+
+
+@pytest.mark.anyio
+async def test_managed_inference_lease_refuses_an_endpoint_occupied_before_spawn(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "spawned"
+    listener = await asyncio.start_server(lambda _reader, _writer: None, "127.0.0.1", 0)
+    socket_address = listener.sockets[0].getsockname()
+    port = int(socket_address[1])
+    try:
+        with pytest.raises(DomainError) as caught:
+            await SubprocessBroker().start_inference_server(
+                request(
+                    tmp_path,
+                    "-c",
+                    "from pathlib import Path; import time; "
+                    f"Path({str(marker)!r}).write_text('spawned'); time.sleep(60)",
+                    timeout_seconds=60,
+                ),
+                host="127.0.0.1",
+                port=port,
+                readiness=lambda: asyncio.sleep(0, result=True),
+                absolute_deadline=time.monotonic() + 2,
+            )
+    finally:
+        listener.close()
+        await listener.wait_closed()
+
+    assert caught.value.code is ErrorCode.EXECUTION_REFUSED
+    assert not marker.exists()
+
+
+@pytest.mark.anyio
+async def test_managed_inference_lease_rechecks_child_after_readiness(tmp_path: Path) -> None:
+    async def readiness() -> bool:
+        await asyncio.sleep(0.1)
+        return True
+
+    with pytest.raises(DomainError) as caught:
+        await SubprocessBroker().start_inference_server(
+            request(tmp_path, "-c", "import time; time.sleep(0.02)", timeout_seconds=60),
+            host="127.0.0.1",
+            port=8123,
+            readiness=readiness,
+            absolute_deadline=time.monotonic() + 2,
+        )
+
+    assert caught.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
+
+
+@pytest.mark.anyio
+async def test_managed_inference_readiness_callback_cannot_extend_deadline(
+    tmp_path: Path,
+) -> None:
+    pid_path = tmp_path / "managed.pid"
+
+    async def readiness() -> bool:
+        while not pid_path.exists():
+            await asyncio.sleep(0.005)
+        await asyncio.Event().wait()
+        return True
+
+    started = time.monotonic()
+    with pytest.raises(DomainError) as caught:
+        await SubprocessBroker().start_inference_server(
+            request(
+                tmp_path,
+                "-c",
+                "from pathlib import Path; import os, time; "
+                f"Path({str(pid_path)!r}).write_text(str(os.getpid())); time.sleep(60)",
+                timeout_seconds=60,
+            ),
+            host="127.0.0.1",
+            port=8123,
+            readiness=readiness,
+            absolute_deadline=time.monotonic() + 0.2,
+        )
+
+    assert caught.value.code is ErrorCode.PROCESS_TIMEOUT
+    assert time.monotonic() - started < 1
+    assert not _process_is_alive(int(pid_path.read_text()))
+
+
+@pytest.mark.anyio
+async def test_managed_inference_observation_cannot_extend_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broker = SubprocessBroker()
+
+    def slow_snapshot(*_args: object, **_kwargs: object) -> tuple[object, ...]:
+        time.sleep(0.5)
+        return ()
+
+    monkeypatch.setattr(broker, "_snapshot_processes", slow_snapshot)
+    started = time.monotonic()
+    with pytest.raises(DomainError) as caught:
+        await broker.start_inference_server(
+            request(tmp_path, "-c", "import time; time.sleep(60)", timeout_seconds=60),
+            host="127.0.0.1",
+            port=8123,
+            readiness=lambda: asyncio.sleep(0, result=True),
+            absolute_deadline=time.monotonic() + 0.1,
+        )
+
+    assert caught.value.code is ErrorCode.PROCESS_TIMEOUT
+    assert time.monotonic() - started < 1
+
+
+@pytest.mark.anyio
 async def test_broker_passes_bounded_stdin_to_jsonc_style_helpers(tmp_path: Path) -> None:
     outcome = await SubprocessBroker().run(
         request(

@@ -5,7 +5,7 @@ from typing import Any
 import pyarrow as pa
 
 SCHEMA_MAJOR = 1
-SCHEMA_MINOR = 6
+SCHEMA_MINOR = 7
 UTC_TIMESTAMP = pa.timestamp("us", tz="UTC")
 
 COMMON_FIELDS: tuple[Any, ...] = (
@@ -41,6 +41,7 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("workload_definition_id", pa.string()),
             pa.field("workload_instance_id", pa.string()),
             pa.field("measurement_protocol_id", pa.string()),
+            pa.field("source_measurement_run_id", pa.string()),
             pa.field("environment_id", pa.string(), nullable=False),
             pa.field("source_state_id", pa.string()),
             pa.field("collector", pa.string()),
@@ -55,6 +56,8 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("execution_identity_id", pa.string()),
             pa.field("execution_identity_quality", pa.string()),
             pa.field("execution_identity_json", pa.string()),
+            pa.field("inference_protocol_identity_id", pa.string()),
+            pa.field("inference_protocol_identity_json", pa.string()),
             pa.field("limitations", pa.list_(pa.string())),
             pa.field("limitation_details_json", pa.string()),
             pa.field("resource_availability", pa.string()),
@@ -353,6 +356,34 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("order_in_block", pa.int32()),
             pa.field("phase", pa.string()),
             pa.field("dimensions", pa.map_(pa.string(), pa.string())),
+            pa.field("evidence_level", pa.string(), nullable=False),
+        ),
+    ),
+    "inference_requests": _schema(
+        "inference_requests",
+        (
+            pa.field("request_id", pa.string(), nullable=False),
+            pa.field("run_id", pa.string(), nullable=False),
+            pa.field("artifact_id", pa.string(), nullable=False),
+            pa.field("source_request_id", pa.string(), nullable=False),
+            pa.field("provider_request_id", pa.string()),
+            pa.field("input_tokens", pa.int64(), nullable=False),
+            pa.field("output_tokens", pa.int64(), nullable=False),
+            pa.field("scheduled_ns", pa.int64()),
+            pa.field("observed_started_ns", pa.int64()),
+            pa.field("ttft_ns", pa.int64()),
+            pa.field("latency_ns", pa.int64()),
+            pa.field("tpot_ns", pa.int64()),
+            pa.field("mean_itl_ns", pa.int64()),
+            pa.field("success", pa.bool_()),
+            pa.field("cancelled", pa.bool_()),
+            pa.field("error_type", pa.string()),
+            pa.field("error_code", pa.string()),
+            pa.field("queue_ns", pa.int64()),
+            pa.field("prefill_ns", pa.int64()),
+            pa.field("decode_ns", pa.int64()),
+            pa.field("cache_hit", pa.bool_()),
+            pa.field("prefix_hash_count", pa.int32()),
             pa.field("evidence_level", pa.string(), nullable=False),
         ),
     ),

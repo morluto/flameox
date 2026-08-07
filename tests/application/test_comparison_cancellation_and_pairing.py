@@ -61,7 +61,7 @@ async def test_async_comparison_cancellation_interrupts_duckdb(
         snapshot: Snapshot,
         baseline_set: RunSet,
         candidate_set: RunSet,
-    ) -> list[str]:
+    ) -> tuple[list[str], list[str]]:
         query_started.set()
         snapshot.execute("SELECT sum(sin(i)) FROM range(100000000000) values(i)").fetchall()
         return original(service, snapshot, baseline_set, candidate_set)

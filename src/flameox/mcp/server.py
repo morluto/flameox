@@ -27,6 +27,8 @@ from flameox.adapters import (
     BenchmarkSamplesExtractor,
     CoverageExtractionResult,
     CoverageExtractor,
+    InferenceArtifactExtractor,
+    InferenceExtractionResult,
     MemrayExtractionResult,
     MemrayExtractor,
     NsightSystemsExtractionResult,
@@ -71,6 +73,8 @@ from flameox.application import (
     CompareRunSetsRequest,
     ComparisonResult,
     ComparisonService,
+    ConfigureInferenceScenarioRequest,
+    ConfigureInferenceServerRequest,
     ConfigureWorkloadRequest,
     CreateInvestigationRequest,
     DeclaredWorkflowDetail,
@@ -98,6 +102,17 @@ from flameox.application import (
     FreezeRunSetRequest,
     ImportArtifactRequest,
     ImportService,
+    InferenceConfigurationList,
+    InferenceConfigurationResult,
+    InferenceProfilingPlan,
+    InferenceProfilingResult,
+    InferenceProfilingService,
+    InferenceReplayPlan,
+    InferenceReplayResult,
+    InferenceReplayService,
+    InferenceRequestQueryResult,
+    InferenceScenarioConfig,
+    InferenceServerConfig,
     IntegrityResult,
     IntegrityService,
     InvestigationListResult,
@@ -243,6 +258,8 @@ class RecoveryAction(ContractModel):
         "discover_artifacts",
         "import_artifact",
         "extract_perfetto",
+        "configure_inference",
+        "replan_inference",
         "manual",
     ]
     safe_to_repeat_same_call: bool
@@ -638,6 +655,29 @@ def _recovery_for(error: DomainError) -> RecoveryAction:
             safe_to_repeat_same_call=False,
             next_tool="list_capabilities",
         )
+    if error.details.get("next_tool") == "configure_inference_server":
+        return RecoveryAction(
+            kind="configure_inference",
+            safe_to_repeat_same_call=False,
+            next_tool="configure_inference_server",
+        )
+    if error.details.get("next_tool") == "list_inference_configurations":
+        return RecoveryAction(
+            kind="configure_inference",
+            safe_to_repeat_same_call=False,
+            next_tool="list_inference_configurations",
+        )
+    if error.details.get("next_tool") == "plan_inference_scenario":
+        return RecoveryAction(
+            kind="replan_inference",
+            safe_to_repeat_same_call=False,
+            next_tool="plan_inference_scenario",
+        )
+    if error.details.get("next_tool") == "manual":
+        return RecoveryAction(
+            kind="manual",
+            safe_to_repeat_same_call=False,
+        )
     if error.code is ErrorCode.WORKSPACE_NOT_FOUND:
         return RecoveryAction(
             kind="initialize_workspace",
@@ -817,7 +857,13 @@ def create_server(
             "an empty operator report. Then use get_evidence, record_analysis, "
             "or record_finding. Poll get_capability_setup after setup starts. A "
             "synchronous consumed capture plan is never retryable; detached starts are "
-            "retryable only with the same idempotency key."
+            "retryable only with the same idempotency key. For inference work, use "
+            "configure_inference_server and configure_inference_scenario, then "
+            "list_inference_configurations -> plan_inference_scenario -> "
+            "run_inference_scenario with expected_plan_id -> list_inference_requests and "
+            "query_measurements. Create an unprofiled measurement run before a diagnostic "
+            "profile; plan_inference_profile -> run_inference_profile requires that run's "
+            "measurement_run_id."
         ),
         lifespan=lifespan,
     )
@@ -954,6 +1000,266 @@ def create_server(
                 result,
                 f"Workload {name!r} is {result.action}; call {result.next_tool} next.",
             )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="configure_inference_server", annotations=CONFIGURE)
+    async def configure_inference_server_tool(
+        name: Annotated[
+            str,
+            Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
+        ],
+        operation: Literal["create", "replace"],
+        mode: Annotated[
+            Literal["managed", "existing_local"],
+            Field(description="managed requires workload; existing_local must use loopback."),
+        ],
+        model: Annotated[str, Field(min_length=1, max_length=500)],
+        ctx: Context[AppContext],
+        workload: Annotated[
+            str | None,
+            Field(description="Declared workload that starts vLLM; required for managed mode."),
+        ] = None,
+        base_url: Annotated[
+            str,
+            Field(description="Loopback-only OpenAI-compatible server URL."),
+        ] = "http://127.0.0.1:8000",
+        model_revision: Annotated[str | None, Field(max_length=200)] = None,
+        tokenizer: Annotated[str | None, Field(max_length=500)] = None,
+        tokenizer_revision: Annotated[str | None, Field(max_length=200)] = None,
+        quantization: Annotated[str | None, Field(max_length=100)] = None,
+        expected_configuration_id: Annotated[
+            str | None, Field(pattern=r"^sha256:[0-9a-f]{64}$")
+        ] = None,
+    ) -> Annotated[CallToolResult, ToolPayload[InferenceConfigurationResult]]:
+        """Create or replace one validated vLLM server declaration without starting it."""
+        try:
+            result = WorkloadService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).configure_inference_server(
+                ConfigureInferenceServerRequest(
+                    name=name,
+                    operation=operation,
+                    expected_configuration_id=expected_configuration_id,
+                    config=InferenceServerConfig(
+                        mode=mode,
+                        workload=workload,
+                        base_url=base_url,
+                        model=model,
+                        model_revision=model_revision,
+                        tokenizer=tokenizer,
+                        tokenizer_revision=tokenizer_revision,
+                        quantization=quantization,
+                    ),
+                )
+            )
+            return _success(result, f"Inference server {name!r} is {result.action}.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="configure_inference_scenario", annotations=CONFIGURE)
+    async def configure_inference_scenario_tool(
+        name: Annotated[
+            str,
+            Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
+        ],
+        operation: Literal["create", "replace"],
+        server_name: Annotated[str, Field(min_length=1, max_length=100)],
+        provider: Literal["aiperf", "vllm_bench"],
+        ctx: Context[AppContext],
+        endpoint_type: Literal["chat", "completions"] = "chat",
+        streaming: bool = True,
+        trace_artifact_id: Annotated[
+            str | None,
+            Field(
+                pattern=r"^sha256:[0-9a-f]{64}$",
+                description="Mooncake JSONL artifact; supported only by the AIPerf provider.",
+            ),
+        ] = None,
+        num_prompts: Annotated[int, Field(gt=0, le=10_000_000)] = 1,
+        concurrency: Annotated[int | None, Field(gt=0, le=100_000)] = None,
+        request_rate: Annotated[float | None, Field(gt=0, le=1_000_000)] = None,
+        burstiness: Annotated[
+            float | None,
+            Field(gt=0, le=1_000_000, description="Requires request_rate when supplied."),
+        ] = None,
+        warmup_request_count: Annotated[int, Field(ge=0, le=1_000_000)] = 0,
+        seed: Annotated[int, Field(ge=0, le=2**31 - 1)] = 0,
+        speedup_ratio: Annotated[float, Field(gt=0, le=100)] = 1.0,
+        semantic_oracle_workload: Annotated[
+            str | None,
+            Field(
+                max_length=100,
+                description="Declared workload with an oracle contract, not an ordinary workload.",
+            ),
+        ] = None,
+        expected_configuration_id: Annotated[
+            str | None, Field(pattern=r"^sha256:[0-9a-f]{64}$")
+        ] = None,
+    ) -> Annotated[CallToolResult, ToolPayload[InferenceConfigurationResult]]:
+        """Create or replace one typed inference replay scenario without executing it."""
+        try:
+            result = WorkloadService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).configure_inference_scenario(
+                ConfigureInferenceScenarioRequest(
+                    name=name,
+                    operation=operation,
+                    expected_configuration_id=expected_configuration_id,
+                    config=InferenceScenarioConfig(
+                        server=server_name,
+                        provider=provider,
+                        endpoint_type=endpoint_type,
+                        streaming=streaming,
+                        trace_artifact_id=trace_artifact_id,
+                        num_prompts=num_prompts,
+                        concurrency=concurrency,
+                        request_rate=request_rate,
+                        burstiness=burstiness,
+                        warmup_request_count=warmup_request_count,
+                        seed=seed,
+                        speedup_ratio=speedup_ratio,
+                        semantic_oracle_workload=semantic_oracle_workload,
+                    ),
+                )
+            )
+            return _success(result, f"Inference scenario {name!r} is {result.action}.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="list_inference_configurations", annotations=READ_ONLY)
+    async def list_inference_configurations_tool(
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[InferenceConfigurationList]]:
+        """List declared inference servers and scenarios without probing or execution."""
+        try:
+            result = WorkloadService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).list_inference()
+            return _success(
+                result,
+                f"Found {len(result.servers)} servers and {len(result.scenarios)} scenarios.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="plan_inference_scenario", annotations=READ_ONLY)
+    async def plan_inference_scenario_tool(
+        scenario_name: Annotated[str, Field(min_length=1, max_length=100)],
+        ctx: Context[AppContext],
+        timeout_seconds: Annotated[float | None, Field(gt=0, le=86_400)] = None,
+    ) -> Annotated[CallToolResult, ToolPayload[InferenceReplayPlan]]:
+        """Preflight a managed or existing-local server and construct a typed replay plan."""
+        try:
+            result = InferenceReplayService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).plan(scenario_name, timeout_seconds=timeout_seconds)
+            return _success(
+                result,
+                f"Planned inference scenario {scenario_name!r}. Next tool: "
+                "run_inference_scenario with the same scenario_name and "
+                f"expected_plan_id={result.plan_id!r}.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="run_inference_scenario", annotations=ADDITIVE)
+    async def run_inference_scenario_tool(
+        scenario_name: Annotated[str, Field(min_length=1, max_length=100)],
+        ctx: Context[AppContext],
+        timeout_seconds: Annotated[float | None, Field(gt=0, le=86_400)] = None,
+        expected_plan_id: Annotated[str | None, Field(pattern=r"^sha256:[0-9a-f]{64}$")] = None,
+    ) -> Annotated[CallToolResult, ToolPayload[InferenceReplayResult]]:
+        """Plan and execute one bounded replay against a managed or existing-local server."""
+        try:
+            service = InferenceReplayService(
+                ctx.request_context.lifespan_context.require_workspace()
+            )
+            result = await service.run(
+                service.plan(
+                    scenario_name,
+                    timeout_seconds=timeout_seconds,
+                    expected_plan_id=expected_plan_id,
+                )
+            )
+            return _success(result, f"Completed inference scenario {scenario_name!r}.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="list_inference_requests", annotations=READ_ONLY)
+    async def list_inference_requests_tool(
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        ctx: Context[AppContext],
+        limit: Annotated[int | None, Field(ge=1, le=1_000)] = None,
+        cursor: str | None = None,
+    ) -> Annotated[CallToolResult, ToolPayload[InferenceRequestQueryResult]]:
+        """Page through bounded normalized inference requests without prompt or error text."""
+        try:
+            result = EvidenceQueryService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).inference_requests(run_id=run_id, limit=limit, cursor=cursor)
+            return _success(result, f"Returned {result.returned} inference requests.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="plan_inference_profile", annotations=READ_ONLY)
+    async def plan_inference_profile_tool(
+        server_name: Annotated[str, Field(min_length=1, max_length=100)],
+        profiler: Literal["torch_profiler", "nsight_systems"],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[InferenceProfilingPlan]]:
+        """Build a diagnostic-only profile plan for one managed vLLM server."""
+        try:
+            result = InferenceProfilingService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).plan(
+                server_name,
+                profiler=profiler,
+            )
+            return _success(
+                result,
+                f"Planned {profiler} capture for {server_name!r}. Next tool: "
+                "run_inference_profile with the same server_name and profiler, a compatible "
+                "scenario_name, a successful unprofiled measurement_run_id, and "
+                f"expected_plan_id={result.plan_id!r}.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="run_inference_profile", annotations=ADDITIVE)
+    async def run_inference_profile_tool(
+        server_name: Annotated[str, Field(min_length=1, max_length=100)],
+        scenario_name: Annotated[str, Field(min_length=1, max_length=100)],
+        profiler: Literal["torch_profiler", "nsight_systems"],
+        measurement_run_id: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=200,
+                description="Successful compatible unprofiled inference run to link.",
+            ),
+        ],
+        ctx: Context[AppContext],
+        timeout_seconds: Annotated[float, Field(gt=0, le=86_400)] = 300,
+        expected_plan_id: Annotated[str | None, Field(pattern=r"^sha256:[0-9a-f]{64}$")] = None,
+    ) -> Annotated[CallToolResult, ToolPayload[InferenceProfilingResult]]:
+        """Run one diagnostic-only profile window against a managed vLLM server."""
+        try:
+            service = InferenceProfilingService(
+                ctx.request_context.lifespan_context.require_workspace()
+            )
+            plan = service.plan(
+                server_name,
+                profiler=profiler,
+                expected_plan_id=expected_plan_id,
+            )
+            result = await service.capture(
+                plan,
+                scenario_name=scenario_name,
+                measurement_run_id=measurement_run_id,
+                timeout_seconds=timeout_seconds,
+            )
+            return _success(result, f"Completed {profiler} diagnostic capture.")
         except DomainError as error:
             return _failure(error)
 
@@ -1685,11 +1991,15 @@ def create_server(
                 "coverage",
                 "pyperf",
                 "pytest",
+                "aiperf",
+                "vllm_bench",
+                "mooncake",
             ],
             Field(
                 description=(
                     "Producer identity. Use auto for common trace detection; use "
-                    "torch.profiler when importing an ambiguous Torch trace."
+                    "torch.profiler when importing an ambiguous Torch trace, and declare the "
+                    "maintained inference provider for imported replay/result artifacts."
                 )
             ),
         ] = "auto",
@@ -2756,6 +3066,46 @@ def create_server(
                 f"Extracted {result.measurement_count} measured values and "
                 f"{result.warmup_count} warmups.",
             )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="extract_inference_trace", annotations=ADDITIVE)
+    async def extract_inference_trace_tool(
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[InferenceExtractionResult]]:
+        """Extract bounded prompt-free Mooncake request schedule evidence."""
+        try:
+            result = await run_atomic_thread(
+                lambda: InferenceArtifactExtractor(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).extract_trace(run_id)
+            )
+            return _success(result, f"Extracted {result.request_count} inference requests.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="extract_inference_result", annotations=ADDITIVE)
+    async def extract_inference_result_tool(
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        provider: Literal["aiperf", "vllm_bench"],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[InferenceExtractionResult]]:
+        """Extract prompt-free AIPerf requests or vLLM aggregate measurements."""
+        try:
+            result = await run_atomic_thread(
+                lambda: (
+                    InferenceArtifactExtractor(
+                        ctx.request_context.lifespan_context.require_workspace()
+                    ).extract_aiperf_result(run_id)
+                    if provider == "aiperf"
+                    else InferenceArtifactExtractor(
+                        ctx.request_context.lifespan_context.require_workspace()
+                    ).extract_vllm_result(run_id)
+                )
+            )
+            count = result.request_count or result.measurement_count
+            return _success(result, f"Extracted {count} inference evidence rows.")
         except DomainError as error:
             return _failure(error)
 

@@ -100,6 +100,8 @@ class ArtifactKind(StrEnum):
     ANALYSIS_RESULT = "analysis_result"
     PROCESS_TREE_SNAPSHOT = "process_tree_snapshot"
     EXPERIMENT_CONFIGURATION = "experiment_configuration"
+    INFERENCE_REQUEST_TRACE = "inference_request_trace"
+    INFERENCE_RESULT = "inference_result"
 
 
 class RunType(StrEnum):
@@ -322,7 +324,12 @@ class ArtifactRegistration(ContractModel):
     @model_validator(mode="after")
     def enforce_sensitivity_floor(self) -> ArtifactRegistration:
         if (
-            self.kind in {ArtifactKind.CORE_DUMP, ArtifactKind.SOURCE_SNAPSHOT}
+            self.kind
+            in {
+                ArtifactKind.CORE_DUMP,
+                ArtifactKind.SOURCE_SNAPSHOT,
+                ArtifactKind.INFERENCE_REQUEST_TRACE,
+            }
             and self.sensitivity is not Sensitivity.SENSITIVE
         ):
             raise ValueError(f"{self.kind.value} artifacts must be sensitive")
@@ -665,6 +672,7 @@ class RunManifest(ContractModel):
     workload_definition_id: Digest | None = None
     workload_instance_id: Digest | None = None
     measurement_protocol_id: Digest | None = None
+    source_measurement_run_id: Identifier | None = None
     environment_id: Digest
     source_state_id: Digest | None = None
     collector: str | None = None
@@ -680,6 +688,8 @@ class RunManifest(ContractModel):
     external_context: ExternalExecutionContext | None = None
     execution_identity: WorkloadExecutionIdentity | None = None
     oracle_receipt: OracleReceiptRecord | None = None
+    inference_protocol_identity_id: Digest | None = None
+    inference_protocol_identity_json: str | None = None
 
     @model_validator(mode="after")
     def validate_run_type(self) -> RunManifest:
