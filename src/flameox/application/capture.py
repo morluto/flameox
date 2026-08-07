@@ -81,7 +81,13 @@ from flameox.domain import (
 )
 from flameox.domain.models import utc_now
 from flameox.evidence import GenerationPublisher
-from flameox.execution import ExecutionOutcome, ExecutionRequest, ResourcePolicy, SubprocessBroker
+from flameox.execution import (
+    ExecutionOutcome,
+    ExecutionRequest,
+    ProcessObservation,
+    ResourcePolicy,
+    SubprocessBroker,
+)
 from flameox.models import ContractModel
 from flameox.observability import OperationLogger, elapsed_ms
 from flameox.storage import ArtifactStore, RunStore, StorageQuota, Workspace
@@ -250,6 +256,7 @@ class _CaptureExecution:
         error_code: str,
         cleanup_complete: bool | None = None,
         process: ProcessResult | None = None,
+        process_observations: tuple[ProcessObservation, ...] = (),
         limitation_details: tuple[LimitationDetail, ...] = (),
         artifacts: tuple[ArtifactRegistration, ...] = (),
     ) -> RunManifest:
@@ -265,6 +272,41 @@ class _CaptureExecution:
             error_code=error_code,
         )
         current = self.run
+        snapshot_path = self.output_root / "process-snapshot.json"
+        snapshot_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_id": self.plan.run_id,
+                    "observations": [item.model_dump(mode="json") for item in process_observations],
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+        snapshot_artifact = self.service.artifacts.import_path(
+            snapshot_path,
+            allowed_roots=(self.output_root,),
+            max_bytes=self.service.workspace.config.capture.max_artifact_bytes,
+        )
+        snapshot_registration = ArtifactRegistration(
+            registration_id=new_id(),
+            run_id=self.plan.run_id,
+            artifact_id=snapshot_artifact.content.artifact_id,
+            display_name="process-snapshot.json",
+            media_type="application/json",
+            kind=ArtifactKind.PROCESS_TREE_SNAPSHOT,
+            role="process_observation",
+            producer="flameox.execution",
+            producer_version="1",
+            sensitivity=Sensitivity.INTERNAL,
+        )
+        snapshot_rows = process_observation_rows(
+            self.plan.run_id,
+            process_observations,
+            artifact_id=snapshot_artifact.content.artifact_id,
+        )
+        artifacts = (*artifacts, snapshot_registration)
 
         def finish_error(run: RunManifest) -> RunManifest:
             return self.service._finish_error(
@@ -275,6 +317,8 @@ class _CaptureExecution:
                     self.cleanup_complete if cleanup_complete is None else cleanup_complete
                 ),
                 process=process,
+                process_snapshot_rows=snapshot_rows[0],
+                process_snapshot_entries=snapshot_rows[1],
                 limitation_details=limitation_details,
                 artifacts=artifacts,
             )
@@ -855,6 +899,18 @@ class CaptureService:
                 if "process" in error.details
                 else None
             )
+            process_observations = tuple(
+                ProcessObservation.model_validate(item)
+                for item in error.details.get("process_observations", ())
+            )
+            if partial_process is None:
+                partial_process = ProcessResult(
+                    timed_out=status is ExecutionStatus.TIMED_OUT,
+                    cancellation_cause=(
+                        "timeout" if status is ExecutionStatus.TIMED_OUT else "process_error"
+                    ),
+                    cleanup_complete=True,
+                )
             native_paths = self._native_output_paths(plan, output_root)
             valid_native_paths = self._valid_native_output_paths(plan, output_root)
             if (
@@ -868,6 +924,7 @@ class CaptureService:
                     stderr=(partial_process.stderr or "").encode(),
                     resolved_executable=Path(plan.collector_argv[0]).resolve(),
                     containment=plan.containment,
+                    process_observations=process_observations,
                 )
                 collector_limitation_details.append(
                     _limitation(
@@ -951,6 +1008,7 @@ class CaptureService:
                     phase="collector execution failed",
                     error_code=error.code.value,
                     process=partial_process,
+                    process_observations=process_observations,
                     limitation_details=tuple(
                         [
                             _limitation("collector", error.code.value.lower(), error.message),
@@ -2383,6 +2441,8 @@ class CaptureService:
         message: str,
         cleanup_complete: bool | None = True,
         process: ProcessResult | None = None,
+        process_snapshot_rows: list[dict[str, object]] | None = None,
+        process_snapshot_entries: list[dict[str, object]] | None = None,
         limitation_details: tuple[LimitationDetail, ...] = (),
         artifacts: tuple[ArtifactRegistration, ...] = (),
     ) -> RunManifest:
@@ -2446,9 +2506,17 @@ class CaptureService:
             }
         )
         terminal = self.runs.append(terminal, expected_revision=running.revision)
+        registration_rows = [
+            artifact_registration_row(
+                registration,
+                byte_length=self.artifacts.get(registration.artifact_id).content.byte_length,
+            )
+            for registration in artifacts
+        ]
         self.publisher.publish_rows(
             {
                 "runs": [run_row(terminal)],
+                "artifact_registrations": registration_rows,
                 "runtime_resource_summaries": [
                     runtime_resource_summary_row(
                         terminal,
@@ -2459,6 +2527,8 @@ class CaptureService:
                     terminal,
                     project_root=self.workspace.project_root,
                 ),
+                "process_snapshots": process_snapshot_rows or [],
+                "process_snapshot_entries": process_snapshot_entries or [],
             },
             publisher="flameox.capture",
             publisher_version="1",

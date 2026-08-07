@@ -174,7 +174,7 @@ class ProcessObservation(ContractModel):
     thread_count: int | None = None
     fd_count: int | None = None
     observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    snapshot_phase: Literal["pre_cleanup", "post_cleanup", "post_root_exit"]
+    snapshot_phase: Literal["running", "pre_cleanup", "post_cleanup", "post_root_exit"]
     alive_before_cleanup: bool | None = None
     cleanup_action: str | None = None
     cleanup_outcome: str | None = None
@@ -201,10 +201,12 @@ class _ObservedWait:
 @dataclass(slots=True)
 class _OutputBudget:
     remaining: int
+    exceeded: bool = False
 
     def consume(self, byte_count: int) -> None:
         self.remaining -= byte_count
         if self.remaining < 0:
+            self.exceeded = True
             raise _OutputLimitExceeded
 
 
@@ -355,6 +357,10 @@ class SubprocessBroker:
         resource_task = asyncio.create_task(
             self._observe_resources(process, request.resource_policy)
         )
+        process_observations.extend(
+            self._snapshot_processes(process.pid, "running", True, None, None)
+        )
+        observed_identities = self._observation_identities(process_observations)
         stdin_task: asyncio.Task[None] | None = None
         if request.stdin_bytes is not None:
             assert process.stdin is not None
@@ -463,7 +469,13 @@ class SubprocessBroker:
 
         finished = time.monotonic_ns()
         process_observations.extend(
-            self._snapshot_processes(process.pid, "post_root_exit", False, None, None)
+            self._snapshot_known_processes(
+                observed_identities,
+                "post_root_exit",
+                False,
+                None,
+                None,
+            )
         )
         result = ProcessResult(
             exit_code=(
@@ -548,7 +560,7 @@ class SubprocessBroker:
     def _snapshot_processes(
         self,
         root_pid: int,
-        phase: Literal["pre_cleanup", "post_cleanup", "post_root_exit"],
+        phase: Literal["running", "pre_cleanup", "post_cleanup", "post_root_exit"],
         alive_before_cleanup: bool | None,
         cleanup_action: str | None,
         cleanup_outcome: str | None,
@@ -578,7 +590,7 @@ class SubprocessBroker:
     def _snapshot_known_processes(
         self,
         identities: tuple[tuple[int, float | None, str], ...],
-        phase: Literal["pre_cleanup", "post_cleanup", "post_root_exit"],
+        phase: Literal["running", "pre_cleanup", "post_cleanup", "post_root_exit"],
         alive_before_cleanup: bool | None,
         cleanup_action: str | None,
         cleanup_outcome: str | None,
@@ -654,7 +666,7 @@ class SubprocessBroker:
     def _observe_process(
         process: psutil.Process,
         source: str,
-        phase: Literal["pre_cleanup", "post_cleanup", "post_root_exit"],
+        phase: Literal["running", "pre_cleanup", "post_cleanup", "post_root_exit"],
         alive_before_cleanup: bool | None,
         cleanup_action: str | None,
         cleanup_outcome: str | None,
@@ -840,21 +852,15 @@ class SubprocessBroker:
                 if terminating is None:
                     if cancellation is not None and cancellation.is_set():
                         terminating = "caller_cancelled"
-                        self._terminate_observed_with_observation(
-                            process, observations, force=True
-                        )
+                        self._terminate_observed_with_observation(process, observations, force=True)
                     elif self._observed_output_exceeded(
                         stdout_stream, stderr_stream, request.max_output_bytes
                     ):
                         terminating = "output_limit"
-                        self._terminate_observed_with_observation(
-                            process, observations, force=True
-                        )
+                        self._terminate_observed_with_observation(process, observations, force=True)
                     elif time.monotonic() >= deadline:
                         terminating = "timeout"
-                        self._terminate_observed_with_observation(
-                            process, observations, force=True
-                        )
+                        self._terminate_observed_with_observation(process, observations, force=True)
                 waited_pid, status, usage = wait4(process.pid, os.WNOHANG)
                 if waited_pid == process.pid:
                     process.returncode = os.waitstatus_to_exitcode(status)
@@ -1132,10 +1138,19 @@ class SubprocessBroker:
         self,
         stream: asyncio.StreamReader,
         budget: _OutputBudget,
+        *,
+        drain_on_limit: bool = False,
     ) -> bytes:
         output = bytearray()
         while chunk := await stream.read(64 * 1024):
-            budget.consume(len(chunk))
+            try:
+                budget.consume(len(chunk))
+            except _OutputLimitExceeded:
+                if not drain_on_limit:
+                    raise
+                while await stream.read(64 * 1024):
+                    pass
+                break
             output.extend(chunk)
         return bytes(output)
 
@@ -1328,6 +1343,7 @@ class ManagedSidecarLease:
         admin_port: int,
         stdout_task: asyncio.Task[bytes],
         stderr_task: asyncio.Task[bytes],
+        output_budget: _OutputBudget,
         observations: list[ProcessObservation],
         started_at: datetime,
     ) -> None:
@@ -1338,6 +1354,7 @@ class ManagedSidecarLease:
         self.admin_port = admin_port
         self._stdout_task = stdout_task
         self._stderr_task = stderr_task
+        self._output_budget = output_budget
         self._observations = observations
         self._started_at = started_at
         self._tracked_proxies: set[str] = set()
@@ -1418,8 +1435,13 @@ class ManagedSidecarLease:
             resolved,
             admin_host,
             admin_port,
-            asyncio.create_task(broker._read_bounded(process.stdout, output_budget)),
-            asyncio.create_task(broker._read_bounded(process.stderr, output_budget)),
+            asyncio.create_task(
+                broker._read_bounded(process.stdout, output_budget, drain_on_limit=True)
+            ),
+            asyncio.create_task(
+                broker._read_bounded(process.stderr, output_budget, drain_on_limit=True)
+            ),
+            output_budget,
             observations,
             datetime.now(UTC),
         )
@@ -1433,7 +1455,7 @@ class ManagedSidecarLease:
                     )
                 if await readiness():
                     observations.extend(
-                        broker._snapshot_processes(process.pid, "post_root_exit", True, None, None)
+                        broker._snapshot_processes(process.pid, "running", True, None, None)
                     )
                     return lease
                 await asyncio.sleep(0.05)
@@ -1448,7 +1470,7 @@ class ManagedSidecarLease:
     async def __aenter__(self) -> ManagedSidecarLease:
         return self
 
-    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+    async def __aexit__(self, *_args: object) -> None:
         await asyncio.shield(self.close())
 
     def create_proxy(
@@ -1495,6 +1517,10 @@ class ManagedSidecarLease:
         from flameox.adapters.toxiproxy import ToxiproxyApiError, ToxiproxyClient
 
         cleanup_failures: list[str] = []
+        if self._output_budget.exceeded:
+            cleanup_failures.append(
+                "sidecar output exceeded the bounded capture budget; excess bytes were discarded"
+            )
         client = ToxiproxyClient(self.base_url, timeout_seconds=1.0)
         for name in tuple(sorted(self._tracked_proxies)):
             try:

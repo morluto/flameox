@@ -172,6 +172,7 @@ class OtlpTraceService:
         events: list[dict[str, object]] = []
         links: list[dict[str, object]] = []
         limitations: list[str] = []
+        identities: set[tuple[str, str]] = set()
         source_ordinal = 0
         for resource_ordinal, resource_spans in enumerate(request.resource_spans):
             resource = resource_spans.resource
@@ -211,11 +212,10 @@ class OtlpTraceService:
                         limitations.append(f"span:{source_ordinal}:missing_timestamp")
                     elif end < start:
                         limitations.append(f"span:{source_ordinal}:end_before_start")
-                    if any(
-                        item["trace_id"] == trace_id and item["span_id"] == span_id
-                        for item in spans
-                    ):
+                    identity = (trace_id, span_id)
+                    if identity in identities:
                         limitations.append(f"span:{source_ordinal}:duplicate_identity")
+                    identities.add(identity)
                     spans.append(
                         {
                             "resource_ordinal": resource_ordinal,

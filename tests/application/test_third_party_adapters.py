@@ -184,7 +184,8 @@ async def test_approved_adapter_runs_full_lifecycle_and_publishes_linked_extract
     assert plan.permissions == ("process_observation",)
     assert plan.adapter_execution_plan is not None
     assert adapter.phases == ["probe", "plan", "validate", "extract"]
-    assert len(result.run.artifacts) == 2
+    assert len(result.run.artifacts) == 3
+    assert any(item.kind.value == "process_tree_snapshot" for item in result.run.artifacts)
     native = next(item for item in result.run.artifacts if item.role == "primary")
     stdout = next(item for item in result.run.artifacts if item.role == "stdout")
     assert ArtifactStore(workspace).get(stdout.artifact_id).payload_path.read_text().strip() == (

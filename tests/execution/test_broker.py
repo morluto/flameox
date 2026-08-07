@@ -55,6 +55,8 @@ async def test_shell_metacharacters_remain_literal_arguments(tmp_path: Path) -> 
     assert outcome.stdout.decode().strip() == literal
     assert not marker.exists()
     assert outcome.process.exit_code == 0
+    assert any(item.snapshot_phase == "running" for item in outcome.process_observations)
+    assert any(item.snapshot_phase == "post_root_exit" for item in outcome.process_observations)
 
 
 @pytest.mark.anyio

@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+
+pytest.importorskip("google.protobuf")
+pytest.importorskip("opentelemetry.proto.collector.trace.v1.trace_service_pb2")
 from google.protobuf import json_format  # type: ignore[import-untyped]
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
@@ -70,9 +73,7 @@ def _request() -> ExportTraceServiceRequest:
             [AnyValue(string_value="nested"), AnyValue(bool_value=False)]
         )
         nested = span.attributes.add(key="nested")
-        nested.value.kvlist_value.values.append(
-            _attribute("member", AnyValue(int_value=9))
-        )
+        nested.value.kvlist_value.values.append(_attribute("member", AnyValue(int_value=9)))
         return cast(Span, span)
 
     root = add_span(b"r" * 8, "root", 100, 200)
@@ -148,8 +149,7 @@ def test_otlp_normalization_and_lifecycle_queries_preserve_evidence(
 
     with Catalog(workspace).open_snapshot() as snapshot:
         attributes = snapshot.execute(
-            "SELECT attributes_json FROM otel_spans WHERE artifact_id = ? "
-            "AND span_id = ? LIMIT 1",
+            "SELECT attributes_json FROM otel_spans WHERE artifact_id = ? AND span_id = ? LIMIT 1",
             (artifact_id, (b"r" * 8).hex()),
         ).fetchone()
     assert attributes is not None

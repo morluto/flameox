@@ -154,9 +154,15 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("disposition", pa.string(), nullable=False),
             pa.field("original_artifact_id", pa.string(), nullable=False),
             pa.field("final_artifact_id", pa.string()),
+            # Retain nullable v1 provenance columns so rebuilding a catalog over
+            # schema-1.5 generations does not hide authoritative reducer identities.
+            pa.field("reducer_definition_id", pa.string()),
+            pa.field("reducer_instance_id", pa.string()),
             pa.field("predicate_definition_id", pa.string(), nullable=False),
             pa.field("predicate_instance_id", pa.string(), nullable=False),
             pa.field("attempts_json", pa.string(), nullable=False),
+            pa.field("reducer_stdout_artifact_id", pa.string()),
+            pa.field("reducer_stderr_artifact_id", pa.string()),
             pa.field("predicate_stdout_artifact_id", pa.string()),
             pa.field("predicate_stderr_artifact_id", pa.string()),
             pa.field("cleanup_complete", pa.bool_(), nullable=False),

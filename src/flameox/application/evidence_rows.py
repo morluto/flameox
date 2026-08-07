@@ -62,7 +62,7 @@ def process_observation_rows(
     entries: list[dict[str, object]] = []
     for phase in phases:
         phase_items = tuple(item for item in observations if item.snapshot_phase == phase)
-        snapshot_id = f"{run_id}:{phase}"
+        snapshot_id = f"{artifact_id}:{run_id}:{phase}"
         observed_at = max(
             (item.observed_at for item in phase_items),
             default=utc_now(),

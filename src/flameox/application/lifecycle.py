@@ -72,8 +72,8 @@ class LifecycleEvidenceService:
             cursor=cursor,
             parameters={"start_ns": start_ns, "end_ns": end_ns, "trace_id": trace_id},
             where=(
-                "artifact_id = ? AND start_time_unix_nano < ? AND "
-                "(end_time_unix_nano = 0 OR end_time_unix_nano > ?)"
+                "artifact_id = ? AND start_time_unix_nano > 0 AND end_time_unix_nano > 0 "
+                "AND start_time_unix_nano < ? AND end_time_unix_nano > ?"
             ),
             values=(artifact_id, end_ns, start_ns),
             select="kind, run_id, artifact_id, trace_id, span_id, parent_span_id, name, "
@@ -92,6 +92,7 @@ class LifecycleEvidenceService:
                 duration_ns=row[10],
             ),
             trace_id=trace_id,
+            limitations=("spans_with_missing_timestamps_are_excluded",),
         )
 
     def get_operation_transitions(
@@ -202,26 +203,54 @@ class LifecycleEvidenceService:
             )
         head = self.workspace.corpus.read_head()
         query = """
-            WITH signatures AS (
+            WITH normalized AS (
+                SELECT s.*,
+                       coalesce(
+                           json_extract_string(r.attributes_json, '$."service.name"'), ''
+                       ) AS service_identity,
+                       coalesce(sc.name, '') AS scope_name
+                FROM otel_spans s
+                LEFT JOIN otel_resources r
+                  ON r.artifact_id = s.artifact_id
+                 AND r.resource_ordinal = s.resource_ordinal
+                LEFT JOIN otel_scopes sc
+                  ON sc.artifact_id = s.artifact_id
+                 AND sc.resource_ordinal = s.resource_ordinal
+                 AND sc.scope_ordinal = s.scope_ordinal
+                WHERE s.artifact_id = ?
+            ), signatures AS (
                 SELECT *,
+                  lag(service_identity) OVER (PARTITION BY trace_id ORDER BY source_ordinal)
+                      AS previous_service_identity,
+                  lag(scope_name) OVER (PARTITION BY trace_id ORDER BY source_ordinal)
+                      AS previous_scope_name,
                   lag(name) OVER (PARTITION BY trace_id ORDER BY source_ordinal) AS previous_name,
                   lag(kind) OVER (PARTITION BY trace_id ORDER BY source_ordinal) AS previous_kind
-                FROM otel_spans WHERE artifact_id = ?
+                FROM normalized
             ), runs AS (
-                  SELECT *, sum(CASE WHEN name = previous_name AND kind = previous_kind
-                              THEN 0 ELSE 1 END)
-                    OVER (PARTITION BY trace_id ORDER BY source_ordinal) AS sequence_group
+                SELECT *, sum(
+                    CASE WHEN service_identity = previous_service_identity
+                              AND scope_name = previous_scope_name
+                              AND name = previous_name AND kind = previous_kind
+                         THEN 0 ELSE 1 END
+                ) OVER (PARTITION BY trace_id ORDER BY source_ordinal) AS sequence_group
                 FROM signatures
+            ), repeated AS (
+                SELECT *, count(*) OVER (PARTITION BY trace_id, sequence_group) AS repetition_count
+                FROM runs
             )
             SELECT 'span', run_id, artifact_id, trace_id, span_id, parent_span_id, name,
                    source_ordinal, start_time_unix_nano, end_time_unix_nano, duration_ns,
-                   count(*) OVER (PARTITION BY trace_id, sequence_group) AS repetition_count
-            FROM runs WHERE artifact_id = ?
+                   repetition_count
+            FROM repeated
+            WHERE repetition_count >= ?
             ORDER BY source_ordinal LIMIT ?
         """
         with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
-            rows = snapshot.execute(query, (artifact_id, artifact_id, bounded + 1)).fetchall()
-        selected = [row for row in rows[:bounded] if row[11] >= minimum_repetitions]
+            rows = snapshot.execute(
+                query, (artifact_id, minimum_repetitions, bounded + 1)
+            ).fetchall()
+        selected = rows[:bounded]
         items = tuple(
             LifecycleItem(
                 kind="span",
@@ -243,7 +272,7 @@ class LifecycleEvidenceService:
             "find_repeated_operation_sequences",
             head.commit_id,
             artifact_id,
-            {"minimum_repetitions": minimum_repetitions},
+            {"minimum_repetitions": minimum_repetitions, "limit": bounded},
             items,
             len(selected),
             len(rows) > bounded,
@@ -383,20 +412,27 @@ class LifecycleEvidenceService:
         select: str,
         mapper: Any,
         trace_id: str | None,
+        limitations: tuple[str, ...] = (),
     ) -> LifecycleQueryResult:
         head = self.workspace.corpus.read_head()
-        digest = digest_model(parameters)
+        digest = digest_model({"artifact_id": artifact_id, **parameters})
         after = self._cursor(cursor, operation, head.commit_id, digest)
-        predicate = where
-        query_values = list(values)
+        base_predicate = where
+        base_values = list(values)
         if trace_id is not None:
-            predicate += " AND trace_id = ?"
-            query_values.append(trace_id)
+            base_predicate += " AND trace_id = ?"
+            base_values.append(trace_id)
+        predicate = base_predicate
+        query_values = list(base_values)
         if after is not None:
             predicate += " AND source_ordinal > ?"
             query_values.append(after)
         query = f"SELECT {select} FROM otel_spans WHERE {predicate} ORDER BY source_ordinal LIMIT ?"
         with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+            total_row = snapshot.execute(
+                f"SELECT count(*) FROM otel_spans WHERE {base_predicate}",
+                tuple(base_values),
+            ).fetchone()
             rows = snapshot.execute(query, (*query_values, limit + 1)).fetchall()
         items = tuple(mapper(row) for row in rows[:limit])
         return self._result(
@@ -405,11 +441,12 @@ class LifecycleEvidenceService:
             artifact_id,
             parameters,
             items,
-            len(rows),
+            int(total_row[0]) if total_row is not None else 0,
             len(rows) > limit,
             items[-1].source_ordinal if len(rows) > limit and items else None,
             cursor_namespace=operation,
             digest=digest,
+            limitations=limitations,
         )
 
     def _result(
