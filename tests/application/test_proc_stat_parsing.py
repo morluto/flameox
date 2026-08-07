@@ -1,165 +1,158 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
 
-from flameox.application.capture import CaptureService
-from flameox.storage import Workspace
+import pytest
 
+import flameox.application.proc as proc
+from flameox.application import RecoveryService
+from flameox.domain import (
+    CaptureLease,
+    CaptureStatus,
+    ExecutionStatus,
+    RunManifest,
+    RunType,
+    ValidationStatus,
+)
+from flameox.storage import RunStore, Workspace
 
-def _stat_line(pid: int, comm: str, starttime: int) -> str:
-    """Build a minimal valid /proc/[pid]/stat line.
-
-    Per proc(5), field 1 is pid, field 2 is ``(comm)``, and the remaining
-    fields are space-separated. We only need fields up to 22 (starttime);
-    the rest are filled with zeros.
-    """
-    rest = " ".join("0" for _ in range(19))
-    return f"{pid} ({comm}) {rest} {starttime} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
-
-
-def test_lease_parses_starttime_for_multi_word_comm() -> None:
-    """Regression test for the /proc/[pid]/stat parsing bug.
-
-    A process whose name (field 2, ``comm``) contains spaces must still
-    yield the correct ``starttime`` (field 22). The old code split the
-    whole line on whitespace and indexed [21], which was wrong whenever
-    ``comm`` had a space.
-    """
-    import tempfile
-
-    workspace = Workspace.initialize(Path(tempfile.mkdtemp()))
-    service = CaptureService(workspace)
-    pid = 12345
-    expected_starttime = 118
-    stat_content = _stat_line(pid, "Web Content", expected_starttime).encode()
-
-    def fake_read_text(self: Path, *args: object, **kwargs: object) -> str:
-        if str(self) == "/proc/sys/kernel/random/boot_id":
-            return "boot-id-1234\n"
-        raise FileNotFoundError(str(self))
-
-    def fake_open(path: str, flags: int, *args: object, **kwargs: object) -> int:
-        if path == f"/proc/{pid}/stat":
-            return 999
-        raise FileNotFoundError(path)
-
-    def fake_read(fd: int, n: int) -> bytes:
-        if fd == 999:
-            return stat_content
-        raise OSError(fd)
-
-    with (
-        patch.object(Path, "read_text", fake_read_text),
-        patch("os.open", fake_open),
-        patch("os.read", fake_read),
-        patch("os.close", lambda fd: 0),
-    ):
-        lease = service._lease(pid)
-
-    assert lease is not None
-    assert lease.process_start_identity == str(expected_starttime)
-    assert lease.process_id == pid
+DIGEST = "sha256:" + ("a" * 64)
+OBSERVED_AT = datetime(2025, 1, 2, 3, 4, tzinfo=UTC)
 
 
-def test_lease_parses_starttime_for_single_word_comm() -> None:
-    """The fix must not regress the simple single-word ``comm`` case."""
-    import tempfile
-
-    workspace = Workspace.initialize(Path(tempfile.mkdtemp()))
-    service = CaptureService(workspace)
-    pid = 6789
-    expected_starttime = 999
-    stat_content = _stat_line(pid, "python", expected_starttime).encode()
-
-    def fake_read_text(self: Path, *args: object, **kwargs: object) -> str:
-        if str(self) == "/proc/sys/kernel/random/boot_id":
-            return "boot-id-5678\n"
-        raise FileNotFoundError(str(self))
-
-    def fake_open(path: str, flags: int, *args: object, **kwargs: object) -> int:
-        if path == f"/proc/{pid}/stat":
-            return 888
-        raise FileNotFoundError(path)
-
-    def fake_read(fd: int, n: int) -> bytes:
-        if fd == 888:
-            return stat_content
-        raise OSError(fd)
-
-    with (
-        patch.object(Path, "read_text", fake_read_text),
-        patch("os.open", fake_open),
-        patch("os.read", fake_read),
-        patch("os.close", lambda fd: 0),
-    ):
-        lease = service._lease(pid)
-
-    assert lease is not None
-    assert lease.process_start_identity == str(expected_starttime)
+def _stat_line(pid: int, comm: str, starttime: str) -> str:
+    fields_3_through_21 = " ".join("0" for _ in range(19))
+    return f"{pid} ({comm}) {fields_3_through_21} {starttime} 0\n"
 
 
-def test_lease_returns_none_when_proc_missing() -> None:
-    """When /proc/[pid]/stat is absent, _lease returns None (process gone)."""
-    import tempfile
-
-    workspace = Workspace.initialize(Path(tempfile.mkdtemp()))
-    service = CaptureService(workspace)
-
-    def fake_read_text(self: Path, *args: object, **kwargs: object) -> str:
-        raise FileNotFoundError(str(self))
-
-    def fake_open(path: str, flags: int, *args: object, **kwargs: object) -> int:
-        raise FileNotFoundError(path)
-
-    with (
-        patch.object(Path, "read_text", fake_read_text),
-        patch("os.open", fake_open),
-        patch("os.read", lambda fd, n: b""),
-        patch("os.close", lambda fd: 0),
-    ):
-        lease = service._lease(99999)
-
-    assert lease is None
+def _write_proc_record(root: Path, pid: int, comm: str, starttime: str) -> None:
+    stat_path = root / str(pid) / "stat"
+    stat_path.parent.mkdir(parents=True)
+    stat_path.write_text(_stat_line(pid, comm, starttime))
 
 
-def test_lease_parses_starttime_for_comm_with_closing_paren() -> None:
-    """Regression: comm containing ')' must not confuse the parser.
+def _running_run(run_id: str, pid: int, starttime: str, boot_id: str) -> RunManifest:
+    return RunManifest(
+        run_id=run_id,
+        run_type=RunType.EXECUTION,
+        execution_status=ExecutionStatus.RUNNING,
+        capture_status=CaptureStatus.RUNNING,
+        validation_status=ValidationStatus.PENDING,
+        environment_id=DIGEST,
+        lease=CaptureLease(
+            process_id=pid,
+            process_start_identity=starttime,
+            boot_id=boot_id,
+            heartbeat_monotonic_ns=0,
+            observed_at=OBSERVED_AT,
+            expires_at=OBSERVED_AT + timedelta(minutes=1),
+        ),
+    )
 
-    The old code used rindex(")") which would find the ')' inside the
-    comm name rather than the one that closes it, misaligning all fields.
-    """
-    import tempfile
 
-    workspace = Workspace.initialize(Path(tempfile.mkdtemp()))
-    service = CaptureService(workspace)
-    pid = 11111
-    expected_starttime = 555
-    # The kernel escapes ')' to '?' in /proc/[pid]/stat comm.
-    stat_content = _stat_line(pid, "a?b", expected_starttime).encode()
+@pytest.mark.parametrize(
+    ("comm", "starttime"),
+    [
+        pytest.param("python", "118", id="single-word-comm"),
+        pytest.param("Web Content", "999", id="spaced-comm"),
+        pytest.param("worker) thread", "555", id="closing-paren-comm"),
+    ],
+)
+def test_proc_stat_reader_returns_field_22(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    comm: str,
+    starttime: str,
+) -> None:
+    monkeypatch.setattr(proc, "PROC_ROOT", tmp_path)
+    _write_proc_record(tmp_path, 12345, comm, starttime)
 
-    def fake_read_text(self: Path, *args: object, **kwargs: object) -> str:
-        if str(self) == "/proc/sys/kernel/random/boot_id":
-            return "boot-id-1111\n"
-        raise FileNotFoundError(str(self))
+    assert proc.read_proc_stat_start_identity(12345) == starttime
 
-    def fake_open(path: str, flags: int, *args: object, **kwargs: object) -> int:
-        if path == f"/proc/{pid}/stat":
-            return 777
-        raise FileNotFoundError(path)
 
-    def fake_read(fd: int, n: int) -> bytes:
-        if fd == 777:
-            return stat_content
-        raise OSError(fd)
+@pytest.mark.parametrize(
+    "stat_text",
+    [
+        pytest.param("12345 python 0 0", id="missing-comm-delimiters"),
+        pytest.param("12345 (python) 0 0", id="missing-starttime"),
+    ],
+)
+def test_proc_stat_parser_rejects_incomplete_records(stat_text: str) -> None:
+    with pytest.raises(ValueError, match=r"comm field|starttime field"):
+        proc.parse_proc_stat_start_identity(stat_text)
 
-    with (
-        patch.object(Path, "read_text", fake_read_text),
-        patch("os.open", fake_open),
-        patch("os.read", fake_read),
-        patch("os.close", lambda fd: 0),
-    ):
-        lease = service._lease(pid)
 
-    assert lease is not None
-    assert lease.process_start_identity == str(expected_starttime)
+def test_proc_stat_reader_rejects_oversized_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(proc, "PROC_ROOT", tmp_path)
+    stat_path = tmp_path / "12345" / "stat"
+    stat_path.parent.mkdir()
+    stat_path.write_bytes(b"x" * (proc.MAX_STAT_BYTES + 1))
+
+    with pytest.raises(ValueError, match="exceeds 8192 bytes"):
+        proc.read_proc_stat_start_identity(12345)
+
+
+def test_recovery_classifies_exact_process_identity_with_spaced_comm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    proc_root = tmp_path / "proc"
+    boot_id_path = proc_root / "sys/kernel/random/boot_id"
+    boot_id_path.parent.mkdir(parents=True)
+    boot_id_path.write_text("boot-id\n")
+    _write_proc_record(proc_root, 12345, "Web Content", "118")
+    monkeypatch.setattr(proc, "PROC_ROOT", proc_root)
+
+    runs = RunStore(workspace)
+    runs.create(_running_run("active", 12345, "118", "boot-id"))
+    runs.create(_running_run("reused-pid", 12345, "117", "boot-id"))
+    runs.create(_running_run("previous-boot", 12345, "118", "old-boot-id"))
+    runs.create(_running_run("missing-process", 54321, "118", "boot-id"))
+
+    inspection = RecoveryService(workspace).inspect()
+
+    assert inspection.active_run_ids == ("active",)
+    assert inspection.recoverable_run_ids == (
+        "missing-process",
+        "previous-boot",
+        "reused-pid",
+    )
+    assert inspection.indeterminate_run_ids == ()
+
+
+def test_recovery_keeps_unreadable_process_identities_indeterminate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    proc_root = tmp_path / "proc"
+    boot_id_path = proc_root / "sys/kernel/random/boot_id"
+    boot_id_path.parent.mkdir(parents=True)
+    boot_id_path.write_text("boot-id\n")
+    malformed_stat = proc_root / "12345" / "stat"
+    malformed_stat.parent.mkdir(parents=True)
+    malformed_stat.write_text("12345 (malformed) 0 0\n")
+    unreadable_stat = proc_root / "23456" / "stat"
+    unreadable_stat.mkdir(parents=True)
+    monkeypatch.setattr(proc, "PROC_ROOT", proc_root)
+
+    runs = RunStore(workspace)
+    runs.create(_running_run("malformed-stat", 12345, "118", "boot-id"))
+    runs.create(_running_run("unreadable-stat", 23456, "118", "boot-id"))
+    service = RecoveryService(workspace)
+
+    inspection = service.inspect()
+    result = service.recover()
+
+    assert inspection.active_run_ids == ()
+    assert inspection.recoverable_run_ids == ()
+    assert inspection.indeterminate_run_ids == ("malformed-stat", "unreadable-stat")
+    assert result.recovered_runs == ()
+    assert result.inspection.indeterminate_run_ids == ("malformed-stat", "unreadable-stat")
+    assert runs.read("malformed-stat").execution_status is ExecutionStatus.RUNNING
+    assert runs.read("unreadable-stat").execution_status is ExecutionStatus.RUNNING

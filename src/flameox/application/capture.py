@@ -40,6 +40,7 @@ from flameox.application.execution_identity import ExecutionIdentityService
 from flameox.application.execution_policy import ExecutionPolicy
 from flameox.application.oracle_receipts import parse_oracle_receipt
 from flameox.application.preflight import PreflightService
+from flameox.application.proc import read_boot_id, read_proc_stat_start_identity
 from flameox.application.quarantine import QuarantineService
 from flameox.application.run_rows import run_row
 from flameox.application.source import collect_source_state
@@ -2797,58 +2798,12 @@ class CaptureService:
 
     def _lease(self, process_id: int) -> CaptureLease | None:
         observed = utc_now()
-        boot_id_path = Path("/proc/sys/kernel/random/boot_id")
-        stat_path = Path("/proc") / str(process_id) / "stat"
         try:
-            boot_id = boot_id_path.read_text().strip()
-
-            # Read /proc/[pid]/stat with a bounded low-level read instead of
-            # read_text(), which streams the whole file and can block
-            # indefinitely on a stuck /proc mount. The stat line is small
-            # (well under 8 KiB), so a single bounded os.read is sufficient.
-            # The process name (field 2, "comm") is parenthesized and may
-            # contain spaces or parentheses (e.g. "Web Content"), so split
-            # on the last ")" and index the remainder rather than the whole
-            # line: starttime is field 22, i.e. index 19 in the slice that
-            # starts at field 3.
-            stat_fd = os.open(str(stat_path), os.O_RDONLY)
-            try:
-                # os.read may return fewer bytes than requested; loop to
-                # collect the full line (well under 8 KiB for valid stat).
-                chunks: list[bytes] = []
-                while True:
-                    chunk = os.read(stat_fd, 8192)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    if len(chunk) < 8192:
-                        break
-                stat_raw = b"".join(chunks)
-            finally:
-                os.close(stat_fd)
-            stat_text = stat_raw.decode("utf-8", errors="replace")
-            # Find the first "(" to locate the start of comm, then the
-            # last ")" that closes it. The last ")" is always the comm
-            # delimiter because the kernel escapes any ")" inside comm
-            # to "?". Using index(")", start) would be wrong if comm
-            # somehow contained an unescaped ")".
-            try:
-                comm_start = stat_text.index("(")
-            except ValueError as exc:
-                raise ValueError("Missing '(' in /proc stat line") from exc
-            try:
-                comm_end = stat_text.rindex(")")
-            except ValueError as exc:
-                raise ValueError("Missing ')' in /proc stat line") from exc
-            if comm_end < comm_start:
-                raise ValueError("Malformed /proc stat line: ')' before '('")
-            stat_fields = stat_text[comm_end + 1 :].split()
-            if len(stat_fields) < 20:
-                raise IndexError(f"Insufficient fields after comm: {len(stat_fields)}")
-            process_start_identity = stat_fields[19]
+            boot_id = read_boot_id()
+            process_start_identity = read_proc_stat_start_identity(process_id)
         except FileNotFoundError:
             return None
-        except (OSError, IndexError, ValueError) as exc:
+        except (OSError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.PROCESS_FAILED,
                 "Could not establish the child process lease identity.",

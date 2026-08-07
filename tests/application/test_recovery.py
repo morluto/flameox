@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from flameox.analysis import RecipeService
@@ -14,7 +14,6 @@ from flameox.domain import (
     RunType,
     ValidationStatus,
 )
-from flameox.domain.models import utc_now
 from flameox.storage import RunStore, Workspace
 
 DIGEST = "sha256:" + ("a" * 64)
@@ -22,7 +21,7 @@ DIGEST = "sha256:" + ("a" * 64)
 
 def test_recovery_closes_only_disappeared_exact_process_lease(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    observed = utc_now()
+    observed = datetime(2025, 1, 2, 3, 4, tzinfo=UTC)
     run = RunManifest(
         run_id="abandoned-run",
         run_type=RunType.EXECUTION,
