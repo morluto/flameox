@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -211,6 +212,8 @@ class _OutputBudget:
 
 
 class SubprocessBroker:
+    _MAX_OBSERVED_PROCESSES = 10_000
+
     async def start_toxiproxy(
         self,
         executable: Path,
@@ -426,9 +429,30 @@ class SubprocessBroker:
             await self._settle_readers(stdout_task, stderr_task)
             await self._settle_resource(resource_task)
             await self._settle_task(stdin_task)
+            output_process = ProcessResult(
+                exit_code=(
+                    process.returncode
+                    if process.returncode is not None and process.returncode >= 0
+                    else None
+                ),
+                terminating_signal=(
+                    -process.returncode
+                    if process.returncode is not None and process.returncode < 0
+                    else None
+                ),
+                wall_time_ns=time.monotonic_ns() - started,
+                cancellation_cause=cancellation_cause,
+                cleanup_complete=cleanup_complete,
+            )
             raise DomainError(
                 ErrorCode.QUERY_BUDGET_EXCEEDED,
                 f"Process output exceeded {request.max_output_bytes} bytes.",
+                details={
+                    "process": output_process.model_dump(mode="json"),
+                    "process_observations": [
+                        item.model_dump(mode="json") for item in process_observations
+                    ],
+                },
             ) from exc
         except _ResourcePolicyExceeded as exc:
             cancellation_cause = "storage_reserve_exceeded"
@@ -566,14 +590,9 @@ class SubprocessBroker:
         cleanup_outcome: str | None,
     ) -> tuple[ProcessObservation, ...]:
         started = time.monotonic()
-        try:
-            root = psutil.Process(root_pid)
-            processes = [(root, "root")]
-            with suppress(psutil.Error):
-                processes.extend((child, "ancestry") for child in root.children(recursive=True))
-        except psutil.Error:
-            return ()
-        return tuple(
+        deadline = started + 2.0
+        processes, truncated = self._enumerate_processes(root_pid, deadline)
+        observations = tuple(
             self._observe_process(
                 process,
                 source,
@@ -581,11 +600,55 @@ class SubprocessBroker:
                 alive_before_cleanup,
                 cleanup_action,
                 cleanup_outcome,
-                deadline=started + 2.0,
+                deadline=deadline,
             )
             for process, source in processes
-            if time.monotonic() <= started + 2.0
+            if time.monotonic() <= deadline
         )
+        if truncated and observations:
+            observations = (
+                observations[0].model_copy(
+                    update={
+                        "failures": (
+                            *observations[0].failures,
+                            "descendant_enumeration_truncated",
+                        )
+                    }
+                ),
+                *observations[1:],
+            )
+        return observations
+
+    def _enumerate_processes(
+        self, root_pid: int, deadline: float
+    ) -> tuple[list[tuple[psutil.Process, str]], bool]:
+        processes: list[tuple[psutil.Process, str]] = []
+        pending: deque[tuple[psutil.Process, str]] = deque()
+        truncated = False
+        try:
+            pending.append((psutil.Process(root_pid), "root"))
+            while pending and len(processes) < self._MAX_OBSERVED_PROCESSES:
+                if time.monotonic() > deadline:
+                    truncated = True
+                    break
+                process, source = pending.popleft()
+                processes.append((process, source))
+                try:
+                    children = process.children(recursive=False)
+                except psutil.Error:
+                    children = []
+                if time.monotonic() > deadline:
+                    truncated = True
+                    break
+                for child in children:
+                    if len(processes) + len(pending) >= self._MAX_OBSERVED_PROCESSES:
+                        truncated = True
+                        break
+                    pending.append((child, "ancestry"))
+            truncated = truncated or bool(pending)
+        except psutil.Error:
+            return [], False
+        return processes, truncated
 
     def _snapshot_known_processes(
         self,
@@ -764,6 +827,9 @@ class SubprocessBroker:
                     finally:
                         process.stdin.close()
 
+                process_observations.extend(
+                    self._snapshot_processes(process.pid, "running", True, None, None)
+                )
                 observed = self._wait_observed(
                     process,
                     request,
@@ -785,12 +851,31 @@ class SubprocessBroker:
 
         finished = time.monotonic_ns()
         process_observations.extend(
-            self._snapshot_processes(process.pid, "post_root_exit", False, None, None)
+            self._snapshot_known_processes(
+                self._observation_identities(process_observations),
+                "post_root_exit",
+                False,
+                None,
+                None,
+            )
         )
         if observed.cancellation_cause == "output_limit":
+            output_process = ProcessResult(
+                exit_code=observed.returncode if observed.returncode >= 0 else None,
+                terminating_signal=(-observed.returncode if observed.returncode < 0 else None),
+                wall_time_ns=finished - started,
+                cancellation_cause="output_limit",
+                cleanup_complete=cleanup_complete,
+            )
             raise DomainError(
                 ErrorCode.QUERY_BUDGET_EXCEEDED,
                 f"Process output exceeded {request.max_output_bytes} bytes.",
+                details={
+                    "process": output_process.model_dump(mode="json"),
+                    "process_observations": [
+                        item.model_dump(mode="json") for item in process_observations
+                    ],
+                },
             )
         if observed.cancellation_cause == "timeout":
             timeout_process = ProcessResult(
@@ -925,10 +1010,9 @@ class SubprocessBroker:
     def _observed_peak_rss(self, pid: int) -> int:
         peak = 0
         try:
-            parent = psutil.Process(pid)
-            processes = (parent, *parent.children(recursive=True))
+            processes, _truncated = self._enumerate_processes(pid, time.monotonic() + 0.5)
             peak = sum(
-                observed.memory_info().rss for observed in processes if observed.is_running()
+                process.memory_info().rss for process, _source in processes if process.is_running()
             )
         except (psutil.Error, OSError):
             pass

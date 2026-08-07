@@ -329,6 +329,15 @@ class FaultExperimentService:
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "Fault experiment definition changed after planning.",
             )
+        definition = self.workloads.definition(config.workload)
+        if (
+            definition.workload_definition_id
+            != plan.experiment_plan.experiment.workload_definition_id
+        ):
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "Fault workload definition changed after planning.",
+            )
         receipt = await run_atomic_thread(self.tools.stage)
         if (
             receipt.version != plan.tool_version

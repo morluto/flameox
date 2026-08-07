@@ -7,6 +7,7 @@ import pytest
 
 from flameox.application import (
     ConfigureWorkloadRequest,
+    ProjectConfig,
     WorkloadConfig,
     WorkloadService,
 )
@@ -90,6 +91,36 @@ def test_unknown_plain_placeholder_is_still_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="template fields are not declared parameters"):
         service.configure(_request("unknown", argv=("python", "-c", "print({missing})")))
+
+
+def test_schema_one_legacy_experiment_fields_remain_loadable() -> None:
+    project = ProjectConfig.model_validate(
+        {
+            "schema_version": 1,
+            "workloads": {
+                "scan": {
+                    "argv": ["python", "-c", "print('{variant}', '{length}')"],
+                    "parameters": {
+                        "variant": ["baseline", "candidate"],
+                        "length": [1, 2],
+                    },
+                }
+            },
+            "experiments": {
+                "scan": {
+                    "workload": "scan",
+                    "variants": ["baseline", "candidate"],
+                    "scaling_parameter": "length",
+                    "scaling_values": [1, 2],
+                }
+            },
+        }
+    )
+
+    experiment = project.experiments["scan"]
+    assert experiment.variants == ("baseline", "candidate")
+    assert experiment.scaling_parameter == "length"
+    assert experiment.scaling_values == (1, 2)
 
 
 def test_replace_requires_current_configuration_digest_and_preserves_unrelated_state(

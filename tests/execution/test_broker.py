@@ -111,6 +111,8 @@ def test_observed_run_preserves_streams_exit_status_and_peak_rss(tmp_path: Path)
     assert outcome.stderr == b"observed stderr\n"
     assert outcome.process.exit_code == 7
     assert outcome.process.peak_rss_bytes is not None
+    assert any(item.snapshot_phase == "running" for item in outcome.process_observations)
+    assert any(item.snapshot_phase == "post_root_exit" for item in outcome.process_observations)
     assert outcome.peak_rss_backend == (
         "wait4_ru_maxrss" if hasattr(os, "wait4") else "psutil_polling"
     )
@@ -129,6 +131,9 @@ def test_observed_output_budget_terminates_the_process(tmp_path: Path) -> None:
         )
 
     assert error.value.code is ErrorCode.QUERY_BUDGET_EXCEEDED
+    assert isinstance(error.value.details["process"], dict)
+    assert error.value.details["process"]["cancellation_cause"] == "output_limit"
+    assert error.value.details["process_observations"]
 
 
 def test_observed_timeout_cleans_up_the_process_group(tmp_path: Path) -> None:

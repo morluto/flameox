@@ -872,9 +872,36 @@ class ExperimentService:
         config: ExperimentConfig,
         workload_parameters: dict[str, tuple[Scalar, ...]],
     ) -> tuple[str, dict[str, tuple[Scalar, ...]], tuple[dict[str, Scalar], ...]]:
-        assert config.treatment_factor is not None
-        treatment_factor = config.treatment_factor
-        factors = dict(config.factors)
+        if config.factors:
+            assert config.treatment_factor is not None
+            treatment_factor = config.treatment_factor
+            factors = dict(config.factors)
+        else:
+            matches = [
+                name
+                for name, choices in workload_parameters.items()
+                if set(config.variants).issubset(set(choices))
+            ]
+            if not matches:
+                raise DomainError(
+                    ErrorCode.WORKSPACE_INVALID,
+                    "Experiment variants must be declared choices of one workload parameter.",
+                )
+            if len(matches) > 1:
+                raise DomainError(
+                    ErrorCode.WORKSPACE_INVALID,
+                    "Experiment variants ambiguously match more than one workload parameter.",
+                    details={"parameters": matches},
+                )
+            treatment_factor = matches[0]
+            factors = {treatment_factor: config.variants}
+            if config.scaling_parameter is not None:
+                if config.scaling_parameter == treatment_factor:
+                    raise DomainError(
+                        ErrorCode.WORKSPACE_INVALID,
+                        "The scaling parameter must differ from the treatment parameter.",
+                    )
+                factors[config.scaling_parameter] = config.scaling_values
 
         for name, values in factors.items():
             allowed = workload_parameters.get(name)

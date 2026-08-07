@@ -121,6 +121,9 @@ def _request() -> ExportTraceServiceRequest:
     add_span(b"z" * 8, "missing", 0, 0)
     add_span(b"v" * 8, "reversed", 700, 600)
     add_span(b"r" * 8, "duplicate", 800, 900)
+    duplicate = scope_spans.spans[-1]
+    duplicate.events.add(name="message", time_unix_nano=850)
+    duplicate.links.add(trace_id=b"l" * 16, span_id=b"l" * 8)
     invalid_trace = add_span(b"short", "invalid", 901, 902)
     invalid_trace.trace_id = b"short"
     return request
@@ -163,8 +166,8 @@ def test_otlp_normalization_and_lifecycle_queries_preserve_evidence(
     assert extracted.evidence_generation_id == repeated.evidence_generation_id
     assert (extracted.resource_count, extracted.scope_count) == (1, 1)
     assert extracted.span_count == 9
-    assert extracted.event_count == 1
-    assert extracted.link_count == 1
+    assert extracted.event_count == 2
+    assert extracted.link_count == 2
     assert any("duplicate_identity" in item for item in extracted.limitations)
     assert any("missing_timestamp" in item for item in extracted.limitations)
     assert any("end_before_start" in item for item in extracted.limitations)
@@ -179,6 +182,19 @@ def test_otlp_normalization_and_lifecycle_queries_preserve_evidence(
     decoded = json.loads(attributes[0])
     assert decoded["bytes"] == {"base64": "cmF3", "type": "bytes"}
     assert decoded["nested"]["member"] == 9
+    with Catalog(workspace).open_snapshot() as snapshot:
+        event_sources = snapshot.execute(
+            "SELECT source_ordinal FROM otel_span_events "
+            "WHERE artifact_id = ? AND span_id = ? ORDER BY source_ordinal",
+            (artifact_id, (b"r" * 8).hex()),
+        ).fetchall()
+        link_sources = snapshot.execute(
+            "SELECT source_ordinal FROM otel_span_links "
+            "WHERE artifact_id = ? AND span_id = ? ORDER BY source_ordinal",
+            (artifact_id, (b"r" * 8).hex()),
+        ).fetchall()
+    assert event_sources == [(0,), (7,)]
+    assert link_sources == [(0,), (7,)]
 
     lifecycle = LifecycleEvidenceService(workspace)
     window = lifecycle.get_operation_window(
@@ -233,10 +249,34 @@ def test_otlp_normalization_and_lifecycle_queries_preserve_evidence(
     )
     assert {item.name for item in transitions.items} >= {"root", "child"}
     assert "missing_parent_references_are_coverage_gaps" in transitions.limitations
+    transition_page = lifecycle.get_operation_transitions(
+        artifact_id=artifact_id,
+        trace_id=(b"t" * 16).hex(),
+        max_depth=1,
+        limit=1,
+    )
+    assert transition_page.next_cursor is not None
+    transition_next = lifecycle.get_operation_transitions(
+        artifact_id=artifact_id,
+        trace_id=(b"t" * 16).hex(),
+        max_depth=1,
+        limit=1,
+        cursor=transition_page.next_cursor,
+    )
+    assert transition_next.items[0].source_ordinal != transition_page.items[0].source_ordinal
 
     repeated_sequences = lifecycle.find_repeated_operation_sequences(artifact_id=artifact_id)
     assert [item.name for item in repeated_sequences.items] == ["repeat", "repeat"]
     assert all(item.details["repetition_count"] == 2 for item in repeated_sequences.items)
+    repeated_page = lifecycle.find_repeated_operation_sequences(artifact_id=artifact_id, limit=1)
+    assert repeated_page.total == 2
+    assert repeated_page.next_cursor is not None
+    repeated_next = lifecycle.find_repeated_operation_sequences(
+        artifact_id=artifact_id,
+        limit=1,
+        cursor=repeated_page.next_cursor,
+    )
+    assert repeated_next.items[0].source_ordinal != repeated_page.items[0].source_ordinal
 
     gaps = lifecycle.get_lifecycle_gaps(artifact_id=artifact_id)
     assert {item.reason for item in gaps.items} >= {

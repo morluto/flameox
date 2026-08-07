@@ -120,6 +120,10 @@ class WorkloadConfig(ContractModel):
 
 class ExperimentConfig(ContractModel):
     workload: str
+    # These fields remain readable for schema-1 workspaces. New configurations
+    # should use factors/treatment_factor; planning projects the legacy shape
+    # into the same factor representation below.
+    variants: Annotated[tuple[str, ...], Field(max_length=16)] = ()
     design: Literal[
         "randomized_complete_blocks",
         "randomized",
@@ -144,17 +148,31 @@ class ExperimentConfig(ContractModel):
     practical_threshold: Annotated[float, Field(ge=0)] = 0
     confidence_level: Annotated[float, Field(gt=0, lt=1)] = 0.95
     random_seed: Annotated[int, Field(ge=0)] = 0
+    scaling_parameter: str | None = None
+    scaling_values: Annotated[tuple[Scalar, ...], Field(max_length=1_000)] = ()
 
     @model_validator(mode="after")
     def valid_design(self) -> ExperimentConfig:
-        if not self.factors:
-            raise ValueError("experiments require at least one factor")
-        if self.treatment_factor not in self.factors:
-            raise ValueError("factor experiments require a declared treatment_factor")
-        if self.combination_policy == "cartesian" and self.combinations:
-            raise ValueError("cartesian experiments cannot declare explicit combinations")
-        if self.combination_policy == "explicit" and not self.combinations:
-            raise ValueError("explicit experiments require combinations")
+        if self.factors:
+            if self.variants or self.scaling_parameter is not None or self.scaling_values:
+                raise ValueError("factor experiments cannot use legacy variant or scaling fields")
+            if self.treatment_factor not in self.factors:
+                raise ValueError("factor experiments require a declared treatment_factor")
+            if self.combination_policy == "cartesian" and self.combinations:
+                raise ValueError("cartesian experiments cannot declare explicit combinations")
+            if self.combination_policy == "explicit" and not self.combinations:
+                raise ValueError("explicit experiments require combinations")
+        else:
+            if not self.variants:
+                raise ValueError("experiments require at least one factor or legacy variants")
+            if len(set(self.variants)) != len(self.variants):
+                raise ValueError("experiment variants must be unique")
+            if self.combinations or self.exclude or self.treatment_factor is not None:
+                raise ValueError("combination fields require factors")
+            if bool(self.scaling_parameter) != bool(self.scaling_values):
+                raise ValueError("scaling_parameter and scaling_values must be declared together")
+            if len(set(self.scaling_values)) != len(self.scaling_values):
+                raise ValueError("experiment scaling values must be unique")
         if self.analysis == "outcome":
             if self.outcome_goal is None:
                 raise ValueError("outcome experiments require outcome_goal")
@@ -330,7 +348,8 @@ class ProjectConfig(ContractModel):
             workload = self.workloads[experiment.workload]
             template_values = (*workload.argv, workload.cwd, *workload.environment.values())
             if not any(
-                "{" + experiment.endpoint_parameter + "}" in value for value in template_values
+                experiment.endpoint_parameter in _template_fields(value)
+                for value in template_values
             ):
                 raise ValueError(
                     "fault experiment endpoint_parameter must be rendered by argv, cwd, "

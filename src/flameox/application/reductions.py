@@ -233,12 +233,13 @@ class ReductionService:
             )
         candidate = root / "candidate"
         original = self.artifacts.get(plan.original_artifact_id).payload_path.read_bytes()
-        outputs: list[tuple[bytes, bytes]] = []
+        latest_output: tuple[bytes, bytes] | None = None
         cancellation = threading.Event()
         failure_state: list[str | None] = [None]
         wall_deadline = time.monotonic() + plan.limits.wall_time_seconds
 
         def predicate(payload: bytes) -> NativePredicateClassification:
+            nonlocal latest_output
             if cancellation.is_set():
                 failure_state[0] = "cancelled"
                 return "unresolved"
@@ -278,7 +279,7 @@ class ReductionService:
             if outcome is None:
                 return "unresolved"
             failure_state[0] = None
-            outputs.append((outcome.stdout, outcome.stderr))
+            latest_output = (outcome.stdout, outcome.stderr)
             return "interesting" if outcome.process.exit_code == 0 else "not_interesting"
 
         try:
@@ -323,16 +324,18 @@ class ReductionService:
                 if stored.content.artifact_id not in accepted_ids:
                     accepted_ids.append(stored.content.artifact_id)
             final_path = root / "final-candidate"
-            final_path.write_bytes(native.final_payload or original)
+            final_path.write_bytes(
+                native.final_payload if native.final_payload is not None else original
+            )
             final_stored = self.artifacts.import_path(
                 final_path,
                 allowed_roots=(root,),
                 max_bytes=self.workspace.config.capture.max_artifact_bytes,
             )
             stdout_id = stderr_id = None
-            if outputs:
-                stdout_id = self._preserve_output(root, "predicate.stdout", outputs[-1][0])
-                stderr_id = self._preserve_output(root, "predicate.stderr", outputs[-1][1])
+            if latest_output is not None:
+                stdout_id = self._preserve_output(root, "predicate.stdout", latest_output[0])
+                stderr_id = self._preserve_output(root, "predicate.stderr", latest_output[1])
             summary = ReductionAttemptSummary(
                 attempted=len(native.attempts),
                 passed=sum(item.classification == "interesting" for item in native.attempts),

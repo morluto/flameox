@@ -17,7 +17,7 @@ from flameox.application import (
     InvestigationService,
 )
 from flameox.application.workloads import FaultExperimentConfig, ProjectConfig
-from flameox.domain import ProcessResult
+from flameox.domain import DomainError, ErrorCode, ProcessResult
 from flameox.execution import ManagedSidecarOutcome, ProcessObservation
 from flameox.storage import ArtifactStore, Workspace
 
@@ -55,6 +55,31 @@ def test_fault_configuration_rejects_unused_endpoint_parameter() -> None:
                 "workloads": {
                     "client": {
                         "argv": ["python", "-c", "print(1)"],
+                        "parameters": {"endpoint": ["unused"]},
+                    }
+                },
+                "fault_experiments": {
+                    "transport": {
+                        "workload": "client",
+                        "endpoint_parameter": "endpoint",
+                        "upstream_host": "127.0.0.1",
+                        "upstream_port": 8080,
+                        "endpoint_template": "http://{host}:{port}",
+                        "scenarios": {"off": {"type": "proxy", "enabled": False}},
+                    }
+                },
+            }
+        )
+
+
+def test_fault_configuration_rejects_escaped_endpoint_parameter() -> None:
+    with pytest.raises(ValueError, match="must be rendered"):
+        ProjectConfig.model_validate(
+            {
+                "schema_version": 1,
+                "workloads": {
+                    "client": {
+                        "argv": ["python", "-c", "print('{{endpoint}}')"],
                         "parameters": {"endpoint": ["unused"]},
                     }
                 },
@@ -181,6 +206,16 @@ latency_ms = 10
 
     assert plan.workload_containment == ExecutionPolicy.APPROVED_AGENT.value
     assert plan.containment == "managed_process_group"
+
+    (tmp_path / "flameox.toml").write_text(
+        (tmp_path / "flameox.toml").read_text().replace("print(1)", "print(2)")
+    )
+    with pytest.raises(DomainError) as error:
+        await FaultExperimentService(
+            workspace,
+            tool_manager=_ToolManager(Path("/bin/true")),
+        ).run(plan.plan_id)
+    assert error.value.code is ErrorCode.INVALID_CAPTURE_PLAN
 
 
 @pytest.mark.anyio

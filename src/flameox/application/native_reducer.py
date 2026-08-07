@@ -201,27 +201,30 @@ class NativeDdminReducer:
                     budget_exhausted = True
                     break
                 if subset_index < len(subsets):
-                    candidate_units = [unit for unit in current if unit not in subset]
+                    candidate_before_dependencies = [unit for unit in current if unit not in subset]
                 else:
-                    candidate_units = list(subset)
-                candidate_units = _with_dependencies(candidate_units, current)
+                    candidate_before_dependencies = list(subset)
+                candidate_units = _with_dependencies(candidate_before_dependencies, current)
                 requested = tuple(unit.unit_id for unit in subset)
                 dependency_added = tuple(
-                    unit.unit_id for unit in candidate_units if unit.unit_id not in requested
+                    unit.unit_id
+                    for unit in candidate_units
+                    if unit.unit_id
+                    not in {candidate.unit_id for candidate in candidate_before_dependencies}
                 )
                 if len(candidate_units) >= len(current):
+                    candidate_payload = rebuild(candidate_units)
+                    candidate_digest = _digest(candidate_payload)
                     attempts.append(
                         NativeReductionAttempt(
                             attempt_id=f"attempt-{len(attempts):08d}",
-                            candidate_digest=_digest(rebuild(candidate_units)),
-                            candidate_size_bytes=len(rebuild(candidate_units)),
+                            candidate_digest=candidate_digest,
+                            candidate_size_bytes=len(candidate_payload),
                             requested_unit_ids=requested,
                             dependency_added_unit_ids=dependency_added,
                             removed_unit_ids=(),
                             classification="not_interesting",
-                            cache_status="hit"
-                            if _digest(rebuild(candidate_units)) in cache
-                            else "miss",
+                            cache_status="hit" if candidate_digest in cache else "miss",
                             duration_ms=0,
                             failure="dependency_closure_no_op",
                         )

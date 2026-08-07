@@ -36,6 +36,13 @@ class _ParsedOtlp:
     limitations: tuple[str, ...]
 
 
+class _OtlpRowLimitExceeded(Exception):
+    def __init__(self, counts: dict[str, int], limitations: tuple[str, ...]) -> None:
+        super().__init__("OTLP normalization row limit exceeded")
+        self.counts = counts
+        self.limitations = limitations
+
+
 class OtlpTraceService:
     """Normalize file-imported OTLP traces into bounded authoritative tables."""
 
@@ -71,6 +78,18 @@ class OtlpTraceService:
         path = self.artifacts.get(registration.artifact_id).payload_path
         try:
             parsed = self._parse(path, registration.media_type)
+        except _OtlpRowLimitExceeded as error:
+            return OtlpExtractionResult(
+                run_id=run_id,
+                artifact_id=registration.artifact_id,
+                resource_count=error.counts["resources"],
+                scope_count=error.counts["scopes"],
+                span_count=error.counts["spans"],
+                event_count=error.counts["events"],
+                link_count=error.counts["links"],
+                limitations=error.limitations,
+                failed=True,
+            )
         except DomainError:
             raise
         except Exception as error:
@@ -81,10 +100,7 @@ class OtlpTraceService:
             ) from error
 
         rows = {
-            table: [
-                {**row, "run_id": run_id, "artifact_id": registration.artifact_id}
-                for row in table_rows
-            ]
+            table: table_rows
             for table, table_rows in (
                 ("otel_resources", parsed.resources),
                 ("otel_scopes", parsed.scopes),
@@ -93,20 +109,10 @@ class OtlpTraceService:
                 ("otel_span_links", parsed.links),
             )
         }
-        total_rows = sum(len(value) for value in rows.values())
-        if total_rows > self.workspace.config.storage.max_rows_per_generation:
-            limitations = (*parsed.limitations, "otlp_row_limit_exceeded")
-            return OtlpExtractionResult(
-                run_id=run_id,
-                artifact_id=registration.artifact_id,
-                resource_count=len(parsed.resources),
-                scope_count=len(parsed.scopes),
-                span_count=len(parsed.spans),
-                event_count=len(parsed.events),
-                link_count=len(parsed.links),
-                limitations=limitations,
-                failed=True,
-            )
+        for table_rows in rows.values():
+            for row in table_rows:
+                row["run_id"] = run_id
+                row["artifact_id"] = registration.artifact_id
         published = self.publisher.publish_rows_idempotent(
             rows,
             publisher="flameox.otlp",
@@ -163,9 +169,11 @@ class OtlpTraceService:
                 "OTLP extraction requires an explicit protobuf or JSON media type.",
                 details={"media_type": media_type},
             )
-        return self._normalize(request)
+        return self._normalize(
+            request, row_limit=self.workspace.config.storage.max_rows_per_generation
+        )
 
-    def _normalize(self, request: Any) -> _ParsedOtlp:
+    def _normalize(self, request: Any, *, row_limit: int) -> _ParsedOtlp:
         resources: list[dict[str, object]] = []
         scopes: list[dict[str, object]] = []
         spans: list[dict[str, object]] = []
@@ -173,20 +181,34 @@ class OtlpTraceService:
         links: list[dict[str, object]] = []
         limitations: list[str] = []
         identities: set[tuple[str, str]] = set()
+        counts = {"resources": 0, "scopes": 0, "spans": 0, "events": 0, "links": 0}
+
+        def append_row(table: list[dict[str, object]], name: str, row: dict[str, object]) -> None:
+            counts[name] += 1
+            if sum(counts.values()) > row_limit:
+                raise _OtlpRowLimitExceeded(
+                    counts.copy(), (*sorted(set(limitations)), "otlp_row_limit_exceeded")
+                )
+            table.append(row)
+
         source_ordinal = 0
         for resource_ordinal, resource_spans in enumerate(request.resource_spans):
             resource = resource_spans.resource
-            resources.append(
+            append_row(
+                resources,
+                "resources",
                 {
                     "resource_ordinal": resource_ordinal,
                     "schema_url": resource_spans.schema_url or None,
                     "attributes_json": _json(_attributes(resource.attributes)),
                     "dropped_attributes_count": resource.dropped_attributes_count,
-                }
+                },
             )
             for scope_ordinal, scope_spans in enumerate(resource_spans.scope_spans):
                 scope = scope_spans.scope
-                scopes.append(
+                append_row(
+                    scopes,
+                    "scopes",
                     {
                         "resource_ordinal": resource_ordinal,
                         "scope_ordinal": scope_ordinal,
@@ -195,7 +217,7 @@ class OtlpTraceService:
                         "schema_url": scope_spans.schema_url or None,
                         "attributes_json": _json(_attributes(scope.attributes)),
                         "dropped_attributes_count": scope.dropped_attributes_count,
-                    }
+                    },
                 )
                 for span in scope_spans.spans:
                     trace_id = _id(span.trace_id, 16, "trace_id", limitations)
@@ -216,7 +238,9 @@ class OtlpTraceService:
                     if identity in identities:
                         limitations.append(f"span:{source_ordinal}:duplicate_identity")
                     identities.add(identity)
-                    spans.append(
+                    append_row(
+                        spans,
+                        "spans",
                         {
                             "resource_ordinal": resource_ordinal,
                             "scope_ordinal": scope_ordinal,
@@ -237,25 +261,31 @@ class OtlpTraceService:
                             "dropped_attributes_count": span.dropped_attributes_count,
                             "dropped_events_count": span.dropped_events_count,
                             "dropped_links_count": span.dropped_links_count,
-                        }
+                        },
                     )
                     for event_ordinal, event in enumerate(span.events):
-                        events.append(
+                        append_row(
+                            events,
+                            "events",
                             {
                                 "trace_id": trace_id,
                                 "span_id": span_id,
+                                "source_ordinal": source_ordinal,
                                 "event_ordinal": event_ordinal,
                                 "time_unix_nano": int(event.time_unix_nano),
                                 "name": event.name,
                                 "attributes_json": _json(_attributes(event.attributes)),
                                 "dropped_attributes_count": event.dropped_attributes_count,
-                            }
+                            },
                         )
                     for link_ordinal, link in enumerate(span.links):
-                        links.append(
+                        append_row(
+                            links,
+                            "links",
                             {
                                 "trace_id": trace_id,
                                 "span_id": span_id,
+                                "source_ordinal": source_ordinal,
                                 "link_ordinal": link_ordinal,
                                 "linked_trace_id": _id(
                                     link.trace_id, 16, "linked_trace_id", limitations
@@ -267,7 +297,7 @@ class OtlpTraceService:
                                 "flags": int(link.flags),
                                 "attributes_json": _json(_attributes(link.attributes)),
                                 "dropped_attributes_count": link.dropped_attributes_count,
-                            }
+                            },
                         )
                     source_ordinal += 1
         return _ParsedOtlp(resources, scopes, spans, events, links, tuple(sorted(set(limitations))))

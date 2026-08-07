@@ -2580,6 +2580,7 @@ def create_server(
         ctx: Context[AppContext],
         minimum_repetitions: Annotated[int, Field(ge=2, le=100)] = 2,
         limit: Annotated[int | None, Field(ge=1, le=1_000)] = None,
+        cursor: Annotated[str | None, Field(max_length=4_096)] = None,
     ) -> Annotated[CallToolResult, ToolPayload[LifecycleQueryResult]]:
         """Return repeated span signatures as bounded derived evidence."""
         try:
@@ -2590,6 +2591,7 @@ def create_server(
                     artifact_id=artifact_id,
                     minimum_repetitions=minimum_repetitions,
                     limit=limit,
+                    cursor=cursor,
                 )
             )
             return _success(result, f"Returned {result.returned} repeated operation spans.")

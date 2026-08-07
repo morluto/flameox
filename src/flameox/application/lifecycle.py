@@ -73,6 +73,7 @@ class LifecycleEvidenceService:
             parameters={"start_ns": start_ns, "end_ns": end_ns, "trace_id": trace_id},
             where=(
                 "artifact_id = ? AND start_time_unix_nano > 0 AND end_time_unix_nano > 0 "
+                "AND end_time_unix_nano >= start_time_unix_nano "
                 "AND start_time_unix_nano < ? AND end_time_unix_nano > ?"
             ),
             values=(artifact_id, end_ns, start_ns),
@@ -120,7 +121,7 @@ class LifecycleEvidenceService:
             parameters.append(trace_id)
         after_sql = ""
         if after is not None:
-            after_sql = " AND s.source_ordinal > ?"
+            after_sql = " AND ancestry.source_ordinal > ?"
         query = f"""
             WITH RECURSIVE ancestry AS (
                 SELECT s.trace_id, s.span_id, s.parent_span_id, s.name, s.source_ordinal,
@@ -150,14 +151,16 @@ class LifecycleEvidenceService:
         parameters.append(bounded + 1)
         with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
             rows = snapshot.execute(query, tuple(parameters)).fetchall()
-            orphan_rows = snapshot.execute(
-                """SELECT count(*) FROM otel_spans child
+            orphan_query = """SELECT count(*) FROM otel_spans child
                    LEFT JOIN otel_spans parent ON parent.artifact_id = child.artifact_id
                      AND parent.trace_id = child.trace_id AND parent.span_id = child.parent_span_id
                    WHERE child.artifact_id = ? AND child.parent_span_id IS NOT NULL
-                     AND parent.span_id IS NULL""",
-                (artifact_id,),
-            ).fetchone()
+                     AND parent.span_id IS NULL"""
+            orphan_values: list[object] = [artifact_id]
+            if trace_id is not None:
+                orphan_query += " AND child.trace_id = ?"
+                orphan_values.append(trace_id)
+            orphan_rows = snapshot.execute(orphan_query, tuple(orphan_values)).fetchone()
         selected = rows[:bounded]
         items = tuple(
             LifecycleItem(
@@ -195,6 +198,7 @@ class LifecycleEvidenceService:
         artifact_id: str,
         minimum_repetitions: int = 2,
         limit: int | None = None,
+        cursor: str | None = None,
     ) -> LifecycleQueryResult:
         bounded = self._limit(limit)
         if minimum_repetitions < 2 or minimum_repetitions > 100:
@@ -202,7 +206,13 @@ class LifecycleEvidenceService:
                 ErrorCode.QUERY_BUDGET_EXCEEDED, "minimum_repetitions must be 2..100."
             )
         head = self.workspace.corpus.read_head()
-        query = """
+        bounds = {
+            "minimum_repetitions": minimum_repetitions,
+            "limit": bounded,
+        }
+        digest = digest_model({"artifact_id": artifact_id, **bounds})
+        after = self._cursor(cursor, "find_repeated_operation_sequences", head.commit_id, digest)
+        cte = """
             WITH normalized AS (
                 SELECT s.*,
                        coalesce(
@@ -239,17 +249,24 @@ class LifecycleEvidenceService:
                 SELECT *, count(*) OVER (PARTITION BY trace_id, sequence_group) AS repetition_count
                 FROM runs
             )
+        """
+        select_sql = """
             SELECT 'span', run_id, artifact_id, trace_id, span_id, parent_span_id, name,
                    source_ordinal, start_time_unix_nano, end_time_unix_nano, duration_ns,
                    repetition_count
             FROM repeated
-            WHERE repetition_count >= ?
-            ORDER BY source_ordinal LIMIT ?
         """
+        query = cte + select_sql + " WHERE repetition_count >= ?"
+        query_values: list[object] = [artifact_id, minimum_repetitions]
+        if after is not None:
+            query += " AND source_ordinal > ?"
+            query_values.append(after)
+        query += " ORDER BY source_ordinal LIMIT ?"
+        query_values.append(bounded + 1)
+        count_query = cte + " SELECT count(*) FROM repeated WHERE repetition_count >= ?"
         with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
-            rows = snapshot.execute(
-                query, (artifact_id, minimum_repetitions, bounded + 1)
-            ).fetchall()
+            total_row = snapshot.execute(count_query, (artifact_id, minimum_repetitions)).fetchone()
+            rows = snapshot.execute(query, tuple(query_values)).fetchall()
         selected = rows[:bounded]
         items = tuple(
             LifecycleItem(
@@ -272,11 +289,13 @@ class LifecycleEvidenceService:
             "find_repeated_operation_sequences",
             head.commit_id,
             artifact_id,
-            {"minimum_repetitions": minimum_repetitions, "limit": bounded},
+            bounds,
             items,
-            len(selected),
+            int(total_row[0]) if total_row else 0,
             len(rows) > bounded,
-            None,
+            items[-1].source_ordinal if len(rows) > bounded and items else None,
+            cursor_namespace="find_repeated_operation_sequences",
+            digest=digest,
             limitations=("repetition_is_evidence_not_a_loop_verdict",),
         )
 

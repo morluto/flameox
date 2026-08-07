@@ -78,6 +78,21 @@ async def test_native_reduction_revalidates_final_candidate(tmp_path: Path) -> N
 
 
 @pytest.mark.anyio
+async def test_native_reduction_publishes_empty_final_artifact(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    _configure(tmp_path, "raise SystemExit(0)")
+    original_id = _original(workspace, tmp_path / "original.txt", "remove-me\n")
+    result = await ReductionService(workspace).execute(_plan(workspace, original_id).plan_id)
+
+    assert result.disposition == "succeeded"
+    assert result.final_unit_count == 0
+    assert result.final_artifact_id is not None
+    assert result.final_artifact_id != original_id
+    final_path = ReductionService(workspace).artifacts.get(result.final_artifact_id).payload_path
+    assert final_path.read_bytes() == b""
+
+
+@pytest.mark.anyio
 async def test_concurrent_native_execution_reconnects_to_one_result(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     _configure(tmp_path, "raise SystemExit(0)")
