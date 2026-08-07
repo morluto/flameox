@@ -272,41 +272,54 @@ class _CaptureExecution:
             error_code=error_code,
         )
         current = self.run
-        snapshot_path = self.output_root / "process-snapshot.json"
-        snapshot_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "run_id": self.plan.run_id,
-                    "observations": [item.model_dump(mode="json") for item in process_observations],
-                },
-                separators=(",", ":"),
-                sort_keys=True,
+        snapshot_rows: tuple[list[dict[str, object]], list[dict[str, object]]] = ([], [])
+        try:
+            snapshot_path = self.output_root / "process-snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "run_id": self.plan.run_id,
+                        "observations": [
+                            item.model_dump(mode="json") for item in process_observations
+                        ],
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
             )
-        )
-        snapshot_artifact = self.service.artifacts.import_path(
-            snapshot_path,
-            allowed_roots=(self.output_root,),
-            max_bytes=self.service.workspace.config.capture.max_artifact_bytes,
-        )
-        snapshot_registration = ArtifactRegistration(
-            registration_id=new_id(),
-            run_id=self.plan.run_id,
-            artifact_id=snapshot_artifact.content.artifact_id,
-            display_name="process-snapshot.json",
-            media_type="application/json",
-            kind=ArtifactKind.PROCESS_TREE_SNAPSHOT,
-            role="process_observation",
-            producer="flameox.execution",
-            producer_version="1",
-            sensitivity=Sensitivity.INTERNAL,
-        )
-        snapshot_rows = process_observation_rows(
-            self.plan.run_id,
-            process_observations,
-            artifact_id=snapshot_artifact.content.artifact_id,
-        )
-        artifacts = (*artifacts, snapshot_registration)
+            snapshot_artifact = self.service.artifacts.import_path(
+                snapshot_path,
+                allowed_roots=(self.output_root,),
+                max_bytes=self.service.workspace.config.capture.max_artifact_bytes,
+            )
+            snapshot_registration = ArtifactRegistration(
+                registration_id=new_id(),
+                run_id=self.plan.run_id,
+                artifact_id=snapshot_artifact.content.artifact_id,
+                display_name="process-snapshot.json",
+                media_type="application/json",
+                kind=ArtifactKind.PROCESS_TREE_SNAPSHOT,
+                role="process_observation",
+                producer="flameox.execution",
+                producer_version="1",
+                sensitivity=Sensitivity.INTERNAL,
+            )
+            snapshot_rows = process_observation_rows(
+                self.plan.run_id,
+                process_observations,
+                artifact_id=snapshot_artifact.content.artifact_id,
+            )
+            artifacts = (*artifacts, snapshot_registration)
+        except (DomainError, OSError) as snapshot_error:
+            limitation_details = (
+                *limitation_details,
+                _limitation(
+                    "collector",
+                    "snapshot_artifact_unavailable",
+                    f"Process snapshot artifact could not be retained: {snapshot_error}",
+                ),
+            )
 
         def finish_error(run: RunManifest) -> RunManifest:
             return self.service._finish_error(

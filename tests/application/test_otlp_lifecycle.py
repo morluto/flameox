@@ -2,23 +2,46 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
-
-pytest.importorskip("google.protobuf")
-pytest.importorskip("opentelemetry.proto.collector.trace.v1.trace_service_pb2")
-from google.protobuf import json_format  # type: ignore[import-untyped]
-from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
-from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
-from opentelemetry.proto.resource.v1.resource_pb2 import Resource
-from opentelemetry.proto.trace.v1.trace_pb2 import Span
 
 from flameox.application import ImportArtifactRequest, ImportService
 from flameox.application.lifecycle import LifecycleEvidenceService
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import Workspace
+
+json_format: Any = None
+ExportTraceServiceRequest: Any = Any
+AnyValue: Any = Any
+KeyValue: Any = Any
+Resource: Any = Any
+Span: Any = Any
+try:
+    from google.protobuf import json_format as _json_format  # type: ignore[import-untyped]
+    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+        ExportTraceServiceRequest as _ExportTraceServiceRequest,
+    )
+    from opentelemetry.proto.common.v1.common_pb2 import (
+        AnyValue as _AnyValue,
+    )
+    from opentelemetry.proto.common.v1.common_pb2 import (
+        KeyValue as _KeyValue,
+    )
+    from opentelemetry.proto.resource.v1.resource_pb2 import Resource as _Resource
+    from opentelemetry.proto.trace.v1.trace_pb2 import Span as _Span
+
+    json_format = _json_format
+    ExportTraceServiceRequest = _ExportTraceServiceRequest
+    AnyValue = _AnyValue
+    KeyValue = _KeyValue
+    Resource = _Resource
+    Span = _Span
+except ImportError:
+    pass
+
+pytestmark = pytest.mark.skipif(json_format is None, reason="trace extra is not installed")
 
 
 def _attribute(key: str, value: AnyValue) -> KeyValue:
