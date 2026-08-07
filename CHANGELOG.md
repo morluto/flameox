@@ -1,6 +1,30 @@
 # Changelog
 
 All notable changes to flameox are documented in this file.
+## [0.1.11] - 2026-08-07
+### Bug Fixes
+
+- **toxiproxy:** Validate staged release behavior
+- **recovery:** Preserve indeterminate process leases
+- **runtime:** Harden worker and recovery lifecycles
+- **review:** Close evidence and lifecycle correctness gaps
+- **capture:** Keep failure finalization bounded
+- **faults:** Close transport and reducer review gaps
+- **evidence:** Preserve lifecycle and process observations
+- **npm:** Resolve latest bootstrap for upgrades
+- **capture:** Prevent exception loss on cancellation, bound diagnostics, evict consumed plans
+- **storage,capture:** Close TOCTOU races, path traversal, and /proc/stat parsing bugs
+- **storage,recovery:** Replace assert with explicit raises, add symlink checks
+### Features
+
+- **capabilities:** Stage managed toxiproxy
+- **evidence:** Add runtime evidence and transport fault experiments
+### Testing
+
+- Replace false-green fixtures with behavioral proof
+- Refresh collection preservation receipt
+- **reducer:** Constrain UTF-8 property inputs
+- **evidence:** Cover lifecycle and process provenance
 ## [0.1.10] - 2026-08-05
 ### Bug Fixes
 
