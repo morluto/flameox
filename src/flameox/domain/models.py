@@ -434,8 +434,8 @@ class CapabilitySetup(ContractModel):
     """The bounded setup action FlameOx can take for one capability."""
 
     method: Literal["start_capability_setup"]
-    extra: Literal["cpu", "execution", "memory", "test", "trace", "torch"]
-    requirement: str
+    extra: Literal["cpu", "execution", "memory", "test", "trace", "torch", "toxiproxy"]
+    requirement: str | None = None
     next_tool: Literal["start_capability_setup", "list_capabilities"]
     verification_tool: Literal["list_capabilities"] = "list_capabilities"
 

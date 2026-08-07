@@ -12,6 +12,7 @@ from typing import Any, ClassVar, cast
 import pytest
 
 from flameox.adapters import AdapterDiscoveryResult, AdapterRegistry
+from flameox.adapters.toxiproxy import ToxiproxyToolReceipt
 from flameox.application import CapabilityList, CapabilityService
 from flameox.application.capabilities import (
     CapabilitySetupManager,
@@ -126,6 +127,72 @@ async def test_active_capability_probe_is_brokered_cached_and_refreshable(
     torch_report = service.get("torch.profiler")
     assert isinstance(torch_report.setup, CapabilitySetup)
     assert torch_report.setup.extra == "torch"
+
+
+def test_toxiproxy_setup_uses_dedicated_staging_phase(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    executable = Path("/bin/true")
+    receipt = ToxiproxyToolReceipt(
+        version="2.12.0",
+        asset="toxiproxy_2.12.0_linux_amd64.tar.gz",
+        sha256="a" * 64,
+        executable=executable,
+    )
+
+    class _ToolManager:
+        staged = False
+
+        def __init__(self, _: Path) -> None:
+            pass
+
+        @staticmethod
+        def release_for_host() -> tuple[str, str, str]:
+            return (receipt.asset, receipt.sha256, "toxiproxy-server")
+
+        @classmethod
+        def staged_receipt(cls) -> ToxiproxyToolReceipt | None:
+            return receipt if cls.staged else None
+
+        @classmethod
+        def stage(cls) -> ToxiproxyToolReceipt:
+            cls.staged = True
+            return receipt
+
+    monkeypatch.setattr("flameox.application.capabilities.ToxiproxyToolManager", _ToolManager)
+    monkeypatch.setattr(CapabilityService, "_verify_toxiproxy", lambda self, value: None)
+    service = CapabilityService(workspace)
+
+    report = service.get("toxiproxy")
+    phases: list[str] = []
+    result = service.prepare(("toxiproxy",), phase_callback=phases.append)
+
+    assert isinstance(report.setup, CapabilitySetup)
+    assert report.setup.extra == "toxiproxy"
+    assert phases == ["staging_toxiproxy"]
+    assert result.installed == ("toxiproxy",)
+    assert service.get("toxiproxy").status is CapabilityStatus.AVAILABLE
+
+
+def test_unsupported_toxiproxy_platform_has_platform_specific_setup_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "flameox.application.capabilities.ToxiproxyToolManager.release_for_host",
+        staticmethod(lambda: None),
+    )
+    service = CapabilityService(Workspace.initialize(tmp_path))
+
+    report = service.get("toxiproxy")
+
+    assert report.status is CapabilityStatus.UNSUPPORTED_PLATFORM
+    with pytest.raises(DomainError) as error:
+        service.prepare(("toxiproxy",))
+    assert error.value.details["unsupported_platform"] == ["toxiproxy"]
+    assert "unavailable on this platform" in error.value.message
 
 
 @pytest.mark.anyio

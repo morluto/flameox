@@ -5,6 +5,7 @@ import json
 import platform
 import re
 import shutil
+import socket
 import sys
 import tempfile
 import threading
@@ -21,6 +22,7 @@ from platformdirs import user_data_path
 from flameox.adapters.builtins import BUILTIN_ADAPTERS, BuiltinAdapter, builtin_adapter
 from flameox.adapters.registry import AdapterRegistry
 from flameox.adapters.setup_runtime import install_trace_processor
+from flameox.adapters.toxiproxy import ToxiproxyClient, ToxiproxyToolManager, ToxiproxyToolReceipt
 from flameox.application.operations import OperationFailure, OperationRunner, OperationStatus
 from flameox.atomic import atomic_write_json
 from flameox.domain import (
@@ -76,7 +78,13 @@ class CapabilitySetupReceipt(ContractModel):
     schema_version: int = 1
     requested: tuple[str, ...]
     completed: tuple[str, ...] = ()
-    phase: Literal["installing_packages", "staging_trace_processor", "completed", "failed"]
+    phase: Literal[
+        "installing_packages",
+        "staging_trace_processor",
+        "staging_toxiproxy",
+        "completed",
+        "failed",
+    ]
     error: str | None = None
     updated_at: datetime
     next_tool: Literal["list_capabilities"] = "list_capabilities"
@@ -293,6 +301,7 @@ class CapabilityService:
                 )
             )
         if self.workspace is not None:
+            reports.append(self._toxiproxy_report(system, architecture))
             for descriptor in AdapterRegistry(self.workspace).discover().adapters:
                 reports.append(
                     CapabilityReport(
@@ -619,19 +628,39 @@ class CapabilityService:
         unsupported = tuple(
             adapter
             for adapter in requested
-            if adapter not in reports or reports[adapter].setup is None
+            if (
+                adapter not in reports
+                or reports[adapter].setup is None
+                or reports[adapter].status is CapabilityStatus.UNSUPPORTED_PLATFORM
+            )
         )
         if unsupported:
+            unsupported_platform = tuple(
+                adapter
+                for adapter in unsupported
+                if adapter in reports
+                and reports[adapter].status is CapabilityStatus.UNSUPPORTED_PLATFORM
+            )
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
-                "One or more requested capabilities are not managed by FlameOx.",
+                (
+                    "One or more requested capabilities are unavailable on this platform."
+                    if unsupported_platform
+                    else "One or more requested capabilities are not managed by FlameOx."
+                ),
                 details={
                     "unsupported_adapters": list(unsupported),
+                    "unsupported_platform": list(unsupported_platform),
                     "next_tool": "list_capabilities",
                 },
                 remediation=(
-                    "Request only capabilities whose report includes a start_capability_setup "
-                    "setup action; host tools and permissions are not installed by FlameOx.",
+                    (
+                        "Use a supported platform for the managed capability, then retry setup."
+                        if unsupported_platform
+                        else "Request only capabilities whose report includes a "
+                        "start_capability_setup setup action; host tools and permissions are "
+                        "not installed by FlameOx."
+                    ),
                 ),
             )
 
@@ -665,16 +694,24 @@ class CapabilityService:
             )
         )
         pending_trace = "perfetto" in pending
-        pending_managed = pending
+        pending_toxiproxy = "toxiproxy" in pending
         self._record_setup_receipt(
             requested,
             completed=already_available,
-            phase="installing_packages",
+            phase=(
+                "installing_packages"
+                if requirements
+                else (
+                    "staging_trace_processor"
+                    if pending_trace
+                    else ("staging_toxiproxy" if pending_toxiproxy else "completed")
+                )
+            ),
         )
-        staging_started = False
+        staging_phase: str | None = None
         lock_path = Path(sys.executable).parent / ".flameox-capability-setup.lock"
-        uv = shutil.which("uv") if pending_managed else None
-        if pending_managed and uv is None:
+        uv = shutil.which("uv") if requirements else None
+        if requirements and uv is None:
             self._record_setup_receipt(
                 requested,
                 completed=already_available,
@@ -690,7 +727,7 @@ class CapabilityService:
                 ),
             )
         try:
-            if pending_managed:
+            if requirements:
                 with portalocker.Lock(lock_path, mode="a", timeout=30):
                     self._check_cancelled(cancel_event)
                     command = [
@@ -733,7 +770,11 @@ class CapabilityService:
                 self._record_setup_receipt(
                     requested,
                     completed=self._available_requested(requested),
-                    phase=("staging_trace_processor" if pending_trace else "completed"),
+                    phase=(
+                        "staging_trace_processor"
+                        if pending_trace
+                        else ("staging_toxiproxy" if pending_toxiproxy else "completed")
+                    ),
                 )
             if pending_trace:
                 self._check_cancelled(cancel_event)
@@ -743,7 +784,7 @@ class CapabilityService:
                         "A workspace is required to stage the managed Trace Processor.",
                         details={"next_tool": "initialize_workspace"},
                     )
-                staging_started = True
+                staging_phase = "staging_trace_processor"
                 self._record_setup_receipt(
                     requested,
                     completed=self._available_requested(requested),
@@ -757,8 +798,27 @@ class CapabilityService:
                     broker=self.broker,
                 )
                 self._check_cancelled(cancel_event)
+            if pending_toxiproxy:
+                self._check_cancelled(cancel_event)
+                if self.workspace is None:
+                    raise DomainError(
+                        ErrorCode.WORKSPACE_NOT_FOUND,
+                        "A workspace is required to stage managed Toxiproxy.",
+                        details={"next_tool": "initialize_workspace"},
+                    )
+                staging_phase = "staging_toxiproxy"
+                self._record_setup_receipt(
+                    requested,
+                    completed=self._available_requested(requested),
+                    phase="staging_toxiproxy",
+                )
+                if phase_callback is not None:
+                    phase_callback("staging_toxiproxy")
+                receipt = ToxiproxyToolManager(self.workspace.paths.root).stage()
+                self._verify_toxiproxy(receipt)
+                self._check_cancelled(cancel_event)
         except DomainError as exc:
-            failure = self._annotate_setup_phase(exc, staging_started=staging_started)
+            failure = self._annotate_setup_phase(exc, staging_phase=staging_phase)
             self._record_setup_receipt(
                 requested,
                 completed=self._available_requested(requested),
@@ -769,17 +829,23 @@ class CapabilityService:
                 raise
             raise failure from exc
         except (OSError, portalocker.exceptions.LockException) as exc:
+            detail = self._bounded_setup_detail(exc)
+            phase_detail = f" [phase={staging_phase}]" if staging_phase is not None else ""
             self._record_setup_receipt(
                 requested,
                 completed=self._available_requested(requested),
                 phase="failed",
-                error=self._bounded_setup_detail(exc),
+                error=f"Capability setup failed{phase_detail}: {detail}",
             )
             raise DomainError(
                 ErrorCode.PROCESS_FAILED,
                 "FlameOx could not prepare the requested optional capabilities.",
                 retryable=True,
-                details={"next_tool": "start_capability_setup", "error": str(exc)[:500]},
+                details={
+                    "next_tool": "start_capability_setup",
+                    "error": detail,
+                    **({"phase": staging_phase} if staging_phase is not None else {}),
+                },
                 remediation=(
                     "Retry start_capability_setup after checking uv and package-index access.",
                 ),
@@ -831,11 +897,11 @@ class CapabilityService:
         return detail[:500] or "Capability setup returned no diagnostic detail."
 
     @staticmethod
-    def _annotate_setup_phase(error: DomainError, *, staging_started: bool) -> DomainError:
-        if not staging_started or isinstance(error.details.get("phase"), str):
+    def _annotate_setup_phase(error: DomainError, *, staging_phase: str | None) -> DomainError:
+        if staging_phase is None or isinstance(error.details.get("phase"), str):
             return error
         details = dict(error.details)
-        details["phase"] = "staging_trace_processor"
+        details["phase"] = staging_phase
         return DomainError(
             error.code,
             error.message,
@@ -954,7 +1020,13 @@ class CapabilityService:
         requested: tuple[str, ...],
         *,
         completed: tuple[str, ...],
-        phase: Literal["installing_packages", "staging_trace_processor", "completed", "failed"],
+        phase: Literal[
+            "installing_packages",
+            "staging_trace_processor",
+            "staging_toxiproxy",
+            "completed",
+            "failed",
+        ],
         error: str | None = None,
     ) -> None:
         receipt = CapabilitySetupReceipt(
@@ -1000,6 +1072,82 @@ class CapabilityService:
             requirement=adapter.managed_requirement,
             next_tool="start_capability_setup",
         )
+
+    def _toxiproxy_report(self, system: str, architecture: str) -> CapabilityReport:
+        assert self.workspace is not None
+        manager = ToxiproxyToolManager(self.workspace.paths.root)
+        release = manager.release_for_host()
+        receipt = manager.staged_receipt()
+        if release is None:
+            return CapabilityReport(
+                adapter="toxiproxy",
+                status=CapabilityStatus.UNSUPPORTED_PLATFORM,
+                provisioning=CapabilityProvisioning.UNSUPPORTED,
+                platform=system,
+                architecture=architecture,
+                features=("loopback_transport_faults",),
+                limitations=("No pinned Toxiproxy release asset exists for this platform.",),
+                setup_verification="not_required",
+            )
+        return CapabilityReport(
+            adapter="toxiproxy",
+            status=(
+                CapabilityStatus.AVAILABLE
+                if receipt is not None
+                else CapabilityStatus.UNAVAILABLE
+            ),
+            provisioning=CapabilityProvisioning.MANAGED_RUNTIME,
+            executable=str(receipt.executable) if receipt is not None else None,
+            version=receipt.version if receipt is not None else None,
+            supported_modes=("fault_experiment",) if receipt is not None else (),
+            supported_formats=("loopback-transport",) if receipt is not None else (),
+            platform=system,
+            architecture=architecture,
+            features=("loopback_transport_faults", "typed_toxics"),
+            remediation=()
+            if receipt is not None
+            else ("Call start_capability_setup with adapter='toxiproxy'.",),
+            setup=CapabilitySetup(
+                method="start_capability_setup",
+                extra="toxiproxy",
+                requirement=None,
+                next_tool="start_capability_setup",
+            ),
+            setup_verification="passive" if receipt is not None else "pending",
+        )
+
+    def _verify_toxiproxy(self, receipt: ToxiproxyToolReceipt) -> None:
+        admin_port = _free_loopback_port()
+        client = ToxiproxyClient(f"http://127.0.0.1:{admin_port}")
+
+        async def verify() -> None:
+            lease = await self.broker.start_toxiproxy(
+                receipt.executable,
+                admin_host="127.0.0.1",
+                admin_port=admin_port,
+                readiness=lambda: asyncio.to_thread(client.health),
+                tool_receipt=receipt,
+                readiness_timeout_seconds=5,
+            )
+            outcome = await lease.close()
+            if not outcome.process.cleanup_complete:
+                raise DomainError(
+                    ErrorCode.PROCESS_FAILED,
+                    "Managed Toxiproxy setup verification could not clean up its probe.",
+                    retryable=True,
+                )
+
+        try:
+            asyncio.run(verify())
+        except DomainError:
+            raise
+        except (OSError, RuntimeError) as error:
+            raise DomainError(
+                ErrorCode.PROCESS_FAILED,
+                "Managed Toxiproxy failed its bounded health verification.",
+                retryable=True,
+                details={"error": str(error)[:500]},
+            ) from error
 
     def _record_managed_extras(self, extras: tuple[str, ...]) -> None:
         values = {
@@ -1128,7 +1276,7 @@ class CapabilityService:
 
 
 class CapabilitySetupManager:
-    """Durable MCP lifecycle for package and Trace Processor provisioning."""
+    """Durable MCP lifecycle for providers and managed runtime tools."""
 
     def __init__(self, workspace: Workspace, service: CapabilityService) -> None:
         self.workspace = workspace
@@ -1169,11 +1317,17 @@ class CapabilitySetupManager:
         loop = asyncio.get_running_loop()
 
         def report_phase(phase: str) -> None:
-            if phase != "staging_trace_processor":
+            if phase not in {"staging_trace_processor", "staging_toxiproxy"}:
                 return
 
+            message = (
+                "Staging the managed Trace Processor."
+                if phase == "staging_trace_processor"
+                else "Staging and verifying managed Toxiproxy."
+            )
+
             async def emit_progress() -> None:
-                await progress(phase, 2, 3, "Staging the managed Trace Processor.")
+                await progress(phase, 2, 3, message)
 
             future = asyncio.run_coroutine_threadsafe(emit_progress(), loop)
             future.result()
@@ -1204,6 +1358,12 @@ class CapabilitySetupManager:
         # Item identities retain the exact bounded request without exposing
         # package-manager arguments or host paths to the protocol.
         return tuple(item.item for item in record.item_outcomes)
+
+
+def _free_loopback_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 async def _run_brokered(

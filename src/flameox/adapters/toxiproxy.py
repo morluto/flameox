@@ -38,7 +38,7 @@ _RELEASES: dict[tuple[str, str], tuple[str, str, str]] = {
     ),
     ("darwin", "x86_64"): (
         "toxiproxy_2.12.0_darwin_amd64.tar.gz",
-        "52ac1f99d720c7a3f910b791bc86318b50ef94822c79a6157606704003ced",
+        "52ac1f99d7204b4b523f910b791bc86318b50ef94822c79a6157606704003ced",
         "toxiproxy-server",
     ),
     ("darwin", "arm64"): (
@@ -76,6 +76,19 @@ class ToxiproxyToolManager:
         machine = platform.machine()
         return _RELEASES.get((system, machine))
 
+    def staged_receipt(self) -> ToxiproxyToolReceipt | None:
+        release = self.release_for_host()
+        if release is None:
+            return None
+        asset, expected_digest, _ = release
+        executable_name = "toxiproxy-server.exe" if os.name == "nt" else "toxiproxy-server"
+        executable = self.tools_root / executable_name
+        if not executable.is_file() or not self._receipt_matches(
+            asset, expected_digest, executable
+        ):
+            return None
+        return ToxiproxyToolReceipt(TOXIPROXY_VERSION, asset, expected_digest, executable)
+
     def stage(self) -> ToxiproxyToolReceipt:
         release = self.release_for_host()
         if release is None:
@@ -87,8 +100,9 @@ class ToxiproxyToolManager:
         asset, expected_digest, member_name = release
         executable_name = "toxiproxy-server.exe" if os.name == "nt" else "toxiproxy-server"
         executable = self.tools_root / executable_name
-        if executable.is_file() and self._receipt_matches(asset, expected_digest, executable):
-            return ToxiproxyToolReceipt(TOXIPROXY_VERSION, asset, expected_digest, executable)
+        existing = self.staged_receipt()
+        if existing is not None:
+            return existing
 
         self.tools_root.mkdir(parents=True, exist_ok=True)
         staging_root = self.workspace_root / "staging"

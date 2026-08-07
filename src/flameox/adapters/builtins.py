@@ -30,7 +30,9 @@ class BuiltinAdapter:
     expected_overhead: str | None = None
     capture_limitations: tuple[str, ...] = ()
     preserve_artifact_on_nonzero: bool = False
-    managed_extra: Literal["cpu", "execution", "memory", "test", "trace", "torch"] | None = None
+    managed_extra: Literal[
+        "cpu", "execution", "memory", "test", "trace", "torch", "toxiproxy"
+    ] | None = None
     managed_requirement: str | None = None
 
 
