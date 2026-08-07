@@ -89,6 +89,7 @@ class NativeDdminReducer:
         predicate: Callable[[bytes], NativePredicateClassification],
         *,
         failure_detail: Callable[[], str | None] | None = None,
+        on_best: Callable[[bytes], None] | None = None,
     ) -> NativeReductionResult:
         original_digest = _digest(original)
         try:
@@ -238,7 +239,10 @@ class NativeDdminReducer:
                 )
                 if outcome == "interesting":
                     current = candidate_units
-                    accepted_best_payloads.append(payload)
+                    if on_best is None:
+                        accepted_best_payloads.append(payload)
+                    else:
+                        on_best(payload)
                     attempts[-1] = attempts[-1].model_copy(update={"became_best": True})
                     granularity = max(granularity - 1, 2)
                     changed = True

@@ -7,7 +7,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections import deque
@@ -100,6 +99,7 @@ class ResourcePolicy(ContractModel):
     staging_root: Path | None = None
     writable_roots: tuple[Path, ...] = ()
     minimum_free_bytes: int = Field(ge=0)
+    maximum_rss_bytes: int | None = Field(default=None, gt=0)
     sampling_interval_ms: int = Field(default=250, ge=25, le=10_000)
     max_observed_files: int = Field(default=10_000, ge=1, le=1_000_000)
 
@@ -187,8 +187,13 @@ class _OutputLimitExceeded(Exception):
 
 
 class _ResourcePolicyExceeded(Exception):
-    def __init__(self, summary: RuntimeResourceSummary) -> None:
+    def __init__(
+        self,
+        summary: RuntimeResourceSummary,
+        cause: Literal["storage_reserve_exceeded", "memory_limit_exceeded"],
+    ) -> None:
         self.summary = summary
+        self.cause = cause
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,7 +201,9 @@ class _ObservedWait:
     returncode: int
     peak_rss_bytes: int | None
     peak_rss_backend: str
-    cancellation_cause: Literal["timeout", "caller_cancelled", "output_limit"] | None = None
+    cancellation_cause: (
+        Literal["timeout", "caller_cancelled", "output_limit", "io_failure"] | None
+    ) = None
 
 
 @dataclass(slots=True)
@@ -211,8 +218,104 @@ class _OutputBudget:
             raise _OutputLimitExceeded
 
 
+@dataclass(slots=True)
+class _ObservedOutput:
+    """Incrementally collect observed-process output under one shared budget."""
+
+    _remaining: int
+    _stdout: bytearray
+    _stderr: bytearray
+    _lock: threading.Lock
+    _limit_exceeded: threading.Event
+    _io_failed: threading.Event
+    _stop: threading.Event
+
+    def __init__(self, max_output_bytes: int) -> None:
+        self._remaining = max_output_bytes
+        self._stdout = bytearray()
+        self._stderr = bytearray()
+        self._lock = threading.Lock()
+        self._limit_exceeded = threading.Event()
+        self._io_failed = threading.Event()
+        self._stop = threading.Event()
+
+    def read_stdout(self, stream: IO[bytes]) -> None:
+        self._read(stream, self._stdout)
+
+    def read_stderr(self, stream: IO[bytes]) -> None:
+        self._read(stream, self._stderr)
+
+    def _read(self, stream: IO[bytes], destination: bytearray) -> None:
+        try:
+            descriptor = stream.fileno()
+            os.set_blocking(descriptor, False)
+            while not self._stop.is_set():
+                try:
+                    chunk = os.read(descriptor, 64 * 1024)
+                except (BlockingIOError, InterruptedError):
+                    self._stop.wait(0.005)
+                    continue
+                if not chunk:
+                    return
+                with self._lock:
+                    retained = min(len(chunk), self._remaining)
+                    destination.extend(chunk[:retained])
+                    self._remaining -= retained
+                    if retained < len(chunk):
+                        self._limit_exceeded.set()
+                        self._stop.set()
+                        return
+        except (OSError, ValueError):
+            if not self._stop.is_set():
+                self._io_failed.set()
+                self._stop.set()
+            return
+        finally:
+            with suppress(OSError, ValueError):
+                stream.close()
+
+    @property
+    def limit_exceeded(self) -> bool:
+        return self._limit_exceeded.is_set()
+
+    @property
+    def io_failed(self) -> bool:
+        return self._io_failed.is_set()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def write_stdin(self, stream: IO[bytes], stdin_bytes: bytes) -> None:
+        try:
+            descriptor = stream.fileno()
+            os.set_blocking(descriptor, False)
+            content = memoryview(stdin_bytes)
+            offset = 0
+            while offset < len(content) and not self._stop.is_set():
+                try:
+                    written = os.write(descriptor, content[offset:])
+                except (BlockingIOError, InterruptedError):
+                    self._stop.wait(0.005)
+                    continue
+                if written == 0:
+                    self._stop.wait(0.005)
+                    continue
+                offset += written
+        except (BrokenPipeError, OSError, ValueError):
+            return
+        finally:
+            with suppress(OSError, ValueError):
+                stream.close()
+
+    def collect(self) -> tuple[bytes, bytes]:
+        with self._lock:
+            return bytes(self._stdout), bytes(self._stderr)
+
+
 class SubprocessBroker:
     _MAX_OBSERVED_PROCESSES = 10_000
+    _OBSERVED_IO_JOIN_SECONDS = 0.25
+    _OBSERVED_IO_STOP_SECONDS = 0.05
 
     async def start_toxiproxy(
         self,
@@ -319,51 +422,58 @@ class SubprocessBroker:
         executable = self._resolve_executable(request.argv[0], cwd, environment)
         argv = (str(executable), *request.argv[1:])
         started = time.monotonic_ns()
+        deadline = asyncio.get_running_loop().time() + request.timeout_seconds
         process_observations: list[ProcessObservation] = []
-        spawn = asyncio.create_task(
-            asyncio.create_subprocess_exec(
-                *argv,
-                cwd=cwd,
-                env=environment,
-                stdin=(
-                    asyncio.subprocess.PIPE
-                    if request.stdin_bytes is not None
-                    else asyncio.subprocess.DEVNULL
-                ),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=os.name == "posix",
-            )
-        )
         try:
-            process = await asyncio.shield(spawn)
-        except asyncio.CancelledError:
-            process = await asyncio.shield(spawn)
-            await self._terminate_with_observation(
-                process, request, process_observations, on_cleanup
-            )
-            raise
-        if on_started is not None:
-            try:
-                await on_started(process.pid)
-            except BaseException:
-                await self._terminate_with_observation(
-                    process, request, process_observations, on_cleanup
+            async with asyncio.timeout_at(deadline):
+                process = await asyncio.create_subprocess_exec(
+                    *argv,
+                    cwd=cwd,
+                    env=environment,
+                    stdin=(
+                        asyncio.subprocess.PIPE
+                        if request.stdin_bytes is not None
+                        else asyncio.subprocess.DEVNULL
+                    ),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=os.name == "posix",
                 )
-                raise
+        except TimeoutError as exc:
+            cleanup_complete = True
+            if on_cleanup is not None:
+                await asyncio.shield(on_cleanup(cleanup_complete))
+            timeout_process = ProcessResult(
+                wall_time_ns=time.monotonic_ns() - started,
+                timed_out=True,
+                cancellation_cause="timeout",
+                cleanup_complete=cleanup_complete,
+            )
+            raise DomainError(
+                ErrorCode.PROCESS_TIMEOUT,
+                f"Process exceeded {request.timeout_seconds} seconds.",
+                details={
+                    "process": timeout_process.model_dump(mode="json"),
+                    "process_observations": [
+                        item.model_dump(mode="json") for item in process_observations
+                    ],
+                },
+                retryable=True,
+            ) from exc
+        except asyncio.CancelledError:
+            if on_cleanup is not None:
+                await asyncio.shield(on_cleanup(True))
+            raise
         assert process.stdout is not None
         assert process.stderr is not None
 
         output_budget = _OutputBudget(request.max_output_bytes)
+        tracked_descendants: dict[int, float | None] = {}
         stdout_task = asyncio.create_task(self._read_bounded(process.stdout, output_budget))
         stderr_task = asyncio.create_task(self._read_bounded(process.stderr, output_budget))
         resource_task = asyncio.create_task(
-            self._observe_resources(process, request.resource_policy)
+            self._observe_resources(process, request.resource_policy, tracked_descendants)
         )
-        process_observations.extend(
-            self._snapshot_processes(process.pid, "running", True, None, None)
-        )
-        observed_identities = self._observation_identities(process_observations)
         stdin_task: asyncio.Task[None] | None = None
         if request.stdin_bytes is not None:
             assert process.stdin is not None
@@ -371,7 +481,25 @@ class SubprocessBroker:
         timed_out = False
         cancellation_cause: str | None = None
         try:
-            async with asyncio.timeout(request.timeout_seconds):
+            async with asyncio.timeout_at(deadline):
+                if on_started is not None:
+                    await on_started(process.pid)
+                process_observations.extend(
+                    self._snapshot_processes(
+                        process.pid,
+                        "running",
+                        True,
+                        None,
+                        None,
+                        deadline=deadline,
+                    )
+                )
+                self._track_observed_descendants(
+                    process.pid,
+                    process_observations,
+                    tracked_descendants,
+                )
+                observed_identities = self._observation_identities(process_observations)
                 results = await asyncio.gather(
                     asyncio.shield(stdout_task),
                     asyncio.shield(stderr_task),
@@ -386,7 +514,11 @@ class SubprocessBroker:
             timed_out = True
             cancellation_cause = "timeout"
             cleanup_complete = await self._terminate_with_observation(
-                process, request, process_observations, on_cleanup
+                process,
+                request,
+                process_observations,
+                on_cleanup,
+                tracked_descendants,
             )
             partial_stdout, partial_stderr = await self._collect_readers(
                 stdout_task,
@@ -424,7 +556,11 @@ class SubprocessBroker:
         except _OutputLimitExceeded as exc:
             cancellation_cause = "output_limit"
             cleanup_complete = await self._terminate_with_observation(
-                process, request, process_observations, on_cleanup
+                process,
+                request,
+                process_observations,
+                on_cleanup,
+                tracked_descendants,
             )
             await self._settle_readers(stdout_task, stderr_task)
             await self._settle_resource(resource_task)
@@ -455,18 +591,32 @@ class SubprocessBroker:
                 },
             ) from exc
         except _ResourcePolicyExceeded as exc:
-            cancellation_cause = "storage_reserve_exceeded"
+            cancellation_cause = exc.cause
             cleanup_complete = await self._terminate_with_observation(
-                process, request, process_observations, on_cleanup
+                process,
+                request,
+                process_observations,
+                on_cleanup,
+                tracked_descendants,
             )
             partial_stdout, partial_stderr = await self._collect_readers(
                 stdout_task,
                 stderr_task,
             )
             await self._settle_task(stdin_task)
+            code = (
+                ErrorCode.STORAGE_QUOTA_EXCEEDED
+                if exc.cause == "storage_reserve_exceeded"
+                else ErrorCode.QUERY_BUDGET_EXCEEDED
+            )
+            message = (
+                "Runtime storage reserve was exceeded."
+                if exc.cause == "storage_reserve_exceeded"
+                else "Process tree exceeded the configured memory budget."
+            )
             raise DomainError(
-                ErrorCode.STORAGE_QUOTA_EXCEEDED,
-                "Runtime storage reserve was exceeded.",
+                code,
+                message,
                 details={
                     "process": ProcessResult(
                         cancellation_cause=cancellation_cause,
@@ -484,7 +634,23 @@ class SubprocessBroker:
         except asyncio.CancelledError:
             cancellation_cause = "caller_cancelled"
             cleanup_complete = await self._terminate_with_observation(
-                process, request, process_observations, on_cleanup
+                process,
+                request,
+                process_observations,
+                on_cleanup,
+                tracked_descendants,
+            )
+            await self._settle_readers(stdout_task, stderr_task)
+            await self._settle_resource(resource_task)
+            await self._settle_task(stdin_task)
+            raise
+        except BaseException:
+            await self._terminate_with_observation(
+                process,
+                request,
+                process_observations,
+                on_cleanup,
+                tracked_descendants,
             )
             await self._settle_readers(stdout_task, stderr_task)
             await self._settle_resource(resource_task)
@@ -538,12 +704,15 @@ class SubprocessBroker:
         request: ExecutionRequest,
         observations: list[ProcessObservation],
         on_cleanup: Callable[[bool], Awaitable[None]] | None,
+        tracked_descendants: dict[int, float | None],
     ) -> bool:
         observations.extend(
             self._snapshot_processes(process.pid, "pre_cleanup", True, "terminate", None)
         )
         identities = self._observation_identities(observations)
-        cleanup_complete = await asyncio.shield(self._terminate(process, request))
+        cleanup_complete = await asyncio.shield(
+            self._terminate(process, request, tracked_descendants)
+        )
         observations.extend(
             self._snapshot_known_processes(
                 identities,
@@ -588,10 +757,15 @@ class SubprocessBroker:
         alive_before_cleanup: bool | None,
         cleanup_action: str | None,
         cleanup_outcome: str | None,
+        *,
+        deadline: float | None = None,
     ) -> tuple[ProcessObservation, ...]:
         started = time.monotonic()
-        deadline = started + 2.0
-        processes, truncated = self._enumerate_processes(root_pid, deadline)
+        observation_deadline = min(
+            started + 2.0,
+            deadline if deadline is not None else started + 2.0,
+        )
+        processes, truncated = self._enumerate_processes(root_pid, observation_deadline)
         observations = tuple(
             self._observe_process(
                 process,
@@ -600,10 +774,10 @@ class SubprocessBroker:
                 alive_before_cleanup,
                 cleanup_action,
                 cleanup_outcome,
-                deadline=deadline,
+                deadline=observation_deadline,
             )
             for process, source in processes
-            if time.monotonic() <= deadline
+            if time.monotonic() <= observation_deadline
         )
         if truncated and observations:
             observations = (
@@ -804,50 +978,74 @@ class SubprocessBroker:
         process: subprocess.Popen[bytes] | None = None
         process_observations: list[ProcessObservation] = []
         cleanup_complete = True
-        with tempfile.TemporaryFile() as stdout_stream, tempfile.TemporaryFile() as stderr_stream:
-            try:
-                process = subprocess.Popen(
-                    argv,
-                    cwd=cwd,
-                    env=environment,
-                    stdin=(
-                        subprocess.PIPE if request.stdin_bytes is not None else subprocess.DEVNULL
-                    ),
-                    stdout=stdout_stream,
-                    stderr=stderr_stream,
-                    start_new_session=os.name == "posix",
+        output = _ObservedOutput(request.max_output_bytes)
+        reader_threads: tuple[threading.Thread, ...] = ()
+        stdin_thread: threading.Thread | None = None
+        deadline = time.monotonic() + request.timeout_seconds
+        try:
+            process = subprocess.Popen(
+                argv,
+                cwd=cwd,
+                env=environment,
+                stdin=(subprocess.PIPE if request.stdin_bytes is not None else subprocess.DEVNULL),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=os.name == "posix",
+            )
+            assert process.stdout is not None
+            assert process.stderr is not None
+            reader_threads = (
+                threading.Thread(
+                    target=output.read_stdout,
+                    args=(process.stdout,),
+                    name="flameox-observed-stdout",
+                    daemon=True,
+                ),
+                threading.Thread(
+                    target=output.read_stderr,
+                    args=(process.stderr,),
+                    name="flameox-observed-stderr",
+                    daemon=True,
+                ),
+            )
+            for thread in reader_threads:
+                thread.start()
+            if request.stdin_bytes is not None:
+                assert process.stdin is not None
+                stdin_thread = threading.Thread(
+                    target=output.write_stdin,
+                    args=(process.stdin, request.stdin_bytes),
+                    name="flameox-observed-stdin",
+                    daemon=True,
                 )
-                if request.stdin_bytes is not None:
-                    assert process.stdin is not None
-                    try:
-                        process.stdin.write(request.stdin_bytes)
-                        process.stdin.flush()
-                    except BrokenPipeError:
-                        pass
-                    finally:
-                        process.stdin.close()
+                stdin_thread.start()
 
-                process_observations.extend(
-                    self._snapshot_processes(process.pid, "running", True, None, None)
+            process_observations.extend(
+                self._snapshot_processes(
+                    process.pid,
+                    "running",
+                    True,
+                    None,
+                    None,
+                    deadline=deadline,
                 )
-                observed = self._wait_observed(
-                    process,
-                    request,
-                    stdout_stream=stdout_stream,
-                    stderr_stream=stderr_stream,
-                    cancellation=cancellation,
-                    observations=process_observations,
-                )
+            )
+            observed = self._wait_observed(
+                process,
+                deadline=deadline,
+                output=output,
+                cancellation=cancellation,
+                observations=process_observations,
+            )
+            cleanup_complete = self._terminate_observed_group(process, force=True)
+            self._join_observed_io(output, reader_threads, stdin_thread)
+            stdout, stderr = output.collect()
+        except BaseException:
+            if process is not None and process.poll() is None:
                 cleanup_complete = self._terminate_observed_group(process, force=True)
-                stdout_stream.seek(0)
-                stderr_stream.seek(0)
-                stdout = stdout_stream.read()
-                stderr = stderr_stream.read()
-            except BaseException:
-                if process is not None and process.poll() is None:
-                    cleanup_complete = self._terminate_observed_group(process, force=True)
-                    self._reap_observed(process)
-                raise
+                self._reap_observed(process)
+            self._join_observed_io(output, reader_threads, stdin_thread)
+            raise
 
         finished = time.monotonic_ns()
         process_observations.extend(
@@ -859,7 +1057,25 @@ class SubprocessBroker:
                 None,
             )
         )
-        if observed.cancellation_cause == "output_limit":
+        if observed.cancellation_cause == "io_failure" or output.io_failed:
+            io_process = ProcessResult(
+                exit_code=observed.returncode if observed.returncode >= 0 else None,
+                terminating_signal=(-observed.returncode if observed.returncode < 0 else None),
+                wall_time_ns=finished - started,
+                cancellation_cause="io_failure",
+                cleanup_complete=cleanup_complete,
+            )
+            raise DomainError(
+                ErrorCode.PROCESS_FAILED,
+                "Process output could not be drained safely.",
+                details={
+                    "process": io_process.model_dump(mode="json"),
+                    "process_observations": [
+                        item.model_dump(mode="json") for item in process_observations
+                    ],
+                },
+            )
+        if observed.cancellation_cause == "output_limit" or output.limit_exceeded:
             output_process = ProcessResult(
                 exit_code=observed.returncode if observed.returncode >= 0 else None,
                 terminating_signal=(-observed.returncode if observed.returncode < 0 else None),
@@ -922,15 +1138,15 @@ class SubprocessBroker:
     def _wait_observed(
         self,
         process: subprocess.Popen[bytes],
-        request: ExecutionRequest,
         *,
-        stdout_stream: IO[bytes],
-        stderr_stream: IO[bytes],
+        deadline: float,
+        output: _ObservedOutput,
         cancellation: threading.Event | None,
         observations: list[ProcessObservation],
     ) -> _ObservedWait:
-        deadline = time.monotonic() + request.timeout_seconds
-        terminating: Literal["timeout", "caller_cancelled", "output_limit"] | None = None
+        terminating: Literal["timeout", "caller_cancelled", "output_limit", "io_failure"] | None = (
+            None
+        )
         wait4 = getattr(os, "wait4", None)
         if wait4 is not None:
             while True:
@@ -938,10 +1154,11 @@ class SubprocessBroker:
                     if cancellation is not None and cancellation.is_set():
                         terminating = "caller_cancelled"
                         self._terminate_observed_with_observation(process, observations, force=True)
-                    elif self._observed_output_exceeded(
-                        stdout_stream, stderr_stream, request.max_output_bytes
-                    ):
+                    elif output.limit_exceeded:
                         terminating = "output_limit"
+                        self._terminate_observed_with_observation(process, observations, force=True)
+                    elif output.io_failed:
+                        terminating = "io_failure"
                         self._terminate_observed_with_observation(process, observations, force=True)
                     elif time.monotonic() >= deadline:
                         terminating = "timeout"
@@ -967,10 +1184,11 @@ class SubprocessBroker:
                 if cancellation is not None and cancellation.is_set():
                     terminating = "caller_cancelled"
                     self._terminate_observed_with_observation(process, observations, force=True)
-                elif self._observed_output_exceeded(
-                    stdout_stream, stderr_stream, request.max_output_bytes
-                ):
+                elif output.limit_exceeded:
                     terminating = "output_limit"
+                    self._terminate_observed_with_observation(process, observations, force=True)
+                elif output.io_failed:
+                    terminating = "io_failure"
                     self._terminate_observed_with_observation(process, observations, force=True)
                 elif time.monotonic() >= deadline:
                     terminating = "timeout"
@@ -1060,19 +1278,21 @@ class SubprocessBroker:
             with suppress(Exception):
                 await stream.wait_closed()
 
-    @staticmethod
-    def _observed_output_exceeded(
-        stdout_stream: IO[bytes],
-        stderr_stream: IO[bytes],
-        max_output_bytes: int,
-    ) -> bool:
-        try:
-            size = (
-                os.fstat(stdout_stream.fileno()).st_size + os.fstat(stderr_stream.fileno()).st_size
-            )
-        except OSError:
-            return False
-        return size > max_output_bytes
+    def _join_observed_io(
+        self,
+        output: _ObservedOutput,
+        reader_threads: tuple[threading.Thread, ...],
+        stdin_thread: threading.Thread | None,
+    ) -> None:
+        threads = (*reader_threads, *([stdin_thread] if stdin_thread is not None else []))
+        deadline = time.monotonic() + self._OBSERVED_IO_JOIN_SECONDS
+        for thread in threads:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        output.stop()
+        stop_deadline = time.monotonic() + self._OBSERVED_IO_STOP_SECONDS
+        for thread in threads:
+            if thread.is_alive():
+                thread.join(timeout=max(0.0, stop_deadline - time.monotonic()))
 
     def _reap_observed(self, process: subprocess.Popen[bytes]) -> None:
         if process.returncode is not None:
@@ -1088,12 +1308,14 @@ class SubprocessBroker:
         self,
         process: asyncio.subprocess.Process,
         policy: ResourcePolicy | None,
+        tracked_descendants: dict[int, float | None],
     ) -> RuntimeResourceSummary | None:
+        interval = 0.1 if policy is None else policy.sampling_interval_ms / 1_000
         if policy is None:
             while process.returncode is None:
-                await asyncio.sleep(0.1)
+                self._track_current_descendants(process.pid, tracked_descendants)
+                await asyncio.sleep(interval)
             return None
-        interval = policy.sampling_interval_ms / 1_000
         minimum_free: int | None = None
         peak_rss = 0
         free_sampled = False
@@ -1112,6 +1334,7 @@ class SubprocessBroker:
             else None
         )
         while process.returncode is None:
+            self._track_current_descendants(process.pid, tracked_descendants)
             try:
                 free = shutil.disk_usage(policy.filesystem_path).free
             except OSError:
@@ -1124,10 +1347,10 @@ class SubprocessBroker:
                     minimum_free = free
                 else:
                     minimum_free = min(previous_free, cast(int, free))
+            rss = 0
             try:
                 parent = psutil.Process(process.pid)
                 processes = (parent, *parent.children(recursive=True))
-                rss = 0
                 for observed in processes:
                     try:
                         rss += observed.memory_info().rss
@@ -1147,7 +1370,18 @@ class SubprocessBroker:
                     unavailable=unavailable,
                     termination="storage_reserve_exceeded",
                 )
-                raise _ResourcePolicyExceeded(summary)
+                raise _ResourcePolicyExceeded(summary, "storage_reserve_exceeded")
+            if policy.maximum_rss_bytes is not None and rss > policy.maximum_rss_bytes:
+                summary = self._resource_summary(
+                    policy,
+                    initial_sizes=initial_sizes,
+                    initial_staging=initial_staging,
+                    minimum_free=minimum_free,
+                    peak_rss=peak_rss,
+                    unavailable=unavailable,
+                    termination="memory_limit_exceeded",
+                )
+                raise _ResourcePolicyExceeded(summary, "memory_limit_exceeded")
             await asyncio.sleep(interval)
         if not free_sampled:
             unavailable.add("minimum_free_bytes")
@@ -1172,7 +1406,7 @@ class SubprocessBroker:
         minimum_free: int | None,
         peak_rss: int,
         unavailable: set[str],
-        termination: Literal["storage_reserve_exceeded"] | None,
+        termination: Literal["storage_reserve_exceeded", "memory_limit_exceeded"] | None,
     ) -> RuntimeResourceSummary:
         growth: dict[str, int] = {}
         for root in policy.writable_roots:
@@ -1242,9 +1476,18 @@ class SubprocessBroker:
         self,
         process: asyncio.subprocess.Process,
         request: ExecutionRequest,
+        tracked_descendants: dict[int, float | None],
     ) -> bool:
+        descendants = self._tracked_processes(
+            (*self._descendants(process.pid),),
+            tracked_descendants,
+            root_pid=process.pid,
+        )
+        for descendant in descendants:
+            with suppress(psutil.Error):
+                descendant.terminate()
         if process.returncode is not None:
-            return True
+            return await self._finish_descendant_cleanup(descendants)
         scope_stopped = True
         if request.systemd_scope_unit is not None:
             scope_stopped = await self._stop_systemd_scope(
@@ -1258,11 +1501,11 @@ class SubprocessBroker:
                 process.terminate()
         except ProcessLookupError:
             await process.wait()
-            return scope_stopped
+            return scope_stopped and await self._finish_descendant_cleanup(descendants)
         try:
             async with asyncio.timeout(request.graceful_shutdown_seconds):
                 await process.wait()
-                return scope_stopped
+                return scope_stopped and await self._finish_descendant_cleanup(descendants)
         except TimeoutError:
             pass
         try:
@@ -1273,7 +1516,79 @@ class SubprocessBroker:
         except ProcessLookupError:
             pass
         await process.wait()
-        return scope_stopped
+        return scope_stopped and await self._finish_descendant_cleanup(descendants)
+
+    @staticmethod
+    def _descendants(root_pid: int) -> tuple[psutil.Process, ...]:
+        try:
+            return tuple(psutil.Process(root_pid).children(recursive=True))
+        except psutil.Error:
+            return ()
+
+    @staticmethod
+    def _track_current_descendants(
+        root_pid: int,
+        tracked_descendants: dict[int, float | None],
+    ) -> None:
+        for descendant in SubprocessBroker._descendants(root_pid):
+            try:
+                tracked_descendants[descendant.pid] = descendant.create_time()
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.AccessDenied:
+                tracked_descendants.setdefault(descendant.pid, None)
+
+    @staticmethod
+    def _track_observed_descendants(
+        root_pid: int,
+        observations: list[ProcessObservation],
+        tracked_descendants: dict[int, float | None],
+    ) -> None:
+        for observation in observations:
+            if observation.pid != root_pid:
+                tracked_descendants.setdefault(observation.pid, observation.create_time)
+
+    @staticmethod
+    def _tracked_processes(
+        current: tuple[psutil.Process, ...],
+        tracked_descendants: dict[int, float | None],
+        *,
+        root_pid: int,
+    ) -> tuple[psutil.Process, ...]:
+        processes = {item.pid: item for item in current if item.pid != root_pid}
+        for pid, expected_create_time in tracked_descendants.items():
+            if pid == root_pid or pid in processes:
+                continue
+            try:
+                candidate = psutil.Process(pid)
+                if (
+                    expected_create_time is not None
+                    and candidate.create_time() != expected_create_time
+                ):
+                    continue
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            processes[pid] = candidate
+        return tuple(processes.values())
+
+    @staticmethod
+    async def _finish_descendant_cleanup(descendants: tuple[psutil.Process, ...]) -> bool:
+        for descendant in descendants:
+            with suppress(psutil.Error):
+                if descendant.is_running() and descendant.status() != psutil.STATUS_ZOMBIE:
+                    descendant.kill()
+        if descendants:
+            await asyncio.to_thread(psutil.wait_procs, descendants, timeout=0.25)
+        return all(SubprocessBroker._process_stopped(item) for item in descendants)
+
+    @staticmethod
+    def _process_stopped(process: psutil.Process) -> bool:
+        try:
+            return not process.is_running() or process.status() == psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return True
+        except psutil.AccessDenied:
+            return False
 
     async def _stop_systemd_scope(
         self,
@@ -1623,7 +1938,15 @@ class ManagedSidecarLease:
             )
         )
         identities = self._broker._observation_identities(self._observations)
-        cleanup_complete = await asyncio.shield(self._broker._terminate(self._process, request))
+        tracked_descendants: dict[int, float | None] = {}
+        self._broker._track_observed_descendants(
+            self._process.pid,
+            self._observations,
+            tracked_descendants,
+        )
+        cleanup_complete = await asyncio.shield(
+            self._broker._terminate(self._process, request, tracked_descendants)
+        )
         self._observations.extend(
             self._broker._snapshot_known_processes(
                 identities, "post_cleanup", False, "terminate", str(cleanup_complete)

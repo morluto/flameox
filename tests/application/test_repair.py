@@ -95,6 +95,29 @@ def test_repair_revalidates_projection_after_acquiring_write_lock(
     assert service.quarantine.list_manifests() == ()
 
 
+def test_repair_rejects_symlink_projection_without_mutating_its_target(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source = tmp_path / "profile.bin"
+    source.write_bytes(b"profile")
+    imported = ImportService(workspace).import_artifact(ImportArtifactRequest(path=source))
+    projection = workspace.paths.runs / imported.run.run_id / "manifest.json"
+    victim = workspace.paths.staging / "preserved.json"
+    victim.write_text("{partial")
+    projection.unlink()
+    try:
+        projection.symlink_to(victim)
+    except OSError:
+        pytest.skip("The platform does not permit symbolic links.")
+
+    with pytest.raises(DomainError) as error:
+        RepairService(workspace).plan()
+
+    assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+    assert victim.read_text() == "{partial"
+    assert projection.is_symlink()
+    assert QuarantineService(workspace).list_manifests() == ()
+
+
 def test_quarantine_resume_completes_crash_after_manifest_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -228,6 +251,45 @@ def test_quarantine_resume_revalidates_content_after_interrupted_move(
 
     assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
     assert QuarantineService(workspace).list_manifests()[0].state == "moving"
+
+
+def test_quarantine_resume_rejects_source_replaced_by_symbolic_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source = workspace.paths.staging / "partial.bin"
+    source.write_bytes(b"shared content")
+    real_replace = os.replace
+
+    def fail_move(move_source: str | Path, destination: str | Path) -> None:
+        if Path(move_source) == source:
+            raise OSError("simulated crash")
+        real_replace(move_source, destination)
+
+    monkeypatch.setattr("flameox.application.recoverable_move.os.replace", fail_move)
+    with pytest.raises(OSError, match="simulated crash"):
+        QuarantineService(workspace).quarantine(
+            source,
+            reason="fixture",
+            operation="test",
+        )
+    (manifest,) = QuarantineService(workspace).list_manifests()
+    victim = workspace.paths.runs / "preserved.bin"
+    victim.write_bytes(b"shared content")
+    source.unlink()
+    try:
+        source.symlink_to(victim)
+    except OSError:
+        pytest.skip("The platform does not permit symbolic links.")
+    monkeypatch.setattr("flameox.application.recoverable_move.os.replace", real_replace)
+
+    with pytest.raises(DomainError) as error:
+        QuarantineService(workspace).resume(manifest.quarantine_id)
+
+    assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+    assert victim.read_bytes() == b"shared content"
+    assert source.is_symlink()
 
 
 def test_quarantine_resume_completes_interrupted_restore(

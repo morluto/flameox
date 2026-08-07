@@ -172,6 +172,45 @@ async def test_detached_startup_crash_returns_replan_recovery(
 
 
 @pytest.mark.anyio
+async def test_detached_task_failure_never_reports_nonterminal_run_as_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _workspace(tmp_path, "print('done')")
+    captures, manager = _manager(workspace)
+
+    async def fail_source_identity(*_args: object, **_kwargs: object) -> None:
+        raise DomainError(ErrorCode.INTERNAL_ERROR, "simulated startup failure")
+
+    def fail_terminalization(*_args: object, **_kwargs: object) -> None:
+        raise DomainError(ErrorCode.INTERNAL_ERROR, "simulated terminalization failure")
+
+    monkeypatch.setattr(
+        "flameox.application.capture.collect_source_state",
+        fail_source_identity,
+    )
+    monkeypatch.setattr(captures, "_finish_error", fail_terminalization)
+    plan = await captures.plan(
+        workload_name="detached",
+        adapter="command",
+        execution_policy=ExecutionPolicy.APPROVED_AGENT,
+    )
+
+    await manager.start(plan.plan_id, "failed-start-001")
+    for _ in range(200):
+        status = manager.status(plan.run_id)
+        if status.state == "failed_to_start":
+            break
+        await asyncio.sleep(0.01)
+
+    assert status.state == "failed_to_start"
+    assert status.execution_status is ExecutionStatus.PLANNED
+    assert status.failure_code == ErrorCode.INTERNAL_ERROR.value
+    assert status.recovery is not None
+    assert status.recovery.tool == "plan_capture"
+
+
+@pytest.mark.anyio
 async def test_lost_start_caller_does_not_cancel_or_orphan_owned_capture(
     tmp_path: Path,
 ) -> None:

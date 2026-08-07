@@ -55,10 +55,11 @@ class RecoveryService:
             except DomainError:
                 indeterminate.append(projection.parent.name)
                 continue
-            if run.execution_status is not ExecutionStatus.RUNNING:
-                continue
-            if run.lease is None:
-                indeterminate.append(run.run_id)
+            recoverable_lifecycle = run.execution_status is ExecutionStatus.RUNNING or (
+                run.execution_status is ExecutionStatus.PLANNED
+                and run.capture_status is CaptureStatus.PENDING
+            )
+            if not recoverable_lifecycle:
                 continue
             lease_state = self._lease_state(run)
             if lease_state == "active":
@@ -128,12 +129,14 @@ class RecoveryService:
             boot_id = read_boot_id()
         except (OSError, ValueError):
             return "indeterminate"
+        if boot_id != run.lease.boot_id:
+            return "recoverable"
         try:
             start_identity = read_proc_stat_start_identity(run.lease.process_id)
         except FileNotFoundError:
             return "recoverable"
         except (OSError, ValueError):
             return "indeterminate"
-        if boot_id == run.lease.boot_id and start_identity == run.lease.process_start_identity:
+        if start_identity == run.lease.process_start_identity:
             return "active"
         return "recoverable"

@@ -3,15 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import secrets
 import shutil
-import sys
 from pathlib import Path
 from typing import Any
 
 from pydantic import Field, JsonValue
 
-from flameox.atomic import atomic_write_json
+from flameox.application.artifact_workers import ArtifactWorker
 from flameox.domain import (
     ArtifactKind,
     ArtifactRegistration,
@@ -22,7 +20,7 @@ from flameox.domain import (
 )
 from flameox.evidence import GenerationPublisher
 from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
-from flameox.execution import ExecutionRequest, SubprocessBroker
+from flameox.execution import SubprocessBroker
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
@@ -665,67 +663,13 @@ class PerfettoExtractor:
         self,
         request: dict[str, JsonValue],
     ) -> dict[str, Any]:
-        job_root = self.workspace.paths.staging / "perfetto" / secrets.token_hex(16)
-        job_root.mkdir(parents=True, exist_ok=False)
-        request_path = job_root / "request.json"
-        response_path = job_root / "response.json"
-        atomic_write_json(request_path, request)
-        try:
-            outcome = await self.broker.run(
-                ExecutionRequest(
-                    argv=(
-                        sys.executable,
-                        "-m",
-                        "flameox.workers.perfetto",
-                        "--request",
-                        str(request_path),
-                        "--response",
-                        str(response_path),
-                    ),
-                    cwd=self.workspace.project_root,
-                    environment_allowlist=tuple(
-                        self.workspace.config.execution.child_environment_allowlist
-                    ),
-                    allowed_working_roots=(self.workspace.project_root,),
-                    timeout_seconds=120,
-                    max_output_bytes=1_048_576,
-                )
-            )
-            if outcome.process.exit_code != 0 or not response_path.is_file():
-                raise DomainError(
-                    ErrorCode.ARTIFACT_PARSE_FAILED,
-                    "Perfetto worker exited without a valid response.",
-                    details={
-                        "exit_code": outcome.process.exit_code,
-                        "stderr": outcome.stderr.decode(errors="replace")[-2_000:],
-                    },
-                )
-            if response_path.stat().st_size > self.workspace.config.capture.max_artifact_bytes:
-                raise DomainError(
-                    ErrorCode.ARTIFACT_TOO_LARGE,
-                    "Perfetto worker response exceeds the configured artifact budget.",
-                )
-            payload = json.loads(response_path.read_text())
-            if not isinstance(payload, dict):
-                raise ValueError("worker response must be a JSON object")
-            if payload.get("ok") is not True:
-                raw_code = payload.get("code")
-                try:
-                    code = ErrorCode(str(raw_code))
-                except ValueError:
-                    code = ErrorCode.INTERNAL_ERROR
-                raise DomainError(
-                    code,
-                    str(payload.get("message", "Perfetto worker failed.")),
-                )
-            return payload
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            raise DomainError(
-                ErrorCode.ARTIFACT_PARSE_FAILED,
-                "Perfetto worker response is invalid.",
-            ) from exc
-        finally:
-            shutil.rmtree(job_root, ignore_errors=True)
+        return await ArtifactWorker(self.workspace, broker=self.broker).run(
+            "flameox.workers.perfetto",
+            request,
+            name="Perfetto",
+            timeout_seconds=120,
+            consume=lambda response, _root: response,
+        )
 
     def _trace_processor_path(self) -> Path:
         configured = self.workspace.config.analysis.trace_processor_path

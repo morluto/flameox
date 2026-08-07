@@ -238,6 +238,38 @@ def test_toxiproxy_stage_rejects_digest_mismatch(
     assert error.value.details["actual"] == hashlib.sha256(archive).hexdigest()
 
 
+def test_toxiproxy_download_is_bounded_before_digest_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class OversizedResponse:
+        chunks = 0
+
+        def __enter__(self) -> OversizedResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _size: int) -> bytes:
+            self.chunks += 1
+            return b"x" * 800 if self.chunks <= 2 else b""
+
+    monkeypatch.setattr(_toxiproxy, "_MAX_RELEASE_BYTES", 1_024, raising=False)
+    monkeypatch.setattr(
+        ToxiproxyToolManager,
+        "release_for_host",
+        staticmethod(lambda: ("release.tar.gz", "0" * 64, "toxiproxy-server")),
+    )
+    monkeypatch.setattr(_toxiproxy, "urlopen", lambda *_args, **_kwargs: OversizedResponse())
+
+    with pytest.raises(DomainError) as error:
+        ToxiproxyToolManager(tmp_path).stage()
+
+    assert error.value.code is ErrorCode.ARTIFACT_TOO_LARGE
+    assert not any((tmp_path / "staging").iterdir())
+
+
 @pytest.mark.parametrize("member_kind", ["traversal", "symlink"])
 def test_toxiproxy_stage_rejects_unsafe_archive_members(
     tmp_path: Path,

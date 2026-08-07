@@ -7,6 +7,7 @@ from typing import Literal
 from uuid import uuid4
 
 from flameox.application.recoverable_move import (
+    lexical_path_beneath,
     move_path,
     resume_move,
     validate_manifest_id,
@@ -20,7 +21,7 @@ from flameox.storage import GenerationManifest, Workspace, tree_bytes
 
 class GarbageEntry(ContractModel):
     path: str
-    kind: Literal["staging", "generation", "artifact"]
+    kind: Literal["staging", "generation", "evidence", "artifact"]
     byte_length: int
     reason: str
 
@@ -151,6 +152,16 @@ class GarbageCollector:
                     reason="Generation is not reachable from a retained corpus commit.",
                     cutoff=cutoff,
                 )
+        for path in sorted(self.workspace.paths.evidence.glob("*/generation=*")):
+            generation_id = path.name.removeprefix("generation=")
+            if path.is_dir() and generation_id not in referenced_generations:
+                self._candidate(
+                    entries,
+                    path,
+                    kind="evidence",
+                    reason="Evidence is not reachable from a retained corpus commit.",
+                    cutoff=cutoff,
+                )
         for metadata in sorted(self.workspace.paths.artifacts.glob("*/*/artifact.json")):
             artifact_id = f"sha256:{metadata.parent.name}"
             if artifact_id not in referenced_artifacts:
@@ -223,6 +234,8 @@ class GarbageCollector:
                     "Corpus HEAD changed before garbage collection.",
                     retryable=True,
                 )
+            for entry in plan.entries:
+                self._source(entry)
             self._write_manifest(trash_root, manifest)
             moved_paths: list[str] = []
             for entry in plan.entries:
@@ -400,14 +413,7 @@ class GarbageCollector:
         )
 
     def _source(self, entry: GarbageEntry) -> tuple[Path, Path]:
-        source = (self.workspace.paths.root / entry.path).resolve()
-        try:
-            relative = source.relative_to(self.workspace.paths.root)
-        except ValueError as exc:
-            raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                "Garbage plan escapes the workspace.",
-            ) from exc
+        source, relative = self._workspace_path(entry.path)
         if relative.parts and relative.parts[0] in {"trash", "quarantine"}:
             raise DomainError(
                 ErrorCode.EXECUTION_REFUSED,
@@ -420,10 +426,11 @@ class GarbageCollector:
         entries: list[GarbageEntry],
         path: Path,
         *,
-        kind: Literal["staging", "generation", "artifact"],
+        kind: Literal["staging", "generation", "evidence", "artifact"],
         reason: str,
         cutoff: datetime,
     ) -> None:
+        self._workspace_path(path.relative_to(self.workspace.paths.root).as_posix())
         modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
         if modified > cutoff:
             return
@@ -435,4 +442,12 @@ class GarbageCollector:
                 byte_length=byte_length,
                 reason=reason,
             )
+        )
+
+    def _workspace_path(self, value: str) -> tuple[Path, Path]:
+        return lexical_path_beneath(
+            self.workspace.paths.root,
+            value,
+            subject="Garbage path",
+            error_code=ErrorCode.ARTIFACT_INTEGRITY_FAILED,
         )

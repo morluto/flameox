@@ -360,6 +360,29 @@ class _CaptureExecution:
     def cleanup_staging(self) -> None:
         shutil.rmtree(self.output_root, ignore_errors=True)
 
+    async def terminate_startup_failure(
+        self,
+        *,
+        message: str,
+        error_code: str,
+    ) -> RunManifest | None:
+        try:
+            return await self.terminate(
+                execution=ExecutionStatus.FAILED,
+                message=message,
+                phase="startup identity collection failed",
+                error_code=error_code,
+            )
+        except Exception as terminate_error:
+            import logging
+
+            self.cleanup_staging()
+            logging.getLogger("flameox.capture").warning(
+                "Finalizing a startup identity failure raised: %s",
+                terminate_error,
+            )
+            return None
+
 
 class CapturePlanRegistry:
     """Bounded in-memory authorization tokens for one server process."""
@@ -716,6 +739,12 @@ class CaptureService:
             started_monotonic=started,
             progress=progress,
         )
+        startup_lease: CaptureLease | None = None
+        startup_lease_error: DomainError | None = None
+        try:
+            startup_lease = self._lease(os.getpid())
+        except DomainError as error:
+            startup_lease_error = error
         identity_requirements = (
             WorkloadService(self.workspace)
             .load()
@@ -766,11 +795,20 @@ class CaptureService:
             writable_roots=plan.writable_roots,
             external_context=plan.external_context,
             execution_identity=plan.planned_execution_identity,
+            lease=startup_lease,
             limitations=_limitation_projection(plan.limitation_details),
             limitation_details=plan.limitation_details,
         )
         self.runs.create(initial)
         capture.run = initial
+        if startup_lease_error is not None:
+            terminal = await capture.terminate_startup_failure(
+                message=startup_lease_error.message,
+                error_code=startup_lease_error.code.value,
+            )
+            if terminal is not None:
+                startup_lease_error.run_id = terminal.run_id
+            raise startup_lease_error
         try:
             accelerator = await AcceleratorIdentityService(self.workspace.project_root).observe(
                 identity_requirements
@@ -813,6 +851,20 @@ class CaptureService:
                     terminate_error,
                 )
             raise cancellation
+        except DomainError as error:
+            terminal = await capture.terminate_startup_failure(
+                message=error.message,
+                error_code=error.code.value,
+            )
+            if terminal is not None:
+                error.run_id = terminal.run_id
+            raise
+        except Exception:
+            await capture.terminate_startup_failure(
+                message="Capture startup identity collection failed unexpectedly.",
+                error_code=ErrorCode.INTERNAL_ERROR.value,
+            )
+            raise
         prepared = initial.model_copy(
             update={
                 "revision": 1,

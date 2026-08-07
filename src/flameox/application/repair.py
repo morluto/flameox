@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 from flameox.application.quarantine import QuarantineManifest, QuarantineService
+from flameox.application.recoverable_move import lexical_path_beneath
 from flameox.atomic import atomic_write_bytes
 from flameox.domain import DomainError, ErrorCode, RunManifest, digest_model
 from flameox.models import ContractModel
@@ -47,13 +48,14 @@ class RepairService:
         entries: list[RepairEntry] = []
         unresolved: list[str] = []
         for projection in sorted(self.workspace.paths.runs.glob("*/manifest.json")):
+            relative = projection.relative_to(self.workspace.paths.root).as_posix()
+            projection = self._resolve(relative)
             try:
                 RunManifest.model_validate_json(projection.read_text())
                 continue
             except (OSError, ValueError) as exc:
                 logger.warning("run projection %s is unreadable: %s", projection, exc)
             recovery_source = self._latest_valid_revision(projection.parent)
-            relative = projection.relative_to(self.workspace.paths.root).as_posix()
             if recovery_source is None:
                 unresolved.append(relative)
                 continue
@@ -122,14 +124,17 @@ class RepairService:
         )
 
     def _resolve(self, relative: str) -> Path:
-        path = (self.workspace.paths.root / relative).resolve()
-        try:
-            path.relative_to(self.workspace.paths.root)
-        except ValueError as exc:
+        path, validated = lexical_path_beneath(
+            self.workspace.paths.root,
+            relative,
+            subject="Repair path",
+            error_code=ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+        )
+        if validated.parts[0] != "runs":
             raise DomainError(
                 ErrorCode.EXECUTION_REFUSED,
-                "Repair plan contains a path outside the workspace.",
-            ) from exc
+                "Repair plan targets a path outside run storage.",
+            )
         return path
 
     @staticmethod

@@ -224,14 +224,26 @@ budgets, cancellation, timeouts, and descendant cleanup one implementation.
 Heavy or artifact-facing extractors run in bounded worker processes. Small
 trusted metadata operations may use an AnyIO worker thread.
 
+Artifact workers receive immutable input paths and scalar limits through a
+staged request file. They write a staged response whose size is capped by the
+execution output budget; large payload handoffs use validated files inside the
+worker's staging directory. The broker applies one absolute deadline from
+process creation through startup callbacks, initial observation, input, output,
+and process exit. Cleanup may finish after that deadline so timeout handling
+does not leak a child. Worker process trees are sampled against the configured
+memory ceiling as well as storage reserves.
+
 Runtime evidence extends this boundary without adding a second execution model:
 file-imported OTLP is normalized by an application service into bounded
 Parquet tables, and every user-visible broker run can publish privacy-limited
 process snapshots around cleanup. Lifecycle queries are curated DuckDB
 operations over those tables; they do not expose SQL or materialize an agent
-interaction graph. Native ddmin invokes the declared predicate through the
-same broker. Reduction plans are Flameox-owned and do not run an arbitrary
-reducer workload or expose a reducer socket protocol.
+interaction graph. Native ddmin runs as an artifact worker and invokes the
+declared predicate through the same broker. Each broker run owns its process
+group for local timeout handling, while outer cleanup also terminates observed
+descendants that cross a process-group boundary. Reduction plans are
+Flameox-owned and do not run an arbitrary reducer workload or expose a reducer
+socket protocol.
 
 The MCP SDK's AnyIO cancellation is translated at the application boundary into
 the execution service's cancellation signal. Cleanup that awaits subprocess or

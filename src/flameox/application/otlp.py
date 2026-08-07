@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from flameox.application.artifact_workers import ArtifactWorker
 from flameox.application.evidence_rows import _json
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.evidence import GenerationPublisher
@@ -53,6 +54,7 @@ class OtlpTraceService:
         self.artifacts = ArtifactStore(workspace)
         self.runs = RunStore(workspace)
         self.publisher = GenerationPublisher(workspace)
+        self.worker = ArtifactWorker(workspace)
 
     def extract_otlp_trace(
         self,
@@ -77,7 +79,32 @@ class OtlpTraceService:
             )
         path = self.artifacts.get(registration.artifact_id).payload_path
         try:
-            parsed = self._parse(path, registration.media_type)
+            response = self.worker.run_sync(
+                "flameox.workers.otlp",
+                {
+                    "artifact_path": str(path),
+                    "media_type": registration.media_type,
+                    "row_limit": self.workspace.config.storage.max_rows_per_generation,
+                },
+                name="OTLP",
+            )
+            if response.get("row_limit_exceeded") is True:
+                raw_counts = response.get("counts")
+                raw_limitations = response.get("limitations")
+                if not isinstance(raw_counts, dict) or not isinstance(raw_limitations, list):
+                    raise ValueError("OTLP row-limit response is invalid")
+                return OtlpExtractionResult(
+                    run_id=run_id,
+                    artifact_id=registration.artifact_id,
+                    resource_count=int(raw_counts["resources"]),
+                    scope_count=int(raw_counts["scopes"]),
+                    span_count=int(raw_counts["spans"]),
+                    event_count=int(raw_counts["events"]),
+                    link_count=int(raw_counts["links"]),
+                    limitations=tuple(str(item) for item in raw_limitations),
+                    failed=True,
+                )
+            parsed = _parsed_response(response)
         except _OtlpRowLimitExceeded as error:
             return OtlpExtractionResult(
                 run_id=run_id,
@@ -133,47 +160,8 @@ class OtlpTraceService:
             limitations=parsed.limitations,
         )
 
-    def _parse(self, path: Path, media_type: str) -> _ParsedOtlp:
-        payload = path.read_bytes()
-        try:
-            from google.protobuf import json_format  # type: ignore[import-untyped]
-            from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
-                ExportTraceServiceRequest,
-            )
-        except ImportError as error:
-            raise DomainError(
-                ErrorCode.CAPABILITY_UNAVAILABLE,
-                "OTLP extraction requires the optional opentelemetry-proto dependency.",
-                remediation=("Install flameox with the trace extra.",),
-            ) from error
-        request = ExportTraceServiceRequest()
-        normalized_media_type = media_type.split(";", 1)[0].strip().lower()
-        if normalized_media_type in {"application/x-protobuf", "application/protobuf"}:
-            try:
-                request.ParseFromString(payload)
-            except Exception as error:
-                raise DomainError(
-                    ErrorCode.ARTIFACT_PARSE_FAILED, "Malformed OTLP protobuf."
-                ) from error
-        elif normalized_media_type == "application/json":
-            try:
-                json_format.Parse(payload.decode("utf-8"), request, ignore_unknown_fields=False)
-            except Exception as error:
-                raise DomainError(
-                    ErrorCode.ARTIFACT_PARSE_FAILED,
-                    "Malformed OTLP protobuf JSON or unknown field.",
-                ) from error
-        else:
-            raise DomainError(
-                ErrorCode.ARTIFACT_PARSE_FAILED,
-                "OTLP extraction requires an explicit protobuf or JSON media type.",
-                details={"media_type": media_type},
-            )
-        return self._normalize(
-            request, row_limit=self.workspace.config.storage.max_rows_per_generation
-        )
-
-    def _normalize(self, request: Any, *, row_limit: int) -> _ParsedOtlp:
+    @staticmethod
+    def _normalize(request: Any, *, row_limit: int) -> _ParsedOtlp:
         resources: list[dict[str, object]] = []
         scopes: list[dict[str, object]] = []
         spans: list[dict[str, object]] = []
@@ -301,6 +289,65 @@ class OtlpTraceService:
                         )
                     source_ordinal += 1
         return _ParsedOtlp(resources, scopes, spans, events, links, tuple(sorted(set(limitations))))
+
+
+def _parse_otlp(path: Path, media_type: str, *, row_limit: int) -> _ParsedOtlp:
+    payload = path.read_bytes()
+    try:
+        from google.protobuf import json_format  # type: ignore[import-untyped]
+        from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+            ExportTraceServiceRequest,
+        )
+    except ImportError as error:
+        raise DomainError(
+            ErrorCode.CAPABILITY_UNAVAILABLE,
+            "OTLP extraction requires the optional opentelemetry-proto dependency.",
+            remediation=("Install flameox with the trace extra.",),
+        ) from error
+    request = ExportTraceServiceRequest()
+    normalized_media_type = media_type.split(";", 1)[0].strip().lower()
+    if normalized_media_type in {"application/x-protobuf", "application/protobuf"}:
+        try:
+            request.ParseFromString(payload)
+        except Exception as error:
+            raise DomainError(
+                ErrorCode.ARTIFACT_PARSE_FAILED, "Malformed OTLP protobuf."
+            ) from error
+    elif normalized_media_type == "application/json":
+        try:
+            json_format.Parse(payload.decode("utf-8"), request, ignore_unknown_fields=False)
+        except Exception as error:
+            raise DomainError(
+                ErrorCode.ARTIFACT_PARSE_FAILED,
+                "Malformed OTLP protobuf JSON or unknown field.",
+            ) from error
+    else:
+        raise DomainError(
+            ErrorCode.ARTIFACT_PARSE_FAILED,
+            "OTLP extraction requires an explicit protobuf or JSON media type.",
+            details={"media_type": media_type},
+        )
+    return OtlpTraceService._normalize(request, row_limit=row_limit)
+
+
+def _parsed_response(response: dict[str, Any]) -> _ParsedOtlp:
+    def rows(name: str) -> list[dict[str, object]]:
+        value = response.get(name)
+        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+            raise ValueError(f"OTLP worker field {name!r} is invalid")
+        return value
+
+    limitations = response.get("limitations")
+    if not isinstance(limitations, list):
+        raise ValueError("OTLP worker limitations are invalid")
+    return _ParsedOtlp(
+        resources=rows("resources"),
+        scopes=rows("scopes"),
+        spans=rows("spans"),
+        events=rows("events"),
+        links=rows("links"),
+        limitations=tuple(str(item) for item in limitations),
+    )
 
 
 def _id(value: bytes, expected: int, label: str, limitations: list[str]) -> str:

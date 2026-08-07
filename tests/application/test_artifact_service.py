@@ -42,6 +42,30 @@ def test_artifact_metadata_keeps_registrations_and_max_sensitivity(
     assert listed.artifacts[0].registration_count == 2
 
 
+def test_artifact_metadata_effective_sensitivity_includes_registrations_outside_page(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+    source = tmp_path / "same.bin"
+    source.write_bytes(b"same")
+    imports = ImportService(workspace)
+    sensitive = imports.import_artifact(
+        ImportArtifactRequest(path=source, sensitivity=Sensitivity.SENSITIVE)
+    )
+    normal = imports.import_artifact(
+        ImportArtifactRequest(path=source, sensitivity=Sensitivity.NORMAL)
+    )
+
+    result = ArtifactService(workspace).get(sensitive.artifact_id, limit=1)
+
+    assert normal.artifact_id == sensitive.artifact_id
+    assert result.total_registrations == 2
+    assert len(result.registrations) == 1
+    assert result.registrations[0].sensitivity is Sensitivity.NORMAL
+    assert result.effective_sensitivity is Sensitivity.SENSITIVE
+
+
 def test_native_viewer_plan_is_read_only_and_uses_content_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
