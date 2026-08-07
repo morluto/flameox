@@ -15,7 +15,13 @@ from flameox.application.native_reducer import (
 @settings(max_examples=20, deadline=None)
 @given(
     st.lists(
-        st.text(alphabet=st.characters(blacklist_characters="\r\n"), max_size=12),
+        st.text(
+            alphabet=st.characters(
+                blacklist_categories=("Cs",),  # type: ignore[arg-type]
+                blacklist_characters="\r\n",
+            ),
+            max_size=12,
+        ),
         max_size=7,
     )
 )
