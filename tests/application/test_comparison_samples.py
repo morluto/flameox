@@ -1,101 +1,105 @@
-"""Regression tests for the silent block-key collision in ``_samples``.
-
-The unblocked path of ``ComparisonService._samples`` writes
-``values[unit_key]`` without checking whether the key already exists. The
-blocked path guards the same situation by raising. These tests pin the
-defensive invariant that the unblocked path must also raise on collision
-rather than silently dropping a measurement.
-
-NOTE: the production guard at the top of ``_samples`` currently makes the
-multi-member unblocked path unreachable, so these tests construct the
-minimal single-member scenario where a collision is still possible (a single
-run emitting two measurements with the same worker/worker_run/value_index).
-"""
-
 from __future__ import annotations
 
-from typing import cast
+from pathlib import Path
 
 import pytest
 
-from flameox.application.comparisons import ComparisonService, _SampleSet
-from flameox.catalog import Snapshot
+from flameox.application import (
+    CompareRunSetsRequest,
+    ComparisonService,
+    FreezeRunSetRequest,
+    RunSetService,
+)
+from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode
-from flameox.domain.models import RunSet, RunSetMember
-
-type Row = tuple[object, ...]
-
-
-class _FakeSnapshot:
-    def __init__(self, measurements_by_run: dict[str, list[Row]]) -> None:
-        self._measurements = measurements_by_run
-
-    def execute(self, sql: str, params: tuple[object, ...]) -> _Rows:
-        if "FROM measurements" in sql:
-            run_id = params[0]
-            assert isinstance(run_id, str)
-            return _Rows(self._measurements.get(run_id, []))
-        if "FROM trials" in sql:
-            return _Rows([])
-        return _Rows([])
+from flameox.evidence import GenerationPublisher
+from flameox.storage import Workspace
+from tests.support.comparisons import imported_benchmark, measurement_row
 
 
-class _Rows:
-    def __init__(self, rows: list[Row]) -> None:
-        self._rows = rows
-
-    def fetchall(self) -> list[Row]:
-        return self._rows
-
-    def fetchone(self) -> Row | None:
-        return self._rows[0] if self._rows else None
-
-
-def _row(
-    value_int: int,
-    value_index: int,
-    worker_id: str = "0",
-    worker_run_index: int = 0,
-    block_id: str | None = None,
-) -> Row:
-    return (value_int, None, block_id, worker_id, worker_run_index, value_index)
-
-
-def _samples(
-    measurements: dict[str, list[Row]],
-    members: tuple[RunSetMember, ...],
-) -> _SampleSet:
-    snapshot = cast(Snapshot, _FakeSnapshot(measurements))
-    run_set = RunSet(
-        run_set_id="sha256:" + "0" * 64,
-        corpus_commit_id="sha256:" + "a" * 64,
-        selection={},
-        members=members,
-        membership_digest="sha256:" + "b" * 64,
+def _comparison_request(
+    workspace: Workspace,
+    baseline_id: str,
+    candidate_id: str,
+) -> CompareRunSetsRequest:
+    run_sets = RunSetService(workspace)
+    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
+    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
+    return CompareRunSetsRequest(
+        baseline_run_set_id=baseline.run_set_id,
+        candidate_run_set_id=candidate.run_set_id,
+        metric="pyperf.scan",
+        unit="ns",
+        polarity="lower_is_better",
+        practical_threshold=0.05,
     )
-    return ComparisonService.__new__(ComparisonService)._samples(snapshot, run_set, "m", "ns")
 
 
-def test_unblocked_path_raises_on_duplicate_key() -> None:
-    """A single run with two measurements sharing a key must raise, not drop."""
-    measurements = {
-        "run-a": [
-            _row(10, 0),
-            _row(20, 0),  # same (worker, worker_run, value_index) -> collision
-        ],
-    }
-    members = (RunSetMember(run_id="run-a", included=True, order=0),)
-    with pytest.raises(DomainError) as exc:
-        _samples(measurements, members)
-    assert exc.value.code is ErrorCode.COMPARISON_INVALID
+def _benchmark_pair(workspace: Workspace, root: Path) -> tuple[str, str]:
+    Catalog(workspace).rebuild()
+    baseline_id = imported_benchmark(
+        workspace,
+        root / "baseline.json",
+        (0.010, 0.011, 0.012),
+    )
+    candidate_id = imported_benchmark(
+        workspace,
+        root / "candidate.json",
+        (0.005, 0.0055, 0.006),
+    )
+    return baseline_id, candidate_id
 
 
-def test_unblocked_path_accepts_distinct_keys() -> None:
-    """Distinct value_index values must not raise and must both be retained."""
-    measurements = {
-        "run-a": [_row(10, 0), _row(20, 1)],
-    }
-    members = (RunSetMember(run_id="run-a", included=True, order=0),)
-    result = _samples(measurements, members)
-    assert sorted(result.values.values()) == [10.0, 20.0]
-    assert result.eligible == 2
+def test_comparison_rejects_duplicate_measurement_keys_without_block_identity(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    baseline_id, candidate_id = _benchmark_pair(workspace, tmp_path)
+    duplicate = measurement_row(
+        baseline_id,
+        20_000_000,
+        measurement_id="duplicate-baseline-measurement",
+        worker_id="scan:0",
+        worker_run_index=0,
+        value_index=0,
+    )
+    GenerationPublisher(workspace).publish_rows(
+        {"measurements": [duplicate]},
+        publisher="comparison-sample-fixture",
+        publisher_version="1",
+        input_run_ids=(baseline_id,),
+    )
+    request = _comparison_request(workspace, baseline_id, candidate_id)
+
+    with pytest.raises(DomainError) as error:
+        ComparisonService(workspace).compare(request)
+
+    assert error.value.code is ErrorCode.COMPARISON_INVALID
+    assert error.value.details == {"run_id": baseline_id, "key": "scan:0:0:0"}
+
+
+def test_comparison_pairs_distinct_measurement_keys_from_published_evidence(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    baseline_id, candidate_id = _benchmark_pair(workspace, tmp_path)
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "measurements": [
+                measurement_row(baseline_id, 13_000_000),
+                measurement_row(candidate_id, 6_500_000),
+            ]
+        },
+        publisher="comparison-sample-fixture",
+        publisher_version="1",
+        input_run_ids=(baseline_id, candidate_id),
+    )
+    request = _comparison_request(workspace, baseline_id, candidate_id)
+
+    result = ComparisonService(workspace).compare(request)
+
+    assert result.comparison.baseline_eligible_n == 4
+    assert result.comparison.candidate_eligible_n == 4
+    assert result.comparison.complete_pair_n == 4
+    assert result.comparison.relative_change is not None
+    assert result.comparison.relative_change < 0

@@ -9,12 +9,14 @@ from flameox.domain import canonical_json
 from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
 
+FIXTURE_CREATED_AT = datetime(2025, 1, 2, 3, 4, tzinfo=UTC)
+
 
 def test_scaling_reports_dispersion_models_and_supported_range(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    now = datetime.now(UTC)
+    now = FIXTURE_CREATED_AT
     variants = (32_768, 65_536, 131_072)
     run_rows = []
     trial_rows = []
@@ -199,7 +201,7 @@ def test_scaling_correlated_hotspots_empty_when_all_filtered(tmp_path: Path) -> 
     ``tested_hypothesis_count=0`` with a declared multiplicity method.
     """
     workspace = Workspace.initialize(tmp_path)
-    now = datetime.now(UTC)
+    now = FIXTURE_CREATED_AT
     # A single scaling point with a single block: no correlation can be computed
     # (n < 2 after the rank filter), so correlated_hotspots must be empty.
     run_rows: list[dict[str, object]] = []

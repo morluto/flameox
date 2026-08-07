@@ -60,12 +60,14 @@ async def test_semantic_matrix_preserves_typed_categorical_evidence(tmp_path: Pa
     expected_rejections = [
         trial for trial in result.trials if trial.factors["case"] == "expected_rejection"
     ]
+    assert len(expected_rejections) == 2
     assert all(trial.outcome is TrialOutcome.SUCCEEDED for trial in expected_rejections)
     assert all(
         trial.oracle_receipt is not None and trial.oracle_receipt.reason == "expected_rejection"
         for trial in expected_rejections
     )
     unsupported = [trial for trial in result.trials if trial.factors["backend"] == "unavailable"]
+    assert len(unsupported) == 2
     assert all(trial.validation_status is ValidationStatus.UNSUPPORTED for trial in unsupported)
     assert all(trial.outcome is TrialOutcome.UNSUPPORTED for trial in unsupported)
     assert result.outcome is not None

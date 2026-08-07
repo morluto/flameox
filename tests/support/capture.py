@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from flameox.config import WorkspaceConfig
 from flameox.storage import Workspace
 
 
@@ -28,5 +27,4 @@ def disable_containment(workspace: Workspace) -> None:
             "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
         }
     )
-    assert isinstance(config, WorkspaceConfig)
     workspace.paths.config.write_text(config.to_toml())

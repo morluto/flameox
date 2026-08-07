@@ -166,7 +166,8 @@ async def test_verify_refuses_a_configured_launcher_that_drifted_from_active_run
     await service.apply(configured)
     config = home / ".claude.json"
     content = json.loads(config.read_text())
-    content["mcpServers"]["flameox"]["command"] = "/tmp/not-the-active-runtime"
+    drifted_path = str(tmp_path / "not-the-active-runtime")
+    content["mcpServers"]["flameox"]["command"] = drifted_path
     config.write_text(json.dumps(content) + "\n")
     verifications_before = len(runtime.verified)
 
@@ -181,9 +182,7 @@ async def test_verify_refuses_a_configured_launcher_that_drifted_from_active_run
     assert caught.value.code is ErrorCode.REVISION_CONFLICT
     assert caught.value.details == {"clients": ["claude"]}
     assert len(runtime.verified) == verifications_before
-    assert json.loads(config.read_text())["mcpServers"]["flameox"]["command"] == (
-        "/tmp/not-the-active-runtime"
-    )
+    assert json.loads(config.read_text())["mcpServers"]["flameox"]["command"] == drifted_path
 
 
 def test_verify_refuses_a_malformed_client_configuration(tmp_path: Path) -> None:

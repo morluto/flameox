@@ -190,7 +190,7 @@ async def test_mcp_rejects_external_workspace_bound_to_another_project(tmp_path:
 async def test_mcp_inspect_instructions_match_initialize_metadata(tmp_path: Path) -> None:
     Workspace.initialize(tmp_path)
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:
-        await client.list_tools()
+        listed = await client.list_tools()
         initialize_instructions = client.instructions
 
     cli = await asyncio.to_thread(
@@ -203,7 +203,7 @@ async def test_mcp_inspect_instructions_match_initialize_metadata(tmp_path: Path
     inspected = json.loads(cli.stdout)
     assert inspected["schema_version"] == 1
     assert inspected["instructions"] == initialize_instructions
-    assert len(inspected["tools"]) == 77
+    assert [item["name"] for item in inspected["tools"]] == [tool.name for tool in listed.tools]
 
 
 @pytest.mark.anyio

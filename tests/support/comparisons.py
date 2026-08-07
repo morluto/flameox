@@ -38,9 +38,17 @@ def imported_benchmark(
     return imported.run.run_id
 
 
-def additional_measurement(run_id: str, value: int) -> dict[str, object]:
+def measurement_row(
+    run_id: str,
+    value: int,
+    *,
+    measurement_id: str | None = None,
+    worker_id: str = "additional-worker",
+    worker_run_index: int = 0,
+    value_index: int = 0,
+) -> dict[str, object]:
     return {
-        "measurement_id": f"additional-{run_id}",
+        "measurement_id": measurement_id or f"additional-{run_id}",
         "run_id": run_id,
         "artifact_id": None,
         "name": "pyperf.scan",
@@ -50,9 +58,9 @@ def additional_measurement(run_id: str, value: int) -> dict[str, object]:
         "aggregation": "sample",
         "scope": "process",
         "trial_id": None,
-        "worker_id": "additional-worker",
-        "worker_run_index": 0,
-        "value_index": 0,
+        "worker_id": worker_id,
+        "worker_run_index": worker_run_index,
+        "value_index": value_index,
         "loop_count": 1,
         "is_warmup": False,
         "block_id": None,

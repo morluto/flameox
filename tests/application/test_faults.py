@@ -133,7 +133,7 @@ class _FakeLease:
         return treatment
 
     async def close(self) -> ManagedSidecarOutcome:
-        now = datetime.now(UTC)
+        now = datetime(2025, 1, 2, 3, 4, tzinfo=UTC)
         observation = ProcessObservation(
             pid=12345,
             create_time=1.0,

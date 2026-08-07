@@ -119,6 +119,8 @@ async def test_operation_runner_idempotency_is_shared_by_runners(tmp_path: Path)
     first_runner = OperationRunner(workspace, "test.operation")
     second_runner = OperationRunner(workspace, "test.operation")
     started = 0
+    invoked = asyncio.Event()
+    release = asyncio.Event()
 
     async def run(
         operation_id: str,
@@ -126,7 +128,8 @@ async def test_operation_runner_idempotency_is_shared_by_runners(tmp_path: Path)
     ) -> dict[str, object]:
         nonlocal started
         started += 1
-        await asyncio.sleep(0.02)
+        invoked.set()
+        await release.wait()
         return {"operation_id": operation_id}
 
     first, second = await asyncio.gather(
@@ -134,8 +137,21 @@ async def test_operation_runner_idempotency_is_shared_by_runners(tmp_path: Path)
         second_runner.start({"value": 1}, "same-key", run),
     )
     assert first.operation_id == second.operation_id
-    await asyncio.sleep(0.05)
-    assert started == 1
+    await asyncio.wait_for(invoked.wait(), timeout=5)
+    release.set()
+    try:
+        status = first
+        for _ in range(50):
+            status = await first_runner.status(first.operation_id)
+            if status.state == "terminal":
+                break
+            await asyncio.sleep(0.01)
+
+        assert started == 1
+        assert status.state == "terminal"
+    finally:
+        await first_runner.shutdown()
+        await second_runner.shutdown()
 
 
 @pytest.mark.anyio
@@ -186,7 +202,12 @@ async def test_operation_runner_preserves_completed_items_on_failure(tmp_path: P
         run,
         items=("first", "second"),
     )
-    await asyncio.sleep(0.02)
-    status = await runner.status(started.operation_id)
+    status = started
+    for _ in range(50):
+        status = await runner.status(started.operation_id)
+        if status.state == "failed":
+            break
+        await asyncio.sleep(0.01)
+
     assert status.state == "failed"
     assert [item.status for item in status.item_outcomes] == ["complete", "retryable"]

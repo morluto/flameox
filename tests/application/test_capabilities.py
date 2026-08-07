@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -622,31 +621,23 @@ def test_list_capabilities_exposes_latest_setup_receipt(tmp_path: Path) -> None:
     assert result.latest_setup.phase == "staging_trace_processor"
 
 
-def test_capability_recommendations_are_scoped_to_selected_adapter(tmp_path: Path) -> None:
-    service = CapabilityService(Workspace.initialize(tmp_path))
-    torch = CapabilityReport(
-        adapter="torch.profiler",
-        status=CapabilityStatus.UNAVAILABLE,
-        setup=CapabilitySetup(
-            extra="torch",
-            method="start_capability_setup",
-            next_tool="start_capability_setup",
-            requirement="torch>=2.7",
-        ),
-    )
-    assert isinstance(torch.setup, CapabilitySetup)
-    pyspy = torch.model_copy(
-        update={
-            "adapter": "py-spy",
-            "setup": torch.setup.model_copy(update={"extra": "cpu", "requirement": "py-spy"}),
-        }
-    )
+def test_capability_recommendations_are_scoped_to_selected_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from importlib.metadata import PackageNotFoundError
 
-    inventory = service._finish((torch, pyspy))
-    selected = service._finish((torch, pyspy), recommendation_adapter="torch.profiler")
+    def unavailable_distribution(_: str) -> str:
+        raise PackageNotFoundError
+
+    monkeypatch.setattr("flameox.application.capabilities.version", unavailable_distribution)
+    service = CapabilityService(Workspace.initialize(tmp_path))
+
+    inventory = service.list()
+    selected = service.list_for_adapter("torch.profiler")
 
     assert inventory.setup_adapters == ()
-    assert inventory.available_setup_adapters == ("py-spy", "torch.profiler")
+    assert "torch.profiler" in inventory.available_setup_adapters
     assert inventory.next_tool is None
     assert selected.recommendation_scope == "torch.profiler"
     assert selected.setup_adapters == ("torch.profiler",)
@@ -857,7 +848,7 @@ async def test_prepare_workload_dependencies_installs_declared_spec_and_reruns_p
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    Workspace.initialize(tmp_path)
+    workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
@@ -876,45 +867,40 @@ python_distributions = ["agent-fixture>=2"]
             raise PackageNotFoundError("agent-fixture")
         return SimpleNamespace(metadata={"Name": "agent-fixture"}, version="2.1")
 
-    def install(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        nonlocal available
-        available = True
-        assert command[-1] == "agent-fixture>=2"
-        return subprocess.CompletedProcess(command, 0, "", "")
+    class InstallingBroker(_ProbeBroker):
+        async def run(
+            self,
+            request: ExecutionRequest,
+            **kwargs: Any,
+        ) -> ExecutionOutcome:
+            nonlocal available
+            available = True
+            return await super().run(request, **kwargs)
 
     monkeypatch.setattr("flameox.application.dependencies.distribution", lookup)
     monkeypatch.setattr("flameox.application.preflight.distribution", lookup)
     monkeypatch.setattr("flameox.application.dependencies._uv_executable", lambda: "/usr/bin/uv")
+    python = tmp_path / "bin" / "python"
+    python.parent.mkdir()
+    monkeypatch.setattr(sys, "executable", str(python))
+    broker = InstallingBroker()
 
-    async def install_async(
-        _: object,
-        command: list[str],
-    ) -> subprocess.CompletedProcess[str]:
-        return install(command)
-
-    monkeypatch.setattr(
-        "flameox.application.dependencies.WorkloadDependencyService._run_install",
-        install_async,
-    )
-
-    result = await WorkloadDependencyService(Workspace(tmp_path / ".diagnostics")).prepare("probe")
+    result = await WorkloadDependencyService(workspace, broker=broker).prepare("probe")
 
     assert result.installed == ("agent-fixture>=2",)
     assert result.already_available == ()
     assert result.status == "ready"
     assert result.next_tool == "plan_capture"
     assert result.preflight.requirements[0].status == "available"
-
-
-@pytest.mark.anyio
-async def test_workload_install_preserves_package_index_environment(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    broker = _ProbeBroker()
-    service = WorkloadDependencyService(workspace, broker=broker)
-
-    await service._run_install(["uv", "pip", "install", "example"])
-
     request = broker.requests[0]
+    assert request.argv == (
+        "/usr/bin/uv",
+        "pip",
+        "install",
+        "--python",
+        str(python),
+        "agent-fixture>=2",
+    )
     assert "HTTPS_PROXY" in request.environment_allowlist
     assert "NO_PROXY" in request.environment_allowlist
     assert "UV_INDEX_URL" in request.environment_allowlist
@@ -926,7 +912,7 @@ async def test_workload_install_wraps_broker_domain_errors_with_recovery_context
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    Workspace.initialize(tmp_path)
+    workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
 schema_version = 1
@@ -949,29 +935,26 @@ python_distributions = ["agent-fixture>=2"]
     )
     monkeypatch.setattr("flameox.application.dependencies._uv_executable", lambda: "/usr/bin/uv")
 
-    async def install_async(
-        _: WorkloadDependencyService,
-        command: list[str],
-    ) -> subprocess.CompletedProcess[str]:
-        del command
-        raise DomainError(
-            ErrorCode.PROCESS_TIMEOUT,
-            "Process exceeded 1800 seconds.",
-            retryable=True,
-            details={"process": {"timed_out": True}},
-        )
+    class FailingBroker(SubprocessBroker):
+        async def run(self, request: ExecutionRequest, **_: Any) -> ExecutionOutcome:
+            raise DomainError(
+                ErrorCode.PROCESS_TIMEOUT,
+                "Process exceeded 1800 seconds.",
+                retryable=True,
+                details={"process": {"timed_out": True}, "argv": list(request.argv)},
+            )
 
-    monkeypatch.setattr(
-        "flameox.application.dependencies.WorkloadDependencyService._run_install",
-        install_async,
-    )
+    python = tmp_path / "bin" / "python"
+    python.parent.mkdir()
+    monkeypatch.setattr(sys, "executable", str(python))
 
     with pytest.raises(DomainError) as failure:
-        await WorkloadDependencyService(Workspace(tmp_path / ".diagnostics")).prepare("probe")
+        await WorkloadDependencyService(workspace, broker=FailingBroker()).prepare("probe")
 
     assert failure.value.code is ErrorCode.PROCESS_TIMEOUT
     assert failure.value.retryable is True
     assert failure.value.details["workload_name"] == "probe"
     assert failure.value.details["next_tool"] == "prepare_workload_dependencies"
     assert failure.value.details["process"]["timed_out"] is True
+    assert failure.value.details["argv"][-1] == "agent-fixture>=2"
     assert any("package-index access" in item for item in failure.value.remediation)
