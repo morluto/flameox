@@ -5,6 +5,19 @@ capability probes, capture planning, extraction, validation, compatibility, and
 viewer handoff. They do not own workspace publication, analysis policy, or MCP
 transport behavior.
 
+The durable adapter lifecycle is:
+
+```text
+probe → plan → execute through broker → validate → preserve → extract
+```
+
+An adapter probes the external capability and produces a side-effect-free plan.
+Flameox executes that plan through its canonical broker, validates and preserves
+the declared native artifacts, and only then runs bounded extraction against the
+immutable inputs. This keeps tool-specific commands and formats behind typed
+contracts while containment, provenance, publication, and analysis policy remain
+owned by the application services.
+
 ## Perfetto integration
 
 Perfetto Trace Processor is the authoritative query engine for detailed

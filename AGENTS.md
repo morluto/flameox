@@ -34,6 +34,9 @@ When changing the product:
   structure;
 - distinguish observed, derived, and inferred claims;
 - prefer bounded task-shaped operations over arbitrary commands or SQL;
+- prefer integrating maintained measurement and replay tools through typed adapters;
+  build custom measurement or replay machinery only when maintained tools cannot
+  satisfy the required evidence, safety, or reproducibility contract;
 - keep DuckDB rebuildable and Parquet/manifests authoritative;
 - keep CLI and MCP as thin transports over the same application services;
 - let agents configure validated named workloads and proceed directly to planning;
