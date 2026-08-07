@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import os
 import shutil
+import subprocess
+from functools import cache
 from pathlib import Path
 
 PACKAGE_PROVIDERS = {
@@ -42,6 +44,35 @@ def trace_processor_path() -> Path | None:
     return candidates[-1] if candidates else None
 
 
+@cache
+def systemd_user_scope_available() -> bool:
+    systemd_run = shutil.which("systemd-run")
+    true_executable = shutil.which("true")
+    if systemd_run is None or true_executable is None:
+        return False
+    try:
+        probe = subprocess.run(
+            (
+                systemd_run,
+                "--user",
+                "--scope",
+                "--quiet",
+                "--collect",
+                "--expand-environment=no",
+                "--",
+                true_executable,
+            ),
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
+
+
 def provider_available(marker: str) -> bool:
     if marker == "requires_perfetto":
         return (
@@ -50,6 +81,8 @@ def provider_available(marker: str) -> bool:
     if marker == "requires_toxiproxy":
         configured = os.environ.get("FLAMEOX_TOXIPROXY_SERVER")
         return bool(configured and Path(configured).is_file())
+    if marker == "requires_systemd":
+        return systemd_user_scope_available()
     package = PACKAGE_PROVIDERS.get(marker)
     if package is not None:
         return importlib.util.find_spec(package) is not None

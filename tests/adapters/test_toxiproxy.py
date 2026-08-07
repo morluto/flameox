@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import platform
-import re
 import tarfile
 from pathlib import Path
 
@@ -76,22 +77,45 @@ def test_toxiproxy_client_shapes_proxy_and_toxic_requests(monkeypatch: pytest.Mo
         ("slow_close", {"delay": 1}),
     ],
 )
-def test_toxiproxy_client_accepts_all_declared_toxic_shapes(
+def test_toxiproxy_client_sends_all_declared_toxic_shapes(
     monkeypatch: pytest.MonkeyPatch,
     toxic_type: str,
     attributes: dict[str, int],
 ) -> None:
-    monkeypatch.setattr(
-        ToxiproxyClient,
-        "_request",
-        lambda self, method, path, payload=None: {},
-    )
-    ToxiproxyClient().add_toxic(
+    requests: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def request(
+        self: ToxiproxyClient,
+        method: str,
+        path: str,
+        payload: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        requests.append((method, path, payload))
+        return {"name": "toxic"}
+
+    monkeypatch.setattr(ToxiproxyClient, "_request", request)
+
+    result = ToxiproxyClient().add_toxic(
         proxy="proxy",
         name="toxic",
         toxic_type=toxic_type,
         attributes=attributes,
     )
+
+    assert result == {"name": "toxic"}
+    assert requests == [
+        (
+            "POST",
+            "/proxies/proxy/toxics",
+            {
+                "name": "toxic",
+                "type": toxic_type,
+                "stream": "downstream",
+                "toxicity": 1.0,
+                "attributes": attributes,
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize("endpoint", ["0.0.0.0:1", "example.test:1", "127.0.0.1:0"])
@@ -150,21 +174,74 @@ def test_toxiproxy_reports_unsupported_platform_without_fallback(
     assert ToxiproxyToolManager.release_for_host() is None
 
 
-def test_toxiproxy_release_fixtures_have_real_sha256_digests() -> None:
-    releases = _toxiproxy._RELEASES
+def _archive(member_name: str, content: bytes = b"toxiproxy-server") -> bytes:
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w:gz") as bundle:
+        member = tarfile.TarInfo(member_name)
+        member.mode = 0o755
+        member.size = len(content)
+        bundle.addfile(member, io.BytesIO(content))
+    return archive.getvalue()
 
-    assert releases
-    for (system, machine), (asset, digest, executable) in releases.items():
-        assert system in {"linux", "darwin", "windows"}
-        assert machine
-        assert asset.startswith("toxiproxy_2.12.0_")
-        assert re.fullmatch(r"[0-9a-f]{64}", digest)
-        assert executable.startswith("toxiproxy-server")
+
+def _stage_release(
+    monkeypatch: pytest.MonkeyPatch,
+    archive: bytes,
+    *,
+    expected_digest: str | None = None,
+) -> None:
+    digest = expected_digest or hashlib.sha256(archive).hexdigest()
+    monkeypatch.setattr(
+        ToxiproxyToolManager,
+        "release_for_host",
+        staticmethod(lambda: ("toxiproxy-test.tar.gz", digest, "toxiproxy-server")),
+    )
+
+    def open_archive(url: str, timeout: float) -> io.BytesIO:
+        assert url.endswith("/toxiproxy-test.tar.gz")
+        assert timeout == 120
+        return io.BytesIO(archive)
+
+    monkeypatch.setattr(_toxiproxy, "urlopen", open_archive)
+
+
+def test_toxiproxy_stage_verifies_archive_and_publishes_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _archive("release/toxiproxy-server")
+    _stage_release(monkeypatch, archive)
+
+    manager = ToxiproxyToolManager(tmp_path)
+    receipt = manager.stage()
+    persisted = json.loads(manager.receipt_path.read_text())
+
+    assert receipt == manager.staged_receipt()
+    assert receipt.executable.read_bytes() == b"toxiproxy-server"
+    assert receipt.executable.stat().st_mode & 0o111
+    assert persisted["sha256"] == hashlib.sha256(archive).hexdigest()
+    assert persisted["executable_sha256"] == hashlib.sha256(b"toxiproxy-server").hexdigest()
+
+
+def test_toxiproxy_stage_rejects_digest_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _archive("toxiproxy-server")
+    _stage_release(monkeypatch, archive, expected_digest="0" * 64)
+
+    with pytest.raises(DomainError) as error:
+        ToxiproxyToolManager(tmp_path).stage()
+
+    assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+    assert error.value.details["expected"] == "0" * 64
+    assert error.value.details["actual"] == hashlib.sha256(archive).hexdigest()
 
 
 @pytest.mark.parametrize("member_kind", ["traversal", "symlink"])
-def test_toxiproxy_archive_extraction_rejects_unsafe_members(
+def test_toxiproxy_stage_rejects_unsafe_archive_members(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     member_kind: str,
 ) -> None:
     archive = io.BytesIO()
@@ -176,9 +253,11 @@ def test_toxiproxy_archive_extraction_rejects_unsafe_members(
         else:
             member.size = 1
         bundle.addfile(member, io.BytesIO(b"x") if member.size else None)
-    archive.seek(0)
-    extracted = tmp_path / "extracted"
-    extracted.mkdir()
-    with tarfile.open(fileobj=archive, mode="r:gz") as bundle, pytest.raises(DomainError) as error:
-        _toxiproxy._safe_extract(bundle, extracted)
+    archive_bytes = archive.getvalue()
+    _stage_release(monkeypatch, archive_bytes)
+
+    with pytest.raises(DomainError) as error:
+        ToxiproxyToolManager(tmp_path).stage()
+
     assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+    assert not (tmp_path / "tools" / "toxiproxy-server").exists()

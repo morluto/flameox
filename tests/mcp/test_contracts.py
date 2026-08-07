@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import errno
+import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from mcp import Client
 from mcp_types import TextContent
 
-from flameox.application import DetachedCaptureManager
 from flameox.catalog import Catalog
 from flameox.mcp import create_server
 from flameox.storage import Workspace
@@ -312,30 +311,56 @@ async def test_mcp_capability_reports_include_provisioning_and_setup_verificatio
 
     assert result.structured_content is not None
     capabilities = result.structured_content["result"]["capabilities"]
-    assert all("provisioning" in item for item in capabilities)
-    assert all("setup_verification" in item for item in capabilities)
+    assert {"command", "pyperf", "torch.profiler"} <= {item["adapter"] for item in capabilities}
+    for capability in capabilities:
+        assert "provisioning" in capability, capability["adapter"]
+        assert "setup_verification" in capability, capability["adapter"]
 
 
 @pytest.mark.anyio
-async def test_mcp_initialize_is_idempotent_without_replacing_capture_manager(
+@pytest.mark.process
+@pytest.mark.serial
+async def test_mcp_initialize_is_idempotent_without_discarding_capture_plans(
     tmp_path: Path,
 ) -> None:
-    with patch(
-        "flameox.mcp.server.DetachedCaptureManager",
-        wraps=DetachedCaptureManager,
-    ) as constructor:
-        async with Client(create_server(tmp_path), raise_exceptions=True) as client:
-            first = await client.call_tool("initialize_workspace", {})
-            second = await client.call_tool("initialize_workspace", {})
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        first = await client.call_tool("initialize_workspace", {})
+        configured = await client.call_tool(
+            "configure_workload",
+            {
+                "name": "probe",
+                "operation": "create",
+                "argv": [sys.executable, "-c", "print('capture-plan-survived')"],
+            },
+        )
+        planned = await client.call_tool(
+            "plan_capture",
+            {"workload_name": "probe", "adapter": "command", "parameters": {}},
+        )
+        assert planned.structured_content is not None
+        second = await client.call_tool("initialize_workspace", {})
+        executed = await client.call_tool(
+            "execute_capture_plan",
+            {"plan_id": planned.structured_content["result"]["plan_id"]},
+        )
+        status = await client.call_tool("workspace_status", {})
 
     assert first.is_error is False
+    assert configured.is_error is False
+    assert planned.is_error is False
     assert second.is_error is False
-    assert constructor.call_count == 1
+    assert executed.is_error is False
+    assert status.is_error is False
     assert first.structured_content is not None
     assert second.structured_content is not None
+    assert executed.structured_content is not None
+    assert status.structured_content is not None
+    assert executed.structured_content["result"]["execution_status"] == "succeeded"
     assert (
         first.structured_content["result"]["workspace_id"]
         == second.structured_content["result"]["workspace_id"]
+        == status.structured_content["result"]["workspace_id"]
+        == Workspace.discover(tmp_path).identity.workspace_id
     )
 
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import Literal
 
 from flameox.application.gc import GarbageCollector
+from flameox.application.proc import read_boot_id, read_proc_stat_start_identity
 from flameox.application.quarantine import QuarantineService
 from flameox.application.run_rows import run_row
 from flameox.domain import (
@@ -16,6 +17,8 @@ from flameox.domain.models import utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import RunStore, Workspace
+
+type LeaseState = Literal["active", "recoverable", "indeterminate"]
 
 
 class RecoveryInspection(ContractModel):
@@ -56,10 +59,14 @@ class RecoveryService:
                 continue
             if run.lease is None:
                 indeterminate.append(run.run_id)
-            elif self._lease_is_live(run):
+                continue
+            lease_state = self._lease_state(run)
+            if lease_state == "active":
                 active.append(run.run_id)
-            else:
+            elif lease_state == "recoverable":
                 recoverable.append(run.run_id)
+            else:
+                indeterminate.append(run.run_id)
         staging_paths = tuple(
             path.relative_to(self.workspace.paths.root).as_posix()
             for path in sorted(self.workspace.paths.staging.rglob("*"))
@@ -114,13 +121,19 @@ class RecoveryService:
             inspection=self.inspect(),
         )
 
-    def _lease_is_live(self, run: RunManifest) -> bool:
+    def _lease_state(self, run: RunManifest) -> LeaseState:
         if run.lease is None:
-            return False
+            return "indeterminate"
         try:
-            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-            fields = Path("/proc").joinpath(str(run.lease.process_id), "stat").read_text().split()
-            start_identity = fields[21]
-        except (OSError, IndexError):
-            return False
-        return boot_id == run.lease.boot_id and start_identity == run.lease.process_start_identity
+            boot_id = read_boot_id()
+        except (OSError, ValueError):
+            return "indeterminate"
+        try:
+            start_identity = read_proc_stat_start_identity(run.lease.process_id)
+        except FileNotFoundError:
+            return "recoverable"
+        except (OSError, ValueError):
+            return "indeterminate"
+        if boot_id == run.lease.boot_id and start_identity == run.lease.process_start_identity:
+            return "active"
+        return "recoverable"

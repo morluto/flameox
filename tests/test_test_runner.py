@@ -4,6 +4,7 @@ import json
 import runpy
 import subprocess
 import sys
+from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ RUNNER = ROOT / "tools" / "test.py"
 RECORDS = load_ownership(ROOT / "tests" / "ownership.toml")
 runner: Any = SimpleNamespace(**runpy.run_path(str(RUNNER)))
 RUNNER_GLOBALS: dict[str, Any] = runner.affected_plan.__globals__
+PlanMutation = Callable[[dict[str, Any]], None]
 
 
 def _plan(
@@ -145,21 +147,38 @@ def test_missing_base_selects_full_plan(monkeypatch: pytest.MonkeyPatch) -> None
     assert plan["optional_lanes"] == list(runner.PROVIDER_LANES)
 
 
-@pytest.mark.parametrize("mutation", ["missing", "extra", "unknown_lane", "oversized"])
+def _remove_schema_version(plan: dict[str, Any]) -> None:
+    del plan["schema_version"]
+
+
+def _add_unknown_field(plan: dict[str, Any]) -> None:
+    plan["unexpected"] = True
+
+
+def _add_unknown_lane(plan: dict[str, Any]) -> None:
+    plan["lanes"] = ["unknown-lane"]
+
+
+def _oversize_matrix(plan: dict[str, Any]) -> None:
+    plan["matrix"]["lanes"] = [{"lane": "core"}] * (runner.PLAN_MAX_MATRIX_ITEMS + 1)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(_remove_schema_version, id="missing-field"),
+        pytest.param(_add_unknown_field, id="extra-field"),
+        pytest.param(_add_unknown_lane, id="unknown-lane"),
+        pytest.param(_oversize_matrix, id="oversized-matrix"),
+    ],
+)
 def test_affected_plan_validator_rejects_malformed_output(
     monkeypatch: pytest.MonkeyPatch,
-    mutation: str,
+    mutate: PlanMutation,
 ) -> None:
     plan = _plan(monkeypatch, set())
     malformed = deepcopy(plan)
-    if mutation == "missing":
-        del malformed["schema_version"]
-    elif mutation == "extra":
-        malformed["unexpected"] = True
-    elif mutation == "unknown_lane":
-        malformed["lanes"] = ["unknown-lane"]
-    else:
-        malformed["matrix"]["lanes"] = [{"lane": "core"}] * (runner.PLAN_MAX_MATRIX_ITEMS + 1)
+    mutate(malformed)
 
     with pytest.raises((runner.PlanValidationError, ValueError)):
         runner.validate_affected_plan(malformed, RECORDS)

@@ -261,7 +261,7 @@ async def test_environment_is_allowlisted_and_dangerous_overrides_fail(
                 tmp_path,
                 "-c",
                 "pass",
-                environment_overrides={"PYTHONPATH": "/tmp/unsafe"},
+                environment_overrides={"PYTHONPATH": str(tmp_path / "unsafe")},
             )
         )
     assert error.value.code is ErrorCode.EXECUTION_REFUSED
@@ -361,14 +361,33 @@ async def test_output_budget_is_shared_between_stdout_and_stderr(
 async def test_cancellation_performs_cleanup_before_propagating(
     tmp_path: Path,
 ) -> None:
+    started = asyncio.Event()
+    process_ids: list[int] = []
+    cleanup: list[bool] = []
+
+    async def record_started(process_id: int) -> None:
+        process_ids.append(process_id)
+        started.set()
+
+    async def record_cleanup(complete: bool) -> None:
+        cleanup.append(complete)
+
     task = asyncio.create_task(
-        SubprocessBroker().run(request(tmp_path, "-c", "import time; time.sleep(10)"))
+        SubprocessBroker().run(
+            request(tmp_path, "-c", "import time; time.sleep(10)"),
+            on_started=record_started,
+            on_cleanup=record_cleanup,
+        )
     )
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(started.wait(), timeout=5)
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await task
+
+    assert cleanup == [True]
+    assert len(process_ids) == 1
+    assert not _process_is_alive(process_ids[0])
 
 
 @pytest.mark.anyio
