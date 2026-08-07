@@ -478,7 +478,7 @@ class PreflightService:
                 "prepare_adapter"
                 if getattr(report.setup, "method", None) == "prepare_adapter"
                 else (
-                    "prepare_capabilities"
+                    "start_capability_setup"
                     if report.setup is not None
                     else (
                         "list_capabilities"

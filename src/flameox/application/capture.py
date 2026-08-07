@@ -31,6 +31,7 @@ from flameox.application.environment import AcceleratorIdentityService, collect_
 from flameox.application.evidence_rows import (
     artifact_registration_row,
     environment_row,
+    process_observation_rows,
     runtime_resource_summary_row,
     runtime_writable_root_rows,
     source_state_row,
@@ -120,11 +121,11 @@ def _merge_limitation_details(
 
 def _limitation_projection(
     details: tuple[LimitationDetail, ...],
-    legacy: tuple[str, ...] = (),
+    existing: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     result: list[str] = []
     seen: set[str] = set()
-    for message in (*legacy, *(item.message for item in details)):
+    for message in (*existing, *(item.message for item in details)):
         if message not in seen:
             seen.add(message)
             result.append(message)
@@ -404,12 +405,14 @@ class CaptureService:
         parameters: dict[str, Scalar] | None = None,
         adapter_options: dict[str, JsonValue] | None = None,
         execution_policy: ExecutionPolicy,
+        dynamic_parameters: tuple[str, ...] = (),
         preflight_mode: Literal["auto", "passive", "active"] = "auto",
         external_context: ExternalExecutionContext | None = None,
     ) -> CapturePlan:
         instance = self.workloads.resolve(
             workload_name,
             parameters,
+            dynamic_parameters=dynamic_parameters,
         )
         definition = self.workloads.definition(workload_name)
         inspection_mode: Literal["passive", "active"] = (
@@ -430,8 +433,8 @@ class CaptureService:
                 next_tool = "prepare_workload_dependencies"
             elif any(item.next_tool == "prepare_adapter" for item in preflight.requirements):
                 next_tool = "prepare_adapter"
-            elif any(item.next_tool == "prepare_capabilities" for item in preflight.requirements):
-                next_tool = "prepare_capabilities"
+            elif any(item.next_tool == "start_capability_setup" for item in preflight.requirements):
+                next_tool = "start_capability_setup"
             elif any(item.kind == "capability" for item in preflight.requirements):
                 next_tool = "list_capabilities"
             raise DomainError(
@@ -545,6 +548,7 @@ class CaptureService:
             "workload_definition_id": definition.workload_definition_id,
             "instance": instance.model_dump(mode="json"),
             "adapter": adapter,
+            "dynamic_parameters": dynamic_parameters,
             "adapter_options": bound_adapter_options,
             "adapter_version": adapter_version,
             "adapter_execution_plan": (
@@ -582,6 +586,7 @@ class CaptureService:
             workload_definition_id=definition.workload_definition_id,
             workload_instance=instance,
             adapter=adapter,
+            dynamic_parameters=dynamic_parameters,
             adapter_options=bound_adapter_options,
             adapter_version=adapter_version,
             adapter_execution_plan=(
@@ -729,6 +734,7 @@ class CaptureService:
                     dict[str, str | int | float | bool],
                     plan.workload_instance.parameters,
                 ),
+                dynamic_parameters=plan.dynamic_parameters,
             )
             await capture.report(3, "Source and environment identity collected")
         except asyncio.CancelledError as cancellation:
@@ -1030,14 +1036,53 @@ class CaptureService:
             )
 
         registrations: list[tuple[ArtifactRegistration, int]] = []
+        process_snapshot_rows: list[dict[str, object]] = []
+        process_snapshot_entries: list[dict[str, object]] = []
         adapter_extraction_rows: list[dict[str, object]] = []
         validation_status = ValidationStatus.NOT_REQUESTED
         validation_limitations: list[str] = []
         oracle_receipt_record: OracleReceiptRecord | None = None
         try:
+            snapshot_path = output_root / "process-snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "run_id": run_id,
+                        "observations": [
+                            item.model_dump(mode="json") for item in outcome.process_observations
+                        ],
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+            snapshot_artifact = self.artifacts.import_path(
+                snapshot_path,
+                allowed_roots=(output_root,),
+                max_bytes=self.workspace.config.capture.max_artifact_bytes,
+            )
+            snapshot_registration = ArtifactRegistration(
+                registration_id=new_id(),
+                run_id=run_id,
+                artifact_id=snapshot_artifact.content.artifact_id,
+                display_name="process-snapshot.json",
+                media_type="application/json",
+                kind=ArtifactKind.PROCESS_TREE_SNAPSHOT,
+                role="process_observation",
+                producer="flameox.execution",
+                producer_version="1",
+                sensitivity=Sensitivity.INTERNAL,
+            )
+            process_snapshot_rows, process_snapshot_entries = process_observation_rows(
+                run_id,
+                outcome.process_observations,
+                artifact_id=snapshot_artifact.content.artifact_id,
+            )
             oracle = self.workloads.resolve_oracle(
                 plan.workload_name,
                 cast(dict[str, Scalar], plan.workload_instance.parameters),
+                dynamic_parameters=plan.dynamic_parameters,
             )
             if oracle is not None and outcome.process.exit_code == 0:
                 try:
@@ -1375,6 +1420,7 @@ class CaptureService:
                         media_type="application/x-ndjson",
                     )
                 )
+            registrations.append((snapshot_registration, snapshot_artifact.content.byte_length))
             if oracle_receipt_record is not None:
                 by_role = {
                     registration.role: registration.artifact_id for registration, _ in registrations
@@ -1581,6 +1627,8 @@ class CaptureService:
                 terminal,
                 project_root=self.workspace.project_root,
             ),
+            "process_snapshots": process_snapshot_rows,
+            "process_snapshot_entries": process_snapshot_entries,
         }
         try:
             published = await run_atomic_thread(
@@ -1701,7 +1749,9 @@ class CaptureService:
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 f"Adapter {adapter!r} is unavailable for capture planning.",
                 details={
-                    "next_tool": "prepare_capabilities" if setup_pending else "list_capabilities",
+                    "next_tool": (
+                        "start_capability_setup" if setup_pending else "list_capabilities"
+                    ),
                     "adapter": adapter,
                     "capability_status": report.status.value,
                     "setup_adapters": [adapter] if setup_pending else [],
@@ -1710,7 +1760,7 @@ class CaptureService:
                 remediation=report.remediation
                 or (
                     (
-                        f"Call prepare_capabilities with adapters=['{adapter}'], then "
+                        f"Call start_capability_setup with adapters=['{adapter}'], then "
                         "call list_capabilities again.",
                     )
                     if setup_pending
@@ -2205,6 +2255,7 @@ class CaptureService:
             "workload_definition_id": plan.workload_definition_id,
             "instance": plan.workload_instance.model_dump(mode="json"),
             "adapter": plan.adapter,
+            "dynamic_parameters": plan.dynamic_parameters,
             "adapter_options": plan.adapter_options,
             "adapter_version": plan.adapter_version,
             "adapter_execution_plan": plan.adapter_execution_plan,

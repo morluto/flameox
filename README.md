@@ -273,6 +273,31 @@ when the trial blocks are complete and the measurements, source, environment,
 and output validation are compatible. Failed trials remain in the evidence
 instead of disappearing from the denominator.
 
+For file-based OTLP traces, import the original payload and normalize it into
+bounded lifecycle evidence before querying operation windows, transitions,
+repetitions, or gaps:
+
+```console
+uv run flameox import trace.json --kind otlp_trace --json
+uv run flameox extract otlp <run-id> --json
+uv run flameox trace operation-window <artifact-id> --start 0 --end 1000000
+```
+
+Transport faults are declared separately under `fault_experiments` and run
+through a pinned, loopback-only Toxiproxy sidecar. The baseline always traverses
+the proxy before a typed treatment, and the result retains the exact
+configuration, tool receipt, ports, logs, process snapshots, containment
+decisions, and oracle outcome:
+
+```console
+uv run flameox fault plan api_timeout --investigation <investigation-id> --json
+uv run flameox fault run --plan-id <plan-id> --json
+uv run flameox fault show <result-id> --json
+```
+
+Fault results are experimental evidence, not automatic correctness or causality
+verdicts. Remote upstreams and undeclared endpoint injection are unsupported.
+
 Useful read-only analyses include:
 
 ```console

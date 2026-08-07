@@ -38,6 +38,20 @@ markers = ["integration"]
 
 
 [[ownership]]
+owner = "toxiproxy-client"
+lane = "adapters"
+paths = ["tests/adapters/test_toxiproxy.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "toxiproxy-integration"
+lane = "adapters"
+paths = ["tests/adapters/test_toxiproxy_integration.py"]
+markers = ["integration", "optional", "requires_toxiproxy"]
+
+
+[[ownership]]
 owner = "setup-runtime"
 lane = "adapters"
 paths = ["tests/adapters/test_setup_runtime.py"]
@@ -132,6 +146,13 @@ owner = "experiments"
 lane = "application"
 paths = ["tests/application/test_experiments.py"]
 markers = ["integration", "serial"]
+
+
+[[ownership]]
+owner = "fault-experiments"
+lane = "application"
+paths = ["tests/application/test_faults.py"]
+markers = ["integration"]
 
 
 [[ownership]]

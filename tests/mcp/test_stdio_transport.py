@@ -59,10 +59,10 @@ async def test_real_stdio_server_keeps_protocol_on_stdout(tmp_path: Path) -> Non
         )
 
     assert "workspace_status" in {tool.name for tool in tools.tools}
-    assert "prepare_capabilities" in {tool.name for tool in tools.tools}
+    assert "start_capability_setup" in {tool.name for tool in tools.tools}
     assert instructions is not None
     assert "get_declared_workflow" in instructions
-    assert "prepare_capabilities" in instructions
+    assert "start_capability_setup" in instructions
     inspected = await asyncio.to_thread(
         CliRunner().invoke,
         app,
@@ -286,7 +286,7 @@ async def test_real_stdio_server_returns_structured_schema_validation_errors(
     async with Client(stdio_client(parameters), raise_exceptions=True) as client:
         result = await client.call_tool("list_runs", {"limit": 0})
         unmanaged = await client.call_tool(
-            "prepare_capabilities",
+            "start_capability_setup",
             {"adapters": ["perf"]},
         )
         invalid_kind = await client.call_tool(

@@ -177,6 +177,15 @@ second, normally narrower allowlist. Names indicating tokens, passwords,
 secrets, keys, credentials, or cookies are excluded even from broad patterns
 unless explicitly allowed by local policy.
 
+Process observations are deliberately narrower than ordinary OS inspection.
+They use `(pid, create_time)` identity to avoid PID reuse and publish only
+bounded identity, parent, status, RSS/CPU/thread/FD readings, observation
+phase, cleanup outcome, and field-level failures. They never publish command
+lines, environments, working directories, executable paths, open-file paths,
+or network addresses. Snapshot collection has a two-second budget and cannot
+delay required cleanup; partial access is evidence, not a reason to weaken
+termination policy.
+
 ### Filesystem access
 
 - Canonicalize and validate every requested root.
@@ -220,7 +229,7 @@ The flameox control process performs no network calls during capture or analysis
 The explicit MCP `start_capability_setup` operation may fetch and install only
 the allowlisted FlameOx optional providers into the managed runtime; poll
 `get_capability_setup` for its durable receipt or use `cancel_capability_setup`
-for cleanup. The compatibility `prepare_capabilities` wrapper follows the same
+for cleanup. The setup operation follows the same
 policy. Setup never executes a workload and records the selected extras for
 future runtime upgrades. Host executables and permissions remain manual
 limitations.
@@ -228,6 +237,16 @@ Symbol-server or debuginfod access is disabled unless explicitly enabled
 in local configuration and invoked through the CLI. Child workloads may use
 the network unless an active containment backend denies it; this is displayed
 in every capture plan and result.
+
+The declared fault-experiment boundary is loopback-only and does not authorize
+remote upstreams, arbitrary endpoint injection, or a general-purpose proxy.
+The broker-owned Toxiproxy lease starts only the pinned server executable on a
+loopback admin address, rejects non-loopback proxy targets and unknown toxic
+types, captures bounded logs and process observations, deletes tracked proxies,
+and terminates the sidecar through the broker. The workload's configured
+containment and the sidecar's managed-process-group containment are recorded
+separately. The service does not claim that the sidecar shares the workload's
+namespace, and never permits remote upstreams or arbitrary endpoint targets.
 
 ### Retention and recovery safety
 

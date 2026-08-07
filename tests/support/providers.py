@@ -22,6 +22,7 @@ PROVIDER_MARKERS = frozenset(
         *PACKAGE_PROVIDERS,
         *EXECUTABLE_PROVIDERS,
         "requires_perfetto",
+        "requires_toxiproxy",
     }
 )
 
@@ -46,6 +47,9 @@ def provider_available(marker: str) -> bool:
         return (
             importlib.util.find_spec("perfetto") is not None and trace_processor_path() is not None
         )
+    if marker == "requires_toxiproxy":
+        configured = os.environ.get("FLAMEOX_TOXIPROXY_SERVER")
+        return bool(configured and Path(configured).is_file())
     package = PACKAGE_PROVIDERS.get(marker)
     if package is not None:
         return importlib.util.find_spec(package) is not None
@@ -58,7 +62,12 @@ def provider_available(marker: str) -> bool:
 def provider_inventory() -> tuple[tuple[str, bool], ...]:
     return tuple(
         (marker, provider_available(marker))
-        for marker in (*PACKAGE_PROVIDERS, *EXECUTABLE_PROVIDERS, "requires_perfetto")
+        for marker in (
+            *PACKAGE_PROVIDERS,
+            *EXECUTABLE_PROVIDERS,
+            "requires_perfetto",
+            "requires_toxiproxy",
+        )
     )
 
 

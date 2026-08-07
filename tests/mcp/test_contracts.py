@@ -240,7 +240,8 @@ async def test_mcp_workspace_initialization_failures_remain_structured(
 async def test_mcp_invalid_configuration_exposes_typed_recovery_context(tmp_path: Path) -> None:
     Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n[experiments.broken]\nworkload = 'missing'\nvariants = ['a', 'b']\n"
+        "schema_version = 1\n[experiments.broken]\nworkload = 'missing'\n"
+        "treatment_factor = 'mode'\n[experiments.broken.factors]\nmode = ['a', 'b']\n"
     )
 
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:

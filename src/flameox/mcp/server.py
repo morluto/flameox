@@ -89,6 +89,9 @@ from flameox.application import (
     ExperimentPlanRegistry,
     ExperimentService,
     ExperimentTrialCollection,
+    FaultExperimentPlan,
+    FaultExperimentResult,
+    FaultExperimentService,
     FindingListResult,
     FindingResult,
     FindingService,
@@ -99,10 +102,14 @@ from flameox.application import (
     IntegrityService,
     InvestigationListResult,
     InvestigationService,
+    LifecycleEvidenceService,
+    LifecycleQueryResult,
     MaterializeAnalysisRequest,
     MeasurementQueryResult,
     NativeViewerPlan,
     NativeViewerService,
+    OtlpExtractionResult,
+    OtlpTraceService,
     PipelineComparison,
     PlanReductionRequest,
     RecordFindingRequest,
@@ -227,7 +234,7 @@ class RecoveryAction(ContractModel):
         "initialize_workspace",
         "configure_workload",
         "inspect_workload_configuration",
-        "prepare_capabilities",
+        "start_capability_setup",
         "prepare_adapter",
         "prepare_workload_dependencies",
         "inspect_capabilities",
@@ -576,11 +583,11 @@ def _recovery_for(error: DomainError) -> RecoveryAction:
             safe_to_repeat_same_call=False,
             next_tool="workload_configuration_status",
         )
-    if error.details.get("next_tool") == "prepare_capabilities":
+    if error.details.get("next_tool") == "start_capability_setup":
         return RecoveryAction(
-            kind="prepare_capabilities",
+            kind="start_capability_setup",
             safe_to_repeat_same_call=True,
-            next_tool="prepare_capabilities",
+            next_tool="start_capability_setup",
         )
     if error.details.get("next_tool") == "prepare_adapter":
         return RecoveryAction(
@@ -773,8 +780,7 @@ def create_server(
             "Use Flameox to collect, preserve, compare, and inspect local runtime evidence "
             "when source, environment, command, and artifact provenance must be reproducible. "
             "Do not provision hosts or install undeclared packages. If list_capabilities reports "
-            "a managed setup action, call start_capability_setup (or the compatibility "
-            "prepare_capabilities wrapper); it installs only the declared "
+            "a managed setup action, call start_capability_setup; it installs only the declared "
             "FlameOx optional providers into the active managed runtime, verifies them, and "
             "does not execute a workload. Host containment is not required for the agent path: "
             "plan_capture(capture_mode='auto') followed by execute_capture_plan runs the "
@@ -987,7 +993,7 @@ def create_server(
             f"Found {sum(item.status.value == 'available' for item in result.capabilities)} of "
             f"{len(result.capabilities)} available capabilities. "
             + (
-                "Call prepare_capabilities for: " + ", ".join(result.setup_adapters) + "."
+                "Call start_capability_setup for: " + ", ".join(result.setup_adapters) + "."
                 if result.setup_adapters
                 else (
                     "Call prepare_adapter for the reported adapter/distribution pairs."
@@ -1000,45 +1006,6 @@ def create_server(
                 )
             ),
         )
-
-    @server.tool(name="prepare_capabilities", annotations=CONFIGURE)
-    async def prepare_capabilities_tool(
-        adapters: Annotated[
-            tuple[
-                Literal["coverage", "memray", "perfetto", "py-spy", "pytest", "torch.profiler"],
-                ...,
-            ],
-            Field(
-                min_length=1,
-                max_length=5,
-                description=(
-                    "Adapter names from list_capabilities that expose a managed setup action."
-                ),
-            ),
-        ],
-        ctx: Context[AppContext],
-        idempotency_key: str | None = None,
-    ) -> Annotated[CallToolResult, ToolPayload[OperationStatus]]:
-        """Compatibility entry point for managed capability setup.
-
-        Starts durable setup and returns immediately with an operation ID. Poll
-        get_capability_setup, or use start_capability_setup for an explicit idempotency key.
-        Setup changes only the active managed runtime or stages Trace Processor; it never
-        executes a project workload or installs privileged collectors.
-        """
-        try:
-            key = idempotency_key or "compat:" + ",".join(dict.fromkeys(adapters))
-            result = await ctx.request_context.lifespan_context.capability_setup_service().start(
-                tuple(adapters),
-                key,
-            )
-            return _success(
-                result,
-                f"Capability setup operation {result.operation_id} is {result.state}; "
-                "poll get_capability_setup before planning.",
-            )
-        except DomainError as error:
-            return _failure(error)
 
     @server.tool(annotations=CONFIGURE)
     async def start_capability_setup(
@@ -1187,13 +1154,14 @@ def create_server(
     @server.tool(name="list_declared_workflows", annotations=READ_ONLY)
     async def list_declared_workflows_tool(
         ctx: Context[AppContext],
-        kind: Literal["workload", "experiment"] = "workload",
+        kind: Literal["workload", "experiment", "fault_experiment"] = "workload",
         limit: Annotated[int, Field(ge=1, le=100)] = 50,
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[DeclaredWorkflowList]]:
         """Discover declared workflows before planning; this never runs them.
 
-        With no arguments, list workloads. Pass kind='experiment' to list declared experiments.
+        With no arguments, list workloads. Pass kind='experiment' or
+        kind='fault_experiment' to list declared experiments.
         """
         try:
             result = WorkloadService(
@@ -1212,7 +1180,7 @@ def create_server(
 
     @server.tool(name="get_declared_workflow", annotations=READ_ONLY)
     async def get_declared_workflow_tool(
-        kind: Literal["workload", "experiment"],
+        kind: Literal["workload", "experiment", "fault_experiment"],
         name: str,
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[DeclaredWorkflowDetail]]:
@@ -1519,6 +1487,74 @@ def create_server(
                     ),
                 ),
             )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="plan_fault_experiment", annotations=READ_ONLY)
+    async def plan_fault_experiment_tool(
+        experiment_name: Annotated[str, Field(min_length=1)],
+        investigation_id: Annotated[str, Field(min_length=1)],
+        parameters: dict[str, Scalar],
+        ctx: Context[AppContext],
+        hypothesis_id: str | None = None,
+    ) -> Annotated[CallToolResult, ToolPayload[FaultExperimentPlan]]:
+        """Bind a declared loopback Toxiproxy experiment and its exact toxic scenarios."""
+        try:
+            result = await FaultExperimentService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).plan(
+                experiment_name=experiment_name,
+                investigation_id=investigation_id,
+                hypothesis_id=hypothesis_id,
+                parameter_overrides=parameters,
+                execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+            )
+            return _success(result, f"Planned fault experiment {result.plan_id}.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="run_fault_experiment", annotations=EXECUTE)
+    async def run_fault_experiment_tool(
+        plan_id: Annotated[str, Field(min_length=1)],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[FaultExperimentResult]]:
+        """Run every baseline and declared treatment through its managed loopback proxy."""
+        try:
+
+            async def report(completed: float, total: float, message: str) -> None:
+                await ctx.report_progress(completed, total, message)
+
+            service = FaultExperimentService(
+                ctx.request_context.lifespan_context.require_workspace()
+            )
+            result = await service.run(plan_id, progress=report)
+            return _success(
+                result,
+                f"Recorded {len(result.trials)} fault trials for "
+                f"{result.experiment.experiment_id}.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Fault experiment {result.experiment.experiment_id}",
+                        uri=f"flameox://experiments/{result.experiment.experiment_id}",
+                        description="Immutable fault experiment protocol and trial provenance.",
+                        mime_type="application/json",
+                    ),
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="get_fault_experiment", annotations=READ_ONLY)
+    async def get_fault_experiment_tool(
+        result_id: Annotated[str, Field(min_length=1)],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[FaultExperimentResult]]:
+        """Read one immutable completed fault experiment result."""
+        try:
+            result = FaultExperimentService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).show(result_id)
+            return _success(result, f"Fault experiment result {result_id}.")
         except DomainError as error:
             return _failure(error)
 
@@ -2445,6 +2481,134 @@ def create_server(
                 cursor=cursor,
             )
             return _success(result, f"Returned {result.returned} trace events.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="extract_otlp_trace", annotations=ADDITIVE)
+    async def extract_otlp_trace_tool(
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        ctx: Context[AppContext],
+        artifact_id: Annotated[str | None, Field(min_length=1, max_length=200)] = None,
+    ) -> Annotated[CallToolResult, ToolPayload[OtlpExtractionResult]]:
+        """Normalize an explicitly registered OTLP file artifact into evidence tables."""
+        try:
+            result = await run_atomic_thread(
+                lambda: OtlpTraceService(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).extract_otlp_trace(run_id, artifact_id)
+            )
+            return _success(result, f"Normalized {result.span_count} OTLP spans.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="get_operation_window", annotations=READ_ONLY)
+    async def get_operation_window_tool(
+        artifact_id: Annotated[str, Field(min_length=1, max_length=200)],
+        start_ns: Annotated[int, Field(ge=0)],
+        end_ns: Annotated[int, Field(gt=0)],
+        ctx: Context[AppContext],
+        trace_id: Annotated[str | None, Field(min_length=1, max_length=100)] = None,
+        limit: Annotated[int | None, Field(ge=1, le=1_000)] = None,
+        cursor: str | None = None,
+    ) -> Annotated[CallToolResult, ToolPayload[LifecycleQueryResult]]:
+        """Return normalized OTLP spans overlapping a bounded time range."""
+        try:
+            result = await run_atomic_thread(
+                lambda: LifecycleEvidenceService(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).get_operation_window(
+                    artifact_id=artifact_id,
+                    start_ns=start_ns,
+                    end_ns=end_ns,
+                    trace_id=trace_id,
+                    limit=limit,
+                    cursor=cursor,
+                )
+            )
+            return _success(result, f"Returned {result.returned} operation spans.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="get_operation_transitions", annotations=READ_ONLY)
+    async def get_operation_transitions_tool(
+        artifact_id: Annotated[str, Field(min_length=1, max_length=200)],
+        ctx: Context[AppContext],
+        trace_id: Annotated[str | None, Field(min_length=1, max_length=100)] = None,
+        max_depth: Annotated[int, Field(ge=0, le=32)] = 8,
+        limit: Annotated[int | None, Field(ge=1, le=1_000)] = None,
+        cursor: str | None = None,
+    ) -> Annotated[CallToolResult, ToolPayload[LifecycleQueryResult]]:
+        """Return bounded parent/child transitions without interpreting causality."""
+        try:
+            result = await run_atomic_thread(
+                lambda: LifecycleEvidenceService(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).get_operation_transitions(
+                    artifact_id=artifact_id,
+                    trace_id=trace_id,
+                    max_depth=max_depth,
+                    limit=limit,
+                    cursor=cursor,
+                )
+            )
+            return _success(result, f"Returned {result.returned} operation transitions.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="find_repeated_operation_sequences", annotations=READ_ONLY)
+    async def find_repeated_operation_sequences_tool(
+        artifact_id: Annotated[str, Field(min_length=1, max_length=200)],
+        ctx: Context[AppContext],
+        minimum_repetitions: Annotated[int, Field(ge=2, le=100)] = 2,
+        limit: Annotated[int | None, Field(ge=1, le=1_000)] = None,
+    ) -> Annotated[CallToolResult, ToolPayload[LifecycleQueryResult]]:
+        """Return repeated span signatures as bounded derived evidence."""
+        try:
+            result = await run_atomic_thread(
+                lambda: LifecycleEvidenceService(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).find_repeated_operation_sequences(
+                    artifact_id=artifact_id,
+                    minimum_repetitions=minimum_repetitions,
+                    limit=limit,
+                )
+            )
+            return _success(result, f"Returned {result.returned} repeated operation spans.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="get_lifecycle_gaps", annotations=READ_ONLY)
+    async def get_lifecycle_gaps_tool(
+        artifact_id: Annotated[str, Field(min_length=1, max_length=200)],
+        ctx: Context[AppContext],
+        limit: Annotated[int | None, Field(ge=1, le=1_000)] = None,
+    ) -> Annotated[CallToolResult, ToolPayload[LifecycleQueryResult]]:
+        """Return explicit timestamp, identity, and missing-parent evidence."""
+        try:
+            result = await run_atomic_thread(
+                lambda: LifecycleEvidenceService(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).get_lifecycle_gaps(artifact_id=artifact_id, limit=limit)
+            )
+            return _success(result, f"Returned {result.returned} lifecycle gaps.")
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="get_process_snapshot", annotations=READ_ONLY)
+    async def get_process_snapshot_tool(
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        ctx: Context[AppContext],
+        phase: Annotated[str | None, Field(min_length=1, max_length=50)] = None,
+        limit: Annotated[int | None, Field(ge=1, le=1_000)] = None,
+    ) -> Annotated[CallToolResult, ToolPayload[LifecycleQueryResult]]:
+        """Return bounded privacy-limited process observations for one run."""
+        try:
+            result = await run_atomic_thread(
+                lambda: LifecycleEvidenceService(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).get_process_snapshot(run_id=run_id, phase=phase, limit=limit)
+            )
+            return _success(result, f"Returned {result.returned} process observations.")
         except DomainError as error:
             return _failure(error)
 

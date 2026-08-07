@@ -105,20 +105,49 @@ argv = ["python", "-m", "tests.validate_gae", "--length", "{length}"]
 
 [experiments.gae_scaling]
 workload = "gae"
-variants = ["baseline", "candidate"]
 design = "randomized_complete_blocks"
 blocks = 10
+treatment_factor = "mode"
 primary_metric = "benchmark.wall_time"
 polarity = "lower_is_better"
 estimand = "median_paired_log_ratio"
 practical_threshold = 0.05
 confidence_level = 0.95
 random_seed = 1984
+
+[experiments.gae_scaling.factors]
+mode = ["baseline", "candidate"]
 ```
 
 Template substitution is limited to declared scalar parameters. It does not
 perform shell interpolation, command substitution, environment expansion, or
 path globbing.
+
+### Runtime evidence and transport experiments
+
+Imported OTLP files are normalized with `extract_otlp_trace`, then inspected
+through bounded operation-window, transition, repetition, lifecycle-gap, and
+process-snapshot queries. These operations return derived evidence with the
+artifact, run, corpus generation, query bounds, coverage, and limitations.
+Missing parents, absent spans, and repeated signatures are observations about
+coverage or behavior; none is an automatic loop, correctness, or causality
+verdict.
+
+Transport faults are declared separately under `fault_experiments`. The
+configuration validates loopback upstreams, endpoint templates, and typed
+latency, timeout, reset, bandwidth, slicing, truncation, slow-close, and proxy
+scenarios. Fault trials use a broker-owned Toxiproxy lease and retain the exact
+scenario, proxy, tool, timing, process, cleanup, and oracle evidence. Workload
+and sidecar containment are reported separately, and fault results remain
+experiment evidence: a supported or refuted finding still needs the
+experiment's metric, estimand, repetition policy, and semantic oracle.
+
+Native reductions use sequential `native_ddmin` with a declared partitioner
+and predicate workload. Supported partitioners are text lines, bounded binary
+chunks, top-level JSON, JSONL, OTLP JSON spans, and Chrome trace events. The
+predicate is tri-state, unresolved candidates are never accepted, and final
+revalidation bypasses the cache. Reduction plans are schema v2 and do not run
+an external reducer workload or expose a reducer socket protocol.
 
 ### Repetition ordering
 
@@ -164,8 +193,8 @@ every value against the workload declaration, materializes the exact ordered
 cells, and rejects products beyond `max_trials`. Every trial carries its stable
 `combination_id` and typed `factors`; names are not parsed to reconstruct
 coordinates. Cancellation or fatal planning failure publishes remaining cells
-as `unattempted`. Legacy variants and scaling configuration normalize into the
-same cell representation.
+as `unattempted`. Factor configuration is required; the removed variants and
+scaling fields are not accepted by the current configuration contract.
 
 ### Correctness and reliability outcomes
 

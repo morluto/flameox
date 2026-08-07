@@ -20,14 +20,17 @@ if TYPE_CHECKING:
     from flameox.application.drilldown import *  # noqa: F403
     from flameox.application.evidence_lookup import *  # noqa: F403
     from flameox.application.evidence_query import *  # noqa: F403
-    from flameox.application.evidence_status import *  # noqa: F403
     from flameox.application.execution_identity import *  # noqa: F403
     from flameox.application.execution_policy import *  # noqa: F403
     from flameox.application.experiments import *  # noqa: F403
+    from flameox.application.faults import *  # noqa: F403
     from flameox.application.gc import *  # noqa: F403
     from flameox.application.imports import *  # noqa: F403
     from flameox.application.integrity import *  # noqa: F403
+    from flameox.application.lifecycle import *  # noqa: F403
+    from flameox.application.native_reducer import *  # noqa: F403
     from flameox.application.operations import *  # noqa: F403
+    from flameox.application.otlp import *  # noqa: F403
     from flameox.application.pipelines import *  # noqa: F403
     from flameox.application.preflight import *  # noqa: F403
     from flameox.application.quarantine import *  # noqa: F403
@@ -54,12 +57,15 @@ _MODULES = (
     "drilldown",
     "evidence_lookup",
     "evidence_query",
-    "evidence_status",
     "execution_identity",
     "execution_policy",
     "experiments",
+    "faults",
     "gc",
     "imports",
+    "lifecycle",
+    "native_reducer",
+    "otlp",
     "integrity",
     "operations",
     "pipelines",
@@ -88,6 +94,7 @@ __all__ = [
     "ArtifactPipelineService",
     "ArtifactRegistrationSummary",
     "ArtifactService",
+    "BandwidthFault",
     "CallEdgeResult",
     "CapabilityList",
     "CapabilityService",
@@ -114,12 +121,10 @@ __all__ = [
     "DetachedProgress",
     "DiscoveryCoverage",
     "DrilldownService",
-    "EvidenceAvailability",
     "EvidenceInput",
     "EvidenceLookupResult",
     "EvidenceLookupService",
     "EvidenceQueryService",
-    "EvidenceStatus",
     "EvidenceSummary",
     "EvidenceSummaryBundle",
     "EvidenceSummaryRequest",
@@ -134,6 +139,10 @@ __all__ = [
     "ExperimentRunResult",
     "ExperimentService",
     "ExperimentTrialCollection",
+    "FaultExperimentConfig",
+    "FaultExperimentPlan",
+    "FaultExperimentResult",
+    "FaultExperimentService",
     "FindingListResult",
     "FindingResult",
     "FindingService",
@@ -154,10 +163,20 @@ __all__ = [
     "IntegrityService",
     "InvestigationListResult",
     "InvestigationService",
+    "LatencyFault",
+    "LifecycleEvidenceService",
+    "LifecycleItem",
+    "LifecycleQueryResult",
+    "LimitDataFault",
     "MaterializeAnalysisRequest",
     "MaterializedAnalysisResult",
     "MeasurementItem",
     "MeasurementQueryResult",
+    "NativeDdminReducer",
+    "NativePredicateClassification",
+    "NativeReductionAttempt",
+    "NativeReductionLimits",
+    "NativeReductionResult",
     "NativeViewerLaunchResult",
     "NativeViewerPlan",
     "NativeViewerService",
@@ -169,6 +188,8 @@ __all__ = [
     "OperationRunner",
     "OperationState",
     "OperationStatus",
+    "OtlpExtractionResult",
+    "OtlpTraceService",
     "OutcomeCount",
     "OutcomeExperimentResult",
     "PipelineComparison",
@@ -179,6 +200,7 @@ __all__ = [
     "PreflightService",
     "ProfileChange",
     "ProjectConfig",
+    "ProxyFault",
     "QuarantineManifest",
     "QuarantineRestoreResult",
     "QuarantineService",
@@ -197,6 +219,7 @@ __all__ = [
     "RepairPlan",
     "RepairResult",
     "RepairService",
+    "ResetPeerFault",
     "ResolvedOracle",
     "ResolvedSetupPlan",
     "RunDiscoveryService",
@@ -212,12 +235,15 @@ __all__ = [
     "SetupReport",
     "SetupService",
     "SetupVerification",
+    "SlicerFault",
+    "SlowCloseFault",
     "StackExample",
     "StackExamplesResult",
     "SummaryArtifact",
     "SummaryClaim",
     "SummaryReference",
     "SummaryRun",
+    "TimeoutFault",
     "TrashManifest",
     "WorkloadConfig",
     "WorkloadConfigurationResult",

@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from flameox.adapters.registry import *  # noqa: F403
     from flameox.adapters.setup_runtime import *  # noqa: F403
     from flameox.adapters.torch_profiler import *  # noqa: F403
+    from flameox.adapters.toxiproxy import *  # noqa: F403
 
 
 _MODULES = (
@@ -35,6 +36,7 @@ _MODULES = (
     "registry",
     "setup_runtime",
     "torch_profiler",
+    "toxiproxy",
 )
 
 __all__ = [
@@ -71,6 +73,10 @@ __all__ = [
     "SetupClient",
     "TorchProfilerCaptureOptions",
     "TorchProfilerSchedule",
+    "ToxiproxyApiError",
+    "ToxiproxyClient",
+    "ToxiproxyToolManager",
+    "ToxiproxyToolReceipt",
     "TraceEvent",
     "TraceProcessorInstallation",
     "TraceWindowResult",

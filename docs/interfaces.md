@@ -130,7 +130,6 @@ reports installed tools, versions, supported modes, permissions, and exact
 managed setup actions. MCP agents use `start_capability_setup` with an explicit
 idempotency key for FlameOx-managed providers, then poll
 `get_capability_setup` or cancel with `cancel_capability_setup`. The older
-`prepare_capabilities` entry point remains a compatibility wrapper. The typed
 `prepare_adapter` action handles an installed third-party entry point; none of
 these actions runs a workload.
 
@@ -162,6 +161,9 @@ flameox experiment plan <name> [parameter overrides]
 flameox experiment run <name> [parameter overrides]
 flameox experiment show <experiment-id>
 flameox experiment trial <trial-id> [--experiment-id <experiment-id>]
+flameox fault plan <name> --investigation <investigation-id> [--hypothesis <hypothesis-id>] [--parameters '<json>']
+flameox fault run [<name> --investigation <investigation-id> | --plan-id <plan-id>] [--parameters '<json>']
+flameox fault show <result-id>
 ```
 
 `flameox.toml` is the project-owned workload declaration. Its strict schema is
@@ -213,6 +215,10 @@ flameox stacks callers <run-or-artifact> <frame-id>
 flameox stacks callees <run-or-artifact> <frame-id>
 flameox stacks examples <run-or-artifact> <frame-id>
 flameox trace window <artifact-id> --start NS --end NS
+flameox trace operation-window <artifact-id> --start NS --end NS
+flameox trace transitions <artifact-id> [--trace-id TRACE]
+flameox trace gaps <artifact-id>
+flameox extract otlp <run-id> [--artifact-id ARTIFACT]
 flameox open <artifact-id>
 ```
 
@@ -223,6 +229,16 @@ There is no arbitrary SQL or free-form PerfettoSQL command.
 `open` prints the appropriate installed viewer command by default.
 `flameox open --launch` executes it explicitly. It never launches a browser when
 `--json` is active.
+
+Fault experiments are declared under the top-level `fault_experiments` table in
+`flameox.toml`. Planning validates the named workload, endpoint parameter,
+loopback upstream, typed toxic scenarios, repetition policy, and pinned
+Toxiproxy identity. `fault run` measures a no-toxic baseline through the same
+proxy before applying each treatment. It records the exact configuration,
+resolved ports, tool receipt, logs, process snapshots, containment decisions,
+timing, trial, and oracle references. Only the declared endpoint parameter is
+rendered into the workload; remote upstreams and arbitrary endpoint injection
+are rejected.
 
 ### Catalog and recovery
 
@@ -350,18 +366,25 @@ The supported tools are grouped as follows:
 
 | Family | Tools |
 | --- | --- |
-| Workspace | `initialize_workspace`, `workspace_status`, `workload_configuration_status`, `configure_workload`, `list_capabilities`, `start_capability_setup`, `get_capability_setup`, `cancel_capability_setup`, `prepare_capabilities`, `prepare_adapter`, `prepare_workload_dependencies`, `validate_workspace` |
+| Workspace | `initialize_workspace`, `workspace_status`, `workload_configuration_status`, `configure_workload`, `list_capabilities`, `start_capability_setup`, `get_capability_setup`, `cancel_capability_setup`, `prepare_adapter`, `prepare_workload_dependencies`, `validate_workspace` |
 | Capture and import | `plan_capture`, `execute_capture_plan`, `import_artifact`, `extract_benchmark_samples`, `extract_pyperf`, `extract_python_startup`, `extract_pytest`, `extract_coverage`, `extract_memray`, `extract_perfetto`, `extract_nsight_systems`, `extract_observations` |
 | Detached capture | `start_detached_capture`, `get_detached_capture`, `cancel_detached_capture` |
 | Discovery | `list_declared_workflows`, `get_declared_workflow`, `list_runs`, `list_findings` |
 | Investigations | `create_investigation`, `list_investigations`, `get_investigation`, `record_hypothesis`, `get_hypothesis` |
 | Experiments | `plan_experiment`, `run_experiment`, `get_experiment`, `freeze_run_set` |
+| Fault experiments | `plan_fault_experiment`, `run_fault_experiment`, `get_fault_experiment` |
 | Runs and artifacts | `list_runs`, `get_run`, `list_artifacts`, `get_artifact`, `get_native_viewer_plan` |
 | Evidence products | `summarize_evidence`, `register_artifact_pipeline`, `compare_artifact_pipelines` |
 | Reductions | `plan_reduction`, `execute_reduction`, `get_reduction` |
 | Analysis | `analyze_hotspots`, `analyze_scaling`, `analyze_pytorch`, `analyze_accelerator_launches`, `analyze_memory`, `analyze_execution`, `analyze_failures`, `compare_run_sets`, `record_analysis`, `record_comparison` |
+| Lifecycle evidence | `extract_otlp_trace`, `get_operation_window`, `get_operation_transitions`, `find_repeated_operation_sequences`, `get_lifecycle_gaps`, `get_process_snapshot` |
 | Drill-down | `get_evidence`, `query_measurements`, `get_frame_callers`, `get_frame_callees`, `get_stack_examples`, `get_trace_window` |
 | Findings | `record_finding`, `list_findings`, `get_finding` |
+
+Reduction planning accepts only the Flameox-native `native_ddmin` engine and a
+declared partitioner. The predicate receives the candidate through
+`FLAMEOX_REDUCTION_CANDIDATE`; external reducer workloads, wrapper executables,
+and socket protocols are not accepted.
 
 The normal first-run sequence is:
 
@@ -465,13 +488,13 @@ observed, or actively verified. Setup results include a bounded verification
 receipt naming the adapters checked and those still unavailable, so an agent can
 decide whether to refresh discovery before planning.
 
-#### `prepare_capabilities`
+#### `start_capability_setup`
 
-Mutating but non-executing. This compatibility entry point starts a durable
+Mutating but non-executing. This canonical setup entry point starts a durable
 operation and returns its operation ID instead of holding an MCP request open.
-Use `start_capability_setup` with an explicit idempotency key for new callers,
-`get_capability_setup` to reconnect and poll, and `cancel_capability_setup` to
-request cleanup. While setup is `starting` or `running`, its status includes a
+It requires an explicit idempotency key. Use `get_capability_setup` to reconnect
+and poll, and `cancel_capability_setup` to request cleanup. While setup is
+`starting` or `running`, its status includes a
 bounded `poll_after_ms` and a `recovery` action with the exact
 `get_capability_setup(operation_id=...)` call. Follow that delay and action;
 terminal states omit polling guidance and retain their terminal recovery. The
@@ -489,7 +512,7 @@ runs the declared workload, mutates source, installs arbitrary packages,
 changes host permissions, or provisions privileged collectors.
 
 `prepare_workload_dependencies` follows the same side-effect rule and remains a
-short compatibility entry point; its installer runs behind a worker boundary,
+short setup entry point; its installer runs behind a worker boundary,
 and its preflight result names the exact missing distributions and next action.
 
 #### `prepare_adapter`
@@ -582,6 +605,19 @@ collection resource exposes the first bounded page and its continuation cursor.
 When a trial identifier is reused by multiple historical experiments, callers
 must provide the experiment ID to resolve it; an unscoped lookup reports the
 ambiguity instead of selecting a newer row.
+
+#### `plan_fault_experiment`, `run_fault_experiment`, and `get_fault_experiment`
+
+Fault planning binds a declared `fault_experiments` workflow and returns an
+immutable plan. It does not accept a proxy URL, remote upstream, toxic payload,
+or arbitrary workload arguments. Execution starts the pinned Toxiproxy server
+through the broker-owned managed-sidecar lease, creates a loopback proxy, runs
+the baseline with no toxic, then runs each declared typed treatment through the
+normal workload, trial, measurement, and oracle paths. Workload and sidecar
+containment decisions are reported separately. Results retain configuration,
+ports, version and digest, bounded logs, process observations, cleanup outcome,
+timing, and oracle evidence. `get_fault_experiment` reads the immutable result;
+it does not rerun the experiment.
 
 #### `create_investigation` and `record_hypothesis`
 

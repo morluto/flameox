@@ -94,9 +94,11 @@ size = [1, 2]
 argv = ["python", "-c", "print('beta')"]
 [experiments.scaling]
 workload = "alpha"
-variants = ["1", "2"]
+treatment_factor = "size"
 primary_metric = "duration"
 polarity = "lower_is_better"
+[experiments.scaling.factors]
+size = [1, 2]
 """
     )
     service = WorkloadService(workspace)
@@ -114,7 +116,7 @@ polarity = "lower_is_better"
     assert [item.name for item in second.workflows] == ["beta"]
     assert second.next_cursor is None
     assert detail.allowed_parameters == {"size": (1, 2)}
-    assert detail.variants == ("1", "2")
+    assert detail.factors == {"size": (1, 2)}
 
     (tmp_path / "flameox.toml").write_text(
         (tmp_path / "flameox.toml").read_text().replace("print('beta')", "print('changed')")
@@ -418,7 +420,7 @@ async def test_missing_managed_adapter_points_to_setup_before_fallback(
             execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
         )
 
-    assert refused.value.details["next_tool"] == "prepare_capabilities"
+    assert refused.value.details["next_tool"] == "start_capability_setup"
     assert refused.value.details["setup_adapters"] == ["torch.profiler"]
     assert "command" in refused.value.details["fallback_adapters"]
 

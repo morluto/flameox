@@ -289,7 +289,7 @@ def test_agent_adapter_preparation_records_exact_identity_and_provenance(
     assert payload["approvals"]["example-profiler"]["provenance"] == "agent"
 
 
-def test_prepare_capabilities_installs_only_declared_missing_providers(
+def test_capability_setup_installs_only_declared_missing_providers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -302,8 +302,8 @@ def test_prepare_capabilities_installs_only_declared_missing_providers(
     )
     setup = CapabilitySetup(
         extra="torch",
-        method="prepare_capabilities",
-        next_tool="prepare_capabilities",
+        method="start_capability_setup",
+        next_tool="start_capability_setup",
         requirement="torch>=2.7",
     )
     missing = CapabilityReport(
@@ -317,7 +317,7 @@ def test_prepare_capabilities_installs_only_declared_missing_providers(
             CapabilityList(
                 capabilities=(missing,),
                 setup_adapters=("torch.profiler",),
-                next_tool="prepare_capabilities",
+                next_tool="start_capability_setup",
             ),
             CapabilityList(
                 capabilities=(available,),
@@ -365,7 +365,7 @@ def test_prepare_capabilities_installs_only_declared_missing_providers(
     assert "SSL_CERT_FILE" in broker.requests[0].environment_allowlist
 
 
-def test_prepare_capabilities_rejects_unmanaged_provider(tmp_path: Path) -> None:
+def test_capability_setup_rejects_unmanaged_provider(tmp_path: Path) -> None:
     service = CapabilityService(
         Workspace.initialize(tmp_path),
         capability_manifest=tmp_path / "capabilities.json",
@@ -378,7 +378,7 @@ def test_prepare_capabilities_rejects_unmanaged_provider(tmp_path: Path) -> None
     assert refused.value.details["next_tool"] == "list_capabilities"
 
 
-def test_prepare_capabilities_cancellation_cleans_up_brokered_install(
+def test_capability_setup_cancellation_cleans_up_brokered_install(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -394,8 +394,8 @@ def test_prepare_capabilities_cancellation_cleans_up_brokered_install(
         status=CapabilityStatus.UNAVAILABLE,
         setup=CapabilitySetup(
             extra="torch",
-            method="prepare_capabilities",
-            next_tool="prepare_capabilities",
+            method="start_capability_setup",
+            next_tool="start_capability_setup",
             requirement="torch>=2.7",
         ),
     )
@@ -424,7 +424,7 @@ def test_prepare_capabilities_cancellation_cleans_up_brokered_install(
     assert failures[0].code is ErrorCode.PROCESS_CANCELLED
 
 
-def test_prepare_capabilities_records_failure_when_uv_is_missing(
+def test_capability_setup_records_failure_when_uv_is_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -437,8 +437,8 @@ def test_prepare_capabilities_records_failure_when_uv_is_missing(
         status=CapabilityStatus.UNAVAILABLE,
         setup=CapabilitySetup(
             extra="torch",
-            method="prepare_capabilities",
-            next_tool="prepare_capabilities",
+            method="start_capability_setup",
+            next_tool="start_capability_setup",
             requirement="torch>=2.7",
         ),
     )
@@ -470,8 +470,8 @@ def test_trace_processor_staging_preserves_phase_and_bounded_cause(
         status=CapabilityStatus.UNAVAILABLE,
         setup=CapabilitySetup(
             extra="trace",
-            method="prepare_capabilities",
-            next_tool="prepare_capabilities",
+            method="start_capability_setup",
+            next_tool="start_capability_setup",
             requirement="perfetto>=0.57,<0.58",
         ),
     )
@@ -484,7 +484,7 @@ def test_trace_processor_staging_preserves_phase_and_bounded_cause(
             "FlameOx could not stage the managed Trace Processor.",
             retryable=True,
             details={
-                "next_tool": "prepare_capabilities",
+                "next_tool": "start_capability_setup",
                 "adapter": "perfetto",
                 "failure_category": "network",
                 "failure_detail": "synthetic TLS failure",
@@ -505,7 +505,7 @@ def test_trace_processor_staging_preserves_phase_and_bounded_cause(
     assert "synthetic TLS failure" in receipt["error"]
 
 
-def test_prepare_capabilities_is_idempotent_when_provider_is_available(
+def test_capability_setup_is_idempotent_when_provider_is_available(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -518,8 +518,8 @@ def test_prepare_capabilities_is_idempotent_when_provider_is_available(
         status=CapabilityStatus.AVAILABLE,
         setup=CapabilitySetup(
             extra="torch",
-            method="prepare_capabilities",
-            next_tool="prepare_capabilities",
+            method="start_capability_setup",
+            next_tool="start_capability_setup",
             requirement="torch>=2.7",
         ),
     )
@@ -562,8 +562,8 @@ def test_capability_recommendations_are_scoped_to_selected_adapter(tmp_path: Pat
         status=CapabilityStatus.UNAVAILABLE,
         setup=CapabilitySetup(
             extra="torch",
-            method="prepare_capabilities",
-            next_tool="prepare_capabilities",
+            method="start_capability_setup",
+            next_tool="start_capability_setup",
             requirement="torch>=2.7",
         ),
     )
@@ -583,7 +583,7 @@ def test_capability_recommendations_are_scoped_to_selected_adapter(tmp_path: Pat
     assert inventory.next_tool is None
     assert selected.recommendation_scope == "torch.profiler"
     assert selected.setup_adapters == ("torch.profiler",)
-    assert selected.next_tool == "prepare_capabilities"
+    assert selected.next_tool == "start_capability_setup"
 
 
 def test_running_capability_setup_status_contains_exact_poll_action(tmp_path: Path) -> None:

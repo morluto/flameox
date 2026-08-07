@@ -108,7 +108,9 @@ argv = ["python", "-c", "print('other')"]
 
 [experiments.compare]
 workload = "alpha"
-variants = ["baseline", "candidate"]
+treatment_factor = "mode"
+[experiments.compare.factors]
+mode = ["baseline", "candidate"]
 """
     )
     workspace = Workspace.initialize(tmp_path)
@@ -161,7 +163,9 @@ argv = ["python", "-c", "print('ok')"]
 
 [experiments.broken]
 workload = "missing"
-variants = ["one", "two"]
+treatment_factor = "mode"
+[experiments.broken.factors]
+mode = ["one", "two"]
 """
     (tmp_path / "flameox.toml").write_text(invalid)
     workspace = Workspace.initialize(tmp_path)
@@ -191,7 +195,9 @@ schema_version = 1
 
 [experiments.broken]
 workload = "missing"
-variants = ["one", "two"]
+treatment_factor = "mode"
+[experiments.broken.factors]
+mode = ["one", "two"]
 """
     )
     workspace = Workspace.initialize(tmp_path)
@@ -204,3 +210,15 @@ variants = ["one", "two"]
     assert "# preserve this note" in repaired
     assert "[workloads.missing]" in repaired
     assert service.configuration_status().status == "valid"
+
+
+def test_experiment_requires_explicit_treatment_factor_and_factors() -> None:
+    from flameox.application.workloads import ExperimentConfig
+
+    config = ExperimentConfig(
+        workload="probe",
+        treatment_factor="mode",
+        factors={"mode": ("baseline", "candidate"), "length": (128, 256)},
+    )
+    assert config.treatment_factor == "mode"
+    assert config.factors["length"] == (128, 256)

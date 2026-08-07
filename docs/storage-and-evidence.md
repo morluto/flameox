@@ -401,6 +401,33 @@ explicit unavailable marker rather than silently substituting zero. Storage
 reserve termination is preserved in the summary and in the run's typed
 limitations.
 
+### OTLP and process evidence
+
+`ArtifactKind.OTLP_TRACE` is a file-import kind. The importer accepts only an
+explicit OTLP protobuf or protobuf-JSON media type, preserves the original
+payload and registration, and publishes normalized resources, scopes, spans,
+events, and links as additive schema-1.6 tables. Attribute values use a
+canonical typed JSON representation; byte values are tagged base64 values.
+Malformed IDs, duplicate identities, missing or reversed timestamps, dropped
+counts, and absent parents remain limitations on derived evidence rather than
+diagnoses.
+
+Every user-visible workload run also registers an internal
+`PROCESS_TREE_SNAPSHOT` artifact and publishes bounded pre-cleanup,
+post-cleanup, and post-root-exit observations when available. Entries contain
+only process identity, parent identity, safe resource/status fields, snapshot
+phase, and cleanup outcome. Command lines, environments, working directories,
+executable paths, open-file paths, and network addresses are intentionally not
+collected. An empty or partial snapshot describes its sampling coverage; it
+does not prove that no process existed between observations.
+
+Fault experiments additionally register an internal
+`EXPERIMENT_CONFIGURATION` artifact containing the exact proxy and toxic
+configuration, tool receipt, resolved ports, timing, and containment decisions.
+The same run retains bounded sidecar logs, process snapshots, cleanup outcome,
+and oracle references. These artifacts are provenance for the ordinary
+experiment/trial records, not a separate unrestricted execution channel.
+
 ## Artifact model
 
 Each content object `artifact.json` contains only storage facts:
@@ -440,6 +467,9 @@ Initial artifact kinds:
 - `source_snapshot`;
 - `collector_metadata`;
 - `analysis_result`.
+- `otlp_trace`;
+- `process_tree_snapshot`;
+- `experiment_configuration`.
 
 Sensitivity levels:
 
@@ -472,7 +502,7 @@ registration context and avoids ambiguous producer or sensitivity claims.
 - Units are explicit.
 - High-cardinality, collector-specific details remain in native artifacts unless
   needed by a supported query.
-- The current Arrow schema is major 1, minor 5. Schema evolution is additive only for declared nullable fields within a major
+- The current Arrow schema is major 1, minor 6. Schema evolution is additive only for declared nullable fields within a major
   schema version. `union_by_name = true` implements that declared evolution; it
   is not itself the evolution policy.
 - Evidence generations written with minor 1.4 remain authoritative and are

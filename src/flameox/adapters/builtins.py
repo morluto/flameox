@@ -104,7 +104,7 @@ BUILTIN_ADAPTERS = {
             supported_formats=("perfetto", "chrome-trace", "pprof", "perf.data"),
             features=("trace_sql", "temporal_slices"),
             remediation=(
-                "Call prepare_capabilities with adapter='perfetto' to stage the user-space "
+                "Call start_capability_setup with adapter='perfetto' to stage the user-space "
                 "Trace Processor, or configure analysis.trace_processor_path explicitly.",
             ),
             version_args=("--version",),

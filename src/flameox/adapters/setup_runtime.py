@@ -314,7 +314,7 @@ def install_trace_processor(
                         raise DomainError(
                             ErrorCode.ARTIFACT_TOO_LARGE,
                             "The managed Trace Processor download exceeded 512 MiB.",
-                            details={"next_tool": "prepare_capabilities", "adapter": "perfetto"},
+                            details={"next_tool": "start_capability_setup", "adapter": "perfetto"},
                         )
                     stream.write(chunk)
             stream.flush()
@@ -346,13 +346,13 @@ def install_trace_processor(
             "FlameOx could not stage the managed Trace Processor.",
             retryable=True,
             details={
-                "next_tool": "prepare_capabilities",
+                "next_tool": "start_capability_setup",
                 "adapter": "perfetto",
                 "failure_category": category,
                 "failure_detail": detail,
             },
             remediation=(
-                "Retry prepare_capabilities; if the download remains unavailable, install "
+                "Retry start_capability_setup; if the download remains unavailable, install "
                 "the official user-space binary or configure analysis.trace_processor_path.",
             ),
         ) from exc
@@ -437,7 +437,7 @@ def _verify_trace_processor(
         raise DomainError(
             ErrorCode.PROCESS_FAILED,
             "The staged Trace Processor failed its bounded version check.",
-            details={"next_tool": "prepare_capabilities", "adapter": "perfetto"},
+            details={"next_tool": "start_capability_setup", "adapter": "perfetto"},
         ) from exc
     _validate_trace_processor_result(
         outcome.process.exit_code,
@@ -536,7 +536,7 @@ def _validate_trace_processor_result(
         raise DomainError(
             ErrorCode.PROCESS_FAILED,
             "The staged Trace Processor failed its bounded version check.",
-            details={"next_tool": "prepare_capabilities", "adapter": "perfetto"},
+            details={"next_tool": "start_capability_setup", "adapter": "perfetto"},
             remediation=(stderr.strip()[:500] or "Retry the managed setup.",),
         )
 

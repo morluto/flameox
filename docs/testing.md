@@ -86,6 +86,20 @@ uv run python tools/test.py optional       # all optional cases
 uv run python tools/test.py full           # every retained case, including optional/performance
 ```
 
+The real Toxiproxy loopback lane is opt-in because it starts a pinned external
+server binary. Set `FLAMEOX_TOXIPROXY_SERVER` to the verified managed
+`toxiproxy-server` path and run:
+
+```console
+FLAMEOX_TOXIPROXY_SERVER=/path/to/toxiproxy-server \
+  uv run pytest -o addopts='' tests/adapters/test_toxiproxy_integration.py -q \
+  -m 'optional and requires_toxiproxy'
+```
+
+This lane uses a local HTTP upstream and covers baseline passthrough, latency,
+peer reset, timeout/stall, bandwidth, and truncation. It does not contact a
+remote upstream. The default suite intentionally deselects these tests.
+
 The shared provider registry checks packages, executables, and the effective
 Trace Processor binary. Some capabilities still depend on permission or a
 running user manager; those tests report a classified skip when the host cannot

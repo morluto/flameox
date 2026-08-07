@@ -53,7 +53,11 @@ class CapabilityList(ContractModel):
     available_setup_third_party_adapters: tuple[str, ...] = ()
     recommendation_scope: str | None = None
     latest_setup: CapabilitySetupReceipt | None = None
-    next_tool: Literal["prepare_capabilities", "prepare_adapter", "list_capabilities"] | None = None
+    next_tool: Literal[
+        "start_capability_setup",
+        "prepare_adapter",
+        "list_capabilities",
+    ] | None = None
 
 
 class SetupVerification(ContractModel):
@@ -215,7 +219,7 @@ class CapabilityService:
                         if resolved or not supported_platform
                         else (
                             (
-                                "Call prepare_capabilities with this adapter to install it into "
+                                "Call start_capability_setup with this adapter to install it into "
                                 "FlameOx's managed runtime.",
                             )
                             if adapter.managed_extra is not None
@@ -273,7 +277,7 @@ class CapabilityService:
                         if package_version
                         else (
                             (
-                                "Call prepare_capabilities with this adapter to install it into "
+                                "Call start_capability_setup with this adapter to install it into "
                                 "FlameOx's managed runtime.",
                             )
                             if adapter.managed_extra is not None
@@ -626,7 +630,7 @@ class CapabilityService:
                     "next_tool": "list_capabilities",
                 },
                 remediation=(
-                    "Request only capabilities whose report includes a prepare_capabilities "
+                    "Request only capabilities whose report includes a start_capability_setup "
                     "setup action; host tools and permissions are not installed by FlameOx.",
                 ),
             )
@@ -680,9 +684,9 @@ class CapabilityService:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 "The managed runtime cannot prepare optional capabilities because uv is missing.",
-                details={"next_tool": "prepare_capabilities"},
+                details={"next_tool": "start_capability_setup"},
                 remediation=(
-                    "Install uv, then reconnect FlameOx and call prepare_capabilities again.",
+                    "Install uv, then reconnect FlameOx and call start_capability_setup again.",
                 ),
             )
         try:
@@ -720,9 +724,9 @@ class CapabilityService:
                         ErrorCode.PROCESS_FAILED,
                         "FlameOx could not prepare the requested optional capabilities.",
                         retryable=True,
-                        details={"next_tool": "prepare_capabilities", "error": detail},
+                        details={"next_tool": "start_capability_setup", "error": detail},
                         remediation=(
-                            "Retry prepare_capabilities after checking the bounded installer "
+                            "Retry start_capability_setup after checking the bounded installer "
                             "error.",
                         ),
                     )
@@ -775,9 +779,9 @@ class CapabilityService:
                 ErrorCode.PROCESS_FAILED,
                 "FlameOx could not prepare the requested optional capabilities.",
                 retryable=True,
-                details={"next_tool": "prepare_capabilities", "error": str(exc)[:500]},
+                details={"next_tool": "start_capability_setup", "error": str(exc)[:500]},
                 remediation=(
-                    "Retry prepare_capabilities after checking uv and package-index access.",
+                    "Retry start_capability_setup after checking uv and package-index access.",
                 ),
             ) from exc
         refreshed = {item.adapter: item for item in self.list().capabilities}
@@ -931,7 +935,7 @@ class CapabilityService:
             recommendation_scope=recommendation_adapter,
             latest_setup=latest_setup,
             next_tool=(
-                "prepare_capabilities"
+                "start_capability_setup"
                 if setup_adapters
                 else ("prepare_adapter" if setup_third_party_adapters else None)
             ),
@@ -991,10 +995,10 @@ class CapabilityService:
         if adapter.managed_extra is None or adapter.managed_requirement is None:
             return None
         return CapabilitySetup(
-            method="prepare_capabilities",
+            method="start_capability_setup",
             extra=adapter.managed_extra,
             requirement=adapter.managed_requirement,
-            next_tool="prepare_capabilities",
+            next_tool="start_capability_setup",
         )
 
     def _record_managed_extras(self, extras: tuple[str, ...]) -> None:
