@@ -16,9 +16,60 @@ from flameox.application import (
     FaultExperimentService,
     InvestigationService,
 )
+from flameox.application.workloads import FaultExperimentConfig, ProjectConfig
 from flameox.domain import ProcessResult
 from flameox.execution import ManagedSidecarOutcome, ProcessObservation
 from flameox.storage import ArtifactStore, Workspace
+
+
+def test_fault_configuration_rejects_non_discriminating_transport_definitions() -> None:
+    with pytest.raises(ValueError, match="endpoint_template"):
+        FaultExperimentConfig.model_validate(
+            {
+                "workload": "client",
+                "endpoint_parameter": "endpoint",
+                "upstream_host": "127.0.0.1",
+                "upstream_port": 8080,
+                "endpoint_template": "http://{host}:{port}{",
+                "scenarios": {"off": {"type": "proxy", "enabled": False}},
+            }
+        )
+    with pytest.raises(ValueError, match="non-discriminating"):
+        FaultExperimentConfig.model_validate(
+            {
+                "workload": "client",
+                "endpoint_parameter": "endpoint",
+                "upstream_host": "127.0.0.1",
+                "upstream_port": 8080,
+                "endpoint_template": "http://{host}:{port}",
+                "scenarios": {"same": {"type": "proxy", "enabled": True}},
+            }
+        )
+
+
+def test_fault_configuration_rejects_unused_endpoint_parameter() -> None:
+    with pytest.raises(ValueError, match="must be rendered"):
+        ProjectConfig.model_validate(
+            {
+                "schema_version": 1,
+                "workloads": {
+                    "client": {
+                        "argv": ["python", "-c", "print(1)"],
+                        "parameters": {"endpoint": ["unused"]},
+                    }
+                },
+                "fault_experiments": {
+                    "transport": {
+                        "workload": "client",
+                        "endpoint_parameter": "endpoint",
+                        "upstream_host": "127.0.0.1",
+                        "upstream_port": 8080,
+                        "endpoint_template": "http://{host}:{port}",
+                        "scenarios": {"off": {"type": "proxy", "enabled": False}},
+                    }
+                },
+            }
+        )
 
 
 class _ToolManager(ToxiproxyToolManager):
@@ -97,7 +148,7 @@ async def test_fault_plan_records_workload_and_sidecar_containment_separately(
 schema_version = 1
 
 [workloads.client]
-argv = ["python", "-c", "print(1)"]
+argv = ["python", "-c", "print(1)", "{endpoint}"]
 cwd = "."
 
 [workloads.client.parameters]

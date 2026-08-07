@@ -83,10 +83,12 @@ class NativeDdminReducer:
         self.chunk_size = chunk_size
         self.limits = limits or NativeReductionLimits()
 
-    def reduce(
+    def reduce(  # noqa: C901 - deterministic ddmin control flow is intentionally explicit
         self,
         original: bytes,
         predicate: Callable[[bytes], NativePredicateClassification],
+        *,
+        failure_detail: Callable[[], str | None] | None = None,
     ) -> NativeReductionResult:
         original_digest = _digest(original)
         try:
@@ -113,14 +115,22 @@ class NativeDdminReducer:
             digest = _digest(payload)
             cache_status: Literal["hit", "miss"] = "hit" if digest in cache else "miss"
             candidate_started = time.monotonic()
+            failure: str | None = None
             if digest in cache:
                 outcome = cache[digest]
                 outcomes: tuple[NativePredicateClassification, ...] = (outcome,)
             else:
-                outcomes_list = tuple(predicate(payload) for _ in range(self.limits.repetitions))
+                outcomes_list_values: list[NativePredicateClassification] = []
+                failures: list[str] = []
+                for _ in range(self.limits.repetitions):
+                    outcomes_list_values.append(predicate(payload))
+                    if failure_detail is not None and (detail := failure_detail()) is not None:
+                        failures.append(detail)
+                outcomes_list = tuple(outcomes_list_values)
                 outcome = _collapse(outcomes_list)
                 outcomes = outcomes_list
                 cache[digest] = outcome
+                failure = failures[0] if failures else None
             attempts.append(
                 NativeReductionAttempt(
                     attempt_id=f"attempt-{len(attempts):08d}",
@@ -132,6 +142,7 @@ class NativeDdminReducer:
                     classification=outcome,
                     cache_status=cache_status,
                     duration_ms=(time.monotonic() - candidate_started) * 1_000,
+                    failure=failure,
                 )
             )
             return outcome
@@ -172,7 +183,7 @@ class NativeDdminReducer:
         current = list(units)
         granularity = 2
         budget_exhausted = False
-        while len(current) >= 2:
+        while current:
             if (
                 len(attempts) >= self.limits.max_attempts
                 or time.monotonic() - started >= self.limits.wall_time_seconds
@@ -194,10 +205,34 @@ class NativeDdminReducer:
                 else:
                     candidate_units = list(subset)
                 candidate_units = _with_dependencies(candidate_units, current)
-                payload = rebuild(candidate_units)
                 requested = tuple(unit.unit_id for unit in subset)
+                dependency_added = tuple(
+                    unit.unit_id for unit in candidate_units if unit.unit_id not in requested
+                )
+                if len(candidate_units) >= len(current):
+                    attempts.append(
+                        NativeReductionAttempt(
+                            attempt_id=f"attempt-{len(attempts):08d}",
+                            candidate_digest=_digest(rebuild(candidate_units)),
+                            candidate_size_bytes=len(rebuild(candidate_units)),
+                            requested_unit_ids=requested,
+                            dependency_added_unit_ids=dependency_added,
+                            removed_unit_ids=(),
+                            classification="not_interesting",
+                            cache_status="hit"
+                            if _digest(rebuild(candidate_units)) in cache
+                            else "miss",
+                            duration_ms=0,
+                            failure="dependency_closure_no_op",
+                        )
+                    )
+                    continue
+                payload = rebuild(candidate_units)
                 removed = tuple(unit.unit_id for unit in current if unit not in candidate_units)
                 outcome = classify(payload, requested, removed)
+                attempts[-1] = attempts[-1].model_copy(
+                    update={"dependency_added_unit_ids": dependency_added}
+                )
                 if outcome == "interesting":
                     current = candidate_units
                     accepted_best_payloads.append(payload)
@@ -332,8 +367,7 @@ class NativeDdminReducer:
                     elif phase in {"e", "F"} and key in begin_by_key:
                         dependencies[unit_id] = (begin_by_key[key],)
                 units = [
-                    replace(unit, dependencies=dependencies.get(unit.unit_id, ()))
-                    for unit in units
+                    replace(unit, dependencies=dependencies.get(unit.unit_id, ())) for unit in units
                 ]
                 return units, lambda selected: _rebuild_chrome(value, selected)
             if isinstance(value, list):
@@ -423,8 +457,7 @@ class NativeDdminReducer:
                     kept = [
                         span
                         for span_index, span in enumerate(scope.spans)
-                        if f"span-{resource_index:04d}-{scope_index:04d}-{span_index:08d}"
-                        in wanted
+                        if f"span-{resource_index:04d}-{scope_index:04d}-{span_index:08d}" in wanted
                     ]
                     del scope.spans[:]
                     for span in kept:

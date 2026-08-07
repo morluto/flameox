@@ -55,11 +55,14 @@ class CapabilityList(ContractModel):
     available_setup_third_party_adapters: tuple[str, ...] = ()
     recommendation_scope: str | None = None
     latest_setup: CapabilitySetupReceipt | None = None
-    next_tool: Literal[
-        "start_capability_setup",
-        "prepare_adapter",
-        "list_capabilities",
-    ] | None = None
+    next_tool: (
+        Literal[
+            "start_capability_setup",
+            "prepare_adapter",
+            "list_capabilities",
+        ]
+        | None
+    ) = None
 
 
 class SetupVerification(ContractModel):
@@ -1092,9 +1095,7 @@ class CapabilityService:
         return CapabilityReport(
             adapter="toxiproxy",
             status=(
-                CapabilityStatus.AVAILABLE
-                if receipt is not None
-                else CapabilityStatus.UNAVAILABLE
+                CapabilityStatus.AVAILABLE if receipt is not None else CapabilityStatus.UNAVAILABLE
             ),
             provisioning=CapabilityProvisioning.MANAGED_RUNTIME,
             executable=str(receipt.executable) if receipt is not None else None,

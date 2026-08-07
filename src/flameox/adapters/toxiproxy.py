@@ -15,6 +15,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+import portalocker
+
 from flameox.atomic import atomic_write_json
 from flameox.domain import DomainError, ErrorCode
 
@@ -90,6 +92,19 @@ class ToxiproxyToolManager:
         return ToxiproxyToolReceipt(TOXIPROXY_VERSION, asset, expected_digest, executable)
 
     def stage(self) -> ToxiproxyToolReceipt:
+        self.tools_root.mkdir(parents=True, exist_ok=True)
+        try:
+            with portalocker.Lock(self.tools_root / ".toxiproxy-stage.lock", mode="a", timeout=30):
+                return self._stage_locked()
+        except portalocker.exceptions.LockException as error:
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "Toxiproxy staging is busy with another setup operation.",
+                retryable=True,
+                remediation=("Retry capability setup after the other setup operation finishes.",),
+            ) from error
+
+    def _stage_locked(self) -> ToxiproxyToolReceipt:
         release = self.release_for_host()
         if release is None:
             raise DomainError(
@@ -104,17 +119,25 @@ class ToxiproxyToolManager:
         if existing is not None:
             return existing
 
-        self.tools_root.mkdir(parents=True, exist_ok=True)
         staging_root = self.workspace_root / "staging"
         staging_root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=staging_root) as temporary:
             archive = Path(temporary) / asset
-            with (
-                urlopen(_RELEASE_URL + asset, timeout=120) as response,
-                archive.open("wb") as stream,
-            ):
-                while chunk := response.read(1024 * 1024):
-                    stream.write(chunk)
+            try:
+                with (
+                    urlopen(_RELEASE_URL + asset, timeout=120) as response,
+                    archive.open("wb") as stream,
+                ):
+                    while chunk := response.read(1024 * 1024):
+                        stream.write(chunk)
+            except (HTTPError, URLError, TimeoutError, OSError) as error:
+                raise DomainError(
+                    ErrorCode.CAPABILITY_UNAVAILABLE,
+                    "The pinned Toxiproxy asset could not be downloaded.",
+                    retryable=True,
+                    details={"asset": asset, "url": _RELEASE_URL + asset},
+                    remediation=("Retry capability setup when network access is available.",),
+                ) from error
             actual_digest = _sha256(archive)
             if actual_digest != expected_digest:
                 raise DomainError(
@@ -281,7 +304,7 @@ class ToxiproxyClient:
             not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", key)
             or not isinstance(value, int)
             or value < 0
-            or value > 2**31 - 1
+            or value > 10_000_000_000
             for key, value in attributes.items()
         ):
             raise ValueError("toxic attributes must be bounded non-negative integers")

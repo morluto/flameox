@@ -1011,12 +1011,20 @@ def create_server(
     async def start_capability_setup(
         adapters: Annotated[
             tuple[
-                Literal["coverage", "memray", "perfetto", "py-spy", "pytest", "torch.profiler"],
+                Literal[
+                    "coverage",
+                    "memray",
+                    "perfetto",
+                    "py-spy",
+                    "pytest",
+                    "torch.profiler",
+                    "toxiproxy",
+                ],
                 ...,
             ],
             Field(
                 min_length=1,
-                max_length=5,
+                max_length=6,
                 description="Managed adapters from list_capabilities to install or stage.",
             ),
         ],
@@ -1490,7 +1498,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="plan_fault_experiment", annotations=READ_ONLY)
+    @server.tool(name="plan_fault_experiment", annotations=ADDITIVE)
     async def plan_fault_experiment_tool(
         experiment_name: Annotated[str, Field(min_length=1)],
         investigation_id: Annotated[str, Field(min_length=1)],
@@ -1656,6 +1664,16 @@ def create_server(
             Field(description="Sensitivity classification: normal, internal, or sensitive."),
         ],
         ctx: Context[AppContext],
+        media_type: Annotated[
+            str | None,
+            Field(
+                max_length=200,
+                description=(
+                    "Explicit media type for formats whose encoding cannot be inferred, such as "
+                    "application/x-protobuf OTLP traces."
+                ),
+            ),
+        ] = None,
         source_root: Literal["project", "temp"] = "project",
         producer: Annotated[
             Literal[
@@ -1692,6 +1710,7 @@ def create_server(
             request = ImportArtifactRequest(
                 path=_safe_import_path(state.project_root, path, source_root),
                 kind=kind,
+                media_type=media_type,
                 sensitivity=sensitivity,
                 producer=None if producer == "auto" else producer,
                 producer_version=producer_version,

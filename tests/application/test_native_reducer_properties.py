@@ -69,6 +69,17 @@ def test_unresolved_candidates_are_never_accepted() -> None:
     assert not any(attempt.became_best for attempt in result.attempts)
 
 
+def test_single_unit_reduction_tests_empty_selection() -> None:
+    result = NativeDdminReducer("text_lines").reduce(
+        b"KEEP\n",
+        lambda _payload: "interesting",
+    )
+
+    assert result.final_payload == b""
+    assert result.minimality == "one_minimal"
+    assert any(attempt.candidate_size_bytes == 0 for attempt in result.attempts)
+
+
 def test_json_normalization_incompatibility_preserves_original() -> None:
     original = b'{ "keep": true, "discard": false }'
     result = NativeDdminReducer("json_top_level").reduce(
@@ -103,3 +114,6 @@ def test_chrome_trace_duration_dependencies_are_kept_together() -> None:
     assert result.final_payload is not None
     final_events = json.loads(result.final_payload)["traceEvents"]
     assert {event["name"] for event in final_events} >= {"begin", "end"}
+    assert result.budget_exhausted is False
+    assert result.minimality == "one_minimal"
+    assert any(attempt.dependency_added_unit_ids for attempt in result.attempts)

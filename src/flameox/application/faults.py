@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import socket
 from collections.abc import Awaitable, Callable
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 
@@ -13,7 +14,13 @@ from pydantic import Field, JsonValue
 from flameox.adapters.toxiproxy import ToxiproxyApiError, ToxiproxyClient, ToxiproxyToolManager
 from flameox.application.async_work import run_atomic_thread
 from flameox.application.capture import CaptureService
-from flameox.application.evidence_rows import artifact_registration_row, process_observation_rows
+from flameox.application.environment import collect_environment
+from flameox.application.evidence_rows import (
+    artifact_registration_row,
+    environment_row,
+    process_observation_rows,
+    source_state_row,
+)
 from flameox.application.execution_policy import ExecutionPolicy
 from flameox.application.experiments import (
     ExperimentBlock,
@@ -22,6 +29,7 @@ from flameox.application.experiments import (
     ExperimentService,
 )
 from flameox.application.run_rows import run_row
+from flameox.application.source import collect_partial_source_state
 from flameox.application.workloads import (
     BandwidthFault,
     FaultExperimentConfig,
@@ -39,15 +47,20 @@ from flameox.domain import (
     ArtifactKind,
     ArtifactRegistration,
     CapturePlan,
+    CaptureStatus,
     DomainError,
     ErrorCode,
+    ExecutionStatus,
     Experiment,
     Hypothesis,
     Investigation,
     RunManifest,
+    RunType,
     Sensitivity,
     Trial,
     TrialOutcome,
+    ValidationStatus,
+    Variant,
     digest_model,
     new_id,
 )
@@ -79,6 +92,8 @@ class FaultExperimentPlan(ContractModel):
     containment: str = "managed_process_group"
     workload_containment: str = "trusted_local"
     limitations: tuple[str, ...] = ()
+    revision: int = 0
+    consumed_at: datetime | None = None
 
 
 class FaultExperimentResult(ContractModel):
@@ -97,6 +112,10 @@ def _free_loopback_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _format_endpoint(host: str, port: int) -> str:
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
 
 def _scenario_attributes(scenario: FaultScenario) -> dict[str, int]:
@@ -144,7 +163,11 @@ class FaultExperimentService:
             workspace, kind="experiments", model=Experiment, id_field="experiment_id"
         )
         self.plans = JsonRecordStore(
-            workspace, kind="fault_experiment_plans", model=FaultExperimentPlan, id_field="plan_id"
+            workspace,
+            kind="fault_experiment_plans",
+            model=FaultExperimentPlan,
+            id_field="plan_id",
+            revision_field="revision",
         )
         self.results = JsonRecordStore(
             workspace,
@@ -290,13 +313,13 @@ class FaultExperimentService:
         self.plans.create(plan)
         return plan
 
-    async def run(
+    async def run(  # noqa: C901 - this is the bounded fault-trial state machine
         self,
         plan_id: str,
         *,
         progress: Callable[[float, float, str], Awaitable[None]] | None = None,
     ) -> FaultExperimentResult:
-        plan = self.plans.read(plan_id)
+        plan = self._consume_plan(plan_id)
         config = self._config(plan.experiment_name)
         if (
             digest_model(config.model_dump(mode="json"))
@@ -354,6 +377,7 @@ class FaultExperimentService:
             ] = "infrastructure_failure"
             lease: ManagedSidecarLease | None = None
             sidecar_ids: tuple[str, ...] = ()
+            cancellation: asyncio.CancelledError | None = None
             try:
                 proxy_name = f"flameox-{plan.plan_id[:12]}-{index:04d}"
                 lease, admin_port, listen_port = await self._start_sidecar(
@@ -390,8 +414,13 @@ class FaultExperimentService:
                 captured = await self.captures.execute(capture_plan.plan_id)
                 run = captured.run
                 outcome, failure_class = helper._classify_run(run)
-            except asyncio.CancelledError:
-                raise
+            except asyncio.CancelledError as error:
+                cancellation = error
+                if run is None and capture_plan is not None:
+                    run_path = self.workspace.paths.runs / capture_plan.run_id
+                    if run_path.exists():
+                        run = RunStore(self.workspace).read(capture_plan.run_id)
+                outcome, failure_class = TrialOutcome.CANCELLED, "cancellation"
             except (ToxiproxyApiError, OSError, ValueError):
                 outcome, failure_class = (
                     TrialOutcome.INFRASTRUCTURE_FAILED,
@@ -408,7 +437,9 @@ class FaultExperimentService:
             finally:
                 if lease is not None:
                     await asyncio.shield(lease.close())
-            if lease is not None and lease.outcome is not None and run is not None:
+            if lease is not None and lease.outcome is not None:
+                if run is None:
+                    run = self._create_sidecar_run(plan, lease.outcome)
                 sidecar_ids = await self._attach_sidecar_evidence(
                     plan,
                     cell,
@@ -431,6 +462,22 @@ class FaultExperimentService:
             )
             helper._publish_trial(trial)
             trials.append(trial)
+            if cancellation is not None:
+                for remaining_block, remaining_order, remaining_cell in schedule[index + 1 :]:
+                    unattempted = helper._make_trial(
+                        plan=plan.experiment_plan,
+                        cell=remaining_cell,
+                        run=None,
+                        block_id=remaining_block.block_id,
+                        order=remaining_order,
+                        outcome=TrialOutcome.UNATTEMPTED,
+                        failure_class="unattempted",
+                    )
+                    helper._publish_trial(unattempted)
+                    trials.append(unattempted)
+                self._publish_fault_variants(plan, trials)
+                raise cancellation
+        self._publish_fault_variants(plan, trials)
         result = FaultExperimentResult(
             result_id=new_id(),
             plan_id=plan.plan_id,
@@ -450,6 +497,62 @@ class FaultExperimentService:
 
     def show(self, result_id: str) -> FaultExperimentResult:
         return self.results.read(result_id)
+
+    def _publish_fault_variants(
+        self, plan: FaultExperimentPlan, trials: list[Trial]
+    ) -> tuple[Variant, ...]:
+        variants: list[Variant] = []
+        for name in plan.experiment_plan.variants:
+            cell = next(
+                cell
+                for block in plan.experiment_plan.blocks
+                for cell in block.cells
+                if cell.treatment == name
+            )
+            trial = next((item for item in trials if item.factors.get("scenario") == name), None)
+            run = RunStore(self.workspace).read(trial.run_id) if trial and trial.run_id else None
+            variants.append(
+                Variant(
+                    variant_id=digest_model(
+                        {
+                            "experiment_id": plan.experiment_plan.experiment.experiment_id,
+                            "name": name,
+                        }
+                    ),
+                    experiment_id=plan.experiment_plan.experiment.experiment_id,
+                    name=name,
+                    source_state_id=run.source_state_id if run is not None else None,
+                    workload_instance_id=run.workload_instance_id if run is not None else None,
+                    parameters=cell.factors,
+                    environment_requirements={},
+                )
+            )
+        helper = ExperimentService(self.workspace, captures=self.captures)
+        self.publisher.publish_rows(
+            {"variants": [helper._variant_row(value) for value in variants]},
+            publisher="flameox.faults",
+            publisher_version="1",
+            input_run_ids=tuple(item.run_id for item in trials if item.run_id is not None),
+        )
+        return tuple(variants)
+
+    def _consume_plan(self, plan_id: str) -> FaultExperimentPlan:
+        now = datetime.now(UTC)
+        with self.workspace.write_locked():
+            plan = self.plans.read(plan_id)
+            if plan.consumed_at is not None:
+                raise DomainError(
+                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    "Fault experiment plan has already been consumed.",
+                )
+            if now >= plan.experiment_plan.expires_at:
+                raise DomainError(
+                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    "Fault experiment plan has expired.",
+                )
+            consumed = plan.model_copy(update={"revision": plan.revision + 1, "consumed_at": now})
+            self.plans.append_locked(consumed, expected_revision=plan.revision)
+            return consumed
 
     def _config(self, name: str) -> FaultExperimentConfig:
         try:
@@ -471,7 +574,10 @@ class FaultExperimentService:
             client = ToxiproxyClient(f"http://127.0.0.1:{admin_port}")
 
             async def readiness(client: ToxiproxyClient = client) -> bool:
-                version = await asyncio.to_thread(client.version)
+                try:
+                    version = await asyncio.to_thread(client.version)
+                except ToxiproxyApiError:
+                    return False
                 return version == plan.tool_version
 
             lease: ManagedSidecarLease | None = None
@@ -487,7 +593,7 @@ class FaultExperimentService:
                 lease.create_proxy(
                     name=proxy_name,
                     listen=f"127.0.0.1:{listen_port}",
-                    upstream=f"{plan.upstream_host}:{plan.upstream_port}",
+                    upstream=_format_endpoint(plan.upstream_host, plan.upstream_port),
                 )
                 return lease, admin_port, listen_port
             except (DomainError, ToxiproxyApiError, OSError):
@@ -550,7 +656,7 @@ class FaultExperimentService:
                 "admin_port": admin_port,
                 "proxy_name": proxy_name,
                 "proxy_listen": f"127.0.0.1:{listen_port}",
-                "proxy_upstream": f"{plan.upstream_host}:{plan.upstream_port}",
+                "proxy_upstream": _format_endpoint(plan.upstream_host, plan.upstream_port),
                 "containment": {
                     "sidecar": outcome.containment,
                     "workload_policy": plan.workload_containment,
@@ -631,4 +737,40 @@ class FaultExperimentService:
             publisher_version=plan.tool_version,
             input_run_ids=(run.run_id,),
         )
+        shutil.rmtree(root, ignore_errors=True)
         return tuple(ids)
+
+    def _create_sidecar_run(
+        self, plan: FaultExperimentPlan, outcome: ManagedSidecarOutcome
+    ) -> RunManifest:
+        environment = collect_environment()
+        source_state = collect_partial_source_state(self.workspace)
+        run = RunManifest(
+            run_id=new_id(),
+            run_type=RunType.EXECUTION,
+            started_at=outcome.started_at,
+            finished_at=outcome.finished_at,
+            execution_status=ExecutionStatus.FAILED,
+            capture_status=CaptureStatus.FAILED,
+            validation_status=ValidationStatus.NOT_REQUESTED,
+            workload_definition_id=plan.experiment_plan.experiment.workload_definition_id,
+            measurement_protocol_id=plan.experiment_plan.experiment.measurement_protocol_id,
+            environment_id=environment.environment_id,
+            source_state_id=source_state.source_state_id,
+            collector="flameox.toxiproxy",
+            collector_version=plan.tool_version,
+            process=outcome.process,
+            limitations=("The workload did not start; this run contains sidecar-only evidence.",),
+        )
+        RunStore(self.workspace).create(run)
+        self.publisher.publish_rows(
+            {
+                "runs": [run_row(run)],
+                "environments": [environment_row(environment)],
+                "source_states": [source_state_row(source_state)],
+            },
+            publisher="flameox.faults",
+            publisher_version="1",
+            input_run_ids=(run.run_id,),
+        )
+        return run

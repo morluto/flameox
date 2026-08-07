@@ -6,6 +6,7 @@ import shutil
 import tomllib
 from ipaddress import ip_address
 from pathlib import Path, PurePath
+from string import Formatter
 from typing import Annotated, Literal, cast
 
 import tomlkit
@@ -259,10 +260,24 @@ class FaultExperimentConfig(ContractModel):
     def validate_transport_scope(self) -> FaultExperimentConfig:
         if not ip_address(self.upstream_host).is_loopback:
             raise ValueError("fault experiment upstream_host must be a loopback IP literal")
-        fields = set(re.findall(r"\{([^{}]+)\}", self.endpoint_template))
-        if fields - {"host", "port"} or fields != {"host", "port"}:
-            raise ValueError("endpoint_template must contain only {host} and {port}")
+        try:
+            parsed = tuple(Formatter().parse(self.endpoint_template))
+            fields = {field for _, field, _, _ in parsed if field is not None}
+            if fields != {"host", "port"} or any(
+                field not in {None, "host", "port"} or format_spec or conversion
+                for _, field, format_spec, conversion in parsed
+            ):
+                raise ValueError
+            self.endpoint_template.format(host="127.0.0.1", port=1)
+        except (IndexError, KeyError, ValueError) as error:
+            raise ValueError("endpoint_template must contain only {host} and {port}") from error
+        if "baseline" in self.scenarios:
+            raise ValueError("baseline is reserved for the synthetic passthrough treatment")
+        if self.blocks * self.repetitions * (len(self.scenarios) + 1) > 100_000:
+            raise ValueError("fault experiment schedule exceeds the 100000-trial bound")
         for scenario in self.scenarios.values():
+            if isinstance(scenario, ProxyFault) and scenario.enabled:
+                raise ValueError("proxy treatment is non-discriminating when enabled")
             if (
                 hasattr(scenario, "jitter_ms")
                 and getattr(scenario, "toxicity", 1.0) == 1
@@ -311,6 +326,15 @@ class ProjectConfig(ContractModel):
                 raise ValueError(
                     "fault experiments must inject a declared workload parameter: "
                     + experiment.endpoint_parameter
+                )
+            workload = self.workloads[experiment.workload]
+            template_values = (*workload.argv, workload.cwd, *workload.environment.values())
+            if not any(
+                "{" + experiment.endpoint_parameter + "}" in value for value in template_values
+            ):
+                raise ValueError(
+                    "fault experiment endpoint_parameter must be rendered by argv, cwd, "
+                    "or environment"
                 )
         return self
 

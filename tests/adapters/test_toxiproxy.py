@@ -179,8 +179,6 @@ def test_toxiproxy_archive_extraction_rejects_unsafe_members(
     archive.seek(0)
     extracted = tmp_path / "extracted"
     extracted.mkdir()
-    with tarfile.open(fileobj=archive, mode="r:gz") as bundle, pytest.raises(
-        DomainError
-    ) as error:
+    with tarfile.open(fileobj=archive, mode="r:gz") as bundle, pytest.raises(DomainError) as error:
         _toxiproxy._safe_extract(bundle, extracted)
     assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED

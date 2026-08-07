@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import shutil
+import threading
+import time
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
@@ -19,7 +22,7 @@ from flameox.application.workloads import WorkloadService
 from flameox.domain import DomainError, ErrorCode, digest_model
 from flameox.domain.models import CommandSpec, utc_now
 from flameox.evidence import GenerationPublisher
-from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
+from flameox.execution import ExecutionOutcome, ExecutionRequest, ResourcePolicy, SubprocessBroker
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, JsonRecordStore, Workspace
 
@@ -208,7 +211,9 @@ class ReductionService:
             retryable=True,
         )
 
-    async def _execute_native(self, plan: ReductionPlan) -> ReductionResult:
+    async def _execute_native(  # noqa: C901 - coordinates bounded predicate lifecycle and publication
+        self, plan: ReductionPlan
+    ) -> ReductionResult:
         reduction_id = digest_model({"plan_id": plan.plan_id, "contract": "reduction-v2"})
         try:
             return self.results.read(reduction_id)
@@ -223,47 +228,89 @@ class ReductionService:
                 reduction_id,
                 root,
                 timeout_seconds=(
-                    plan.limits.wall_time_seconds
-                    + plan.limits.predicate_timeout_seconds
-                    + 10
+                    plan.limits.wall_time_seconds + plan.limits.predicate_timeout_seconds + 10
                 ),
             )
         candidate = root / "candidate"
         original = self.artifacts.get(plan.original_artifact_id).payload_path.read_bytes()
         outputs: list[tuple[bytes, bytes]] = []
+        cancellation = threading.Event()
+        failure_state: list[str | None] = [None]
+        wall_deadline = time.monotonic() + plan.limits.wall_time_seconds
 
         def predicate(payload: bytes) -> NativePredicateClassification:
+            if cancellation.is_set():
+                failure_state[0] = "cancelled"
+                return "unresolved"
             candidate.write_bytes(payload)
-            try:
-                outcome = asyncio.run(
+            remaining = wall_deadline - time.monotonic()
+            if remaining <= 0:
+                failure_state[0] = "reduction_wall_time"
+                return "unresolved"
+            timeout = min(plan.limits.predicate_timeout_seconds, remaining)
+
+            async def run_predicate() -> ExecutionOutcome | None:
+                task = asyncio.create_task(
                     self.broker.run(
                         self._execution_request(
                             plan.predicate_command,
-                            timeout=plan.limits.predicate_timeout_seconds,
+                            timeout=timeout,
                             writable_root=root,
                             overrides={"FLAMEOX_REDUCTION_CANDIDATE": str(candidate)},
                         )
                     )
                 )
-            except DomainError:
+                while not task.done():
+                    if cancellation.is_set():
+                        task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await task
+                        failure_state[0] = "cancelled"
+                        return None
+                    await asyncio.sleep(0.01)
+                return await task
+
+            try:
+                outcome = asyncio.run(run_predicate())
+            except DomainError as error:
+                failure_state[0] = error.code.value
                 return "unresolved"
+            if outcome is None:
+                return "unresolved"
+            failure_state[0] = None
             outputs.append((outcome.stdout, outcome.stderr))
             return "interesting" if outcome.process.exit_code == 0 else "not_interesting"
 
         try:
-            native = await asyncio.to_thread(
-                NativeDdminReducer(
-                    plan.partitioner,
-                    chunk_size=plan.chunk_size,
-                    limits=NativeReductionLimits(
-                        max_attempts=plan.limits.max_attempts,
-                        wall_time_seconds=plan.limits.wall_time_seconds,
-                        repetitions=plan.limits.predicate_repetitions,
-                    ),
-                ).reduce,
-                original,
-                predicate,
+            reducer = NativeDdminReducer(
+                plan.partitioner,
+                chunk_size=plan.chunk_size,
+                limits=NativeReductionLimits(
+                    max_attempts=plan.limits.max_attempts,
+                    wall_time_seconds=plan.limits.wall_time_seconds,
+                    repetitions=plan.limits.predicate_repetitions,
+                ),
             )
+            worker = asyncio.create_task(
+                asyncio.to_thread(
+                    reducer.reduce,
+                    original,
+                    predicate,
+                    failure_detail=lambda: failure_state[0],
+                )
+            )
+            cancelled = False
+            try:
+                native = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                cancelled = True
+                cancellation.set()
+                native = await asyncio.shield(worker)
+                native = native.model_copy(
+                    update={
+                        "limitations": (*native.limitations, "reduction_cancelled"),
+                    }
+                )
             accepted_ids: list[str] = []
             for index, payload in enumerate(native.accepted_best_payloads):
                 path = root / f"best-{index:08d}"
@@ -297,11 +344,16 @@ class ReductionService:
                     for item in native.attempts
                 ),
                 timed_out=sum(
-                    item.classification == "unresolved" and not item.predicate_outcomes
+                    item.classification == "unresolved"
+                    and item.failure
+                    in {
+                        ErrorCode.PROCESS_TIMEOUT.value,
+                        "reduction_wall_time",
+                    }
                     for item in native.attempts
                 ),
             )
-            return self._publish_native_result(
+            result = self._publish_native_result(
                 plan,
                 reduction_id,
                 native,
@@ -314,8 +366,10 @@ class ReductionService:
                 stderr_id=stderr_id,
                 cleanup_complete=self._cleanup(root),
             )
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
         except asyncio.CancelledError:
-            self._cleanup(root)
             raise
         except DomainError as error:
             return self._publish_native_result(
@@ -393,9 +447,13 @@ class ReductionService:
                     "disposition": created.disposition,
                     "original_artifact_id": created.original_artifact_id,
                     "final_artifact_id": created.final_artifact_id,
+                    "reducer_definition_id": None,
+                    "reducer_instance_id": None,
                     "predicate_definition_id": created.predicate_definition_id,
                     "predicate_instance_id": created.predicate_instance_id,
                     "attempts_json": created.attempts.model_dump_json(),
+                    "reducer_stdout_artifact_id": None,
+                    "reducer_stderr_artifact_id": None,
                     "predicate_stdout_artifact_id": created.predicate_stdout_artifact_id,
                     "predicate_stderr_artifact_id": created.predicate_stderr_artifact_id,
                     "cleanup_complete": created.cleanup_complete,
@@ -502,6 +560,7 @@ class ReductionService:
     def _cleanup(root: Path) -> bool:
         shutil.rmtree(root, ignore_errors=True)
         return not root.exists()
+
 
 def _executable_digest(command: CommandSpec) -> str:
     try:
