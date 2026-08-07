@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import ClassVar
 
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactContent, CursorCodec, DomainError, ErrorCode, Sensitivity
@@ -50,12 +49,6 @@ class ArtifactListResult(ContractModel):
 
 
 class ArtifactService:
-    _SENSITIVITY_ORDER: ClassVar[dict[Sensitivity, int]] = {
-        Sensitivity.NORMAL: 0,
-        Sensitivity.INTERNAL: 1,
-        Sensitivity.SENSITIVE: 2,
-    }
-
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
 
@@ -70,7 +63,9 @@ class ArtifactService:
                 (artifact_id, limit),
             ).fetchall()
             count_row = snapshot.execute(
-                "SELECT count(*) FROM artifact_registrations WHERE artifact_id = ?",
+                "SELECT count(*), max(CASE sensitivity WHEN 'sensitive' THEN 2 "
+                "WHEN 'internal' THEN 1 ELSE 0 END) "
+                "FROM artifact_registrations WHERE artifact_id = ?",
                 (artifact_id,),
             ).fetchone()
             assert count_row is not None
@@ -94,11 +89,12 @@ class ArtifactService:
             resource_uri=f"flameox://artifacts/{artifact_id}",
             registrations=registrations,
             total_registrations=int(count_row[0]),
-            effective_sensitivity=max(
-                (item.sensitivity for item in registrations),
-                default=Sensitivity.NORMAL,
-                key=self._SENSITIVITY_ORDER.__getitem__,
-            ),
+            effective_sensitivity={
+                None: Sensitivity.NORMAL,
+                0: Sensitivity.NORMAL,
+                1: Sensitivity.INTERNAL,
+                2: Sensitivity.SENSITIVE,
+            }[count_row[1]],
         )
 
     def list(self, *, limit: int = 100, cursor: str | None = None) -> ArtifactListResult:

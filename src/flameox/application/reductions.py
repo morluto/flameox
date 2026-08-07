@@ -3,26 +3,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import shutil
-import threading
-import time
-from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
-from flameox.application.native_reducer import (
-    NativeDdminReducer,
-    NativePredicateClassification,
-    NativeReductionLimits,
-    NativeReductionResult,
-)
+from flameox.application.artifact_workers import ArtifactWorker
+from flameox.application.native_reducer import NativeReductionResult
 from flameox.application.workloads import WorkloadService
 from flameox.domain import DomainError, ErrorCode, digest_model
 from flameox.domain.models import CommandSpec, utc_now
 from flameox.evidence import GenerationPublisher
-from flameox.execution import ExecutionOutcome, ExecutionRequest, ResourcePolicy, SubprocessBroker
+from flameox.execution import SubprocessBroker
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, JsonRecordStore, Workspace
 
@@ -191,6 +184,7 @@ class ReductionService:
 
     async def _wait_for_result(
         self,
+        plan: ReductionPlan,
         reduction_id: str,
         root: Path,
         *,
@@ -203,6 +197,8 @@ class ReductionService:
             except DomainError as error:
                 if error.code is not ErrorCode.WORKSPACE_INVALID:
                     raise
+            if not root.exists():
+                return await self._execute_native(plan)
             await asyncio.sleep(0.1)
         shutil.rmtree(root, ignore_errors=True)
         raise DomainError(
@@ -211,9 +207,7 @@ class ReductionService:
             retryable=True,
         )
 
-    async def _execute_native(  # noqa: C901 - coordinates bounded predicate lifecycle and publication
-        self, plan: ReductionPlan
-    ) -> ReductionResult:
+    async def _execute_native(self, plan: ReductionPlan) -> ReductionResult:
         reduction_id = digest_model({"plan_id": plan.plan_id, "contract": "reduction-v2"})
         try:
             return self.results.read(reduction_id)
@@ -225,117 +219,80 @@ class ReductionService:
             root.mkdir(parents=True, exist_ok=False)
         except FileExistsError:
             return await self._wait_for_result(
+                plan,
                 reduction_id,
                 root,
                 timeout_seconds=(
                     plan.limits.wall_time_seconds + plan.limits.predicate_timeout_seconds + 10
                 ),
             )
-        candidate = root / "candidate"
-        original = self.artifacts.get(plan.original_artifact_id).payload_path.read_bytes()
-        latest_output: tuple[bytes, bytes] | None = None
-        cancellation = threading.Event()
-        failure_state: list[str | None] = [None]
-        wall_deadline = time.monotonic() + plan.limits.wall_time_seconds
-
-        def predicate(payload: bytes) -> NativePredicateClassification:
-            nonlocal latest_output
-            if cancellation.is_set():
-                failure_state[0] = "cancelled"
-                return "unresolved"
-            candidate.write_bytes(payload)
-            remaining = wall_deadline - time.monotonic()
-            if remaining <= 0:
-                failure_state[0] = "reduction_wall_time"
-                return "unresolved"
-            timeout = min(plan.limits.predicate_timeout_seconds, remaining)
-
-            async def run_predicate() -> ExecutionOutcome | None:
-                task = asyncio.create_task(
-                    self.broker.run(
-                        self._execution_request(
-                            plan.predicate_command,
-                            timeout=timeout,
-                            writable_root=root,
-                            overrides={"FLAMEOX_REDUCTION_CANDIDATE": str(candidate)},
-                        )
-                    )
-                )
-                while not task.done():
-                    if cancellation.is_set():
-                        task.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await task
-                        failure_state[0] = "cancelled"
-                        return None
-                    await asyncio.sleep(0.01)
-                return await task
-
-            try:
-                outcome = asyncio.run(run_predicate())
-            except DomainError as error:
-                failure_state[0] = error.code.value
-                return "unresolved"
-            if outcome is None:
-                return "unresolved"
-            failure_state[0] = None
-            latest_output = (outcome.stdout, outcome.stderr)
-            return "interesting" if outcome.process.exit_code == 0 else "not_interesting"
-
         try:
-            reducer = NativeDdminReducer(
-                plan.partitioner,
-                chunk_size=plan.chunk_size,
-                limits=NativeReductionLimits(
-                    max_attempts=plan.limits.max_attempts,
-                    wall_time_seconds=plan.limits.wall_time_seconds,
-                    repetitions=plan.limits.predicate_repetitions,
-                ),
-            )
-            worker = asyncio.create_task(
-                asyncio.to_thread(
-                    reducer.reduce,
-                    original,
-                    predicate,
-                    failure_detail=lambda: failure_state[0],
-                )
-            )
-            cancelled = False
-            try:
-                native = await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                cancelled = True
-                cancellation.set()
-                native = await asyncio.shield(worker)
-                native = native.model_copy(
-                    update={
-                        "limitations": (*native.limitations, "reduction_cancelled"),
-                    }
-                )
-            accepted_ids: list[str] = []
-            for index, payload in enumerate(native.accepted_best_payloads):
-                path = root / f"best-{index:08d}"
-                path.write_bytes(payload)
-                stored = self.artifacts.import_path(
-                    path,
-                    allowed_roots=(root,),
+            artifact_path = self.artifacts.get(plan.original_artifact_id).payload_path
+
+            def consume(
+                response: dict[str, object], worker_root: Path
+            ) -> tuple[NativeReductionResult, list[str], str, str | None, str | None, Path]:
+                raw_result = response.get("result")
+                accepted_paths = response.get("accepted_paths")
+                if not isinstance(raw_result, dict) or not isinstance(accepted_paths, list):
+                    raise DomainError(
+                        ErrorCode.ARTIFACT_PARSE_FAILED,
+                        "Reduction worker returned an invalid result contract.",
+                    )
+                native = NativeReductionResult.model_validate(raw_result)
+                accepted_ids: list[str] = []
+                for raw_path in accepted_paths:
+                    path = self._worker_file(worker_root, raw_path)
+                    stored = self.artifacts.import_path(
+                        path,
+                        allowed_roots=(worker_root,),
+                        max_bytes=self.workspace.config.capture.max_artifact_bytes,
+                    )
+                    if stored.content.artifact_id not in accepted_ids:
+                        accepted_ids.append(stored.content.artifact_id)
+                final_path = self._worker_file(worker_root, response.get("final_path"))
+                final_id = self.artifacts.import_path(
+                    final_path,
+                    allowed_roots=(worker_root,),
                     max_bytes=self.workspace.config.capture.max_artifact_bytes,
-                )
-                if stored.content.artifact_id not in accepted_ids:
-                    accepted_ids.append(stored.content.artifact_id)
-            final_path = root / "final-candidate"
-            final_path.write_bytes(
-                native.final_payload if native.final_payload is not None else original
+                ).content.artifact_id
+                stdout_id = self._import_worker_output(worker_root, response.get("stdout_path"))
+                stderr_id = self._import_worker_output(worker_root, response.get("stderr_path"))
+                return native, accepted_ids, final_id, stdout_id, stderr_id, worker_root
+
+            worker_result = await ArtifactWorker(self.workspace, broker=self.broker).run(
+                "flameox.workers.reduction",
+                {
+                    "artifact_path": str(artifact_path),
+                    "partitioner": plan.partitioner,
+                    "chunk_size": plan.chunk_size,
+                    "predicate_command": plan.predicate_command.model_dump(mode="json"),
+                    "limits": {
+                        "max_attempts": plan.limits.max_attempts,
+                        "wall_time_seconds": plan.limits.wall_time_seconds,
+                        "repetitions": plan.limits.predicate_repetitions,
+                    },
+                    "predicate_timeout_seconds": plan.limits.predicate_timeout_seconds,
+                    "project_root": str(self.workspace.project_root),
+                    "workspace_root": str(self.workspace.paths.root),
+                    "staging_root": str(self.workspace.paths.staging),
+                    "max_output_bytes": self.workspace.config.execution.max_output_bytes,
+                    "minimum_free_bytes": self.workspace.config.storage.min_free_bytes,
+                    "maximum_rss_bytes": self.workspace.config.execution.max_memory_bytes,
+                    "sampling_interval_ms": (
+                        self.workspace.config.execution.resource_sampling_interval_ms
+                    ),
+                    "max_observed_files": (
+                        self.workspace.config.execution.max_resource_observed_files
+                    ),
+                },
+                name="reduction",
+                timeout_seconds=(
+                    plan.limits.wall_time_seconds + plan.limits.predicate_timeout_seconds + 10
+                ),
+                consume=consume,
             )
-            final_stored = self.artifacts.import_path(
-                final_path,
-                allowed_roots=(root,),
-                max_bytes=self.workspace.config.capture.max_artifact_bytes,
-            )
-            stdout_id = stderr_id = None
-            if latest_output is not None:
-                stdout_id = self._preserve_output(root, "predicate.stdout", latest_output[0])
-                stderr_id = self._preserve_output(root, "predicate.stderr", latest_output[1])
+            native, accepted_ids, final_id, stdout_id, stderr_id, worker_root = worker_result
             summary = ReductionAttemptSummary(
                 attempted=len(native.attempts),
                 passed=sum(item.classification == "interesting" for item in native.attempts),
@@ -361,16 +318,14 @@ class ReductionService:
                 reduction_id,
                 native,
                 summary,
-                final_artifact_id=final_stored.content.artifact_id,
+                final_artifact_id=final_id,
                 best_known_artifact_id=(
                     accepted_ids[-1] if accepted_ids else plan.original_artifact_id
                 ),
                 stdout_id=stdout_id,
                 stderr_id=stderr_id,
-                cleanup_complete=self._cleanup(root),
+                cleanup_complete=self._cleanup(root) and not worker_root.exists(),
             )
-            if cancelled:
-                raise asyncio.CancelledError
             return result
         except asyncio.CancelledError:
             raise
@@ -380,8 +335,8 @@ class ReductionService:
                 reduction_id,
                 NativeReductionResult(
                     disposition="inconclusive",
-                    original_digest=f"sha256:{hashlib.sha256(original).hexdigest()}",
-                    final_digest=f"sha256:{hashlib.sha256(original).hexdigest()}",
+                    original_digest=plan.original_artifact_id,
+                    final_digest=plan.original_artifact_id,
                     original_unit_count=0,
                     final_unit_count=0,
                     minimality="not_claimed",
@@ -520,44 +475,38 @@ class ReductionService:
                 "Predicate identity changed after reduction planning.",
             )
 
-    def _execution_request(
-        self,
-        command: CommandSpec,
-        *,
-        timeout: float,
-        writable_root: Path,
-        overrides: dict[str, str],
-    ) -> ExecutionRequest:
-        return ExecutionRequest(
-            argv=command.argv,
-            cwd=Path(command.cwd),
-            environment_allowlist=("PATH",),
-            environment_overrides={**command.env_overrides, **overrides},
-            allowed_working_roots=(self.workspace.project_root,),
-            timeout_seconds=timeout,
-            max_output_bytes=self.workspace.config.execution.max_output_bytes,
-            resource_policy=ResourcePolicy(
-                filesystem_path=self.workspace.paths.root,
-                staging_root=self.workspace.paths.staging,
-                writable_roots=(writable_root,),
-                minimum_free_bytes=self.workspace.config.storage.min_free_bytes,
-                sampling_interval_ms=(
-                    self.workspace.config.execution.resource_sampling_interval_ms
-                ),
-                max_observed_files=self.workspace.config.execution.max_resource_observed_files,
-            ),
-        )
-
-    def _preserve_output(self, root: Path, name: str, content: bytes) -> str | None:
-        if not content:
+    def _import_worker_output(self, root: Path, raw_path: object) -> str | None:
+        if raw_path is None:
             return None
-        path = root / name
-        path.write_bytes(content)
+        path = self._worker_file(root, raw_path)
         return self.artifacts.import_path(
             path,
             allowed_roots=(root,),
             max_bytes=self.workspace.config.execution.max_output_bytes,
         ).content.artifact_id
+
+    @staticmethod
+    def _worker_file(root: Path, raw_path: object) -> Path:
+        if not isinstance(raw_path, str) or Path(raw_path).name != raw_path:
+            raise DomainError(
+                ErrorCode.ARTIFACT_PARSE_FAILED,
+                "Reduction worker returned an invalid staged-file reference.",
+            )
+        path = root / raw_path
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(root.resolve(strict=True))
+        except (OSError, ValueError) as error:
+            raise DomainError(
+                ErrorCode.ARTIFACT_PARSE_FAILED,
+                "Reduction worker staged-file reference escapes its job directory.",
+            ) from error
+        if not resolved.is_file():
+            raise DomainError(
+                ErrorCode.ARTIFACT_PARSE_FAILED,
+                "Reduction worker staged-file reference is not a regular file.",
+            )
+        return resolved
 
     @staticmethod
     def _cleanup(root: Path) -> bool:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from enum import Enum, auto
 from pathlib import Path
 
 from flameox.application.gc import GarbageCollector
+from flameox.application.proc import parse_proc_stat_starttime
 from flameox.application.quarantine import QuarantineService
 from flameox.application.run_rows import run_row
 from flameox.domain import (
@@ -34,6 +36,12 @@ class RecoveryResult(ContractModel):
     inspection: RecoveryInspection
 
 
+class _LeaseState(Enum):
+    LIVE = auto()
+    MISSING = auto()
+    INDETERMINATE = auto()
+
+
 class RecoveryService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
@@ -52,11 +60,16 @@ class RecoveryService:
             except DomainError:
                 indeterminate.append(projection.parent.name)
                 continue
-            if run.execution_status is not ExecutionStatus.RUNNING:
+            recoverable_lifecycle = run.execution_status is ExecutionStatus.RUNNING or (
+                run.execution_status is ExecutionStatus.PLANNED
+                and run.capture_status is CaptureStatus.PENDING
+            )
+            if not recoverable_lifecycle:
                 continue
-            if run.lease is None:
+            lease_state = self._lease_state(run)
+            if lease_state is _LeaseState.INDETERMINATE:
                 indeterminate.append(run.run_id)
-            elif self._lease_is_live(run):
+            elif lease_state is _LeaseState.LIVE:
                 active.append(run.run_id)
             else:
                 recoverable.append(run.run_id)
@@ -114,13 +127,25 @@ class RecoveryService:
             inspection=self.inspect(),
         )
 
-    def _lease_is_live(self, run: RunManifest) -> bool:
+    def _lease_state(self, run: RunManifest) -> _LeaseState:
         if run.lease is None:
-            return False
+            return _LeaseState.INDETERMINATE
         try:
             boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-            fields = Path("/proc").joinpath(str(run.lease.process_id), "stat").read_text().split()
-            start_identity = fields[21]
-        except (OSError, IndexError):
-            return False
-        return boot_id == run.lease.boot_id and start_identity == run.lease.process_start_identity
+        except OSError:
+            return _LeaseState.INDETERMINATE
+        if boot_id != run.lease.boot_id:
+            return _LeaseState.MISSING
+        try:
+            stat_text = Path("/proc").joinpath(str(run.lease.process_id), "stat").read_text()
+        except FileNotFoundError:
+            return _LeaseState.MISSING
+        except OSError:
+            return _LeaseState.INDETERMINATE
+        try:
+            start_identity = parse_proc_stat_starttime(stat_text)
+        except ValueError:
+            return _LeaseState.INDETERMINATE
+        if start_identity != run.lease.process_start_identity:
+            return _LeaseState.MISSING
+        return _LeaseState.LIVE

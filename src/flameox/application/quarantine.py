@@ -7,6 +7,7 @@ from typing import Literal
 from uuid import uuid4
 
 from flameox.application.recoverable_move import (
+    lexical_path_beneath,
     move_path,
     resume_move,
     validate_manifest_id,
@@ -109,6 +110,7 @@ class QuarantineService:
         )
         self._write_manifest(quarantine_root, manifest)
         move_path(source, stored_path)
+        self._verify_digest(stored_path, manifest)
         manifest = manifest.model_copy(update={"state": "quarantined"})
         self._write_manifest(quarantine_root, manifest)
         return manifest
@@ -221,16 +223,28 @@ class QuarantineService:
         quarantine_root: Path,
         manifest: QuarantineManifest,
     ) -> tuple[Path, Path]:
-        original = (self.workspace.paths.root / manifest.original_path).resolve()
-        stored = (quarantine_root / manifest.stored_path).resolve()
-        try:
-            original.relative_to(self.workspace.paths.root)
-            stored.relative_to(quarantine_root)
-        except ValueError as exc:
+        original, original_relative = lexical_path_beneath(
+            self.workspace.paths.root,
+            manifest.original_path,
+            subject="Quarantine original path",
+            error_code=ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+        )
+        stored, stored_relative = lexical_path_beneath(
+            quarantine_root,
+            manifest.stored_path,
+            subject="Quarantine stored path",
+            error_code=ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+        )
+        if original_relative.parts[0] in {"quarantine", "trash"}:
             raise DomainError(
                 ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                "Quarantine manifest contains a path outside recovery storage.",
-            ) from exc
+                "Quarantine manifest targets protected recovery storage.",
+            )
+        if len(stored_relative.parts) < 2 or stored_relative.parts[0] != "object":
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Quarantine manifest contains an invalid stored path.",
+            )
         return original, stored
 
     def _workspace_path(self, source: Path) -> tuple[Path, Path]:
@@ -243,28 +257,18 @@ class QuarantineService:
                 ErrorCode.EXECUTION_REFUSED,
                 "Quarantine source escapes the workspace.",
             ) from exc
-        candidate = workspace_root
-        for part in lexical_relative.parts:
-            candidate /= part
-            if candidate.is_symlink():
-                raise DomainError(
-                    ErrorCode.EXECUTION_REFUSED,
-                    "Quarantine does not follow symbolic links.",
-                )
-        resolved = source.resolve()
-        try:
-            relative = resolved.relative_to(self.workspace.paths.root)
-        except ValueError as exc:
-            raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                "Quarantine source escapes the workspace.",
-            ) from exc
+        candidate, relative = lexical_path_beneath(
+            workspace_root,
+            lexical_relative.as_posix(),
+            subject="Quarantine source",
+            error_code=ErrorCode.EXECUTION_REFUSED,
+        )
         if not relative.parts or relative.parts[0] in {"quarantine", "trash"}:
             raise DomainError(
                 ErrorCode.EXECUTION_REFUSED,
                 "Quarantine source targets protected recovery storage.",
             )
-        return resolved, relative
+        return candidate, relative
 
     @staticmethod
     def _verify_digest(path: Path, manifest: QuarantineManifest) -> None:

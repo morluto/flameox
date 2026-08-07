@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -262,32 +263,7 @@ class GenerationPublisher:
                     details={"staging_path": str(staging_root)},
                 )
 
-            for staged_path, final_path in staged_to_final:
-                final_path.parent.mkdir(parents=True, exist_ok=True)
-                if final_path.exists():
-                    if _file_sha256(final_path) != _file_sha256(staged_path):
-                        raise DomainError(
-                            ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                            f"Generation target already differs: {final_path}",
-                        )
-                    staged_path.unlink()
-                else:
-                    os.replace(staged_path, final_path)
-                    fsync_directory(final_path.parent)
-
             final_manifest = self.workspace.paths.root / final_manifest_relative
-            final_manifest.parent.mkdir(parents=True, exist_ok=True)
-            if final_manifest.exists():
-                existing = GenerationManifest.model_validate_json(final_manifest.read_text())
-                if existing != manifest:
-                    raise DomainError(
-                        ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                        "Generation manifest target already contains different data.",
-                    )
-            else:
-                os.replace(staged_manifest, final_manifest)
-                fsync_directory(final_manifest.parent)
-
             retained = self._without_superseded(
                 current_head.generation_manifests,
                 supersedes,
@@ -297,8 +273,53 @@ class GenerationPublisher:
                 parent_commit_id=current_head.commit_id,
                 generation_manifests=manifest_paths,
             )
-            self.workspace.corpus.write_commit(commit)
-            self.workspace.corpus.publish_head(commit.commit_id)
+            placed_evidence: list[Path] = []
+            placed_manifest: Path | None = None
+            head_publish_attempted = False
+            try:
+                for staged_path, final_path in staged_to_final:
+                    final_path.parent.mkdir(parents=True, exist_ok=True)
+                    if final_path.exists():
+                        if _file_sha256(final_path) != _file_sha256(staged_path):
+                            raise DomainError(
+                                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                                f"Generation target already differs: {final_path}",
+                            )
+                        staged_path.unlink()
+                    else:
+                        placed_evidence.append(final_path)
+                        os.replace(staged_path, final_path)
+                        fsync_directory(final_path.parent)
+
+                final_manifest.parent.mkdir(parents=True, exist_ok=True)
+                if final_manifest.exists():
+                    existing = GenerationManifest.model_validate_json(final_manifest.read_text())
+                    if existing != manifest:
+                        raise DomainError(
+                            ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                            "Generation manifest target already contains different data.",
+                        )
+                else:
+                    placed_manifest = final_manifest
+                    os.replace(staged_manifest, final_manifest)
+                    fsync_directory(final_manifest.parent)
+
+                self.workspace.corpus.write_commit(commit)
+                head_publish_attempted = True
+                self.workspace.corpus.publish_head(commit.commit_id)
+            except BaseException:
+                rollback = not head_publish_attempted
+                if head_publish_attempted:
+                    try:
+                        rollback = self.workspace.corpus.read_head().commit_id != commit.commit_id
+                    except DomainError:
+                        # An unreadable HEAD cannot prove that publication failed.
+                        # Preserve the immutable files rather than risk deleting
+                        # evidence referenced by a successfully replaced HEAD.
+                        rollback = False
+                if rollback:
+                    self._rollback_placement(placed_evidence, placed_manifest)
+                raise
 
         shutil.rmtree(staging_root, ignore_errors=True)
         OperationLogger(self.workspace.paths.root).emit(
@@ -312,6 +333,22 @@ class GenerationPublisher:
             bytes_returned=sum(file.byte_length for file in final_files),
         )
         return PublishedGeneration(manifest=manifest, commit=commit)
+
+    @staticmethod
+    def _rollback_placement(
+        placed_evidence: list[Path],
+        placed_manifest: Path | None,
+    ) -> None:
+        for path in reversed(placed_evidence):
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                path.parent.rmdir()
+        if placed_manifest is not None:
+            with contextlib.suppress(OSError):
+                placed_manifest.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                placed_manifest.parent.rmdir()
 
     def _without_superseded(
         self,

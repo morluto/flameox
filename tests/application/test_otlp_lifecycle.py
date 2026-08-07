@@ -345,3 +345,31 @@ def test_otlp_row_limit_refuses_partial_generation_and_retains_raw_artifact(
     assert result.evidence_generation_id is None
     assert "otlp_row_limit_exceeded" in result.limitations
     assert ImportService(workspace).artifacts.get(artifact_id).payload_path.is_file()
+
+
+def test_otlp_extraction_does_not_read_artifact_bytes_in_application_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    request = _request()
+    run_id, artifact_id = _import(
+        workspace,
+        tmp_path / "worker-boundary.otlp",
+        request.SerializeToString(deterministic=True),
+        "application/x-protobuf",
+    )
+    artifact_path = ImportService(workspace).artifacts.get(artifact_id).payload_path
+    original_read_bytes = Path.read_bytes
+
+    def refuse_artifact_read(path: Path) -> bytes:
+        if path == artifact_path:
+            raise AssertionError("application process read the whole OTLP artifact")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", refuse_artifact_read)
+
+    result = ImportService(workspace).extract_otlp_trace(run_id, artifact_id)
+
+    assert result.failed is False
+    assert result.span_count == 9

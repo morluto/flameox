@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 from pathlib import Path
 from typing import Any, cast
@@ -301,6 +302,110 @@ timeout_seconds = 30
     assert terminal.capture_status is CaptureStatus.CANCELLED
     assert terminal.finished_at is not None
     assert terminal.external_context == context
+
+
+@pytest.mark.anyio
+async def test_startup_identity_failure_is_terminal_and_cleans_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    write_workload(tmp_path)
+    disable_containment(workspace)
+    service = CaptureService(workspace)
+    plan = await service.plan(
+        workload_name="echo",
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    async def fail_source_identity(*_args: object, **_kwargs: object) -> None:
+        raise DomainError(ErrorCode.INTERNAL_ERROR, "simulated source identity failure")
+
+    monkeypatch.setattr(
+        "flameox.application.capture.collect_source_state",
+        fail_source_identity,
+    )
+
+    with pytest.raises(DomainError, match="simulated source identity failure"):
+        await service.execute(plan.plan_id)
+
+    terminal = RunStore(workspace).read(plan.run_id)
+    assert terminal.execution_status is ExecutionStatus.FAILED
+    assert terminal.capture_status is CaptureStatus.FAILED
+    assert terminal.finished_at is not None
+    assert terminal.process is not None
+    assert terminal.process.cancellation_cause == "process_error"
+    assert not (workspace.paths.staging / "captures" / plan.plan_id).exists()
+
+
+@pytest.mark.anyio
+async def test_startup_identity_collection_records_recoverable_owner_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    write_workload(tmp_path)
+    disable_containment(workspace)
+    service = CaptureService(workspace)
+    plan = await service.plan(
+        workload_name="echo",
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    collecting = asyncio.Event()
+
+    async def wait_during_source_identity(*_args: object, **_kwargs: object) -> None:
+        collecting.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "flameox.application.capture.collect_source_state",
+        wait_during_source_identity,
+    )
+    task = asyncio.create_task(service.execute(plan.plan_id))
+    await asyncio.wait_for(collecting.wait(), timeout=2)
+
+    starting = RunStore(workspace).read(plan.run_id)
+
+    assert starting.execution_status is ExecutionStatus.PLANNED
+    assert starting.capture_status is CaptureStatus.PENDING
+    assert starting.lease is not None
+    assert starting.lease.process_id == os.getpid()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.anyio
+async def test_startup_lease_failure_terminalizes_consumed_capture_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    write_workload(tmp_path)
+    disable_containment(workspace)
+    service = CaptureService(workspace)
+    plan = await service.plan(
+        workload_name="echo",
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    def fail_lease(_process_id: int) -> object:
+        raise DomainError(ErrorCode.PROCESS_FAILED, "simulated lease identity failure")
+
+    monkeypatch.setattr(service, "_lease", fail_lease)
+
+    with pytest.raises(DomainError, match="simulated lease identity failure") as error:
+        await service.execute(plan.plan_id)
+
+    terminal = RunStore(workspace).read(plan.run_id)
+    assert error.value.run_id == plan.run_id
+    assert terminal.execution_status is ExecutionStatus.FAILED
+    assert terminal.capture_status is CaptureStatus.FAILED
+    assert terminal.finished_at is not None
 
 
 @pytest.mark.anyio

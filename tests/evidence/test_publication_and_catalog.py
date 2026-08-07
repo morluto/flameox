@@ -390,6 +390,8 @@ def test_publication_crashes_before_head_never_expose_partial_generation(
         )
 
     assert workspace.corpus.read_head().commit_id == original_head
+    assert not list(workspace.paths.evidence.rglob("*.parquet"))
+    assert not list(workspace.paths.generations.rglob("manifest.json"))
     with Catalog(workspace).open_snapshot(original_head) as snapshot:
         assert snapshot.execute("SELECT count(*) FROM runs").fetchone() == (0,)
 
@@ -415,3 +417,40 @@ def test_crash_after_head_only_exposes_complete_generation(
 
     with Catalog(workspace).open_snapshot() as snapshot:
         assert snapshot.execute("SELECT run_id FROM runs").fetchall() == [("run-after-head",)]
+
+
+def test_uncertain_head_read_after_publication_failure_keeps_referenced_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    original_publish_head = workspace.corpus.publish_head
+    original_read_head = workspace.corpus.read_head
+    head_advanced = False
+
+    def fail_after_head(commit_id: str) -> None:
+        nonlocal head_advanced
+        original_publish_head(commit_id)
+        head_advanced = True
+        raise RuntimeError("simulated failure after HEAD replacement")
+
+    def unreadable_after_head() -> CorpusCommit:
+        if head_advanced:
+            raise DomainError(ErrorCode.WORKSPACE_INVALID, "simulated unreadable HEAD")
+        return original_read_head()
+
+    monkeypatch.setattr(workspace.corpus, "publish_head", fail_after_head)
+    monkeypatch.setattr(workspace.corpus, "read_head", unreadable_after_head)
+
+    with pytest.raises(RuntimeError, match="failure after HEAD"):
+        GenerationPublisher(workspace).publish_rows(
+            {"runs": [run_row("run-after-uncertain-head")]},
+            publisher="test",
+            publisher_version="1",
+        )
+
+    monkeypatch.setattr(workspace.corpus, "read_head", original_read_head)
+    with Catalog(workspace).open_snapshot() as snapshot:
+        assert snapshot.execute("SELECT run_id FROM runs").fetchall() == [
+            ("run-after-uncertain-head",)
+        ]

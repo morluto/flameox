@@ -27,6 +27,7 @@ class ToxiproxyApiError(RuntimeError):
 
 TOXIPROXY_VERSION = "2.12.0"
 _RELEASE_URL = f"https://github.com/Shopify/toxiproxy/releases/download/v{TOXIPROXY_VERSION}/"
+_MAX_RELEASE_BYTES = 128 * 1024 * 1024
 _RELEASES: dict[tuple[str, str], tuple[str, str, str]] = {
     ("linux", "x86_64"): (
         "toxiproxy_2.12.0_linux_amd64.tar.gz",
@@ -128,7 +129,15 @@ class ToxiproxyToolManager:
                     urlopen(_RELEASE_URL + asset, timeout=120) as response,
                     archive.open("wb") as stream,
                 ):
+                    downloaded = 0
                     while chunk := response.read(1024 * 1024):
+                        downloaded += len(chunk)
+                        if downloaded > _MAX_RELEASE_BYTES:
+                            raise DomainError(
+                                ErrorCode.ARTIFACT_TOO_LARGE,
+                                "The managed Toxiproxy download exceeded its size limit.",
+                                details={"asset": asset, "limit_bytes": _MAX_RELEASE_BYTES},
+                            )
                         stream.write(chunk)
             except (HTTPError, URLError, TimeoutError, OSError) as error:
                 raise DomainError(

@@ -10,10 +10,12 @@ from flameox.application import (
     CompactionService,
     FreezeRunSetRequest,
     GarbageCollector,
+    GarbagePlan,
     ImportArtifactRequest,
     ImportService,
     RunSetService,
 )
+from flameox.domain import DomainError, ErrorCode
 from flameox.storage import Workspace
 
 
@@ -45,6 +47,90 @@ def test_gc_is_dry_run_first_and_moves_only_plan_to_recoverable_trash(
     assert (trash / "objects" / "staging" / "abandoned" / "partial.bin").read_bytes() == (
         b"recoverable"
     )
+
+
+def test_gc_discovers_unreferenced_final_evidence_from_interrupted_publication(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    orphan = workspace.paths.evidence / "runs" / "generation=interrupted"
+    orphan.mkdir(parents=True)
+    (orphan / "part-00000.parquet").write_bytes(b"unreachable")
+    old = time.time() - 48 * 3600
+    os.utime(orphan, (old, old))
+
+    collector = GarbageCollector(workspace)
+    plan = collector.plan(minimum_age_hours=24)
+
+    assert [(entry.path, entry.kind) for entry in plan.entries] == [
+        ("evidence/runs/generation=interrupted", "evidence")
+    ]
+
+    result = collector.apply(plan)
+
+    assert not orphan.exists()
+    assert (
+        Path(result.trash_root)
+        / "objects"
+        / "evidence"
+        / "runs"
+        / "generation=interrupted"
+        / "part-00000.parquet"
+    ).read_bytes() == b"unreachable"
+
+
+def test_gc_rejects_symlink_candidate_without_moving_its_target(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    victim = workspace.paths.runs / "preserved"
+    victim.mkdir(parents=True)
+    payload = victim / "manifest.json"
+    payload.write_text("must remain")
+    old = time.time() - 48 * 3600
+    os.utime(victim, (old, old))
+    candidate = workspace.paths.staging / "linked-candidate"
+    candidate.symlink_to(victim, target_is_directory=True)
+
+    with pytest.raises(DomainError) as error:
+        GarbageCollector(workspace).plan(minimum_age_hours=24)
+
+    assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+    assert payload.read_text() == "must remain"
+    assert candidate.is_symlink()
+
+
+def test_gc_apply_rejects_candidate_swapped_to_symlink_after_recheck(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    candidate = workspace.paths.staging / "abandoned"
+    candidate.mkdir()
+    (candidate / "partial.bin").write_bytes(b"recoverable")
+    old = time.time() - 48 * 3600
+    os.utime(candidate, (old, old))
+    victim = workspace.paths.runs / "preserved"
+    victim.mkdir(parents=True)
+    payload = victim / "manifest.json"
+    payload.write_text("must remain")
+    collector = GarbageCollector(workspace)
+    authorized = collector.plan(minimum_age_hours=24)
+    real_plan = collector.plan
+
+    def swap_after_recheck(*, minimum_age_hours: int = 24) -> GarbagePlan:
+        current = real_plan(minimum_age_hours=minimum_age_hours)
+        candidate.rename(tmp_path / "displaced-candidate")
+        candidate.symlink_to(victim, target_is_directory=True)
+        return current
+
+    monkeypatch.setattr(collector, "plan", swap_after_recheck)
+
+    with pytest.raises(DomainError) as error:
+        collector.apply(authorized)
+
+    assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+    assert payload.read_text() == "must remain"
+    assert candidate.is_symlink()
+    assert not any(workspace.paths.trash.iterdir())
 
 
 def test_gc_retains_generations_reachable_from_a_pinned_run_set(

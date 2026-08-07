@@ -194,7 +194,7 @@ class DetachedCaptureManager:
             ExecutionStatus.CANCELLED,
         }
         task = self._tasks.get(run_id)
-        managed = task is not None
+        managed = task is not None and not task.done()
         state: Literal[
             "starting",
             "running",
@@ -227,6 +227,11 @@ class DetachedCaptureManager:
             failure_code=record.failure_code,
             failure_message=record.failure_message,
             limitations=limitations,
+            recovery=(
+                DetachedRecovery(arguments=record.plan_request)
+                if state == "failed_to_start" and record.plan_request
+                else None
+            ),
         )
 
     async def cancel(self, run_id: str) -> DetachedCaptureStatus:
@@ -325,7 +330,7 @@ class DetachedCaptureManager:
                         ExecutionStatus.TIMED_OUT,
                         ExecutionStatus.CANCELLED,
                     }
-                    else "running"
+                    else "failed_to_start"
                 )
             except DomainError:
                 state = "failed_to_start"

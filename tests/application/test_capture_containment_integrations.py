@@ -51,7 +51,7 @@ async def test_capture_plan_uses_minimal_bubblewrap_and_systemd_limits(
     plan = await service.plan(
         workload_name="echo",
         adapter="command",
-        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        execution_policy=ExecutionPolicy.APPROVED_AGENT,
     )
 
     argv = plan.collector_argv

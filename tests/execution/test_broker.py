@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -136,6 +139,50 @@ def test_observed_output_budget_terminates_the_process(tmp_path: Path) -> None:
     assert error.value.details["process_observations"]
 
 
+def test_observed_output_budget_stops_a_burst_before_it_completes(tmp_path: Path) -> None:
+    completed = tmp_path / "burst-completed"
+    code = (
+        "import pathlib, sys; "
+        "sys.stdout.buffer.write(b'x' * (5 * 1024 * 1024)); "
+        "sys.stdout.flush(); "
+        "pathlib.Path(sys.argv[1]).write_text('completed')"
+    )
+
+    with pytest.raises(DomainError) as error:
+        SubprocessBroker().run_sync(
+            request(
+                tmp_path,
+                "-c",
+                code,
+                str(completed),
+                observation="child_peak_rss",
+                max_output_bytes=1_024,
+            )
+        )
+
+    assert error.value.code is ErrorCode.QUERY_BUDGET_EXCEEDED
+    assert not completed.exists()
+
+
+def test_observed_timeout_includes_large_stdin_transfer(tmp_path: Path) -> None:
+    started = time.monotonic()
+
+    with pytest.raises(DomainError) as error:
+        SubprocessBroker().run_sync(
+            request(
+                tmp_path,
+                "-c",
+                "import sys, time; time.sleep(0.5); sys.stdin.buffer.read()",
+                stdin_bytes=b"x" * (2 * 1024 * 1024),
+                observation="child_peak_rss",
+                timeout_seconds=0.05,
+            )
+        )
+
+    assert error.value.code is ErrorCode.PROCESS_TIMEOUT
+    assert time.monotonic() - started < 0.5
+
+
 def test_observed_timeout_cleans_up_the_process_group(tmp_path: Path) -> None:
     pid_path = tmp_path / "observed.pid"
     code = (
@@ -204,6 +251,36 @@ def test_observed_run_cleans_up_descendants_after_parent_exits(tmp_path: Path) -
     assert not _process_is_alive(child_pid)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process sessions")
+def test_observed_run_does_not_wait_for_an_escaped_output_writer(tmp_path: Path) -> None:
+    pid_path = tmp_path / "escaped-output-writer.pid"
+    code = (
+        "import pathlib, subprocess, sys, time; "
+        "child = subprocess.Popen("
+        "[sys.executable, '-c', 'import time; time.sleep(0.75)'], "
+        "start_new_session=True); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); time.sleep(0.15)"
+    )
+    started = time.monotonic()
+
+    child_pid: int | None = None
+    try:
+        outcome = SubprocessBroker().run_sync(
+            request(tmp_path, "-c", code, str(pid_path), observation="child_peak_rss")
+        )
+        child_pid = int(pid_path.read_text())
+
+        assert outcome.process.exit_code == 0
+        assert time.monotonic() - started < 0.5
+        assert not any(
+            thread.name.startswith("flameox-observed-") for thread in threading.enumerate()
+        )
+    finally:
+        if child_pid is not None:
+            with suppress(ProcessLookupError):
+                os.killpg(child_pid, signal.SIGKILL)
+
+
 @pytest.mark.anyio
 async def test_observed_cancellation_cleans_up_before_propagating(
     tmp_path: Path,
@@ -240,6 +317,29 @@ async def test_observed_cancellation_cleans_up_before_propagating(
             break
         await asyncio.sleep(0.01)
     assert not _process_is_alive(process_pid)
+
+
+@pytest.mark.anyio
+async def test_observed_cancellation_interrupts_blocked_stdin(tmp_path: Path) -> None:
+    task = asyncio.create_task(
+        SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                "import sys, time; time.sleep(0.75); sys.stdin.buffer.read()",
+                stdin_bytes=b"x" * (2 * 1024 * 1024),
+                observation="child_peak_rss",
+            )
+        )
+    )
+    await asyncio.sleep(0.05)
+    started = time.monotonic()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert time.monotonic() - started < 0.5
 
 
 @pytest.mark.anyio
@@ -341,6 +441,113 @@ async def test_timeout_and_output_budget_terminate_process(tmp_path: Path) -> No
 
 
 @pytest.mark.anyio
+async def test_timeout_terminates_descendants_outside_the_root_process_group(
+    tmp_path: Path,
+) -> None:
+    pid_path = tmp_path / "timeout-descendant.pid"
+    child_options = ", start_new_session=True" if os.name == "posix" else ""
+    code = (
+        "import pathlib, subprocess, sys, time; "
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']"
+        f"{child_options}); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); time.sleep(30)"
+    )
+
+    with pytest.raises(DomainError) as error:
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                code,
+                str(pid_path),
+                timeout_seconds=0.3,
+            )
+        )
+
+    assert error.value.code is ErrorCode.PROCESS_TIMEOUT
+    assert pid_path.is_file()
+    assert not _process_is_alive(int(pid_path.read_text()))
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process sessions")
+async def test_timeout_terminates_observed_descendant_after_parent_exits(
+    tmp_path: Path,
+) -> None:
+    pid_path = tmp_path / "exited-parent-descendant.pid"
+    code = (
+        "import pathlib, subprocess, sys, time; "
+        "child = subprocess.Popen("
+        "[sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); time.sleep(0.15)"
+    )
+
+    with pytest.raises(DomainError) as error:
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                code,
+                str(pid_path),
+                timeout_seconds=0.3,
+            )
+        )
+
+    assert error.value.code is ErrorCode.PROCESS_TIMEOUT
+    assert pid_path.is_file()
+    assert not _process_is_alive(int(pid_path.read_text()))
+
+
+@pytest.mark.anyio
+async def test_timeout_includes_startup_callback_and_cleans_up_child(tmp_path: Path) -> None:
+    child_pid: int | None = None
+
+    async def slow_started(pid: int) -> None:
+        nonlocal child_pid
+        child_pid = pid
+        await asyncio.sleep(0.25)
+
+    started = time.monotonic()
+    with pytest.raises(DomainError) as error:
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                "import time; time.sleep(10)",
+                timeout_seconds=0.05,
+            ),
+            on_started=slow_started,
+        )
+
+    assert error.value.code is ErrorCode.PROCESS_TIMEOUT
+    assert time.monotonic() - started < 0.2
+    assert child_pid is not None
+    assert not _process_is_alive(child_pid)
+
+
+@pytest.mark.anyio
+async def test_timeout_does_not_reawait_a_stalled_subprocess_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def stalled_spawn(*_arguments: object, **_options: object) -> object:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", stalled_spawn)
+
+    started = time.monotonic()
+    with pytest.raises(DomainError) as error:
+        await asyncio.wait_for(
+            SubprocessBroker().run(request(tmp_path, "-c", "pass", timeout_seconds=0.05)),
+            timeout=0.2,
+        )
+
+    assert error.value.code is ErrorCode.PROCESS_TIMEOUT
+    assert time.monotonic() - started < 0.2
+
+
+@pytest.mark.anyio
 async def test_output_budget_is_shared_between_stdout_and_stderr(
     tmp_path: Path,
 ) -> None:
@@ -406,6 +613,32 @@ async def test_resource_policy_records_descendant_rss_disk_floor_and_root_growth
     assert resources.writable_root_growth_bytes[str(output)] == 4096
     assert resources.policy_termination is None
     assert outcome.process.peak_rss_bytes == resources.peak_rss_bytes
+
+
+@pytest.mark.anyio
+async def test_resource_policy_terminates_process_tree_above_memory_limit(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(DomainError) as error:
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                "import time; value = bytearray(20_000_000); time.sleep(10)",
+                resource_policy=ResourcePolicy(
+                    filesystem_path=tmp_path,
+                    writable_roots=(tmp_path,),
+                    minimum_free_bytes=0,
+                    maximum_rss_bytes=1_000_000,
+                    sampling_interval_ms=25,
+                ),
+            )
+        )
+
+    assert error.value.code is ErrorCode.QUERY_BUDGET_EXCEEDED
+    process = error.value.details["process"]
+    assert process["cancellation_cause"] == "memory_limit_exceeded"
+    assert process["resources"]["policy_termination"] == "memory_limit_exceeded"
 
 
 @pytest.mark.anyio
