@@ -289,8 +289,14 @@ timeout_seconds = 30
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
         external_context=context,
     )
-    task = asyncio.create_task(service.execute(plan.plan_id))
-    await asyncio.sleep(0.1)
+    collector_started = asyncio.Event()
+
+    async def record_progress(completed: float, _total: float, _message: str) -> None:
+        if completed == 4:
+            collector_started.set()
+
+    task = asyncio.create_task(service.execute(plan.plan_id, progress=record_progress))
+    await asyncio.wait_for(collector_started.wait(), timeout=5)
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):

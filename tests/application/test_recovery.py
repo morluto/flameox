@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+import flameox.application.proc as proc
 from flameox.analysis import RecipeService
 from flameox.application import RecoveryService
 from flameox.catalog import Catalog
@@ -47,9 +48,20 @@ def _stat_line(pid: int, comm: str, starttime: int) -> str:
     return f"{pid} ({comm}) {fields_before_starttime} {starttime}\n"
 
 
+def _write_proc_identity(root: Path, *, boot_id: str, stat_text: str | None) -> Path:
+    boot_id_path = root / "sys/kernel/random/boot_id"
+    boot_id_path.parent.mkdir(parents=True)
+    boot_id_path.write_text(f"{boot_id}\n")
+    stat_path = root / "12345" / "stat"
+    if stat_text is not None:
+        stat_path.parent.mkdir(parents=True)
+        stat_path.write_text(stat_text)
+    return stat_path
+
+
 def test_recovery_closes_only_disappeared_exact_process_lease(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    observed = utc_now()
+    observed = datetime(2025, 1, 2, 3, 4, tzinfo=UTC)
     run = RunManifest(
         run_id="abandoned-run",
         run_type=RunType.EXECUTION,
@@ -107,20 +119,13 @@ def test_recovery_keeps_live_lease_when_process_name_contains_spaces(
     RunStore(workspace).create(
         _running_run(run_id="live-run", boot_id="boot-id", start_identity="118")
     )
-    original_read_text = Path.read_text
-
-    def read_text(
-        path: Path,
-        encoding: str | None = None,
-        errors: str | None = None,
-    ) -> str:
-        if str(path) == "/proc/sys/kernel/random/boot_id":
-            return "boot-id\n"
-        if str(path) == "/proc/12345/stat":
-            return _stat_line(12345, "Web Content", 118)
-        return original_read_text(path, encoding=encoding, errors=errors)
-
-    monkeypatch.setattr(Path, "read_text", read_text)
+    proc_root = tmp_path / "proc"
+    _write_proc_identity(
+        proc_root,
+        boot_id="boot-id",
+        stat_text=_stat_line(12345, "Web Content", 118),
+    )
+    monkeypatch.setattr(proc, "PROC_ROOT", proc_root)
 
     inspection = RecoveryService(workspace).inspect()
 
@@ -137,20 +142,10 @@ def test_recovery_does_not_equate_unreadable_proc_state_with_process_death(
     RunStore(workspace).create(
         _running_run(run_id="unknown-run", boot_id="boot-id", start_identity="118")
     )
-    original_read_text = Path.read_text
-
-    def read_text(
-        path: Path,
-        encoding: str | None = None,
-        errors: str | None = None,
-    ) -> str:
-        if str(path) == "/proc/sys/kernel/random/boot_id":
-            return "boot-id\n"
-        if str(path) == "/proc/12345/stat":
-            raise PermissionError("injected proc read failure")
-        return original_read_text(path, encoding=encoding, errors=errors)
-
-    monkeypatch.setattr(Path, "read_text", read_text)
+    proc_root = tmp_path / "proc"
+    stat_path = _write_proc_identity(proc_root, boot_id="boot-id", stat_text=None)
+    stat_path.mkdir(parents=True)
+    monkeypatch.setattr(proc, "PROC_ROOT", proc_root)
 
     inspection = RecoveryService(workspace).inspect()
 
@@ -167,20 +162,15 @@ def test_recovery_treats_changed_boot_id_as_conclusive_before_reading_process(
     RunStore(workspace).create(
         _running_run(run_id="pre-reboot-run", boot_id="old-boot-id", start_identity="118")
     )
-    original_read_text = Path.read_text
-
-    def read_text(
-        path: Path,
-        encoding: str | None = None,
-        errors: str | None = None,
-    ) -> str:
-        if str(path) == "/proc/sys/kernel/random/boot_id":
-            return "new-boot-id\n"
-        if str(path) == "/proc/12345/stat":
-            raise AssertionError("A changed boot identity makes the process read unnecessary")
-        return original_read_text(path, encoding=encoding, errors=errors)
-
-    monkeypatch.setattr(Path, "read_text", read_text)
+    proc_root = tmp_path / "proc"
+    _write_proc_identity(proc_root, boot_id="new-boot-id", stat_text=None)
+    monkeypatch.setattr(proc, "PROC_ROOT", proc_root)
+    monkeypatch.setattr(
+        "flameox.application.recovery.read_proc_stat_start_identity",
+        lambda _process_id: pytest.fail(
+            "a changed boot identity makes the process read unnecessary"
+        ),
+    )
 
     inspection = RecoveryService(workspace).inspect()
 
@@ -204,36 +194,18 @@ def test_recovery_reconciles_planned_capture_from_exact_startup_lease(
         }
     )
     RunStore(workspace).create(startup)
-    original_read_text = Path.read_text
-
-    def read_text(
-        path: Path,
-        encoding: str | None = None,
-        errors: str | None = None,
-    ) -> str:
-        if str(path) == "/proc/sys/kernel/random/boot_id":
-            return "boot-id\n"
-        if str(path) == "/proc/12345/stat":
-            return _stat_line(12345, "flameox owner", 118)
-        return original_read_text(path, encoding=encoding, errors=errors)
-
-    monkeypatch.setattr(Path, "read_text", read_text)
+    proc_root = tmp_path / "proc"
+    stat_path = _write_proc_identity(
+        proc_root,
+        boot_id="boot-id",
+        stat_text=_stat_line(12345, "flameox owner", 118),
+    )
+    monkeypatch.setattr(proc, "PROC_ROOT", proc_root)
 
     live = RecoveryService(workspace).inspect()
     assert live.active_run_ids == ("starting-run",)
 
-    def process_disappeared(
-        path: Path,
-        encoding: str | None = None,
-        errors: str | None = None,
-    ) -> str:
-        if str(path) == "/proc/sys/kernel/random/boot_id":
-            return "boot-id\n"
-        if str(path) == "/proc/12345/stat":
-            raise FileNotFoundError(path)
-        return original_read_text(path, encoding=encoding, errors=errors)
-
-    monkeypatch.setattr(Path, "read_text", process_disappeared)
+    stat_path.unlink()
 
     vanished = RecoveryService(workspace).inspect()
     assert vanished.recoverable_run_ids == ("starting-run",)

@@ -21,25 +21,38 @@ from flameox.storage import RunStore, Workspace
 from tests.support.capture import disable_containment, write_workload
 
 
-def test_writable_roots_reject_traversal_and_symlink_escape(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "writable_path",
+    [
+        pytest.param("../outside", id="parent-traversal"),
+        pytest.param("escape", id="symlink-escape"),
+        pytest.param(".git", id="git-metadata"),
+        pytest.param(".diagnostics/build", id="workspace-metadata"),
+    ],
+)
+def test_writable_roots_reject_traversal_and_symlink_escape(
+    tmp_path: Path,
+    writable_path: str,
+) -> None:
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "escape").symlink_to(tmp_path.parent, target_is_directory=True)
-    for value in ("../outside", "escape", ".git", ".diagnostics/build"):
-        (tmp_path / "flameox.toml").write_text(
-            f"""
+    (tmp_path / "flameox.toml").write_text(
+        f"""
 schema_version = 1
 [workloads.build]
 argv = ["python", "-c", "print('build')"]
-writable_paths = [{json.dumps(value)}]
+writable_paths = [{json.dumps(writable_path)}]
 """
-        )
-        with pytest.raises(DomainError) as refused:
-            WorkloadService(workspace).writable_targets("build")
-        assert refused.value.code is ErrorCode.EXECUTION_REFUSED
+    )
+
+    with pytest.raises(DomainError) as refused:
+        WorkloadService(workspace).writable_targets("build")
+
+    assert refused.value.code is ErrorCode.EXECUTION_REFUSED
 
 
 @pytest.mark.anyio
-async def test_trusted_local_capture_does_not_require_systemd_user_manager(
+async def test_trusted_local_capture_is_uncontained_when_containment_tools_are_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -48,16 +61,12 @@ async def test_trusted_local_capture_does_not_require_systemd_user_manager(
     service = CaptureService(workspace)
     real_which = shutil.which
 
-    def available_executable(name: str) -> str | None:
+    def without_containment_tools(name: str) -> str | None:
         if name in {"bwrap", "systemd-run"}:
-            return "/usr/bin/true"
+            return None
         return real_which(name)
 
-    async def unexpected_user_manager_probe(_systemd_run: str) -> bool:
-        raise AssertionError("trusted-local execution must not probe containment")
-
-    monkeypatch.setattr("flameox.application.capture.shutil.which", available_executable)
-    monkeypatch.setattr(service, "_systemd_user_scope_available", unexpected_user_manager_probe)
+    monkeypatch.setattr("flameox.application.capture.shutil.which", without_containment_tools)
 
     plan = await service.plan(
         workload_name="echo",

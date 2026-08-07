@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -197,14 +198,17 @@ async def test_interruptible_catalog_query_cancels_and_releases_snapshot(
     workspace = Workspace.initialize(tmp_path)
     catalog = Catalog(workspace)
     catalog.rebuild()
-    task = asyncio.create_task(
-        catalog.run_interruptible(
-            lambda snapshot: snapshot.execute(
-                "SELECT sum(sin(i)) FROM range(100000000000) values(i)"
-            ).fetchall()
+    query_started = threading.Event()
+
+    def run_query(snapshot: Any) -> list[tuple[object, ...]]:
+        query_started.set()
+        return cast(
+            list[tuple[object, ...]],
+            snapshot.execute("SELECT sum(sin(i)) FROM range(100000000000) values(i)").fetchall(),
         )
-    )
-    await asyncio.sleep(0.05)
+
+    task = asyncio.create_task(catalog.run_interruptible(run_query))
+    assert await asyncio.to_thread(query_started.wait, 5)
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -231,7 +235,7 @@ def test_concurrent_publishers_retry_contention_without_losing_generations(
                         "project_root": ".",
                         "status": "open",
                         "parent_investigation_id": None,
-                        "created_at": datetime.now(UTC),
+                        "created_at": datetime(2025, 1, 2, 3, 4, index, tzinfo=UTC),
                     }
                 ]
             },

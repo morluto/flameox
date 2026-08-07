@@ -138,6 +138,7 @@ length = [32768, 65536, 131072]
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
     experiment = await experiment_service.run(experiment_plan.plan_id)
+    assert len(experiment.trials) == 6
     assert all(trial.validation_status is ValidationStatus.PASSED for trial in experiment.trials)
     scaling = RecipeService(workspace).scaling(experiment.experiment.experiment_id)
     scaling_record = AnalysisMaterializationService(workspace).record(

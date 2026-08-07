@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from enum import Enum, auto
-from pathlib import Path
+from typing import Literal
 
 from flameox.application.gc import GarbageCollector
-from flameox.application.proc import parse_proc_stat_starttime
+from flameox.application.proc import read_boot_id, read_proc_stat_start_identity
 from flameox.application.quarantine import QuarantineService
 from flameox.application.run_rows import run_row
 from flameox.domain import (
@@ -18,6 +17,8 @@ from flameox.domain.models import utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import RunStore, Workspace
+
+type LeaseState = Literal["active", "recoverable", "indeterminate"]
 
 
 class RecoveryInspection(ContractModel):
@@ -34,12 +35,6 @@ class RecoveryResult(ContractModel):
     resumed_trash_manifests: tuple[str, ...] = ()
     resumed_quarantine_manifests: tuple[str, ...] = ()
     inspection: RecoveryInspection
-
-
-class _LeaseState(Enum):
-    LIVE = auto()
-    MISSING = auto()
-    INDETERMINATE = auto()
 
 
 class RecoveryService:
@@ -67,12 +62,12 @@ class RecoveryService:
             if not recoverable_lifecycle:
                 continue
             lease_state = self._lease_state(run)
-            if lease_state is _LeaseState.INDETERMINATE:
-                indeterminate.append(run.run_id)
-            elif lease_state is _LeaseState.LIVE:
+            if lease_state == "active":
                 active.append(run.run_id)
-            else:
+            elif lease_state == "recoverable":
                 recoverable.append(run.run_id)
+            else:
+                indeterminate.append(run.run_id)
         staging_paths = tuple(
             path.relative_to(self.workspace.paths.root).as_posix()
             for path in sorted(self.workspace.paths.staging.rglob("*"))
@@ -127,25 +122,21 @@ class RecoveryService:
             inspection=self.inspect(),
         )
 
-    def _lease_state(self, run: RunManifest) -> _LeaseState:
+    def _lease_state(self, run: RunManifest) -> LeaseState:
         if run.lease is None:
-            return _LeaseState.INDETERMINATE
+            return "indeterminate"
         try:
-            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-        except OSError:
-            return _LeaseState.INDETERMINATE
+            boot_id = read_boot_id()
+        except (OSError, ValueError):
+            return "indeterminate"
         if boot_id != run.lease.boot_id:
-            return _LeaseState.MISSING
+            return "recoverable"
         try:
-            stat_text = Path("/proc").joinpath(str(run.lease.process_id), "stat").read_text()
+            start_identity = read_proc_stat_start_identity(run.lease.process_id)
         except FileNotFoundError:
-            return _LeaseState.MISSING
-        except OSError:
-            return _LeaseState.INDETERMINATE
-        try:
-            start_identity = parse_proc_stat_starttime(stat_text)
-        except ValueError:
-            return _LeaseState.INDETERMINATE
-        if start_identity != run.lease.process_start_identity:
-            return _LeaseState.MISSING
-        return _LeaseState.LIVE
+            return "recoverable"
+        except (OSError, ValueError):
+            return "indeterminate"
+        if start_identity == run.lease.process_start_identity:
+            return "active"
+        return "recoverable"

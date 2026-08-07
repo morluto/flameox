@@ -189,13 +189,25 @@ timeout_seconds = 60
             {"workload_name": "wait", "adapter": "command", "parameters": {}},
         )
         assert planned.structured_content is not None
+        collector_started = asyncio.Event()
+
+        async def record_progress(
+            progress: float,
+            total: float | None,
+            message: str | None,
+        ) -> None:
+            del total, message
+            if progress == 4:
+                collector_started.set()
+
         task = asyncio.create_task(
             client.call_tool(
                 "execute_capture_plan",
                 {"plan_id": planned.structured_content["result"]["plan_id"]},
+                progress_callback=record_progress,
             )
         )
-        await asyncio.sleep(0.2)
+        await asyncio.wait_for(collector_started.wait(), timeout=5)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task

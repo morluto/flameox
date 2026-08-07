@@ -42,13 +42,15 @@ timeout_seconds = 30
             execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
         )
     except DomainError as error:
-        if error.code is ErrorCode.CAPABILITY_UNAVAILABLE:
+        if (
+            error.code is ErrorCode.CAPABILITY_UNAVAILABLE
+            and error.details.get("capability_status") == "permission_required"
+        ):
             pytest.skip("The host kernel does not permit perf sampling for this process.")
         raise
     result = await service.execute(plan.plan_id)
-    if result.run.execution_status is not ExecutionStatus.SUCCEEDED:
-        pytest.skip("The host kernel does not permit perf sampling for this process.")
 
+    assert result.run.execution_status is ExecutionStatus.SUCCEEDED
     assert any(
         registration.kind.value == "sample_profile" and registration.display_name == "perf.data"
         for registration in result.run.artifacts

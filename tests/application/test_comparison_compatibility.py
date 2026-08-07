@@ -34,8 +34,8 @@ from flameox.domain import (
 from flameox.evidence import GenerationPublisher
 from flameox.storage import RunStore, Workspace
 from tests.support.comparisons import (
-    additional_measurement,
     imported_benchmark,
+    measurement_row,
 )
 
 
@@ -227,8 +227,8 @@ def test_comparison_reads_both_run_sets_from_one_pinned_corpus_commit(
     GenerationPublisher(workspace).publish_rows(
         {
             "measurements": [
-                additional_measurement(baseline_id, 13_000_000),
-                additional_measurement(candidate_id, 6_500_000),
+                measurement_row(baseline_id, 13_000_000),
+                measurement_row(candidate_id, 6_500_000),
             ]
         },
         publisher="snapshot-regression",

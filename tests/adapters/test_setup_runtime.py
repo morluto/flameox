@@ -9,8 +9,16 @@ from pathlib import Path
 import pytest
 
 from flameox.adapters import ManagedRuntime, install_trace_processor
+from flameox.application import CapabilityList
 from flameox.application.capabilities import CapabilityService
-from flameox.domain import DomainError, ErrorCode, ProcessResult
+from flameox.domain import (
+    CapabilityReport,
+    CapabilitySetup,
+    CapabilityStatus,
+    DomainError,
+    ErrorCode,
+    ProcessResult,
+)
 from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
 from flameox.storage import Workspace
 
@@ -93,21 +101,7 @@ async def test_runtime_install_uses_an_exact_isolated_uv_tool_environment(
 
 
 @pytest.mark.anyio
-async def test_runtime_install_carries_prepared_capabilities_into_new_runtime(
-    tmp_path: Path,
-) -> None:
-    broker = RecordingBroker()
-    runtime = RecordingRuntime(tmp_path, broker=broker)
-    (tmp_path / "capabilities.json").write_text(
-        '{"schema_version": 1, "extras": ["torch", "memory"]}\n'
-    )
-    await runtime.install("0.1.1")
-
-    recorded_command = list(broker.requests[0].argv)
-    assert recorded_command[-1] == "flameox[memory,torch]==0.1.1"
-
-
-def test_workspace_capability_setup_is_visible_to_runtime_upgrades(
+async def test_prepared_workspace_capability_is_carried_into_runtime_upgrade(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -118,9 +112,31 @@ def test_workspace_capability_setup_is_visible_to_runtime_upgrades(
         lambda *_args, **_kwargs: runtime_root,
     )
 
-    CapabilityService(workspace)._record_managed_extras(("torch",))
+    setup = CapabilitySetup(
+        extra="torch",
+        method="start_capability_setup",
+        next_tool="start_capability_setup",
+        requirement="torch>=2.7",
+    )
+    available = CapabilityReport(
+        adapter="torch.profiler",
+        status=CapabilityStatus.AVAILABLE,
+        setup=setup,
+    )
+    service = CapabilityService(workspace)
+    monkeypatch.setattr(
+        service,
+        "list",
+        lambda: CapabilityList(capabilities=(available,)),
+    )
 
-    assert ManagedRuntime(runtime_root)._managed_extras() == ("torch",)
+    prepared = service.prepare(("torch.profiler",))
+    broker = RecordingBroker()
+    installed = await RecordingRuntime(runtime_root, broker=broker).install("0.1.1")
+
+    assert prepared.already_available == ("torch.profiler",)
+    assert installed.installed is True
+    assert broker.requests[0].argv[-1] == "flameox[torch]==0.1.1"
 
 
 def test_installed_version_discovery_ignores_unmanaged_directories(tmp_path: Path) -> None:

@@ -239,7 +239,19 @@ variant = ["baseline", "candidate"]
     )
 
     task = asyncio.create_task(service.run(plan.plan_id))
-    await asyncio.sleep(0.2)
+    running_run_id: str | None = None
+    for _ in range(500):
+        for run_path in workspace.paths.runs.iterdir():
+            if not run_path.is_dir():
+                continue
+            run = RunStore(workspace).read(run_path.name)
+            if run.execution_status is ExecutionStatus.RUNNING:
+                running_run_id = run.run_id
+                break
+        if running_run_id is not None:
+            break
+        await asyncio.sleep(0.01)
+    assert running_run_id is not None
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -753,7 +765,11 @@ mode = ["base", "candidate"]
 
     assert result.outcome is not None
     assert result.outcome.disposition == "unsupported"
-    assert all(item.unsupported == 1 for item in result.outcome.counts)
+    assert {item.treatment: item.unsupported for item in result.outcome.counts} == {
+        "base": 1,
+        "candidate": 1,
+    }
+    assert len(result.trials) == 2
     assert all(trial.run_id is None for trial in result.trials)
     assert all(trial.outcome is TrialOutcome.UNSUPPORTED for trial in result.trials)
 
@@ -800,6 +816,10 @@ mode = ["base", "candidate"]
     result = await service.run(plan.plan_id)
 
     assert result.outcome is not None
-    assert all(item.timed_out == 1 for item in result.outcome.counts)
+    assert {item.treatment: item.timed_out for item in result.outcome.counts} == {
+        "base": 1,
+        "candidate": 1,
+    }
+    assert len(result.trials) == 2
     assert all(trial.failure_class == "timeout" for trial in result.trials)
     assert all(trial.outcome is TrialOutcome.TIMED_OUT for trial in result.trials)

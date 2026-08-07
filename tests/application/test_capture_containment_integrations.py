@@ -16,6 +16,7 @@ from flameox.domain import (
     ValidationStatus,
 )
 from flameox.storage import ArtifactStore, Workspace
+from tests.support.providers import systemd_user_scope_available
 
 
 @pytest.mark.anyio
@@ -25,8 +26,8 @@ from flameox.storage import ArtifactStore, Workspace
 async def test_capture_plan_uses_minimal_bubblewrap_and_systemd_limits(
     tmp_path: Path,
 ) -> None:
-    if shutil.which("bwrap") is None or shutil.which("systemd-run") is None:
-        pytest.skip("Bubblewrap and systemd-run are required for active containment.")
+    if shutil.which("bwrap") is None or not systemd_user_scope_available():
+        pytest.skip("Bubblewrap and a systemd user manager are required for active containment.")
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         "schema_version = 1\n"
@@ -81,8 +82,11 @@ async def test_capture_plan_uses_minimal_bubblewrap_and_systemd_limits(
 async def test_approved_cargo_build_uses_only_declared_writable_root(
     tmp_path: Path,
 ) -> None:
-    if any(shutil.which(name) is None for name in ("bwrap", "systemd-run", "cargo")):
-        pytest.skip("Cargo, bubblewrap, and systemd-run are required.")
+    if (
+        any(shutil.which(name) is None for name in ("bwrap", "cargo"))
+        or not systemd_user_scope_available()
+    ):
+        pytest.skip("Cargo, bubblewrap, and a systemd user manager are required.")
     cargo = subprocess.run(
         ("rustup", "which", "cargo"),
         check=True,

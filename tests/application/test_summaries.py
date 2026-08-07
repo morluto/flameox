@@ -15,9 +15,9 @@ from flameox.application import (
     render_evidence_summary_markdown,
 )
 from flameox.catalog import Catalog
-from flameox.config import WorkspaceConfig
 from flameox.domain import ExternalExecutionContext, Sensitivity
 from flameox.storage import RunStore, Workspace
+from tests.support.capture import disable_containment
 
 
 def _write_workload(project: Path) -> None:
@@ -34,23 +34,13 @@ message = ["candidate", "token-secret"]
     )
 
 
-def _disable_containment(workspace: Workspace) -> None:
-    config = workspace.config.model_copy(
-        update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
-        }
-    )
-    assert isinstance(config, WorkspaceConfig)
-    workspace.paths.config.write_text(config.to_toml())
-
-
 @pytest.mark.anyio
 async def test_summary_is_stable_and_redacts_sensitive_execution_context(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     _write_workload(tmp_path)
-    _disable_containment(workspace)
+    disable_containment(workspace)
     context = ExternalExecutionContext(
         orchestrator="crabbox",
         provider="runpod",
@@ -101,7 +91,7 @@ async def test_summary_never_excerpts_sensitive_process_output(
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     _write_workload(tmp_path)
-    _disable_containment(workspace)
+    disable_containment(workspace)
     service = CaptureService(workspace)
     plan = await service.plan(
         workload_name="proof",

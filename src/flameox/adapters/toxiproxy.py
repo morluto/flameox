@@ -221,7 +221,7 @@ def _safe_extract(bundle: tarfile.TarFile, target: Path) -> None:
                 "The Toxiproxy archive contains an unsafe path.",
                 details={"member": member.name},
             ) from error
-    bundle.extractall(target)
+    bundle.extractall(target, filter="data")
 
 
 @dataclass(frozen=True, slots=True)

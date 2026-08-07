@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -229,34 +230,52 @@ async def test_adapter_package_change_invalidates_unconsumed_plan(
     assert not workspace.paths.runs.joinpath(plan.run_id).exists()
 
 
+@pytest.mark.anyio
+async def test_adapter_planning_failure_is_structured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _workspace(tmp_path)
+    adapter = FixtureAdapter(fail_plan=True)
+    _install_fixture(monkeypatch, adapter)
+
+    with pytest.raises(DomainError, match="bounded planning") as failure:
+        await CaptureService(workspace).plan(
+            workload_name="fixture",
+            adapter="fixture",
+            execution_policy=ExecutionPolicy.APPROVED_AGENT,
+        )
+
+    assert failure.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+    assert not (workspace.paths.staging / "captures").exists()
+
+
 @pytest.mark.parametrize(
-    ("adapter", "message"),
+    ("adapter_factory", "message"),
     [
-        (FixtureAdapter(fail_plan=True), "bounded planning"),
-        (FixtureAdapter(valid=False), "rejected its declared artifact"),
-        (FixtureAdapter(fail_extract=True), "extraction failed"),
+        pytest.param(
+            lambda: FixtureAdapter(valid=False),
+            "rejected its declared artifact",
+            id="validation",
+        ),
+        pytest.param(
+            lambda: FixtureAdapter(fail_extract=True),
+            "extraction failed",
+            id="extraction",
+        ),
     ],
 )
 @pytest.mark.anyio
-async def test_adapter_failures_are_structured_and_leave_no_staging(
+async def test_adapter_execution_failures_are_structured_and_leave_no_staging(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    adapter: FixtureAdapter,
+    adapter_factory: Callable[[], FixtureAdapter],
     message: str,
 ) -> None:
     workspace = _workspace(tmp_path)
+    adapter = adapter_factory()
     _install_fixture(monkeypatch, adapter)
     service = CaptureService(workspace)
-    if adapter.fail_plan:
-        with pytest.raises(DomainError, match=message) as failure:
-            await service.plan(
-                workload_name="fixture",
-                adapter="fixture",
-                execution_policy=ExecutionPolicy.APPROVED_AGENT,
-            )
-        assert failure.value.code is ErrorCode.INVALID_CAPTURE_PLAN
-        return
-
     plan = await service.plan(
         workload_name="fixture",
         adapter="fixture",

@@ -103,7 +103,7 @@ markers = ["integration"]
 owner = "comparison-samples"
 lane = "application"
 paths = ["tests/application/test_comparison_samples.py"]
-markers = ["unit"]
+markers = ["integration"]
 
 
 [[ownership]]
