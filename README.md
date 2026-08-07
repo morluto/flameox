@@ -1,6 +1,6 @@
 <h1 align="center">flameox</h1>
 
-<p align="center"><strong>Runtime evidence for coding agents</strong></p>
+<p align="center"><strong>Runtime evidence that helps agents trace, profile, and burn down hotspots in application and native code, GPU kernels, and inference stacks.</strong></p>
 
 <p align="center">
   <img
@@ -11,8 +11,8 @@
 </p>
 
 <p align="center">
-  Let an agent query, compare, and audit profiler traces, benchmarks, memory captures,
-  and execution evidence without uploading your code or data.
+  Give an agent the traces, benchmarks, and measurements it needs to investigate a
+  runtime symptom with evidence it can inspect and reproduce.
 </p>
 
 <p align="center">
