@@ -727,6 +727,7 @@ class SubprocessBroker:
         argv = (str(executable), *request.argv[1:])
         started = time.monotonic_ns()
         process: subprocess.Popen[bytes] | None = None
+        process_observations: list[ProcessObservation] = []
         cleanup_complete = True
         with tempfile.TemporaryFile() as stdout_stream, tempfile.TemporaryFile() as stderr_stream:
             try:
@@ -757,6 +758,7 @@ class SubprocessBroker:
                     stdout_stream=stdout_stream,
                     stderr_stream=stderr_stream,
                     cancellation=cancellation,
+                    observations=process_observations,
                 )
                 cleanup_complete = self._terminate_observed_group(process, force=True)
                 stdout_stream.seek(0)
@@ -770,6 +772,9 @@ class SubprocessBroker:
                 raise
 
         finished = time.monotonic_ns()
+        process_observations.extend(
+            self._snapshot_processes(process.pid, "post_root_exit", False, None, None)
+        )
         if observed.cancellation_cause == "output_limit":
             raise DomainError(
                 ErrorCode.QUERY_BUDGET_EXCEEDED,
@@ -790,7 +795,12 @@ class SubprocessBroker:
             raise DomainError(
                 ErrorCode.PROCESS_TIMEOUT,
                 f"Process exceeded {request.timeout_seconds} seconds.",
-                details={"process": timeout_process.model_dump(mode="json")},
+                details={
+                    "process": timeout_process.model_dump(mode="json"),
+                    "process_observations": [
+                        item.model_dump(mode="json") for item in process_observations
+                    ],
+                },
                 retryable=True,
             )
 
@@ -809,6 +819,7 @@ class SubprocessBroker:
             resolved_executable=executable,
             containment=("process_group" if os.name == "posix" else "process"),
             peak_rss_backend=observed.peak_rss_backend,
+            process_observations=tuple(process_observations),
         )
 
     def _wait_observed(
@@ -819,6 +830,7 @@ class SubprocessBroker:
         stdout_stream: IO[bytes],
         stderr_stream: IO[bytes],
         cancellation: threading.Event | None,
+        observations: list[ProcessObservation],
     ) -> _ObservedWait:
         deadline = time.monotonic() + request.timeout_seconds
         terminating: Literal["timeout", "caller_cancelled", "output_limit"] | None = None
@@ -828,15 +840,21 @@ class SubprocessBroker:
                 if terminating is None:
                     if cancellation is not None and cancellation.is_set():
                         terminating = "caller_cancelled"
-                        self._terminate_observed_group(process, force=True)
+                        self._terminate_observed_with_observation(
+                            process, observations, force=True
+                        )
                     elif self._observed_output_exceeded(
                         stdout_stream, stderr_stream, request.max_output_bytes
                     ):
                         terminating = "output_limit"
-                        self._terminate_observed_group(process, force=True)
+                        self._terminate_observed_with_observation(
+                            process, observations, force=True
+                        )
                     elif time.monotonic() >= deadline:
                         terminating = "timeout"
-                        self._terminate_observed_group(process, force=True)
+                        self._terminate_observed_with_observation(
+                            process, observations, force=True
+                        )
                 waited_pid, status, usage = wait4(process.pid, os.WNOHANG)
                 if waited_pid == process.pid:
                     process.returncode = os.waitstatus_to_exitcode(status)
@@ -857,15 +875,15 @@ class SubprocessBroker:
             if terminating is None:
                 if cancellation is not None and cancellation.is_set():
                     terminating = "caller_cancelled"
-                    self._terminate_observed_group(process, force=True)
+                    self._terminate_observed_with_observation(process, observations, force=True)
                 elif self._observed_output_exceeded(
                     stdout_stream, stderr_stream, request.max_output_bytes
                 ):
                     terminating = "output_limit"
-                    self._terminate_observed_group(process, force=True)
+                    self._terminate_observed_with_observation(process, observations, force=True)
                 elif time.monotonic() >= deadline:
                     terminating = "timeout"
-                    self._terminate_observed_group(process, force=True)
+                    self._terminate_observed_with_observation(process, observations, force=True)
             time.sleep(0.005)
         peak = max(peak, self._observed_peak_rss(process.pid))
         return _ObservedWait(
@@ -874,6 +892,29 @@ class SubprocessBroker:
             peak_rss_backend="psutil_polling",
             cancellation_cause=terminating,
         )
+
+    def _terminate_observed_with_observation(
+        self,
+        process: subprocess.Popen[bytes],
+        observations: list[ProcessObservation],
+        *,
+        force: bool,
+    ) -> bool:
+        observations.extend(
+            self._snapshot_processes(process.pid, "pre_cleanup", True, "terminate", None)
+        )
+        identities = self._observation_identities(observations)
+        cleanup_complete = self._terminate_observed_group(process, force=force)
+        observations.extend(
+            self._snapshot_known_processes(
+                identities,
+                "post_cleanup",
+                False,
+                "terminate",
+                str(cleanup_complete),
+            )
+        )
+        return cleanup_complete
 
     def _observed_peak_rss(self, pid: int) -> int:
         peak = 0

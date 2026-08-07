@@ -156,6 +156,13 @@ markers = ["integration"]
 
 
 [[ownership]]
+owner = "otlp-lifecycle"
+lane = "application"
+paths = ["tests/application/test_otlp_lifecycle.py"]
+markers = ["integration"]
+
+
+[[ownership]]
 owner = "garbage-collection"
 lane = "storage"
 paths = ["tests/application/test_gc.py"]
@@ -209,6 +216,13 @@ owner = "reductions"
 lane = "process"
 paths = ["tests/application/test_reductions.py"]
 markers = ["integration", "process", "serial"]
+
+
+[[ownership]]
+owner = "native-reducer-properties"
+lane = "application"
+paths = ["tests/application/test_native_reducer_properties.py"]
+markers = ["unit"]
 
 
 [[ownership]]

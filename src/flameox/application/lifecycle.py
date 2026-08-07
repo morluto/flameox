@@ -293,7 +293,7 @@ class LifecycleEvidenceService:
         """
         with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
             rows = snapshot.execute(
-                query, (artifact_id, artifact_id, artifact_id, bounded + 1)
+                query, (artifact_id, artifact_id, artifact_id, artifact_id, bounded + 1)
             ).fetchall()
         items = tuple(
             LifecycleItem(

@@ -154,6 +154,18 @@ def test_observed_timeout_cleans_up_the_process_group(tmp_path: Path) -> None:
     details = error.value.details["process"]
     assert isinstance(details, dict)
     assert details["cleanup_complete"] is True
+    observations = error.value.details["process_observations"]
+    assert isinstance(observations, list)
+    assert {item["snapshot_phase"] for item in observations} >= {
+        "pre_cleanup",
+        "post_cleanup",
+    }
+    assert all(
+        not set(item).intersection(
+            {"cmdline", "environment", "cwd", "exe", "open_files", "connections"}
+        )
+        for item in observations
+    )
     assert pid_path.is_file()
     child_pid = int(pid_path.read_text())
     for _ in range(100):
