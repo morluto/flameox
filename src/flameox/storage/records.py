@@ -112,41 +112,46 @@ class JsonRecordStore[RecordT: BaseModel]:
         return tuple(records)
 
     def append(self, record: RecordT, *, expected_revision: int) -> RecordT:
+        with self.workspace.write_locked():
+            self.append_locked(record, expected_revision=expected_revision)
+        return record
+
+    def append_locked(self, record: RecordT, *, expected_revision: int) -> RecordT:
+        """Append a revision while the caller owns the workspace write lock."""
         if self.revision_field is None:
             raise DomainError(
                 ErrorCode.REVISION_CONFLICT,
                 f"{self.kind} records do not support revisions.",
             )
         identifier = self._identifier(record)
-        with self.workspace.write_locked():
-            current = self.read(identifier)
-            actual = self._revision(current)
-            next_revision = self._revision(record)
-            if next_revision != expected_revision + 1:
-                # Caller bug: the supplied next revision does not match the
-                # expected sequence. Retrying would loop forever, so this is
-                # not retryable.
-                raise DomainError(
-                    ErrorCode.REVISION_CONFLICT,
-                    f"{self.kind} {identifier!r} has a stale expected revision.",
-                    details={
-                        "expected_revision": expected_revision,
-                        "supplied_next_revision": next_revision,
-                    },
-                )
-            if actual != expected_revision:
-                # Genuine race: another writer committed first. Retryable.
-                raise DomainError(
-                    ErrorCode.REVISION_CONFLICT,
-                    f"{self.kind} {identifier!r} changed before the update.",
-                    retryable=True,
-                    details={
-                        "expected_revision": expected_revision,
-                        "actual_revision": actual,
-                    },
-                )
-            self._write_revision(record)
-            self._write_projection(record)
+        current = self.read(identifier)
+        actual = self._revision(current)
+        next_revision = self._revision(record)
+        if next_revision != expected_revision + 1:
+            # Caller bug: the supplied next revision does not match the
+            # expected sequence. Retrying would loop forever, so this is
+            # not retryable.
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                f"{self.kind} {identifier!r} has a stale expected revision.",
+                details={
+                    "expected_revision": expected_revision,
+                    "supplied_next_revision": next_revision,
+                },
+            )
+        if actual != expected_revision:
+            # Genuine race: another writer committed first. Retryable.
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                f"{self.kind} {identifier!r} changed before the update.",
+                retryable=True,
+                details={
+                    "expected_revision": expected_revision,
+                    "actual_revision": actual,
+                },
+            )
+        self._write_revision(record)
+        self._write_projection(record)
         return record
 
     def _root(self, identifier: str) -> Path:

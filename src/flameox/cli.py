@@ -46,6 +46,7 @@ from flameox.application import (
     EvidenceSummaryService,
     ExecutionPolicy,
     ExperimentService,
+    FaultExperimentService,
     FindingService,
     FreezeRunSetRequest,
     GarbageCollector,
@@ -53,8 +54,10 @@ from flameox.application import (
     ImportService,
     IntegrityService,
     InvestigationService,
+    LifecycleEvidenceService,
     MaterializeAnalysisRequest,
     NativeViewerService,
+    OtlpTraceService,
     QuarantineService,
     RecordFindingRequest,
     RecordHypothesisRequest,
@@ -93,6 +96,7 @@ config_app = typer.Typer(help="Inspect effective workspace policy.")
 measurements_app = typer.Typer(help="Run bounded curated measurement queries.")
 evidence_app = typer.Typer(help="Retrieve one typed immutable evidence reference.")
 experiment_app = typer.Typer(help="Plan, run, and inspect controlled experiments.")
+fault_app = typer.Typer(help="Plan, run, and inspect loopback Toxiproxy fault experiments.")
 stacks_app = typer.Typer(help="Inspect bounded call relationships and stacks.")
 trace_app = typer.Typer(help="Inspect bounded temporal trace windows.")
 adapters_app = typer.Typer(help="Discover and approve third-party adapter entry points.")
@@ -112,6 +116,7 @@ app.add_typer(config_app, name="config")
 app.add_typer(measurements_app, name="measurements")
 app.add_typer(evidence_app, name="evidence")
 app.add_typer(experiment_app, name="experiment")
+app.add_typer(fault_app, name="fault")
 app.add_typer(stacks_app, name="stacks")
 app.add_typer(trace_app, name="trace")
 app.add_typer(adapters_app, name="adapters")
@@ -973,6 +978,85 @@ def experiment_trial(
     _emit(result, as_json=json_output)
 
 
+@fault_app.command("plan")
+def fault_plan(
+    name: Annotated[str, typer.Argument(help="Named fault experiment in flameox.toml.")],
+    investigation_id: Annotated[str, typer.Option("--investigation")],
+    hypothesis_id: Annotated[str | None, typer.Option("--hypothesis")] = None,
+    parameters: Annotated[str, typer.Option("--parameters")] = "{}",
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Plan a bounded loopback transport-fault experiment."""
+
+    async def plan() -> BaseModel:
+        return await FaultExperimentService(_workspace(workspace)).plan(
+            experiment_name=name,
+            investigation_id=investigation_id,
+            hypothesis_id=hypothesis_id,
+            parameter_overrides=_parameter_overrides(parameters),
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
+
+    try:
+        result = _run_async(plan)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@fault_app.command("run")
+def fault_run(
+    name: Annotated[str | None, typer.Argument(help="Named fault experiment.")] = None,
+    investigation_id: Annotated[str | None, typer.Option("--investigation")] = None,
+    plan_id: Annotated[str | None, typer.Option("--plan-id")] = None,
+    hypothesis_id: Annotated[str | None, typer.Option("--hypothesis")] = None,
+    parameters: Annotated[str, typer.Option("--parameters")] = "{}",
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Run a planned fault experiment, or plan one from its declared name."""
+
+    async def run() -> BaseModel:
+        service = FaultExperimentService(_workspace(workspace))
+        selected_plan = plan_id
+        if selected_plan is None:
+            if name is None or investigation_id is None:
+                raise DomainError(
+                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    "fault run requires --plan-id or NAME with --investigation.",
+                )
+            planned = await service.plan(
+                experiment_name=name,
+                investigation_id=investigation_id,
+                hypothesis_id=hypothesis_id,
+                parameter_overrides=_parameter_overrides(parameters),
+                execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+            )
+            selected_plan = planned.plan_id
+        return await service.run(selected_plan)
+
+    try:
+        result = _run_async(run)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@fault_app.command("show")
+def fault_show(
+    result_id: str,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Show one completed fault experiment result."""
+    try:
+        result = FaultExperimentService(_workspace(workspace)).show(result_id)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
 @capture_app.command("plan")
 def capture_plan(
     adapter: Annotated[str, typer.Argument(help="Registered capture adapter.")],
@@ -1630,6 +1714,88 @@ def trace_window(
             )
 
         result = _run_async(run)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@trace_app.command("operation-window")
+def operation_window(
+    artifact_id: str,
+    start_ns: Annotated[int, typer.Option("--start", min=0)],
+    end_ns: Annotated[int, typer.Option("--end", min=1)],
+    trace_id: Annotated[str | None, typer.Option("--trace-id")] = None,
+    limit: Annotated[int | None, typer.Option(min=1, max=1_000)] = None,
+    cursor: Annotated[str | None, typer.Option("--cursor")] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Return bounded OTLP spans overlapping a time window."""
+    try:
+        result = LifecycleEvidenceService(_workspace(workspace)).get_operation_window(
+            artifact_id=artifact_id,
+            start_ns=start_ns,
+            end_ns=end_ns,
+            trace_id=trace_id,
+            limit=limit,
+            cursor=cursor,
+        )
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@trace_app.command("transitions")
+def operation_transitions(
+    artifact_id: str,
+    trace_id: Annotated[str | None, typer.Option("--trace-id")] = None,
+    max_depth: Annotated[int, typer.Option("--max-depth", min=0, max=32)] = 8,
+    limit: Annotated[int | None, typer.Option(min=1, max=1_000)] = None,
+    cursor: Annotated[str | None, typer.Option("--cursor")] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Return bounded parent/child transitions and coverage gaps."""
+    try:
+        result = LifecycleEvidenceService(_workspace(workspace)).get_operation_transitions(
+            artifact_id=artifact_id,
+            trace_id=trace_id,
+            max_depth=max_depth,
+            limit=limit,
+            cursor=cursor,
+        )
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@trace_app.command("gaps")
+def lifecycle_gaps(
+    artifact_id: str,
+    limit: Annotated[int | None, typer.Option(min=1, max=1_000)] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Return explicit OTLP timestamp, parent, and identity gaps."""
+    try:
+        result = LifecycleEvidenceService(_workspace(workspace)).get_lifecycle_gaps(
+            artifact_id=artifact_id, limit=limit
+        )
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@extract_app.command("otlp")
+def extract_otlp(
+    run_id: str,
+    artifact_id: Annotated[str | None, typer.Option("--artifact-id")] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Normalize a registered OTLP file artifact into bounded Parquet evidence."""
+    try:
+        result = OtlpTraceService(_workspace(workspace)).extract_otlp_trace(run_id, artifact_id)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)

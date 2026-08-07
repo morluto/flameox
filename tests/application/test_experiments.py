@@ -63,7 +63,7 @@ argv = ["python", "-c", "print('same-output')"]
 
 [experiments.scan_comparison]
 workload = "scan"
-variants = ["baseline", "candidate"]
+treatment_factor = "implementation"
 design = "randomized_complete_blocks"
 blocks = 1
 primary_metric = "pyperf.workload"
@@ -72,6 +72,8 @@ estimand = "median_paired_log_ratio"
 practical_threshold = 0.01
 confidence_level = 0.95
 random_seed = 1984
+[experiments.scan_comparison.factors]
+implementation = ["baseline", "candidate"]
 """
     )
     config = workspace.config.model_copy(
@@ -143,7 +145,7 @@ async def test_experiment_plan_rejects_multiplicative_trial_explosion(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    scaling_values = ", ".join(str(value) for value in range(1_000))
+    scaling_values = ", ".join(str(value) for value in range(32))
     (tmp_path / "flameox.toml").write_text(
         f"""
 schema_version = 1
@@ -158,15 +160,16 @@ length = [{scaling_values}]
 
 [experiments.oversized]
 workload = "scan"
-variants = ["baseline", "candidate"]
+treatment_factor = "variant"
 design = "randomized_complete_blocks"
 blocks = 1000
-scaling_parameter = "length"
-scaling_values = [{scaling_values}]
 primary_metric = "wall_time"
 polarity = "lower_is_better"
 estimand = "median_paired_log_ratio"
 practical_threshold = 0.01
+[experiments.oversized.factors]
+variant = ["baseline", "candidate"]
+length = [{scaling_values}]
 """
     )
     investigation = InvestigationService(workspace).create(
@@ -182,7 +185,7 @@ practical_threshold = 0.01
         )
 
     assert error.value.code is ErrorCode.QUERY_BUDGET_EXCEEDED
-    assert error.value.details["trial_count"] == 2_000_000
+    assert error.value.details["trial_count"] == 64_000
 
 
 @pytest.mark.anyio
@@ -205,7 +208,7 @@ variant = ["baseline", "candidate"]
 
 [experiments.cancelled]
 workload = "wait"
-variants = ["baseline", "candidate"]
+treatment_factor = "variant"
 design = "randomized_complete_blocks"
 blocks = 1
 primary_metric = "wall_time"
@@ -214,6 +217,8 @@ estimand = "median_paired_log_ratio"
 practical_threshold = 0.01
 confidence_level = 0.95
 random_seed = 7
+[experiments.cancelled.factors]
+variant = ["baseline", "candidate"]
 """
     )
     config = workspace.config.model_copy(
@@ -271,12 +276,14 @@ argv = ["python", "-c", "print('{variant}')"]
 variant = ["base", "candidate"]
 [experiments.failed]
 workload = "probe"
-variants = ["base", "candidate"]
+treatment_factor = "variant"
 blocks = 1
 primary_metric = "wall_time"
 polarity = "neutral"
 estimand = "descriptive"
 practical_threshold = 0
+[experiments.failed.factors]
+variant = ["base", "candidate"]
 """
     )
     investigation = InvestigationService(workspace).create(

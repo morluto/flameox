@@ -42,12 +42,14 @@ memory = ["memray>=1.17"]
 torch = ["torch>=2.7"]
 execution = ["coverage>=7.14,<8"]
 test = ["pytest>=8.3", "pytest-xdist>=3.6"]
-trace = ["perfetto>=0.57,<0.58"]
+trace = ["perfetto>=0.57,<0.58", "opentelemetry-proto>=1.44,<1.45", "protobuf>=5,<7"]
 cpu = ["py-spy>=0.4.2,<0.5"]
 all = [
     "coverage>=7.14,<8",
     "memray>=1.17",
     "perfetto>=0.57,<0.58",
+    "opentelemetry-proto>=1.44,<1.45",
+    "protobuf>=5,<7",
     "py-spy>=0.4.2,<0.5",
     "pyperf>=2.9",
     "pytest>=8.3",
@@ -95,6 +97,7 @@ markers = [
     "requires_perfetto: requires a local Trace Processor provider",
     "requires_pyspy: requires the optional py-spy provider",
     "requires_systemd: requires a systemd user manager",
+    "requires_toxiproxy: requires the pinned Toxiproxy server binary",
     "requires_torch: requires the optional PyTorch provider",
 ]
 xfail_strict = true
@@ -128,6 +131,10 @@ max-complexity = 18
 quote-style = "double"
 indent-style = "space"
 docstring-code-format = true
+
+[tool.deptry.package_module_name_map]
+opentelemetry-proto = "opentelemetry"
+protobuf = "google"
 
 [tool.mypy]
 python_version = "3.12"

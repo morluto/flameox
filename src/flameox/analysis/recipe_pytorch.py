@@ -59,7 +59,7 @@ class PyTorchRecipes(RecipeContext):
                     remediation=(
                         "Call extract_perfetto with the reported run_id, then retry "
                         "analyze_pytorch.",
-                        "If Trace Processor is unavailable, call prepare_capabilities with "
+                        "If Trace Processor is unavailable, call start_capability_setup with "
                         "adapter='perfetto'.",
                     ),
                 )

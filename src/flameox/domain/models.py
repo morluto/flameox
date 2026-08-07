@@ -83,6 +83,7 @@ def effective_sensitivity(
 
 class ArtifactKind(StrEnum):
     EXECUTION_TRACE = "execution_trace"
+    OTLP_TRACE = "otlp_trace"
     PYTHON_STARTUP = "python_startup"
     TEST_EXECUTION = "test_execution"
     SAMPLE_PROFILE = "sample_profile"
@@ -97,6 +98,8 @@ class ArtifactKind(StrEnum):
     SOURCE_SNAPSHOT = "source_snapshot"
     COLLECTOR_METADATA = "collector_metadata"
     ANALYSIS_RESULT = "analysis_result"
+    PROCESS_TREE_SNAPSHOT = "process_tree_snapshot"
+    EXPERIMENT_CONFIGURATION = "experiment_configuration"
 
 
 class RunType(StrEnum):
@@ -430,10 +433,10 @@ class CapabilityProvisioning(StrEnum):
 class CapabilitySetup(ContractModel):
     """The bounded setup action FlameOx can take for one capability."""
 
-    method: Literal["prepare_capabilities"]
-    extra: Literal["cpu", "execution", "memory", "test", "trace", "torch"]
-    requirement: str
-    next_tool: Literal["prepare_capabilities", "list_capabilities"]
+    method: Literal["start_capability_setup"]
+    extra: Literal["cpu", "execution", "memory", "test", "trace", "torch", "toxiproxy"]
+    requirement: str | None = None
+    next_tool: Literal["start_capability_setup", "list_capabilities"]
     verification_tool: Literal["list_capabilities"] = "list_capabilities"
 
 
@@ -498,7 +501,7 @@ class RequirementResult(ContractModel):
     next_tool: (
         Literal[
             "prepare_adapter",
-            "prepare_capabilities",
+            "start_capability_setup",
             "prepare_workload_dependencies",
             "list_capabilities",
             "plan_capture",
@@ -578,6 +581,7 @@ class CapturePlan(ContractModel):
     workload_definition_id: Digest
     workload_instance: WorkloadInstance
     adapter: Identifier
+    dynamic_parameters: tuple[Identifier, ...] = ()
     adapter_options: dict[str, JsonValue] = Field(default_factory=dict)
     execution_policy: Literal["trusted_local", "approved_agent"]
     adapter_version: str | None = None

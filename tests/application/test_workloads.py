@@ -7,6 +7,7 @@ import pytest
 
 from flameox.application import (
     ConfigureWorkloadRequest,
+    ProjectConfig,
     WorkloadConfig,
     WorkloadService,
 )
@@ -92,6 +93,36 @@ def test_unknown_plain_placeholder_is_still_rejected(tmp_path: Path) -> None:
         service.configure(_request("unknown", argv=("python", "-c", "print({missing})")))
 
 
+def test_schema_one_legacy_experiment_fields_remain_loadable() -> None:
+    project = ProjectConfig.model_validate(
+        {
+            "schema_version": 1,
+            "workloads": {
+                "scan": {
+                    "argv": ["python", "-c", "print('{variant}', '{length}')"],
+                    "parameters": {
+                        "variant": ["baseline", "candidate"],
+                        "length": [1, 2],
+                    },
+                }
+            },
+            "experiments": {
+                "scan": {
+                    "workload": "scan",
+                    "variants": ["baseline", "candidate"],
+                    "scaling_parameter": "length",
+                    "scaling_values": [1, 2],
+                }
+            },
+        }
+    )
+
+    experiment = project.experiments["scan"]
+    assert experiment.variants == ("baseline", "candidate")
+    assert experiment.scaling_parameter == "length"
+    assert experiment.scaling_values == (1, 2)
+
+
 def test_replace_requires_current_configuration_digest_and_preserves_unrelated_state(
     tmp_path: Path,
 ) -> None:
@@ -108,7 +139,9 @@ argv = ["python", "-c", "print('other')"]
 
 [experiments.compare]
 workload = "alpha"
-variants = ["baseline", "candidate"]
+treatment_factor = "mode"
+[experiments.compare.factors]
+mode = ["baseline", "candidate"]
 """
     )
     workspace = Workspace.initialize(tmp_path)
@@ -161,7 +194,9 @@ argv = ["python", "-c", "print('ok')"]
 
 [experiments.broken]
 workload = "missing"
-variants = ["one", "two"]
+treatment_factor = "mode"
+[experiments.broken.factors]
+mode = ["one", "two"]
 """
     (tmp_path / "flameox.toml").write_text(invalid)
     workspace = Workspace.initialize(tmp_path)
@@ -191,7 +226,9 @@ schema_version = 1
 
 [experiments.broken]
 workload = "missing"
-variants = ["one", "two"]
+treatment_factor = "mode"
+[experiments.broken.factors]
+mode = ["one", "two"]
 """
     )
     workspace = Workspace.initialize(tmp_path)
@@ -204,3 +241,15 @@ variants = ["one", "two"]
     assert "# preserve this note" in repaired
     assert "[workloads.missing]" in repaired
     assert service.configuration_status().status == "valid"
+
+
+def test_experiment_requires_explicit_treatment_factor_and_factors() -> None:
+    from flameox.application.workloads import ExperimentConfig
+
+    config = ExperimentConfig(
+        workload="probe",
+        treatment_factor="mode",
+        factors={"mode": ("baseline", "candidate"), "length": (128, 256)},
+    )
+    assert config.treatment_factor == "mode"
+    assert config.factors["length"] == (128, 256)

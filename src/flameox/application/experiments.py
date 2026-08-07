@@ -737,16 +737,7 @@ class ExperimentService:
                     source_state_id=run.source_state_id if run is not None else None,
                     workload_instance_id=(run.workload_instance_id if run is not None else None),
                     parameters=factor_values,
-                    # A scaling variant spans several workload instances; its
-                    # declared parameter family remains explicit here.
-                    environment_requirements=(
-                        {
-                            "scaling_parameter": config.scaling_parameter,
-                            "scaling_values": list(config.scaling_values),
-                        }
-                        if config.scaling_parameter is not None
-                        else {}
-                    ),
+                    environment_requirements={},
                 )
             )
         published = await run_atomic_thread(
@@ -882,9 +873,9 @@ class ExperimentService:
         workload_parameters: dict[str, tuple[Scalar, ...]],
     ) -> tuple[str, dict[str, tuple[Scalar, ...]], tuple[dict[str, Scalar], ...]]:
         if config.factors:
-            factors = dict(config.factors)
             assert config.treatment_factor is not None
             treatment_factor = config.treatment_factor
+            factors = dict(config.factors)
         else:
             matches = [
                 name
@@ -1193,7 +1184,7 @@ class ExperimentService:
             "infrastructure_failure",
         ],
     ) -> Trial:
-        parameter_name, parameter_int, parameter_float = self._legacy_parameter_projection(
+        parameter_name, parameter_int, parameter_float = self._trial_parameter_projection(
             plan, cell
         )
         return Trial(
@@ -1244,11 +1235,11 @@ class ExperimentService:
         )
 
     @staticmethod
-    def _legacy_parameter_projection(
+    def _trial_parameter_projection(
         plan: ExperimentPlan,
         cell: ExperimentCell,
     ) -> tuple[str | None, int | None, float | None]:
-        """Project one context factor for readers of the pre-factor trial schema."""
+        """Populate the optional scalar parameter projection on the trial row."""
         context_factors = tuple(name for name in cell.factors if name != plan.variant_parameter)
         parameter_name = context_factors[0] if len(context_factors) == 1 else None
         parameter_value = cell.factors[parameter_name] if parameter_name is not None else None

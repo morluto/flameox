@@ -56,6 +56,40 @@ flameox does not copy the entire Perfetto trace into Parquet. It extracts only
 cross-run summaries and source-linked measurements required by supported
 recipes.
 
+## OTLP trace import
+
+The optional `trace` extra includes the official `opentelemetry-proto` types.
+File imports accept explicit `application/x-protobuf`, `application/protobuf`,
+or `application/json` media types. Binary payloads use the generated
+`ExportTraceServiceRequest`; JSON uses the standard protobuf JSON parser with
+unknown fields rejected. Resource, scope, span, event, and link rows preserve
+OpenInference attributes as ordinary OTLP attributes and record malformed
+lengths, timestamps, duplicates, and dropped counts as limitations.
+
+There is no live OTLP receiver, format sniffing, compressed transport envelope,
+or provider-specific attribute mapping in this version.
+
+## Toxiproxy transport-fault boundary
+
+The typed `fault_experiments` configuration, standard-library control client,
+and pinned 2.12.0 asset stager establish the transport-fault boundary. The
+stager accepts only allowlisted release assets and verifies their SHA-256
+receipt; unsupported platforms are reported as unavailable. Proxies are
+loopback-only and the configuration requires a declared workload endpoint
+parameter.
+
+`flameox fault plan`, `flameox fault run`, and `flameox fault show` use a
+broker-owned Toxiproxy lease. Each trial creates a loopback proxy, runs the
+baseline through that proxy without an active toxic, applies one typed
+treatment, and injects only the declared endpoint parameter. Configuration,
+tool receipt, ports, logs, process snapshots, cleanup outcome, and oracle
+result remain attached to the workload run. Workload containment and sidecar
+containment are recorded independently: the workload follows its selected
+execution policy, while the pinned sidecar is restricted to a managed process
+group and loopback scope. Remote upstreams, arbitrary endpoint injection,
+malformed application messages, and semantic-event activation remain
+unsupported.
+
 ## Adapter system
 
 ### Interface
@@ -374,7 +408,7 @@ A capability may be:
 For missing managed providers, the report also contains a typed setup action.
 Agents should pass its adapter name to `start_capability_setup` with a stable
 idempotency key, poll the durable result, and then refresh the capability list
-before planning. `prepare_capabilities` remains a compatibility wrapper. This
+before planning. This
 covers the published `execution`, `memory`, `cpu`, `test`, and `torch` extras.
 It does not install host tools or change permissions. A fallback adapter must be
 chosen only after the agent has shown the requested capability's evidence

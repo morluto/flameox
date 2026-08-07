@@ -55,6 +55,8 @@ async def test_shell_metacharacters_remain_literal_arguments(tmp_path: Path) -> 
     assert outcome.stdout.decode().strip() == literal
     assert not marker.exists()
     assert outcome.process.exit_code == 0
+    assert any(item.snapshot_phase == "running" for item in outcome.process_observations)
+    assert any(item.snapshot_phase == "post_root_exit" for item in outcome.process_observations)
 
 
 @pytest.mark.anyio
@@ -109,6 +111,8 @@ def test_observed_run_preserves_streams_exit_status_and_peak_rss(tmp_path: Path)
     assert outcome.stderr == b"observed stderr\n"
     assert outcome.process.exit_code == 7
     assert outcome.process.peak_rss_bytes is not None
+    assert any(item.snapshot_phase == "running" for item in outcome.process_observations)
+    assert any(item.snapshot_phase == "post_root_exit" for item in outcome.process_observations)
     assert outcome.peak_rss_backend == (
         "wait4_ru_maxrss" if hasattr(os, "wait4") else "psutil_polling"
     )
@@ -127,6 +131,9 @@ def test_observed_output_budget_terminates_the_process(tmp_path: Path) -> None:
         )
 
     assert error.value.code is ErrorCode.QUERY_BUDGET_EXCEEDED
+    assert isinstance(error.value.details["process"], dict)
+    assert error.value.details["process"]["cancellation_cause"] == "output_limit"
+    assert error.value.details["process_observations"]
 
 
 def test_observed_timeout_cleans_up_the_process_group(tmp_path: Path) -> None:
@@ -154,6 +161,18 @@ def test_observed_timeout_cleans_up_the_process_group(tmp_path: Path) -> None:
     details = error.value.details["process"]
     assert isinstance(details, dict)
     assert details["cleanup_complete"] is True
+    observations = error.value.details["process_observations"]
+    assert isinstance(observations, list)
+    assert {item["snapshot_phase"] for item in observations} >= {
+        "pre_cleanup",
+        "post_cleanup",
+    }
+    assert all(
+        not set(item).intersection(
+            {"cmdline", "environment", "cwd", "exe", "open_files", "connections"}
+        )
+        for item in observations
+    )
     assert pid_path.is_file()
     child_pid = int(pid_path.read_text())
     for _ in range(100):

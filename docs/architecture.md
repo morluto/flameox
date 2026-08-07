@@ -224,6 +224,15 @@ budgets, cancellation, timeouts, and descendant cleanup one implementation.
 Heavy or artifact-facing extractors run in bounded worker processes. Small
 trusted metadata operations may use an AnyIO worker thread.
 
+Runtime evidence extends this boundary without adding a second execution model:
+file-imported OTLP is normalized by an application service into bounded
+Parquet tables, and every user-visible broker run can publish privacy-limited
+process snapshots around cleanup. Lifecycle queries are curated DuckDB
+operations over those tables; they do not expose SQL or materialize an agent
+interaction graph. Native ddmin invokes the declared predicate through the
+same broker. Reduction plans are Flameox-owned and do not run an arbitrary
+reducer workload or expose a reducer socket protocol.
+
 The MCP SDK's AnyIO cancellation is translated at the application boundary into
 the execution service's cancellation signal. Cleanup that awaits subprocess or
 publication work runs in a bounded shielded cancellation scope and re-raises
@@ -268,7 +277,7 @@ flameox[all]          all non-vendor optional integrations
 The MCP setup actions are the agent-facing installers. `start_capability_setup`
 accepts an explicit managed adapter enum and idempotency key, returns a durable
 operation, and is followed by `get_capability_setup` or
-`cancel_capability_setup`; `prepare_capabilities` is the compatibility wrapper.
+`cancel_capability_setup`.
 `prepare_adapter` records an exact installed third-party identity, and
 `prepare_workload_dependencies` installs only Python distributions already
 declared by a named workload. Selected extras are recorded in the workspace

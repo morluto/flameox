@@ -12,6 +12,7 @@ from typing import Any, ClassVar, cast
 import pytest
 
 from flameox.adapters import AdapterDiscoveryResult, AdapterRegistry
+from flameox.adapters.toxiproxy import ToxiproxyToolReceipt
 from flameox.application import CapabilityList, CapabilityService
 from flameox.application.capabilities import (
     CapabilitySetupManager,
@@ -126,6 +127,72 @@ async def test_active_capability_probe_is_brokered_cached_and_refreshable(
     torch_report = service.get("torch.profiler")
     assert isinstance(torch_report.setup, CapabilitySetup)
     assert torch_report.setup.extra == "torch"
+
+
+def test_toxiproxy_setup_uses_dedicated_staging_phase(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    executable = Path("/bin/true")
+    receipt = ToxiproxyToolReceipt(
+        version="2.12.0",
+        asset="toxiproxy_2.12.0_linux_amd64.tar.gz",
+        sha256="a" * 64,
+        executable=executable,
+    )
+
+    class _ToolManager:
+        staged = False
+
+        def __init__(self, _: Path) -> None:
+            pass
+
+        @staticmethod
+        def release_for_host() -> tuple[str, str, str]:
+            return (receipt.asset, receipt.sha256, "toxiproxy-server")
+
+        @classmethod
+        def staged_receipt(cls) -> ToxiproxyToolReceipt | None:
+            return receipt if cls.staged else None
+
+        @classmethod
+        def stage(cls) -> ToxiproxyToolReceipt:
+            cls.staged = True
+            return receipt
+
+    monkeypatch.setattr("flameox.application.capabilities.ToxiproxyToolManager", _ToolManager)
+    monkeypatch.setattr(CapabilityService, "_verify_toxiproxy", lambda self, value: None)
+    service = CapabilityService(workspace)
+
+    report = service.get("toxiproxy")
+    phases: list[str] = []
+    result = service.prepare(("toxiproxy",), phase_callback=phases.append)
+
+    assert isinstance(report.setup, CapabilitySetup)
+    assert report.setup.extra == "toxiproxy"
+    assert phases == ["staging_toxiproxy"]
+    assert result.installed == ("toxiproxy",)
+    assert service.get("toxiproxy").status is CapabilityStatus.AVAILABLE
+
+
+def test_unsupported_toxiproxy_platform_has_platform_specific_setup_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "flameox.application.capabilities.ToxiproxyToolManager.release_for_host",
+        staticmethod(lambda: None),
+    )
+    service = CapabilityService(Workspace.initialize(tmp_path))
+
+    report = service.get("toxiproxy")
+
+    assert report.status is CapabilityStatus.UNSUPPORTED_PLATFORM
+    with pytest.raises(DomainError) as error:
+        service.prepare(("toxiproxy",))
+    assert error.value.details["unsupported_platform"] == ["toxiproxy"]
+    assert "unavailable on this platform" in error.value.message
 
 
 @pytest.mark.anyio
@@ -289,7 +356,7 @@ def test_agent_adapter_preparation_records_exact_identity_and_provenance(
     assert payload["approvals"]["example-profiler"]["provenance"] == "agent"
 
 
-def test_prepare_capabilities_installs_only_declared_missing_providers(
+def test_capability_setup_installs_only_declared_missing_providers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -302,8 +369,8 @@ def test_prepare_capabilities_installs_only_declared_missing_providers(
     )
     setup = CapabilitySetup(
         extra="torch",
-        method="prepare_capabilities",
-        next_tool="prepare_capabilities",
+        method="start_capability_setup",
+        next_tool="start_capability_setup",
         requirement="torch>=2.7",
     )
     missing = CapabilityReport(
@@ -317,7 +384,7 @@ def test_prepare_capabilities_installs_only_declared_missing_providers(
             CapabilityList(
                 capabilities=(missing,),
                 setup_adapters=("torch.profiler",),
-                next_tool="prepare_capabilities",
+                next_tool="start_capability_setup",
             ),
             CapabilityList(
                 capabilities=(available,),
@@ -365,7 +432,7 @@ def test_prepare_capabilities_installs_only_declared_missing_providers(
     assert "SSL_CERT_FILE" in broker.requests[0].environment_allowlist
 
 
-def test_prepare_capabilities_rejects_unmanaged_provider(tmp_path: Path) -> None:
+def test_capability_setup_rejects_unmanaged_provider(tmp_path: Path) -> None:
     service = CapabilityService(
         Workspace.initialize(tmp_path),
         capability_manifest=tmp_path / "capabilities.json",
@@ -378,7 +445,7 @@ def test_prepare_capabilities_rejects_unmanaged_provider(tmp_path: Path) -> None
     assert refused.value.details["next_tool"] == "list_capabilities"
 
 
-def test_prepare_capabilities_cancellation_cleans_up_brokered_install(
+def test_capability_setup_cancellation_cleans_up_brokered_install(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -394,8 +461,8 @@ def test_prepare_capabilities_cancellation_cleans_up_brokered_install(
         status=CapabilityStatus.UNAVAILABLE,
         setup=CapabilitySetup(
             extra="torch",
-            method="prepare_capabilities",
-            next_tool="prepare_capabilities",
+            method="start_capability_setup",
+            next_tool="start_capability_setup",
             requirement="torch>=2.7",
         ),
     )
@@ -424,7 +491,7 @@ def test_prepare_capabilities_cancellation_cleans_up_brokered_install(
     assert failures[0].code is ErrorCode.PROCESS_CANCELLED
 
 
-def test_prepare_capabilities_records_failure_when_uv_is_missing(
+def test_capability_setup_records_failure_when_uv_is_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -437,8 +504,8 @@ def test_prepare_capabilities_records_failure_when_uv_is_missing(
         status=CapabilityStatus.UNAVAILABLE,
         setup=CapabilitySetup(
             extra="torch",
-            method="prepare_capabilities",
-            next_tool="prepare_capabilities",
+            method="start_capability_setup",
+            next_tool="start_capability_setup",
             requirement="torch>=2.7",
         ),
     )
@@ -470,8 +537,8 @@ def test_trace_processor_staging_preserves_phase_and_bounded_cause(
         status=CapabilityStatus.UNAVAILABLE,
         setup=CapabilitySetup(
             extra="trace",
-            method="prepare_capabilities",
-            next_tool="prepare_capabilities",
+            method="start_capability_setup",
+            next_tool="start_capability_setup",
             requirement="perfetto>=0.57,<0.58",
         ),
     )
@@ -484,7 +551,7 @@ def test_trace_processor_staging_preserves_phase_and_bounded_cause(
             "FlameOx could not stage the managed Trace Processor.",
             retryable=True,
             details={
-                "next_tool": "prepare_capabilities",
+                "next_tool": "start_capability_setup",
                 "adapter": "perfetto",
                 "failure_category": "network",
                 "failure_detail": "synthetic TLS failure",
@@ -505,7 +572,7 @@ def test_trace_processor_staging_preserves_phase_and_bounded_cause(
     assert "synthetic TLS failure" in receipt["error"]
 
 
-def test_prepare_capabilities_is_idempotent_when_provider_is_available(
+def test_capability_setup_is_idempotent_when_provider_is_available(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -518,8 +585,8 @@ def test_prepare_capabilities_is_idempotent_when_provider_is_available(
         status=CapabilityStatus.AVAILABLE,
         setup=CapabilitySetup(
             extra="torch",
-            method="prepare_capabilities",
-            next_tool="prepare_capabilities",
+            method="start_capability_setup",
+            next_tool="start_capability_setup",
             requirement="torch>=2.7",
         ),
     )
@@ -562,8 +629,8 @@ def test_capability_recommendations_are_scoped_to_selected_adapter(tmp_path: Pat
         status=CapabilityStatus.UNAVAILABLE,
         setup=CapabilitySetup(
             extra="torch",
-            method="prepare_capabilities",
-            next_tool="prepare_capabilities",
+            method="start_capability_setup",
+            next_tool="start_capability_setup",
             requirement="torch>=2.7",
         ),
     )
@@ -583,7 +650,7 @@ def test_capability_recommendations_are_scoped_to_selected_adapter(tmp_path: Pat
     assert inventory.next_tool is None
     assert selected.recommendation_scope == "torch.profiler"
     assert selected.setup_adapters == ("torch.profiler",)
-    assert selected.next_tool == "prepare_capabilities"
+    assert selected.next_tool == "start_capability_setup"
 
 
 def test_running_capability_setup_status_contains_exact_poll_action(tmp_path: Path) -> None:

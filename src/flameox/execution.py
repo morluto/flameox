@@ -10,9 +10,11 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, Literal, cast
 
@@ -143,6 +145,41 @@ class ExecutionOutcome:
     resolved_executable: Path
     containment: str
     peak_rss_backend: str | None = None
+    process_observations: tuple[ProcessObservation, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedSidecarOutcome:
+    process: ProcessResult
+    stdout: bytes
+    stderr: bytes
+    containment: str
+    process_observations: tuple[ProcessObservation, ...]
+    started_at: datetime
+    finished_at: datetime
+
+
+class ProcessObservation(ContractModel):
+    """Privacy-bounded process evidence captured around broker cleanup."""
+
+    pid: int = Field(gt=0)
+    create_time: float | None = None
+    parent_pid: int | None = None
+    parent_create_time: float | None = None
+    discovery_source: Literal["root", "ancestry", "previously_observed", "containment"]
+    name: str | None = None
+    status: str | None = None
+    rss_bytes: int | None = None
+    cpu_user_seconds: float | None = None
+    cpu_system_seconds: float | None = None
+    thread_count: int | None = None
+    fd_count: int | None = None
+    observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    snapshot_phase: Literal["running", "pre_cleanup", "post_cleanup", "post_root_exit"]
+    alive_before_cleanup: bool | None = None
+    cleanup_action: str | None = None
+    cleanup_outcome: str | None = None
+    failures: tuple[str, ...] = ()
 
 
 class _OutputLimitExceeded(Exception):
@@ -165,14 +202,40 @@ class _ObservedWait:
 @dataclass(slots=True)
 class _OutputBudget:
     remaining: int
+    exceeded: bool = False
 
     def consume(self, byte_count: int) -> None:
         self.remaining -= byte_count
         if self.remaining < 0:
+            self.exceeded = True
             raise _OutputLimitExceeded
 
 
 class SubprocessBroker:
+    _MAX_OBSERVED_PROCESSES = 10_000
+
+    async def start_toxiproxy(
+        self,
+        executable: Path,
+        *,
+        admin_host: str,
+        admin_port: int,
+        readiness: Callable[[], Awaitable[bool]],
+        tool_receipt: object | None = None,
+        readiness_timeout_seconds: float = 10.0,
+    ) -> ManagedSidecarLease:
+        """Start the only long-lived process this broker exposes: Toxiproxy."""
+
+        return await ManagedSidecarLease.start(
+            self,
+            executable,
+            admin_host=admin_host,
+            admin_port=admin_port,
+            readiness=readiness,
+            tool_receipt=tool_receipt,
+            readiness_timeout_seconds=readiness_timeout_seconds,
+        )
+
     def run_sync(
         self,
         request: ExecutionRequest,
@@ -256,6 +319,7 @@ class SubprocessBroker:
         executable = self._resolve_executable(request.argv[0], cwd, environment)
         argv = (str(executable), *request.argv[1:])
         started = time.monotonic_ns()
+        process_observations: list[ProcessObservation] = []
         spawn = asyncio.create_task(
             asyncio.create_subprocess_exec(
                 *argv,
@@ -275,17 +339,17 @@ class SubprocessBroker:
             process = await asyncio.shield(spawn)
         except asyncio.CancelledError:
             process = await asyncio.shield(spawn)
-            cleanup_complete = await asyncio.shield(self._terminate(process, request))
-            if on_cleanup is not None:
-                await asyncio.shield(on_cleanup(cleanup_complete))
+            await self._terminate_with_observation(
+                process, request, process_observations, on_cleanup
+            )
             raise
         if on_started is not None:
             try:
                 await on_started(process.pid)
             except BaseException:
-                cleanup_complete = await asyncio.shield(self._terminate(process, request))
-                if on_cleanup is not None:
-                    await asyncio.shield(on_cleanup(cleanup_complete))
+                await self._terminate_with_observation(
+                    process, request, process_observations, on_cleanup
+                )
                 raise
         assert process.stdout is not None
         assert process.stderr is not None
@@ -296,6 +360,10 @@ class SubprocessBroker:
         resource_task = asyncio.create_task(
             self._observe_resources(process, request.resource_policy)
         )
+        process_observations.extend(
+            self._snapshot_processes(process.pid, "running", True, None, None)
+        )
+        observed_identities = self._observation_identities(process_observations)
         stdin_task: asyncio.Task[None] | None = None
         if request.stdin_bytes is not None:
             assert process.stdin is not None
@@ -317,9 +385,9 @@ class SubprocessBroker:
         except TimeoutError as exc:
             timed_out = True
             cancellation_cause = "timeout"
-            cleanup_complete = await asyncio.shield(self._terminate(process, request))
-            if on_cleanup is not None:
-                await asyncio.shield(on_cleanup(cleanup_complete))
+            cleanup_complete = await self._terminate_with_observation(
+                process, request, process_observations, on_cleanup
+            )
             partial_stdout, partial_stderr = await self._collect_readers(
                 stdout_task,
                 stderr_task,
@@ -345,26 +413,52 @@ class SubprocessBroker:
             raise DomainError(
                 ErrorCode.PROCESS_TIMEOUT,
                 f"Process exceeded {request.timeout_seconds} seconds.",
-                details={"process": timeout_process.model_dump(mode="json")},
+                details={
+                    "process": timeout_process.model_dump(mode="json"),
+                    "process_observations": [
+                        item.model_dump(mode="json") for item in process_observations
+                    ],
+                },
                 retryable=True,
             ) from exc
         except _OutputLimitExceeded as exc:
             cancellation_cause = "output_limit"
-            cleanup_complete = await asyncio.shield(self._terminate(process, request))
-            if on_cleanup is not None:
-                await asyncio.shield(on_cleanup(cleanup_complete))
+            cleanup_complete = await self._terminate_with_observation(
+                process, request, process_observations, on_cleanup
+            )
             await self._settle_readers(stdout_task, stderr_task)
             await self._settle_resource(resource_task)
             await self._settle_task(stdin_task)
+            output_process = ProcessResult(
+                exit_code=(
+                    process.returncode
+                    if process.returncode is not None and process.returncode >= 0
+                    else None
+                ),
+                terminating_signal=(
+                    -process.returncode
+                    if process.returncode is not None and process.returncode < 0
+                    else None
+                ),
+                wall_time_ns=time.monotonic_ns() - started,
+                cancellation_cause=cancellation_cause,
+                cleanup_complete=cleanup_complete,
+            )
             raise DomainError(
                 ErrorCode.QUERY_BUDGET_EXCEEDED,
                 f"Process output exceeded {request.max_output_bytes} bytes.",
+                details={
+                    "process": output_process.model_dump(mode="json"),
+                    "process_observations": [
+                        item.model_dump(mode="json") for item in process_observations
+                    ],
+                },
             ) from exc
         except _ResourcePolicyExceeded as exc:
             cancellation_cause = "storage_reserve_exceeded"
-            cleanup_complete = await asyncio.shield(self._terminate(process, request))
-            if on_cleanup is not None:
-                await asyncio.shield(on_cleanup(cleanup_complete))
+            cleanup_complete = await self._terminate_with_observation(
+                process, request, process_observations, on_cleanup
+            )
             partial_stdout, partial_stderr = await self._collect_readers(
                 stdout_task,
                 stderr_task,
@@ -381,20 +475,32 @@ class SubprocessBroker:
                         resources=exc.summary,
                         stdout=partial_stdout.decode(errors="replace"),
                         stderr=partial_stderr.decode(errors="replace"),
-                    ).model_dump(mode="json")
+                    ).model_dump(mode="json"),
+                    "process_observations": [
+                        item.model_dump(mode="json") for item in process_observations
+                    ],
                 },
             ) from exc
         except asyncio.CancelledError:
             cancellation_cause = "caller_cancelled"
-            cleanup_complete = await asyncio.shield(self._terminate(process, request))
-            if on_cleanup is not None:
-                await asyncio.shield(on_cleanup(cleanup_complete))
+            cleanup_complete = await self._terminate_with_observation(
+                process, request, process_observations, on_cleanup
+            )
             await self._settle_readers(stdout_task, stderr_task)
             await self._settle_resource(resource_task)
             await self._settle_task(stdin_task)
             raise
 
         finished = time.monotonic_ns()
+        process_observations.extend(
+            self._snapshot_known_processes(
+                observed_identities,
+                "post_root_exit",
+                False,
+                None,
+                None,
+            )
+        )
         result = ProcessResult(
             exit_code=(
                 process.returncode
@@ -423,7 +529,33 @@ class SubprocessBroker:
                 if request.systemd_scope_unit is not None
                 else ("process_group" if os.name == "posix" else "process")
             ),
+            process_observations=tuple(process_observations),
         )
+
+    async def _terminate_with_observation(
+        self,
+        process: asyncio.subprocess.Process,
+        request: ExecutionRequest,
+        observations: list[ProcessObservation],
+        on_cleanup: Callable[[bool], Awaitable[None]] | None,
+    ) -> bool:
+        observations.extend(
+            self._snapshot_processes(process.pid, "pre_cleanup", True, "terminate", None)
+        )
+        identities = self._observation_identities(observations)
+        cleanup_complete = await asyncio.shield(self._terminate(process, request))
+        observations.extend(
+            self._snapshot_known_processes(
+                identities,
+                "post_cleanup",
+                False,
+                "terminate",
+                str(cleanup_complete),
+            )
+        )
+        if on_cleanup is not None:
+            await asyncio.shield(on_cleanup(cleanup_complete))
+        return cleanup_complete
 
     async def _run_observed_async(
         self,
@@ -449,6 +581,209 @@ class SubprocessBroker:
                 await asyncio.shield(on_cleanup(outcome.process.cleanup_complete is True))
             raise
 
+    def _snapshot_processes(
+        self,
+        root_pid: int,
+        phase: Literal["running", "pre_cleanup", "post_cleanup", "post_root_exit"],
+        alive_before_cleanup: bool | None,
+        cleanup_action: str | None,
+        cleanup_outcome: str | None,
+    ) -> tuple[ProcessObservation, ...]:
+        started = time.monotonic()
+        deadline = started + 2.0
+        processes, truncated = self._enumerate_processes(root_pid, deadline)
+        observations = tuple(
+            self._observe_process(
+                process,
+                source,
+                phase,
+                alive_before_cleanup,
+                cleanup_action,
+                cleanup_outcome,
+                deadline=deadline,
+            )
+            for process, source in processes
+            if time.monotonic() <= deadline
+        )
+        if truncated and observations:
+            observations = (
+                observations[0].model_copy(
+                    update={
+                        "failures": (
+                            *observations[0].failures,
+                            "descendant_enumeration_truncated",
+                        )
+                    }
+                ),
+                *observations[1:],
+            )
+        return observations
+
+    def _enumerate_processes(
+        self, root_pid: int, deadline: float
+    ) -> tuple[list[tuple[psutil.Process, str]], bool]:
+        processes: list[tuple[psutil.Process, str]] = []
+        pending: deque[tuple[psutil.Process, str]] = deque()
+        truncated = False
+        try:
+            pending.append((psutil.Process(root_pid), "root"))
+            while pending and len(processes) < self._MAX_OBSERVED_PROCESSES:
+                if time.monotonic() > deadline:
+                    truncated = True
+                    break
+                process, source = pending.popleft()
+                processes.append((process, source))
+                try:
+                    children = process.children(recursive=False)
+                except psutil.Error:
+                    children = []
+                if time.monotonic() > deadline:
+                    truncated = True
+                    break
+                for child in children:
+                    if len(processes) + len(pending) >= self._MAX_OBSERVED_PROCESSES:
+                        truncated = True
+                        break
+                    pending.append((child, "ancestry"))
+            truncated = truncated or bool(pending)
+        except psutil.Error:
+            return [], False
+        return processes, truncated
+
+    def _snapshot_known_processes(
+        self,
+        identities: tuple[tuple[int, float | None, str], ...],
+        phase: Literal["running", "pre_cleanup", "post_cleanup", "post_root_exit"],
+        alive_before_cleanup: bool | None,
+        cleanup_action: str | None,
+        cleanup_outcome: str | None,
+    ) -> tuple[ProcessObservation, ...]:
+        started = time.monotonic()
+        observations: list[ProcessObservation] = []
+        for pid, create_time, _source in identities:
+            if time.monotonic() > started + 2.0:
+                break
+            try:
+                process = psutil.Process(pid)
+            except psutil.Error:
+                observations.append(
+                    ProcessObservation(
+                        pid=pid,
+                        create_time=create_time,
+                        discovery_source="previously_observed",
+                        snapshot_phase=phase,
+                        alive_before_cleanup=alive_before_cleanup,
+                        cleanup_action=cleanup_action,
+                        cleanup_outcome=cleanup_outcome,
+                        failures=("process_unavailable",),
+                    )
+                )
+                continue
+            current_create_time: float | None
+            try:
+                current_create_time = process.create_time()
+            except psutil.Error:
+                current_create_time = None
+            if (
+                create_time is not None
+                and current_create_time is not None
+                and create_time != current_create_time
+            ):
+                observations.append(
+                    ProcessObservation(
+                        pid=pid,
+                        create_time=current_create_time,
+                        discovery_source="previously_observed",
+                        snapshot_phase=phase,
+                        alive_before_cleanup=alive_before_cleanup,
+                        cleanup_action=cleanup_action,
+                        cleanup_outcome=cleanup_outcome,
+                        failures=("pid_reused",),
+                    )
+                )
+                continue
+            observations.append(
+                self._observe_process(
+                    process,
+                    "previously_observed",
+                    phase,
+                    alive_before_cleanup,
+                    cleanup_action,
+                    cleanup_outcome,
+                    deadline=started + 2.0,
+                )
+            )
+        return tuple(observations)
+
+    @staticmethod
+    def _observation_identities(
+        observations: list[ProcessObservation],
+    ) -> tuple[tuple[int, float | None, str], ...]:
+        return tuple(
+            dict.fromkeys(
+                (item.pid, item.create_time, item.discovery_source) for item in observations
+            )
+        )
+
+    @staticmethod
+    def _observe_process(
+        process: psutil.Process,
+        source: str,
+        phase: Literal["running", "pre_cleanup", "post_cleanup", "post_root_exit"],
+        alive_before_cleanup: bool | None,
+        cleanup_action: str | None,
+        cleanup_outcome: str | None,
+        *,
+        deadline: float,
+    ) -> ProcessObservation:
+        failures: list[str] = []
+
+        def read(name: str, default: Any = None) -> Any:
+            if time.monotonic() > deadline:
+                failures.append("observation_budget_exceeded")
+                return default
+            try:
+                return getattr(process, name)()
+            except (psutil.Error, OSError, PermissionError, AttributeError):
+                failures.append(name)
+                return default
+
+        create_time = read("create_time")
+        parent = read("parent")
+        parent_pid = None
+        parent_create_time = None
+        if parent is not None:
+            try:
+                parent_pid = parent.pid
+                parent_create_time = parent.create_time()
+            except psutil.Error:
+                failures.append("parent_identity")
+        memory = read("memory_info")
+        cpu = read("cpu_times")
+        fd_count = read("num_fds")
+        if fd_count is None:
+            fd_count = read("num_handles")
+        alive = read("is_running")
+        return ProcessObservation(
+            pid=process.pid,
+            create_time=create_time,
+            parent_pid=parent_pid,
+            parent_create_time=parent_create_time,
+            discovery_source=source,  # type: ignore[arg-type]
+            name=read("name"),
+            status=read("status"),
+            rss_bytes=getattr(memory, "rss", None),
+            cpu_user_seconds=getattr(cpu, "user", None),
+            cpu_system_seconds=getattr(cpu, "system", None),
+            thread_count=read("num_threads"),
+            fd_count=fd_count,
+            snapshot_phase=phase,
+            alive_before_cleanup=alive_before_cleanup if alive is not None else None,
+            cleanup_action=cleanup_action,
+            cleanup_outcome=cleanup_outcome,
+            failures=tuple(sorted(set(failures))),
+        )
+
     def _run_observed_sync(
         self,
         request: ExecutionRequest,
@@ -467,6 +802,7 @@ class SubprocessBroker:
         argv = (str(executable), *request.argv[1:])
         started = time.monotonic_ns()
         process: subprocess.Popen[bytes] | None = None
+        process_observations: list[ProcessObservation] = []
         cleanup_complete = True
         with tempfile.TemporaryFile() as stdout_stream, tempfile.TemporaryFile() as stderr_stream:
             try:
@@ -491,12 +827,16 @@ class SubprocessBroker:
                     finally:
                         process.stdin.close()
 
+                process_observations.extend(
+                    self._snapshot_processes(process.pid, "running", True, None, None)
+                )
                 observed = self._wait_observed(
                     process,
                     request,
                     stdout_stream=stdout_stream,
                     stderr_stream=stderr_stream,
                     cancellation=cancellation,
+                    observations=process_observations,
                 )
                 cleanup_complete = self._terminate_observed_group(process, force=True)
                 stdout_stream.seek(0)
@@ -510,10 +850,32 @@ class SubprocessBroker:
                 raise
 
         finished = time.monotonic_ns()
+        process_observations.extend(
+            self._snapshot_known_processes(
+                self._observation_identities(process_observations),
+                "post_root_exit",
+                False,
+                None,
+                None,
+            )
+        )
         if observed.cancellation_cause == "output_limit":
+            output_process = ProcessResult(
+                exit_code=observed.returncode if observed.returncode >= 0 else None,
+                terminating_signal=(-observed.returncode if observed.returncode < 0 else None),
+                wall_time_ns=finished - started,
+                cancellation_cause="output_limit",
+                cleanup_complete=cleanup_complete,
+            )
             raise DomainError(
                 ErrorCode.QUERY_BUDGET_EXCEEDED,
                 f"Process output exceeded {request.max_output_bytes} bytes.",
+                details={
+                    "process": output_process.model_dump(mode="json"),
+                    "process_observations": [
+                        item.model_dump(mode="json") for item in process_observations
+                    ],
+                },
             )
         if observed.cancellation_cause == "timeout":
             timeout_process = ProcessResult(
@@ -530,7 +892,12 @@ class SubprocessBroker:
             raise DomainError(
                 ErrorCode.PROCESS_TIMEOUT,
                 f"Process exceeded {request.timeout_seconds} seconds.",
-                details={"process": timeout_process.model_dump(mode="json")},
+                details={
+                    "process": timeout_process.model_dump(mode="json"),
+                    "process_observations": [
+                        item.model_dump(mode="json") for item in process_observations
+                    ],
+                },
                 retryable=True,
             )
 
@@ -549,6 +916,7 @@ class SubprocessBroker:
             resolved_executable=executable,
             containment=("process_group" if os.name == "posix" else "process"),
             peak_rss_backend=observed.peak_rss_backend,
+            process_observations=tuple(process_observations),
         )
 
     def _wait_observed(
@@ -559,6 +927,7 @@ class SubprocessBroker:
         stdout_stream: IO[bytes],
         stderr_stream: IO[bytes],
         cancellation: threading.Event | None,
+        observations: list[ProcessObservation],
     ) -> _ObservedWait:
         deadline = time.monotonic() + request.timeout_seconds
         terminating: Literal["timeout", "caller_cancelled", "output_limit"] | None = None
@@ -568,15 +937,15 @@ class SubprocessBroker:
                 if terminating is None:
                     if cancellation is not None and cancellation.is_set():
                         terminating = "caller_cancelled"
-                        self._terminate_observed_group(process, force=True)
+                        self._terminate_observed_with_observation(process, observations, force=True)
                     elif self._observed_output_exceeded(
                         stdout_stream, stderr_stream, request.max_output_bytes
                     ):
                         terminating = "output_limit"
-                        self._terminate_observed_group(process, force=True)
+                        self._terminate_observed_with_observation(process, observations, force=True)
                     elif time.monotonic() >= deadline:
                         terminating = "timeout"
-                        self._terminate_observed_group(process, force=True)
+                        self._terminate_observed_with_observation(process, observations, force=True)
                 waited_pid, status, usage = wait4(process.pid, os.WNOHANG)
                 if waited_pid == process.pid:
                     process.returncode = os.waitstatus_to_exitcode(status)
@@ -597,15 +966,15 @@ class SubprocessBroker:
             if terminating is None:
                 if cancellation is not None and cancellation.is_set():
                     terminating = "caller_cancelled"
-                    self._terminate_observed_group(process, force=True)
+                    self._terminate_observed_with_observation(process, observations, force=True)
                 elif self._observed_output_exceeded(
                     stdout_stream, stderr_stream, request.max_output_bytes
                 ):
                     terminating = "output_limit"
-                    self._terminate_observed_group(process, force=True)
+                    self._terminate_observed_with_observation(process, observations, force=True)
                 elif time.monotonic() >= deadline:
                     terminating = "timeout"
-                    self._terminate_observed_group(process, force=True)
+                    self._terminate_observed_with_observation(process, observations, force=True)
             time.sleep(0.005)
         peak = max(peak, self._observed_peak_rss(process.pid))
         return _ObservedWait(
@@ -615,13 +984,35 @@ class SubprocessBroker:
             cancellation_cause=terminating,
         )
 
+    def _terminate_observed_with_observation(
+        self,
+        process: subprocess.Popen[bytes],
+        observations: list[ProcessObservation],
+        *,
+        force: bool,
+    ) -> bool:
+        observations.extend(
+            self._snapshot_processes(process.pid, "pre_cleanup", True, "terminate", None)
+        )
+        identities = self._observation_identities(observations)
+        cleanup_complete = self._terminate_observed_group(process, force=force)
+        observations.extend(
+            self._snapshot_known_processes(
+                identities,
+                "post_cleanup",
+                False,
+                "terminate",
+                str(cleanup_complete),
+            )
+        )
+        return cleanup_complete
+
     def _observed_peak_rss(self, pid: int) -> int:
         peak = 0
         try:
-            parent = psutil.Process(pid)
-            processes = (parent, *parent.children(recursive=True))
+            processes, _truncated = self._enumerate_processes(pid, time.monotonic() + 0.5)
             peak = sum(
-                observed.memory_info().rss for observed in processes if observed.is_running()
+                process.memory_info().rss for process, _source in processes if process.is_running()
             )
         except (psutil.Error, OSError):
             pass
@@ -831,10 +1222,19 @@ class SubprocessBroker:
         self,
         stream: asyncio.StreamReader,
         budget: _OutputBudget,
+        *,
+        drain_on_limit: bool = False,
     ) -> bytes:
         output = bytearray()
         while chunk := await stream.read(64 * 1024):
-            budget.consume(len(chunk))
+            try:
+                budget.consume(len(chunk))
+            except _OutputLimitExceeded:
+                if not drain_on_limit:
+                    raise
+                while await stream.read(64 * 1024):
+                    pass
+                break
             output.extend(chunk)
         return bytes(output)
 
@@ -1013,3 +1413,253 @@ class SubprocessBroker:
                 f"Executable is not a runnable file: {resolved}",
             )
         return resolved
+
+
+class ManagedSidecarLease:
+    """Broker-owned, capability-scoped lease for a Toxiproxy sidecar."""
+
+    def __init__(
+        self,
+        broker: SubprocessBroker,
+        process: asyncio.subprocess.Process,
+        executable: Path,
+        admin_host: str,
+        admin_port: int,
+        stdout_task: asyncio.Task[bytes],
+        stderr_task: asyncio.Task[bytes],
+        output_budget: _OutputBudget,
+        observations: list[ProcessObservation],
+        started_at: datetime,
+    ) -> None:
+        self._broker = broker
+        self._process = process
+        self._executable = executable
+        self.admin_host = admin_host
+        self.admin_port = admin_port
+        self._stdout_task = stdout_task
+        self._stderr_task = stderr_task
+        self._output_budget = output_budget
+        self._observations = observations
+        self._started_at = started_at
+        self._tracked_proxies: set[str] = set()
+        self._closed = False
+        self._outcome: ManagedSidecarOutcome | None = None
+
+    @classmethod
+    async def start(
+        cls,
+        broker: SubprocessBroker,
+        executable: Path,
+        *,
+        admin_host: str,
+        admin_port: int,
+        readiness: Callable[[], Awaitable[bool]],
+        tool_receipt: object | None,
+        readiness_timeout_seconds: float,
+    ) -> ManagedSidecarLease:
+        import ipaddress
+
+        try:
+            address = ipaddress.ip_address(admin_host)
+        except ValueError as error:
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "Toxiproxy admin host must be an IP literal.",
+            ) from error
+        if not address.is_loopback or not 1 <= admin_port <= 65_535:
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "Toxiproxy admin endpoint must be a loopback address and valid port.",
+            )
+        resolved = executable.resolve()
+        from flameox.adapters.toxiproxy import ToxiproxyToolReceipt
+
+        if not isinstance(tool_receipt, ToxiproxyToolReceipt):
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "Managed Toxiproxy startup requires a verified setup receipt.",
+            )
+        if tool_receipt.executable.resolve() != resolved:
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "The Toxiproxy executable does not match its verified setup receipt.",
+            )
+        if resolved.name not in {"toxiproxy-server", "toxiproxy-server.exe"}:
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "Managed sidecar leases accept only the pinned Toxiproxy server executable.",
+            )
+        if not resolved.is_file() or not os.access(resolved, os.X_OK):
+            raise DomainError(ErrorCode.CAPABILITY_UNAVAILABLE, "Toxiproxy server is not runnable.")
+        request = ExecutionRequest(
+            argv=(str(resolved), "-host", admin_host, "-port", str(admin_port)),
+            cwd=resolved.parent,
+            environment_allowlist=("PATH",),
+            allowed_working_roots=(resolved.parent,),
+            timeout_seconds=86_400,
+            graceful_shutdown_seconds=2,
+            max_output_bytes=2 * 1024 * 1024,
+        )
+        environment = broker._build_environment(request)
+        process = await asyncio.create_subprocess_exec(
+            *request.argv,
+            cwd=broker._resolve_cwd(request.cwd, request.allowed_working_roots),
+            env=environment,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=os.name == "posix",
+        )
+        assert process.stdout is not None and process.stderr is not None
+        observations: list[ProcessObservation] = []
+        output_budget = _OutputBudget(request.max_output_bytes)
+        lease = cls(
+            broker,
+            process,
+            resolved,
+            admin_host,
+            admin_port,
+            asyncio.create_task(
+                broker._read_bounded(process.stdout, output_budget, drain_on_limit=True)
+            ),
+            asyncio.create_task(
+                broker._read_bounded(process.stderr, output_budget, drain_on_limit=True)
+            ),
+            output_budget,
+            observations,
+            datetime.now(UTC),
+        )
+        deadline = time.monotonic() + readiness_timeout_seconds
+        try:
+            while time.monotonic() < deadline:
+                if process.returncode is not None:
+                    raise DomainError(
+                        ErrorCode.CAPABILITY_UNAVAILABLE,
+                        "Toxiproxy exited before its control API became ready.",
+                    )
+                if await readiness():
+                    observations.extend(
+                        broker._snapshot_processes(process.pid, "running", True, None, None)
+                    )
+                    return lease
+                await asyncio.sleep(0.05)
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "Toxiproxy control API did not become ready before the bounded deadline.",
+            )
+        except BaseException:
+            await asyncio.shield(lease.close())
+            raise
+
+    async def __aenter__(self) -> ManagedSidecarLease:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        await asyncio.shield(self.close())
+
+    def create_proxy(
+        self, *, name: str, listen: str, upstream: str, enabled: bool = True
+    ) -> dict[str, Any]:
+        self._ensure_open()
+        from flameox.adapters.toxiproxy import ToxiproxyClient
+
+        result = ToxiproxyClient(self.base_url).create_proxy(
+            name=name, listen=listen, upstream=upstream, enabled=enabled
+        )
+        self._tracked_proxies.add(name)
+        return result
+
+    def update_proxy(self, name: str, *, enabled: bool) -> dict[str, Any]:
+        self._ensure_open()
+        from flameox.adapters.toxiproxy import ToxiproxyClient
+
+        self._require_tracked(name)
+        return ToxiproxyClient(self.base_url).update_proxy(name, enabled=enabled)
+
+    def add_toxic(self, **kwargs: Any) -> dict[str, Any]:
+        self._ensure_open()
+        from flameox.adapters.toxiproxy import ToxiproxyClient
+
+        proxy = kwargs.get("proxy")
+        if not isinstance(proxy, str):
+            raise DomainError(ErrorCode.INVALID_CAPTURE_PLAN, "A toxic requires a tracked proxy.")
+        self._require_tracked(proxy)
+        return ToxiproxyClient(self.base_url).add_toxic(**kwargs)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.admin_host}:{self.admin_port}"
+
+    @property
+    def outcome(self) -> ManagedSidecarOutcome | None:
+        return self._outcome
+
+    async def close(self) -> ManagedSidecarOutcome:
+        if self._outcome is not None:
+            return self._outcome
+        self._closed = True
+        from flameox.adapters.toxiproxy import ToxiproxyApiError, ToxiproxyClient
+
+        cleanup_failures: list[str] = []
+        if self._output_budget.exceeded:
+            cleanup_failures.append(
+                "sidecar output exceeded the bounded capture budget; excess bytes were discarded"
+            )
+        client = ToxiproxyClient(self.base_url, timeout_seconds=1.0)
+        for name in tuple(sorted(self._tracked_proxies)):
+            try:
+                await asyncio.to_thread(client.delete_proxy, name)
+            except (ToxiproxyApiError, OSError) as error:
+                cleanup_failures.append(f"proxy {name}: {error}")
+        request = ExecutionRequest(
+            argv=(str(self._executable),),
+            cwd=self._executable.parent,
+            allowed_working_roots=(self._executable.parent,),
+            graceful_shutdown_seconds=2,
+        )
+        self._observations.extend(
+            self._broker._snapshot_processes(
+                self._process.pid, "pre_cleanup", True, "terminate", None
+            )
+        )
+        identities = self._broker._observation_identities(self._observations)
+        cleanup_complete = await asyncio.shield(self._broker._terminate(self._process, request))
+        self._observations.extend(
+            self._broker._snapshot_known_processes(
+                identities, "post_cleanup", False, "terminate", str(cleanup_complete)
+            )
+        )
+        stdout = await self._broker._collect_readers(self._stdout_task, self._stderr_task)
+        stdout_bytes, stderr_bytes = stdout
+        if cleanup_failures:
+            stderr_bytes += ("\n" + "\n".join(cleanup_failures)).encode()
+        finished = datetime.now(UTC)
+        self._outcome = ManagedSidecarOutcome(
+            process=ProcessResult(
+                exit_code=(
+                    self._process.returncode if self._process.returncode is not None else None
+                ),
+                cleanup_complete=cleanup_complete,
+                wall_time_ns=max(0, int((finished - self._started_at).total_seconds() * 1e9)),
+                stdout=stdout_bytes.decode(errors="replace"),
+                stderr=stderr_bytes.decode(errors="replace"),
+            ),
+            stdout=stdout_bytes,
+            stderr=stderr_bytes,
+            containment="process_group" if os.name == "posix" else "process",
+            process_observations=tuple(self._observations),
+            started_at=self._started_at,
+            finished_at=finished,
+        )
+        return self._outcome
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise DomainError(ErrorCode.EXECUTION_REFUSED, "The Toxiproxy sidecar lease is closed.")
+
+    def _require_tracked(self, name: str) -> None:
+        if name not in self._tracked_proxies:
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "The proxy is outside this sidecar lease.",
+            )

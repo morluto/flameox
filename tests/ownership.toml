@@ -38,6 +38,20 @@ markers = ["integration"]
 
 
 [[ownership]]
+owner = "toxiproxy-client"
+lane = "adapters"
+paths = ["tests/adapters/test_toxiproxy.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "toxiproxy-integration"
+lane = "adapters"
+paths = ["tests/adapters/test_toxiproxy_integration.py"]
+markers = ["integration", "optional", "requires_toxiproxy"]
+
+
+[[ownership]]
 owner = "setup-runtime"
 lane = "adapters"
 paths = ["tests/adapters/test_setup_runtime.py"]
@@ -135,6 +149,20 @@ markers = ["integration", "serial"]
 
 
 [[ownership]]
+owner = "fault-experiments"
+lane = "application"
+paths = ["tests/application/test_faults.py"]
+markers = ["integration"]
+
+
+[[ownership]]
+owner = "otlp-lifecycle"
+lane = "application"
+paths = ["tests/application/test_otlp_lifecycle.py"]
+markers = ["integration"]
+
+
+[[ownership]]
 owner = "garbage-collection"
 lane = "storage"
 paths = ["tests/application/test_gc.py"]
@@ -188,6 +216,13 @@ owner = "reductions"
 lane = "process"
 paths = ["tests/application/test_reductions.py"]
 markers = ["integration", "process", "serial"]
+
+
+[[ownership]]
+owner = "native-reducer-properties"
+lane = "application"
+paths = ["tests/application/test_native_reducer_properties.py"]
+markers = ["unit"]
 
 
 [[ownership]]

@@ -37,6 +37,8 @@ def _duckdb_type(data_type: pa.DataType) -> str:
         return "BIGINT"
     if pa.types.is_uint64(data_type):
         return "UBIGINT"
+    if pa.types.is_uint32(data_type):
+        return "UINTEGER"
     if pa.types.is_float64(data_type):
         return "DOUBLE"
     if pa.types.is_boolean(data_type):

@@ -85,11 +85,13 @@ class ExecutionIdentityService:
         workload_name: str,
         *,
         parameters: dict[str, str | int | float | bool],
+        dynamic_parameters: tuple[str, ...] = (),
     ) -> WorkloadExecutionIdentity:
         config = self.workloads.load().workloads[workload_name]
         instance = self.workloads.resolve(
             workload_name,
             parameters,
+            dynamic_parameters=dynamic_parameters,
         )
         inputs: list[ExecutionIdentityInput] = []
         if config.identity.python_modules:

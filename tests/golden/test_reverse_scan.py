@@ -86,17 +86,18 @@ argv = ["python", "validate.py", "{mode}", "{length}"]
 
 [experiments.reverse_scan_scaling]
 workload = "reverse_scan"
-variants = ["baseline", "candidate"]
+treatment_factor = "mode"
 design = "randomized_complete_blocks"
 blocks = 1
-scaling_parameter = "length"
-scaling_values = [32768, 65536, 131072]
 primary_metric = "pyperf.workload"
 polarity = "lower_is_better"
 estimand = "median_paired_log_ratio"
 practical_threshold = 0.05
 confidence_level = 0.95
 random_seed = 1984
+[experiments.reverse_scan_scaling.factors]
+mode = ["baseline", "candidate"]
+length = [32768, 65536, 131072]
 """
     )
     git(tmp_path, "init")

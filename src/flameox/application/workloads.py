@@ -4,7 +4,9 @@ import os
 import re
 import shutil
 import tomllib
+from ipaddress import ip_address
 from pathlib import Path, PurePath
+from string import Formatter
 from typing import Annotated, Literal, cast
 
 import tomlkit
@@ -118,6 +120,9 @@ class WorkloadConfig(ContractModel):
 
 class ExperimentConfig(ContractModel):
     workload: str
+    # These fields remain readable for schema-1 workspaces. New configurations
+    # should use factors/treatment_factor; planning projects the legacy shape
+    # into the same factor representation below.
     variants: Annotated[tuple[str, ...], Field(max_length=16)] = ()
     design: Literal[
         "randomized_complete_blocks",
@@ -148,25 +153,26 @@ class ExperimentConfig(ContractModel):
 
     @model_validator(mode="after")
     def valid_design(self) -> ExperimentConfig:
-        if len(set(self.variants)) != len(self.variants):
-            raise ValueError("experiment variants must be unique")
-        if bool(self.variants) == bool(self.factors):
-            raise ValueError("declare either legacy variants or factors")
         if self.factors:
+            if self.variants or self.scaling_parameter is not None or self.scaling_values:
+                raise ValueError("factor experiments cannot use legacy variant or scaling fields")
             if self.treatment_factor not in self.factors:
                 raise ValueError("factor experiments require a declared treatment_factor")
-            if self.scaling_parameter is not None or self.scaling_values:
-                raise ValueError("factor experiments cannot use legacy scaling fields")
             if self.combination_policy == "cartesian" and self.combinations:
                 raise ValueError("cartesian experiments cannot declare explicit combinations")
             if self.combination_policy == "explicit" and not self.combinations:
                 raise ValueError("explicit experiments require combinations")
-        elif self.combinations or self.exclude or self.treatment_factor is not None:
-            raise ValueError("combination fields require factors")
-        if bool(self.scaling_parameter) != bool(self.scaling_values):
-            raise ValueError("scaling_parameter and scaling_values must be declared together")
-        if len(set(self.scaling_values)) != len(self.scaling_values):
-            raise ValueError("experiment scaling values must be unique")
+        else:
+            if not self.variants:
+                raise ValueError("experiments require at least one factor or legacy variants")
+            if len(set(self.variants)) != len(self.variants):
+                raise ValueError("experiment variants must be unique")
+            if self.combinations or self.exclude or self.treatment_factor is not None:
+                raise ValueError("combination fields require factors")
+            if bool(self.scaling_parameter) != bool(self.scaling_values):
+                raise ValueError("scaling_parameter and scaling_values must be declared together")
+            if len(set(self.scaling_values)) != len(self.scaling_values):
+                raise ValueError("experiment scaling values must be unique")
         if self.analysis == "outcome":
             if self.outcome_goal is None:
                 raise ValueError("outcome experiments require outcome_goal")
@@ -183,10 +189,132 @@ class ExperimentConfig(ContractModel):
         return self
 
 
+class LatencyFault(ContractModel):
+    type: Literal["latency"]
+    latency_ms: int = Field(gt=0, le=3_600_000)
+    jitter_ms: int = Field(default=0, ge=0, le=3_600_000)
+    stream: Literal["upstream", "downstream"] = "downstream"
+    toxicity: float = Field(default=1.0, ge=0, le=1)
+
+
+class TimeoutFault(ContractModel):
+    type: Literal["timeout"]
+    timeout_ms: int = Field(gt=0, le=3_600_000)
+    stream: Literal["upstream", "downstream"] = "downstream"
+    toxicity: float = Field(default=1.0, ge=0, le=1)
+
+
+class ResetPeerFault(ContractModel):
+    type: Literal["reset_peer"]
+    stream: Literal["upstream", "downstream"] = "downstream"
+    toxicity: float = Field(default=1.0, ge=0, le=1)
+
+
+class BandwidthFault(ContractModel):
+    type: Literal["bandwidth"]
+    bandwidth_limit: int = Field(gt=0, le=10_000_000_000)
+    stream: Literal["upstream", "downstream"] = "downstream"
+    toxicity: float = Field(default=1.0, ge=0, le=1)
+
+
+class SlicerFault(ContractModel):
+    type: Literal["slicer"]
+    average_size: int = Field(gt=0, le=10_000_000)
+    size_variation: int = Field(default=0, ge=0, le=10_000_000)
+    delay_ms: int = Field(default=0, ge=0, le=3_600_000)
+    stream: Literal["upstream", "downstream"] = "downstream"
+    toxicity: float = Field(default=1.0, ge=0, le=1)
+
+
+class LimitDataFault(ContractModel):
+    type: Literal["limit_data"]
+    bytes: int = Field(gt=0, le=10_000_000_000)
+    stream: Literal["upstream", "downstream"] = "downstream"
+    toxicity: float = Field(default=1.0, ge=0, le=1)
+
+
+class SlowCloseFault(ContractModel):
+    type: Literal["slow_close"]
+    delay_ms: int = Field(gt=0, le=3_600_000)
+    stream: Literal["upstream", "downstream"] = "downstream"
+    toxicity: float = Field(default=1.0, ge=0, le=1)
+
+
+class ProxyFault(ContractModel):
+    type: Literal["proxy"]
+    enabled: bool = True
+
+
+FaultScenario = Annotated[
+    LatencyFault
+    | TimeoutFault
+    | ResetPeerFault
+    | BandwidthFault
+    | SlicerFault
+    | LimitDataFault
+    | SlowCloseFault
+    | ProxyFault,
+    Field(discriminator="type"),
+]
+
+
+class FaultExperimentConfig(ContractModel):
+    workload: str
+    endpoint_parameter: str
+    upstream_host: str
+    upstream_port: int = Field(gt=0, le=65_535)
+    endpoint_template: str
+    scenarios: dict[str, FaultScenario] = Field(min_length=1, max_length=64)
+    blocks: int = Field(default=1, gt=0, le=1_000)
+    repetitions: int = Field(default=1, gt=0, le=1_000)
+    primary_metric: str = "categorical_outcome"
+    polarity: Literal["lower_is_better", "higher_is_better", "neutral"] = "neutral"
+    estimand: str = "median_paired_log_ratio"
+    practical_threshold: float = Field(default=0, ge=0)
+    confidence_level: float = Field(default=0.95, gt=0, lt=1)
+    random_seed: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_transport_scope(self) -> FaultExperimentConfig:
+        if not ip_address(self.upstream_host).is_loopback:
+            raise ValueError("fault experiment upstream_host must be a loopback IP literal")
+        try:
+            parsed = tuple(Formatter().parse(self.endpoint_template))
+            fields = {field for _, field, _, _ in parsed if field is not None}
+            if fields != {"host", "port"} or any(
+                field not in {None, "host", "port"} or format_spec or conversion
+                for _, field, format_spec, conversion in parsed
+            ):
+                raise ValueError
+            self.endpoint_template.format(host="127.0.0.1", port=1)
+        except (IndexError, KeyError, ValueError) as error:
+            raise ValueError("endpoint_template must contain only {host} and {port}") from error
+        if "baseline" in self.scenarios:
+            raise ValueError("baseline is reserved for the synthetic passthrough treatment")
+        if self.blocks * self.repetitions * (len(self.scenarios) + 1) > 100_000:
+            raise ValueError("fault experiment schedule exceeds the 100000-trial bound")
+        for scenario in self.scenarios.values():
+            if isinstance(scenario, ProxyFault) and scenario.enabled:
+                raise ValueError("proxy treatment is non-discriminating when enabled")
+            if (
+                hasattr(scenario, "jitter_ms")
+                and getattr(scenario, "toxicity", 1.0) == 1
+                and getattr(scenario, "jitter_ms", 0) != 0
+            ):
+                raise ValueError("deterministic latency faults require zero jitter")
+            if getattr(scenario, "toxicity", 1.0) < 1 and self.repetitions < 2:
+                raise ValueError("stochastic fault scenarios require repeated trials")
+        return self
+
+
 class ProjectConfig(ContractModel):
     schema_version: Literal[1] = 1
     workloads: dict[str, WorkloadConfig] = Field(default_factory=dict, max_length=1_000)
     experiments: dict[str, ExperimentConfig] = Field(
+        default_factory=dict,
+        max_length=1_000,
+    )
+    fault_experiments: dict[str, FaultExperimentConfig] = Field(
         default_factory=dict,
         max_length=1_000,
     )
@@ -200,8 +328,33 @@ class ProjectConfig(ContractModel):
                 if experiment.workload not in self.workloads
             }
         )
+        missing_faults = sorted(
+            {
+                experiment.workload
+                for experiment in self.fault_experiments.values()
+                if experiment.workload not in self.workloads
+            }
+        )
+        if missing_faults:
+            missing.extend(missing_faults)
         if missing:
             raise ValueError("experiments reference unknown workloads: " + ", ".join(missing))
+        for experiment in self.fault_experiments.values():
+            if experiment.endpoint_parameter not in self.workloads[experiment.workload].parameters:
+                raise ValueError(
+                    "fault experiments must inject a declared workload parameter: "
+                    + experiment.endpoint_parameter
+                )
+            workload = self.workloads[experiment.workload]
+            template_values = (*workload.argv, workload.cwd, *workload.environment.values())
+            if not any(
+                experiment.endpoint_parameter in _template_fields(value)
+                for value in template_values
+            ):
+                raise ValueError(
+                    "fault experiment endpoint_parameter must be rendered by argv, cwd, "
+                    "or environment"
+                )
         return self
 
 
@@ -256,7 +409,7 @@ class ResolvedOracle(ContractModel):
 
 
 class DeclaredWorkflowSummary(ContractModel):
-    kind: Literal["workload", "experiment"]
+    kind: Literal["workload", "experiment", "fault_experiment"]
     name: str
     definition_id: str
     parameter_names: tuple[str, ...] = ()
@@ -279,7 +432,7 @@ class DeclaredWorkflowDetail(ContractModel):
     summary: DeclaredWorkflowSummary
     allowed_parameters: dict[str, tuple[Scalar, ...]]
     workload_name: str | None = None
-    variants: tuple[str, ...] = ()
+    factors: dict[str, tuple[Scalar, ...]] = Field(default_factory=dict)
     design: str | None = None
     blocks: int | None = None
     primary_metric: str | None = None
@@ -437,7 +590,7 @@ class WorkloadService:
     def list_declared(
         self,
         *,
-        kind: Literal["workload", "experiment"],
+        kind: Literal["workload", "experiment", "fault_experiment"],
         limit: int,
         cursor: str | None = None,
     ) -> DeclaredWorkflowList:
@@ -457,7 +610,11 @@ class WorkloadService:
             except (IndexError, TypeError, ValueError) as exc:
                 raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.") from exc
 
-        names = sorted(project.workloads if kind == "workload" else project.experiments)
+        names = sorted(
+            project.workloads
+            if kind == "workload"
+            else (project.experiments if kind == "experiment" else project.fault_experiments)
+        )
         summaries = tuple(self._workflow_summary(project, kind, name) for name in names)
         selected = summaries[offset : offset + limit]
         next_offset = offset + len(selected)
@@ -482,17 +639,22 @@ class WorkloadService:
     def get_declared(
         self,
         *,
-        kind: Literal["workload", "experiment"],
+        kind: Literal["workload", "experiment", "fault_experiment"],
         name: str,
     ) -> DeclaredWorkflowDetail:
         project = self.load()
         configuration_id = digest_model(project)
         summary = self._workflow_summary(project, kind, name)
-        workload_config = (
-            project.workloads[name]
+        workload_name = (
+            name
             if kind == "workload"
-            else project.workloads[project.experiments[name].workload]
+            else (
+                project.experiments[name].workload
+                if kind == "experiment"
+                else project.fault_experiments[name].workload
+            )
         )
+        workload_config = project.workloads[workload_name]
         requirements, adapter_options, option_total, options_truncated = self._inspection_fields(
             workload_config
         )
@@ -510,6 +672,24 @@ class WorkloadService:
                 adapter_options_total=option_total,
                 adapter_options_truncated=options_truncated,
             )
+        if kind == "fault_experiment":
+            fault = project.fault_experiments[name]
+            return DeclaredWorkflowDetail(
+                configuration_id=configuration_id,
+                summary=summary,
+                allowed_parameters=workload_config.parameters,
+                workload_name=fault.workload,
+                blocks=fault.blocks,
+                primary_metric=fault.primary_metric,
+                polarity=fault.polarity,
+                estimand=fault.estimand,
+                validation_spec_id=self.definition(fault.workload).validation_spec_id,
+                requirements=requirements,
+                adapter_options=adapter_options,
+                adapter_option_total=option_total,
+                adapter_options_total=option_total,
+                adapter_options_truncated=options_truncated,
+            )
         experiment = project.experiments[name]
         workload = project.workloads[experiment.workload]
         return DeclaredWorkflowDetail(
@@ -517,7 +697,7 @@ class WorkloadService:
             summary=summary,
             allowed_parameters=workload.parameters,
             workload_name=experiment.workload,
-            variants=experiment.variants,
+            factors=experiment.factors,
             design=experiment.design,
             blocks=experiment.blocks,
             primary_metric=experiment.primary_metric,
@@ -634,7 +814,7 @@ class WorkloadService:
     def _workflow_summary(
         self,
         project: ProjectConfig,
-        kind: Literal["workload", "experiment"],
+        kind: Literal["workload", "experiment", "fault_experiment"],
         name: str,
     ) -> DeclaredWorkflowSummary:
         try:
@@ -645,6 +825,21 @@ class WorkloadService:
                     kind=kind,
                     name=name,
                     definition_id=definition.workload_definition_id,
+                    parameter_names=tuple(sorted(workload_config.parameters)),
+                    oracle_strength=(
+                        workload_config.oracle.strength
+                        if workload_config.oracle is not None
+                        else None
+                    ),
+                    timeout_seconds=workload_config.timeout_seconds,
+                )
+            if kind == "fault_experiment":
+                fault_config = project.fault_experiments[name]
+                workload_config = project.workloads[fault_config.workload]
+                return DeclaredWorkflowSummary(
+                    kind=kind,
+                    name=name,
+                    definition_id=digest_model(fault_config),
                     parameter_names=tuple(sorted(workload_config.parameters)),
                     oracle_strength=(
                         workload_config.oracle.strength
@@ -803,10 +998,12 @@ class WorkloadService:
         self,
         name: str,
         overrides: dict[str, Scalar] | None = None,
+        *,
+        dynamic_parameters: tuple[str, ...] = (),
     ) -> WorkloadInstance:
         config = self._selected(name)
         definition = self.definition(name)
-        selected = self._parameters(config, overrides or {})
+        selected = self._parameters(config, overrides or {}, dynamic_parameters=dynamic_parameters)
         cwd = (self.workspace.project_root / _render(config.cwd, selected)).resolve()
         try:
             cwd.relative_to(self.workspace.project_root)
@@ -844,6 +1041,8 @@ class WorkloadService:
         self,
         name: str,
         overrides: dict[str, Scalar] | None = None,
+        *,
+        dynamic_parameters: tuple[str, ...] = (),
     ) -> ResolvedOracle | None:
         config = self._selected(name)
         if config.oracle is None:
@@ -853,7 +1052,7 @@ class WorkloadService:
                 ErrorCode.WORKSPACE_INVALID,
                 f"Workload {name!r} declares an oracle without argv.",
             )
-        selected = self._parameters(config, overrides or {})
+        selected = self._parameters(config, overrides or {}, dynamic_parameters=dynamic_parameters)
         cwd = (self.workspace.project_root / _render(config.cwd, selected)).resolve()
         rendered = tuple(_render(value, selected) for value in config.oracle.argv)
         return ResolvedOracle(
@@ -955,7 +1154,21 @@ class WorkloadService:
         self,
         config: WorkloadConfig,
         overrides: dict[str, Scalar],
+        *,
+        dynamic_parameters: tuple[str, ...] = (),
     ) -> dict[str, Scalar]:
+        if len(set(dynamic_parameters)) != len(dynamic_parameters):
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "Dynamic workload parameters must be unique.",
+            )
+        unknown_dynamic = set(dynamic_parameters) - set(config.parameters)
+        if unknown_dynamic:
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "Dynamic workload parameters must be declared by the workload.",
+                details={"parameters": sorted(unknown_dynamic)},
+            )
         unexpected = set(overrides) - set(config.parameters)
         if unexpected:
             raise DomainError(
@@ -970,8 +1183,13 @@ class WorkloadService:
                     ErrorCode.WORKSPACE_INVALID,
                     f"Workload parameter {name!r} has no allowed values.",
                 )
+            if name in dynamic_parameters and name not in overrides:
+                raise DomainError(
+                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    f"Dynamic workload parameter {name!r} must be supplied.",
+                )
             value = overrides.get(name, choices[0])
-            if value not in choices:
+            if name not in dynamic_parameters and value not in choices:
                 raise DomainError(
                     ErrorCode.INVALID_CAPTURE_PLAN,
                     f"Value for {name!r} is outside the declared choices.",

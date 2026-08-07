@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from flameox.domain import ArtifactRegistration, EnvironmentRecord, RunManifest, SourceState
+from flameox.domain import (
+    ArtifactRegistration,
+    EnvironmentRecord,
+    RunManifest,
+    SourceState,
+)
+from flameox.domain.models import utc_now
+from flameox.execution import ProcessObservation
 
 
 def artifact_registration_row(
@@ -41,6 +48,67 @@ def source_state_row(source_state: SourceState) -> dict[str, object]:
         "fields_json": _json(source_state.fields),
         "missing_fields": list(source_state.missing_fields),
     }
+
+
+def process_observation_rows(
+    run_id: str,
+    observations: tuple[ProcessObservation, ...],
+    *,
+    artifact_id: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Project broker observations into the two bounded process evidence tables."""
+    phases = sorted({item.snapshot_phase for item in observations}) or ["post_root_exit"]
+    summaries: list[dict[str, object]] = []
+    entries: list[dict[str, object]] = []
+    for phase in phases:
+        phase_items = tuple(item for item in observations if item.snapshot_phase == phase)
+        snapshot_id = f"{artifact_id}:{run_id}:{phase}"
+        observed_at = max(
+            (item.observed_at for item in phase_items),
+            default=utc_now(),
+        )
+        summaries.append(
+            {
+                "run_id": run_id,
+                "artifact_id": artifact_id,
+                "snapshot_id": snapshot_id,
+                "phase": phase,
+                "observed_at": observed_at,
+                "entry_count": len(phase_items),
+                "sources_json": _json(sorted({item.discovery_source for item in phase_items})),
+                "limitations": sorted(
+                    {
+                        f"process:{item.pid}:{failure}"
+                        for item in phase_items
+                        for failure in item.failures
+                    }
+                ),
+            }
+        )
+        entries.extend(
+            {
+                "snapshot_id": snapshot_id,
+                "pid": item.pid,
+                "create_time": item.create_time,
+                "parent_pid": item.parent_pid,
+                "parent_create_time": item.parent_create_time,
+                "discovery_source": item.discovery_source,
+                "name": item.name,
+                "status": item.status,
+                "rss_bytes": item.rss_bytes,
+                "cpu_user_seconds": item.cpu_user_seconds,
+                "cpu_system_seconds": item.cpu_system_seconds,
+                "thread_count": item.thread_count,
+                "fd_count": item.fd_count,
+                "observed_at": item.observed_at,
+                "alive_before_cleanup": item.alive_before_cleanup,
+                "cleanup_action": item.cleanup_action,
+                "cleanup_outcome": item.cleanup_outcome,
+                "failures_json": _json(list(item.failures)),
+            }
+            for item in phase_items
+        )
+    return summaries, entries
 
 
 def runtime_resource_summary_row(
@@ -105,15 +173,10 @@ def _normalized_unavailable_metrics(metrics: set[str]) -> list[str]:
             normalized.add("writable_root_growth")
         elif metric in {
             "minimum_free_bytes",
-            "staging_growth",
             "staging_growth_bytes",
-            "peak_rss",
             "peak_rss_bytes",
-            "descendant_peak_rss",
         }:
-            normalized.add(
-                "peak_rss" if metric == "descendant_peak_rss" else metric.removesuffix("_bytes")
-            )
+            normalized.add(metric.removesuffix("_bytes"))
         else:
             normalized.add(metric)
     return sorted(normalized)

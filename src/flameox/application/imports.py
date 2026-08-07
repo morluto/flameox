@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from flameox.application.environment import collect_environment
 from flameox.application.evidence_rows import (
@@ -27,6 +28,9 @@ from flameox.domain.models import (
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
+
+if TYPE_CHECKING:
+    from flameox.application.otlp import OtlpExtractionResult
 
 
 class ImportArtifactRequest(ContractModel):
@@ -142,9 +146,18 @@ class ImportService:
             corpus_commit_id=published.commit.commit_id,
         )
 
+    def extract_otlp_trace(
+        self, run_id: str, artifact_id: str | None = None
+    ) -> OtlpExtractionResult:
+        from flameox.application.otlp import OtlpTraceService
+
+        return OtlpTraceService(self.workspace).extract_otlp_trace(run_id, artifact_id)
+
     @staticmethod
     def _infer_producer(path: Path, kind: ArtifactKind) -> str:
         """Recover common producer identity before analysis routing loses it."""
+        if kind is ArtifactKind.OTLP_TRACE:
+            return "opentelemetry"
         if kind is not ArtifactKind.EXECUTION_TRACE:
             return "flameox.import"
         try:
