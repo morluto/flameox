@@ -23,7 +23,8 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> &nbsp;&middot;&nbsp;
-  <a href="#what-flameox-investigates">What flameox investigates</a> &nbsp;&middot;&nbsp;
+  <a href="#supported-workflows">Supported workflows</a> &nbsp;&middot;&nbsp;
+  <a href="#what-flameox-does">What flameox does</a> &nbsp;&middot;&nbsp;
   <a href="#how-it-works">How it works</a> &nbsp;&middot;&nbsp;
   <a href="#cli-and-mcp">CLI and MCP</a> &nbsp;&middot;&nbsp;
   <a href="#documentation">Documentation</a>
@@ -34,17 +35,6 @@
 <!-- mcp-name: io.github.morluto/flameox -->
 
 ---
-
-flameox helps coding agents investigate performance, memory, execution,
-concurrency, and reliability with evidence you can inspect and reproduce. It
-connects agents to maintained tools such as Python import-time tracing, pytest,
-xdist, pyperf, py-spy, Perfetto Trace Processor, coverage.py, Memray, and
-torch.profiler, then keeps each original artifact alongside a record of how it
-was produced.
-
-flameox is not a profiler or an automatic bug finder. It coordinates existing
-tools, compares runs collected under compatible conditions, and ties findings
-back to the measurements that support them.
 
 ## Quick start
 
@@ -58,9 +48,8 @@ npx flameox@latest setup
 
 The wizard detects Claude Code, Cursor, OpenCode, Codex, Gemini CLI, and
 Antigravity. It preselects detected clients for connection and previews every
-configuration file it will change; you can adjust the selection before applying
-it. After you approve the plan, it installs and verifies a versioned local
-runtime and activates the clients you chose.
+configuration file it will change. After approval, it installs and verifies a
+versioned local runtime and activates the clients you chose.
 
 Restart the configured client, open a project, and ask:
 
@@ -74,8 +63,8 @@ server does not initialize arbitrary launch directories automatically.
 
 flameox can initialize its `.diagnostics/` workspace through MCP. An agent can
 create or update a validated named workload in `flameox.toml` through MCP, then
-plan and run it immediately. See
-[Named workloads and capture](#named-workloads-and-capture) for an example.
+plan and run it immediately. See [Named workloads and capture](#named-workloads-and-capture)
+for the command and configuration shape.
 
 ### Use the CLI from source
 
@@ -87,32 +76,49 @@ uv run flameox init .
 uv run flameox status
 ```
 
-## What flameox investigates
+## What flameox does
 
-| Question | Evidence |
+flameox is a local evidence layer for coding agents investigating performance,
+memory, execution, concurrency, and reliability. It coordinates maintained
+tools—pyperf, py-spy, Perfetto Trace Processor, coverage.py, Memray,
+torch.profiler, pytest, and more—while preserving their native artifacts with
+the workload, source, environment, limits, and outcome that produced them.
+
+It is not another profiler or an automatic bug finder. A profile points to a
+place to investigate; Flameox helps an agent collect comparable runs, retain
+failed attempts, validate behavior, and record the evidence behind a finding.
+
+## Supported workflows
+
+Choose the path that matches the symptom you have now.
+
+| If you are investigating | Flameox gives the agent |
 | --- | --- |
-| **Where does this workload spend CPU time?** | Sampled stacks, frames, callers, callees, and trace windows |
-| **Does runtime grow with input size?** | Repeated measurements, scaling fits, uncertainty, and correlated hotspots |
-| **Why does memory grow?** | Allocation records, retained memory, phases, threads, and processes |
-| **Which execution paths changed?** | Coverage contexts, files, functions, branches, and two-run differences |
-| **What does PyTorch spend time on?** | Operators, shapes when captured, CPU or accelerator time, and memory |
-| **Are failures clustered rather than isolated?** | Failed attempts grouped by environment, source, workload, and error |
+| A slow Python, native, or service workload | py-spy stacks, pyperf samples, Perfetto traces, process/resource summaries, and validation outputs to identify hotspots and compare a candidate change. |
+| PyTorch execution or GPU kernels | torch.profiler traces and imported Nsight Systems evidence for CUDA runtime activity, graph launches, kernels, synchronization, and idle gaps. |
+| A local inference server | Typed aiperf or vLLM replay evidence, bounded request timing and token summaries, plus linked torch.profiler or Nsight Systems captures for compatible runs. |
+| Memory growth or changed execution paths | Memray allocation evidence, coverage contexts, pytest results, process cleanup, and failed-attempt context. |
+| A suspected regression | Randomized paired trials, validation receipts, pyperf measurements, and selected runtime-resource metrics such as peak process-tree RSS. |
 
-Profiles show where to investigate; they do not prove why behavior changed or
-whether the program remains correct. To confirm a result, use a representative
-workload and declared metric, compare the same source and environment, retain the
-samples, and validate the program's output for both the baseline and candidate.
+Availability depends on the selected adapter, operating system, and permissions.
+Run `list_capabilities` to see what the current workspace can collect; Flameox
+records unavailable or incomplete evidence rather than filling gaps with guesses.
 
 ## How it works
 
 1. **Declare.** An agent creates or updates a validated named workload and
    Flameox binds its current definition to every plan and run.
 2. **Capture.** A maintained profiler or benchmark tool runs while flameox records
-   the tool, command, environment, source revision, limits, and outcome.
+   the tool, command, environment, source revision, limits, and outcome. For
+   inference and GPU work, it can link a replay or profiler capture to the
+   compatible unprofiled workload it represents.
 3. **Preserve.** flameox keeps the original artifact and publishes queryable
    evidence to the project workspace.
 4. **Analyze.** The CLI and MCP server provide focused queries for
-   hotspots, scaling, memory, execution, failures, and comparisons.
+   hotspots, scaling, memory, execution, inference requests, failures, and
+   comparisons. Paired comparisons preserve incomplete evidence and reject
+   incompatible source, environment, validation, collector, or resource-sampling
+   conditions instead of silently combining them.
 5. **Record.** Findings remain tied to the runs, measurements, validation, and
    analysis that support them. Failed attempts remain visible.
 
