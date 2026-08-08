@@ -937,6 +937,8 @@ def inference_configure_server(
     name: str,
     mode: Literal["managed", "existing_local"],
     model: str,
+    provider: Annotated[Literal["vllm", "sglang"], typer.Option("--provider")] = "vllm",
+    benchmark_python: Annotated[str | None, typer.Option("--benchmark-python")] = None,
     operation: Literal["create", "replace"] = "create",
     workload: Annotated[str | None, typer.Option("--workload")] = None,
     base_url: Annotated[str, typer.Option("--base-url")] = "http://127.0.0.1:8000",
@@ -958,6 +960,8 @@ def inference_configure_server(
                 operation=operation,
                 expected_configuration_id=expected_configuration_id,
                 config=InferenceServerConfig(
+                    provider=provider,
+                    benchmark_python=benchmark_python,
                     mode=mode,
                     workload=workload,
                     base_url=base_url,
@@ -980,7 +984,7 @@ def inference_configure_server(
 def inference_configure_scenario(
     name: str,
     server: str,
-    provider: Literal["aiperf", "vllm_bench"],
+    provider: Literal["aiperf", "vllm_bench", "sglang_bench"],
     operation: Literal["create", "replace"] = "create",
     endpoint_type: Literal["chat", "completions"] = "chat",
     streaming: bool = True,
@@ -994,6 +998,11 @@ def inference_configure_scenario(
     speedup_ratio: Annotated[float, typer.Option("--speedup-ratio", min=0.001)] = 1.0,
     semantic_oracle_workload: Annotated[
         str | None, typer.Option("--semantic-oracle-workload")
+    ] = None,
+    random_input_len: Annotated[int | None, typer.Option("--random-input-len", min=1)] = None,
+    random_output_len: Annotated[int | None, typer.Option("--random-output-len", min=1)] = None,
+    random_range_ratio: Annotated[
+        float | None, typer.Option("--random-range-ratio", min=0.001, max=1.0)
     ] = None,
     expected_configuration_id: Annotated[
         str | None, typer.Option("--expected-configuration-id")
@@ -1022,6 +1031,9 @@ def inference_configure_scenario(
                     seed=seed,
                     speedup_ratio=speedup_ratio,
                     semantic_oracle_workload=semantic_oracle_workload,
+                    random_input_len=random_input_len,
+                    random_output_len=random_output_len,
+                    random_range_ratio=random_range_ratio,
                 ),
             )
         )

@@ -33,7 +33,7 @@ _NonEmptyStr = Annotated[str, StringConstraints(min_length=1, max_length=500)]
 class TraceIdentity(ContractModel):
     """Identity of the replayed inference trace input."""
 
-    format: Literal["mooncake", "aiperf", "vllm", "custom"] | None = None
+    format: Literal["mooncake", "aiperf", "vllm", "sglang.bench_serving", "custom"] | None = None
     producer: _Identifier
     producer_version: _NonEmptyStr | None = None
     artifact_digest: _Digest | None = None
@@ -70,7 +70,7 @@ class ModelIdentity(ContractModel):
 class ServerConfigIdentity(ContractModel):
     """vLLM / serving server configuration identity."""
 
-    backend: Literal["vllm", "openai-chat", "custom"]
+    backend: Literal["vllm", "sglang", "openai-chat", "custom"]
     endpoint: _NonEmptyStr | None = None
     kv_transfer_config: dict[str, str] = Field(default_factory=dict)
     cache_backend: Literal["none", "mooncake", "lmcache", "vllm_paged", "custom"] = "vllm_paged"

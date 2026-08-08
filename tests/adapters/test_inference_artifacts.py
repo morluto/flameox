@@ -12,6 +12,7 @@ from flameox.adapters import (
     InferenceArtifactExtractor,
     MooncakeRequestRow,
     MooncakeTraceParser,
+    SglangResultParser,
     VllmResultParser,
 )
 from flameox.application import EvidenceQueryService, ImportArtifactRequest, ImportService
@@ -1465,3 +1466,60 @@ def test_aiperf_extractor_enforces_independent_request_row_cap(
     assert workspace.config.storage.max_rows_per_generation > 1
     assert result.request_count == 1
     assert result.limitations == ("AIPerf request evidence truncated at 1 rows.",)
+
+
+def test_sglang_result_parser_rejects_sensitive_detailed_output(tmp_path: Path) -> None:
+    result_path = tmp_path / "result.jsonl"
+    result_path.write_text(
+        json.dumps(
+            {
+                "duration": 1.0,
+                "completed": 1,
+                "total_input_tokens": 4,
+                "total_output_tokens": 2,
+                "request_throughput": 1.0,
+                "generated_texts": ["secret"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DomainError, match="aggregate SGLang JSONL"):
+        SglangResultParser().parse(result_path)
+
+
+def test_sglang_result_parser_emits_safe_optional_scalar_metrics(tmp_path: Path) -> None:
+    result_path = tmp_path / "result.jsonl"
+    result_path.write_text(
+        json.dumps(
+            {
+                "duration": 1.0,
+                "completed": 2,
+                "total_input_tokens": 8,
+                "total_output_tokens": 4,
+                "request_throughput": 2.0,
+                "accept_length": 3.5,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    _document, rows = SglangResultParser().parse(result_path)
+
+    values = {row.name: row.value_float for row in rows}
+    assert values["sglang.accept_length"] == 3.5
+    assert values["sglang.request_throughput"] == 2.0
+    assert all(row.dimensions["producer"] == "sglang.bench_serving" for row in rows)
+
+
+@pytest.mark.parametrize("payload", ["", "{}\n{}\n", '{"duration": NaN}\n'])
+def test_sglang_result_parser_rejects_malformed_or_multiple_records(
+    tmp_path: Path, payload: str
+) -> None:
+    result_path = tmp_path / "result.jsonl"
+    result_path.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(DomainError, match="aggregate SGLang JSONL"):
+        SglangResultParser().parse(result_path)

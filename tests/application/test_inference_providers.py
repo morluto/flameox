@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from flameox.application.inference_providers import (
     AIPerfProfileRequest,
+    SglangBenchServingRequest,
     VllmBenchServeRequest,
     discover_inference_tool,
     probe_existing_vllm_server,
@@ -153,3 +154,25 @@ def test_aiperf_discovery_rejects_unsupported_version(
     assert result.compatible is False
     assert result.executable_digest is not None
     assert result.compatibility_reason is not None
+
+
+def test_sglang_bench_uses_fixed_module_random_workload_and_safe_output(tmp_path: Path) -> None:
+    request = SglangBenchServingRequest(
+        benchmark_python=Path("/opt/sglang/bin/python"),
+        base_url="http://127.0.0.1:8000",
+        model="model",
+        tokenizer="tokenizer",
+        result_path=tmp_path / "result.jsonl",
+        num_prompts=3,
+        random_input_len=16,
+        random_output_len=8,
+        random_range_ratio=0.5,
+        endpoint_type="chat",
+    )
+
+    argv = request.argv()
+
+    assert argv[:3] == ("/opt/sglang/bin/python", "-m", "sglang.bench_serving")
+    assert "sglang-oai-chat" in argv
+    assert "--output-details" not in argv
+    assert argv[argv.index("--output-file") + 1] == str(tmp_path / "result.jsonl")

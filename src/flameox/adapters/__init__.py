@@ -81,6 +81,8 @@ __all__ = [
     "PythonStartupExtractor",
     "RuntimeInstallation",
     "SetupClient",
+    "SglangResultDocument",
+    "SglangResultParser",
     "TorchProfilerCaptureOptions",
     "TorchProfilerSchedule",
     "ToxiproxyApiError",

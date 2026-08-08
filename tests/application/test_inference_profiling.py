@@ -11,7 +11,9 @@ import pytest
 
 from flameox.application.inference import InferenceReplayService
 from flameox.application.inference_profiling import (
+    InferenceProfilerControlClient,
     InferenceProfilingService,
+    SglangProfileOptions,
     VllmProfilerControlClient,
 )
 from flameox.application.inference_providers import InferenceToolDiscovery
@@ -297,6 +299,47 @@ def test_profiler_control_uses_only_start_and_stop_endpoints(
         ("POST", "http://127.0.0.1:8000/start_profile"),
         ("POST", "http://127.0.0.1:8000/stop_profile"),
     ]
+
+
+def test_sglang_profiler_control_posts_only_fixed_profile_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payloads: list[tuple[str, bytes]] = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def fake_urlopen(request: object, *, timeout: float) -> Response:
+        del timeout
+        payloads.append((request.full_url, request.data))  # type: ignore[attr-defined]
+        return Response()
+
+    monkeypatch.setattr("flameox.application.inference_profiling.urlopen", fake_urlopen)
+    client = InferenceProfilerControlClient("http://127.0.0.1:8000", provider="sglang")
+    client.start(
+        output_dir=tmp_path / "traces",
+        profile_id="profile-id",
+        options=SglangProfileOptions(),
+    )
+    client.stop()
+
+    assert json.loads(payloads[0][1]) == {
+        "output_dir": str(tmp_path / "traces"),
+        "profile_id": "profile-id",
+        "start_step": 5,
+        "num_steps": 2,
+        "activities": ["CPU", "GPU"],
+        "profile_by_stage": True,
+        "record_shapes": True,
+        "with_stack": True,
+    }
+    assert payloads[1] == ("http://127.0.0.1:8000/stop_profile", b"")
 
 
 def test_torch_profile_preserves_compressed_trace_for_perfetto(tmp_path: Path) -> None:
