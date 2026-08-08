@@ -873,9 +873,7 @@ class InferenceReplayService:
         candidate = Path(command.argv[0])
         if candidate.is_absolute() or candidate.parent != Path("."):
             return (
-                candidate
-                if candidate.is_absolute()
-                else (Path(command.cwd) / candidate).resolve()
+                candidate if candidate.is_absolute() else (Path(command.cwd) / candidate).resolve()
             )
         environment = {**os.environ, **command.env_overrides}
         located = shutil.which(command.argv[0], path=environment.get("PATH"))
