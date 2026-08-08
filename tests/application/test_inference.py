@@ -192,9 +192,7 @@ def test_sglang_protocol_identity_binds_random_shape_and_provenance(
         version="0.5.16",
         executable_digest="sha256:" + "c" * 64,
     )
-    monkeypatch.setattr(
-        inference_module, "discover_sglang", lambda _launcher, *, broker: discovery
-    )
+    monkeypatch.setattr(inference_module, "discover_sglang", lambda _launcher, *, broker: discovery)
     monkeypatch.setattr(
         inference_module,
         "probe_existing_vllm_server",
