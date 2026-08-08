@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flameox"
-version = "0.1.11"
+version = "0.1.12"
 description = "Local runtime evidence CLI and MCP server for coding agents"
 readme = "README.md"
 license = "MIT"
