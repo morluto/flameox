@@ -10,6 +10,7 @@ from flameox.analysis import RecipeService
 from flameox.application import (
     CreateInvestigationRequest,
     ExecutionPolicy,
+    ExperimentConfig,
     ExperimentService,
     InvestigationService,
 )
@@ -33,6 +34,33 @@ def _git(project: Path, *args: str) -> None:
         capture_output=True,
         text=True,
     )
+
+
+@pytest.mark.parametrize(
+    "metric",
+    (
+        "runtime_resource.peak_rss_bytes",
+        "runtime_resource.minimum_free_bytes",
+        "runtime_resource.staging_growth_bytes",
+    ),
+)
+def test_experiment_config_accepts_closed_runtime_resource_catalog(metric: str) -> None:
+    config = ExperimentConfig(
+        workload="scan",
+        variants=("baseline", "candidate"),
+        primary_metric=metric,
+    )
+
+    assert config.primary_metric == metric
+
+
+def test_experiment_config_rejects_writable_root_growth_metric() -> None:
+    with pytest.raises(ValueError, match="runtime-resource primary_metric"):
+        ExperimentConfig(
+            workload="scan",
+            variants=("baseline", "candidate"),
+            primary_metric="runtime_resource.writable_root_growth_bytes",
+        )
 
 
 @pytest.mark.anyio
@@ -138,6 +166,60 @@ implementation = ["baseline", "candidate"]
     assert [item[0] for item in progress] == list(range(7))
     assert {item[1] for item in progress} == {6}
     assert all(item[2] for item in progress)
+
+
+@pytest.mark.anyio
+async def test_runtime_resource_primary_metric_runs_paired_comparison(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "bench.py").write_text("assert sum(range(1000)) >= 0\n")
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.scan]
+argv = ["python", "bench.py"]
+cwd = "."
+[workloads.scan.parameters]
+implementation = ["baseline", "candidate"]
+[workloads.scan.oracle]
+strength = "cross_treatment_equivalence"
+argv = ["python", "-c", "print('same-output')"]
+[experiments.resources]
+workload = "scan"
+treatment_factor = "implementation"
+blocks = 1
+primary_metric = "runtime_resource.peak_rss_bytes"
+polarity = "lower_is_better"
+[experiments.resources.factors]
+implementation = ["baseline", "candidate"]
+"""
+    )
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "add", "bench.py", "flameox.toml")
+    _git(
+        tmp_path,
+        "-c",
+        "user.name=flameox Test",
+        "-c",
+        "user.email=flameox@example.invalid",
+        "commit",
+        "-qm",
+        "fixture",
+    )
+    investigation = InvestigationService(workspace).create(
+        CreateInvestigationRequest(question="Does resource use differ?")
+    )
+    service = ExperimentService(workspace)
+    plan = await service.plan(
+        experiment_name="resources",
+        investigation_id=investigation.investigation_id,
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    result = await service.run(plan.plan_id)
+
+    assert result.comparison is not None
+    assert result.comparison.comparison.metric == "runtime_resource.peak_rss_bytes"
 
 
 @pytest.mark.anyio

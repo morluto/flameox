@@ -778,6 +778,7 @@ async def test_resource_policy_records_descendant_rss_disk_floor_and_root_growth
     assert resources.minimum_free_bytes is not None
     assert resources.peak_rss_bytes is not None
     assert resources.peak_rss_bytes > 0
+    assert resources.peak_rss_backend == "psutil_recursive_polling"
     assert resources.writable_root_growth_bytes[str(output)] == 4096
     assert resources.policy_termination is None
     assert outcome.process.peak_rss_bytes == resources.peak_rss_bytes
@@ -840,6 +841,7 @@ async def test_resource_policy_marks_short_process_samples_unavailable(
     assert resources is not None
     assert resources.minimum_free_bytes is None
     assert resources.peak_rss_bytes is None
+    assert resources.peak_rss_backend is None
     assert set(resources.unavailable_metrics) >= {
         "minimum_free_bytes",
         "peak_rss_bytes",

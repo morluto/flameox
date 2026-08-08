@@ -56,14 +56,15 @@ async def test_capture_plan_is_single_use_and_publishes_process_evidence(
     with Catalog(workspace).open_snapshot() as snapshot:
         resource_row = snapshot.execute(
             "SELECT run_id, sampling_interval_ms, minimum_free_bytes, "
-            "staging_growth_bytes, peak_rss_bytes, unavailable_metrics "
+            "staging_growth_bytes, peak_rss_bytes, peak_rss_backend, unavailable_metrics "
             "FROM runtime_resource_summaries WHERE run_id = ?",
             (result.run.run_id,),
         ).fetchone()
     assert resource_row is not None
     assert resource_row[0] == result.run.run_id
     assert resource_row[1] > 0
-    assert isinstance(resource_row[5], list)
+    assert resource_row[5] in {None, "psutil_recursive_polling"}
+    assert isinstance(resource_row[6], list)
     memory = RecipeService(workspace).memory(result.run.run_id)
     assert memory.runtime_resource_totals is not None
     assert memory.runtime_resource_totals.run_count == 1

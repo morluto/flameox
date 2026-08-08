@@ -1456,6 +1456,7 @@ class SubprocessBroker:
             staging_growth_bytes=staging_growth,
             writable_root_growth_bytes=growth,
             peak_rss_bytes=peak_rss or None,
+            peak_rss_backend=("psutil_recursive_polling" if peak_rss else None),
             unavailable_metrics=tuple(sorted(unavailable)),
             policy_termination=termination,
         )

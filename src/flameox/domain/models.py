@@ -639,6 +639,9 @@ class RuntimeResourceSummary(ContractModel):
     staging_growth_bytes: Annotated[int, Field(ge=0)] | None = None
     writable_root_growth_bytes: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
     peak_rss_bytes: Annotated[int, Field(ge=0)] | None = None
+    # This identifies the observation method, not a guarantee of the process
+    # tree's lifetime maximum.
+    peak_rss_backend: str | None = None
     unavailable_metrics: tuple[str, ...] = ()
     policy_termination: Literal["storage_reserve_exceeded", "memory_limit_exceeded"] | None = None
 

@@ -260,6 +260,11 @@ class FaultExperimentService:
             experiment_name=experiment_name,
             experiment=experiment,
             adapter="command",
+            metric_source=(
+                "runtime_resource"
+                if config.primary_metric.startswith("runtime_resource.")
+                else "measurement"
+            ),
             execution_policy=execution_policy,
             variant_parameter="scenario",
             variants=treatments,

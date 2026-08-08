@@ -95,6 +95,7 @@ class ExperimentPlan(ContractModel):
     experiment_name: str
     experiment: Experiment
     adapter: str
+    metric_source: Literal["measurement", "runtime_resource"]
     execution_policy: ExecutionPolicy
     variant_parameter: str
     variants: tuple[str, ...]
@@ -435,6 +436,11 @@ class ExperimentService:
             "name": experiment_name,
             "config": config.model_dump(mode="json"),
             "parameters": supplied_overrides,
+            "metric_source": (
+                "runtime_resource"
+                if config.primary_metric.startswith("runtime_resource.")
+                else "measurement"
+            ),
         }
         experiment = Experiment(
             experiment_id=new_id(),
@@ -537,6 +543,11 @@ class ExperimentService:
             experiment_name=experiment_name,
             experiment=experiment,
             adapter=adapter,
+            metric_source=(
+                "runtime_resource"
+                if config.primary_metric.startswith("runtime_resource.")
+                else "measurement"
+            ),
             execution_policy=execution_policy,
             variant_parameter=variant_parameter,
             variants=variants,
@@ -796,7 +807,7 @@ class ExperimentService:
             limitations.append(
                 "Automatic paired comparison currently requires exactly two variants."
             )
-        elif plan.adapter != "pyperf":
+        elif plan.metric_source == "measurement" and plan.adapter != "pyperf":
             limitations.append(
                 "Automatic experiment comparison currently requires pyperf measurements."
             )
@@ -808,7 +819,8 @@ class ExperimentService:
                         candidate_run_set_id=run_sets[1].run_set_id,
                         experiment_id=plan.experiment.experiment_id,
                         metric=plan.experiment.primary_metric,
-                        unit="ns",
+                        unit=("bytes" if plan.metric_source == "runtime_resource" else "ns"),
+                        metric_source=plan.metric_source,
                         polarity=plan.experiment.polarity,
                         practical_threshold=plan.experiment.practical_threshold,
                         confidence_level=plan.experiment.confidence_level,
