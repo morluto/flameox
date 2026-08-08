@@ -125,6 +125,32 @@ def test_sglang_scenario_rejects_dropped_burstiness() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("provider", "trace_artifact_id", "random_input_len", "random_output_len", "message"),
+    [
+        ("aiperf", None, None, None, "requires an aiperf trace_artifact_id"),
+        ("vllm_bench", None, None, None, "only supported by aiperf trace replays"),
+        ("sglang_bench", None, 4, 2, "only supported by aiperf trace replays"),
+    ],
+)
+def test_inference_scenario_rejects_speedup_when_provider_cannot_apply_it(
+    provider: str,
+    trace_artifact_id: str | None,
+    random_input_len: int | None,
+    random_output_len: int | None,
+    message: str,
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        InferenceScenarioConfig(
+            server="local",
+            provider=provider,  # type: ignore[arg-type]
+            trace_artifact_id=trace_artifact_id,
+            random_input_len=random_input_len,
+            random_output_len=random_output_len,
+            speedup_ratio=2.0,
+        )
+
+
 def test_sglang_config_rejects_non_cuda_v1_escape_hatches() -> None:
     with pytest.raises(ValidationError, match="extra_forbidden"):
         InferenceServerConfig.model_validate(

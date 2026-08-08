@@ -139,6 +139,7 @@ class VllmBenchServeRequest(ContractModel):
     request_rate: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
     burstiness: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
     max_concurrency: Annotated[int, Field(gt=0, le=100_000)] | None = None
+    warmup_request_count: Annotated[int, Field(ge=0, le=1_000_000)] = 0
     seed: Annotated[int, Field(ge=0, le=2**31 - 1)] = 0
 
     @field_validator("base_url")
@@ -183,6 +184,7 @@ class VllmBenchServeRequest(ContractModel):
             values.extend(("--burstiness", str(self.burstiness)))
         if self.max_concurrency is not None:
             values.extend(("--max-concurrency", str(self.max_concurrency)))
+        values.extend(("--num-warmups", str(self.warmup_request_count)))
         return tuple(values)
 
 
@@ -258,8 +260,7 @@ class SglangBenchServingRequest(ContractModel):
             values.extend(("--request-rate", str(self.request_rate)))
         if self.max_concurrency is not None:
             values.extend(("--max-concurrency", str(self.max_concurrency)))
-        if self.warmup_request_count:
-            values.extend(("--warmup-requests", str(self.warmup_request_count)))
+        values.extend(("--warmup-requests", str(self.warmup_request_count)))
         return tuple(values)
 
 

@@ -388,6 +388,14 @@ class InferenceScenarioConfig(ContractModel):
             raise ValueError("trace_artifact_id is only supported by the aiperf provider")
         if self.provider == "vllm_bench" and not self.streaming:
             raise ValueError("vllm_bench non-streaming response mode is unsupported in v1")
+        if self.provider != "aiperf" and self.speedup_ratio != 1.0:
+            raise ValueError("speedup_ratio is only supported by aiperf trace replays")
+        if (
+            self.provider == "aiperf"
+            and self.trace_artifact_id is None
+            and self.speedup_ratio != 1.0
+        ):
+            raise ValueError("speedup_ratio requires an aiperf trace_artifact_id")
         if self.provider == "sglang_bench":
             if not self.streaming:
                 raise ValueError("sglang_bench non-streaming response mode is unsupported in v1")
