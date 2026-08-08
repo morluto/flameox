@@ -7,6 +7,7 @@ import pytest
 
 from flameox.adapters.inference import InferenceArtifactExtractor
 from flameox.analysis.inference_protocol import InferenceProtocolIdentity
+from flameox.application.environment import collect_environment
 from flameox.application.evidence_query import EvidenceQueryService
 from flameox.application.inference import (
     InferenceReplayResult,
@@ -161,6 +162,54 @@ def test_plan_existing_local_vllm_bench_uses_shorter_default_deadline(
     assert plan.argv[0] == "/tools/vllm"
     assert "bench" in plan.argv and "serve" in plan.argv
     assert plan.timeout_seconds == 600.0  # vllm_bench default deadline
+
+
+def test_sglang_protocol_identity_binds_random_shape_and_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    launcher = tmp_path / "sglang-python"
+    launcher.write_text("launcher")
+    launcher.chmod(0o755)
+    (tmp_path / "flameox.toml").write_text(
+        "schema_version = 1\n"
+        "[inference_servers.local]\n"
+        'provider = "sglang"\n'
+        f'benchmark_python = "{launcher}"\n'
+        'mode = "existing_local"\nbase_url = "http://127.0.0.1:8000"\nmodel = "model"\n'
+        "[inference_scenarios.replay]\n"
+        'server = "local"\nprovider = "sglang_bench"\n'
+        "random_input_len = 4\nrandom_output_len = 2\nrandom_range_ratio = 0.5\n"
+    )
+    from flameox.application import inference as inference_module
+    from flameox.application.inference_providers import ExistingServerProbe, InferenceToolDiscovery
+
+    discovery = InferenceToolDiscovery(
+        tool="sglang",
+        executable=launcher,
+        available=True,
+        compatible=True,
+        version="0.5.16",
+        executable_digest="sha256:" + "c" * 64,
+    )
+    monkeypatch.setattr(inference_module, "discover_sglang", lambda _launcher, *, broker: discovery)
+    monkeypatch.setattr(
+        inference_module,
+        "probe_existing_vllm_server",
+        lambda *_args, **_kwargs: ExistingServerProbe(
+            base_url="http://127.0.0.1:8000", health_ready=True, model_ids=("model",)
+        ),
+    )
+    service = InferenceReplayService(workspace, broker=RecordingBroker())
+    plan = service.plan("replay")
+    reshaped = plan.model_copy(update={"random_input_len": 8})
+
+    identity = service._protocol_identity(plan, environment=collect_environment())
+    reshaped_identity = service._protocol_identity(reshaped, environment=collect_environment())
+
+    assert identity.trace.producer == "sglang.bench_serving"
+    assert identity.server.cache_backend == "custom"
+    assert identity.trace.artifact_digest != reshaped_identity.trace.artifact_digest
 
 
 def test_each_replay_plan_uses_an_isolated_output_directory(

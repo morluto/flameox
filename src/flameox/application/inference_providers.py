@@ -26,6 +26,7 @@ from urllib.response import addinfourl
 from pydantic import Field, field_validator, model_validator
 
 from flameox.domain import DomainError, ErrorCode
+from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.models import ContractModel
 
 _MAX_PROBE_RESPONSE_BYTES = 1024 * 1024
@@ -185,8 +186,85 @@ class VllmBenchServeRequest(ContractModel):
         return tuple(values)
 
 
+class SglangBenchServingRequest(ContractModel):
+    """Bounded SGLang 0.5.16 ``bench_serving`` random-workload invocation."""
+
+    benchmark_python: Path
+    base_url: str
+    model: Annotated[str, Field(min_length=1, max_length=500)]
+    tokenizer: Annotated[str, Field(min_length=1, max_length=500)] | None = None
+    result_path: Path
+    endpoint_type: Literal["chat", "completions"] = "chat"
+    streaming: bool = True
+    num_prompts: Annotated[int, Field(gt=0, le=10_000_000)]
+    random_input_len: Annotated[int, Field(gt=0, le=1_000_000)]
+    random_output_len: Annotated[int, Field(gt=0, le=1_000_000)]
+    random_range_ratio: Annotated[float, Field(gt=0, le=1)] = 1.0
+    request_rate: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
+    max_concurrency: Annotated[int, Field(gt=0, le=100_000)] | None = None
+    warmup_request_count: Annotated[int, Field(ge=0, le=1_000_000)] = 0
+    seed: Annotated[int, Field(ge=0, le=2**31 - 1)] = 0
+
+    @field_validator("base_url")
+    @classmethod
+    def valid_url(cls, value: str) -> str:
+        return _loopback_http_url(value)
+
+    @model_validator(mode="after")
+    def valid_launcher_and_streaming(self) -> SglangBenchServingRequest:
+        if not self.benchmark_python.is_absolute():
+            raise ValueError("benchmark_python must be absolute")
+        if not self.streaming:
+            raise ValueError(
+                "sglang bench_serving non-streaming response mode is unsupported in v1"
+            )
+        if urlsplit(self.base_url).path not in ("", "/"):
+            raise ValueError("sglang bench_serving requires a root base_url in v1")
+        return self
+
+    def argv(self) -> tuple[str, ...]:
+        parsed = urlsplit(self.base_url)
+        assert parsed.hostname is not None
+        values = [
+            str(self.benchmark_python),
+            "-m",
+            "sglang.bench_serving",
+            "--backend",
+            "sglang-oai-chat" if self.endpoint_type == "chat" else "sglang-oai",
+            "--host",
+            parsed.hostname,
+            "--port",
+            str(parsed.port or 80),
+            "--model",
+            self.model,
+            "--dataset-name",
+            "random",
+            "--random-input-len",
+            str(self.random_input_len),
+            "--random-output-len",
+            str(self.random_output_len),
+            "--random-range-ratio",
+            str(self.random_range_ratio),
+            "--num-prompts",
+            str(self.num_prompts),
+            "--seed",
+            str(self.seed),
+            "--output-file",
+            str(self.result_path),
+        ]
+        if self.tokenizer is not None:
+            values.extend(("--tokenizer", self.tokenizer))
+        if self.request_rate is not None:
+            values.extend(("--request-rate", str(self.request_rate)))
+        if self.max_concurrency is not None:
+            values.extend(("--max-concurrency", str(self.max_concurrency)))
+        if self.warmup_request_count:
+            values.extend(("--warmup-requests", str(self.warmup_request_count)))
+        return tuple(values)
+
+
 class InferenceToolDiscovery(ContractModel):
-    tool: Literal["aiperf", "vllm"]
+    tool: Literal["aiperf", "vllm", "sglang"]
     executable: Path | None
     available: bool
     version: str | None = None
@@ -194,6 +272,67 @@ class InferenceToolDiscovery(ContractModel):
     compatible: bool = False
     compatibility_reason: str | None = None
     remediation: tuple[str, ...] = ()
+
+
+def discover_sglang(
+    benchmark_python: Path, *, broker: SubprocessBroker | None = None
+) -> InferenceToolDiscovery:
+    """Discover SGLang through its declared launcher, never Flameox's PATH."""
+    executable = benchmark_python.resolve()
+    digest = _digest_executable(executable)
+    tool_version: str | None = None
+    if executable.is_file() and os.access(executable, os.X_OK):
+        try:
+            outcome = (broker or SubprocessBroker()).run_sync(
+                ExecutionRequest(
+                    argv=(
+                        str(executable),
+                        "-c",
+                        "from importlib.metadata import version; print(version('sglang'))",
+                    ),
+                    cwd=executable.parent,
+                    environment_allowlist=("PATH",),
+                    allowed_working_roots=(executable.parent,),
+                    timeout_seconds=5,
+                    max_output_bytes=1024,
+                )
+            )
+            if outcome.process.exit_code == 0:
+                candidate = outcome.stdout.decode("utf-8", errors="strict").strip()
+                tool_version = candidate if candidate else None
+        except (DomainError, OSError, UnicodeDecodeError):
+            pass
+    compatible = tool_version == "0.5.16"
+    return InferenceToolDiscovery(
+        tool="sglang",
+        executable=executable if executable.is_file() else None,
+        available=executable.is_file() and os.access(executable, os.X_OK) and compatible,
+        version=tool_version,
+        executable_digest=digest,
+        compatible=compatible,
+        compatibility_reason=None
+        if compatible
+        else "SGLang 0.5.16 is required in benchmark_python.",
+        remediation=(
+            ()
+            if compatible
+            else (
+                "Install sglang==0.5.16 in the declared benchmark_python runtime; "
+                "Flameox does not install it.",
+            )
+        ),
+    )
+
+
+def _digest_executable(executable: Path) -> str | None:
+    digest = hashlib.sha256()
+    try:
+        with executable.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return f"sha256:{digest.hexdigest()}"
 
 
 def discover_inference_tool(tool: Literal["aiperf", "vllm"]) -> InferenceToolDiscovery:
@@ -209,14 +348,7 @@ def discover_inference_tool(tool: Literal["aiperf", "vllm"]) -> InferenceToolDis
     tool_version: str | None = None
     executable_digest: str | None = None
     if executable is not None:
-        digest = hashlib.sha256()
-        try:
-            with executable.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            executable_digest = f"sha256:{digest.hexdigest()}"
-        except OSError:
-            executable_digest = None
+        executable_digest = _digest_executable(executable)
         try:
             tool_version = version(tool)
         except PackageNotFoundError:

@@ -318,7 +318,8 @@ class InferenceServerConfig(ContractModel):
     endpoint Flameox probes but never starts.
     """
 
-    provider: Literal["vllm"] = "vllm"
+    provider: Literal["vllm", "sglang"] = "vllm"
+    benchmark_python: str | None = None
     mode: Literal["managed", "existing_local"]
     workload: str | None = None
     base_url: str = "http://127.0.0.1:8000"
@@ -330,6 +331,15 @@ class InferenceServerConfig(ContractModel):
 
     @model_validator(mode="after")
     def mode_fields_are_consistent(self) -> InferenceServerConfig:
+        if self.provider == "sglang":
+            if self.benchmark_python is None or not Path(self.benchmark_python).is_absolute():
+                raise ValueError(
+                    "sglang inference servers require an absolute benchmark_python launcher"
+                )
+            if urlsplit(self.base_url).path not in ("", "/"):
+                raise ValueError("sglang inference servers require a root base_url in v1")
+        elif self.benchmark_python is not None:
+            raise ValueError("benchmark_python is only supported by sglang inference servers")
         if self.mode == "managed":
             if self.workload is None:
                 raise ValueError("managed inference servers require a workload")
@@ -356,7 +366,7 @@ class InferenceScenarioConfig(ContractModel):
     """
 
     server: str
-    provider: Literal["aiperf", "vllm_bench"]
+    provider: Literal["aiperf", "vllm_bench", "sglang_bench"]
     endpoint_type: Literal["chat", "completions"] = "chat"
     streaming: bool = True
     trace_artifact_id: Digest | None = None
@@ -368,6 +378,9 @@ class InferenceScenarioConfig(ContractModel):
     seed: Annotated[int, Field(ge=0, le=2**31 - 1)] = 0
     speedup_ratio: Annotated[float, Field(gt=0, le=100)] = 1.0
     semantic_oracle_workload: str | None = None
+    random_input_len: Annotated[int, Field(gt=0, le=1_000_000)] | None = None
+    random_output_len: Annotated[int, Field(gt=0, le=1_000_000)] | None = None
+    random_range_ratio: Annotated[float, Field(gt=0, le=1)] | None = None
 
     @model_validator(mode="after")
     def trace_requires_aiperf(self) -> InferenceScenarioConfig:
@@ -375,6 +388,18 @@ class InferenceScenarioConfig(ContractModel):
             raise ValueError("trace_artifact_id is only supported by the aiperf provider")
         if self.provider == "vllm_bench" and not self.streaming:
             raise ValueError("vllm_bench non-streaming response mode is unsupported in v1")
+        if self.provider == "sglang_bench":
+            if not self.streaming:
+                raise ValueError("sglang_bench non-streaming response mode is unsupported in v1")
+            if self.random_input_len is None or self.random_output_len is None:
+                raise ValueError("sglang_bench requires random_input_len and random_output_len")
+            if self.burstiness is not None:
+                raise ValueError("sglang_bench burstiness is unsupported in v1")
+        elif any(
+            value is not None
+            for value in (self.random_input_len, self.random_output_len, self.random_range_ratio)
+        ):
+            raise ValueError("random workload fields are only supported by sglang_bench")
         if self.burstiness is not None and self.request_rate is None:
             raise ValueError("burstiness requires request_rate")
         return self
@@ -467,6 +492,12 @@ class ProjectConfig(ContractModel):
             raise ValueError(
                 "inference scenarios reference unknown servers: " + ", ".join(missing_servers)
             )
+        for scenario in self.inference_scenarios.values():
+            server = self.inference_servers[scenario.server]
+            if scenario.provider == "sglang_bench" and server.provider != "sglang":
+                raise ValueError("sglang_bench scenarios require an sglang inference server")
+            if scenario.provider != "sglang_bench" and server.provider == "sglang":
+                raise ValueError("sglang inference servers require an sglang_bench scenario")
         missing_oracles = sorted(
             {
                 scenario.semantic_oracle_workload

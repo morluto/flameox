@@ -50,8 +50,10 @@ from flameox.application.imports import ImportArtifactRequest, ImportService
 from flameox.application.inference_providers import (
     AIPerfProfileRequest,
     ExistingServerProbe,
+    SglangBenchServingRequest,
     VllmBenchServeRequest,
     discover_inference_tool,
+    discover_sglang,
     probe_existing_vllm_server,
 )
 from flameox.application.oracle_receipts import parse_oracle_receipt
@@ -96,6 +98,7 @@ from flameox.storage import ArtifactStore, RunStore, Workspace
 _PROVIDER_TOOL: dict[str, Literal["aiperf", "vllm"]] = {
     "aiperf": "aiperf",
     "vllm_bench": "vllm",
+    "sglang_bench": "vllm",
 }
 _MAX_RESULT_LIMITATIONS = 16
 
@@ -107,8 +110,8 @@ class InferenceReplayPlan(ContractModel):
     plan_id: str
     scenario_name: str
     server_name: str
-    provider: Literal["aiperf", "vllm_bench"]
-    server_provider: Literal["vllm"] = "vllm"
+    provider: Literal["aiperf", "vllm_bench", "sglang_bench"]
+    server_provider: Literal["vllm", "sglang"] = "vllm"
     server_mode: Literal["managed", "existing_local"]
     base_url: str
     model: Annotated[str, Field(min_length=1, max_length=500)]
@@ -140,6 +143,9 @@ class InferenceReplayPlan(ContractModel):
     seed: Annotated[int, Field(ge=0, le=2**31 - 1)] = 0
     speedup_ratio: Annotated[float, Field(gt=0, le=100)] = 1.0
     semantic_oracle_workload: str | None = None
+    random_input_len: Annotated[int, Field(gt=0, le=1_000_000)] | None = None
+    random_output_len: Annotated[int, Field(gt=0, le=1_000_000)] | None = None
+    random_range_ratio: Annotated[float, Field(gt=0, le=1)] | None = None
     timeout_seconds: Annotated[float, Field(gt=0, le=86_400)]
     deadline_at: datetime
     exploratory_reason: Annotated[str, Field(min_length=1, max_length=500)]
@@ -156,7 +162,7 @@ class InferenceReplayResult(ContractModel):
     plan_id: str
     scenario_name: str
     server_name: str
-    provider: Literal["aiperf", "vllm_bench"]
+    provider: Literal["aiperf", "vllm_bench", "sglang_bench"]
     argv: Annotated[tuple[str, ...], Field(max_length=1_024)]
     output_path: str | None = None
     output_path_retained: bool = False
@@ -223,7 +229,11 @@ class InferenceReplayService:
         deadline = self._deadline(timeout_seconds, scenario, server)
         deadline_at = utc_now() + timedelta(seconds=deadline)
         tool = _PROVIDER_TOOL[scenario.provider]
-        discovery = discover_inference_tool(tool)
+        discovery = (
+            discover_sglang(Path(server.benchmark_python), broker=self.broker)
+            if scenario.provider == "sglang_bench" and server.benchmark_python is not None
+            else discover_inference_tool(tool)
+        )
         probe: ExistingServerProbe | None = None
         if server.mode == "existing_local" and discovery.available:
             probe = probe_existing_vllm_server(
@@ -245,6 +255,8 @@ class InferenceReplayService:
                 )
         server_executable_digest, server_version = self._server_tool_identity(server)
         output_path = self._output_path(scenario_name, new_id())
+        if scenario.provider == "sglang_bench":
+            output_path = output_path.with_suffix(".jsonl")
         request = (
             self._build_request(
                 scenario,
@@ -313,6 +325,9 @@ class InferenceReplayService:
             seed=scenario.seed,
             speedup_ratio=scenario.speedup_ratio,
             semantic_oracle_workload=scenario.semantic_oracle_workload,
+            random_input_len=scenario.random_input_len,
+            random_output_len=scenario.random_output_len,
+            random_range_ratio=scenario.random_range_ratio,
             timeout_seconds=deadline,
             deadline_at=deadline_at,
             exploratory_reason=(
@@ -859,10 +874,11 @@ class InferenceReplayService:
         command = self.workloads.resolve(server.workload).command
         executable = self._resolve_server_executable(command)
         executable_digest = self._executable_digest(executable)
-        discovery = discover_inference_tool("vllm")
+        discovery = discover_inference_tool("vllm") if server.provider == "vllm" else None
         version = (
             discovery.version
-            if discovery.executable is not None
+            if discovery is not None
+            and discovery.executable is not None
             and executable.resolve() == discovery.executable.resolve()
             else None
         )
@@ -901,7 +917,11 @@ class InferenceReplayService:
                 "Inference configuration changed after this plan was created.",
                 remediation=("Plan the inference scenario again, then retry execution.",),
             )
-        provider = discover_inference_tool(_PROVIDER_TOOL[plan.provider])
+        provider = (
+            discover_sglang(Path(plan.tool_executable), broker=self.broker)
+            if plan.provider == "sglang_bench" and plan.tool_executable is not None
+            else discover_inference_tool(_PROVIDER_TOOL[plan.provider])
+        )
         if not plan.tool_available or not plan.argv:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
@@ -962,7 +982,7 @@ class InferenceReplayService:
         executable: Path,
         *,
         output_path: Path,
-    ) -> AIPerfProfileRequest | VllmBenchServeRequest:
+    ) -> AIPerfProfileRequest | VllmBenchServeRequest | SglangBenchServingRequest:
         # AIPerf's fixed_schedule requires a Mooncake trace; without a declared
         # trace_artifact_id the replay uses the tool's default schedule.
         fixed_schedule = scenario.trace_artifact_id is not None
@@ -989,6 +1009,27 @@ class InferenceReplayService:
                 seed=scenario.seed,
                 request_count=scenario.num_prompts if trace_path is None else None,
                 speedup_ratio=scenario.speedup_ratio,
+            )
+        if scenario.provider == "sglang_bench":
+            assert server.benchmark_python is not None
+            assert scenario.random_input_len is not None
+            assert scenario.random_output_len is not None
+            return SglangBenchServingRequest(
+                benchmark_python=Path(server.benchmark_python),
+                base_url=server.base_url,
+                model=server.model,
+                tokenizer=server.tokenizer,
+                endpoint_type=scenario.endpoint_type,
+                streaming=scenario.streaming,
+                num_prompts=scenario.num_prompts,
+                random_input_len=scenario.random_input_len,
+                random_output_len=scenario.random_output_len,
+                random_range_ratio=scenario.random_range_ratio or 1.0,
+                request_rate=scenario.request_rate,
+                max_concurrency=scenario.concurrency,
+                warmup_request_count=scenario.warmup_request_count,
+                seed=scenario.seed,
+                result_path=output_path,
             )
         return VllmBenchServeRequest(
             executable=executable,
@@ -1161,6 +1202,9 @@ class InferenceReplayService:
                     "streaming": plan.streaming,
                     "model": plan.model,
                     "tokenizer": plan.tokenizer,
+                    "random_input_len": plan.random_input_len,
+                    "random_output_len": plan.random_output_len,
+                    "random_range_ratio": plan.random_range_ratio,
                 }
             )
         managed_command_digest = None
@@ -1193,6 +1237,8 @@ class InferenceReplayService:
                     if plan.trace_artifact_id is not None
                     else "aiperf"
                     if plan.provider == "aiperf"
+                    else "sglang.bench_serving"
+                    if plan.provider == "sglang_bench"
                     else "vllm"
                 ),
                 producer=(
@@ -1200,6 +1246,8 @@ class InferenceReplayService:
                     if plan.trace_artifact_id is not None
                     else "aiperf"
                     if plan.provider == "aiperf"
+                    else "sglang.bench_serving"
+                    if plan.provider == "sglang_bench"
                     else "vllm"
                 ),
                 producer_version=(
@@ -1225,7 +1273,8 @@ class InferenceReplayService:
                 quantization=plan.quantization or "none",
             ),
             server=ServerConfigIdentity(
-                backend="vllm",
+                backend=plan.server_provider,
+                cache_backend="custom" if plan.server_provider == "sglang" else "vllm_paged",
                 endpoint=(
                     "/v1/chat/completions" if plan.endpoint_type == "chat" else "/v1/completions"
                 ),
@@ -1454,13 +1503,15 @@ class InferenceReplayService:
         extractor = InferenceArtifactExtractor(self.workspace)
         limitations: list[str] = []
         try:
-            if plan.provider == "vllm_bench":
+            if plan.provider in {"vllm_bench", "sglang_bench"}:
                 if preserved:
-                    result = extractor.extract_vllm_result(
-                        preserved[0][1], evidence_run_id=evidence_run_id
-                    )
+                    result = (
+                        extractor.extract_sglang_result
+                        if plan.provider == "sglang_bench"
+                        else extractor.extract_vllm_result
+                    )(preserved[0][1], evidence_run_id=evidence_run_id)
                     return result.limitations
-                return ("vLLM benchmark result JSON was not emitted.",)
+                return ("Inference benchmark result was not emitted.",)
             export = next((item for item in preserved if item[0] == "profile_export.jsonl"), None)
             inputs = next((item for item in preserved if item[0] == "inputs.json"), None)
             if export is None:
@@ -1524,7 +1575,9 @@ class InferenceReplayService:
                         media_type=self._provider_media_type(path),
                         sensitivity=(
                             Sensitivity.SENSITIVE
-                            if plan.provider == "aiperf" or is_oracle or is_server_output
+                            if plan.provider in {"aiperf", "sglang_bench"}
+                            or is_oracle
+                            or is_server_output
                             else Sensitivity.INTERNAL
                         ),
                         role=(

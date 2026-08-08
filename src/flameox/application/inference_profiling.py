@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from flameox.analysis.inference_protocol import InferenceProtocolIdentity, ProfilerState
 from flameox.application.evidence_query import EvidenceQueryService
@@ -23,7 +23,7 @@ from flameox.application.evidence_rows import (
 )
 from flameox.application.imports import ImportArtifactRequest, ImportService
 from flameox.application.inference import InferenceReplayService
-from flameox.application.inference_providers import _loopback_http_url
+from flameox.application.inference_providers import _loopback_http_url, discover_sglang
 from flameox.application.run_rows import run_row
 from flameox.application.source import collect_partial_source_state
 from flameox.application.workloads import WorkloadService
@@ -53,10 +53,22 @@ from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
 
+class SglangProfileOptions(ContractModel):
+    """The only SGLang 0.5.16 profiler request Flameox permits in v1."""
+
+    start_step: Literal[5] = 5
+    num_steps: Literal[2] = 2
+    activities: tuple[Literal["CPU"], Literal["GPU"]] = ("CPU", "GPU")
+    profile_by_stage: Literal[True] = True
+    record_shapes: Literal[True] = True
+    with_stack: Literal[True] = True
+
+
 class InferenceProfilingPlan(ContractModel):
     schema_version: Literal[1] = 1
     plan_id: str
     server_name: str
+    server_provider: Literal["vllm", "sglang"] = "vllm"
     profiler: Literal["torch_profiler", "nsight_systems"]
     base_url: str
     server_argv: tuple[str, ...]
@@ -68,8 +80,22 @@ class InferenceProfilingPlan(ContractModel):
     configuration_id: str
     server_executable_digest: str | None = None
     server_version: str | None = None
+    benchmark_executable_digest: str | None = None
     diagnostic_only: Literal[True] = True
     limitations: tuple[str, ...]
+    sglang_profile_id: Annotated[str, Field(min_length=1, max_length=100)] | None = None
+    sglang_profile_options: SglangProfileOptions | None = None
+
+    @model_validator(mode="after")
+    def sglang_profile_contract_is_consistent(self) -> InferenceProfilingPlan:
+        requires_sglang_options = (
+            self.server_provider == "sglang" and self.profiler == "torch_profiler"
+        )
+        if requires_sglang_options != (self.sglang_profile_options is not None):
+            raise ValueError("SGLang Torch profiling requires fixed SGLang profile options")
+        if requires_sglang_options != (self.sglang_profile_id is not None):
+            raise ValueError("SGLang Torch profiling requires a generated profile id")
+        return self
 
 
 class InferenceProfilingResult(ContractModel):
@@ -123,19 +149,40 @@ class InferenceProfilingService:
                 ErrorCode.EXECUTION_REFUSED,
                 "Inference profiling requires a Flameox-managed server workload.",
             )
+        if server.provider == "sglang" and profiler != "torch_profiler":
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "SGLang profiling supports only its stage-separated Torch profiler in v1.",
+                remediation=("Use profiler='torch_profiler' for the declared SGLang server.",),
+            )
         workload = self.workloads.resolve(server.workload)
         replay = InferenceReplayService(self.workspace, broker=self.broker)
         server_executable_digest, server_version = replay._server_tool_identity(server)
+        sglang_discovery = (
+            discover_sglang(Path(server.benchmark_python), broker=self.broker)
+            if server.provider == "sglang" and server.benchmark_python is not None
+            else None
+        )
+        if sglang_discovery is not None:
+            server_version = sglang_discovery.version
         native_argv = workload.command.argv
         output_root = self.workspace.paths.staging / f"inference-profile-{server_name}" / new_id()
         environment = dict(workload.command.env_overrides)
         limitations: tuple[str, ...]
-        if profiler == "torch_profiler":
+        if profiler == "torch_profiler" and server.provider == "vllm":
             output_path = output_root / "torch"
             environment["VLLM_TORCH_PROFILER_DIR"] = str(output_path)
             argv = native_argv
             limitations = (
                 "Diagnostic profile; measurements must come from a separate unprofiled run.",
+            )
+        elif profiler == "torch_profiler":
+            output_path = output_root / "torch"
+            argv = native_argv
+            limitations = (
+                "Diagnostic profile; measurements must come from a separate unprofiled run.",
+                "SGLang captures separate prefill/decode traces; kernel dominance supports a "
+                "hypothesis, not a bandwidth conclusion.",
             )
         else:
             if nsys_executable is None:
@@ -169,8 +216,13 @@ class InferenceProfilingService:
                 "The native .nsys-rep must be exported with official nsys export "
                 "before extraction.",
             )
+        sglang_profile_options = (
+            SglangProfileOptions()
+            if server.provider == "sglang" and profiler == "torch_profiler"
+            else None
+        )
         environment_names = set(environment)
-        if profiler == "torch_profiler":
+        if profiler == "torch_profiler" and server.provider == "vllm":
             environment_names.add("VLLM_TORCH_PROFILER_DIR")
         environment_digest = digest_model(workload.command.env_overrides)
         identity = {
@@ -184,6 +236,17 @@ class InferenceProfilingService:
                 replay._executable_digest(nsys_executable) if nsys_executable else None
             ),
             "configuration_id": digest_model(project.model_dump(mode="json")),
+            "server_provider": server.provider,
+            "server_executable_digest": server_executable_digest,
+            "benchmark_executable_digest": (
+                sglang_discovery.executable_digest if sglang_discovery is not None else None
+            ),
+            "server_version": server_version,
+            "sglang_profile_options": (
+                sglang_profile_options.model_dump(mode="json")
+                if sglang_profile_options is not None
+                else None
+            ),
         }
         plan_id = digest_model(identity)
         if expected_plan_id is not None and expected_plan_id != plan_id:
@@ -196,6 +259,7 @@ class InferenceProfilingService:
         return InferenceProfilingPlan(
             plan_id=plan_id,
             server_name=server_name,
+            server_provider=server.provider,
             profiler=profiler,
             base_url=server.base_url,
             server_argv=argv,
@@ -207,7 +271,13 @@ class InferenceProfilingService:
             configuration_id=digest_model(project.model_dump(mode="json")),
             server_executable_digest=server_executable_digest,
             server_version=server_version,
+            benchmark_executable_digest=(
+                sglang_discovery.executable_digest if sglang_discovery is not None else None
+            ),
             limitations=limitations,
+            # This is a server-side operation token, not a source of plan churn.
+            sglang_profile_id=(f"flameox-{plan_id[7:31]}" if sglang_profile_options else None),
+            sglang_profile_options=sglang_profile_options,
         )
 
     async def capture(  # noqa: C901 - one lifecycle boundary owns every terminal transition
@@ -239,10 +309,20 @@ class InferenceProfilingService:
                 "Managed server environment identity changed after profiling was planned.",
                 remediation=("Plan the inference profile again, then retry capture.",),
             )
-        if plan.profiler == "torch_profiler":
+        if plan.profiler == "torch_profiler" and plan.server_provider == "vllm":
             server_environment["VLLM_TORCH_PROFILER_DIR"] = str(plan.output_path)
         server_digest, server_version = replay._server_tool_identity(server)
-        if server_digest != plan.server_executable_digest or server_version != plan.server_version:
+        if server.provider == "sglang" and server.benchmark_python is not None:
+            sglang_discovery = discover_sglang(Path(server.benchmark_python), broker=self.broker)
+            server_version = sglang_discovery.version
+            benchmark_digest = sglang_discovery.executable_digest
+        else:
+            benchmark_digest = None
+        if (
+            server_digest != plan.server_executable_digest
+            or server_version != plan.server_version
+            or benchmark_digest != plan.benchmark_executable_digest
+        ):
             raise DomainError(
                 ErrorCode.REVISION_CONFLICT,
                 "Managed server executable identity changed after profiling was planned.",
@@ -319,14 +399,22 @@ class InferenceProfilingService:
             limitations = list(run.limitations)
             benchmark_exit_code: int | None = None
             benchmark_process = None
-            control = VllmProfilerControlClient(plan.base_url)
+            control = InferenceProfilerControlClient(plan.base_url, provider=plan.server_provider)
             try:
                 try:
                     control.timeout_seconds = min(
                         control.timeout_seconds,
                         max(0.01, (deadline_at - utc_now()).total_seconds()),
                     )
-                    await asyncio.to_thread(control.start)
+                    if plan.server_provider == "sglang":
+                        await asyncio.to_thread(
+                            control.start,
+                            output_dir=plan.output_path,
+                            profile_id=plan.sglang_profile_id,
+                            options=plan.sglang_profile_options,
+                        )
+                    else:
+                        await asyncio.to_thread(control.start)
                     remaining = (deadline_at - utc_now()).total_seconds()
                     if remaining <= 0:
                         raise DomainError(ErrorCode.PROCESS_TIMEOUT, "Profiling deadline expired.")
@@ -811,7 +899,13 @@ class InferenceProfilingService:
                             Sensitivity.SENSITIVE if server_output else Sensitivity.INTERNAL
                         ),
                         role=("inference_server_output" if server_output else "inference_profile"),
-                        producer="nsys" if plan.profiler == "nsight_systems" else "torch_profiler",
+                        producer=(
+                            "nsys"
+                            if plan.profiler == "nsight_systems"
+                            else "sglang.torch_profiler"
+                            if plan.server_provider == "sglang"
+                            else "torch_profiler"
+                        ),
                         allow_external_path=True,
                     )
                 )
@@ -897,25 +991,55 @@ class InferenceProfilingService:
         return None
 
 
-class VllmProfilerControlClient:
-    """Bounded client for vLLM's start/stop profiler control endpoints."""
+class InferenceProfilerControlClient:
+    """Provider-aware bounded client for vLLM and SGLang profiler endpoints."""
 
-    def __init__(self, base_url: str, *, timeout_seconds: float = 5.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        provider: Literal["vllm", "sglang"] = "vllm",
+        timeout_seconds: float = 5.0,
+    ) -> None:
         self.base_url = _loopback_http_url(base_url)
+        self.provider = provider
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         self.timeout_seconds = timeout_seconds
 
-    def start(self) -> None:
-        self._post("/start_profile")
+    def start(
+        self,
+        *,
+        output_dir: Path | None = None,
+        profile_id: str | None = None,
+        options: SglangProfileOptions | None = None,
+    ) -> None:
+        payload: bytes = b""
+        if self.provider == "sglang":
+            if output_dir is None or profile_id is None or options is None:
+                raise ValueError("SGLang profiling requires generated profile options")
+            payload = json.dumps(
+                {
+                    "output_dir": str(output_dir),
+                    "profile_id": profile_id,
+                    **options.model_dump(mode="json"),
+                },
+                separators=(",", ":"),
+            ).encode()
+        self._post("/start_profile", payload)
 
     def stop(self) -> None:
-        self._post("/stop_profile")
+        self._post("/stop_profile", b"")
 
-    def _post(self, path: Literal["/start_profile", "/stop_profile"]) -> None:
+    def _post(self, path: Literal["/start_profile", "/stop_profile"], payload: bytes) -> None:
         try:
             with urlopen(
-                Request(f"{self.base_url}{path}", data=b"", method="POST"),
+                Request(
+                    f"{self.base_url}{path}",
+                    data=payload,
+                    method="POST",
+                    headers={"Content-Type": "application/json"} if payload else {},
+                ),
                 timeout=self.timeout_seconds,
             ) as response:
                 if not 200 <= response.status < 300:
@@ -923,5 +1047,9 @@ class VllmProfilerControlClient:
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
             raise DomainError(
                 ErrorCode.PROCESS_FAILED,
-                f"vLLM profiler control failed at {path}.",
+                f"{self.provider} profiler control failed at {path}.",
             ) from exc
+
+
+# Backwards-compatible import name for callers that only target vLLM.
+VllmProfilerControlClient = InferenceProfilerControlClient

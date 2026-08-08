@@ -1094,6 +1094,148 @@ class VllmResultParser:
         return rows
 
 
+class SglangResultDocument(ContractModel):
+    """Safe aggregate subset of SGLang 0.5.16 ``bench_serving`` JSONL output."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    duration: Annotated[float, Field(ge=0)]
+    completed: Annotated[int, Field(ge=0)]
+    total_input_tokens: Annotated[int, Field(ge=0)]
+    total_output_tokens: Annotated[int, Field(ge=0)]
+    num_prompts: Annotated[int, Field(gt=0)] | None = None
+    request_throughput: Annotated[float, Field(ge=0)] | None = None
+    input_throughput: Annotated[float, Field(ge=0)] | None = None
+    output_throughput: Annotated[float, Field(ge=0)] | None = None
+    total_token_throughput: Annotated[float, Field(ge=0)] | None = None
+    accept_length: Annotated[float, Field(ge=0)] | None = None
+    concurrency: Annotated[float, Field(ge=0)] | None = None
+    mean_e2e_latency_ms: Annotated[float, Field(ge=0)] | None = None
+    median_e2e_latency_ms: Annotated[float, Field(ge=0)] | None = None
+    std_e2e_latency_ms: Annotated[float, Field(ge=0)] | None = None
+    p90_e2e_latency_ms: Annotated[float, Field(ge=0)] | None = None
+    p95_e2e_latency_ms: Annotated[float, Field(ge=0)] | None = None
+    p99_e2e_latency_ms: Annotated[float, Field(ge=0)] | None = None
+    mean_ttft_ms: Annotated[float, Field(ge=0)] | None = None
+    median_ttft_ms: Annotated[float, Field(ge=0)] | None = None
+    std_ttft_ms: Annotated[float, Field(ge=0)] | None = None
+    p90_ttft_ms: Annotated[float, Field(ge=0)] | None = None
+    p95_ttft_ms: Annotated[float, Field(ge=0)] | None = None
+    p99_ttft_ms: Annotated[float, Field(ge=0)] | None = None
+    mean_tpot_ms: Annotated[float, Field(ge=0)] | None = None
+    median_tpot_ms: Annotated[float, Field(ge=0)] | None = None
+    std_tpot_ms: Annotated[float, Field(ge=0)] | None = None
+    p90_tpot_ms: Annotated[float, Field(ge=0)] | None = None
+    p95_tpot_ms: Annotated[float, Field(ge=0)] | None = None
+    p99_tpot_ms: Annotated[float, Field(ge=0)] | None = None
+    mean_itl_ms: Annotated[float, Field(ge=0)] | None = None
+    median_itl_ms: Annotated[float, Field(ge=0)] | None = None
+    std_itl_ms: Annotated[float, Field(ge=0)] | None = None
+    p90_itl_ms: Annotated[float, Field(ge=0)] | None = None
+    p95_itl_ms: Annotated[float, Field(ge=0)] | None = None
+    p99_itl_ms: Annotated[float, Field(ge=0)] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_sensitive_details(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            raise ValueError("SGLang result must be a JSON object")
+        sensitive = {"input_lens", "output_lens", "ttfts", "itls", "generated_texts", "errors"}
+        if sensitive & value.keys() or any(isinstance(item, list) for item in value.values()):
+            raise ValueError("SGLang detailed output is not accepted")
+        return value
+
+    @field_validator("*")
+    @classmethod
+    def finite_numbers(cls, value: Any) -> Any:
+        if value is None:
+            return value
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError("SGLang metrics must be JSON numbers")
+        if not math.isfinite(float(value)):
+            raise ValueError("SGLang metrics must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def counts_are_consistent(self) -> SglangResultDocument:
+        if self.num_prompts is not None and self.completed > self.num_prompts:
+            raise ValueError("SGLang completed count exceeds num_prompts")
+        return self
+
+
+class SglangResultParser:
+    """Parse exactly one bounded, aggregate-only SGLang 0.5.16 JSONL record.
+
+    SGLang's optional detailed output carries prompts, generations and error
+    text.  It is intentionally rejected before any normalization occurs.
+    """
+
+    max_document_bytes = 1024 * 1024
+    _measurement_fields = tuple(
+        name for name in SglangResultDocument.model_fields if name not in {"num_prompts"}
+    )
+
+    def parse(self, path: Path) -> tuple[SglangResultDocument, list[VllmMeasurementRow]]:
+        try:
+            if path.stat().st_size > self.max_document_bytes:
+                raise ValueError("SGLang result exceeds size bound")
+            lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            if len(lines) != 1:
+                raise ValueError("SGLang output must contain exactly one non-empty JSONL record")
+            payload = json.loads(lines[0])
+            document = SglangResultDocument.model_validate(payload)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise DomainError(
+                ErrorCode.ARTIFACT_PARSE_FAILED,
+                "The artifact is not a valid aggregate SGLang JSONL result.",
+            ) from exc
+        rows: list[VllmMeasurementRow] = []
+        for key in self._measurement_fields:
+            value = getattr(document, key)
+            if value is None:
+                continue
+            value = float(value)
+            unit = (
+                "ms"
+                if key.endswith("_ms")
+                else "tokens/sec"
+                if key.endswith("throughput")
+                else "s"
+                if key == "duration"
+                else "count"
+            )
+            dimensions = {
+                "producer": "sglang.bench_serving",
+                "completed": str(document.completed),
+            }
+            aggregation = "aggregate"
+            if key.startswith("mean_"):
+                aggregation = "mean"
+                dimensions["stat"] = "mean"
+            elif key.startswith("median_"):
+                aggregation = "median"
+                dimensions["stat"] = "median"
+            elif key.startswith("std_"):
+                aggregation = "std"
+                dimensions["stat"] = "std"
+            elif key.startswith("p") and "_" in key:
+                percentile = key.split("_", 1)[0][1:]
+                if percentile.isdigit():
+                    aggregation = "percentile"
+                    dimensions.update({"stat": "percentile", "percentile": percentile})
+            rows.append(
+                VllmMeasurementRow(
+                    measurement_id=digest_model({"name": f"sglang.{key}", "value": value}),
+                    name=f"sglang.{key}",
+                    value_float=value,
+                    unit=unit,
+                    aggregation=aggregation,
+                    dimensions=dimensions,
+                )
+            )
+        return document, rows
+
+
 class InferenceExtractionResult(ContractModel):
     schema_version: Literal[1] = 1
     run_id: str
@@ -1244,6 +1386,66 @@ class InferenceArtifactExtractor:
             input_artifact_ids=(registration.artifact_id,),
             operation_identity={
                 "kind": "vllm_bench",
+                "parser_version": self.version,
+                "evidence_run_id": target_run,
+            },
+        )
+        return InferenceExtractionResult(
+            run_id=run_id,
+            artifact_id=registration.artifact_id,
+            evidence_run_id=target_run,
+            measurement_count=len(rows),
+            corpus_commit_id=published.commit.commit_id,
+        )
+
+    def extract_sglang_result(
+        self, run_id: str, *, evidence_run_id: str | None = None
+    ) -> InferenceExtractionResult:
+        """Publish scalar-only measurements from a preserved SGLang JSONL result."""
+        registration = self._registration(run_id, ArtifactKind.INFERENCE_RESULT)
+        stored = self.artifacts.get(registration.artifact_id)
+        target_run = evidence_run_id or run_id
+        _document, measurements = SglangResultParser().parse(stored.payload_path)
+        rows = [
+            {
+                "measurement_id": digest_model(
+                    {
+                        "run_id": target_run,
+                        "artifact_id": registration.artifact_id,
+                        "row": row.model_dump(mode="json"),
+                    }
+                ),
+                "run_id": target_run,
+                "artifact_id": registration.artifact_id,
+                "name": row.name,
+                "value_int": None,
+                "value_float": row.value_float,
+                "unit": row.unit,
+                "aggregation": row.aggregation,
+                "scope": "workload",
+                "trial_id": None,
+                "worker_id": None,
+                "worker_run_index": None,
+                "value_index": None,
+                "loop_count": None,
+                "is_warmup": False,
+                "block_id": None,
+                "variant_id": None,
+                "order_in_block": None,
+                "phase": "steady_state",
+                "dimensions": row.dimensions,
+                "evidence_level": row.evidence_level,
+            }
+            for row in measurements
+        ]
+        published = self.publisher.publish_rows_idempotent(
+            {"measurements": rows},
+            publisher=self.name,
+            publisher_version=self.version,
+            input_run_ids=tuple(dict.fromkeys((run_id, target_run))),
+            input_artifact_ids=(registration.artifact_id,),
+            operation_identity={
+                "kind": "sglang_bench_serving",
                 "parser_version": self.version,
                 "evidence_run_id": target_run,
             },

@@ -72,6 +72,72 @@ def test_managed_inference_server_rejects_localhost_name() -> None:
         )
 
 
+@pytest.mark.parametrize("launcher", [None, "python", "relative/python"])
+def test_sglang_server_requires_an_absolute_benchmark_launcher(launcher: str | None) -> None:
+    with pytest.raises(ValidationError, match="absolute benchmark_python"):
+        InferenceServerConfig(
+            provider="sglang",
+            benchmark_python=launcher,
+            mode="existing_local",
+            model="model",
+        )
+
+
+def test_sglang_server_rejects_non_root_base_url() -> None:
+    with pytest.raises(ValidationError, match="root base_url"):
+        InferenceServerConfig(
+            provider="sglang",
+            benchmark_python="/opt/sglang/bin/python",
+            mode="existing_local",
+            base_url="http://127.0.0.1:8000/api",
+            model="model",
+        )
+
+
+def test_sglang_scenario_requires_random_workload_and_sglang_server() -> None:
+    with pytest.raises(ValidationError, match="requires random_input_len"):
+        InferenceScenarioConfig(server="local", provider="sglang_bench")
+    with pytest.raises(ValidationError, match="require an sglang inference server"):
+        ProjectConfig.model_validate(
+            {
+                "inference_servers": {"local": {"mode": "existing_local", "model": "model"}},
+                "inference_scenarios": {
+                    "replay": {
+                        "server": "local",
+                        "provider": "sglang_bench",
+                        "random_input_len": 4,
+                        "random_output_len": 2,
+                    }
+                },
+            }
+        )
+
+
+def test_sglang_scenario_rejects_dropped_burstiness() -> None:
+    with pytest.raises(ValidationError, match="burstiness is unsupported"):
+        InferenceScenarioConfig(
+            server="local",
+            provider="sglang_bench",
+            random_input_len=4,
+            random_output_len=2,
+            request_rate=1,
+            burstiness=0.5,
+        )
+
+
+def test_sglang_config_rejects_non_cuda_v1_escape_hatches() -> None:
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        InferenceServerConfig.model_validate(
+            {
+                "provider": "sglang",
+                "benchmark_python": "/opt/sglang/bin/python",
+                "mode": "existing_local",
+                "model": "model",
+                "rocm": True,
+            }
+        )
+
+
 def test_structured_inference_configuration_preserves_existing_sections(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(

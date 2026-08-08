@@ -1016,6 +1016,11 @@ def create_server(
         ],
         model: Annotated[str, Field(min_length=1, max_length=500)],
         ctx: Context[AppContext],
+        provider: Literal["vllm", "sglang"] = "vllm",
+        benchmark_python: Annotated[
+            str | None,
+            Field(description="Absolute SGLang Python launcher; required only for sglang."),
+        ] = None,
         workload: Annotated[
             str | None,
             Field(description="Declared workload that starts vLLM; required for managed mode."),
@@ -1042,6 +1047,8 @@ def create_server(
                     operation=operation,
                     expected_configuration_id=expected_configuration_id,
                     config=InferenceServerConfig(
+                        provider=provider,
+                        benchmark_python=benchmark_python,
                         mode=mode,
                         workload=workload,
                         base_url=base_url,
@@ -1065,7 +1072,7 @@ def create_server(
         ],
         operation: Literal["create", "replace"],
         server_name: Annotated[str, Field(min_length=1, max_length=100)],
-        provider: Literal["aiperf", "vllm_bench"],
+        provider: Literal["aiperf", "vllm_bench", "sglang_bench"],
         ctx: Context[AppContext],
         endpoint_type: Literal["chat", "completions"] = "chat",
         streaming: bool = True,
@@ -1093,6 +1100,9 @@ def create_server(
                 description="Declared workload with an oracle contract, not an ordinary workload.",
             ),
         ] = None,
+        random_input_len: Annotated[int | None, Field(gt=0, le=1_000_000)] = None,
+        random_output_len: Annotated[int | None, Field(gt=0, le=1_000_000)] = None,
+        random_range_ratio: Annotated[float | None, Field(gt=0, le=1)] = None,
         expected_configuration_id: Annotated[
             str | None, Field(pattern=r"^sha256:[0-9a-f]{64}$")
         ] = None,
@@ -1120,6 +1130,9 @@ def create_server(
                         seed=seed,
                         speedup_ratio=speedup_ratio,
                         semantic_oracle_workload=semantic_oracle_workload,
+                        random_input_len=random_input_len,
+                        random_output_len=random_output_len,
+                        random_range_ratio=random_range_ratio,
                     ),
                 )
             )
@@ -3088,7 +3101,7 @@ def create_server(
     @server.tool(name="extract_inference_result", annotations=ADDITIVE)
     async def extract_inference_result_tool(
         run_id: Annotated[str, Field(min_length=1, max_length=200)],
-        provider: Literal["aiperf", "vllm_bench"],
+        provider: Literal["aiperf", "vllm_bench", "sglang_bench"],
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[InferenceExtractionResult]]:
         """Extract prompt-free AIPerf requests or vLLM aggregate measurements."""
@@ -3099,6 +3112,10 @@ def create_server(
                         ctx.request_context.lifespan_context.require_workspace()
                     ).extract_aiperf_result(run_id)
                     if provider == "aiperf"
+                    else InferenceArtifactExtractor(
+                        ctx.request_context.lifespan_context.require_workspace()
+                    ).extract_sglang_result(run_id)
+                    if provider == "sglang_bench"
                     else InferenceArtifactExtractor(
                         ctx.request_context.lifespan_context.require_workspace()
                     ).extract_vllm_result(run_id)
