@@ -59,7 +59,16 @@ class ImportService:
 
     def import_artifact(self, request: ImportArtifactRequest) -> ImportResult:
         if (
-            request.kind in {ArtifactKind.CORE_DUMP, ArtifactKind.SOURCE_SNAPSHOT}
+            request.kind
+            in {
+                ArtifactKind.CORE_DUMP,
+                ArtifactKind.SOURCE_SNAPSHOT,
+                ArtifactKind.INFERENCE_REQUEST_TRACE,
+            }
+            and request.sensitivity is not Sensitivity.SENSITIVE
+        ) or (
+            request.kind is ArtifactKind.INFERENCE_RESULT
+            and request.producer == "aiperf"
             and request.sensitivity is not Sensitivity.SENSITIVE
         ):
             raise DomainError(

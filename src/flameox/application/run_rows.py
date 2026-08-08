@@ -16,6 +16,7 @@ def run_row(manifest: RunManifest) -> dict[str, object]:
         "workload_definition_id": manifest.workload_definition_id,
         "workload_instance_id": manifest.workload_instance_id,
         "measurement_protocol_id": manifest.measurement_protocol_id,
+        "source_measurement_run_id": manifest.source_measurement_run_id,
         "environment_id": manifest.environment_id,
         "source_state_id": manifest.source_state_id,
         "collector": manifest.collector,
@@ -47,6 +48,8 @@ def run_row(manifest: RunManifest) -> dict[str, object]:
             if manifest.execution_identity
             else None
         ),
+        "inference_protocol_identity_id": manifest.inference_protocol_identity_id,
+        "inference_protocol_identity_json": manifest.inference_protocol_identity_json,
         "limitations": list(manifest.limitations),
         "limitation_details_json": json.dumps(
             [item.model_dump(mode="json") for item in manifest.limitation_details],

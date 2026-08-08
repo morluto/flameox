@@ -44,6 +44,20 @@ def test_core_dump_has_mandatory_sensitivity_floor() -> None:
         )
 
 
+def test_inference_request_trace_has_mandatory_sensitivity_floor() -> None:
+    with pytest.raises(ValidationError):
+        ArtifactRegistration(
+            registration_id="registration",
+            run_id="run",
+            artifact_id=DIGEST,
+            display_name="requests.jsonl",
+            media_type="application/x-ndjson",
+            kind=ArtifactKind.INFERENCE_REQUEST_TRACE,
+            role="primary",
+            sensitivity=Sensitivity.INTERNAL,
+        )
+
+
 def test_import_run_cannot_claim_execution() -> None:
     with pytest.raises(ValidationError):
         RunManifest(

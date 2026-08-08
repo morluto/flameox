@@ -11,6 +11,10 @@ from typing import Literal
 from pydantic import Field, JsonValue, model_validator
 
 from flameox.analysis import compare_paired_samples
+from flameox.analysis.inference_protocol import (
+    InferenceProtocolIdentity,
+    compare_inference_protocols,
+)
 from flameox.application.analysis_provenance import (
     AnalysisProvenanceInput,
     build_analysis_provenance,
@@ -252,7 +256,7 @@ class ComparisonService:
         baseline_set = self.run_sets.read(request.baseline_run_set_id)
         candidate_set = self.run_sets.read(request.candidate_run_set_id)
         corpus_commit_id = snapshot.commit.commit_id
-        mismatches = self._compatibility_mismatches(
+        invalidating, exploratory = self._compatibility_mismatches(
             snapshot,
             baseline_set,
             candidate_set,
@@ -276,9 +280,9 @@ class ComparisonService:
             polarity=request.polarity,
         )
         if baseline.eligible == 0:
-            mismatches.append("baseline run set has no eligible measurements")
+            invalidating.append("baseline run set has no eligible measurements")
         if candidate.eligible == 0:
-            mismatches.append("candidate run set has no eligible measurements")
+            invalidating.append("candidate run set has no eligible measurements")
         comparison_id = digest_model(
             {
                 "recipe": "compare_run_sets.v1",
@@ -314,11 +318,19 @@ class ComparisonService:
                 "candidate_excluded_n": candidate.excluded,
             }
         )
-        if mismatches:
+        all_reasons = (*invalidating, *exploratory)
+        if invalidating:
             comparison = comparison.model_copy(
                 update={
                     "validity": ComparisonValidity.INVALID,
-                    "mismatches": tuple(mismatches),
+                    "mismatches": tuple(all_reasons),
+                }
+            )
+        elif exploratory:
+            comparison = comparison.model_copy(
+                update={
+                    "validity": ComparisonValidity.EXPLORATORY,
+                    "mismatches": tuple(all_reasons),
                 }
             )
         return ComparisonResult(
@@ -400,7 +412,12 @@ class ComparisonService:
                 },
                 limitations=(
                     ("Compatibility mismatches invalidate proof.",)
-                    if result.comparison.mismatches
+                    if result.comparison.validity is ComparisonValidity.INVALID
+                    else (
+                        "Comparison is exploratory; incomplete identity or "
+                        "missing oracle prevents confirmatory proof.",
+                    )
+                    if result.comparison.validity is ComparisonValidity.EXPLORATORY
                     else ()
                 ),
                 started_at=started,
@@ -526,8 +543,18 @@ class ComparisonService:
         snapshot: Snapshot,
         baseline: RunSet,
         candidate: RunSet,
-    ) -> list[str]:
-        mismatches: list[str] = []
+    ) -> tuple[list[str], list[str]]:
+        """Return ``(invalidating, exploratory)`` compatibility reasons.
+
+        Invalidating reasons make the comparison INVALID. Exploratory reasons
+        make it EXPLORATORY — missing evidence is a limitation, not a verdict.
+        Inference replay runs use their persisted typed protocol for trace,
+        provider, server, hardware, profiler, and semantic-oracle provenance.
+        Incomplete protocol identity is exploratory; conflicting identity is
+        invalidating.
+        """
+        invalidating: list[str] = []
+        exploratory: list[str] = []
         run_ids = tuple(
             member.run_id for run_set in (baseline, candidate) for member in run_set.members
         )
@@ -536,7 +563,8 @@ class ComparisonService:
             "SELECT run_id, environment_id, source_state_id, "
             "workload_definition_id, validation_status, collector, "
             "collector_version, measurement_protocol_id, execution_identity_id, "
-            "execution_identity_quality, execution_identity_json FROM ("
+            "execution_identity_quality, execution_identity_json, "
+            "inference_protocol_identity_json FROM ("
             "SELECT *, row_number() OVER (PARTITION BY run_id "
             "ORDER BY published_at DESC) AS revision_order FROM runs"
             f") WHERE revision_order = 1 AND run_id IN ({run_placeholders})",
@@ -544,77 +572,63 @@ class ComparisonService:
         ).fetchall()
         by_id = {str(row[0]): row for row in run_rows}
         if set(by_id) != set(run_ids):
-            mismatches.append("one or more run-set members are absent from the pinned corpus")
+            invalidating.append("one or more run-set members are absent from the pinned corpus")
         baseline_runs = [
             by_id[member.run_id] for member in baseline.members if member.run_id in by_id
         ]
         candidate_runs = [
             by_id[member.run_id] for member in candidate.members if member.run_id in by_id
         ]
-        environments = {str(run[1]) for run in (*baseline_runs, *candidate_runs)}
-        mismatches.extend(self._environment_identity_mismatches(snapshot, environments))
-        mismatches.extend(self._execution_identity_mismatches((*baseline_runs, *candidate_runs)))
-        baseline_sources = {str(run[2]) if run[2] is not None else None for run in baseline_runs}
-        candidate_sources = {str(run[2]) if run[2] is not None else None for run in candidate_runs}
-        if len(baseline_sources) > 1 or len(candidate_sources) > 1:
-            mismatches.append("source_state_id differs within a treatment")
-        if None in baseline_sources or None in candidate_sources:
-            mismatches.append("one or more runs have no source_state_id")
-        known_sources = {
-            source for source in (*baseline_sources, *candidate_sources) if source is not None
-        }
-        if known_sources:
-            source_placeholders = ", ".join("?" for _ in known_sources)
-            qualities = snapshot.execute(
-                "SELECT DISTINCT identity_quality FROM source_states "
-                f"WHERE source_state_id IN ({source_placeholders})",
-                tuple(sorted(known_sources)),
-            ).fetchall()
-            if not qualities or any(row[0] == "partial" for row in qualities):
-                mismatches.append("source identity is partial or unavailable")
-        definitions = {run[3] for run in (*baseline_runs, *candidate_runs)}
+        all_runs = (*baseline_runs, *candidate_runs)
+        inference_run_ids = {str(row[0]) for row in all_runs if row[11] is not None}
+        all_inference = bool(run_ids) and set(run_ids).issubset(inference_run_ids)
+        mixed_inference = bool(inference_run_ids) and not all_inference
+
+        if mixed_inference:
+            invalidating.append("cannot compare inference replay runs with non-inference runs")
+        environments = {str(run[1]) for run in all_runs}
+        invalidating.extend(self._environment_identity_mismatches(snapshot, environments))
+        exec_mismatches = self._execution_identity_mismatches(all_runs)
+        if all_inference:
+            for mismatch in exec_mismatches:
+                if "differs" in mismatch:
+                    invalidating.append(mismatch)
+                else:
+                    exploratory.append(mismatch)
+        else:
+            invalidating.extend(exec_mismatches)
+        self._source_state_checks(
+            snapshot,
+            baseline_runs,
+            candidate_runs,
+            all_inference,
+            invalidating,
+            exploratory,
+        )
+        definitions = {run[3] for run in all_runs}
         if len(definitions) > 1:
-            mismatches.append("workload_definition_id differs across treatments")
-        if any(
-            str(run[4]) != ValidationStatus.PASSED.value
-            for run in (*baseline_runs, *candidate_runs)
-        ):
-            mismatches.append("one or more runs lack passing validation")
+            invalidating.append("workload_definition_id differs across treatments")
+        self._validation_checks(
+            snapshot,
+            all_runs,
+            baseline,
+            candidate,
+            run_ids,
+            run_placeholders,
+            all_inference,
+            invalidating,
+            exploratory,
+        )
         collector_configurations = {
             (
                 str(run[5]) if run[5] is not None else None,
                 str(run[6]) if run[6] is not None else None,
                 str(run[7]) if run[7] is not None else None,
             )
-            for run in (*baseline_runs, *candidate_runs)
+            for run in all_runs
         }
         if len(collector_configurations) > 1:
-            mismatches.append("collector version or measurement protocol differs")
-        validation_rows = snapshot.execute(
-            "SELECT run_id, artifact_id FROM artifact_registrations "
-            f"WHERE run_id IN ({run_placeholders}) "
-            "AND role = 'validation_cross_treatment_equivalence'",
-            run_ids,
-        ).fetchall()
-        validation_by_run: dict[str, set[str]] = {}
-        for run_id, artifact_id in validation_rows:
-            validation_by_run.setdefault(str(run_id), set()).add(str(artifact_id))
-        baseline_validation = {
-            artifact_id
-            for member in baseline.members
-            for artifact_id in validation_by_run.get(member.run_id, set())
-        }
-        candidate_validation = {
-            artifact_id
-            for member in candidate.members
-            for artifact_id in validation_by_run.get(member.run_id, set())
-        }
-        if (
-            not baseline_validation
-            or not candidate_validation
-            or baseline_validation != candidate_validation
-        ):
-            mismatches.append("cross-treatment validation outputs are missing or differ")
+            invalidating.append("collector version or measurement protocol differs")
         artifact_configurations: dict[str, set[tuple[str, str | None, str | None, str]]] = {
             "baseline": set(),
             "candidate": set(),
@@ -639,8 +653,216 @@ class ComparisonService:
             if str(run_id) in candidate_ids:
                 artifact_configurations["candidate"].add(configuration)
         if artifact_configurations["baseline"] != artifact_configurations["candidate"]:
-            mismatches.append("profiler artifact configuration differs across treatments")
-        return mismatches
+            invalidating.append("profiler artifact configuration differs across treatments")
+        if all_inference:
+            invalidating.extend(self._inference_protocol_mismatches(baseline_runs, candidate_runs))
+            exploratory.extend(self._inference_protocol_exploratory(baseline_runs, candidate_runs))
+        return invalidating, exploratory
+
+    @staticmethod
+    def _source_state_checks(
+        snapshot: Snapshot,
+        baseline_runs: list[tuple[object, ...]],
+        candidate_runs: list[tuple[object, ...]],
+        all_inference: bool,
+        invalidating: list[str],
+        exploratory: list[str],
+    ) -> None:
+        if all_inference:
+            # Inference source/server provenance is represented by the typed
+            # protocol identity (trace/provider/managed-server digests). A
+            # generic source checkout is neither required nor meaningful for
+            # an existing local serving endpoint.
+            return
+        baseline_sources = {str(run[2]) if run[2] is not None else None for run in baseline_runs}
+        candidate_sources = {str(run[2]) if run[2] is not None else None for run in candidate_runs}
+        if len(baseline_sources) > 1 or len(candidate_sources) > 1:
+            invalidating.append("source_state_id differs within a treatment")
+        if None in baseline_sources or None in candidate_sources:
+            msg = "one or more runs have no source_state_id"
+            invalidating.append(msg)
+        known_sources = {
+            source for source in (*baseline_sources, *candidate_sources) if source is not None
+        }
+        if known_sources:
+            source_placeholders = ", ".join("?" for _ in known_sources)
+            qualities = snapshot.execute(
+                "SELECT DISTINCT identity_quality FROM source_states "
+                f"WHERE source_state_id IN ({source_placeholders})",
+                tuple(sorted(known_sources)),
+            ).fetchall()
+            if not qualities or any(row[0] == "partial" for row in qualities):
+                msg = "source identity is partial or unavailable"
+                invalidating.append(msg)
+
+    @staticmethod
+    def _validation_checks(
+        snapshot: Snapshot,
+        all_runs: tuple[tuple[object, ...], ...],
+        baseline: RunSet,
+        candidate: RunSet,
+        run_ids: tuple[str, ...],
+        run_placeholders: str,
+        all_inference: bool,
+        invalidating: list[str],
+        exploratory: list[str],
+    ) -> None:
+        if any(str(run[4]) != ValidationStatus.PASSED.value for run in all_runs):
+            msg = "one or more runs lack passing validation"
+            if all_inference:
+                exploratory.append(msg)
+            else:
+                invalidating.append(msg)
+        if all_inference:
+            # Semantic validation identity and outcome are authoritative in
+            # the inference protocol. Cross-treatment artifact registrations
+            # are a contract for generic workloads and need not be duplicated.
+            return
+        validation_rows = snapshot.execute(
+            "SELECT run_id, artifact_id FROM artifact_registrations "
+            f"WHERE run_id IN ({run_placeholders}) "
+            "AND role = 'validation_cross_treatment_equivalence'",
+            run_ids,
+        ).fetchall()
+        validation_by_run: dict[str, set[str]] = {}
+        for run_id, artifact_id in validation_rows:
+            validation_by_run.setdefault(str(run_id), set()).add(str(artifact_id))
+        baseline_validation = {
+            artifact_id
+            for member in baseline.members
+            for artifact_id in validation_by_run.get(member.run_id, set())
+        }
+        candidate_validation = {
+            artifact_id
+            for member in candidate.members
+            for artifact_id in validation_by_run.get(member.run_id, set())
+        }
+        if not baseline_validation and not candidate_validation:
+            msg = "cross-treatment validation outputs are missing"
+            if all_inference:
+                exploratory.append(msg)
+            else:
+                invalidating.append(msg)
+        elif baseline_validation != candidate_validation:
+            invalidating.append("cross-treatment validation outputs differ")
+
+    @staticmethod
+    def _parse_protocol_identity(
+        row: tuple[object, ...],
+    ) -> tuple[InferenceProtocolIdentity | None, str | None]:
+        """Parse a persisted protocol identity. Returns ``(identity, error)``.
+
+        ``identity`` is the parsed model or ``None``. ``error`` is a non-``None``
+        string when the persisted JSON is present but malformed, so the caller
+        can report it as an invalidating compatibility reason instead of
+        leaking a ``ValidationError``.
+        """
+        raw = row[11]
+        if not isinstance(raw, str):
+            return None, None
+        try:
+            return InferenceProtocolIdentity.model_validate_json(raw), None
+        except (ValueError, TypeError) as exc:
+            return None, f"malformed inference protocol identity JSON: {exc}"
+
+    @staticmethod
+    def _inference_protocol_mismatches(
+        baseline_runs: list[tuple[object, ...]],
+        candidate_runs: list[tuple[object, ...]],
+    ) -> list[str]:
+        reasons: list[str] = []
+        # Check for malformed JSON within each treatment.
+        for label, runs in (("baseline", baseline_runs), ("candidate", candidate_runs)):
+            for row in runs:
+                _identity, error = ComparisonService._parse_protocol_identity(row)
+                if error is not None:
+                    reasons.append(f"inference protocol malformed: {label} run {row[0]} — {error}")
+        # Within-treatment: compare every included run against the treatment reference.
+        for label, runs in (("baseline", baseline_runs), ("candidate", candidate_runs)):
+            reasons.extend(ComparisonService._within_treatment_protocol_mismatches(label, runs))
+        # Cross-treatment: compare treatment references.
+        baseline_identity = ComparisonService._treatment_reference(baseline_runs)
+        candidate_identity = ComparisonService._treatment_reference(candidate_runs)
+        if baseline_identity is None or candidate_identity is None:
+            return list(dict.fromkeys(reasons))
+        result = compare_inference_protocols(baseline_identity, candidate_identity)
+        reasons.extend(
+            f"inference protocol mismatch: {m.field} "
+            f"(baseline={m.baseline!r}, candidate={m.candidate!r})"
+            for m in result.mismatches
+        )
+        return list(dict.fromkeys(reasons))
+
+    @staticmethod
+    def _inference_protocol_exploratory(
+        baseline_runs: list[tuple[object, ...]],
+        candidate_runs: list[tuple[object, ...]],
+    ) -> list[str]:
+        reasons: list[str] = []
+        for label, runs in (("baseline", baseline_runs), ("candidate", candidate_runs)):
+            reference = ComparisonService._treatment_reference(runs)
+            if reference is None:
+                continue
+            for row in runs:
+                identity, error = ComparisonService._parse_protocol_identity(row)
+                if error is not None or identity is None or identity == reference:
+                    continue
+                comparison = compare_inference_protocols(reference, identity)
+                reasons.extend(
+                    f"inference protocol within-treatment exploratory: {label} "
+                    f"run {row[0]} field {item.field} — {item.reason}"
+                    for item in comparison.exploratory_reasons
+                )
+        baseline_identity = ComparisonService._treatment_reference(baseline_runs)
+        candidate_identity = ComparisonService._treatment_reference(candidate_runs)
+        if baseline_identity is None or candidate_identity is None:
+            return reasons
+        result = compare_inference_protocols(baseline_identity, candidate_identity)
+        reasons.extend(
+            f"inference protocol exploratory: {item.field} — {item.reason}"
+            for item in result.exploratory_reasons
+        )
+        return list(dict.fromkeys(reasons))
+
+    @staticmethod
+    def _treatment_reference(
+        runs: list[tuple[object, ...]],
+    ) -> InferenceProtocolIdentity | None:
+        """Return the first parseable protocol identity in a treatment."""
+        for row in runs:
+            identity, _error = ComparisonService._parse_protocol_identity(row)
+            if identity is not None:
+                return identity
+        return None
+
+    @staticmethod
+    def _within_treatment_protocol_mismatches(
+        label: str,
+        runs: list[tuple[object, ...]],
+    ) -> list[str]:
+        """Compare every included run's protocol against the treatment reference.
+
+        Reports exact dotted field mismatches so a repeated trial with a
+        different model, schedule, or server configuration is caught.
+        """
+        reference = ComparisonService._treatment_reference(runs)
+        if reference is None:
+            return []
+        reasons: list[str] = []
+        for row in runs:
+            identity, error = ComparisonService._parse_protocol_identity(row)
+            if error is not None or identity is None:
+                continue
+            if identity == reference:
+                continue
+            result = compare_inference_protocols(reference, identity)
+            for mismatch in result.mismatches:
+                reasons.append(
+                    f"inference protocol within-treatment mismatch: {label} "
+                    f"run {row[0]} field {mismatch.field} "
+                    f"(reference={mismatch.baseline!r}, run={mismatch.candidate!r})"
+                )
+        return reasons
 
     @staticmethod
     def _environment_identity_mismatches(
@@ -675,8 +897,18 @@ class ComparisonService:
             for run in applicable:
                 if not isinstance(run[10], str):
                     continue
-                value = json.loads(run[10])
+                try:
+                    value = json.loads(run[10])
+                except (TypeError, ValueError):
+                    mismatches.append("declared execution identity JSON is malformed")
+                    continue
+                if not isinstance(value, dict) or not isinstance(value.get("inputs", []), list):
+                    mismatches.append("declared execution identity JSON is malformed")
+                    continue
                 for item in value.get("inputs", []):
+                    if not isinstance(item, dict):
+                        mismatches.append("declared execution identity JSON is malformed")
+                        continue
                     requested = item.get("requested")
                     if not isinstance(requested, str):
                         continue

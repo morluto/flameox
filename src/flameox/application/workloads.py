@@ -8,6 +8,7 @@ from ipaddress import ip_address
 from pathlib import Path, PurePath
 from string import Formatter
 from typing import Annotated, Literal, cast
+from urllib.parse import urlsplit
 
 import tomlkit
 from pydantic import Field, JsonValue, model_validator
@@ -17,6 +18,7 @@ from tomlkit.items import Table
 from flameox.adapters.builtins import BUILTIN_ADAPTERS
 from flameox.adapters.registry import AdapterRegistry
 from flameox.application.capabilities import CapabilityService
+from flameox.application.inference_providers import _loopback_http_url
 from flameox.atomic import atomic_write_text
 from flameox.domain import (
     CapabilityReport,
@@ -30,6 +32,7 @@ from flameox.domain import (
     WorkloadInstance,
     digest_model,
 )
+from flameox.domain.models import Digest
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
@@ -307,6 +310,76 @@ class FaultExperimentConfig(ContractModel):
         return self
 
 
+class InferenceServerConfig(ContractModel):
+    """A declared inference server target for replay scenarios.
+
+    The first slice supports only vLLM. A ``managed`` server is launched through
+    a declared flameox workload; an ``existing_local`` server is a loopback
+    endpoint Flameox probes but never starts.
+    """
+
+    provider: Literal["vllm"] = "vllm"
+    mode: Literal["managed", "existing_local"]
+    workload: str | None = None
+    base_url: str = "http://127.0.0.1:8000"
+    model: Annotated[str, Field(min_length=1, max_length=500)]
+    model_revision: Annotated[str, Field(min_length=1, max_length=200)] | None = None
+    tokenizer: Annotated[str, Field(min_length=1, max_length=500)] | None = None
+    tokenizer_revision: Annotated[str, Field(min_length=1, max_length=200)] | None = None
+    quantization: Annotated[str, Field(min_length=1, max_length=100)] | None = None
+
+    @model_validator(mode="after")
+    def mode_fields_are_consistent(self) -> InferenceServerConfig:
+        if self.mode == "managed":
+            if self.workload is None:
+                raise ValueError("managed inference servers require a workload")
+            # Managed servers are bind-probed by the broker, which deliberately
+            # accepts an IP literal so it can prove ownership of the endpoint.
+            # Keep the configuration contract aligned with that lifecycle.
+            hostname = urlsplit(self.base_url).hostname
+            if hostname is not None and hostname.lower() == "localhost":
+                raise ValueError(
+                    "managed inference servers require an IP-literal loopback base_url"
+                )
+        else:
+            if self.workload is not None:
+                raise ValueError("existing_local inference servers do not declare a workload")
+        _loopback_http_url(self.base_url)
+        return self
+
+
+class InferenceScenarioConfig(ContractModel):
+    """A declared replay scenario binding a server and maintained provider.
+
+    Trace input, repetition, and timing-scale parameters are bounded and
+    forward-compatible with the maintained AIPerf and vLLM bench providers.
+    """
+
+    server: str
+    provider: Literal["aiperf", "vllm_bench"]
+    endpoint_type: Literal["chat", "completions"] = "chat"
+    streaming: bool = True
+    trace_artifact_id: Digest | None = None
+    num_prompts: Annotated[int, Field(gt=0, le=10_000_000)] = 1
+    concurrency: Annotated[int, Field(gt=0, le=100_000)] | None = None
+    request_rate: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
+    burstiness: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
+    warmup_request_count: Annotated[int, Field(ge=0, le=1_000_000)] = 0
+    seed: Annotated[int, Field(ge=0, le=2**31 - 1)] = 0
+    speedup_ratio: Annotated[float, Field(gt=0, le=100)] = 1.0
+    semantic_oracle_workload: str | None = None
+
+    @model_validator(mode="after")
+    def trace_requires_aiperf(self) -> InferenceScenarioConfig:
+        if self.trace_artifact_id is not None and self.provider != "aiperf":
+            raise ValueError("trace_artifact_id is only supported by the aiperf provider")
+        if self.provider == "vllm_bench" and not self.streaming:
+            raise ValueError("vllm_bench non-streaming response mode is unsupported in v1")
+        if self.burstiness is not None and self.request_rate is None:
+            raise ValueError("burstiness requires request_rate")
+        return self
+
+
 class ProjectConfig(ContractModel):
     schema_version: Literal[1] = 1
     workloads: dict[str, WorkloadConfig] = Field(default_factory=dict, max_length=1_000)
@@ -315,6 +388,14 @@ class ProjectConfig(ContractModel):
         max_length=1_000,
     )
     fault_experiments: dict[str, FaultExperimentConfig] = Field(
+        default_factory=dict,
+        max_length=1_000,
+    )
+    inference_servers: dict[str, InferenceServerConfig] = Field(
+        default_factory=dict,
+        max_length=1_000,
+    )
+    inference_scenarios: dict[str, InferenceScenarioConfig] = Field(
         default_factory=dict,
         max_length=1_000,
     )
@@ -355,6 +436,68 @@ class ProjectConfig(ContractModel):
                     "fault experiment endpoint_parameter must be rendered by argv, cwd, "
                     "or environment"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def inference_references_are_valid(self) -> ProjectConfig:
+        missing_server_workloads = sorted(
+            {
+                server.workload
+                for server in self.inference_servers.values()
+                if (
+                    server.mode == "managed"
+                    and server.workload is not None
+                    and server.workload not in self.workloads
+                )
+            }
+        )
+        if missing_server_workloads:
+            raise ValueError(
+                "inference servers reference unknown workloads: "
+                + ", ".join(missing_server_workloads)
+            )
+        missing_servers = sorted(
+            {
+                scenario.server
+                for scenario in self.inference_scenarios.values()
+                if scenario.server not in self.inference_servers
+            }
+        )
+        if missing_servers:
+            raise ValueError(
+                "inference scenarios reference unknown servers: " + ", ".join(missing_servers)
+            )
+        missing_oracles = sorted(
+            {
+                scenario.semantic_oracle_workload
+                for scenario in self.inference_scenarios.values()
+                if scenario.semantic_oracle_workload is not None
+                and scenario.semantic_oracle_workload not in self.workloads
+            }
+        )
+        if missing_oracles:
+            raise ValueError(
+                "inference scenarios reference unknown oracle workloads: "
+                + ", ".join(missing_oracles)
+            )
+        invalid_oracle_names: set[str] = set()
+        for scenario in self.inference_scenarios.values():
+            name = scenario.semantic_oracle_workload
+            if name is None or name not in self.workloads:
+                continue
+            oracle = self.workloads[name].oracle
+            if (
+                oracle is None
+                or oracle.strength is not OracleStrength.CONTRACT_CHECK
+                or oracle.receipt_schema is None
+            ):
+                invalid_oracle_names.add(name)
+        invalid_oracles = sorted(invalid_oracle_names)
+        if invalid_oracles:
+            raise ValueError(
+                "inference oracle workloads must declare a contract-check receipt oracle: "
+                + ", ".join(invalid_oracles)
+            )
         return self
 
 
@@ -400,6 +543,43 @@ class WorkloadConfigurationResult(ContractModel):
         Field(max_length=8),
     ]
     next_tool: Literal["list_declared_workflows"] = "list_declared_workflows"
+
+
+class ConfigureInferenceServerRequest(ContractModel):
+    name: Annotated[
+        str,
+        Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
+    ]
+    operation: Literal["create", "replace"]
+    config: InferenceServerConfig
+    expected_configuration_id: Digest | None = None
+
+
+class ConfigureInferenceScenarioRequest(ContractModel):
+    name: Annotated[
+        str,
+        Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
+    ]
+    operation: Literal["create", "replace"]
+    config: InferenceScenarioConfig
+    expected_configuration_id: Digest | None = None
+
+
+class InferenceConfigurationResult(ContractModel):
+    schema_version: Literal[1] = 1
+    kind: Literal["server", "scenario"]
+    action: Literal["created", "updated", "unchanged"]
+    name: str
+    configuration_id: Digest
+    definition_id: Digest
+    changed_paths: tuple[Literal["flameox.toml"], ...]
+
+
+class InferenceConfigurationList(ContractModel):
+    schema_version: Literal[1] = 1
+    configuration_id: Digest
+    servers: dict[str, InferenceServerConfig]
+    scenarios: dict[str, InferenceScenarioConfig]
 
 
 class ResolvedOracle(ContractModel):
@@ -586,6 +766,14 @@ class WorkloadService:
 
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self.load().workloads))
+
+    def list_inference(self) -> InferenceConfigurationList:
+        project = ProjectConfig() if not self.project_config_path.exists() else self.load()
+        return InferenceConfigurationList(
+            configuration_id=digest_model(project),
+            servers=dict(sorted(project.inference_servers.items())),
+            scenarios=dict(sorted(project.inference_scenarios.items())),
+        )
 
     def list_declared(
         self,
@@ -994,6 +1182,99 @@ class WorkloadService:
             changed_paths=tuple(changed_paths),
         )
 
+    def configure_inference_server(
+        self, request: ConfigureInferenceServerRequest
+    ) -> InferenceConfigurationResult:
+        return self._configure_inference_entry(
+            kind="server",
+            name=request.name,
+            operation=request.operation,
+            config=request.config,
+            expected_configuration_id=request.expected_configuration_id,
+        )
+
+    def configure_inference_scenario(
+        self, request: ConfigureInferenceScenarioRequest
+    ) -> InferenceConfigurationResult:
+        return self._configure_inference_entry(
+            kind="scenario",
+            name=request.name,
+            operation=request.operation,
+            config=request.config,
+            expected_configuration_id=request.expected_configuration_id,
+        )
+
+    def _configure_inference_entry(
+        self,
+        *,
+        kind: Literal["server", "scenario"],
+        name: str,
+        operation: Literal["create", "replace"],
+        config: InferenceServerConfig | InferenceScenarioConfig,
+        expected_configuration_id: Digest | None,
+    ) -> InferenceConfigurationResult:
+        section: Literal["inference_servers", "inference_scenarios"] = (
+            "inference_servers" if kind == "server" else "inference_scenarios"
+        )
+        with self.workspace.write_locked():
+            text = (
+                self.project_config_path.read_text(encoding="utf-8")
+                if self.project_config_path.exists()
+                else ""
+            )
+            project = self.load() if text else ProjectConfig()
+            current_id = digest_model(project)
+            entries = project.inference_servers if kind == "server" else project.inference_scenarios
+            existing = entries.get(name)
+            if operation == "create" and existing is not None and existing != config:
+                raise DomainError(
+                    ErrorCode.EXECUTION_REFUSED,
+                    f"Inference {kind} {name!r} already exists; use operation='replace'.",
+                    details={"configuration_id": current_id},
+                )
+            if operation == "replace":
+                if existing is None:
+                    raise DomainError(
+                        ErrorCode.REVISION_CONFLICT,
+                        f"Cannot replace inference {kind} {name!r} because it is not declared.",
+                    )
+                if expected_configuration_id != current_id:
+                    raise DomainError(
+                        ErrorCode.REVISION_CONFLICT,
+                        "Inference configuration changed before replacement.",
+                        details={"configuration_id": current_id},
+                    )
+            action: Literal["created", "updated", "unchanged"] = (
+                "unchanged"
+                if existing == config
+                else ("created" if existing is None else "updated")
+            )
+            updated_values = {**entries, name: config}
+            updated = ProjectConfig.model_validate(
+                {
+                    **project.model_dump(mode="python"),
+                    section: updated_values,
+                }
+            )
+            changed_paths: tuple[Literal["flameox.toml"], ...] = ()
+            if action != "unchanged":
+                rendered = self._render_named_config(text, section, name, config)
+                mode = (
+                    self.project_config_path.stat().st_mode & 0o777
+                    if self.project_config_path.exists()
+                    else 0o644
+                )
+                atomic_write_text(self.project_config_path, rendered, mode=mode)
+                changed_paths = ("flameox.toml",)
+        return InferenceConfigurationResult(
+            kind=kind,
+            action=action,
+            name=name,
+            configuration_id=digest_model(updated),
+            definition_id=digest_model(config),
+            changed_paths=changed_paths,
+        )
+
     def resolve(
         self,
         name: str,
@@ -1226,4 +1507,30 @@ class WorkloadService:
                 existing[key] = tomlkit.item(value)
         else:
             workloads[name] = tomlkit.item(values)
+        return tomlkit.dumps(document)
+
+    @staticmethod
+    def _render_named_config(
+        text: str,
+        section: Literal["inference_servers", "inference_scenarios"],
+        name: str,
+        config: InferenceServerConfig | InferenceScenarioConfig,
+    ) -> str:
+        document = tomlkit.parse(text) if text else tomlkit.document()
+        if "schema_version" not in document:
+            document["schema_version"] = 1
+        group = document.get(section)
+        if group is None:
+            group = tomlkit.table()
+            document[section] = group
+        values = config.model_dump(mode="python", exclude_none=True, exclude_defaults=True)
+        existing = group.get(name)
+        if isinstance(existing, Table):
+            for key in list(existing):
+                if key not in values:
+                    del existing[key]
+            for key, value in values.items():
+                existing[key] = tomlkit.item(value)
+        else:
+            group[name] = tomlkit.item(values)
         return tomlkit.dumps(document)

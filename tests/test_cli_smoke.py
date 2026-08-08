@@ -132,3 +132,39 @@ def test_global_project_root_initializes_and_invalid_request_exits_two(
     assert (project / ".diagnostics" / "workspace.json").is_file()
     assert invalid.exit_code == 2
     assert "Structured input is invalid" in invalid.output
+
+
+def test_inference_configuration_errors_and_empty_list_are_structured(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    workspace = project / ".diagnostics"
+    runner = CliRunner()
+    assert runner.invoke(app, ["init", str(project)]).exit_code == 0
+
+    listed = runner.invoke(
+        app,
+        ["inference", "list", "--workspace", str(workspace), "--json"],
+    )
+    invalid = runner.invoke(
+        app,
+        [
+            "inference",
+            "configure-server",
+            "local",
+            "managed",
+            "model",
+            "--workspace",
+            str(workspace),
+            "--json",
+        ],
+    )
+
+    assert listed.exit_code == 0, listed.output
+    listed_payload = json.loads(listed.stdout)
+    assert listed_payload["servers"] == {}
+    assert listed_payload["scenarios"] == {}
+    assert listed_payload["configuration_id"].startswith("sha256:")
+    assert invalid.exit_code == 2, invalid.output
+    error_payload = json.loads(invalid.stdout)
+    assert error_payload["error"]["code"] == "INVALID_ARGUMENTS"
+    assert error_payload["error"]["details"]["validation_errors"]

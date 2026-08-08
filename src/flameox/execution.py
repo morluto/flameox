@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -15,7 +16,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, Any, Literal, cast
+from typing import IO, Any, Literal, TypeVar, cast
 
 import psutil
 from pydantic import Field, field_validator
@@ -78,6 +79,8 @@ INSTALLER_ENVIRONMENT_ALLOWLIST = (
     "PIP_INDEX_URL",
     "PIP_EXTRA_INDEX_URL",
 )
+
+_T = TypeVar("_T")
 
 
 def _is_dangerous_environment_name(name: str) -> bool:
@@ -337,6 +340,26 @@ class SubprocessBroker:
             readiness=readiness,
             tool_receipt=tool_receipt,
             readiness_timeout_seconds=readiness_timeout_seconds,
+        )
+
+    async def start_inference_server(
+        self,
+        request: ExecutionRequest,
+        *,
+        host: str,
+        port: int,
+        readiness: Callable[[], Awaitable[bool]],
+        absolute_deadline: float,
+    ) -> ManagedSidecarLease:
+        """Start one declared loopback inference server under a managed lease."""
+
+        return await ManagedSidecarLease.start_inference(
+            self,
+            request,
+            host=host,
+            port=port,
+            readiness=readiness,
+            absolute_deadline=absolute_deadline,
         )
 
     def run_sync(
@@ -1731,7 +1754,7 @@ class SubprocessBroker:
 
 
 class ManagedSidecarLease:
-    """Broker-owned, capability-scoped lease for a Toxiproxy sidecar."""
+    """Broker-owned lease for a typed loopback sidecar process."""
 
     def __init__(
         self,
@@ -1865,6 +1888,151 @@ class ManagedSidecarLease:
         except BaseException:
             await asyncio.shield(lease.close())
             raise
+
+    @classmethod
+    async def start_inference(
+        cls,
+        broker: SubprocessBroker,
+        request: ExecutionRequest,
+        *,
+        host: str,
+        port: int,
+        readiness: Callable[[], Awaitable[bool]],
+        absolute_deadline: float,
+    ) -> ManagedSidecarLease:
+        import ipaddress
+
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError as error:
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "Managed inference server host must be an IP literal.",
+            ) from error
+        if not address.is_loopback or not 1 <= port <= 65_535:
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "Managed inference servers require a loopback address and valid port.",
+            )
+        if time.monotonic() >= absolute_deadline:
+            raise DomainError(ErrorCode.PROCESS_TIMEOUT, "Inference startup deadline expired.")
+        family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+        endpoint = (host, port, 0, 0) if address.version == 6 else (host, port)
+        with socket.socket(family, socket.SOCK_STREAM) as port_guard:
+            try:
+                port_guard.bind(endpoint)
+            except OSError as error:
+                raise DomainError(
+                    ErrorCode.EXECUTION_REFUSED,
+                    "Managed inference server endpoint is already occupied before startup.",
+                    details={"host": host, "port": port},
+                ) from error
+        cwd = broker._resolve_cwd(request.cwd, request.allowed_working_roots)
+        environment = broker._build_environment(request)
+        executable = broker._resolve_executable(request.argv[0], cwd, environment)
+        argv = (str(executable), *request.argv[1:])
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=cwd,
+            env=environment,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=os.name == "posix",
+        )
+        assert process.stdout is not None and process.stderr is not None
+        observations: list[ProcessObservation] = []
+        output_budget = _OutputBudget(request.max_output_bytes)
+        lease = cls(
+            broker,
+            process,
+            executable,
+            host,
+            port,
+            asyncio.create_task(
+                broker._read_bounded(process.stdout, output_budget, drain_on_limit=True)
+            ),
+            asyncio.create_task(
+                broker._read_bounded(process.stderr, output_budget, drain_on_limit=True)
+            ),
+            output_budget,
+            observations,
+            datetime.now(UTC),
+        )
+        try:
+            while time.monotonic() < absolute_deadline:
+                if process.returncode is not None:
+                    raise DomainError(
+                        ErrorCode.CAPABILITY_UNAVAILABLE,
+                        "Managed inference server exited before readiness.",
+                    )
+                ready = await cls._await_before_deadline(
+                    readiness(),
+                    absolute_deadline,
+                    "Managed inference server readiness check exceeded the run deadline.",
+                )
+                if ready:
+                    await asyncio.sleep(0)
+                    if process.returncode is not None:
+                        raise DomainError(
+                            ErrorCode.CAPABILITY_UNAVAILABLE,
+                            "Managed inference server exited while reporting readiness.",
+                        )
+                    snapshot = await cls._await_before_deadline(
+                        asyncio.to_thread(
+                            broker._snapshot_processes,
+                            process.pid,
+                            "running",
+                            True,
+                            None,
+                            None,
+                        ),
+                        absolute_deadline,
+                        "Managed inference server observation exceeded the run deadline.",
+                    )
+                    observations.extend(snapshot)
+                    if process.returncode is not None:
+                        raise DomainError(
+                            ErrorCode.CAPABILITY_UNAVAILABLE,
+                            "Managed inference server exited before its lease was established.",
+                        )
+                    return lease
+                await asyncio.sleep(min(0.05, max(0.0, absolute_deadline - time.monotonic())))
+            raise DomainError(
+                ErrorCode.PROCESS_TIMEOUT,
+                "Managed inference server did not become ready before the run deadline.",
+            )
+        except BaseException:
+            await asyncio.shield(lease.close())
+            raise
+
+    @staticmethod
+    async def _await_before_deadline(
+        awaitable: Awaitable[_T],
+        absolute_deadline: float,
+        timeout_message: str,
+    ) -> _T:
+        """Await external startup work without allowing cancellation to extend its deadline."""
+
+        task = asyncio.ensure_future(awaitable)
+
+        def consume_result(completed: asyncio.Future[_T]) -> None:
+            with suppress(BaseException):
+                completed.result()
+
+        remaining = absolute_deadline - time.monotonic()
+        try:
+            if remaining > 0:
+                done, _pending = await asyncio.wait((task,), timeout=remaining)
+                if done:
+                    return task.result()
+        except BaseException:
+            task.cancel()
+            task.add_done_callback(consume_result)
+            raise
+        task.cancel()
+        task.add_done_callback(consume_result)
+        raise DomainError(ErrorCode.PROCESS_TIMEOUT, timeout_message)
 
     async def __aenter__(self) -> ManagedSidecarLease:
         return self
