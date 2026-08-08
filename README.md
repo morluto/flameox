@@ -96,7 +96,7 @@ Choose the path that matches the symptom you have now.
 | --- | --- |
 | A slow Python, native, or service workload | py-spy stacks, pyperf samples, Perfetto traces, process/resource summaries, and validation outputs to identify hotspots and compare a candidate change. |
 | PyTorch execution or GPU kernels | torch.profiler traces and imported Nsight Systems evidence for CUDA runtime activity, graph launches, kernels, synchronization, and idle gaps. |
-| A local inference server | Typed aiperf or vLLM replay evidence, bounded request timing and token summaries, plus linked torch.profiler or Nsight Systems captures for compatible runs. |
+| A local inference server | Typed aiperf, vLLM, or SGLang replay evidence, bounded request timing and token summaries, plus linked torch.profiler or Nsight Systems captures for compatible runs. |
 | Memory growth or changed execution paths | Memray allocation evidence, coverage contexts, pytest results, process cleanup, and failed-attempt context. |
 | A suspected regression | Randomized paired trials, validation receipts, pyperf measurements, and selected runtime-resource metrics such as peak process-tree RSS. |
 
