@@ -179,7 +179,7 @@ def test_sglang_protocol_identity_binds_random_shape_and_provenance(
         'mode = "existing_local"\nbase_url = "http://127.0.0.1:8000"\nmodel = "model"\n'
         "[inference_scenarios.replay]\n"
         'server = "local"\nprovider = "sglang_bench"\n'
-        "random_input_len = 4\nrandom_output_len = 2\nrandom_range_ratio = 0.5\n"
+        "random_input_len = 4\nrandom_output_len = 2\n"
     )
     from flameox.application import inference as inference_module
     from flameox.application.inference_providers import ExistingServerProbe, InferenceToolDiscovery
@@ -209,6 +209,7 @@ def test_sglang_protocol_identity_binds_random_shape_and_provenance(
 
     assert identity.trace.producer == "sglang.bench_serving"
     assert identity.server.cache_backend == "custom"
+    assert plan.random_range_ratio == 1.0
     assert identity.trace.artifact_digest != reshaped_identity.trace.artifact_digest
 
 

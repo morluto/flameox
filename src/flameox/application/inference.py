@@ -327,7 +327,11 @@ class InferenceReplayService:
             semantic_oracle_workload=scenario.semantic_oracle_workload,
             random_input_len=scenario.random_input_len,
             random_output_len=scenario.random_output_len,
-            random_range_ratio=scenario.random_range_ratio,
+            random_range_ratio=(
+                scenario.random_range_ratio or 1.0
+                if scenario.provider == "sglang_bench"
+                else scenario.random_range_ratio
+            ),
             timeout_seconds=deadline,
             deadline_at=deadline_at,
             exploratory_reason=(
@@ -1041,6 +1045,7 @@ class InferenceReplayService:
             request_rate=scenario.request_rate,
             burstiness=scenario.burstiness,
             max_concurrency=scenario.concurrency,
+            warmup_request_count=scenario.warmup_request_count,
             seed=scenario.seed,
             result_path=output_path,
         )

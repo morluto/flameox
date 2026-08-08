@@ -94,6 +94,7 @@ def test_vllm_bench_argv_requires_structured_result_file(tmp_path: Path) -> None
     assert request.argv()[request.argv().index("--endpoint") + 1] == "/v1/chat/completions"
     assert "--endpoint-type" not in request.argv()
     assert "--streaming" not in request.argv()
+    assert request.argv()[request.argv().index("--num-warmups") + 1] == "0"
 
 
 def test_vllm_bench_refuses_unsupported_non_streaming_mode(tmp_path: Path) -> None:
@@ -177,6 +178,7 @@ def test_sglang_bench_uses_fixed_module_random_workload_and_safe_output(tmp_path
     assert "sglang-oai-chat" in argv
     assert "--output-details" not in argv
     assert argv[argv.index("--output-file") + 1] == str(tmp_path / "result.jsonl")
+    assert argv[argv.index("--warmup-requests") + 1] == "0"
 
 
 def test_sglang_bench_rejects_base_url_paths(tmp_path: Path) -> None:
