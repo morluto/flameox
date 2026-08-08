@@ -216,6 +216,18 @@ before confirmatory collection. Adaptive stopping is allowed only when its rule
 and statistical method are predeclared. Profiling and operator scans may select
 a candidate mechanism, but the confirmation experiment uses fresh measurements.
 
+Performance experiments may use the closed runtime-resource metric catalog:
+`runtime_resource.peak_rss_bytes`, `runtime_resource.minimum_free_bytes`, or
+`runtime_resource.staging_growth_bytes`. These resolve to bytes-valued
+resource-summary evidence rather than measurement-table rows. Flameox reuses
+the existing NumPy/SciPy paired-comparison path after reducing each realized
+block to one resource value. Comparisons require matching resource sampling
+intervals; peak RSS additionally requires the same non-null sampling backend.
+Missing or explicitly unavailable resource evidence leaves an incomplete pair,
+never a zero or imputed value. Writable-root growth is deliberately not a
+catalog metric because comparing it requires a compatible root-identity
+selector across runs.
+
 ### Validation oracle
 
 Performance evidence is not sufficient to establish semantic preservation.

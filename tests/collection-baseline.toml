@@ -1,4 +1,4 @@
-expected_test_count = 782
+expected_test_count = 789
 
 # New files are normalized to their pre-split path so this receipt proves
 # test identity and parametrized case preservation across the decomposition.
@@ -59,13 +59,13 @@ expected_test_count = 782
 'tests/application/test_async_work.py' = { count = 1, digest = '5c21ab9d048e8676c0b086ff6859e87b28da82ab793c2b70de975f592355067e' }
 'tests/application/test_capabilities.py' = { count = 20, digest = '15279d4414beca5438e376ff2f787b3e9fe916d8242de0b35d3580de4cc24069' }
 'tests/application/test_capture_native_outputs.py' = { count = 5, digest = '73ffb01416e94a3044feeecb6f11f1fb452f0b1595ecc8b3ac3ef4f749918f77' }
-'tests/application/test_comparison_samples.py' = { count = 2, digest = 'a65cec9530be08e51029fe8f5d283b6ef5f2fc2c7285f82eb224ee6be93fc914' }
+'tests/application/test_comparison_samples.py' = { count = 4, digest = 'b8991dad3746e42fe7373453660787de0302aa144b4f3184a97966cf1c026f4f' }
 'tests/application/test_detached.py' = { count = 9, digest = '4e14dd7f799b1dcbc3eddf8d6ab45af470f9287e769ee03346698aeb78477365' }
 'tests/application/test_discovery.py' = { count = 2, digest = '154e2545ae8110e6e72d19cd62a1734779f7bf2f6b14180f57ea2852365e8fd2' }
 'tests/application/test_environment_identity.py' = { count = 10, digest = '22a3e3a5af0f747fcf9a680ba01e2d05dab7362ed5ac558d774e788826fb62c6' }
 'tests/application/test_evidence_query.py' = { count = 2, digest = '9773c3030eed6d98646628197d0aa81bb7fcfefe6bc75c72a294cf1dac0a77dd' }
 'tests/application/test_evidence_scope.py' = { count = 2, digest = 'e3e51e28f67c6512e3943f88f469d937f88d5f7f88317a34868640e55b9f590b' }
-'tests/application/test_experiments.py' = { count = 11, digest = 'ef1d24a47a9ed83b4e069315bdf7057f7e2028ef840bcbd22b662d1442dae3ad' }
+'tests/application/test_experiments.py' = { count = 16, digest = 'ebaf81b100f66145dc9870b7b387f2d2b637c4c7a6e67f0fb62c4a26b815b462' }
 'tests/application/test_faults.py' = { count = 5, digest = '9330626143cdfb60660c3466aea29491ddce50d1cecd1e04fe4b4b7b11d2fe8a' }
 'tests/application/test_inference.py' = { count = 22, digest = '696d8052fed45f7eef19344604fd58aa7a7deb5c2d819038c5800fbebb111f88' }
 'tests/application/test_inference_comparison.py' = { count = 11, digest = '79781b7a04fb5ab8c940d8e52198d8b70cb0052b40d1b9fce3032fda1b875ed7' }

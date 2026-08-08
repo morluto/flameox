@@ -389,7 +389,11 @@ has a bounded `source` (`adapter`, `preflight`, `collector`, `artifact`,
 string field remains a deterministic, de-duplicated compatibility projection;
 older manifests containing only strings remain readable. Runtime resource
 summaries preserve sampling interval, minimum free bytes, staging growth, peak
-RSS, storage-policy termination, and explicitly unavailable metrics.
+RSS, its observation backend, storage-policy termination, and explicitly
+unavailable metrics. `peak_rss_backend = psutil_recursive_polling` means the
+reported value is the largest parent-plus-recursive-descendant RSS total seen
+by polling. It is an observed peak, not a guaranteed lifetime maximum: a
+short-lived descendant can exit between samples.
 
 Capture publication writes runtime-resource evidence into two dedicated tables:
 `runtime_resource_summaries` contains one bounded observation per terminal run,
@@ -400,6 +404,11 @@ short-lived process or a failed sampler publishes a nullable metric plus an
 explicit unavailable marker rather than silently substituting zero. Storage
 reserve termination is preserved in the summary and in the run's typed
 limitations.
+
+The evidence layer uses psutil for this bounded recursive collection and
+DuckDB/Parquet for schema-compatible reads. Added nullable summary fields are
+read as `NULL` from earlier Parquet evidence; prior generations are never
+rewritten merely to add a field.
 
 ### OTLP and process evidence
 

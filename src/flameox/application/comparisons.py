@@ -40,6 +40,12 @@ from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import JsonRecordStore, RunStore, Workspace
 
+_RUNTIME_RESOURCE_COLUMNS = {
+    "runtime_resource.peak_rss_bytes": "peak_rss_bytes",
+    "runtime_resource.minimum_free_bytes": "minimum_free_bytes",
+    "runtime_resource.staging_growth_bytes": "staging_growth_bytes",
+}
+
 
 class FreezeRunSetMember(ContractModel):
     run_id: str
@@ -72,10 +78,20 @@ class CompareRunSetsRequest(ContractModel):
     experiment_id: str | None = None
     metric: str
     unit: str
+    metric_source: Literal["measurement", "runtime_resource"] = "measurement"
     polarity: Literal["lower_is_better", "higher_is_better", "neutral"]
     practical_threshold: float = Field(ge=0)
     confidence_level: float = Field(default=0.95, gt=0, lt=1)
     random_seed: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_metric_source(self) -> CompareRunSetsRequest:
+        if self.metric_source == "runtime_resource":
+            if self.metric not in _RUNTIME_RESOURCE_COLUMNS:
+                raise ValueError("runtime-resource comparisons require a catalog metric")
+            if self.unit != "bytes":
+                raise ValueError("runtime-resource comparisons require unit='bytes'")
+        return self
 
 
 class ComparisonResult(ContractModel):
@@ -111,6 +127,7 @@ class _SampleSet:
     eligible: int
     failed: int
     excluded: int
+    nonpositive: int = 0
 
 
 class RunSetService:
@@ -261,18 +278,27 @@ class ComparisonService:
             baseline_set,
             candidate_set,
         )
-        baseline = self._samples(
-            snapshot,
-            baseline_set,
-            request.metric,
-            request.unit,
-        )
-        candidate = self._samples(
-            snapshot,
-            candidate_set,
-            request.metric,
-            request.unit,
-        )
+        baseline = self._samples(snapshot, baseline_set, request)
+        candidate = self._samples(snapshot, candidate_set, request)
+        if request.metric_source == "runtime_resource":
+            invalidating.extend(
+                self._runtime_resource_compatibility_mismatches(
+                    snapshot, baseline_set, candidate_set, request.metric
+                )
+            )
+            if baseline.eligible != baseline.attempted - baseline.failed - baseline.excluded:
+                exploratory.append(
+                    "baseline runtime-resource evidence is unavailable or incomplete"
+                )
+            if candidate.eligible != candidate.attempted - candidate.failed - candidate.excluded:
+                exploratory.append(
+                    "candidate runtime-resource evidence is unavailable or incomplete"
+                )
+            if baseline.nonpositive or candidate.nonpositive:
+                invalidating.append(
+                    "zero-valued runtime-resource evidence is incompatible with the "
+                    "median paired log-ratio estimand"
+                )
         profile_changes = self._profile_changes(
             snapshot,
             baseline_set,
@@ -450,6 +476,16 @@ class ComparisonService:
         self,
         snapshot: Snapshot,
         run_set: RunSet,
+        request: CompareRunSetsRequest,
+    ) -> _SampleSet:
+        if request.metric_source == "runtime_resource":
+            return self._runtime_resource_samples(snapshot, run_set, request.metric)
+        return self._measurement_samples(snapshot, run_set, request.metric, request.unit)
+
+    def _measurement_samples(
+        self,
+        snapshot: Snapshot,
+        run_set: RunSet,
         metric: str,
         unit: str,
     ) -> _SampleSet:
@@ -537,6 +573,145 @@ class ComparisonService:
             failed=failed,
             excluded=excluded,
         )
+
+    def _runtime_resource_samples(
+        self,
+        snapshot: Snapshot,
+        run_set: RunSet,
+        metric: str,
+    ) -> _SampleSet:
+        column = _RUNTIME_RESOURCE_COLUMNS[metric]
+        values: dict[str, float] = {}
+        attempted = len(run_set.members)
+        failed = 0
+        excluded = 0
+        nonpositive = 0
+        if len(run_set.members) > 1 and any(member.trial_id is None for member in run_set.members):
+            raise DomainError(
+                ErrorCode.COMPARISON_INVALID,
+                "Multi-run paired comparisons require explicit trial identities.",
+            )
+        for member in run_set.members:
+            if not member.included:
+                excluded += 1
+                continue
+            block_key = str(member.order)
+            if member.trial_id is not None:
+                trial_rows = snapshot.execute(
+                    "SELECT DISTINCT block_id, outcome FROM trials WHERE trial_id = ?",
+                    (member.trial_id,),
+                ).fetchall()
+                if len(trial_rows) != 1:
+                    raise DomainError(
+                        ErrorCode.COMPARISON_INVALID,
+                        "Run-set trial evidence is missing or ambiguous.",
+                        details={"trial_id": member.trial_id},
+                    )
+                block_id, outcome = trial_rows[0]
+                if str(outcome) != "succeeded":
+                    failed += 1
+                    continue
+                if block_id is None:
+                    raise DomainError(
+                        ErrorCode.COMPARISON_INVALID,
+                        "Paired experiment trials require block identities.",
+                        details={"trial_id": member.trial_id},
+                    )
+                block_key = str(block_id)
+            rows = snapshot.execute(
+                f"SELECT {column}, unavailable_metrics FROM runtime_resource_summaries "
+                "WHERE run_id = ?",
+                (member.run_id,),
+            ).fetchall()
+            if len(rows) > 1:
+                raise DomainError(
+                    ErrorCode.COMPARISON_INVALID,
+                    "Run has ambiguous runtime-resource summary evidence.",
+                    details={"run_id": member.run_id},
+                )
+            if not rows:
+                continue
+            value, unavailable_metrics = rows[0]
+            if value is None or metric.removeprefix("runtime_resource.") in set(
+                unavailable_metrics or []
+            ):
+                continue
+            if value <= 0:
+                nonpositive += 1
+                continue
+            if block_key in values:
+                raise DomainError(
+                    ErrorCode.COMPARISON_INVALID,
+                    "Run set contains more than one included trial for a block.",
+                    details={"block_id": block_key},
+                )
+            values[block_key] = float(value)
+        return _SampleSet(
+            values=values,
+            attempted=attempted,
+            eligible=len(values),
+            failed=failed,
+            excluded=excluded,
+            nonpositive=nonpositive,
+        )
+
+    def _runtime_resource_compatibility_mismatches(
+        self,
+        snapshot: Snapshot,
+        baseline: RunSet,
+        candidate: RunSet,
+        metric: str,
+    ) -> list[str]:
+        reasons: list[str] = []
+        configurations: dict[str, set[tuple[object, ...]]] = {"baseline": set(), "candidate": set()}
+        for treatment, run_set in (("baseline", baseline), ("candidate", candidate)):
+            for member in run_set.members:
+                if not member.included:
+                    continue
+                if member.trial_id is not None:
+                    trial_rows = snapshot.execute(
+                        "SELECT DISTINCT outcome FROM trials WHERE trial_id = ?",
+                        (member.trial_id,),
+                    ).fetchall()
+                    if len(trial_rows) != 1 or str(trial_rows[0][0]) != "succeeded":
+                        continue
+                column = _RUNTIME_RESOURCE_COLUMNS[metric]
+                rows = snapshot.execute(
+                    f"SELECT {column}, unavailable_metrics, sampling_interval_ms, "
+                    "peak_rss_backend "
+                    "FROM runtime_resource_summaries WHERE run_id = ?",
+                    (member.run_id,),
+                ).fetchall()
+                if len(rows) != 1:
+                    continue
+                value, unavailable_metrics, interval, backend = rows[0]
+                if (
+                    value is None
+                    or value <= 0
+                    or metric.removeprefix("runtime_resource.") in set(unavailable_metrics or [])
+                ):
+                    continue
+                configuration = (
+                    (interval, backend) if metric.endswith("peak_rss_bytes") else (interval,)
+                )
+                configurations[treatment].add(configuration)
+        baseline_configs = configurations["baseline"]
+        candidate_configs = configurations["candidate"]
+        if (
+            len(baseline_configs) > 1
+            or len(candidate_configs) > 1
+            or baseline_configs != candidate_configs
+        ):
+            reasons.append(
+                "runtime-resource sampling interval or backend differs across treatments"
+            )
+        if metric.endswith("peak_rss_bytes") and (
+            not baseline_configs
+            or not candidate_configs
+            or any(config[1] is None for config in (*baseline_configs, *candidate_configs))
+        ):
+            reasons.append("peak RSS backend identity is unavailable")
+        return reasons
 
     def _compatibility_mismatches(
         self,

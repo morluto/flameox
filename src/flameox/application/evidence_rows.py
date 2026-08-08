@@ -128,6 +128,7 @@ def runtime_resource_summary_row(
         "minimum_free_bytes": resources.minimum_free_bytes if resources is not None else None,
         "staging_growth_bytes": resources.staging_growth_bytes if resources is not None else None,
         "peak_rss_bytes": resources.peak_rss_bytes if resources is not None else None,
+        "peak_rss_backend": resources.peak_rss_backend if resources is not None else None,
         "policy_termination": (resources.policy_termination if resources is not None else None),
         "unavailable_metrics": _normalized_unavailable_metrics(unavailable),
     }

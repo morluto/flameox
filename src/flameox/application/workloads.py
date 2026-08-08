@@ -38,6 +38,14 @@ from flameox.storage import Workspace
 
 Scalar = str | int | float | bool
 
+RUNTIME_RESOURCE_METRICS = frozenset(
+    {
+        "runtime_resource.peak_rss_bytes",
+        "runtime_resource.minimum_free_bytes",
+        "runtime_resource.staging_growth_bytes",
+    }
+)
+
 
 class WorkloadOracleConfig(ContractModel):
     strength: OracleStrength = OracleStrength.EXECUTION_CHECK
@@ -156,6 +164,14 @@ class ExperimentConfig(ContractModel):
 
     @model_validator(mode="after")
     def valid_design(self) -> ExperimentConfig:
+        if self.primary_metric.startswith("runtime_resource.") and (
+            self.primary_metric not in RUNTIME_RESOURCE_METRICS
+        ):
+            raise ValueError(
+                "runtime-resource primary_metric must be one of "
+                "runtime_resource.peak_rss_bytes, runtime_resource.minimum_free_bytes, "
+                "or runtime_resource.staging_growth_bytes"
+            )
         if self.factors:
             if self.variants or self.scaling_parameter is not None or self.scaling_values:
                 raise ValueError("factor experiments cannot use legacy variant or scaling fields")
