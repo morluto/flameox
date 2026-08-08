@@ -102,6 +102,18 @@ def test_sglang_scenario_requires_random_workload_and_sglang_server() -> None:
         )
 
 
+def test_sglang_scenario_rejects_dropped_burstiness() -> None:
+    with pytest.raises(ValidationError, match="burstiness is unsupported"):
+        InferenceScenarioConfig(
+            server="local",
+            provider="sglang_bench",
+            random_input_len=4,
+            random_output_len=2,
+            request_rate=1,
+            burstiness=0.5,
+        )
+
+
 def test_sglang_config_rejects_non_cuda_v1_escape_hatches() -> None:
     with pytest.raises(ValidationError, match="extra_forbidden"):
         InferenceServerConfig.model_validate(

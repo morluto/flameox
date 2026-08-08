@@ -391,6 +391,8 @@ class InferenceScenarioConfig(ContractModel):
                 raise ValueError("sglang_bench non-streaming response mode is unsupported in v1")
             if self.random_input_len is None or self.random_output_len is None:
                 raise ValueError("sglang_bench requires random_input_len and random_output_len")
+            if self.burstiness is not None:
+                raise ValueError("sglang_bench burstiness is unsupported in v1")
         elif any(
             value is not None
             for value in (self.random_input_len, self.random_output_len, self.random_range_ratio)

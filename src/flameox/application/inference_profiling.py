@@ -148,6 +148,12 @@ class InferenceProfilingService:
                 ErrorCode.EXECUTION_REFUSED,
                 "Inference profiling requires a Flameox-managed server workload.",
             )
+        if server.provider == "sglang" and profiler != "torch_profiler":
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "SGLang profiling supports only its stage-separated Torch profiler in v1.",
+                remediation=("Use profiler='torch_profiler' for the declared SGLang server.",),
+            )
         workload = self.workloads.resolve(server.workload)
         replay = InferenceReplayService(self.workspace, broker=self.broker)
         server_executable_digest, server_version = replay._server_tool_identity(server)
