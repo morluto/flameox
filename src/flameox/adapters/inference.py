@@ -1107,7 +1107,7 @@ class SglangResultDocument(ContractModel):
     request_throughput: Annotated[float, Field(ge=0)] | None = None
     input_throughput: Annotated[float, Field(ge=0)] | None = None
     output_throughput: Annotated[float, Field(ge=0)] | None = None
-    total_throughput: Annotated[float, Field(ge=0)] | None = None
+    total_token_throughput: Annotated[float, Field(ge=0)] | None = None
     accept_length: Annotated[float, Field(ge=0)] | None = None
     concurrency: Annotated[float, Field(ge=0)] | None = None
     mean_e2e_latency_ms: Annotated[float, Field(ge=0)] | None = None
@@ -1204,17 +1204,33 @@ class SglangResultParser:
                 if key == "duration"
                 else "count"
             )
+            dimensions = {
+                "producer": "sglang.bench_serving",
+                "completed": str(document.completed),
+            }
+            aggregation = "aggregate"
+            if key.startswith("mean_"):
+                aggregation = "mean"
+                dimensions["stat"] = "mean"
+            elif key.startswith("median_"):
+                aggregation = "median"
+                dimensions["stat"] = "median"
+            elif key.startswith("std_"):
+                aggregation = "std"
+                dimensions["stat"] = "std"
+            elif key.startswith("p") and "_" in key:
+                percentile = key.split("_", 1)[0][1:]
+                if percentile.isdigit():
+                    aggregation = "percentile"
+                    dimensions.update({"stat": "percentile", "percentile": percentile})
             rows.append(
                 VllmMeasurementRow(
                     measurement_id=digest_model({"name": f"sglang.{key}", "value": value}),
                     name=f"sglang.{key}",
                     value_float=value,
                     unit=unit,
-                    aggregation="aggregate",
-                    dimensions={
-                        "producer": "sglang.bench_serving",
-                        "completed": str(document.completed),
-                    },
+                    aggregation=aggregation,
+                    dimensions=dimensions,
                 )
             )
         return document, rows

@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 import sys
 import time
 from importlib.metadata import PackageNotFoundError, version
@@ -27,6 +26,7 @@ from urllib.response import addinfourl
 from pydantic import Field, field_validator, model_validator
 
 from flameox.domain import DomainError, ErrorCode
+from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.models import ContractModel
 
 _MAX_PROBE_RESPONSE_BYTES = 1024 * 1024
@@ -218,6 +218,8 @@ class SglangBenchServingRequest(ContractModel):
             raise ValueError(
                 "sglang bench_serving non-streaming response mode is unsupported in v1"
             )
+        if urlsplit(self.base_url).path not in ("", "/"):
+            raise ValueError("sglang bench_serving requires a root base_url in v1")
         return self
 
     def argv(self) -> tuple[str, ...]:
@@ -272,28 +274,33 @@ class InferenceToolDiscovery(ContractModel):
     remediation: tuple[str, ...] = ()
 
 
-def discover_sglang(benchmark_python: Path) -> InferenceToolDiscovery:
+def discover_sglang(
+    benchmark_python: Path, *, broker: SubprocessBroker | None = None
+) -> InferenceToolDiscovery:
     """Discover SGLang through its declared launcher, never Flameox's PATH."""
     executable = benchmark_python.resolve()
     digest = _digest_executable(executable)
     tool_version: str | None = None
     if executable.is_file() and os.access(executable, os.X_OK):
         try:
-            completed = subprocess.run(
-                (
-                    str(executable),
-                    "-c",
-                    "from importlib.metadata import version; print(version('sglang'))",
-                ),
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
+            outcome = (broker or SubprocessBroker()).run_sync(
+                ExecutionRequest(
+                    argv=(
+                        str(executable),
+                        "-c",
+                        "from importlib.metadata import version; print(version('sglang'))",
+                    ),
+                    cwd=executable.parent,
+                    environment_allowlist=("PATH",),
+                    allowed_working_roots=(executable.parent,),
+                    timeout_seconds=5,
+                    max_output_bytes=1024,
+                )
             )
-            if completed.returncode == 0:
-                candidate = completed.stdout.strip()
+            if outcome.process.exit_code == 0:
+                candidate = outcome.stdout.decode("utf-8", errors="strict").strip()
                 tool_version = candidate if candidate else None
-        except (OSError, subprocess.SubprocessError):
+        except (DomainError, OSError, UnicodeDecodeError):
             pass
     compatible = tool_version == "0.5.16"
     return InferenceToolDiscovery(
@@ -307,8 +314,12 @@ def discover_sglang(benchmark_python: Path) -> InferenceToolDiscovery:
         if compatible
         else "SGLang 0.5.16 is required in benchmark_python.",
         remediation=(
-            "Install sglang==0.5.16 in the declared benchmark_python runtime; "
-            "Flameox does not install it.",
+            ()
+            if compatible
+            else (
+                "Install sglang==0.5.16 in the declared benchmark_python runtime; "
+                "Flameox does not install it.",
+            )
         ),
     )
 

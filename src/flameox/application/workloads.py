@@ -336,6 +336,8 @@ class InferenceServerConfig(ContractModel):
                 raise ValueError(
                     "sglang inference servers require an absolute benchmark_python launcher"
                 )
+            if urlsplit(self.base_url).path not in ("", "/"):
+                raise ValueError("sglang inference servers require a root base_url in v1")
         elif self.benchmark_python is not None:
             raise ValueError("benchmark_python is only supported by sglang inference servers")
         if self.mode == "managed":

@@ -248,6 +248,50 @@ def test_torch_profile_plan_uses_managed_workload_and_trace_directory(tmp_path: 
     assert plan.plan_id == second.plan_id
 
 
+def test_sglang_torch_plan_has_stable_identity_and_derived_profile_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    launcher = tmp_path / "sglang-python"
+    launcher.write_text("launcher")
+    launcher.chmod(0o755)
+    (tmp_path / "serve.py").write_text("print('serve')")
+    (tmp_path / "flameox.toml").write_text(
+        "schema_version = 1\n"
+        '[workloads.serve]\nargv = ["python", "serve.py"]\n'
+        "[inference_servers.local]\n"
+        'provider = "sglang"\n'
+        f'benchmark_python = "{launcher}"\n'
+        'mode = "managed"\nworkload = "serve"\n'
+        'base_url = "http://127.0.0.1:8000"\nmodel = "model"\n'
+        "[inference_scenarios.profile]\n"
+        'server = "local"\nprovider = "sglang_bench"\n'
+        "random_input_len = 4\nrandom_output_len = 2\n"
+    )
+
+    discovery = InferenceToolDiscovery(
+        tool="sglang",
+        executable=launcher,
+        available=True,
+        compatible=True,
+        version="0.5.16",
+        executable_digest="sha256:" + "b" * 64,
+    )
+    monkeypatch.setattr(
+        "flameox.application.inference_profiling.discover_sglang",
+        lambda _launcher, *, broker: discovery,
+    )
+
+    service = InferenceProfilingService(workspace)
+    first = service.plan("local", profiler="torch_profiler")
+    second = service.plan("local", profiler="torch_profiler")
+
+    assert first.plan_id == second.plan_id
+    assert first.sglang_profile_id == second.sglang_profile_id
+    assert first.sglang_profile_id == f"flameox-{first.plan_id[7:31]}"
+    assert first.benchmark_executable_digest == discovery.executable_digest
+
+
 def test_nsight_plan_wraps_server_with_documented_cuda_capture_range(tmp_path: Path) -> None:
     nsys = tmp_path / "nsys"
     nsys.write_text("#!/bin/sh\n")

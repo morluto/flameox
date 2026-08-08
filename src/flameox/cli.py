@@ -2248,7 +2248,7 @@ def extract_inference_trace(
 def extract_inference_result(
     run_id: Annotated[str, typer.Argument(help="Import run containing provider result data.")],
     provider: Annotated[
-        Literal["aiperf", "vllm_bench"],
+        Literal["aiperf", "vllm_bench", "sglang_bench"],
         typer.Option("--provider", help="Maintained provider artifact schema."),
     ],
     workspace: WorkspaceOption = None,
@@ -2260,6 +2260,8 @@ def extract_inference_result(
         result = (
             extractor.extract_aiperf_result(run_id)
             if provider == "aiperf"
+            else extractor.extract_sglang_result(run_id)
+            if provider == "sglang_bench"
             else extractor.extract_vllm_result(run_id)
         )
     except DomainError as error:

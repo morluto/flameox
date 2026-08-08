@@ -230,7 +230,7 @@ class InferenceReplayService:
         deadline_at = utc_now() + timedelta(seconds=deadline)
         tool = _PROVIDER_TOOL[scenario.provider]
         discovery = (
-            discover_sglang(Path(server.benchmark_python))
+            discover_sglang(Path(server.benchmark_python), broker=self.broker)
             if scenario.provider == "sglang_bench" and server.benchmark_python is not None
             else discover_inference_tool(tool)
         )
@@ -869,18 +869,16 @@ class InferenceReplayService:
         return scenario, server
 
     def _server_tool_identity(self, server: InferenceServerConfig) -> tuple[str | None, str | None]:
-        if server.provider == "sglang" and server.benchmark_python is not None:
-            discovery = discover_sglang(Path(server.benchmark_python))
-            return discovery.executable_digest, discovery.version
         if server.mode != "managed" or server.workload is None:
             return None, None
         command = self.workloads.resolve(server.workload).command
         executable = self._resolve_server_executable(command)
         executable_digest = self._executable_digest(executable)
-        discovery = discover_inference_tool("vllm")
+        discovery = discover_inference_tool("vllm") if server.provider == "vllm" else None
         version = (
             discovery.version
-            if discovery.executable is not None
+            if discovery is not None
+            and discovery.executable is not None
             and executable.resolve() == discovery.executable.resolve()
             else None
         )
@@ -920,7 +918,7 @@ class InferenceReplayService:
                 remediation=("Plan the inference scenario again, then retry execution.",),
             )
         provider = (
-            discover_sglang(Path(plan.tool_executable))
+            discover_sglang(Path(plan.tool_executable), broker=self.broker)
             if plan.provider == "sglang_bench" and plan.tool_executable is not None
             else discover_inference_tool(_PROVIDER_TOOL[plan.provider])
         )
@@ -1204,6 +1202,9 @@ class InferenceReplayService:
                     "streaming": plan.streaming,
                     "model": plan.model,
                     "tokenizer": plan.tokenizer,
+                    "random_input_len": plan.random_input_len,
+                    "random_output_len": plan.random_output_len,
+                    "random_range_ratio": plan.random_range_ratio,
                 }
             )
         managed_command_digest = None
@@ -1245,6 +1246,8 @@ class InferenceReplayService:
                     if plan.trace_artifact_id is not None
                     else "aiperf"
                     if plan.provider == "aiperf"
+                    else "sglang.bench_serving"
+                    if plan.provider == "sglang_bench"
                     else "vllm"
                 ),
                 producer_version=(
@@ -1271,6 +1274,7 @@ class InferenceReplayService:
             ),
             server=ServerConfigIdentity(
                 backend=plan.server_provider,
+                cache_backend="custom" if plan.server_provider == "sglang" else "vllm_paged",
                 endpoint=(
                     "/v1/chat/completions" if plan.endpoint_type == "chat" else "/v1/completions"
                 ),

@@ -3101,7 +3101,7 @@ def create_server(
     @server.tool(name="extract_inference_result", annotations=ADDITIVE)
     async def extract_inference_result_tool(
         run_id: Annotated[str, Field(min_length=1, max_length=200)],
-        provider: Literal["aiperf", "vllm_bench"],
+        provider: Literal["aiperf", "vllm_bench", "sglang_bench"],
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[InferenceExtractionResult]]:
         """Extract prompt-free AIPerf requests or vLLM aggregate measurements."""
@@ -3112,6 +3112,10 @@ def create_server(
                         ctx.request_context.lifespan_context.require_workspace()
                     ).extract_aiperf_result(run_id)
                     if provider == "aiperf"
+                    else InferenceArtifactExtractor(
+                        ctx.request_context.lifespan_context.require_workspace()
+                    ).extract_sglang_result(run_id)
+                    if provider == "sglang_bench"
                     else InferenceArtifactExtractor(
                         ctx.request_context.lifespan_context.require_workspace()
                     ).extract_vllm_result(run_id)

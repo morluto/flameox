@@ -83,6 +83,17 @@ def test_sglang_server_requires_an_absolute_benchmark_launcher(launcher: str | N
         )
 
 
+def test_sglang_server_rejects_non_root_base_url() -> None:
+    with pytest.raises(ValidationError, match="root base_url"):
+        InferenceServerConfig(
+            provider="sglang",
+            benchmark_python="/opt/sglang/bin/python",
+            mode="existing_local",
+            base_url="http://127.0.0.1:8000/api",
+            model="model",
+        )
+
+
 def test_sglang_scenario_requires_random_workload_and_sglang_server() -> None:
     with pytest.raises(ValidationError, match="requires random_input_len"):
         InferenceScenarioConfig(server="local", provider="sglang_bench")

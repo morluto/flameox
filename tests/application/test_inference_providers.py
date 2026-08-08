@@ -11,6 +11,7 @@ from flameox.application.inference_providers import (
     SglangBenchServingRequest,
     VllmBenchServeRequest,
     discover_inference_tool,
+    discover_sglang,
     probe_existing_vllm_server,
 )
 
@@ -176,3 +177,48 @@ def test_sglang_bench_uses_fixed_module_random_workload_and_safe_output(tmp_path
     assert "sglang-oai-chat" in argv
     assert "--output-details" not in argv
     assert argv[argv.index("--output-file") + 1] == str(tmp_path / "result.jsonl")
+
+
+def test_sglang_bench_rejects_base_url_paths(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="root base_url"):
+        SglangBenchServingRequest(
+            benchmark_python=Path("/opt/sglang/bin/python"),
+            base_url="http://127.0.0.1:8000/api",
+            model="model",
+            result_path=tmp_path / "result.jsonl",
+            num_prompts=1,
+            random_input_len=4,
+            random_output_len=2,
+        )
+
+
+def test_sglang_discovery_uses_the_bounded_broker(tmp_path: Path) -> None:
+    from flameox.domain import ProcessResult
+    from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
+
+    executable = tmp_path / "python"
+    executable.write_text("launcher")
+    executable.chmod(0o755)
+
+    class Broker(SubprocessBroker):
+        def __init__(self) -> None:
+            self.request: ExecutionRequest | None = None
+
+        def run_sync(self, request: ExecutionRequest, **_kwargs: object) -> ExecutionOutcome:
+            self.request = request
+            return ExecutionOutcome(
+                process=ProcessResult(exit_code=0),
+                stdout=b"0.5.16\n",
+                stderr=b"",
+                resolved_executable=executable,
+                containment="process_group",
+            )
+
+    broker = Broker()
+    discovery = discover_sglang(executable, broker=broker)
+
+    assert discovery.available is True
+    assert discovery.remediation == ()
+    assert broker.request is not None
+    assert broker.request.timeout_seconds == 5
+    assert broker.request.max_output_bytes == 1024

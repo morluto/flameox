@@ -23,7 +23,7 @@ from flameox.application.evidence_rows import (
 )
 from flameox.application.imports import ImportArtifactRequest, ImportService
 from flameox.application.inference import InferenceReplayService
-from flameox.application.inference_providers import _loopback_http_url
+from flameox.application.inference_providers import _loopback_http_url, discover_sglang
 from flameox.application.run_rows import run_row
 from flameox.application.source import collect_partial_source_state
 from flameox.application.workloads import WorkloadService
@@ -80,6 +80,7 @@ class InferenceProfilingPlan(ContractModel):
     configuration_id: str
     server_executable_digest: str | None = None
     server_version: str | None = None
+    benchmark_executable_digest: str | None = None
     diagnostic_only: Literal[True] = True
     limitations: tuple[str, ...]
     sglang_profile_id: Annotated[str, Field(min_length=1, max_length=100)] | None = None
@@ -157,6 +158,13 @@ class InferenceProfilingService:
         workload = self.workloads.resolve(server.workload)
         replay = InferenceReplayService(self.workspace, broker=self.broker)
         server_executable_digest, server_version = replay._server_tool_identity(server)
+        sglang_discovery = (
+            discover_sglang(Path(server.benchmark_python), broker=self.broker)
+            if server.provider == "sglang" and server.benchmark_python is not None
+            else None
+        )
+        if sglang_discovery is not None:
+            server_version = sglang_discovery.version
         native_argv = workload.command.argv
         output_root = self.workspace.paths.staging / f"inference-profile-{server_name}" / new_id()
         environment = dict(workload.command.env_overrides)
@@ -213,7 +221,6 @@ class InferenceProfilingService:
             if server.provider == "sglang" and profiler == "torch_profiler"
             else None
         )
-        sglang_profile_id = new_id() if sglang_profile_options is not None else None
         environment_names = set(environment)
         if profiler == "torch_profiler" and server.provider == "vllm":
             environment_names.add("VLLM_TORCH_PROFILER_DIR")
@@ -230,8 +237,16 @@ class InferenceProfilingService:
             ),
             "configuration_id": digest_model(project.model_dump(mode="json")),
             "server_provider": server.provider,
-            "sglang_profile_id": sglang_profile_id,
-            "sglang_profile_options": sglang_profile_options,
+            "server_executable_digest": server_executable_digest,
+            "benchmark_executable_digest": (
+                sglang_discovery.executable_digest if sglang_discovery is not None else None
+            ),
+            "server_version": server_version,
+            "sglang_profile_options": (
+                sglang_profile_options.model_dump(mode="json")
+                if sglang_profile_options is not None
+                else None
+            ),
         }
         plan_id = digest_model(identity)
         if expected_plan_id is not None and expected_plan_id != plan_id:
@@ -256,8 +271,12 @@ class InferenceProfilingService:
             configuration_id=digest_model(project.model_dump(mode="json")),
             server_executable_digest=server_executable_digest,
             server_version=server_version,
+            benchmark_executable_digest=(
+                sglang_discovery.executable_digest if sglang_discovery is not None else None
+            ),
             limitations=limitations,
-            sglang_profile_id=sglang_profile_id,
+            # This is a server-side operation token, not a source of plan churn.
+            sglang_profile_id=(f"flameox-{plan_id[7:31]}" if sglang_profile_options else None),
             sglang_profile_options=sglang_profile_options,
         )
 
@@ -293,7 +312,17 @@ class InferenceProfilingService:
         if plan.profiler == "torch_profiler" and plan.server_provider == "vllm":
             server_environment["VLLM_TORCH_PROFILER_DIR"] = str(plan.output_path)
         server_digest, server_version = replay._server_tool_identity(server)
-        if server_digest != plan.server_executable_digest or server_version != plan.server_version:
+        if server.provider == "sglang" and server.benchmark_python is not None:
+            sglang_discovery = discover_sglang(Path(server.benchmark_python), broker=self.broker)
+            server_version = sglang_discovery.version
+            benchmark_digest = sglang_discovery.executable_digest
+        else:
+            benchmark_digest = None
+        if (
+            server_digest != plan.server_executable_digest
+            or server_version != plan.server_version
+            or benchmark_digest != plan.benchmark_executable_digest
+        ):
             raise DomainError(
                 ErrorCode.REVISION_CONFLICT,
                 "Managed server executable identity changed after profiling was planned.",

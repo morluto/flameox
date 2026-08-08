@@ -1499,7 +1499,10 @@ def test_sglang_result_parser_emits_safe_optional_scalar_metrics(tmp_path: Path)
                 "total_input_tokens": 8,
                 "total_output_tokens": 4,
                 "request_throughput": 2.0,
+                "total_token_throughput": 12.0,
                 "accept_length": 3.5,
+                "mean_ttft_ms": 4.0,
+                "p95_ttft_ms": 9.0,
             }
         )
         + "\n",
@@ -1511,7 +1514,12 @@ def test_sglang_result_parser_emits_safe_optional_scalar_metrics(tmp_path: Path)
     values = {row.name: row.value_float for row in rows}
     assert values["sglang.accept_length"] == 3.5
     assert values["sglang.request_throughput"] == 2.0
+    assert values["sglang.total_token_throughput"] == 12.0
     assert all(row.dimensions["producer"] == "sglang.bench_serving" for row in rows)
+    by_name = {row.name: row for row in rows}
+    assert by_name["sglang.mean_ttft_ms"].aggregation == "mean"
+    assert by_name["sglang.p95_ttft_ms"].aggregation == "percentile"
+    assert by_name["sglang.p95_ttft_ms"].dimensions["percentile"] == "95"
 
 
 @pytest.mark.parametrize("payload", ["", "{}\n{}\n", '{"duration": NaN}\n'])
