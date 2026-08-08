@@ -1,6 +1,11 @@
 # Changelog
 
 All notable changes to flameox are documented in this file.
+## [0.1.13] - 2026-08-08
+### Documentation
+
+- **readme:** Mention SGLang inference replay
+- Clarify supported workflows
 ## [0.1.12] - 2026-08-08
 ### Bug Fixes
 
