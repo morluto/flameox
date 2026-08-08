@@ -11,6 +11,7 @@ from flameox.application import (
     CreateInvestigationRequest,
     ExecutionPolicy,
     ExperimentConfig,
+    ExperimentPlan,
     ExperimentService,
     InvestigationService,
 )
@@ -61,6 +62,10 @@ def test_experiment_config_rejects_writable_root_growth_metric() -> None:
             variants=("baseline", "candidate"),
             primary_metric="runtime_resource.writable_root_growth_bytes",
         )
+
+
+def test_experiment_plan_defaults_metric_source_for_persisted_plans() -> None:
+    assert ExperimentPlan.model_fields["metric_source"].default == "measurement"
 
 
 @pytest.mark.anyio

@@ -127,6 +127,7 @@ class _SampleSet:
     eligible: int
     failed: int
     excluded: int
+    nonpositive: int = 0
 
 
 class RunSetService:
@@ -292,6 +293,11 @@ class ComparisonService:
             if candidate.eligible != candidate.attempted - candidate.failed - candidate.excluded:
                 exploratory.append(
                     "candidate runtime-resource evidence is unavailable or incomplete"
+                )
+            if baseline.nonpositive or candidate.nonpositive:
+                invalidating.append(
+                    "zero-valued runtime-resource evidence is incompatible with the "
+                    "median paired log-ratio estimand"
                 )
         profile_changes = self._profile_changes(
             snapshot,
@@ -579,6 +585,7 @@ class ComparisonService:
         attempted = len(run_set.members)
         failed = 0
         excluded = 0
+        nonpositive = 0
         if len(run_set.members) > 1 and any(member.trial_id is None for member in run_set.members):
             raise DomainError(
                 ErrorCode.COMPARISON_INVALID,
@@ -629,6 +636,9 @@ class ComparisonService:
                 unavailable_metrics or []
             ):
                 continue
+            if value <= 0:
+                nonpositive += 1
+                continue
             if block_key in values:
                 raise DomainError(
                     ErrorCode.COMPARISON_INVALID,
@@ -642,6 +652,7 @@ class ComparisonService:
             eligible=len(values),
             failed=failed,
             excluded=excluded,
+            nonpositive=nonpositive,
         )
 
     def _runtime_resource_compatibility_mismatches(
@@ -664,14 +675,22 @@ class ComparisonService:
                     ).fetchall()
                     if len(trial_rows) != 1 or str(trial_rows[0][0]) != "succeeded":
                         continue
+                column = _RUNTIME_RESOURCE_COLUMNS[metric]
                 rows = snapshot.execute(
-                    "SELECT sampling_interval_ms, peak_rss_backend "
+                    f"SELECT {column}, unavailable_metrics, sampling_interval_ms, "
+                    "peak_rss_backend "
                     "FROM runtime_resource_summaries WHERE run_id = ?",
                     (member.run_id,),
                 ).fetchall()
                 if len(rows) != 1:
                     continue
-                interval, backend = rows[0]
+                value, unavailable_metrics, interval, backend = rows[0]
+                if (
+                    value is None
+                    or value <= 0
+                    or metric.removeprefix("runtime_resource.") in set(unavailable_metrics or [])
+                ):
+                    continue
                 configuration = (
                     (interval, backend) if metric.endswith("peak_rss_bytes") else (interval,)
                 )

@@ -95,7 +95,7 @@ class ExperimentPlan(ContractModel):
     experiment_name: str
     experiment: Experiment
     adapter: str
-    metric_source: Literal["measurement", "runtime_resource"]
+    metric_source: Literal["measurement", "runtime_resource"] = "measurement"
     execution_policy: ExecutionPolicy
     variant_parameter: str
     variants: tuple[str, ...]

@@ -11,7 +11,7 @@ from flameox.application import (
     RunSetService,
 )
 from flameox.catalog import Catalog
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import ComparisonValidity, DomainError, ErrorCode
 from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
 from tests.support.comparisons import imported_benchmark, measurement_row
@@ -171,3 +171,56 @@ def test_runtime_resource_comparison_rejects_wrong_unit() -> None:
             polarity="lower_is_better",
             practical_threshold=0,
         )
+
+
+def test_runtime_resource_zero_is_invalid_for_log_ratio_estimation(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    baseline_id, candidate_id = _benchmark_pair(workspace, tmp_path)
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "runtime_resource_summaries": [
+                {
+                    "run_id": baseline_id,
+                    "sampling_interval_ms": 100,
+                    "minimum_free_bytes": 1,
+                    "staging_growth_bytes": 10,
+                    "peak_rss_bytes": 100,
+                    "peak_rss_backend": "psutil_recursive_polling",
+                    "policy_termination": None,
+                    "unavailable_metrics": [],
+                },
+                {
+                    "run_id": candidate_id,
+                    "sampling_interval_ms": 100,
+                    "minimum_free_bytes": 1,
+                    "staging_growth_bytes": 0,
+                    "peak_rss_bytes": 100,
+                    "peak_rss_backend": "psutil_recursive_polling",
+                    "policy_termination": None,
+                    "unavailable_metrics": [],
+                },
+            ]
+        },
+        publisher="comparison-resource-fixture",
+        publisher_version="1",
+        input_run_ids=(baseline_id, candidate_id),
+    )
+    run_sets = RunSetService(workspace)
+    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
+    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
+
+    result = ComparisonService(workspace).compare(
+        CompareRunSetsRequest(
+            baseline_run_set_id=baseline.run_set_id,
+            candidate_run_set_id=candidate.run_set_id,
+            metric="runtime_resource.staging_growth_bytes",
+            metric_source="runtime_resource",
+            unit="bytes",
+            polarity="lower_is_better",
+            practical_threshold=0,
+        )
+    )
+
+    assert result.comparison.validity is ComparisonValidity.INVALID
+    assert result.comparison.candidate_eligible_n == 0
+    assert any("zero-valued" in reason for reason in result.comparison.mismatches)
