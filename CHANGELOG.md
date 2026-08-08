@@ -1,6 +1,29 @@
 # Changelog
 
 All notable changes to flameox are documented in this file.
+## [0.1.12] - 2026-08-08
+### Bug Fixes
+
+- **inference:** Preserve provider schedule contracts (#123) ([#123](https://github.com/morluto/flameox/pull/123))
+- **inference:** Harden replay review boundaries
+### Continuous Integration
+
+- Register inference test collection
+### Documentation
+
+- Clarify runtime evidence workflow
+- **adapters:** Clarify maintained tool integration
+### Features
+
+- **experiments:** Compare runtime resource metrics (#125) ([#125](https://github.com/morluto/flameox/pull/125))
+- **inference:** Add replay and profiling workflows
+### Styling
+
+- **inference:** Format executable resolution
+### Testing
+
+- Update collection baseline
+- Update inference collection receipt
 ## [0.1.11] - 2026-08-07
 ### Bug Fixes
 
