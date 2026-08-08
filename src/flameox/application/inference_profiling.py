@@ -27,6 +27,7 @@ from flameox.application.inference_providers import _loopback_http_url
 from flameox.application.run_rows import run_row
 from flameox.application.source import collect_partial_source_state
 from flameox.application.workloads import WorkloadService
+from flameox.atomic import atomic_write_bytes
 from flameox.domain import (
     ArtifactKind,
     ArtifactRegistration,
@@ -366,6 +367,11 @@ class InferenceProfilingService:
                         limitations.append(error.message)
                 server_outcome = await asyncio.shield(lease.close())
 
+            if server_outcome.stdout:
+                atomic_write_bytes(plan.output_path.parent / "server.stdout", server_outcome.stdout)
+            if server_outcome.stderr:
+                atomic_write_bytes(plan.output_path.parent / "server.stderr", server_outcome.stderr)
+
             if server_outcome.process.cleanup_complete is not True:
                 limitations.append("Managed server process cleanup was incomplete.")
 
@@ -374,10 +380,14 @@ class InferenceProfilingService:
             artifacts, runs, preservation_limitations = self._preserve(plan)
             limitations.extend(preservation_limitations)
             extracted_runs = await self._extract_preserved(plan, runs, deadline_at, limitations)
+            if artifacts and not extracted_runs:
+                limitations.append(
+                    "No recognized profiler trace was extracted from preserved artifacts."
+                )
             operational_limitations = limitations[len(run.limitations) :]
             coverage: Literal["complete", "partial", "unavailable"] = (
                 "complete"
-                if artifacts and not operational_limitations
+                if extracted_runs and not operational_limitations
                 else ("partial" if artifacts else "unavailable")
             )
             finished = self._finish_run(
@@ -785,6 +795,7 @@ class InferenceProfilingService:
         importer = ImportService(self.workspace)
         for path in candidates:
             trace_file = path.name.endswith((".json", ".json.gz", ".pftrace", ".sqlite"))
+            server_output = path.name.startswith("server.")
             try:
                 imported = importer.import_artifact(
                     ImportArtifactRequest(
@@ -792,10 +803,14 @@ class InferenceProfilingService:
                         kind=(
                             ArtifactKind.EXECUTION_TRACE
                             if trace_file
+                            else ArtifactKind.PROCESS_OUTPUT
+                            if server_output
                             else ArtifactKind.COLLECTOR_METADATA
                         ),
-                        sensitivity=Sensitivity.INTERNAL,
-                        role="inference_profile",
+                        sensitivity=(
+                            Sensitivity.SENSITIVE if server_output else Sensitivity.INTERNAL
+                        ),
+                        role=("inference_server_output" if server_output else "inference_profile"),
                         producer="nsys" if plan.profiler == "nsight_systems" else "torch_profiler",
                         allow_external_path=True,
                     )

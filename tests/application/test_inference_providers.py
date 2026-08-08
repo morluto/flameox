@@ -112,6 +112,9 @@ def test_existing_server_probe_uses_only_read_endpoints(monkeypatch: pytest.Monk
     class Response:
         status = 200
 
+        def __init__(self) -> None:
+            self._read = False
+
         def __enter__(self) -> Response:
             return self
 
@@ -119,13 +122,16 @@ def test_existing_server_probe_uses_only_read_endpoints(monkeypatch: pytest.Monk
             return None
 
         def read(self, *_args: object) -> bytes:
+            if self._read:
+                return b""
+            self._read = True
             return json.dumps({"data": [{"id": "model"}]}).encode()
 
-    def fake_urlopen(request: object, *, timeout: float) -> Response:
+    def fake_open_probe(request: object, timeout: float) -> Response:
         calls.append(request.full_url)  # type: ignore[attr-defined]
         return Response()
 
-    monkeypatch.setattr("flameox.application.inference_providers.urlopen", fake_urlopen)
+    monkeypatch.setattr("flameox.application.inference_providers._open_probe", fake_open_probe)
 
     assert probe_existing_vllm_server("http://127.0.0.1:8000").model_ids == ("model",)
     assert calls == ["http://127.0.0.1:8000/health", "http://127.0.0.1:8000/v1/models"]

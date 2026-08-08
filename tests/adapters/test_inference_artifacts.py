@@ -196,6 +196,22 @@ def test_mooncake_parse_truncates_at_max_rows(tmp_path: Path) -> None:
     assert summary.limitations == ("Trace truncated at 2 requests.",)
 
 
+def test_mooncake_parse_at_exact_row_limit_is_not_truncated(tmp_path: Path) -> None:
+    trace = tmp_path / "mooncake_trace.jsonl"
+    _write_mooncake_trace(
+        trace,
+        [
+            {"timestamp": 0, "input_length": 1, "output_length": 1, "hash_ids": [0]},
+            {"timestamp": 1, "input_length": 1, "output_length": 1, "hash_ids": [1]},
+        ],
+    )
+
+    summary, rows = MooncakeTraceParser(max_rows=2).parse(trace)
+
+    assert len(rows) == 2
+    assert summary.limitations == ()
+
+
 def test_mooncake_parse_reports_nonzero_first_timestamp(tmp_path: Path) -> None:
     trace = tmp_path / "mooncake_trace.jsonl"
     _write_mooncake_trace(
@@ -285,6 +301,16 @@ def test_mooncake_rejects_oversized_line(tmp_path: Path) -> None:
 
     with pytest.raises(DomainError) as error:
         MooncakeTraceParser(max_rows=10).parse(trace)
+
+    assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
+
+
+def test_mooncake_rejects_unterminated_oversized_line(tmp_path: Path) -> None:
+    trace = tmp_path / "mooncake_trace.jsonl"
+    trace.write_bytes(b"{" + (b"x" * (MooncakeTraceParser.max_line_bytes + 1)))
+
+    with pytest.raises(DomainError) as error:
+        MooncakeTraceParser().parse(trace)
 
     assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
 
@@ -417,6 +443,16 @@ def test_aiperf_record_limit_counts_records_not_blank_lines(tmp_path: Path) -> N
 
     assert len(rows) == 1
     assert parser.truncated is True
+
+
+def test_aiperf_rejects_unterminated_oversized_line(tmp_path: Path) -> None:
+    result = tmp_path / "profile_export.jsonl"
+    result.write_bytes(b"{" + (b"x" * (AIPerfRecordParser.max_line_bytes + 1)))
+
+    with pytest.raises(DomainError) as error:
+        list(AIPerfRecordParser().iter_rows(result))
+
+    assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -1193,6 +1229,39 @@ def test_vllm_parse_rejects_negative_latency(tmp_path: Path) -> None:
     assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
 
 
+@pytest.mark.parametrize(
+    "percentile_pair",
+    [(-1.0, 1.0), (101.0, 1.0), (50.0, -1.0), (float("nan"), 1.0), (50.0, float("inf"))],
+)
+def test_vllm_parse_rejects_invalid_percentile_pairs(
+    tmp_path: Path, percentile_pair: tuple[float, float]
+) -> None:
+    result = tmp_path / "mooncake_replay_results.json"
+    result.write_text(
+        json.dumps(
+            _vllm_result(metrics={"percentiles_ttft_ms": [percentile_pair]}),
+            allow_nan=True,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DomainError) as error:
+        VllmResultParser().parse(result)
+
+    assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
+
+
+@pytest.mark.parametrize("payload", [[], "not an object", 1])
+def test_vllm_parse_wraps_non_object_json_as_domain_error(tmp_path: Path, payload: object) -> None:
+    result = tmp_path / "mooncake_replay_results.json"
+    result.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(DomainError) as error:
+        VllmResultParser().parse(result)
+
+    assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
+
+
 def test_vllm_parse_rejects_infinite_latency(tmp_path: Path) -> None:
     result = tmp_path / "mooncake_replay_results.json"
     payload = _vllm_result()
@@ -1386,6 +1455,7 @@ def test_aiperf_extractor_enforces_independent_request_row_cap(
             path=result_path,
             kind=ArtifactKind.INFERENCE_RESULT,
             producer="aiperf",
+            sensitivity=Sensitivity.SENSITIVE,
         )
     )
     monkeypatch.setattr(InferenceArtifactExtractor, "max_request_rows", 1)

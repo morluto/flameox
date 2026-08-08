@@ -139,14 +139,17 @@ class MooncakeTraceParser:
         """Yield validated rows from a Mooncake trace JSONL file streamingly."""
         try:
             with path.open("rb") as stream:
-                for index, raw in enumerate(stream):
+                index = 0
+                while raw := stream.readline(self.max_line_bytes + 1):
                     if not raw.strip():
+                        index += 1
                         continue
                     if len(raw) > self.max_line_bytes:
                         raise ValueError(
                             f"trace line {index} exceeds the {self.max_line_bytes}-byte limit"
                         )
                     yield self._row_from_line(raw, index)
+                    index += 1
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
@@ -159,7 +162,12 @@ class MooncakeTraceParser:
         limitations: list[str] = []
         first_timestamp: int | None = None
         last_timestamp: int | None = None
-        for row in self.iter_rows(path):
+        iterator = iter(self.iter_rows(path))
+        while len(rows) < self.max_rows:
+            try:
+                row = next(iterator)
+            except StopIteration:
+                break
             if first_timestamp is None:
                 first_timestamp = row.timestamp_ms
             if last_timestamp is not None and row.timestamp_ms < last_timestamp:
@@ -168,9 +176,13 @@ class MooncakeTraceParser:
                 )
             last_timestamp = row.timestamp_ms
             rows.append(row)
-            if len(rows) >= self.max_rows:
+        if len(rows) == self.max_rows:
+            try:
+                next(iterator)
+            except StopIteration:
+                pass
+            else:
                 limitations.append(f"Trace truncated at {self.max_rows} requests.")
-                break
         if not rows:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
@@ -261,8 +273,10 @@ class AIPerfRecordParser:
         record_count = 0
         try:
             with path.open("rb") as stream:
-                for line_index, raw in enumerate(stream):
+                line_index = 0
+                while raw := stream.readline(self.max_line_bytes + 1):
                     if not raw.strip():
+                        line_index += 1
                         continue
                     if record_count >= self.max_rows:
                         self.truncated = True
@@ -276,6 +290,7 @@ class AIPerfRecordParser:
                         self._correlate(payload, inputs_index)
                     yield self._normalize(payload, line_index)
                     record_count += 1
+                    line_index += 1
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
@@ -819,6 +834,21 @@ class VllmAggregateMetrics(ContractModel):
                 raise ValueError(f"{name} must be non-negative")
         return self
 
+    @field_validator(
+        "percentiles_ttft_ms",
+        "percentiles_tpot_ms",
+        "percentiles_itl_ms",
+        "percentiles_e2el_ms",
+    )
+    @classmethod
+    def valid_percentiles(cls, values: tuple[_VllmPercentile, ...]) -> tuple[_VllmPercentile, ...]:
+        for percentile, latency_ms in values:
+            if not 0 <= float(percentile) <= 100 or not math.isfinite(float(percentile)):
+                raise ValueError("percentile ranks must be finite values from 0 through 100")
+            if latency_ms < 0 or not math.isfinite(float(latency_ms)):
+                raise ValueError("percentile latency values must be finite and non-negative")
+        return values
+
 
 class VllmResultDocument(ContractModel):
     """The wrapper emitted by the Mooncake replayer around vLLM metrics.
@@ -878,7 +908,7 @@ class VllmResultParser:
     ) -> tuple[VllmResultDocument, list[VllmMeasurementRow]]:
         try:
             document = VllmResultDocument.model_validate(self._normalize_document(payload))
-        except ValidationError as exc:
+        except (ValidationError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
                 "The vLLM benchmark-result document violates the normalized schema.",
@@ -901,7 +931,7 @@ class VllmResultParser:
             if not isinstance(payload, dict):
                 raise ValueError("vLLM benchmark result must be a JSON object")
             return VllmResultDocument.model_validate(VllmResultParser._normalize_document(payload))
-        except ValidationError as exc:
+        except (ValidationError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
                 "The vLLM benchmark-result document violates the normalized schema.",

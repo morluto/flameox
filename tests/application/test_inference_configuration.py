@@ -62,6 +62,16 @@ def test_inference_scenario_requires_declared_server() -> None:
         )
 
 
+def test_managed_inference_server_rejects_localhost_name() -> None:
+    with pytest.raises(ValidationError, match="IP-literal loopback"):
+        InferenceServerConfig(
+            mode="managed",
+            workload="serve",
+            base_url="http://localhost:8000",
+            model="model",
+        )
+
+
 def test_structured_inference_configuration_preserves_existing_sections(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(

@@ -8,6 +8,7 @@ from ipaddress import ip_address
 from pathlib import Path, PurePath
 from string import Formatter
 from typing import Annotated, Literal, cast
+from urllib.parse import urlsplit
 
 import tomlkit
 from pydantic import Field, JsonValue, model_validator
@@ -332,6 +333,14 @@ class InferenceServerConfig(ContractModel):
         if self.mode == "managed":
             if self.workload is None:
                 raise ValueError("managed inference servers require a workload")
+            # Managed servers are bind-probed by the broker, which deliberately
+            # accepts an IP literal so it can prove ownership of the endpoint.
+            # Keep the configuration contract aligned with that lifecycle.
+            hostname = urlsplit(self.base_url).hostname
+            if hostname is not None and hostname.lower() == "localhost":
+                raise ValueError(
+                    "managed inference servers require an IP-literal loopback base_url"
+                )
         else:
             if self.workload is not None:
                 raise ValueError("existing_local inference servers do not declare a workload")

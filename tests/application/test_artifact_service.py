@@ -11,7 +11,7 @@ from flameox.application import (
     NativeViewerService,
 )
 from flameox.catalog import Catalog
-from flameox.domain import Sensitivity
+from flameox.domain import ArtifactKind, DomainError, ErrorCode, Sensitivity
 from flameox.storage import Workspace
 
 
@@ -84,3 +84,24 @@ def test_native_viewer_plan_is_read_only_and_uses_content_path(
     assert plan.argv[0] == "/usr/bin/xdg-open"
     assert Path(plan.argv[1]).is_file()
     assert not plan.launches
+
+
+@pytest.mark.parametrize("sensitivity", [Sensitivity.NORMAL, Sensitivity.INTERNAL])
+def test_import_refuses_underclassified_aiperf_result(
+    tmp_path: Path, sensitivity: Sensitivity
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    export = tmp_path / "profile_export.jsonl"
+    export.write_text('{"metadata":{"prompt":"secret"}}\n')
+
+    with pytest.raises(DomainError) as error:
+        ImportService(workspace).import_artifact(
+            ImportArtifactRequest(
+                path=export,
+                kind=ArtifactKind.INFERENCE_RESULT,
+                producer="aiperf",
+                sensitivity=sensitivity,
+            )
+        )
+
+    assert error.value.code is ErrorCode.SENSITIVE_ARTIFACT_REFUSED

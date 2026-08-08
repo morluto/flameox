@@ -66,6 +66,10 @@ class ImportService:
                 ArtifactKind.INFERENCE_REQUEST_TRACE,
             }
             and request.sensitivity is not Sensitivity.SENSITIVE
+        ) or (
+            request.kind is ArtifactKind.INFERENCE_RESULT
+            and request.producer == "aiperf"
+            and request.sensitivity is not Sensitivity.SENSITIVE
         ):
             raise DomainError(
                 code=ErrorCode.SENSITIVE_ARTIFACT_REFUSED,

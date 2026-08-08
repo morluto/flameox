@@ -97,6 +97,7 @@ _PROVIDER_TOOL: dict[str, Literal["aiperf", "vllm"]] = {
     "aiperf": "aiperf",
     "vllm_bench": "vllm",
 }
+_MAX_RESULT_LIMITATIONS = 16
 
 
 class InferenceReplayPlan(ContractModel):
@@ -622,7 +623,16 @@ class InferenceReplayService:
             oracle = await self._run_oracle(plan, output_path, outcome)
         finally:
             server_outcome = await asyncio.shield(lease.close())
+        self._write_server_output(output_path.parent, server_outcome)
         return outcome, probe, output_path, server_outcome, oracle
+
+    @staticmethod
+    def _write_server_output(root: Path, outcome: ManagedSidecarOutcome) -> None:
+        """Stage bounded broker-captured server logs for immutable preservation."""
+        if outcome.stdout:
+            atomic_write_bytes(root / "server.stdout", outcome.stdout)
+        if outcome.stderr:
+            atomic_write_bytes(root / "server.stderr", outcome.stderr)
 
     def _execute_sync(
         self, plan: InferenceReplayPlan
@@ -847,7 +857,7 @@ class InferenceReplayService:
         if server.mode != "managed" or server.workload is None:
             return None, None
         command = self.workloads.resolve(server.workload).command
-        executable = Path(command.argv[0])
+        executable = self._resolve_server_executable(command)
         executable_digest = self._executable_digest(executable)
         discovery = discover_inference_tool("vllm")
         version = (
@@ -857,6 +867,19 @@ class InferenceReplayService:
             else None
         )
         return executable_digest, version
+
+    @staticmethod
+    def _resolve_server_executable(command: CommandSpec) -> Path:
+        candidate = Path(command.argv[0])
+        if candidate.is_absolute() or candidate.parent != Path("."):
+            return (
+                candidate
+                if candidate.is_absolute()
+                else (Path(command.cwd) / candidate).resolve()
+            )
+        environment = {**os.environ, **command.env_overrides}
+        located = shutil.which(command.argv[0], path=environment.get("PATH"))
+        return Path(located).resolve() if located is not None else candidate
 
     @staticmethod
     def _executable_digest(path: Path) -> str | None:
@@ -1036,13 +1059,24 @@ class InferenceReplayService:
             health_ready=probe.health_ready,
             probed_model_ids=probe.model_ids,
             exploratory_reason=plan.exploratory_reason,
-            limitations=tuple(limitations),
+            limitations=self._bounded_result_limitations(limitations),
             server_cleanup_complete=(
                 server_outcome.process.cleanup_complete if server_outcome is not None else None
             ),
             artifact_ids=artifact_ids,
             artifact_run_ids=artifact_run_ids,
             oracle_status=oracle.result.status if oracle.result is not None else None,
+        )
+
+    @staticmethod
+    def _bounded_result_limitations(limitations: list[str]) -> tuple[str, ...]:
+        unique = tuple(dict.fromkeys(limitations))
+        if len(unique) <= _MAX_RESULT_LIMITATIONS:
+            return unique
+        omitted = len(unique) - (_MAX_RESULT_LIMITATIONS - 1)
+        return (
+            *unique[: _MAX_RESULT_LIMITATIONS - 1],
+            f"{omitted} additional limitations are recorded on the canonical run.",
         )
 
     async def _managed_environment(self, plan: InferenceReplayPlan) -> EnvironmentRecord:
@@ -1382,6 +1416,13 @@ class InferenceReplayService:
         source_state: SourceState,
         artifact_ids: tuple[str, ...],
     ) -> None:
+        input_artifact_ids = list(artifact_ids)
+        if run.inference_protocol_identity_json is not None:
+            protocol = InferenceProtocolIdentity.model_validate_json(
+                run.inference_protocol_identity_json
+            )
+            if protocol.trace.artifact_digest is not None:
+                input_artifact_ids.append(protocol.trace.artifact_digest)
         self.publisher.publish_rows(
             {
                 "runs": [run_row(run)],
@@ -1400,7 +1441,7 @@ class InferenceReplayService:
             publisher="flameox.inference",
             publisher_version="1",
             input_run_ids=(run.run_id,),
-            input_artifact_ids=artifact_ids,
+            input_artifact_ids=tuple(dict.fromkeys(input_artifact_ids)),
         )
 
     def _extract_outputs(
@@ -1455,6 +1496,8 @@ class InferenceReplayService:
                     output_path.parent / "oracle-receipt.json",
                     output_path.parent / "oracle.stdout",
                     output_path.parent / "oracle.stderr",
+                    output_path.parent / "server.stdout",
+                    output_path.parent / "server.stderr",
                 )
                 if path.is_file()
             )
@@ -1466,6 +1509,7 @@ class InferenceReplayService:
         for path in candidates:
             is_inputs = plan.provider == "aiperf" and path.name == "inputs.json"
             is_oracle = path.name.startswith("oracle")
+            is_server_output = path.name.startswith("server.")
             try:
                 imported = importer.import_artifact(
                     ImportArtifactRequest(
@@ -1476,17 +1520,21 @@ class InferenceReplayService:
                             else ArtifactKind.VALIDATION_OUTPUT
                             if is_oracle and path.name != "oracle.stderr"
                             else ArtifactKind.PROCESS_OUTPUT
-                            if is_oracle
+                            if is_oracle or is_server_output
                             else ArtifactKind.INFERENCE_RESULT
                         ),
                         media_type=self._provider_media_type(path),
                         sensitivity=(
                             Sensitivity.SENSITIVE
-                            if plan.provider == "aiperf" or is_oracle
+                            if plan.provider == "aiperf" or is_oracle or is_server_output
                             else Sensitivity.INTERNAL
                         ),
                         role=(
-                            "inference_oracle_output" if is_oracle else "inference_provider_output"
+                            "inference_oracle_output"
+                            if is_oracle
+                            else "inference_server_output"
+                            if is_server_output
+                            else "inference_provider_output"
                         ),
                         producer=(
                             plan.semantic_oracle_workload or "inference_oracle"

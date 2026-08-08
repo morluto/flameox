@@ -17,15 +17,29 @@ import time
 from importlib.metadata import PackageNotFoundError, version
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.response import addinfourl
 
 from pydantic import Field, field_validator, model_validator
 
 from flameox.domain import DomainError, ErrorCode
 from flameox.models import ContractModel
+
+_MAX_PROBE_RESPONSE_BYTES = 1024 * 1024
+
+
+class _RejectRedirects(HTTPRedirectHandler):
+    """Keep passive loopback probes on the declared endpoint."""
+
+    def redirect_request(self, *args: object, **kwargs: object) -> None:
+        return None
+
+
+def _open_probe(request: Request, timeout: float) -> addinfourl:
+    return cast(addinfourl, build_opener(_RejectRedirects()).open(request, timeout=timeout))
 
 
 def _loopback_http_url(value: str) -> str:
@@ -258,15 +272,26 @@ def probe_existing_vllm_server(
         return value
 
     try:
-        with urlopen(
+        with _open_probe(
             Request(f"{normalized}/health", method="GET"), timeout=remaining()
         ) as response:
-            health_ready = 200 <= response.status < 300
-        with urlopen(
+            health_ready = response.status is not None and 200 <= response.status < 300
+        with _open_probe(
             Request(f"{normalized}/v1/models", method="GET"), timeout=remaining()
         ) as response:
-            payload = json.load(response)
-    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = response.read(min(64 * 1024, _MAX_PROBE_RESPONSE_BYTES + 1 - total))
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _MAX_PROBE_RESPONSE_BYTES:
+                    raise ValueError("/v1/models response exceeded the passive probe limit")
+                chunks.append(chunk)
+                remaining()
+            payload = json.loads(b"".join(chunks))
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
         raise DomainError(
             ErrorCode.CAPABILITY_UNAVAILABLE,
             "The loopback inference server did not satisfy passive readiness probes.",
