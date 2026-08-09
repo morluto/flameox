@@ -1,6 +1,20 @@
 # Changelog
 
 All notable changes to flameox are documented in this file.
+## [0.1.13] - 2026-08-09
+### Bug Fixes
+
+- **runtime:** Harden cancellation and recovery (#127) ([#127](https://github.com/morluto/flameox/pull/127))
+### Documentation
+
+- Align public descriptions and examples (#130) ([#130](https://github.com/morluto/flameox/pull/130))
+- Require changelog-ready pull request titles (#129) ([#129](https://github.com/morluto/flameox/pull/129))
+- **readme:** Mention SGLang inference replay
+- Clarify supported workflows
+### Refactoring
+
+- Make invalid evidence and MCP states unrepresentable (#128) ([#128](https://github.com/morluto/flameox/pull/128))
+- **mcp:** Extract resource registrations (#127) ([#127](https://github.com/morluto/flameox/pull/127))
 ## [0.1.12] - 2026-08-08
 ### Bug Fixes
 
