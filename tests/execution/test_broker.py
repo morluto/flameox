@@ -80,6 +80,13 @@ async def test_managed_inference_lease_uses_absolute_readiness_deadline(
         readiness=readiness,
         absolute_deadline=time.monotonic() + 2,
     )
+    with pytest.raises(DomainError) as error:
+        lease.create_proxy(
+            name="wrong-sidecar",
+            listen="127.0.0.1:8124",
+            upstream="127.0.0.1:8125",
+        )
+    assert error.value.code is ErrorCode.EXECUTION_REFUSED
     outcome = await lease.close()
 
     assert ready_calls == 2

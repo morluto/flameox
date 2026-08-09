@@ -9,6 +9,7 @@ from flameox.application.run_rows import run_row
 from flameox.domain import (
     CaptureStatus,
     DomainError,
+    ErrorCode,
     ExecutionStatus,
     ProcessResult,
     RunManifest,
@@ -107,7 +108,11 @@ class RecoveryService:
                     ),
                 }
             )
-            recovered.append(self.runs.append(terminal, expected_revision=current.revision))
+            try:
+                recovered.append(self.runs.append(terminal, expected_revision=current.revision))
+            except DomainError as error:
+                if error.code is not ErrorCode.REVISION_CONFLICT:
+                    raise
         if recovered:
             self.publisher.publish_rows(
                 {"runs": [run_row(run) for run in recovered]},

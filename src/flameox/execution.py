@@ -1769,6 +1769,8 @@ class ManagedSidecarLease:
         output_budget: _OutputBudget,
         observations: list[ProcessObservation],
         started_at: datetime,
+        *,
+        supports_toxiproxy_control: bool = False,
     ) -> None:
         self._broker = broker
         self._process = process
@@ -1780,6 +1782,7 @@ class ManagedSidecarLease:
         self._output_budget = output_budget
         self._observations = observations
         self._started_at = started_at
+        self._supports_toxiproxy_control = supports_toxiproxy_control
         self._tracked_proxies: set[str] = set()
         self._closed = False
         self._outcome: ManagedSidecarOutcome | None = None
@@ -1867,6 +1870,7 @@ class ManagedSidecarLease:
             output_budget,
             observations,
             datetime.now(UTC),
+            supports_toxiproxy_control=True,
         )
         deadline = time.monotonic() + readiness_timeout_seconds
         try:
@@ -2044,6 +2048,7 @@ class ManagedSidecarLease:
     def create_proxy(
         self, *, name: str, listen: str, upstream: str, enabled: bool = True
     ) -> dict[str, Any]:
+        self._require_toxiproxy_control()
         self._ensure_open()
         from flameox.adapters.toxiproxy import ToxiproxyClient
 
@@ -2054,6 +2059,7 @@ class ManagedSidecarLease:
         return result
 
     def update_proxy(self, name: str, *, enabled: bool) -> dict[str, Any]:
+        self._require_toxiproxy_control()
         self._ensure_open()
         from flameox.adapters.toxiproxy import ToxiproxyClient
 
@@ -2061,6 +2067,7 @@ class ManagedSidecarLease:
         return ToxiproxyClient(self.base_url).update_proxy(name, enabled=enabled)
 
     def add_toxic(self, **kwargs: Any) -> dict[str, Any]:
+        self._require_toxiproxy_control()
         self._ensure_open()
         from flameox.adapters.toxiproxy import ToxiproxyClient
 
@@ -2082,19 +2089,20 @@ class ManagedSidecarLease:
         if self._outcome is not None:
             return self._outcome
         self._closed = True
-        from flameox.adapters.toxiproxy import ToxiproxyApiError, ToxiproxyClient
-
         cleanup_failures: list[str] = []
         if self._output_budget.exceeded:
             cleanup_failures.append(
                 "sidecar output exceeded the bounded capture budget; excess bytes were discarded"
             )
-        client = ToxiproxyClient(self.base_url, timeout_seconds=1.0)
-        for name in tuple(sorted(self._tracked_proxies)):
-            try:
-                await asyncio.to_thread(client.delete_proxy, name)
-            except (ToxiproxyApiError, OSError) as error:
-                cleanup_failures.append(f"proxy {name}: {error}")
+        if self._supports_toxiproxy_control:
+            from flameox.adapters.toxiproxy import ToxiproxyApiError, ToxiproxyClient
+
+            client = ToxiproxyClient(self.base_url, timeout_seconds=1.0)
+            for name in tuple(sorted(self._tracked_proxies)):
+                try:
+                    await asyncio.to_thread(client.delete_proxy, name)
+                except (ToxiproxyApiError, OSError) as error:
+                    cleanup_failures.append(f"proxy {name}: {error}")
         request = ExecutionRequest(
             argv=(str(self._executable),),
             cwd=self._executable.parent,
@@ -2148,6 +2156,13 @@ class ManagedSidecarLease:
     def _ensure_open(self) -> None:
         if self._closed:
             raise DomainError(ErrorCode.EXECUTION_REFUSED, "The Toxiproxy sidecar lease is closed.")
+
+    def _require_toxiproxy_control(self) -> None:
+        if not self._supports_toxiproxy_control:
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "This managed sidecar does not expose Toxiproxy controls.",
+            )
 
     def _require_tracked(self, name: str) -> None:
         if name not in self._tracked_proxies:
