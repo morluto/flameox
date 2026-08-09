@@ -19,10 +19,12 @@ CONFIGURED_EXECUTABLE_PROVIDERS = {
 EXECUTABLE_PROVIDERS = {
     "requires_bwrap": "bwrap",
     "requires_cargo": "cargo",
-    "requires_compute_sanitizer": "compute-sanitizer",
     "requires_perf": "perf",
     "requires_pyspy": "py-spy",
     "requires_systemd": "systemd-run",
+    "requires_compute_sanitizer": "compute-sanitizer",
+    "requires_ncu": "ncu",
+    "requires_rocprofv3": "rocprofv3",
 }
 PROVIDER_MARKERS = frozenset(
     {

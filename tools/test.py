@@ -68,7 +68,9 @@ PROVIDER_LANES = {
     "optional-coverage": "optional and requires_coverage",
     "optional-compute-sanitizer": "optional and requires_compute_sanitizer",
     "optional-cute": "optional and requires_cute",
+    "optional-ncu": "optional and requires_ncu",
     "optional-nvbench": "optional and requires_nvbench",
+    "optional-rocprofv3": "optional and requires_rocprofv3",
     "optional-triton": "optional and requires_triton",
     "optional-memray": "optional and requires_memray",
     "optional-perfetto": "optional and requires_perfetto",
@@ -76,7 +78,8 @@ PROVIDER_LANES = {
     "optional-torch": "optional and requires_torch",
     "optional-host": (
         "optional and not requires_compute_sanitizer and not requires_cute "
-        "and not requires_nvbench and not requires_triton "
+        "and not requires_ncu and not requires_nvbench and not requires_rocprofv3 "
+        "and not requires_triton "
         "and not requires_coverage "
         "and not requires_memray "
         "and not requires_perfetto and not requires_pyspy and not requires_torch"
@@ -86,7 +89,9 @@ GPU_PROVIDER_LANES = frozenset(
     {
         "optional-compute-sanitizer",
         "optional-cute",
+        "optional-ncu",
         "optional-nvbench",
+        "optional-rocprofv3",
         "optional-triton",
     }
 )
@@ -728,7 +733,9 @@ def affected_plan(  # noqa: C901
                 ("requires_coverage", "optional-coverage"),
                 ("requires_compute_sanitizer", "optional-compute-sanitizer"),
                 ("requires_cute", "optional-cute"),
+                ("requires_ncu", "optional-ncu"),
                 ("requires_nvbench", "optional-nvbench"),
+                ("requires_rocprofv3", "optional-rocprofv3"),
                 ("requires_triton", "optional-triton"),
                 ("requires_memray", "optional-memray"),
                 ("requires_perfetto", "optional-perfetto"),

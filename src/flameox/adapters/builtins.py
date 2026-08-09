@@ -11,7 +11,9 @@ from flameox.adapters.options import (
     compute_sanitizer_options,
     compute_sanitizer_suppression_path,
     cute_compiler_options,
+    nsight_compute_options,
     nvbench_options,
+    rocprofv3_options,
     triton_compiler_options,
 )
 from flameox.adapters.torch_profiler import SdkTorchProfilerOptions, torch_profiler_options
@@ -283,6 +285,63 @@ BUILTIN_ADAPTERS = {
             preserve_artifact_on_nonzero=True,
         ),
         BuiltinAdapter(
+            name="rocprofv3",
+            dependency_kind="executable",
+            dependency="rocprofv3",
+            supported_modes=("pftrace",),
+            supported_formats=("pftrace",),
+            features=(
+                "hip_api",
+                "kernel_dispatch",
+                "memory_copy",
+                "memory_allocation",
+                "scratch_memory",
+                "marker_ranges",
+            ),
+            remediation=(
+                "Install rocprofiler-sdk with rocprofv3 from ROCm and verify AMD GPU access.",
+            ),
+            version_args=("--version",),
+            supported_platforms=("linux",),
+            output_filename="rocprofv3_results.pftrace",
+            artifact_kinds=(ArtifactKind.EXECUTION_TRACE,),
+            expected_overhead=(
+                "ROCm tracing overhead depends on the selected API, dispatch, memory, scratch, "
+                "and marker domains."
+            ),
+            capture_limitations=(
+                "PFTrace contains only the explicitly selected rocprofv3 trace domains.",
+                "Counter collection and the raw rocprofiler SDK are not enabled.",
+            ),
+            preserve_artifact_on_nonzero=True,
+        ),
+        BuiltinAdapter(
+            name="nsight.compute",
+            dependency_kind="executable",
+            dependency="ncu",
+            supported_modes=("profile",),
+            supported_formats=("ncu-rep", "ncu-repz"),
+            features=("gpu_metrics", "report_sections", "rules", "source_correlation"),
+            remediation=(
+                "Install NVIDIA Nsight Compute and grant access to NVIDIA GPU performance "
+                "counters.",
+            ),
+            version_args=("--version",),
+            permissions=("nvidia_gpu_performance_counters",),
+            supported_platforms=("linux", "windows"),
+            output_filename="nsight-compute.ncu-rep",
+            artifact_kinds=(ArtifactKind.KERNEL_PROFILE,),
+            expected_overhead=(
+                "Kernel replay and metric collection can substantially change execution time."
+            ),
+            capture_limitations=(
+                "Only the selected set or explicit sections and bounded launches are profiled.",
+                "Counter availability depends on GPU, driver, and system permissions.",
+                "Roofline evidence is exposed only when present in the official report.",
+            ),
+            preserve_artifact_on_nonzero=True,
+        ),
+        BuiltinAdapter(
             name="triton.compiler",
             dependency_kind="internal",
             dependency=None,
@@ -353,7 +412,7 @@ def builtin_adapter(name: str) -> BuiltinAdapter | None:
     return BUILTIN_ADAPTERS.get(name)
 
 
-def build_capture_invocation(
+def build_capture_invocation(  # noqa: C901 - provider routing is intentionally explicit
     adapter_name: str,
     workload_argv: tuple[str, ...],
     output_root: Path,
@@ -445,6 +504,22 @@ def build_capture_invocation(
         )
     elif adapter_name == "nvbench":
         return _nvbench_capture_invocation(
+            adapter,
+            workload_argv,
+            output,
+            executable=executable,
+            options=options,
+        )
+    elif adapter_name == "rocprofv3":
+        return _rocprofv3_capture_invocation(
+            adapter,
+            workload_argv,
+            output_root,
+            executable=executable,
+            options=options,
+        )
+    elif adapter_name == "nsight.compute":
+        return _nsight_compute_capture_invocation(
             adapter,
             workload_argv,
             output,
@@ -758,6 +833,84 @@ def _nvbench_capture_invocation(
     if selected.devices is not None:
         injected.extend(("-d", selected.devices))
     argv = (*injected, *rest_argv)
+    return CaptureInvocation(
+        argv=argv,
+        artifact_kinds=adapter.artifact_kinds,
+        expected_overhead=adapter.expected_overhead or "",
+        limitations=adapter.capture_limitations,
+        environment={},
+    )
+
+
+def _rocprofv3_capture_invocation(
+    adapter: BuiltinAdapter,
+    workload_argv: tuple[str, ...],
+    output_root: Path,
+    *,
+    executable: str | None,
+    options: dict[str, object] | None,
+) -> CaptureInvocation:
+    selected = rocprofv3_options(options)
+    argv_parts: list[str] = [
+        _require_executable(adapter.name, executable),
+        "--output-format",
+        "pftrace",
+        "-o",
+        "rocprofv3",
+        "-d",
+        str(output_root),
+    ]
+    for enabled, flag in (
+        (selected.hip_trace, "--hip-trace"),
+        (selected.kernel_trace, "--kernel-trace"),
+        (selected.memory_copy_trace, "--memory-copy-trace"),
+        (selected.memory_allocation_trace, "--memory-allocation-trace"),
+        (selected.scratch_memory_trace, "--scratch-memory-trace"),
+        (selected.marker_trace, "--marker-trace"),
+    ):
+        if enabled:
+            argv_parts.append(flag)
+    argv = (*argv_parts, "--", *workload_argv)
+    return CaptureInvocation(
+        argv=argv,
+        artifact_kinds=adapter.artifact_kinds,
+        expected_overhead=adapter.expected_overhead or "",
+        limitations=adapter.capture_limitations,
+        environment={},
+    )
+
+
+def _nsight_compute_capture_invocation(
+    adapter: BuiltinAdapter,
+    workload_argv: tuple[str, ...],
+    output: str,
+    *,
+    executable: str | None,
+    options: dict[str, object] | None,
+) -> CaptureInvocation:
+    selected = nsight_compute_options(options)
+    argv_parts: list[str] = [
+        _require_executable(adapter.name, executable),
+        "--export",
+        output,
+        "--force-overwrite",
+        "--replay-mode",
+        selected.replay_mode,
+        "--launch-skip",
+        str(selected.launch_skip),
+        "--launch-count",
+        str(selected.launch_count),
+    ]
+    if selected.set is not None:
+        argv_parts.extend(("--set", selected.set))
+    else:
+        for section in selected.sections or ():
+            argv_parts.extend(("--section", section))
+    if selected.kernel_name is not None:
+        argv_parts.extend(
+            ("--kernel-name-base", "demangled", "--kernel-name", selected.kernel_name)
+        )
+    argv = (*argv_parts, *workload_argv)
     return CaptureInvocation(
         argv=argv,
         artifact_kinds=adapter.artifact_kinds,

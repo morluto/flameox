@@ -24,6 +24,7 @@ from flameox.adapters import (
     InferenceArtifactExtractor,
     KernelValidationExtractor,
     MemrayExtractor,
+    NsightComputeExtractor,
     NsightSystemsExtractor,
     NvbenchExtractor,
     ObservationExtractor,
@@ -2392,6 +2393,23 @@ def extract_nvbench(
     """Extract NVBench sample times and frequencies from a preserved bundle."""
     try:
         result = NvbenchExtractor(_workspace(workspace)).extract(run_id)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@extract_app.command("nsight-compute")
+def extract_nsight_compute(
+    run_id: Annotated[
+        str,
+        typer.Argument(help="Run containing an unchanged .ncu-rep or .ncu-repz report."),
+    ],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Extract bounded metrics through NVIDIA's installed ncu_report interface."""
+    try:
+        result = NsightComputeExtractor(_workspace(workspace)).extract(run_id)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)

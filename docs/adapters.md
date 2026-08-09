@@ -377,57 +377,123 @@ not exact timestamps.
 
 #### `flameox.kernel-validation.v1`
 
-Producer-neutral kernel-correctness evidence is imported as strict JSON conforming to the
-`flameox.kernel-validation.v1` schema. The published JSON Schema lives at
-`src/flameox/schemas/kernel-validation-v1.schema.json` and is generated from the same Pydantic
-model used for validation. The artifact kind is `validation_output`; import does not require a
-GPU, CUDA, or a kernel runner.
+Producer-neutral kernel-correctness evidence is imported as strict JSON
+conforming to the `flameox.kernel-validation.v1` schema. The published JSON
+Schema lives at `src/flameox/schemas/kernel-validation-v1.schema.json` and is
+generated from the same Pydantic model used for validation, so import and
+schema publication cannot drift. The artifact kind is `validation_output`;
+import does not require a GPU, CUDA, or any kernel runner.
 
-The contract binds producer and reference identity, bounded case inputs, seed and device,
-declared metrics and tolerances, output and case outcomes, up to eight representative failures,
-and coverage limitations. Supported metrics are `max_abs_error`, `max_rel_error`, `mse`, `rmse`,
-`psnr`, and `cosine_similarity`. Lower-is-better metrics require `<=`; higher-is-better metrics
-require `>=`. Metric, output, case, and aggregate statuses are checked for consistency. Passing
-the document requires complete coverage; non-finite values and incomplete coverage without a
-limitation are rejected.
+The document binds producer and reference-implementation identity, per-case
+inputs (dtype, shape, role, seed, device), declared metric definitions and
+tolerances, per-output and per-case observed metrics, pass/fail/inconclusive/
+unsupported outcomes, bounded representative failures, and coverage
+limitations. Supported metrics are `max_abs_error`, `max_rel_error`, `mse`,
+`rmse`, `psnr`, and `cosine_similarity`; each carries a comparator (`<=` for
+lower-is-better, `>=` for higher-is-better), threshold, unit, and status. The
+model enforces three aggregate-verdict invariants: a metric status cannot
+contradict its value and threshold; an output status cannot contradict its
+metrics; and the document status cannot contradict its case outcomes or
+declared coverage completeness. Non-finite values, unknown schema versions,
+ambiguous aggregates, and incomplete coverage without a stated limitation are
+rejected explicitly. Failed outputs require at least one bounded representative
+failure; non-failed outputs reject representative failures.
 
-Extraction publishes additive schema-minor-9 tables `kernel_validation_cases` and
-`kernel_validation_metrics`. Native JSON remains authoritative, extracted tables are rebuildable,
-and repeated extraction reuses the existing generation. Fixtures are project-owned synthetic JSON
-documents generated in `tests/adapters/test_kernel_validation.py` under the project MIT license.
+Extraction publishes two evidence tables:
+`kernel_validation_cases` (case/output identity, status, dimensions, inputs,
+device, seed, representative failures, limitations) and
+`kernel_validation_metrics` (per-output metric name, value, comparator,
+threshold, unit, status, limitation). Both are schema minor 9 additions; the
+raw artifact remains authoritative and rows are rebuildable. Repeating
+extraction for the same artifact and extractor identity reuses the existing
+normalized generation. The trial-level `flameox.oracle-receipt.v1` remains the
+decisive verdict and may reference this artifact by diagnostic role; the
+detailed artifact does not duplicate benchmark samples, run provenance, or
+experiment structure.
 
-Observed claims are the declared case outcomes, metric values and thresholds, coverage flag, and
-representative failure coordinates. Aggregate statuses are derived. The extractor makes no inferred
-correctness claim beyond the declared metrics, tolerances, and coverage.
+Ownership: `tests/adapters/test_kernel_validation.py`, lane `adapters`,
+markers `unit`. Fixtures are synthetic JSON documents generated in-test; no
+vendor-produced artifact is required. The test suite covers exact agreement,
+tolerance-bound agreement, numerical failure with bounded representative
+failures, non-finite rejection, contradictory aggregate rejection, unknown
+schema version rejection, and idempotent re-extraction.
+
+Observed claims: per-case status, per-metric value and threshold, declared
+tolerances, coverage completeness flag, representative failure coordinates.
+Derived claims: aggregate output status from metric statuses, aggregate case
+status from output statuses, document status from case outcomes and coverage.
+Inferred claims: none — the extractor does not infer correctness beyond the
+declared metrics and tolerances.
 
 #### `compute-sanitizer`
 
-The maintained adapter runs NVIDIA Compute Sanitizer around a declared workload and preserves its
-XML report as `sanitizer_report`. It supports the official `memcheck`, `racecheck`, `initcheck`, and
-`synccheck` tools and fixes output to `--xml --save <path>`. Strict options cover launch skip/count,
-target-process scope and bounded filter, kernel name, demangling, a distinct finding exit code, and
-an optional project-relative suppression file whose SHA-256 digest enters capture-plan identity.
-Suppression files must be regular, non-linked, project-contained files; arbitrary flags are refused.
+The maintained capture adapter runs NVIDIA Compute Sanitizer around an already
+declared workload and preserves the XML report as a `sanitizer_report`
+artifact. The adapter supports the four official tools — `memcheck`,
+`racecheck`, `initcheck`, and `synccheck` — and emits XML through `--xml` with
+`--save`. It does not require a separate import converter; existing XML reports
+may also be imported directly with producer `compute-sanitizer`.
 
-Compatibility family `compute-sanitizer.xml.2026.v1` was observed with Compute Sanitizer 2026.2.1.
-NVIDIA does not publish a stable XML XSD, so extraction is version-bounded and unknown record shapes
-or tags become limitations. XML parsing runs in an isolated bounded worker using `defusedxml`, caps
-host stacks at 64 frames, and normalizes source paths. A configured finding exit plus parsed records
-is a completed failed validation, while other nonzero exits, missing or malformed reports, and
-timeouts remain failed attempts with preserved partial evidence.
+Official output: `compute-sanitizer --tool <tool> --xml --save <path> -- <workload>`.
+The adapter binds tool choice, `launch_skip`, `launch_count`,
+`target_processes` (`application-only` or `all`), `target_processes_filter`,
+`kernel_name`, `demangle`, `finding_exit_code`, and an optional
+project-relative suppression file whose SHA-256 digest is recorded in the
+capture plan. Suppression files must be regular, non-linked, project-contained
+files; absolute paths, `..` traversal, and symlinks are rejected. Arbitrary
+flag injection is refused — only the declared options are accepted.
 
-Linux and Windows are supported; GPU access and a CUDA toolkit installation are required and are
-not provisioned by Flameox. Overhead depends on the selected sanitizer tool and input. A clean report
-covers only the selected tool, launches, processes, and filters and does not prove numerical
-correctness.
+Platform: Linux and Windows. Permissions: GPU access and the CUDA toolkit;
+the executable is detected at runtime and not provisioned by Flameox. Overhead:
+GPU instrumentation overhead whose exact cost depends on the selected sanitizer
+tool. Containment: follows the workload's selected execution policy; the
+sanitizer wraps the workload argv and Flameox owns process execution,
+containment, quotas, and cancellation. The adapter preserves artifacts on
+nonzero exit because sanitizer findings produce a nonzero exit code by design.
 
-The live fixture `tests/fixtures/compute_sanitizer/kernel_probe.cu` is project-owned MIT-licensed
-CUDA C++. The optional live test compiles it with `nvcc -lineinfo` and checks both in-bounds and
-out-of-bounds captures. Deterministic tests use synthetic XML and cover clean, memory, API,
-sanitizer, malformed, truncated, unknown, and oversized reports. Observed claims come from XML;
-classification and path normalization are deterministic derivations; no root cause is inferred.
+Local evidence: Compute Sanitizer `2026.2.1` was observed locally. The
+compatibility family is `compute-sanitizer.xml.2026.v1`; extraction is
+version-bounded because NVIDIA does not publish a stable XSD for the XML
+format. The parser runs in a bounded subprocess worker
+(`flameox.workers.compute_sanitizer`) behind the canonical broker and uses
+`defusedxml` rather than implementing XML entity defenses locally. It rejects
+DTD and entity declarations, requires a `ComputeSanitizerOutput` root element,
+and reports unknown record elements or XML tags as explicit limitations rather
+than silently accepting them. Host stacks are truncated to 64 frames. Source
+paths are normalized to project-relative form; external paths are reported as
+`<external>/<basename>`. The extractor distinguishes `clean` (zero findings,
+no limitations), `findings` (one or more records), and `inconclusive`
+(limitations without records). A clean report covers only the selected tool,
+launches, processes, and filters; it does not prove numerical correctness. An
+oracle receipt may reference the sanitizer report by diagnostic role, but a
+clean sanitizer run never proves numerical equivalence.
 
-+#### `nvbench`
+Fixture provenance and licensing: `tests/fixtures/compute_sanitizer/kernel_probe.cu`
+is a Flameox-authored CUDA C++ source file under the project MIT license. It
+compiles with `nvcc -lineinfo` into a small probe that performs an in-bounds or
+out-of-bounds global memory write depending on a runtime argument. No
+vendor-produced XML fixture is committed; XML fixtures are synthetic and
+generated in-test. The live test (`tests/adapters/test_compute_sanitizer_live.py`)
+compiles the probe with `nvcc`, runs `compute-sanitizer --tool memcheck` around
+it, imports the XML, and extracts findings; it skips when `compute-sanitizer`
+or `nvcc` is absent.
+
+Ownership: `tests/adapters/test_compute_sanitizer.py` is owned by `adapters`,
+lane `adapters`, markers `unit`. `tests/adapters/test_compute_sanitizer_live.py`
+is owned by `compute-sanitizer-live`, lane `adapters`, markers `integration`,
+`optional`, `process`, `serial`, `requires_compute_sanitizer`.
+
+Observed claims: error kind, level, message, memory space, access size,
+direction, error class, function, source path, line, PC, thread/block indices,
+and host stack frames — all read directly from the XML record. Derived claims:
+classification (`memory_access`, `race`, `uninitialized_memory`,
+`synchronization`, `api_error`, `sanitizer_error`, `unknown`) is derived from
+the record's kind, message, and error text; project-relative path normalization
+is a deterministic derivation from the reported path. Inferred claims: none —
+the extractor does not infer the root cause of a memory error or claim
+correctness beyond the retained findings.
+
+#### `nvbench`
 
 The NVBench integration targets the JSON schema and JSON-binary behavior verified at
 `NVIDIA/nvbench@c18488992e313240166f588b9ee4da3e0de76004`. NVBench is linked into each benchmark
@@ -501,6 +567,102 @@ staging paths, manifest outcome, and pipeline identity. Cache
 status remains `unknown` unless the producer supplies evidence. Inferred claims: none — an
 available stage does not prove semantic correctness, optimal code generation, or a cache hit.
 
+#### `nsight.compute`
+
+The maintained adapter preserves official `.ncu-rep` and `.ncu-repz` reports as immutable
+`kernel_profile` artifacts. Extraction runs in the isolated artifact worker and exclusively uses
+the `ncu_report` Python interface shipped with the detected Nsight Compute installation. NVIDIA
+owns the native report format and reader; Flameox neither decodes the binary format nor adds a
+runtime PyPI dependency. The schema fingerprint binds the report-interface version to the
+observed metric and section identities. Roofline evidence is published only when a metric, rule,
+or section in the report explicitly identifies roofline data; Flameox does not synthesize a
+roofline or bottleneck conclusion.
+
+Capture requires exactly one named section set or 1–32 exact section identifiers, with an
+optional bounded kernel name, launch skip from 0 to 1,000,000, launch count from 1 to 1,000,000,
+and replay mode `kernel`, `application`, `range`, or `app-range`. Regex sections, arbitrary flags,
+external section directories, and source import are not accepted. Linux and Windows are declared
+capture platforms; a supported NVIDIA GPU, driver, Nsight Compute installation, and
+performance-counter permission are required. Kernel replay can impose substantial,
+workload-dependent overhead. The standard execution policy owns process containment, staging,
+quotas, timeout, and
+cancellation, while `ncu` owns the native report bytes. Flameox never changes privileges. NVIDIA's
+`ERR_NVGPUCTRPERM` maps to `permission_required` with remediation rather than a privilege attempt.
+
+Normalization is bounded by the workspace generation row quota, a 120-second worker timeout,
+1,000 ranges, 10,000 actions, and separate metric and observation budgets derived from the row
+quota. Numeric metrics enter `measurements`; string attributes, rules and result tables, section
+identities, and source/SASS/PTX references enter observations. Source bodies are not copied out of
+the report. Unknown metric value kinds, truncated collections, and exceptions from optional
+official-interface access become explicit limitations. Missing optional methods degrade
+gracefully; corrupt reports, a missing official interface, and invalid required interface results
+fail extraction with bounded recovery guidance.
+
+Local compatibility evidence used Nsight Compute `2026.2.1` and its installed, vendor-produced
+`extras/samples/instructionMix/sobelFloat.ncu-rep`. The sample was read successfully through that
+installation's `ncu_report` interface and is not redistributed or committed by Flameox; it remains
+covered by the locally installed NVIDIA product's license. Deterministic tests use a
+Flameox-authored fake interface under the project MIT license to exercise type handling, bounds,
+corruption, and provenance. The local driver initially produced the official
+`ERR_NVGPUCTRPERM` diagnostic, proving the `permission_required` mapping. After an administrator
+enabled non-admin counter access, the managed adapter profiled the pinned official NVBench stream
+benchmark with the `basic` set on the `sm_86` RTX 3060, preserved the `.ncu-rep`, and extracted
+actions and numeric metrics through the installed official interface. Both the denied capability
+path and successful live counter capture are therefore observed on this host.
+
+Observed claims are report/range/action names exposed by the official interface, kernel and device
+identity attributes, numeric and string metric values and units, section and rule identities,
+result tables, and source/SASS/PTX references. Derived claims are bounded row normalization,
+counts, schema fingerprint, and the explicit-identity test for `roofline_present`. Inferred claims:
+none — metric presence or magnitude does not by itself prove causality, correctness, a bottleneck,
+or an optimization opportunity.
+
+#### `rocprofv3`
+
+The maintained Linux capture adapter invokes the official ROCprofiler-SDK CLI
+with `--output-format pftrace`, a Flameox-owned `-d` staging directory, and the
+fixed `-o rocprofv3` basename. It accepts only the documented `--hip-trace`,
+`--kernel-trace`, `--memory-copy-trace`, `--memory-allocation-trace`,
+`--scratch-memory-trace`, and `--marker-trace` domains; at least one must be
+enabled. The resulting `rocprofv3_results.pftrace` remains an immutable
+`execution_trace` artifact with producer `rocprofv3`. Flameox does not load the
+raw ROCprofiler SDK or decode PFTrace: extraction uses the existing bounded
+Perfetto worker and accelerator recipe.
+
+Compatibility floor: ROCm 6.2 / ROCprofiler-SDK 0.4 is the documented minimum
+for rocprofv3 HIP tracing and PFTrace output. The complete option set above and
+the `_results.pftrace` naming convention were verified against current official
+ROCm 7.x documentation. An older CLI that rejects a selected domain is reported
+as a failed attempt with its stdout, stderr, process identity, and any non-empty
+PFTrace retained; Flameox does not silently substitute another domain.
+
+Platform and requirements: Linux, a supported AMD GPU and ROCm installation,
+and workload access to the host GPU device nodes (normally `/dev/kfd` and
+`/dev/dri`). Flameox never changes device permissions or privileges. Tracing
+overhead depends on the enabled domains and workload event rate. The normal
+execution policy owns containment, quotas, timeout, cancellation, and the
+bounded output directory; rocprofv3 owns the native PFTrace bytes.
+
+Fixture provenance and proof gap: `tests/adapters/test_rocprofv3.py` creates a
+Flameox-authored fake CLI under the project MIT license. It verifies exact argv,
+output naming, strict option rejection, and partial-artifact preservation, but
+its sentinel output is not presented as a valid PFTrace. The project-owned
+`project-owned-rocm-shaped-perfetto.json` fixture is a valid Perfetto-compatible
+Chrome trace containing HIP-runtime-shaped and kernel events. It covers import,
+bounded Perfetto extraction, and accelerator summarization, but it was not
+produced by rocprofv3 and therefore does not establish native PFTrace
+compatibility. No AMD host or vendor-produced trace is in scope, so rocprofv3
+capture compatibility remains fixture/process-simulation backed.
+
+Perfetto extraction inherits the workspace row quota, worker timeout, curated
+standard-table queries, truncation reporting, and malformed-trace errors.
+Unsupported or absent ROCm events degrade to incomplete standard summaries;
+Flameox does not add a second parser or infer missing activity. Observed claims
+are the selected domains, process result, native artifact identity, and events
+returned by Trace Processor. Derived claims are bounded normalized slices,
+counts, durations, and accelerator summaries. Inferred claims: none — neither a
+trace nor an absent event establishes causality, correctness, or a bottleneck.
+
 ### Candidate adapters
 
 - GDB/LLDB and elfutils for core metadata, with user init files, autoload, and
@@ -511,7 +673,6 @@ available stage does not prove semantic correctness, optimal code generation, or
 - `rr` recording references;
 - Nsight Systems Arrow, JSONL, or Parquet exports beyond the maintained SQLite
   subset;
-- `rocprofv3` Perfetto-compatible exports;
 - heaptrack or platform-native heap profiles;
 - VizTracer or Python monitoring integrations when ordered call evidence is
   necessary and Perfetto annotations are insufficient;
