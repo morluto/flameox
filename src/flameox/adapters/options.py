@@ -49,8 +49,76 @@ class ComputeSanitizerOptions(ContractModel):
         return self
 
 
+class NvbenchOptions(ContractModel):
+    """Bounded capture options for the NVBench CLI (``--json`` and ``--jsonbin``)."""
+
+    enable_jsonbin: bool = True
+    stopping_criterion: Annotated[str, StringConstraints(min_length=1, max_length=100)] | None = (
+        None
+    )
+    min_samples: Annotated[int, Field(ge=1, le=1_000_000)] | None = None
+    timeout: Annotated[float, Field(gt=0, le=86_400)] | None = None
+    devices: Annotated[str, StringConstraints(min_length=1, max_length=200)] | None = None
+
+
+_BoundedSubdir = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
+]
+
+
+_BoundedFilename = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
+]
+
+
+class TritonCompilerOptions(ContractModel):
+    """Bounded capture options for the managed triton.compiler env-var adapter.
+
+    ``reproducer_filename`` sets ``TRITON_REPRODUCER_PATH`` to a bounded
+    filename inside the output root (not inside the dump directory).  The
+    reproducer file is inventoried explicitly if it exists after the run.
+    """
+
+    dump_subdir: _BoundedSubdir = "triton-dumps"
+    kernel_dump: bool = True
+    reproducer_filename: _BoundedFilename | None = None
+
+
+CuteDslKeepToken = Literal["ir", "ir-debug", "ptx", "cubin", "sass", "llvm", "all"]
+
+
+class CuteCompilerOptions(ContractModel):
+    """Bounded capture options for the managed cute.compiler env-var adapter.
+
+    ``keep_allowlist`` accepts the official ``CUTE_DSL_KEEP`` tokens documented
+    by CuTe DSL: ``ir``, ``ir-debug``, ``ptx``, ``cubin``, ``sass``, ``llvm``,
+    and ``all``.  The ``all`` token is mutually exclusive with the others.
+    """
+
+    dump_subdir: _BoundedSubdir = "cute-dsl-dumps"
+    keep_allowlist: Annotated[
+        tuple[CuteDslKeepToken, ...],
+        Field(min_length=1, max_length=20),
+    ] = ("ir", "ptx", "cubin")
+
+    @model_validator(mode="after")
+    def unique_and_consistent_allowlist(self) -> CuteCompilerOptions:
+        if len(set(self.keep_allowlist)) != len(self.keep_allowlist):
+            raise ValueError("CUTE_DSL_KEEP allowlist entries must be unique")
+        if "all" in self.keep_allowlist and len(self.keep_allowlist) > 1:
+            raise ValueError("CUTE_DSL_KEEP 'all' is mutually exclusive with other tokens")
+        if {"ir", "ir-debug"}.issubset(self.keep_allowlist):
+            raise ValueError("CUTE_DSL_KEEP 'ir' and 'ir-debug' are mutually exclusive")
+        return self
+
+
 _ADAPTER_OPTION_MODELS: dict[str, type[ContractModel]] = {
     "compute-sanitizer": ComputeSanitizerOptions,
+    "cute.compiler": CuteCompilerOptions,
+    "nvbench": NvbenchOptions,
+    "triton.compiler": TritonCompilerOptions,
 }
 
 
@@ -178,6 +246,18 @@ def read_compute_sanitizer_suppression(
             remediation=("Create a new capture plan after updating the suppression file.",),
         )
     return payload
+
+
+def nvbench_options(options: dict[str, object] | None) -> NvbenchOptions:
+    return cast(NvbenchOptions, _validate_adapter_options("nvbench", options))
+
+
+def triton_compiler_options(options: dict[str, object] | None) -> TritonCompilerOptions:
+    return cast(TritonCompilerOptions, _validate_adapter_options("triton.compiler", options))
+
+
+def cute_compiler_options(options: dict[str, object] | None) -> CuteCompilerOptions:
+    return cast(CuteCompilerOptions, _validate_adapter_options("cute.compiler", options))
 
 
 def _contained_project_file(project_root: Path, relative: str) -> Path:

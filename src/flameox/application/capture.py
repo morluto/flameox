@@ -26,6 +26,7 @@ from flameox.adapters.builtins import (
     replace_compute_sanitizer_suppression,
 )
 from flameox.adapters.compute_sanitizer import inspect_compute_sanitizer_report
+from flameox.adapters.kernel_build import KernelBuildManifestV1
 from flameox.adapters.options import (
     bind_adapter_options,
     compute_sanitizer_options,
@@ -46,7 +47,16 @@ from flameox.application.evidence_rows import (
 )
 from flameox.application.execution_identity import ExecutionIdentityService
 from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.kernel_builds import KernelBuildCaptureCollector
+from flameox.application.nvbench_imports import (
+    collect_nvbench_sidecar_specs,
+    load_nvbench_document_with_integrity,
+    load_nvbench_sidecar_specs,
+    resolve_nvbench_sidecar_path,
+    validate_nvbench_sidecar_file,
+)
 from flameox.application.oracle_receipts import parse_oracle_receipt
+from flameox.application.pipelines import ArtifactPipelineService
 from flameox.application.preflight import PreflightService
 from flameox.application.proc import read_boot_id, read_proc_stat_start_identity
 from flameox.application.quarantine import QuarantineService
@@ -752,6 +762,8 @@ class CaptureService:
         output_root.mkdir(parents=True, exist_ok=False)
         for binding in plan.writable_roots:
             Path(binding.storage_path).mkdir(parents=True, exist_ok=False)
+        if plan.adapter in {"triton.compiler", "cute.compiler"}:
+            self._create_kernel_build_dump_dir(plan, output_root)
         capture = _CaptureExecution(
             service=self,
             plan=plan,
@@ -1177,6 +1189,9 @@ class CaptureService:
             and not outcome.process.timed_out
             and preserve_nonzero_artifact
         ):
+            # Provider configured to preserve partial artifacts:
+            # keep nonempty invalid/partial native output as partial evidence
+            # rather than quarantining.  A nonzero limitation is already recorded.
             reason = (
                 "Collector completed without every expected native output."
                 if not any(path.exists() for path in native_paths)
@@ -1196,6 +1211,7 @@ class CaptureService:
             )
 
         registrations: list[tuple[ArtifactRegistration, int]] = []
+        kernel_build_manifest: KernelBuildManifestV1 | None = None
         process_snapshot_rows: list[dict[str, object]] = []
         process_snapshot_entries: list[dict[str, object]] = []
         adapter_extraction_rows: list[dict[str, object]] = []
@@ -1484,7 +1500,18 @@ class CaptureService:
                         media_type=media_type,
                     )
                 )
-            if plan.adapter_execution_plan is not None and collector_succeeded:
+            if plan.adapter in {"triton.compiler", "cute.compiler"}:
+                (
+                    kernel_build_registrations,
+                    kernel_build_manifest,
+                ) = await self._collect_kernel_build(
+                    plan,
+                    output_root,
+                    run_id,
+                    outcome.process.exit_code if outcome.process.exit_code is not None else 1,
+                )
+                registrations.extend(kernel_build_registrations)
+            elif plan.adapter_execution_plan is not None and collector_succeeded:
                 (
                     plugin_registrations,
                     plugin_extractions,
@@ -1612,6 +1639,21 @@ class CaptureService:
                             producer_version=plan.adapter_version,
                         )
                     )
+                if plan.adapter == "nvbench" and valid_native_paths:
+                    primary_registration = next(
+                        registered
+                        for registered in registrations
+                        if registered[0].kind is ArtifactKind.BENCHMARK_SAMPLES
+                        and registered[0].role == "primary"
+                    )
+                    sidecar_regs = await self._register_nvbench_sidecars(
+                        plan,
+                        output_root,
+                        run_id,
+                        primary_registration=primary_registration,
+                        partial=not native_complete or not collector_succeeded,
+                    )
+                    registrations.extend(sidecar_regs)
             observations = output_root / "observations.jsonl"
             if observations.is_file():
                 registrations.append(
@@ -1734,6 +1776,12 @@ class CaptureService:
                         (succeeded and (not native_paths or native_complete))
                         or (preserve_nonzero_artifact and bool(valid_native_paths))
                         or (timed_out and bool(valid_native_paths))
+                        or (
+                            plan.adapter in {"triton.compiler", "cute.compiler"}
+                            and any(
+                                reg.kind is ArtifactKind.KERNEL_BUILD for reg, _ in registrations
+                            )
+                        )
                     )
                     else CaptureStatus.FAILED
                 ),
@@ -1762,6 +1810,33 @@ class CaptureService:
         )
         self.runs.append(terminal, expected_revision=running.revision)
         capture.run = terminal
+        if kernel_build_manifest is not None:
+            registration_ids_by_path = {
+                registration.display_name: registration.registration_id
+                for registration in terminal.artifacts
+                if registration.role.startswith("compiler_stage:")
+            }
+            try:
+                await run_atomic_thread(
+                    lambda: ArtifactPipelineService(self.workspace).register(
+                        kernel_build_manifest.pipeline_request(
+                            run_id=terminal.run_id,
+                            registration_ids_by_path=registration_ids_by_path,
+                        )
+                    )
+                )
+            except DomainError as error:
+                pipeline_failed = terminal.model_copy(
+                    update={
+                        "revision": terminal.revision + 1,
+                        "execution_status": ExecutionStatus.FAILED,
+                        "limitations": (*terminal.limitations, error.message),
+                    }
+                )
+                self.runs.append(pipeline_failed, expected_revision=terminal.revision)
+                capture.run = pipeline_failed
+                error.run_id = pipeline_failed.run_id
+                raise
         measurement_rows: list[dict[str, object]] = []
         if terminal.process is not None and terminal.process.wall_time_ns is not None:
             measurement_rows.append(
@@ -1977,10 +2052,200 @@ class CaptureService:
         definition = builtin_adapter(plan.adapter)
         if definition is None or plan.adapter == "command" or definition.output_filename is None:
             return ()
+        if plan.adapter in {"triton.compiler", "cute.compiler"}:
+            return ()
         if plan.adapter == "torch.profiler":
             options = torch_profiler_options(cast(dict[str, object], plan.adapter_options))
             return tuple(output_root / filename for filename in options.output_filenames)
         return (output_root / definition.output_filename,)
+
+    async def _register_nvbench_sidecars(
+        self,
+        plan: CapturePlan,
+        output_root: Path,
+        run_id: str,
+        *,
+        primary_registration: tuple[ArtifactRegistration, int],
+        partial: bool = False,
+    ) -> list[tuple[ArtifactRegistration, int]]:
+        """Register provider-declared NVBench jsonbin sidecars.
+
+        Parses the primary JSON via the shared selector
+        (``load_nvbench_sidecar_specs``) to discover which sidecar files
+        the document references.  Only those files are registered with
+        ``role="nvbench_sidecar"`` and ``display_name`` matching the
+        declared relative path.  No sibling globbing is performed.
+
+        Every declared filename is validated as a normalized relative
+        POSIX path that resolves under ``output_root``.  Each sidecar
+        file must be a regular non-linked file with exact declared byte
+        length before registration.
+
+        When ``partial`` is False (successful capture), any parse error,
+        unsupported hint, missing/mismatched sidecar, or path escape
+        raises ``DomainError`` so that
+        ``_native_output_manifest_is_valid`` returns ``False`` and the
+        run fails with a bounded limitation.
+
+        When ``partial`` is True (nonzero exit), parse failures and
+        missing/mismatched sidecars are silently skipped — the missing
+        sidecar evidence is a bounded limitation/proof gap, not a
+        trigger for globbing.
+        """
+        definition = builtin_adapter(plan.adapter)
+        if definition is None or definition.output_filename is None:
+            return []
+        json_path = output_root / definition.output_filename
+        max_bytes = self.workspace.config.capture.max_artifact_bytes
+        try:
+            document, document_bytes, document_sha256 = load_nvbench_document_with_integrity(
+                json_path,
+                max_bytes=max_bytes,
+            )
+            self._require_registered_integrity(
+                primary_registration,
+                expected_byte_length=document_bytes,
+                expected_sha256=document_sha256,
+            )
+            specs = collect_nvbench_sidecar_specs(document)
+        except DomainError:
+            if not partial:
+                raise
+            return []
+        registrations: list[tuple[ArtifactRegistration, int]] = []
+        for spec in specs:
+            try:
+                sidecar_path = resolve_nvbench_sidecar_path(spec.filename, output_root)
+                validate_nvbench_sidecar_file(sidecar_path, spec.byte_length)
+            except DomainError:
+                if not partial:
+                    raise
+                continue
+            registered = await self._register_path_async(
+                run_id,
+                sidecar_path,
+                kind=plan.expected_artifact_kinds[0],
+                role="nvbench_sidecar",
+                media_type="application/octet-stream",
+                producer=plan.adapter,
+                producer_version=plan.adapter_version,
+                display_name=spec.filename,
+            )
+            self._require_registered_integrity(
+                registered,
+                expected_byte_length=spec.byte_length,
+            )
+            registrations.append(registered)
+        return registrations
+
+    @staticmethod
+    def _create_kernel_build_dump_dir(plan: CapturePlan, output_root: Path) -> None:
+        env_key = "TRITON_DUMP_DIR" if plan.adapter == "triton.compiler" else "CUTE_DSL_DUMP_DIR"
+        dump_path = plan.collector_environment.get(env_key)
+        if dump_path is not None:
+            Path(dump_path).mkdir(parents=True, exist_ok=True)
+
+    async def _collect_kernel_build(
+        self,
+        plan: CapturePlan,
+        output_root: Path,
+        run_id: str,
+        exit_code: int,
+    ) -> tuple[list[tuple[ArtifactRegistration, int]], KernelBuildManifestV1]:
+        env_key = "TRITON_DUMP_DIR" if plan.adapter == "triton.compiler" else "CUTE_DSL_DUMP_DIR"
+        dump_path = plan.collector_environment.get(env_key)
+        dump_dir = Path(dump_path) if dump_path is not None else output_root / "dumps"
+        source_environment = {
+            key: value
+            for key, value in plan.collector_environment.items()
+            if key not in {"FLAMEOX_OBSERVATIONS_PATH"}
+        }
+        cute_keep: tuple[str, ...] | None = None
+        if plan.adapter == "cute.compiler":
+            keep_value = plan.adapter_options.get("keep_allowlist")
+            if isinstance(keep_value, list):
+                cute_keep = tuple(str(item) for item in keep_value)
+        reproducer_path: Path | None = None
+        reproducer_env = plan.collector_environment.get("TRITON_REPRODUCER_PATH")
+        if reproducer_env is not None:
+            reproducer_path = Path(reproducer_env)
+        collector = KernelBuildCaptureCollector(self.workspace)
+        manifest, manifest_path, native_paths = await run_atomic_thread(
+            lambda: collector.collect(
+                adapter=plan.adapter,
+                dump_dir=dump_dir,
+                output_root=output_root,
+                workload_name=plan.workload_name,
+                exit_code=exit_code,
+                producer_version=plan.adapter_version,
+                source_environment=source_environment,
+                cute_keep_allowlist=cute_keep,
+                reproducer_path=reproducer_path,
+            )
+        )
+        registrations: list[tuple[ArtifactRegistration, int]] = []
+        declarations = {
+            stage.artifact.path: stage for stage in manifest.stages if stage.artifact is not None
+        }
+        for native in native_paths:
+            relative = native.relative_to(output_root).as_posix()
+            stage = declarations[relative]
+            stage_role = f"compiler_stage:{stage.name}"
+            registered = await self._register_path_async(
+                run_id,
+                native,
+                kind=ArtifactKind.KERNEL_BUILD,
+                role=stage_role,
+                media_type=mimetypes.guess_type(native.name)[0] or "application/octet-stream",
+                producer=plan.adapter,
+                producer_version=plan.adapter_version,
+                display_name=relative,
+            )
+            declaration = stage.artifact
+            assert declaration is not None
+            self._require_registered_integrity(
+                registered,
+                expected_byte_length=declaration.byte_length,
+                expected_sha256=declaration.sha256,
+            )
+            registrations.append(registered)
+        manifest_bytes = manifest_path.stat().st_size
+        with manifest_path.open("rb") as stream:
+            manifest_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
+        registered_manifest = await self._register_path_async(
+            run_id,
+            manifest_path,
+            kind=ArtifactKind.KERNEL_BUILD,
+            role="kernel_build_manifest",
+            media_type="application/json",
+            producer=plan.adapter,
+            producer_version=plan.adapter_version,
+        )
+        self._require_registered_integrity(
+            registered_manifest,
+            expected_byte_length=manifest_bytes,
+            expected_sha256=manifest_sha256,
+        )
+        registrations.append(registered_manifest)
+        return registrations, manifest
+
+    def _require_registered_integrity(
+        self,
+        registered: tuple[ArtifactRegistration, int],
+        *,
+        expected_byte_length: int,
+        expected_sha256: str | None = None,
+    ) -> None:
+        registration, byte_length = registered
+        stored = self.artifacts.get(registration.artifact_id)
+        if byte_length != expected_byte_length or (
+            expected_sha256 is not None
+            and stored.content.integrity.sha256 != expected_sha256.removeprefix("sha256:").lower()
+        ):
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                f"Registered artifact {registration.display_name!r} changed after inventory.",
+            )
 
     def _valid_native_output_paths(
         self,
@@ -2018,11 +2283,61 @@ class CaptureService:
             if path not in expected
         )
 
+    def _nvbench_manifest_is_valid(
+        self,
+        plan: CapturePlan,
+        output_root: Path,
+    ) -> bool:
+        """Validate the NVBench JSON and all declared sidecars.
+
+        Returns ``True`` only if the JSON parses successfully, every
+        declared sidecar filename is a safe relative path under
+        ``output_root``, and each sidecar file exists as a regular
+        non-linked file with exact declared byte length.  Any parse
+        error, unsupported hint, missing/mismatched sidecar, or path
+        escape returns ``False``.
+        """
+        definition = builtin_adapter(plan.adapter)
+        if definition is None or definition.output_filename is None:
+            return False
+        json_path = output_root / definition.output_filename
+        max_bytes = self.workspace.config.capture.max_artifact_bytes
+        try:
+            specs = load_nvbench_sidecar_specs(json_path, max_bytes=max_bytes)
+        except DomainError:
+            return False
+        for spec in specs:
+            try:
+                sidecar_path = resolve_nvbench_sidecar_path(spec.filename, output_root)
+                validate_nvbench_sidecar_file(sidecar_path, spec.byte_length)
+            except DomainError:
+                return False
+        return True
+
     def _native_output_manifest_is_valid(
         self,
         plan: CapturePlan,
         output_root: Path,
     ) -> bool:
+        if plan.adapter == "nvbench":
+            return self._nvbench_manifest_is_valid(plan, output_root)
+        if plan.adapter == "compute-sanitizer":
+            path = output_root / "compute-sanitizer.xml"
+            try:
+                if (
+                    path.is_symlink()
+                    or path.stat().st_size > self.workspace.config.capture.max_artifact_bytes
+                ):
+                    return False
+                with path.open("rb") as stream:
+                    prefix = stream.read(1_024)
+                    stream.seek(max(0, path.stat().st_size - 1_024))
+                    suffix = stream.read(1_024)
+            except OSError:
+                return False
+            return b"<ComputeSanitizerOutput" in prefix and (
+                b"</ComputeSanitizerOutput>" in suffix or b"<ComputeSanitizerOutput/>" in suffix
+            )
         if plan.adapter != "torch.profiler":
             return True
         options = torch_profiler_options(cast(dict[str, object], plan.adapter_options))
@@ -2148,6 +2463,26 @@ class CaptureService:
                 options=cast(dict[str, object] | None, options),
                 project_root=self.workspace.project_root,
             )
+            if invocation.environment:
+                conflicts = {
+                    key: {
+                        "workload_value": workload.env_overrides[key],
+                        "adapter_value": invocation.environment[key],
+                    }
+                    for key in invocation.environment
+                    if key in workload.env_overrides
+                    and workload.env_overrides[key] != invocation.environment[key]
+                }
+                if conflicts:
+                    raise DomainError(
+                        ErrorCode.INVALID_CAPTURE_PLAN,
+                        f"Workload env_overrides conflict with {adapter} adapter environment.",
+                        details={"conflicts": conflicts},
+                        remediation=(
+                            "Remove the conflicting env_override from the workload or set it "
+                            "to the identical value required by the adapter.",
+                        ),
+                    )
             return _AdapterBinding(
                 argv=invocation.argv,
                 artifact_kinds=invocation.artifact_kinds,
@@ -2829,6 +3164,7 @@ class CaptureService:
         producer: str = "flameox.capture",
         producer_version: str | None = None,
         sensitivity: Sensitivity = Sensitivity.INTERNAL,
+        display_name: str | None = None,
     ) -> tuple[ArtifactRegistration, int]:
         stored = self.artifacts.import_path(
             path,
@@ -2839,7 +3175,7 @@ class CaptureService:
             registration_id=new_id(),
             run_id=run_id,
             artifact_id=stored.content.artifact_id,
-            display_name=path.name,
+            display_name=display_name or path.name,
             media_type=media_type,
             kind=kind,
             role=role,
@@ -2860,6 +3196,7 @@ class CaptureService:
         producer: str = "flameox.capture",
         producer_version: str | None = None,
         sensitivity: Sensitivity = Sensitivity.INTERNAL,
+        display_name: str | None = None,
     ) -> tuple[ArtifactRegistration, int]:
         return await run_atomic_thread(
             lambda: self._register_path(
@@ -2871,6 +3208,7 @@ class CaptureService:
                 producer=producer,
                 producer_version=producer_version,
                 sensitivity=sensitivity,
+                display_name=display_name,
             )
         )
 

@@ -103,6 +103,7 @@ class ArtifactKind(StrEnum):
     EXPERIMENT_CONFIGURATION = "experiment_configuration"
     INFERENCE_REQUEST_TRACE = "inference_request_trace"
     INFERENCE_RESULT = "inference_result"
+    KERNEL_BUILD = "kernel_build"
 
 
 class RunType(StrEnum):

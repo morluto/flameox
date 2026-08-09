@@ -11,9 +11,11 @@ if TYPE_CHECKING:
     from flameox.adapters.compute_sanitizer import *  # noqa: F403
     from flameox.adapters.coverage import *  # noqa: F403
     from flameox.adapters.inference import *  # noqa: F403
+    from flameox.adapters.kernel_build import *  # noqa: F403
     from flameox.adapters.kernel_validation import *  # noqa: F403
     from flameox.adapters.memray import *  # noqa: F403
     from flameox.adapters.nsight_systems import *  # noqa: F403
+    from flameox.adapters.nvbench import *  # noqa: F403
     from flameox.adapters.observations import *  # noqa: F403
     from flameox.adapters.options import *  # noqa: F403
     from flameox.adapters.perfetto import *  # noqa: F403
@@ -32,9 +34,11 @@ _MODULES = (
     "compute_sanitizer",
     "coverage",
     "inference",
+    "kernel_build",
     "kernel_validation",
     "memray",
     "nsight_systems",
+    "nvbench",
     "observations",
     "options",
     "perfetto",
@@ -49,6 +53,7 @@ _MODULES = (
 
 __all__ = [
     "ALL_SETUP_CLIENTS",
+    "KERNEL_BUILD_SCHEMA_VERSION",
     "AIPerfCorrelationSummary",
     "AIPerfInputsIndex",
     "AIPerfRecordParser",
@@ -67,8 +72,13 @@ __all__ = [
     "ComputeSanitizerOptions",
     "CoverageExtractionResult",
     "CoverageExtractor",
+    "CuteCompilerOptions",
+    "CuteDslKeepToken",
     "InferenceArtifactExtractor",
     "InferenceExtractionResult",
+    "KernelBuildArtifact",
+    "KernelBuildManifestV1",
+    "KernelBuildStage",
     "KernelValidationExtractionResult",
     "KernelValidationExtractor",
     "KernelValidationV1",
@@ -81,6 +91,13 @@ __all__ = [
     "MooncakeTraceSummary",
     "NsightSystemsExtractionResult",
     "NsightSystemsExtractor",
+    "NvbenchBenchmark",
+    "NvbenchExtractionResult",
+    "NvbenchExtractor",
+    "NvbenchJsonDocument",
+    "NvbenchOptions",
+    "NvbenchState",
+    "NvbenchSummary",
     "ObservationExtractionResult",
     "ObservationExtractor",
     "PerfettoExtractionResult",
@@ -105,6 +122,7 @@ __all__ = [
     "TraceEvent",
     "TraceProcessorInstallation",
     "TraceWindowResult",
+    "TritonCompilerOptions",
     "VllmAggregateMetrics",
     "VllmMeasurementRow",
     "VllmResultDocument",
@@ -112,6 +130,7 @@ __all__ = [
     "WholeEntrypointTorchProfilerOptions",
     "bind_adapter_options",
     "install_trace_processor",
+    "kernel_build_json_schema",
 ]
 
 

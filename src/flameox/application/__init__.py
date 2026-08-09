@@ -30,8 +30,10 @@ if TYPE_CHECKING:
     from flameox.application.inference_profiling import *  # noqa: F403
     from flameox.application.inference_providers import *  # noqa: F403
     from flameox.application.integrity import *  # noqa: F403
+    from flameox.application.kernel_builds import *  # noqa: F403
     from flameox.application.lifecycle import *  # noqa: F403
     from flameox.application.native_reducer import *  # noqa: F403
+    from flameox.application.nvbench_imports import *  # noqa: F403
     from flameox.application.operations import *  # noqa: F403
     from flameox.application.otlp import *  # noqa: F403
     from flameox.application.pipelines import *  # noqa: F403
@@ -72,7 +74,9 @@ _MODULES = (
     "native_reducer",
     "otlp",
     "integrity",
+    "kernel_builds",
     "inference_providers",
+    "nvbench_imports",
     "operations",
     "pipelines",
     "preflight",
@@ -200,6 +204,9 @@ __all__ = [
     "IntegrityService",
     "InvestigationListResult",
     "InvestigationService",
+    "KernelBuildCaptureCollector",
+    "KernelBuildImportResult",
+    "KernelBuildImportService",
     "LatencyFault",
     "LifecycleEvidenceService",
     "LifecycleItem",
@@ -222,6 +229,8 @@ __all__ = [
     "NativeViewerPlan",
     "NativeViewerService",
     "NsightSystemsProfilingPlan",
+    "NvbenchImportResult",
+    "NvbenchImportService",
     "OperationFailure",
     "OperationItemOutcome",
     "OperationProgress",

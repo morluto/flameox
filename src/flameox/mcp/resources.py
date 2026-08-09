@@ -6,8 +6,10 @@ from typing import Literal, Protocol, cast
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 
+from flameox.adapters.kernel_build import kernel_build_json_schema
 from flameox.adapters.kernel_validation import kernel_validation_json_schema
 from flameox.application import (
+    ArtifactPipelineService,
     ArtifactService,
     EvidenceLookupService,
     ExperimentService,
@@ -30,14 +32,6 @@ def _workspace(ctx: Context) -> Workspace:
 
 def register_resources[T: WorkspaceContext](server: MCPServer[T]) -> None:  # noqa: C901
     """Register resource projections independently from the MCP tool transport."""
-
-    @server.resource(
-        "flameox://schemas/kernel-validation/v1",
-        mime_type="application/schema+json",
-        description="Published JSON Schema for flameox.kernel-validation.v1.",
-    )
-    async def kernel_validation_schema_resource() -> str:
-        return json.dumps(kernel_validation_json_schema(), indent=2, sort_keys=True)
 
     def error_payload(error: DomainError) -> str:
         return json.dumps({"ok": False, "error": error.to_detail()})
@@ -63,6 +57,38 @@ def register_resources[T: WorkspaceContext](server: MCPServer[T]) -> None:  # no
         try:
             workspace = _workspace(ctx)
             return ArtifactService(workspace).get(artifact_id).model_dump_json(indent=2)
+        except DomainError as error:
+            return error_payload(error)
+
+    @server.resource(
+        "flameox://schemas/kernel-validation/v1",
+        mime_type="application/schema+json",
+        description="Published JSON Schema for flameox.kernel-validation.v1.",
+    )
+    async def kernel_validation_schema_resource() -> str:
+        return json.dumps(kernel_validation_json_schema(), indent=2, sort_keys=True)
+
+    @server.resource(
+        "flameox://schemas/kernel-build/v1",
+        mime_type="application/schema+json",
+        description="Published JSON Schema for flameox.kernel-build.v1.",
+    )
+    async def kernel_build_schema_resource() -> str:
+        return json.dumps(kernel_build_json_schema(), indent=2, sort_keys=True)
+
+    @server.resource(
+        "flameox://pipelines/{pipeline_id}",
+        mime_type="application/json",
+        description="Immutable artifact-pipeline projection.",
+    )
+    async def pipeline_resource(pipeline_id: str, ctx: Context) -> str:
+        try:
+            workspace = _workspace(ctx)
+            return (
+                ArtifactPipelineService(workspace)
+                .pipelines.read(pipeline_id)
+                .model_dump_json(indent=2)
+            )
         except DomainError as error:
             return error_payload(error)
 
