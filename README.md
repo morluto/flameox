@@ -217,15 +217,19 @@ argv = ["python", "validate.py", "--implementation", "{implementation}"]
 
 [experiments.scan_comparison]
 workload = "scan"
-variants = ["baseline", "candidate"]
 design = "randomized_complete_blocks"
 blocks = 10
+treatment_factor = "implementation"
+combination_policy = "cartesian"
 primary_metric = "pyperf.workload"
 polarity = "lower_is_better"
 estimand = "median_paired_log_ratio"
 practical_threshold = 0.05
 confidence_level = 0.95
 random_seed = 1984
+
+[experiments.scan_comparison.factors]
+implementation = ["baseline", "candidate"]
 ```
 
 An agent can create this declaration directly through MCP with
