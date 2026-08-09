@@ -1,0 +1,47 @@
+{
+  "traceEvents": [
+    {
+      "name": "hipLaunchKernelGGL",
+      "cat": "hip_runtime",
+      "ph": "X",
+      "ts": 0,
+      "dur": 2,
+      "pid": 17,
+      "tid": 3,
+      "args": {
+        "phase": "decode",
+        "correlation": 41
+      }
+    },
+    {
+      "name": "vector_add",
+      "cat": "kernel",
+      "ph": "X",
+      "ts": 4,
+      "dur": 5,
+      "pid": 17,
+      "tid": 9,
+      "args": {
+        "phase": "decode",
+        "correlation": 41,
+        "device": "amd:0",
+        "stream": 7
+      }
+    },
+    {
+      "name": "vector_add",
+      "cat": "kernel",
+      "ph": "X",
+      "ts": 12,
+      "dur": 3,
+      "pid": 17,
+      "tid": 9,
+      "args": {
+        "phase": "decode",
+        "correlation": 42,
+        "device": "amd:0",
+        "stream": 7
+      }
+    }
+  ]
+}

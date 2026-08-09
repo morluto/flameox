@@ -40,7 +40,8 @@ def test_list_reports_lanes_and_metadata_commands() -> None:
 
     assert result.returncode == 0, result.stderr
     assert "  golden" in result.stdout
-    assert "  optional-nvbench" in result.stdout
+    assert "  optional-ncu" in result.stdout
+    assert "  optional-rocprofv3" in result.stdout
     assert "Metadata commands:" in result.stdout
     assert "  capabilities validate managed setup metadata against extras" in result.stdout
 

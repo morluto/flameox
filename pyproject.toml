@@ -10,9 +10,9 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
-    "defusedxml>=0.7.1,<0.8",
     "anyio>=4.9,<5",
     "duckdb>=1.5.4,<1.6",
+    "defusedxml>=0.7.1,<0.8",
     "ijson>=3.4,<4",
     "mcp==2.0.0",
     "mcp-types==2.0.0",
@@ -87,7 +87,6 @@ packages = ["src/flameox"]
 addopts = "-ra --strict-config --strict-markers --durations=10 -p no:randomly -m 'not performance and not optional and not process'"
 testpaths = ["tests"]
 markers = [
-    "requires_compute_sanitizer: requires NVIDIA Compute Sanitizer and a compatible GPU",
     "unit: deterministic tests for one semantic owner",
     "integration: tests crossing two or more Flameox services",
     "process: tests that spawn, transport to, or cancel another process",
@@ -104,6 +103,9 @@ markers = [
     "requires_systemd: requires a systemd user manager",
     "requires_toxiproxy: requires the pinned Toxiproxy server binary",
     "requires_torch: requires the optional PyTorch provider",
+    "requires_compute_sanitizer: requires NVIDIA Compute Sanitizer and a compatible GPU",
+    "requires_ncu: requires NVIDIA Nsight Compute and its official Python report interface",
+    "requires_rocprofv3: requires rocprofv3 and a compatible AMD GPU",
     "requires_triton: requires the optional Triton provider and a compatible GPU",
     "requires_nvbench: requires a configured NVBench benchmark executable and compatible GPU",
     "requires_cute: requires the optional CuTe DSL provider and a compatible GPU",

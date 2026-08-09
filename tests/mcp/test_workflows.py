@@ -319,7 +319,11 @@ async def test_mcp_kernel_validation_extraction_reports_progress_and_resources(
     Workspace.initialize(tmp_path)
     recorded_progress: list[tuple[float, float | None, str | None]] = []
 
-    async def record(progress: float, total: float | None, message: str | None) -> None:
+    async def record(
+        progress: float,
+        total: float | None,
+        message: str | None,
+    ) -> None:
         recorded_progress.append((progress, total, message))
 
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:

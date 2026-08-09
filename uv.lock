@@ -1088,8 +1088,8 @@ name = "flameox"
 version = "0.1.13"
 source = { editable = "." }
 dependencies = [
-    { name = "defusedxml" },
     { name = "anyio" },
+    { name = "defusedxml" },
     { name = "duckdb" },
     { name = "ijson" },
     { name = "mcp" },
@@ -1176,12 +1176,12 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "defusedxml", specifier = ">=0.7.1,<0.8" },
     { name = "aiperf", marker = "extra == 'all'", specifier = ">=0.12,<0.13" },
     { name = "aiperf", marker = "extra == 'inference'", specifier = ">=0.12,<0.13" },
     { name = "anyio", specifier = ">=4.9,<5" },
     { name = "coverage", marker = "extra == 'all'", specifier = ">=7.14,<8" },
     { name = "coverage", marker = "extra == 'execution'", specifier = ">=7.14,<8" },
+    { name = "defusedxml", specifier = ">=0.7.1,<0.8" },
     { name = "deptry", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "duckdb", specifier = ">=1.5.4,<1.6" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.130" },
