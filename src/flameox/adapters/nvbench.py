@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import math
 import struct
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -45,6 +46,7 @@ _SAMPLE_FREQS_HINT = "file/sample_freqs"
 _MAX_STATES = 100_000
 _MAX_SUMMARIES_PER_STATE = 1_000
 _MAX_SAMPLES_PER_SERIES = 1_000_000
+_SUPPORTED_JSON_MAJOR = 1
 
 BoundedString = Annotated[str, StringConstraints(min_length=1, max_length=500)]
 
@@ -244,6 +246,23 @@ class NvbenchJsonDocument(_NvbenchModel):
             return None
 
 
+def require_supported_nvbench_schema(
+    document: NvbenchJsonDocument,
+    *,
+    run_id: str | None = None,
+) -> NvbenchJsonVersion:
+    version = document.json_version
+    if version is None or version.major != _SUPPORTED_JSON_MAJOR:
+        declared = "missing" if version is None else str(version.major)
+        raise DomainError(
+            ErrorCode.ARTIFACT_PARSE_FAILED,
+            f"Unsupported NVBench JSON schema major {declared}; only major "
+            f"{_SUPPORTED_JSON_MAJOR} is verified.",
+            run_id=run_id,
+        )
+    return version
+
+
 class NvbenchExtractionResult(ContractModel):
     schema_version: int = 1
     run_id: str
@@ -296,7 +315,9 @@ class NvbenchExtractor:
         stored = self.artifacts.get(primary.artifact_id)
         document = self._load_json(stored.payload_path)
         producer_version = self._producer_version(document, primary)
-        declared_rows = self._declared_measurement_count(document, run_id=run_id)
+        json_version = require_supported_nvbench_schema(document, run_id=run_id)
+        summaries = tuple(self._iter_unique_sidecar_summaries(document, run_id=run_id))
+        declared_rows = sum(size for _, _, _, _, size in summaries)
         max_rows = self.workspace.config.storage.max_rows_per_generation
         if declared_rows > max_rows:
             raise DomainError(
@@ -307,29 +328,22 @@ class NvbenchExtractor:
 
         limitations: list[str] = []
         consumed_sidecar_ids: set[str] = set()
-        json_version = document.json_version
-        if json_version is None:
-            limitations.append("The NVBench JSON schema version was missing or invalid.")
         if producer_version is None:
             limitations.append("The NVBench producer version was not declared.")
 
         rows: list[dict[str, object]] = []
-        for bench in document.benchmarks:
-            for state_index, state in enumerate(bench.states):
-                if state.is_skipped:
-                    continue
-                for summary in state.summaries:
-                    series_rows, sidecar_artifact_id = self._extract_summary(
-                        run_id=run_id,
-                        benchmark_name=bench.name,
-                        state_index=state_index,
-                        state=state,
-                        summary=summary,
-                        sidecars=sidecars,
-                    )
-                    rows.extend(series_rows)
-                    if sidecar_artifact_id is not None:
-                        consumed_sidecar_ids.add(sidecar_artifact_id)
+        for benchmark_name, state_index, state, summary, _ in summaries:
+            series_rows, sidecar_artifact_id = self._extract_summary(
+                run_id=run_id,
+                benchmark_name=benchmark_name,
+                state_index=state_index,
+                state=state,
+                summary=summary,
+                sidecars=sidecars,
+            )
+            rows.extend(series_rows)
+            if sidecar_artifact_id is not None:
+                consumed_sidecar_ids.add(sidecar_artifact_id)
 
         input_artifact_ids = (
             primary.artifact_id,
@@ -450,22 +464,42 @@ class NvbenchExtractor:
         return rows, registration.artifact_id
 
     @classmethod
-    def _declared_measurement_count(
+    def _iter_unique_sidecar_summaries(
         cls,
         document: NvbenchJsonDocument,
         *,
         run_id: str,
-    ) -> int:
-        total = 0
+    ) -> Iterator[tuple[str, int, NvbenchState, NvbenchSummary, int]]:
+        seen: dict[str, tuple[str, int]] = {}
         for benchmark in document.benchmarks:
-            for state in benchmark.states:
+            for state_index, state in enumerate(benchmark.states):
                 if state.is_skipped:
                     continue
                 for summary in state.summaries:
                     size = cls._declared_sidecar_size(summary, run_id=run_id)
-                    if size is not None:
-                        total += size
-        return total
+                    if size is None:
+                        continue
+                    filename = summary.sidecar_filename
+                    if filename is None:
+                        raise DomainError(
+                            ErrorCode.ARTIFACT_PARSE_FAILED,
+                            f"NVBench summary with hint {summary.hint!r} is missing "
+                            "the required filename datum.",
+                            run_id=run_id,
+                        )
+                    identity = (summary.hint or "", size)
+                    previous = seen.get(filename)
+                    if previous is not None:
+                        if previous != identity:
+                            raise DomainError(
+                                ErrorCode.ARTIFACT_PARSE_FAILED,
+                                f"NVBench document reuses sidecar {filename!r} with "
+                                "conflicting sizes or sample hints.",
+                                run_id=run_id,
+                            )
+                        continue
+                    seen[filename] = identity
+                    yield benchmark.name, state_index, state, summary, size
 
     @staticmethod
     def _declared_sidecar_size(summary: NvbenchSummary, *, run_id: str) -> int | None:

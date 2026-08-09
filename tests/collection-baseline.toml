@@ -1,4 +1,4 @@
-expected_test_count = 1029
+expected_test_count = 1069
 
 # New files are normalized to their pre-split path so this receipt proves
 # test identity and parametrized case preservation across the decomposition.
@@ -33,20 +33,20 @@ expected_test_count = 1029
 'tests/analysis/test_recipes.py' = '87ea564890d57d16d9e6303089121662be325905ff4ee485d489c8efeb8d6d7e'
 'tests/application/test_records_and_comparisons.py' = 'd052ad24e744c16d0058b1c01ab76a18d84bce0729d63cf824d5cd23046d0759'
 'tests/application/test_workloads_and_capture.py' = '3213ed7c619a233587e807d4e79f8601291762645e5c985aba68f632590e5d73'
-'tests/mcp/test_server.py' = 'b2cd9e86fd2bad216eb66541772b52bed480839fd7a69d63b8bc2890401a64f3'
+'tests/mcp/test_server.py' = 'c18be24ad5a7f588dd1a764208875d3200b563441a96135f20de216ac97f4da2'
 'tests/test_cli_setup.py' = '2e1c3a607b7b4cefecb44f98c88c2e65ccbc0afaae39201c2c443eef0204c561'
 
 [files]
 'tests/adapters/test_benchmark_samples.py' = { count = 8, digest = '71e398543a29c75f059be8b1ba659ee80952b9407ef0295b7fa9bfe736ad05d3' }
-'tests/adapters/test_compute_sanitizer.py' = { count = 17, digest = '0a44b26ba1816dee25ceb541819e23c8f64fc5f833efdd4d53a40750e4de14e6' }
+'tests/adapters/test_compute_sanitizer.py' = { count = 25, digest = '533856439b8f1b90c1ea954f1ac2bdac4013e4f4f8f10f05cce584d064040bf0' }
 'tests/adapters/test_compute_sanitizer_live.py' = { count = 2, digest = 'ed25601a0ea6a107634c87cde1bf6c7ead550feeb1dc9dfa74c7852966e691cc' }
 'tests/adapters/test_cute_compiler_live.py' = { count = 1, digest = 'c06df142e528133b2fc9ce9045f37d96bf4155740f85928b5d7452ce1d9075f2' }
-'tests/adapters/test_kernel_build.py' = { count = 13, digest = 'b6c8efe8c729909e6f3554c1b83554e62f5cf289728588e2c6b4a3877d59637a' }
+'tests/adapters/test_kernel_build.py' = { count = 20, digest = 'bf361b4f8f92591372dfea9aa5314045572e848f599a09a21ca438893b66580d' }
 'tests/adapters/test_kernel_build_capture.py' = { count = 23, digest = 'ba3671771c7bffa170869d7fca5e86a2e098603d461788bccc7e931eb6e7431a' }
-'tests/adapters/test_kernel_validation.py' = { count = 12, digest = '86a12a5fb7f6a3cf94a68be67fd68cb1ea34736f5be7a68a7bee2b9145bf0f37' }
-'tests/adapters/test_nsight_compute.py' = { count = 4, digest = '3135414e6ce11321c6fc2aec2c7fbbf06343eeca695c72b4a0bf48811df229ca' }
+'tests/adapters/test_kernel_validation.py' = { count = 24, digest = 'd07e46ef25f9e38726edbf244159cb390d40834457d0ab2138bb9ec8560b0522' }
+'tests/adapters/test_nsight_compute.py' = { count = 9, digest = 'd807405e5ed7a7cb79285061edfc54cb49f567ab3af677df2a849ca9c5cfd359' }
 'tests/adapters/test_nsight_compute_live.py' = { count = 3, digest = 'bf6c37d9ff8691a3624795dfd1de809e407e2b5b7cc4bfc8522c5b147036d18f' }
-'tests/adapters/test_nvbench.py' = { count = 42, digest = '74e6d6e9e6cb31e5a018ac0ed4c0d11b0d0077b6f6dbc56124accce2b0c230d0' }
+'tests/adapters/test_nvbench.py' = { count = 46, digest = '8699ffcef62177430de36a008de035ca9a5455e23a90b13afd439217d514dd10' }
 'tests/adapters/test_nvbench_live.py' = { count = 1, digest = '95b6165af0c766dac662211d5065d9f3854aa99a038fba53c28cba1a8f5b5bf9' }
 'tests/adapters/test_rocprofv3.py' = { count = 5, digest = '70dcedb9448c59b72bfd9b538c1413620dff1ba50c57967e9187a416d032dd5a' }
 'tests/adapters/test_triton_compiler_live.py' = { count = 1, digest = '0dfa64a2bfaaf94a441d80fac025d703bc267101e9ab748c31d25c8ee9ebfd5e' }
@@ -71,7 +71,7 @@ expected_test_count = 1029
 'tests/application/test_artifact_workers.py' = { count = 6, digest = 'dd06d1ce7d46627d8cdfb5c8a3b0198e3e8e978d4cbdf0c1bed268a230102124' }
 'tests/application/test_artifact_service.py' = { count = 5, digest = '478916ee602095b39b51258e5156a2a1f072e608d8c515b18ed41c85a017beb2' }
 'tests/application/test_async_work.py' = { count = 1, digest = '5c21ab9d048e8676c0b086ff6859e87b28da82ab793c2b70de975f592355067e' }
-'tests/application/test_capabilities.py' = { count = 20, digest = '15279d4414beca5438e376ff2f787b3e9fe916d8242de0b35d3580de4cc24069' }
+'tests/application/test_capabilities.py' = { count = 21, digest = '5f9ca23933755447ba4c5c8d7f3d1506276b4622435e181e8349a4b0f504f522' }
 'tests/application/test_capture_native_outputs.py' = { count = 5, digest = '73ffb01416e94a3044feeecb6f11f1fb452f0b1595ecc8b3ac3ef4f749918f77' }
 'tests/application/test_capture_nvbench_provider.py' = { count = 5, digest = '60dc3c898ac55fef04dea85abe5d2236be4d72ca549641d44d48d34b22cace71' }
 'tests/application/test_comparison_samples.py' = { count = 5, digest = 'e8f94545da22cc09a8868477a4ad48b9c7a88dcecd03de4d00a0d9199ca293dc' }
@@ -92,7 +92,7 @@ expected_test_count = 1029
 'tests/application/test_gc.py' = { count = 8, digest = '2ef5cddb403f867124821c2cfde9df70896e2cd8d284c2e563b6455f0ad998d4' }
 'tests/application/test_integrity.py' = { count = 1, digest = 'c44a2cb51b7f5a90c106b4a59e9661551a47ae8d0a21df308387618b99e277aa' }
 'tests/application/test_path_containment.py' = { count = 9, digest = '3336e2349910166ada6bd0519a015e74fe405dc3a0389d63a43e41d706dcfefc' }
-'tests/application/test_pipelines.py' = { count = 12, digest = '1aa521f8619c0993604c1b6b12953992f136837696d15f210e3ecf97480c44f2' }
+'tests/application/test_pipelines.py' = { count = 13, digest = 'ab18dd09119013d89e63702c056984a8e66134e23bd9c48f1350d3f46331b5a6' }
 'tests/application/test_proc_stat_parsing.py' = { count = 8, digest = '304f574ce49f342fccbecae8ef16ea8aa0e55003d4a9b654c875a381d9092183' }
 'tests/application/test_python_evidence_capture.py' = { count = 4, digest = 'a74791e80211abb9630845a3fd76a324c20124278f4df80140158f8c1495d03d' }
 'tests/application/test_records_and_comparisons.py' = { count = 8, digest = 'd052ad24e744c16d0058b1c01ab76a18d84bce0729d63cf824d5cd23046d0759' }
@@ -119,7 +119,7 @@ expected_test_count = 1029
 'tests/golden/test_memory_regression.py' = { count = 1, digest = '7898013cd64ec203e28d00b6549f002586a2d23f0c06eba6f1c979478f1aac1e' }
 'tests/golden/test_reverse_scan.py' = { count = 1, digest = '11e8db62d67d86b3e2be63a8e3425dbd7927329f4d405a3d6718251286a20bea' }
 'tests/mcp/test_agent_workflows.py' = { count = 7, digest = '1267ceb6cd3cdff4940461e8bcc50ce81e43c44815f6da85e947540e4395e5bd' }
-'tests/mcp/test_server.py' = { count = 49, digest = 'b2cd9e86fd2bad216eb66541772b52bed480839fd7a69d63b8bc2890401a64f3' }
+'tests/mcp/test_server.py' = { count = 51, digest = 'b2cd9e86fd2bad216eb66541772b52bed480839fd7a69d63b8bc2890401a64f3' }
 'tests/collectors/test_torch_launcher.py' = { count = 1, digest = 'b875d2f61ff086520d190513676e50fd1e6cf7152a9697e7b3c3d61d360736a3' }
 'tests/performance/test_catalog_scale.py' = { count = 4, digest = '1c7587225525c2e0cc877bf62105c1d2447ec5d230e0a9d0eaef0ae7322e9214' }
 'tests/security/test_offline.py' = { count = 1, digest = 'a9de75a583146be9fccb27627ae4fdd6d6f3265912dad9423fe97415ba833fd3' }

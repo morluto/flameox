@@ -209,6 +209,19 @@ async def test_accelerator_tools_advertise_bounded_v2_schemas(tmp_path: Path) ->
     schedule = tools["plan_capture"].input_schema["$defs"]["TorchProfilerSchedule"]
     assert schedule["additionalProperties"] is False
     assert schedule["properties"]["repeat"]["maximum"] == 100
+    sanitizer = tools["plan_capture"].input_schema["$defs"]["ComputeSanitizerCaptureOptions"]
+    assert sanitizer["additionalProperties"] is False
+    assert set(sanitizer["properties"]) == {
+        "tool",
+        "launch_skip",
+        "launch_count",
+        "target_processes",
+        "target_processes_filter",
+        "kernel_name",
+        "demangle",
+        "suppression_file",
+        "finding_exit_code",
+    }
 
 
 @pytest.mark.anyio
@@ -239,6 +252,16 @@ async def test_accelerator_tools_advertise_bounded_v2_schemas(tmp_path: Path) ->
                 "torch_profiler_options.sdk.record_shapes",
                 "torch_profiler_options.sdk.schedule.active",
             ),
+        ),
+        (
+            "plan_capture",
+            {
+                "workload_name": "workload",
+                "adapter": "compute-sanitizer",
+                "parameters": {},
+                "compute_sanitizer_options": {"launch_skip": True},
+            },
+            ("compute_sanitizer_options.launch_skip",),
         ),
     ],
 )

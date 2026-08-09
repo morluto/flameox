@@ -267,7 +267,7 @@ BUILTIN_ADAPTERS = {
                 "(nvbench::main or NVBENCH_MAIN); verify CUDA toolkit and GPU access.",
             ),
             version_args=("--version",),
-            supported_platforms=("linux",),
+            supported_platforms=("linux", "windows"),
             output_filename="nvbench.json",
             artifact_kinds=(ArtifactKind.BENCHMARK_SAMPLES,),
             expected_overhead=(
@@ -758,9 +758,19 @@ def _compute_sanitizer_capture_invocation(
 def replace_compute_sanitizer_suppression(
     argv: tuple[str, ...],
     staged_path: Path,
+    *,
+    workload_argv: tuple[str, ...],
 ) -> tuple[str, ...]:
     """Point a planned Compute Sanitizer invocation at its verified staged input."""
-    indexes = [index for index, value in enumerate(argv[:-1]) if value == "--suppressions"]
+    if len(workload_argv) > len(argv) or argv[-len(workload_argv) :] != workload_argv:
+        raise DomainError(
+            ErrorCode.INTERNAL_ERROR,
+            "Planned Compute Sanitizer workload arguments do not match the collector suffix.",
+        )
+    collector_length = len(argv) - len(workload_argv)
+    indexes = [
+        index for index, value in enumerate(argv[:collector_length]) if value == "--suppressions"
+    ]
     if len(indexes) != 1:
         raise DomainError(
             ErrorCode.INTERNAL_ERROR,

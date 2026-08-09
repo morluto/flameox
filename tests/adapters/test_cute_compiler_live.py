@@ -65,6 +65,6 @@ timeout_seconds = 120
     assert result.run.capture_status is CaptureStatus.REGISTERED
     assert any(
         registration.kind is ArtifactKind.KERNEL_BUILD
-        and registration.role.startswith("compiler_stage:")
+        and registration.role.startswith("compiler_stage")
         for registration in result.run.artifacts
     )

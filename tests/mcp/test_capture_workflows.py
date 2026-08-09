@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -130,6 +132,56 @@ argv = ["python", "-c", "print('ok')"]
         assert command["argv"][-2:] == ["-c", "print('ok')"]
         assert "unsafe" not in command["argv"]
         assert command["cwd"] == str(tmp_path.resolve())
+
+
+@pytest.mark.anyio
+async def test_mcp_plan_capture_binds_compute_sanitizer_options(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "compute-sanitizer"
+    executable.write_text(
+        '#!/bin/sh\nif [ "$1" = "--version" ]; then echo \'Version 2026.2.1\'; exit 0; fi\nexit 1\n'
+    )
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    (tmp_path / "sanitizer.supp").write_text("# fixture\n")
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.probe]
+argv = ["/bin/true"]
+cwd = "."
+"""
+    )
+    Workspace.initialize(tmp_path)
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        result = await client.call_tool(
+            "plan_capture",
+            {
+                "workload_name": "probe",
+                "adapter": "compute-sanitizer",
+                "parameters": {},
+                "capture_mode": "trusted_local",
+                "preflight_mode": "passive",
+                "compute_sanitizer_options": {
+                    "tool": "racecheck",
+                    "launch_skip": 2,
+                    "launch_count": 3,
+                    "suppression_file": "sanitizer.supp",
+                },
+            },
+        )
+
+    assert result.is_error is False, result.structured_content
+    assert result.structured_content is not None
+    options = result.structured_content["result"]["adapter_options"]
+    assert options["tool"] == "racecheck"
+    assert options["launch_skip"] == 2
+    assert options["launch_count"] == 3
+    assert options["suppression_file"] == "sanitizer.supp"
+    assert options["suppression_digest"].startswith("sha256:")
 
 
 @pytest.mark.anyio

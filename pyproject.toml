@@ -105,7 +105,6 @@ markers = [
     "requires_torch: requires the optional PyTorch provider",
     "requires_compute_sanitizer: requires NVIDIA Compute Sanitizer and a compatible GPU",
     "requires_ncu: requires NVIDIA Nsight Compute and its official Python report interface",
-    "requires_rocprofv3: requires rocprofv3 and a compatible AMD GPU",
     "requires_triton: requires the optional Triton provider and a compatible GPU",
     "requires_nvbench: requires a configured NVBench benchmark executable and compatible GPU",
     "requires_cute: requires the optional CuTe DSL provider and a compatible GPU",

@@ -7,6 +7,8 @@ import os
 import re
 import shutil
 import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -25,6 +27,13 @@ _SAFE_PAYLOAD_NAME = re.compile(r"^payload(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,15})?
 class StoredArtifact:
     content: ArtifactContent
     payload_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactSnapshot:
+    payload_path: Path
+    byte_length: int
+    sha256: str
 
 
 def _write_all(descriptor: int, data: bytes) -> None:
@@ -46,16 +55,68 @@ class ArtifactStore:
         max_bytes: int,
     ) -> StoredArtifact:
         source = source.absolute()
+        with self.temporary_snapshot(
+            source,
+            allowed_roots=allowed_roots,
+            max_bytes=max_bytes,
+        ) as snapshot:
+            hexadecimal = snapshot.sha256
+            artifact_id = f"sha256:{hexadecimal}"
+            extension = source.suffix if _SAFE_EXTENSION.fullmatch(source.suffix) else ""
+            payload_name = f"payload{extension}"
+            object_root = self.workspace.paths.artifacts / hexadecimal[:2] / hexadecimal
+            metadata_path = object_root / "artifact.json"
+            with self.workspace.write_locked():
+                StorageQuota(self.workspace).require_capacity(staging=True)
+                if metadata_path.exists():
+                    content = self._read_metadata(metadata_path)
+                    if (
+                        content.artifact_id != artifact_id
+                        or content.byte_length != snapshot.byte_length
+                    ):
+                        raise DomainError(
+                            ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                            "Existing content-addressed artifact metadata conflicts.",
+                        )
+                    payload_path = object_root / content.payload_name
+                    if not payload_path.is_file():
+                        raise DomainError(
+                            ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                            "Existing artifact payload is missing.",
+                        )
+                else:
+                    object_root.mkdir(parents=True, exist_ok=True)
+                    payload_path = object_root / payload_name
+                    os.replace(snapshot.payload_path, payload_path)
+                    fsync_directory(object_root)
+                    content = ArtifactContent(
+                        artifact_id=artifact_id,
+                        byte_length=snapshot.byte_length,
+                        payload_name=payload_name,
+                        integrity=Integrity(sha256=hexadecimal, hashed_at=utc_now()),
+                    )
+                    atomic_write_json(metadata_path, content.model_dump(mode="json"))
+        return StoredArtifact(content=content, payload_path=payload_path)
+
+    @contextmanager
+    def temporary_snapshot(
+        self,
+        source: Path,
+        *,
+        allowed_roots: tuple[Path, ...],
+        max_bytes: int,
+    ) -> Iterator[ArtifactSnapshot]:
+        """Yield an immutable bounded copy without committing it to the CAS."""
+        source = source.absolute()
         self._require_allowed_parent(source, allowed_roots)
         source_fd = self._open_source(source, allowed_roots)
-
-        staging_root = self.workspace.paths.staging / f"import-{uuid4().hex}"
+        staging_root = self.workspace.paths.staging / f"snapshot-{uuid4().hex}"
         staging_root.mkdir(parents=True, exist_ok=False)
         staged_path = staging_root / "payload"
         staged_fd = os.open(staged_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         digest = hashlib.sha256()
         total = 0
-        staged_complete = False
+        copied = False
         try:
             before = os.fstat(source_fd)
             if not stat.S_ISREG(before.st_mode):
@@ -104,53 +165,20 @@ class ArtifactStore:
                     "Artifact import source changed while it was read.",
                     retryable=True,
                 )
-            staged_complete = True
+            copied = True
         finally:
             os.close(source_fd)
             os.close(staged_fd)
-            if not staged_complete:
+            if not copied:
                 shutil.rmtree(staging_root, ignore_errors=True)
-
-        hexadecimal = digest.hexdigest()
-        artifact_id = f"sha256:{hexadecimal}"
-        extension = source.suffix if _SAFE_EXTENSION.fullmatch(source.suffix) else ""
-        payload_name = f"payload{extension}"
-        object_root = self.workspace.paths.artifacts / hexadecimal[:2] / hexadecimal
-        metadata_path = object_root / "artifact.json"
-
         try:
-            with self.workspace.write_locked():
-                StorageQuota(self.workspace).require_capacity(staging=True)
-                if metadata_path.exists():
-                    content = self._read_metadata(metadata_path)
-                    if content.artifact_id != artifact_id or content.byte_length != total:
-                        raise DomainError(
-                            ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                            "Existing content-addressed artifact metadata conflicts.",
-                        )
-                    payload_path = object_root / content.payload_name
-                    if not payload_path.is_file():
-                        raise DomainError(
-                            ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                            "Existing artifact payload is missing.",
-                        )
-                    staged_path.unlink(missing_ok=True)
-                else:
-                    object_root.mkdir(parents=True, exist_ok=True)
-                    payload_path = object_root / payload_name
-                    os.replace(staged_path, payload_path)
-                    fsync_directory(object_root)
-                    content = ArtifactContent(
-                        artifact_id=artifact_id,
-                        byte_length=total,
-                        payload_name=payload_name,
-                        integrity=Integrity(sha256=hexadecimal, hashed_at=utc_now()),
-                    )
-                    atomic_write_json(metadata_path, content.model_dump(mode="json"))
+            yield ArtifactSnapshot(
+                payload_path=staged_path,
+                byte_length=total,
+                sha256=digest.hexdigest(),
+            )
         finally:
             shutil.rmtree(staging_root, ignore_errors=True)
-
-        return StoredArtifact(content=content, payload_path=payload_path)
 
     def _open_source(
         self,

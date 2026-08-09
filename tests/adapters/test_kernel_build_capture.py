@@ -206,10 +206,16 @@ async def test_triton_compiler_capture_emits_manifest_with_native_artifacts(
     assert result.run.capture_status is CaptureStatus.REGISTERED
     manifest_reg = next(reg for reg in result.run.artifacts if reg.role == "kernel_build_manifest")
     assert manifest_reg.kind is ArtifactKind.KERNEL_BUILD
-    native_regs = [reg for reg in result.run.artifacts if reg.role.startswith("compiler_stage:")]
+    native_regs = [reg for reg in result.run.artifacts if reg.role.startswith("compiler_stage")]
     assert len(native_regs) == 3
     extensions = {reg.display_name.rsplit(".", 1)[1] for reg in native_regs}
     assert extensions == {"ttir", "ptx", "cubin"}
+    media_types = {reg.display_name.rsplit(".", 1)[1]: reg.media_type for reg in native_regs}
+    assert media_types == {
+        "ttir": "text/plain",
+        "ptx": "text/plain",
+        "cubin": "application/octet-stream",
+    }
     pipelines = ArtifactPipelineService(workspace).pipelines.list()
     assert len(pipelines) == 1
     assert pipelines[0].run_id == result.run.run_id
@@ -238,7 +244,7 @@ async def test_triton_compiler_capture_preserves_manifest_on_nonzero_exit(
     assert result.run.capture_status is CaptureStatus.REGISTERED
     manifest_regs = [reg for reg in result.run.artifacts if reg.role == "kernel_build_manifest"]
     assert len(manifest_regs) == 1
-    native_regs = [reg for reg in result.run.artifacts if reg.role.startswith("compiler_stage:")]
+    native_regs = [reg for reg in result.run.artifacts if reg.role.startswith("compiler_stage")]
     assert len(native_regs) == 3
 
 
@@ -268,7 +274,7 @@ sys.exit(0)
     result = await service.execute(plan.plan_id)
     assert result.run.execution_status is ExecutionStatus.SUCCEEDED
     assert result.run.capture_status is CaptureStatus.REGISTERED
-    native_regs = [reg for reg in result.run.artifacts if reg.role.startswith("compiler_stage:")]
+    native_regs = [reg for reg in result.run.artifacts if reg.role.startswith("compiler_stage")]
     assert len(native_regs) == 2
     assert all(len(reg.role) <= 100 for reg in native_regs)
     assert any("long_kernel_identity" in reg.display_name for reg in native_regs)

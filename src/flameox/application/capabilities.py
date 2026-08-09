@@ -161,16 +161,28 @@ class CapabilityService:
         for adapter in BUILTIN_ADAPTERS.values():
             if adapter.dependency_kind != "internal":
                 continue
+            supported_platform = (
+                adapter.supported_platforms is None or system in adapter.supported_platforms
+            )
             reports.append(
                 CapabilityReport(
                     adapter=adapter.name,
-                    status=CapabilityStatus.AVAILABLE,
-                    provisioning=CapabilityProvisioning.BUNDLED,
-                    supported_modes=adapter.supported_modes,
-                    supported_formats=adapter.supported_formats,
+                    status=(
+                        CapabilityStatus.AVAILABLE
+                        if supported_platform
+                        else CapabilityStatus.UNSUPPORTED_PLATFORM
+                    ),
+                    provisioning=(
+                        CapabilityProvisioning.BUNDLED
+                        if supported_platform
+                        else CapabilityProvisioning.UNSUPPORTED
+                    ),
+                    supported_modes=adapter.supported_modes if supported_platform else (),
+                    supported_formats=adapter.supported_formats if supported_platform else (),
                     platform=system,
                     architecture=architecture,
                     features=adapter.features,
+                    restrictions=self._platform_restrictions(adapter),
                     limitations=adapter.capture_limitations,
                 )
             )

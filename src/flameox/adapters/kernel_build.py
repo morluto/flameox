@@ -148,17 +148,27 @@ class KernelBuildManifestV1(ContractModel):
                         status=cast(Literal["skipped", "unavailable", "failed"], stage.status),
                     )
                 )
-        limitations = list(self.limitations)
+        derived: list[str] = []
         if self.diagnostics:
-            limitations.append("compiler diagnostics are preserved in the kernel-build manifest")
+            derived.append("compiler diagnostics are preserved in the kernel-build manifest")
         if self.device_identity is None:
-            limitations.append("device identity was not supplied by the producer")
+            derived.append("device identity was not supplied by the producer")
+        limitations = list(dict.fromkeys((*derived, *self.limitations)))
+        if len(limitations) > 20:
+            retained = 19 - len(derived)
+            limitations = [
+                *derived,
+                *tuple(dict.fromkeys(self.limitations))[:retained],
+                "Additional limitations remain available in the kernel-build manifest.",
+            ]
         return RegisterPipelineRequest(
             run_id=run_id,
             pipeline_name=f"{self.producer}.compiler",
             pipeline_schema=KERNEL_BUILD_SCHEMA_VERSION,
             producer=self.producer,
             producer_version=self.producer_version,
+            workload_identity=self.workload_identity,
+            device_identity=self.device_identity,
             stages=tuple(declarations),
             limitations=tuple(dict.fromkeys(limitations)),
         )

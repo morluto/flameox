@@ -37,6 +37,7 @@ _DimensionValue = str | int | float | bool
 Int64 = Annotated[int, Field(ge=-(2**63), le=2**63 - 1)]
 
 _MAX_KERNEL_VALIDATION_BYTES = 64 * 1024 * 1024
+_MAX_SUMMARY_LIMITATIONS = 100
 
 _LOWER_IS_BETTER = {"max_abs_error", "max_rel_error", "mse", "rmse"}
 _HIGHER_IS_BETTER = {"psnr", "cosine_similarity"}
@@ -80,14 +81,24 @@ class KernelValidationMetric(ContractModel):
         _require_finite(self.value, "metric value")
         _require_finite(self.threshold, "metric threshold")
         expected = "<=" if self.name in _LOWER_IS_BETTER else ">="
-        if self.status == "unsupported":
+        if self.status in {"inconclusive", "unsupported"}:
             if self.limitation is None:
-                raise ValueError("unsupported metrics require a limitation")
+                raise ValueError(f"{self.status} metrics require a limitation")
+            if any(item is not None for item in (self.value, self.comparator, self.threshold)):
+                raise ValueError(
+                    f"{self.status} metrics cannot declare a value, comparator, or threshold"
+                )
             return self
         if self.value is None or self.threshold is None or self.comparator is None:
             raise ValueError("supported metrics require value, comparator, and threshold")
         if self.comparator != expected:
             raise ValueError(f"{self.name} requires comparator {expected}")
+        if self.name in _LOWER_IS_BETTER and (self.value < 0 or self.threshold < 0):
+            raise ValueError(f"{self.name} value and threshold must be nonnegative")
+        if self.name == "cosine_similarity" and not (
+            -1 <= self.value <= 1 and -1 <= self.threshold <= 1
+        ):
+            raise ValueError("cosine_similarity value and threshold must be between -1 and 1")
         passed = (
             self.value <= self.threshold
             if self.comparator == "<="
@@ -111,6 +122,15 @@ class KernelValidationFailure(ContractModel):
     def finite_values(self) -> KernelValidationFailure:
         for name in ("expected", "actual", "absolute_error", "relative_error"):
             _require_finite(getattr(self, name), name)
+        if not (
+            self.coordinates
+            or self.expected is not None
+            or self.actual is not None
+            or self.absolute_error is not None
+            or self.relative_error is not None
+            or self.detail
+        ):
+            raise ValueError("representative failures must contain a substantive witness")
         return self
 
 
@@ -384,7 +404,7 @@ class KernelValidationExtractor:
             output_count=len(case_rows),
             metric_count=len(metric_rows),
             corpus_commit_id=published.commit.commit_id,
-            limitations=document.limitations,
+            limitations=_summary_limitations(document),
         )
 
     @staticmethod
@@ -395,8 +415,8 @@ class KernelValidationExtractor:
                     ErrorCode.ARTIFACT_TOO_LARGE,
                     "Kernel-validation JSON exceeds the 64 MiB contract limit.",
                 )
-            with path.open(encoding="utf-8") as stream:
-                return KernelValidationV1.model_validate(json.load(stream))
+            payload = path.read_text(encoding="utf-8")
+            return KernelValidationV1.model_validate_json(payload, strict=True)
         except DomainError:
             raise
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
@@ -408,6 +428,34 @@ class KernelValidationExtractor:
 
 def kernel_validation_json_schema() -> dict[str, JsonValue]:
     return KernelValidationV1.model_json_schema(mode="validation")
+
+
+def _summary_limitations(document: KernelValidationV1) -> tuple[str, ...]:
+    nested = (
+        *document.limitations,
+        *(
+            limitation
+            for case in document.cases
+            for limitation in (
+                *case.limitations,
+                *(
+                    limitation
+                    for output in case.outputs
+                    for limitation in (
+                        *output.limitations,
+                        *(metric.limitation for metric in output.metrics if metric.limitation),
+                    )
+                ),
+            )
+        ),
+    )
+    unique = tuple(dict.fromkeys(nested))
+    if len(unique) <= _MAX_SUMMARY_LIMITATIONS:
+        return unique
+    return (
+        *unique[: _MAX_SUMMARY_LIMITATIONS - 1],
+        "Additional nested limitations were omitted from this bounded summary.",
+    )
 
 
 def _json(value: object) -> str:

@@ -71,6 +71,8 @@ class RegisterPipelineRequest(ContractModel):
     pipeline_schema: Annotated[str, Field(min_length=1, max_length=100)]
     producer: Annotated[str, Field(min_length=1, max_length=100)]
     producer_version: Annotated[str, Field(min_length=1, max_length=100)]
+    workload_identity: Annotated[str, Field(min_length=1, max_length=200)] | None = None
+    device_identity: Annotated[str, Field(min_length=1, max_length=500)] | None = None
     stages: Annotated[tuple[PipelineStageDeclaration, ...], Field(min_length=1, max_length=100)]
     limitations: Annotated[tuple[str, ...], Field(max_length=20)] = ()
 
@@ -135,6 +137,8 @@ class ArtifactPipeline(ContractModel):
     pipeline_schema: str
     producer: str
     producer_version: str
+    workload_identity: str | None = None
+    device_identity: str | None = None
     source_state_id: str | None
     environment_id: str
     stages: tuple[PipelineStage, ...]
@@ -211,6 +215,39 @@ class PipelineComparison(ContractModel):
     result_digest: str
 
 
+def _pipeline_identity_compatibility(
+    baseline: ArtifactPipeline,
+    candidate: ArtifactPipeline,
+) -> tuple[Literal["compatible", "incompatible", "unknown"], tuple[str, ...], tuple[str, ...]]:
+    mismatches = [
+        name
+        for name in ("pipeline_name", "pipeline_schema", "producer")
+        if getattr(baseline, name) != getattr(candidate, name)
+    ]
+    unknown_identities: list[str] = []
+    if any(pipeline.producer_version.casefold() == "unknown" for pipeline in (baseline, candidate)):
+        unknown_identities.append("producer_version")
+    elif baseline.producer_version != candidate.producer_version:
+        mismatches.append("producer_version")
+    for name in ("workload_identity", "device_identity"):
+        baseline_value = getattr(baseline, name)
+        candidate_value = getattr(candidate, name)
+        if baseline_value is None or candidate_value is None:
+            unknown_identities.append(name)
+        elif baseline_value != candidate_value:
+            mismatches.append(name)
+    if baseline.source_state_id != candidate.source_state_id:
+        mismatches.append("source_state_id")
+    if baseline.environment_id != candidate.environment_id:
+        mismatches.append("environment_id")
+    compatibility: Literal["compatible", "incompatible", "unknown"] = "compatible"
+    if mismatches:
+        compatibility = "incompatible"
+    elif unknown_identities:
+        compatibility = "unknown"
+    return compatibility, tuple(mismatches), tuple(unknown_identities)
+
+
 class ArtifactPipelineService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
@@ -273,6 +310,8 @@ class ArtifactPipelineService:
             pipeline_schema=request.pipeline_schema,
             producer=request.producer,
             producer_version=request.producer_version,
+            workload_identity=request.workload_identity,
+            device_identity=request.device_identity,
             source_state_id=run.source_state_id,
             environment_id=run.environment_id,
             stages=tuple(stages),
@@ -321,17 +360,9 @@ class ArtifactPipelineService:
     def compare(self, baseline_pipeline_id: str, candidate_pipeline_id: str) -> PipelineComparison:
         baseline = self.pipelines.read(baseline_pipeline_id)
         candidate = self.pipelines.read(candidate_pipeline_id)
-        mismatches = tuple(
-            name
-            for name in ("pipeline_name", "pipeline_schema", "producer", "producer_version")
-            if getattr(baseline, name) != getattr(candidate, name)
-        )
-        if baseline.source_state_id != candidate.source_state_id:
-            mismatches = (*mismatches, "source_state_id")
-        if baseline.environment_id != candidate.environment_id:
-            mismatches = (*mismatches, "environment_id")
-        compatibility: Literal["compatible", "incompatible", "unknown"] = (
-            "incompatible" if mismatches else "compatible"
+        compatibility, mismatches, unknown_identities = _pipeline_identity_compatibility(
+            baseline,
+            candidate,
         )
         baseline_by_name = {stage.name: stage for stage in baseline.stages}
         candidate_by_name = {stage.name: stage for stage in candidate.stages}
@@ -343,6 +374,11 @@ class ArtifactPipelineService:
         )
         stages: list[PipelineStageComparison] = []
         limitations = [*baseline.limitations, *candidate.limitations]
+        if unknown_identities:
+            limitations.append(
+                "Critical pipeline identity evidence is unavailable for: "
+                f"{', '.join(unknown_identities)}."
+            )
         for name in ordered_names:
             left = baseline_by_name.get(name)
             right = candidate_by_name.get(name)
@@ -467,7 +503,7 @@ class ArtifactPipelineService:
         disposition: StageDisposition
         stage_limitations = (*left.limitations, *right.limitations)
         incompatible = (
-            compatibility != "compatible"
+            compatibility == "incompatible"
             or left.format != right.format
             or left.format_schema != right.format_schema
             or left.extractor != right.extractor

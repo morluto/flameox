@@ -3,11 +3,15 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
+from packaging.version import InvalidVersion, Version
+
 from flameox.application.artifact_workers import ArtifactWorker
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
+
+_SUPPORTED_PRODUCER_MAJOR = 2026
 
 
 class ComputeSanitizerExtractionResult(ContractModel):
@@ -75,6 +79,32 @@ def inspect_compute_sanitizer_report(
     )
 
 
+def compute_sanitizer_compatibility_limitations(
+    producer_version: str | None,
+) -> tuple[str, ...]:
+    """Describe whether a report belongs to the explicitly verified XML family."""
+    if producer_version is None:
+        return (
+            "Compute Sanitizer producer version is unavailable; XML compatibility is unverified.",
+        )
+    normalized = producer_version.strip()
+    if normalized.casefold().startswith("version "):
+        normalized = normalized.split(maxsplit=1)[1]
+    try:
+        observed_major = Version(normalized).major
+    except InvalidVersion:
+        return (
+            "Compute Sanitizer producer version is not identifiable; XML compatibility is "
+            "unverified.",
+        )
+    if observed_major != _SUPPORTED_PRODUCER_MAJOR:
+        return (
+            f"Compute Sanitizer {observed_major} XML is outside the verified "
+            f"{_SUPPORTED_PRODUCER_MAJOR} compatibility family.",
+        )
+    return ()
+
+
 class ComputeSanitizerExtractor:
     name = "compute-sanitizer.xml"
     version = "1"
@@ -116,7 +146,10 @@ class ComputeSanitizerExtractor:
         )
         records = inspection.records
         classifications = inspection.classifications
-        limitations = list(inspection.limitations)
+        limitations = [
+            *compute_sanitizer_compatibility_limitations(registration.producer_version),
+            *inspection.limitations,
+        ]
         schema_fingerprint = digest_model(
             {
                 "compatibility_family": self.compatibility_family,

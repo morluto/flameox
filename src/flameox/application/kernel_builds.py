@@ -26,6 +26,7 @@ from flameox.models import ContractModel
 from flameox.storage import Workspace
 
 _MAX_KERNEL_BUILD_MEMBERS = 100
+_MAX_KERNEL_BUILD_MANIFEST_BYTES = 1024 * 1024
 
 # Triton dump extensions: NVIDIA (ttir/ttgir/llir/ptx/cubin/sass) and
 # AMD (amdgcn/hsaco) targets, plus metadata files emitted alongside IR.
@@ -462,7 +463,15 @@ class KernelBuildImportService:
         sensitivity: Sensitivity = Sensitivity.INTERNAL,
         allow_external_path: bool = False,
     ) -> KernelBuildImportResult:
-        manifest, manifest_bytes, manifest_sha256 = self._load_manifest(manifest_path)
+        importer = ImportService(self.workspace)
+        with importer._snapshot_provider_document(
+            manifest_path,
+            allow_external_path=allow_external_path,
+            max_bytes=_MAX_KERNEL_BUILD_MANIFEST_BYTES,
+        ) as snapshot:
+            manifest, _, _ = self._load_manifest(snapshot.payload_path)
+            manifest_bytes = snapshot.byte_length
+            manifest_sha256 = snapshot.sha256
         members: list[BundleMember] = []
         for stage in manifest.stages:
             if stage.artifact is None:
@@ -471,7 +480,7 @@ class KernelBuildImportService:
             members.append(
                 BundleMember(
                     path=path,
-                    role=f"compiler_stage:{stage.name}",
+                    role=stage.artifact.role,
                     media_type=stage.artifact.media_type,
                     display_name=stage.artifact.path,
                     expected_byte_length=stage.artifact.byte_length,
@@ -483,7 +492,7 @@ class KernelBuildImportService:
                 ErrorCode.EXECUTION_REFUSED,
                 "Kernel-build manifest exceeds the 99 native-artifact bundle limit.",
             )
-        imported = ImportService(self.workspace)._import_provider_bundle(
+        imported = importer._import_provider_bundle(
             ImportBundleRequest(
                 primary=BundleMember(
                     path=manifest_path,
@@ -524,10 +533,10 @@ class KernelBuildImportService:
     def _load_manifest(self, path: Path) -> tuple[KernelBuildManifestV1, int, str]:
         try:
             size = path.stat().st_size
-            if size > self.workspace.config.capture.max_artifact_bytes:
+            if size > _MAX_KERNEL_BUILD_MANIFEST_BYTES:
                 raise DomainError(
                     ErrorCode.ARTIFACT_TOO_LARGE,
-                    "Kernel-build manifest exceeds the configured per-artifact limit.",
+                    "Kernel-build manifest exceeds the 1 MiB provider-document limit.",
                 )
             raw = path.read_bytes()
             if len(raw) != size:

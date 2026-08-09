@@ -41,7 +41,12 @@ def test_list_reports_lanes_and_metadata_commands() -> None:
     assert result.returncode == 0, result.stderr
     assert "  golden" in result.stdout
     assert "  optional-ncu" in result.stdout
-    assert "  optional-rocprofv3" in result.stdout
+    assert "  optional-rocprofv3" not in result.stdout
+    for lane, expression in runner.PROVIDER_LANES.items():
+        if lane == "optional-host":
+            continue
+        marker = expression.removeprefix("optional and ")
+        assert any(marker in record.markers for record in RECORDS), lane
     assert "Metadata commands:" in result.stdout
     assert "  capabilities validate managed setup metadata against extras" in result.stdout
 

@@ -25,7 +25,10 @@ from flameox.adapters.builtins import (
     builtin_adapter,
     replace_compute_sanitizer_suppression,
 )
-from flameox.adapters.compute_sanitizer import inspect_compute_sanitizer_report
+from flameox.adapters.compute_sanitizer import (
+    compute_sanitizer_compatibility_limitations,
+    inspect_compute_sanitizer_report,
+)
 from flameox.adapters.kernel_build import KernelBuildManifestV1
 from flameox.adapters.options import (
     bind_adapter_options,
@@ -572,6 +575,17 @@ class CaptureService:
                 ),
             )
         adapter_capability = await self._adapter_capability(adapter, mode=preflight_mode)
+        if adapter == "compute-sanitizer" and execution_policy is not ExecutionPolicy.TRUSTED_LOCAL:
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "Managed Compute Sanitizer capture cannot access NVIDIA devices in the current "
+                "containment backend.",
+                details={"adapter": adapter, "requested_execution_policy": execution_policy.value},
+                remediation=(
+                    "Use trusted-local capture on a trusted NVIDIA host until bounded GPU device "
+                    "bindings are supported.",
+                ),
+            )
         planned_execution_identity = ExecutionIdentityService(
             self.workspace,
             broker=self.broker,
@@ -928,6 +942,7 @@ class CaptureService:
                     collector_argv = replace_compute_sanitizer_suppression(
                         collector_argv,
                         staged_suppression,
+                        workload_argv=plan.workload_instance.command.argv,
                     )
             outcome = await self.broker.run(
                 ExecutionRequest(
@@ -1602,6 +1617,21 @@ class CaptureService:
                                 f"Compute Sanitizer report validation failed: {error.message}"
                             )
                         else:
+                            compatibility_limitations = compute_sanitizer_compatibility_limitations(
+                                plan.adapter_version
+                            )
+                            inspection = inspection.model_copy(
+                                update={
+                                    "limitations": tuple(
+                                        dict.fromkeys(
+                                            (
+                                                *compatibility_limitations,
+                                                *inspection.limitations,
+                                            )
+                                        )
+                                    )
+                                }
+                            )
                             has_findings = bool(inspection.records)
                             supported_exit = outcome.process.exit_code in {
                                 0,
@@ -1618,7 +1648,11 @@ class CaptureService:
                                 validation_status = (
                                     ValidationStatus.FAILED
                                     if has_findings
-                                    else ValidationStatus.PASSED
+                                    else (
+                                        ValidationStatus.INCONCLUSIVE
+                                        if inspection.limitations
+                                        else ValidationStatus.PASSED
+                                    )
                                 )
                             validation_limitations.extend(inspection.limitations)
                 manifest = output_root / "torch-profiler-cycles.json"
@@ -1814,7 +1848,8 @@ class CaptureService:
             registration_ids_by_path = {
                 registration.display_name: registration.registration_id
                 for registration in terminal.artifacts
-                if registration.role.startswith("compiler_stage:")
+                if registration.kind is ArtifactKind.KERNEL_BUILD
+                and registration.role != "kernel_build_manifest"
             }
             try:
                 await run_atomic_thread(
@@ -2190,19 +2225,18 @@ class CaptureService:
         for native in native_paths:
             relative = native.relative_to(output_root).as_posix()
             stage = declarations[relative]
-            stage_role = f"compiler_stage:{stage.name}"
+            declaration = stage.artifact
+            assert declaration is not None
             registered = await self._register_path_async(
                 run_id,
                 native,
                 kind=ArtifactKind.KERNEL_BUILD,
-                role=stage_role,
-                media_type=mimetypes.guess_type(native.name)[0] or "application/octet-stream",
+                role=declaration.role,
+                media_type=declaration.media_type,
                 producer=plan.adapter,
                 producer_version=plan.adapter_version,
                 display_name=relative,
             )
-            declaration = stage.artifact
-            assert declaration is not None
             self._require_registered_integrity(
                 registered,
                 expected_byte_length=declaration.byte_length,

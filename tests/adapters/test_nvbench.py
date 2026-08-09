@@ -373,6 +373,8 @@ def test_nvbench_rejects_declared_samples_over_row_budget_before_decoding(
     summaries.append(
         {**summaries[0], "tag": "nv/json/bin:sample_freqs", "hint": "file/sample_freqs"}
     )
+    summaries[1]["data"] = [dict(datum) for datum in summaries[1]["data"]]
+    summaries[1]["data"][0]["value"] = "out.json-bin/1.bin"
     json_path.write_text(json.dumps(document))
     # This payload is deliberately malformed for the declared sample count. A
     # decoder-first implementation reports a size mismatch instead of rejecting
@@ -407,7 +409,7 @@ def test_nvbench_rejects_malformed_json(tmp_path: Path) -> None:
     assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
 
 
-def test_nvbench_extracts_zero_measurements_from_empty_document(
+def test_nvbench_rejects_empty_document_without_schema_identity(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
@@ -418,9 +420,8 @@ def test_nvbench_extracts_zero_measurements_from_empty_document(
 
     run_id = _import_bundle(workspace, json_path, sidecar_path)
 
-    result = NvbenchExtractor(workspace).extract(run_id)
-    assert result.measurement_count == 0
-    assert result.benchmark_count == 0
+    with pytest.raises(DomainError, match="schema major missing"):
+        NvbenchExtractor(workspace).extract(run_id)
 
 
 def test_nvbench_rejects_run_without_primary(tmp_path: Path) -> None:
@@ -680,8 +681,20 @@ def test_nvbench_import_service_round_trip_extract(tmp_path: Path) -> None:
     assert extracted.benchmark_count == 1
 
 
+def test_nvbench_rejects_unverified_json_schema_major_before_decoding(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    json_path = tmp_path / "out.json"
+    sidecar_path = tmp_path / "0.bin"
+    json_path.write_text(_nvbench_json(sidecar_filename="0.bin", json_version=(2, 0, 0)))
+    sidecar_path.write_bytes(_float32_bytes([0.01, 0.02, 0.03]))
+    run_id = _import_bundle(workspace, json_path, sidecar_path, sidecar_filename="0.bin")
+
+    with pytest.raises(DomainError, match="only major 1 is verified"):
+        NvbenchExtractor(workspace).extract(run_id)
+
+
 def test_nvbench_import_service_rejects_malformed_json(tmp_path: Path) -> None:
-    """A non-JSON file is rejected at parse time before any import."""
+    """A unique non-JSON primary leaves no anonymous artifact or run."""
     workspace = Workspace.initialize(tmp_path)
     json_path = tmp_path / "out.json"
     json_path.write_text("{not valid json")
@@ -689,6 +702,9 @@ def test_nvbench_import_service_rejects_malformed_json(tmp_path: Path) -> None:
     with pytest.raises(DomainError) as error:
         NvbenchImportService(workspace).import_json(json_path, allow_external_path=True)
     assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
+    assert tuple(workspace.paths.artifacts.rglob("artifact.json")) == ()
+    assert tuple(workspace.paths.runs.iterdir()) == ()
+    assert tuple(workspace.paths.staging.iterdir()) == ()
 
 
 def test_nvbench_import_service_rejects_conflicting_sidecar_sizes(
@@ -753,6 +769,30 @@ def test_nvbench_import_service_collapses_duplicate_sidecar_same_size(
 
     result = NvbenchImportService(workspace).import_json(json_path, allow_external_path=True)
     assert result.sidecar_count == 1
+    assert NvbenchExtractor(workspace).extract(result.run.run_id).measurement_count == 3
+
+
+def test_nvbench_rejects_reused_sidecar_with_conflicting_hint(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    json_path = tmp_path / "out.json"
+    sidecar_dir = tmp_path / "out.json-bin"
+    sidecar_dir.mkdir()
+    (sidecar_dir / "0.bin").write_bytes(_float32_bytes([0.01, 0.02, 0.03]))
+    doc = json.loads(_nvbench_json(sample_count=3))
+    doc["benchmarks"][0]["states"][0]["summaries"].append(
+        {
+            "tag": "sample_freqs",
+            "hint": "file/sample_freqs",
+            "data": [
+                {"name": "filename", "type": "string", "value": "out.json-bin/0.bin"},
+                {"name": "size", "type": "int64", "value": "3"},
+            ],
+        }
+    )
+    json_path.write_text(json.dumps(doc))
+
+    with pytest.raises(DomainError, match="conflicting sizes or sample hints"):
+        NvbenchImportService(workspace).import_json(json_path, allow_external_path=True)
 
 
 def test_nvbench_import_service_rejects_unknown_file_hint(
@@ -883,6 +923,34 @@ def test_nvbench_import_service_rejects_symlinked_sidecar(tmp_path: Path) -> Non
         NvbenchImportService(workspace).import_json(json_path, allow_external_path=True)
 
     assert error.value.code is ErrorCode.EXECUTION_REFUSED
+
+
+def test_nvbench_import_rejects_symlinked_primary_before_parsing(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    external = tmp_path.parent / f"{tmp_path.name}-external.json"
+    external.write_text(_nvbench_json())
+    primary = tmp_path / "out.json"
+    primary.symlink_to(external)
+    try:
+        with pytest.raises(DomainError) as error:
+            NvbenchImportService(workspace).import_json(primary)
+        assert error.value.code is ErrorCode.EXECUTION_REFUSED
+    finally:
+        external.unlink()
+
+
+def test_nvbench_import_applies_provider_document_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    json_path = tmp_path / "out.json"
+    json_path.write_text(_nvbench_json())
+    monkeypatch.setattr("flameox.application.nvbench_imports._MAX_NVBENCH_DOCUMENT_BYTES", 8)
+
+    with pytest.raises(DomainError) as error:
+        NvbenchImportService(workspace).import_json(json_path)
+    assert error.value.code is ErrorCode.ARTIFACT_TOO_LARGE
 
 
 def test_nvbench_import_service_verifies_primary_sha256(tmp_path: Path) -> None:

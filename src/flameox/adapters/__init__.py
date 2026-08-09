@@ -69,6 +69,7 @@ __all__ = [
     "ClientConfigEdit",
     "ClientConfigRegistry",
     "ClientPlanAction",
+    "ComputeSanitizerCaptureOptions",
     "ComputeSanitizerExtractionResult",
     "ComputeSanitizerExtractor",
     "ComputeSanitizerOptions",

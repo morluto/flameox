@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import mimetypes
 import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -29,7 +31,7 @@ from flameox.domain.models import (
 )
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
-from flameox.storage import ArtifactStore, RunStore, StoredArtifact, Workspace
+from flameox.storage import ArtifactSnapshot, ArtifactStore, RunStore, StoredArtifact, Workspace
 
 if TYPE_CHECKING:
     from flameox.application.otlp import OtlpExtractionResult
@@ -144,6 +146,30 @@ class ImportService:
         self.artifacts = ArtifactStore(workspace)
         self.runs = RunStore(workspace)
         self.publisher = GenerationPublisher(workspace)
+
+    @contextmanager
+    def _snapshot_provider_document(
+        self,
+        path: Path,
+        *,
+        allow_external_path: bool,
+        max_bytes: int,
+    ) -> Iterator[ArtifactSnapshot]:
+        """Copy a provider primary through the canonical no-follow import boundary.
+
+        Provider-specific parsers inspect the immutable returned payload rather
+        than opening an untrusted source path themselves. The later bundle
+        import remains bound to this snapshot's size and digest.
+        """
+        allowed_roots = [self.workspace.project_root]
+        if allow_external_path:
+            allowed_roots.append(path.absolute().parent)
+        with self.artifacts.temporary_snapshot(
+            path,
+            allowed_roots=tuple(allowed_roots),
+            max_bytes=min(max_bytes, self.workspace.config.capture.max_artifact_bytes),
+        ) as snapshot:
+            yield snapshot
 
     def import_artifact(self, request: ImportArtifactRequest) -> ImportResult:
         if (

@@ -396,8 +396,13 @@ contradict its value and threshold; an output status cannot contradict its
 metrics; and the document status cannot contradict its case outcomes or
 declared coverage completeness. Non-finite values, unknown schema versions,
 ambiguous aggregates, and incomplete coverage without a stated limitation are
-rejected explicitly. Failed outputs require at least one bounded representative
-failure; non-failed outputs reject representative failures.
+rejected explicitly. Error metrics and their tolerances must be nonnegative,
+cosine similarity must remain in `[-1, 1]`, and inconclusive or unsupported
+metrics carry a limitation instead of numeric comparison fields. Failed outputs
+require at least one bounded, substantive representative failure; non-failed
+outputs reject representative failures. JSON validation is strict, so strings
+and booleans are not coerced into numeric contract fields. Extraction returns a
+bounded summary of document, case, output, and metric limitations.
 
 Extraction publishes two evidence tables:
 `kernel_validation_cases` (case/output identity, status, dimensions, inputs,
@@ -446,15 +451,19 @@ flag injection is refused — only the declared options are accepted.
 Platform: Linux and Windows. Permissions: GPU access and the CUDA toolkit;
 the executable is detected at runtime and not provisioned by Flameox. Overhead:
 GPU instrumentation overhead whose exact cost depends on the selected sanitizer
-tool. Containment: follows the workload's selected execution policy; the
-sanitizer wraps the workload argv and Flameox owns process execution,
-containment, quotas, and cancellation. The adapter preserves artifacts on
+tool. Managed containment is currently refused because the containment backend
+does not yet bind a bounded NVIDIA device set into its private `/dev`.
+Trusted-local capture remains available on a trusted GPU host and records that
+choice. The sanitizer wraps the workload argv and Flameox owns process
+execution, quotas, and cancellation. The adapter preserves artifacts on
 nonzero exit because sanitizer findings produce a nonzero exit code by design.
 
 Local evidence: Compute Sanitizer `2026.2.1` was observed locally. The
 compatibility family is `compute-sanitizer.xml.2026.v1`; extraction is
 version-bounded because NVIDIA does not publish a stable XSD for the XML
-format. The parser runs in a bounded subprocess worker
+format. A missing, invalid, legacy, or future producer version makes an
+otherwise clean report inconclusive rather than assigning it to the verified
+2026 family. The parser runs in a bounded subprocess worker
 (`flameox.workers.compute_sanitizer`) behind the canonical broker and uses
 `defusedxml` rather than implementing XML entity defenses locally. It rejects
 DTD and entity declarations, requires a `ComputeSanitizerOutput` root element,
@@ -505,6 +514,9 @@ Provider import reads the bounded JSON first and selects only the `file/sample_t
 `file/sample_freqs` sidecars it declares. Relative paths must remain inside the JSON bundle;
 unknown file encodings, missing declarations, traversal, symlinks, hard links, duplicate paths,
 count/byte mismatches, and bundles over 100 members or the workspace byte quotas fail explicitly.
+The provider document is snapshotted through the same no-follow artifact boundary before parsing,
+is limited to 16 MiB, and must declare the verified JSON schema major 1. Repeated references to
+the same filename, sample hint, and count are decoded once; conflicting repetitions are rejected.
 The current binary encoding is little-endian float32, with element counts serialized by NVBench
 as decimal strings. JSON and sidecars remain unchanged and authoritative. Extraction publishes
 raw timing samples in seconds and frequency samples in hertz through the existing measurements
@@ -549,7 +561,10 @@ digest through the shared bounded bundle importer and registers the result in th
 `ArtifactPipeline` service, enabling the existing comparison path rather than a second compiler
 pipeline store. Managed captures register that same pipeline directly. Provider dumps do not
 declare predecessor lineage, so Flameox leaves predecessor edges unset rather than deriving them
-from filenames or directories.
+from filenames or directories. Manifest parsing is capped at 1 MiB and starts from a no-follow
+immutable snapshot. Pipeline compatibility includes the declared workload and device identities;
+if the compiler version is unavailable, comparison remains `unknown` rather than claiming
+compatibility.
 
 A local `sm_86` run with Triton `3.7.1` produced and registered real compiler dumps through the
 managed adapter. Deterministic process tests cover both wrappers, failed compilation, missing
@@ -573,8 +588,9 @@ The maintained adapter preserves official `.ncu-rep` and `.ncu-repz` reports as 
 `kernel_profile` artifacts. Extraction runs in the isolated artifact worker and exclusively uses
 the `ncu_report` Python interface shipped with the detected Nsight Compute installation. NVIDIA
 owns the native report format and reader; Flameox neither decodes the binary format nor adds a
-runtime PyPI dependency. The schema fingerprint binds the report-interface version to the
-observed metric and section identities. Roofline evidence is published only when a metric, rule,
+runtime PyPI dependency. The schema fingerprint binds the selected report-interface digest and
+report version to the observed metric and section identities. Roofline evidence is published only
+when a metric, rule,
 or section in the report explicitly identifies roofline data; Flameox does not synthesize a
 roofline or bottleneck conclusion.
 
@@ -589,12 +605,15 @@ quotas, timeout, and
 cancellation, while `ncu` owns the native report bytes. Flameox never changes privileges. NVIDIA's
 `ERR_NVGPUCTRPERM` maps to `permission_required` with remediation rather than a privilege attempt.
 
-Normalization is bounded by the workspace generation row quota, a 120-second worker timeout,
-1,000 ranges, 10,000 actions, and separate metric and observation budgets derived from the row
-quota. Numeric metrics enter `measurements`; string attributes, rules and result tables, section
-identities, and source/SASS/PTX references enter observations. Source bodies are not copied out of
-the report. Unknown metric value kinds, truncated collections, and exceptions from optional
-official-interface access become explicit limitations. Missing optional methods degrade
+Normalization is bounded by the workspace generation row quota, the worker's serialized-output
+budget, a 120-second worker timeout, 1,000 ranges, 10,000 actions, and separate metric and
+observation budgets. The response budget reserves a 64 KiB envelope and conservatively allows
+16 KiB per normalized row. Numeric metrics enter `measurements`; string attributes, rules and
+result tables, section identities, and source/SASS/PTX references enter observations. Source
+bodies are not copied out of the report. Provenance records the SHA-256 identity of the selected
+`ncu_report.py`; changing that reader creates a distinct extraction generation. Unknown metric
+value kinds, truncated collections, and exceptions from optional official-interface access
+become explicit limitations. Missing optional methods degrade
 gracefully; corrupt reports, a missing official interface, and invalid required interface results
 fail extraction with bounded recovery guidance.
 

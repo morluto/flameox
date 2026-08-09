@@ -16,21 +16,21 @@ BoundedFilter = Annotated[
     str,
     StringConstraints(min_length=1, max_length=500, pattern=r"^[^\x00\r\n]+$"),
 ]
+_MAX_SUPPRESSION_BYTES = 1024 * 1024
 
 
-class ComputeSanitizerOptions(ContractModel):
+class ComputeSanitizerCaptureOptions(ContractModel):
+    """User-facing Compute Sanitizer selections before plan identity is bound."""
+
     tool: Literal["memcheck", "racecheck", "initcheck", "synccheck"] = "memcheck"
-    launch_skip: Annotated[int, Field(ge=0, le=1_000_000)] = 0
-    launch_count: Annotated[int, Field(ge=0, le=1_000_000)] = 0
+    launch_skip: Annotated[int, Field(strict=True, ge=0, le=1_000_000)] = 0
+    launch_count: Annotated[int, Field(strict=True, ge=0, le=1_000_000)] = 0
     target_processes: Literal["application-only", "all"] = "application-only"
     target_processes_filter: BoundedFilter | None = None
     kernel_name: BoundedFilter | None = None
     demangle: Literal["full", "simple", "no"] = "full"
     suppression_file: Annotated[str, StringConstraints(min_length=1, max_length=500)] | None = None
-    suppression_digest: (
-        Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")] | None
-    ) = None
-    finding_exit_code: Annotated[int, Field(ge=1, le=255)] = 86
+    finding_exit_code: Annotated[int, Field(strict=True, ge=1, le=255)] = 86
 
     @field_validator("suppression_file")
     @classmethod
@@ -41,6 +41,14 @@ class ComputeSanitizerOptions(ContractModel):
         if path.is_absolute() or ".." in path.parts:
             raise ValueError("suppression_file must be project-relative and contained")
         return path.as_posix()
+
+
+class ComputeSanitizerOptions(ComputeSanitizerCaptureOptions):
+    """Plan-bound options including the suppression content identity."""
+
+    suppression_digest: (
+        Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")] | None
+    ) = None
 
     @model_validator(mode="after")
     def suppression_identity_is_complete(self) -> ComputeSanitizerOptions:
@@ -236,8 +244,9 @@ def bind_adapter_options(
                     "Compute Sanitizer suppression_file must be a project-relative string.",
                 )
             path = _contained_project_file(project_root, suppression)
+            payload = _read_bounded_suppression(path)
             raw["suppression_file"] = path.relative_to(project_root.resolve()).as_posix()
-            raw["suppression_digest"] = _sha256(path)
+            raw["suppression_digest"] = _sha256_bytes(payload)
         bound = _validate_adapter_options(adapter, cast(dict[str, object], raw))
         return cast(dict[str, JsonValue], bound.model_dump(mode="json"))
     if adapter in _ADAPTER_OPTION_MODELS:
@@ -263,17 +272,7 @@ def compute_sanitizer_suppression_path(
     if options.suppression_file is None:
         return None
     path = _contained_project_file(project_root, options.suppression_file)
-    observed_digest = _sha256(path)
-    if observed_digest != options.suppression_digest:
-        raise DomainError(
-            ErrorCode.INVALID_CAPTURE_PLAN,
-            "Compute Sanitizer suppression file changed after the capture plan was issued.",
-            details={
-                "expected_sha256": options.suppression_digest,
-                "observed_sha256": observed_digest,
-            },
-            remediation=("Create a new capture plan after updating the suppression file.",),
-        )
+    _verify_suppression_digest(_read_bounded_suppression(path), options.suppression_digest)
     return path
 
 
@@ -286,6 +285,13 @@ def read_compute_sanitizer_suppression(
     if options.suppression_file is None:
         return None
     path = _contained_project_file(project_root, options.suppression_file)
+    payload = _read_bounded_suppression(path)
+    _verify_suppression_digest(payload, options.suppression_digest)
+    return payload
+
+
+def _read_bounded_suppression(path: Path) -> bytes:
+    """Read one suppression file through a no-follow descriptor under the public size bound."""
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
         metadata = os.fstat(descriptor)
@@ -294,34 +300,37 @@ def read_compute_sanitizer_suppression(
                 ErrorCode.EXECUTION_REFUSED,
                 "Compute Sanitizer suppression file must be a regular non-linked file.",
             )
-        if metadata.st_size > 1024 * 1024:
+        if metadata.st_size > _MAX_SUPPRESSION_BYTES:
             raise DomainError(
                 ErrorCode.EXECUTION_REFUSED,
                 "Compute Sanitizer suppression file exceeds the 1 MiB limit.",
             )
         with os.fdopen(descriptor, "rb") as stream:
             descriptor = -1
-            payload = stream.read(1024 * 1024 + 1)
+            payload = stream.read(_MAX_SUPPRESSION_BYTES + 1)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    if len(payload) > 1024 * 1024:
+    if len(payload) > _MAX_SUPPRESSION_BYTES:
         raise DomainError(
             ErrorCode.EXECUTION_REFUSED,
             "Compute Sanitizer suppression file exceeds the 1 MiB limit.",
         )
-    observed_digest = f"sha256:{hashlib.sha256(payload).hexdigest()}"
-    if observed_digest != options.suppression_digest:
+    return payload
+
+
+def _verify_suppression_digest(payload: bytes, expected_digest: str | None) -> None:
+    observed_digest = _sha256_bytes(payload)
+    if observed_digest != expected_digest:
         raise DomainError(
             ErrorCode.INVALID_CAPTURE_PLAN,
             "Compute Sanitizer suppression file changed after the capture plan was issued.",
             details={
-                "expected_sha256": options.suppression_digest,
+                "expected_sha256": expected_digest,
                 "observed_sha256": observed_digest,
             },
             remediation=("Create a new capture plan after updating the suppression file.",),
         )
-    return payload
 
 
 def nvbench_options(options: dict[str, object] | None) -> NvbenchOptions:
@@ -375,15 +384,5 @@ def _contained_project_file(project_root: Path, relative: str) -> Path:
     return path
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        stream = os.fdopen(descriptor, "rb")
-    except OSError:
-        os.close(descriptor)
-        raise
-    with stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return f"sha256:{digest.hexdigest()}"
+def _sha256_bytes(payload: bytes) -> str:
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"

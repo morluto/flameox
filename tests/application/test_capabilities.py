@@ -194,6 +194,20 @@ def test_unsupported_toxiproxy_platform_has_platform_specific_setup_error(
     assert "unavailable on this platform" in error.value.message
 
 
+def test_internal_adapter_honors_declared_platform_support(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("flameox.application.capabilities.platform.system", lambda: "Darwin")
+
+    report = CapabilityService(Workspace.initialize(tmp_path)).get("nvbench")
+
+    assert report.status is CapabilityStatus.UNSUPPORTED_PLATFORM
+    assert report.provisioning.value == "unsupported"
+    assert report.supported_modes == ()
+    assert report.supported_formats == ()
+
+
 @pytest.mark.anyio
 async def test_perf_probe_exercises_permissions_and_cleans_staging(
     tmp_path: Path,

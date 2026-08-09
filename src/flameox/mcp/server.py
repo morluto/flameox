@@ -21,6 +21,7 @@ from flameox import __version__
 from flameox.adapters import (
     BenchmarkSamplesExtractionResult,
     BenchmarkSamplesExtractor,
+    ComputeSanitizerCaptureOptions,
     ComputeSanitizerExtractionResult,
     ComputeSanitizerExtractor,
     CoverageExtractionResult,
@@ -1594,6 +1595,7 @@ def create_server(
         preflight_mode: Literal["auto", "passive", "active"] = "auto",
         capture_mode: Literal["auto", "managed", "trusted_local"] = "auto",
         external_context: ExternalExecutionContext | None = None,
+        compute_sanitizer_options: ComputeSanitizerCaptureOptions | None = None,
         torch_profiler_options: TorchProfilerCaptureOptions | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[CapturePlan]]:
         """Bind one current capture without running it.
@@ -1604,6 +1606,16 @@ def create_server(
         same direct local execution explicitly. This tool never executes the workload.
         """
         try:
+            if compute_sanitizer_options is not None and adapter != "compute-sanitizer":
+                raise DomainError(
+                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    "compute_sanitizer_options require adapter='compute-sanitizer'.",
+                )
+            if compute_sanitizer_options is not None and torch_profiler_options is not None:
+                raise DomainError(
+                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    "Select options for exactly one capture adapter.",
+                )
             execution_policy = (
                 ExecutionPolicy.APPROVED_AGENT
                 if capture_mode == "managed"
@@ -1617,9 +1629,13 @@ def create_server(
                 preflight_mode=preflight_mode,
                 external_context=external_context,
                 adapter_options=(
-                    torch_profiler_options.model_dump(mode="json")
-                    if torch_profiler_options is not None
-                    else None
+                    compute_sanitizer_options.model_dump(mode="json")
+                    if compute_sanitizer_options is not None
+                    else (
+                        torch_profiler_options.model_dump(mode="json")
+                        if torch_profiler_options is not None
+                        else None
+                    )
                 ),
             )
             return _success(

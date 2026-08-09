@@ -24,7 +24,6 @@ EXECUTABLE_PROVIDERS = {
     "requires_systemd": "systemd-run",
     "requires_compute_sanitizer": "compute-sanitizer",
     "requires_ncu": "ncu",
-    "requires_rocprofv3": "rocprofv3",
 }
 PROVIDER_MARKERS = frozenset(
     {

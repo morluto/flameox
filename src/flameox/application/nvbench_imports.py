@@ -11,7 +11,11 @@ from pathlib import Path, PurePosixPath
 
 from pydantic import ValidationError
 
-from flameox.adapters.nvbench import NvbenchJsonDocument, NvbenchSummary
+from flameox.adapters.nvbench import (
+    NvbenchJsonDocument,
+    NvbenchSummary,
+    require_supported_nvbench_schema,
+)
 from flameox.application.imports import (
     BundleMember,
     ImportBundleRequest,
@@ -24,6 +28,7 @@ from flameox.storage import Workspace
 
 _FLOAT32_SIZE = 4
 _MAX_SIDECARS = 99
+_MAX_NVBENCH_DOCUMENT_BYTES = 16 * 1024 * 1024
 
 
 class NvbenchImportResult(ContractModel):
@@ -82,10 +87,26 @@ class NvbenchImportService:
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "NVBench expected_sha256 must be a SHA-256 digest.",
             )
-        document, document_bytes, document_sha256 = load_nvbench_document_with_integrity(
+        importer = ImportService(self.workspace)
+        with importer._snapshot_provider_document(
             json_path,
-            max_bytes=self.workspace.config.capture.max_artifact_bytes,
-        )
+            allow_external_path=allow_external_path,
+            max_bytes=_MAX_NVBENCH_DOCUMENT_BYTES,
+        ) as snapshot:
+            document, _, _ = load_nvbench_document_with_integrity(
+                snapshot.payload_path,
+                max_bytes=_MAX_NVBENCH_DOCUMENT_BYTES,
+            )
+            document_bytes = snapshot.byte_length
+            document_sha256 = snapshot.sha256
+        require_supported_nvbench_schema(document)
+        if expected_sha256 is not None:
+            expected = expected_sha256.removeprefix("sha256:").lower()
+            if expected != document_sha256:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                    "NVBench JSON sha256 mismatch against the caller-declared digest.",
+                )
         sidecar_specs = collect_nvbench_sidecar_specs(document)
         sidecar_members: list[BundleMember] = []
         json_dir = json_path.parent
@@ -106,9 +127,9 @@ class NvbenchImportService:
             media_type="application/json",
             display_name=json_path.name,
             expected_byte_length=document_bytes,
-            expected_sha256=expected_sha256 or document_sha256,
+            expected_sha256=document_sha256,
         )
-        imported = ImportService(self.workspace)._import_provider_bundle(
+        imported = importer._import_provider_bundle(
             ImportBundleRequest(
                 primary=primary_member,
                 sidecars=tuple(sidecar_members),
@@ -146,6 +167,7 @@ class NvbenchImportService:
 class NvbenchSidecarSpec:
     filename: str
     byte_length: int
+    hint: str
 
 
 def _sidecar_spec_from_summary(summary: NvbenchSummary) -> NvbenchSidecarSpec | None:
@@ -178,7 +200,12 @@ def _sidecar_spec_from_summary(summary: NvbenchSummary) -> NvbenchSidecarSpec | 
             f"NVBench summary with hint {summary.hint!r} is missing "
             "a valid decimal-string size datum.",
         )
-    return NvbenchSidecarSpec(filename=filename, byte_length=size * _FLOAT32_SIZE)
+    assert summary.hint is not None
+    return NvbenchSidecarSpec(
+        filename=filename,
+        byte_length=size * _FLOAT32_SIZE,
+        hint=summary.hint,
+    )
 
 
 def collect_nvbench_sidecar_specs(
@@ -194,7 +221,7 @@ def collect_nvbench_sidecar_specs(
     the same sidecar from multiple summaries).  Duplicate filenames with
     **different** sizes are rejected as an ambiguous declaration.
     """
-    seen: dict[str, int] = {}
+    seen: dict[str, tuple[int, str]] = {}
     specs: list[NvbenchSidecarSpec] = []
     for bench in document.benchmarks:
         for state in bench.states:
@@ -205,14 +232,14 @@ def collect_nvbench_sidecar_specs(
                 if spec is None:
                     continue
                 if spec.filename in seen:
-                    if seen[spec.filename] != spec.byte_length:
+                    if seen[spec.filename] != (spec.byte_length, spec.hint):
                         raise DomainError(
                             ErrorCode.ARTIFACT_PARSE_FAILED,
-                            f"NVBench document declares conflicting sizes "
+                            f"NVBench document declares conflicting sizes or sample hints "
                             f"for sidecar {spec.filename!r}.",
                         )
                     continue
-                seen[spec.filename] = spec.byte_length
+                seen[spec.filename] = (spec.byte_length, spec.hint)
                 specs.append(spec)
     if len(specs) > _MAX_SIDECARS:
         raise DomainError(
@@ -256,11 +283,12 @@ def load_nvbench_document_with_integrity(
     max_bytes: int,
 ) -> tuple[NvbenchJsonDocument, int, str]:
     try:
+        effective_max_bytes = min(max_bytes, _MAX_NVBENCH_DOCUMENT_BYTES)
         size = json_path.stat().st_size
-        if size > max_bytes:
+        if size > effective_max_bytes:
             raise DomainError(
                 ErrorCode.ARTIFACT_TOO_LARGE,
-                "NVBench JSON exceeds the configured per-artifact byte limit.",
+                "NVBench JSON exceeds the bounded provider-document limit.",
             )
         raw = json_path.read_bytes()
         if len(raw) != size:

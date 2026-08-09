@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
 from pathlib import Path
 from typing import Any
 
+from packaging.version import InvalidVersion, Version
+
 from flameox.application.artifact_workers import ArtifactWorker
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
+
+_NCU_INSTALL_ROOTS = (
+    Path("/opt/nvidia/nsight-compute"),
+    Path("/usr/local/NVIDIA-Nsight-Compute"),
+)
+_WORKER_RESPONSE_OVERHEAD_BYTES = 64 * 1024
+_WORKER_RESPONSE_BYTES_PER_ROW = 16 * 1024
 
 
 class NsightComputeExtractionResult(ContractModel):
@@ -24,6 +34,7 @@ class NsightComputeExtractionResult(ContractModel):
     metric_count: int
     observation_count: int
     roofline_present: bool
+    report_interface_sha256: str
     schema_fingerprint: str
     corpus_commit_id: str
     limitations: tuple[str, ...]
@@ -36,14 +47,15 @@ def find_ncu_report_interface(
 ) -> Path | None:
     """Find the Python interface shipped with Nsight Compute, never a PyPI substitute."""
 
-    candidates: set[Path] = set()
     resolved_executable = Path(executable).resolve() if executable else None
     if resolved_executable is not None:
         for parent in resolved_executable.parents:
             candidate = parent / "extras" / "python" / "ncu_report.py"
             if candidate.is_file():
-                candidates.add(candidate)
-    for base in (Path("/opt/nvidia/nsight-compute"), Path("/usr/local/NVIDIA-Nsight-Compute")):
+                return candidate
+
+    candidates: set[Path] = set()
+    for base in _NCU_INSTALL_ROOTS:
         if base.is_dir():
             candidates.update(base.glob("*/extras/python/ncu_report.py"))
             direct = base / "extras" / "python" / "ncu_report.py"
@@ -52,11 +64,22 @@ def find_ncu_report_interface(
     if not candidates:
         return None
 
-    def key(path: Path) -> tuple[int, tuple[int, ...], str]:
+    def parsed_version(value: str) -> Version:
+        match = re.search(r"\d+(?:\.\d+)+", value)
+        if match is None:
+            return Version("0")
+        try:
+            return Version(match.group())
+        except InvalidVersion:
+            return Version("0")
+
+    producer = parsed_version(producer_version) if producer_version else Version("0")
+
+    def key(path: Path) -> tuple[int, Version, str]:
         version_text = path.parents[2].name
-        matches = tuple(int(part) for part in re.findall(r"\d+", version_text))
-        exact = int(bool(producer_version and version_text == producer_version))
-        return exact, matches, path.as_posix()
+        candidate = parsed_version(version_text)
+        exact = int(producer != Version("0") and candidate == producer)
+        return exact, candidate, path.as_posix()
 
     return max(candidates, key=key)
 
@@ -105,6 +128,8 @@ class NsightComputeExtractor:
                     "FlameOx does not decode NVIDIA report binaries.",
                 ),
             )
+        with interface.open("rb") as stream:
+            report_interface_sha256 = "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
         artifact = ArtifactStore(self.workspace).get(registration.artifact_id)
         maximum = self.workspace.config.storage.max_rows_per_generation
         if maximum < 3:
@@ -113,8 +138,20 @@ class NsightComputeExtractor:
                 "Nsight Compute extraction requires room for metrics, observations, "
                 "and provenance.",
             )
-        max_metrics = (maximum - 1) // 2
-        max_observations = maximum - 1 - max_metrics
+        response_bytes = self.workspace.config.execution.max_output_bytes
+        response_rows = max(
+            0,
+            (response_bytes - _WORKER_RESPONSE_OVERHEAD_BYTES) // _WORKER_RESPONSE_BYTES_PER_ROW,
+        )
+        normalized_rows = min(maximum - 1, response_rows)
+        if normalized_rows < 2:
+            raise DomainError(
+                ErrorCode.QUERY_BUDGET_EXCEEDED,
+                "Nsight Compute extraction requires a worker response budget of at least "
+                f"{_WORKER_RESPONSE_OVERHEAD_BYTES + 2 * _WORKER_RESPONSE_BYTES_PER_ROW} bytes.",
+            )
+        max_metrics = normalized_rows // 2
+        max_observations = normalized_rows - max_metrics
         response = ArtifactWorker(self.workspace).run_sync(
             "flameox.workers.nsight_compute",
             {
@@ -142,6 +179,7 @@ class NsightComputeExtractor:
         schema_fingerprint = digest_model(
             {
                 "compatibility_family": self.compatibility_family,
+                "report_interface_sha256": report_interface_sha256,
                 "report_version": report_version,
                 "metric_ids": metric_ids,
                 "section_ids": section_ids,
@@ -166,6 +204,7 @@ class NsightComputeExtractor:
                     "value": {
                         "metric_ids": metric_ids,
                         "producer_version": registration.producer_version,
+                        "report_interface_sha256": report_interface_sha256,
                         "report_version": report_version,
                         "roofline_present": bool(response.get("roofline_present", False)),
                         "schema_fingerprint": schema_fingerprint,
@@ -182,6 +221,7 @@ class NsightComputeExtractor:
             input_artifact_ids=(registration.artifact_id,),
             operation_identity={
                 "compatibility_family": self.compatibility_family,
+                "report_interface_sha256": report_interface_sha256,
                 "report_version": report_version,
                 "schema_fingerprint": schema_fingerprint,
                 "max_metrics": max_metrics,
@@ -198,6 +238,7 @@ class NsightComputeExtractor:
             metric_count=len(measurements),
             observation_count=len(observations),
             roofline_present=bool(response.get("roofline_present", False)),
+            report_interface_sha256=report_interface_sha256,
             schema_fingerprint=schema_fingerprint,
             corpus_commit_id=published.commit.commit_id,
             limitations=tuple(limitations),
@@ -275,7 +316,7 @@ class NsightComputeExtractor:
             "line_from": None,
             "line_to": None,
             "context": "extractor_provenance" if kind == "profile.extraction" else None,
-            "evidence_level": "observed",
+            "evidence_level": "derived" if kind == "profile.extraction" else "observed",
         }
 
 

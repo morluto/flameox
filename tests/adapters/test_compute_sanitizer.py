@@ -6,7 +6,10 @@ from typing import cast
 
 import pytest
 
-from flameox.adapters.builtins import build_capture_invocation
+from flameox.adapters.builtins import (
+    build_capture_invocation,
+    replace_compute_sanitizer_suppression,
+)
 from flameox.adapters.compute_sanitizer import ComputeSanitizerExtractor
 from flameox.adapters.options import bind_adapter_options
 from flameox.application import (
@@ -53,7 +56,12 @@ def _precise_record(*, unknown: str = "") -> str:
     """
 
 
-def _import(workspace: Workspace, source: Path) -> str:
+def _import(
+    workspace: Workspace,
+    source: Path,
+    *,
+    producer_version: str | None = "2026.2.1",
+) -> str:
     return (
         ImportService(workspace)
         .import_artifact(
@@ -61,7 +69,7 @@ def _import(workspace: Workspace, source: Path) -> str:
                 path=source,
                 kind=ArtifactKind.SANITIZER_REPORT,
                 producer="compute-sanitizer",
-                producer_version="2026.2.1",
+                producer_version=producer_version,
             )
         )
         .run.run_id
@@ -100,6 +108,23 @@ def test_compute_sanitizer_accepts_clean_empty_report(tmp_path: Path) -> None:
 
     assert result.status == "clean"
     assert result.finding_count == 0
+
+
+@pytest.mark.parametrize("producer_version", (None, "2025.1.0", "2027.0", "unknown"))
+def test_compute_sanitizer_marks_unverified_clean_versions_inconclusive(
+    tmp_path: Path,
+    producer_version: str | None,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source = tmp_path / "clean.xml"
+    source.write_text('<?xml version="1.0"?><ComputeSanitizerOutput/>')
+
+    result = ComputeSanitizerExtractor(workspace).extract(
+        _import(workspace, source, producer_version=producer_version)
+    )
+
+    assert result.status == "inconclusive"
+    assert result.limitations
 
 
 def test_compute_sanitizer_reports_unknown_record_shapes(tmp_path: Path) -> None:
@@ -288,6 +313,45 @@ def test_compute_sanitizer_options_are_strict_and_bind_suppression_digest(
     assert error.value.code is ErrorCode.INVALID_CAPTURE_PLAN
 
 
+def test_compute_sanitizer_replaces_only_collector_suppression_argument(tmp_path: Path) -> None:
+    workload = ("python", "kernel.py", "--suppressions", "workload.supp")
+    invocation = (
+        "compute-sanitizer",
+        "--suppressions",
+        "planned.supp",
+        *workload,
+    )
+
+    replaced = replace_compute_sanitizer_suppression(
+        invocation,
+        tmp_path / "staged.supp",
+        workload_argv=workload,
+    )
+
+    assert replaced == (
+        "compute-sanitizer",
+        "--suppressions",
+        str(tmp_path / "staged.supp"),
+        *workload,
+    )
+
+
+def test_compute_sanitizer_rejects_oversized_suppression_during_planning(
+    tmp_path: Path,
+) -> None:
+    suppression = tmp_path / "oversized.supp"
+    suppression.write_bytes(b"x" * (1024 * 1024 + 1))
+
+    with pytest.raises(DomainError, match="exceeds the 1 MiB limit") as error:
+        bind_adapter_options(
+            "compute-sanitizer",
+            {"suppression_file": suppression.name},
+            project_root=tmp_path,
+        )
+
+    assert error.value.code is ErrorCode.EXECUTION_REFUSED
+
+
 @pytest.mark.anyio
 async def test_compute_sanitizer_rejects_suppression_changed_after_planning(
     tmp_path: Path,
@@ -354,3 +418,88 @@ def test_compute_sanitizer_rejects_suppression_escape_and_symlink(tmp_path: Path
             {"suppression_file": "linked.supp"},
             project_root=tmp_path,
         )
+
+
+@pytest.mark.anyio
+async def test_compute_sanitizer_clean_capture_with_unknown_xml_is_inconclusive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sanitizer = tmp_path / "fake-compute-sanitizer"
+    sanitizer.write_text(
+        "#!/bin/sh\n"
+        'while [ "$1" != "--save" ]; do shift; done\n'
+        "shift\n"
+        "printf '%s' '<ComputeSanitizerOutput><futureFinding/></ComputeSanitizerOutput>' > \"$1\"\n"
+    )
+    sanitizer.chmod(sanitizer.stat().st_mode | stat.S_IXUSR)
+    (tmp_path / "flameox.toml").write_text(
+        "schema_version = 1\n[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\n"
+    )
+    workspace = Workspace.initialize(tmp_path)
+    disable_containment(workspace)
+    capability = CapabilityReport(
+        adapter="compute-sanitizer",
+        status=CapabilityStatus.AVAILABLE,
+        executable=str(sanitizer),
+        version="2026.2.1",
+        supported_modes=("memcheck",),
+        supported_formats=("compute-sanitizer-xml",),
+        permission_status="granted",
+        probe_kind="active",
+    )
+    service = CaptureService(workspace)
+    monkeypatch.setattr(service.capabilities, "get", lambda _adapter: capability)
+
+    async def probe(_adapter: str, *, refresh: bool = False) -> CapabilityReport:
+        assert refresh
+        return capability
+
+    monkeypatch.setattr(service.capabilities, "probe", probe)
+    plan = await service.plan(
+        workload_name="probe",
+        adapter="compute-sanitizer",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    result = await service.execute(plan.plan_id)
+
+    assert result.run.validation_status.value == "inconclusive"
+    assert "Unknown Compute Sanitizer XML element: futureFinding." in result.run.limitations
+
+
+@pytest.mark.anyio
+async def test_compute_sanitizer_refuses_managed_capture_without_gpu_device_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "flameox.toml").write_text(
+        "schema_version = 1\n[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\n"
+    )
+    workspace = Workspace.initialize(tmp_path)
+    capability = CapabilityReport(
+        adapter="compute-sanitizer",
+        status=CapabilityStatus.AVAILABLE,
+        executable="/usr/bin/compute-sanitizer",
+        version="2026.2.1",
+        supported_modes=("memcheck",),
+        supported_formats=("compute-sanitizer-xml",),
+        permission_status="granted",
+        probe_kind="active",
+    )
+    service = CaptureService(workspace)
+    monkeypatch.setattr(service.capabilities, "get", lambda _adapter: capability)
+
+    async def probe(_adapter: str, *, refresh: bool = False) -> CapabilityReport:
+        return capability
+
+    monkeypatch.setattr(service.capabilities, "probe", probe)
+
+    with pytest.raises(DomainError, match="cannot access NVIDIA devices") as error:
+        await service.plan(
+            workload_name="probe",
+            adapter="compute-sanitizer",
+            execution_policy=ExecutionPolicy.APPROVED_AGENT,
+        )
+
+    assert error.value.code is ErrorCode.EXECUTION_REFUSED

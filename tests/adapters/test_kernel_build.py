@@ -8,8 +8,12 @@ import pytest
 from pydantic import ValidationError
 
 from flameox.adapters import KernelBuildManifestV1, kernel_build_json_schema
-from flameox.application import KernelBuildImportService, RegisteredPipelineStageDeclaration
-from flameox.domain import DomainError
+from flameox.application import (
+    ArtifactPipelineService,
+    KernelBuildImportService,
+    RegisteredPipelineStageDeclaration,
+)
+from flameox.domain import DomainError, ErrorCode
 from flameox.storage import Workspace
 
 
@@ -72,6 +76,8 @@ def test_kernel_build_translates_to_existing_pipeline_contract() -> None:
 
     assert request.pipeline_name == "triton.compiler"
     assert request.pipeline_schema == "flameox.kernel-build.v1"
+    assert request.workload_identity == "vector-add"
+    assert request.device_identity == "NVIDIA sm_86"
     assert all(isinstance(stage, RegisteredPipelineStageDeclaration) for stage in request.stages)
     assert request.stages[1].status == "cached"
     assert "diagnostics are preserved" in request.limitations[0]
@@ -155,9 +161,176 @@ def test_kernel_build_bundle_import_registers_existing_pipeline(tmp_path: Path) 
     result = KernelBuildImportService(workspace).import_manifest(manifest_path)
 
     assert result.run.artifacts[0].role == "kernel_build_manifest"
-    assert result.run.artifacts[1].role == "compiler_stage:ttir"
+    assert result.run.artifacts[1].role == "compiler_stage"
+    assert result.pipeline.workload_identity == "vector-add"
+    assert result.pipeline.device_identity == "NVIDIA sm_86"
     assert result.pipeline.run_id == result.run.run_id
     assert result.pipeline.stages[0].artifact_id == result.run.artifacts[1].artifact_id
+
+
+def test_kernel_build_pipeline_comparison_binds_workload_device_and_unknown_version(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    pipeline_ids: list[str] = []
+    for directory, workload, device in (
+        ("left", "vector-add", "sm_86"),
+        ("right", "matrix-multiply", "sm_90"),
+    ):
+        root = tmp_path / directory
+        root.mkdir()
+        artifact = root / "kernel.ttir"
+        artifact.write_text("ttir")
+        manifest = _manifest(
+            producer_version="unknown",
+            workload_identity=workload,
+            device_identity=device,
+            stages=[
+                {
+                    "name": "ttir",
+                    "ordinal": 0,
+                    "status": "available",
+                    "format": "mlir",
+                    "format_schema": "triton-ttir",
+                    "artifact": {
+                        "path": artifact.name,
+                        "byte_length": 4,
+                        "sha256": hashlib.sha256(b"ttir").hexdigest(),
+                    },
+                }
+            ],
+        )
+        manifest_path = root / "kernel-build.json"
+        manifest_path.write_text(manifest.model_dump_json())
+        pipeline_ids.append(
+            KernelBuildImportService(workspace).import_manifest(manifest_path).pipeline.pipeline_id
+        )
+
+    comparison = ArtifactPipelineService(workspace).compare(*pipeline_ids)
+
+    assert comparison.compatibility == "incompatible"
+    assert comparison.identity_mismatches == ("workload_identity", "device_identity")
+
+
+def test_kernel_build_unknown_compiler_version_is_not_compatible(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    pipeline_ids: list[str] = []
+    for directory in ("left", "right"):
+        root = tmp_path / directory
+        root.mkdir()
+        artifact = root / "kernel.ttir"
+        artifact.write_text("ttir")
+        manifest = _manifest(
+            producer_version="unknown",
+            stages=[
+                {
+                    "name": "ttir",
+                    "ordinal": 0,
+                    "status": "available",
+                    "format": "mlir",
+                    "format_schema": "triton-ttir",
+                    "artifact": {
+                        "path": artifact.name,
+                        "byte_length": 4,
+                        "sha256": hashlib.sha256(b"ttir").hexdigest(),
+                    },
+                }
+            ],
+        )
+        manifest_path = root / "kernel-build.json"
+        manifest_path.write_text(manifest.model_dump_json())
+        pipeline_ids.append(
+            KernelBuildImportService(workspace).import_manifest(manifest_path).pipeline.pipeline_id
+        )
+
+    comparison = ArtifactPipelineService(workspace).compare(*pipeline_ids)
+
+    assert comparison.compatibility == "unknown"
+    assert any("producer_version" in item for item in comparison.limitations)
+
+
+def test_kernel_build_pipeline_limits_derived_limitations() -> None:
+    manifest = _manifest(
+        device_identity=None,
+        diagnostics=["diagnostic"],
+        limitations=[f"limitation-{index}" for index in range(20)],
+    )
+
+    request = manifest.pipeline_request(
+        run_id="run-1",
+        registration_ids_by_path={
+            "kernel/vector_add.ttir": "registration-ttir",
+            "kernel/vector_add.ptx": "registration-ptx",
+        },
+    )
+
+    assert len(request.limitations) == 20
+    assert request.limitations[-1].startswith("Additional limitations")
+
+
+def test_kernel_build_import_uses_bounded_declared_role(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    artifact = tmp_path / "kernel.ttir"
+    artifact.write_text("ttir")
+    stage = _manifest().stages[0].model_dump(mode="json")
+    stage["name"] = "x" * 100
+    stage["artifact"] = {
+        "path": artifact.name,
+        "byte_length": 4,
+        "sha256": hashlib.sha256(b"ttir").hexdigest(),
+        "role": "compiler_stage",
+    }
+    manifest_path = tmp_path / "kernel-build.json"
+    manifest_path.write_text(_manifest(stages=[stage]).model_dump_json())
+
+    result = KernelBuildImportService(workspace).import_manifest(manifest_path)
+
+    assert result.run.artifacts[1].role == "compiler_stage"
+
+
+def test_kernel_build_import_rejects_symlinked_manifest_before_parsing(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    external = tmp_path.parent / f"{tmp_path.name}-external.json"
+    external.write_text(_manifest().model_dump_json())
+    manifest_path = tmp_path / "kernel-build.json"
+    manifest_path.symlink_to(external)
+    try:
+        with pytest.raises(DomainError) as error:
+            KernelBuildImportService(workspace).import_manifest(manifest_path)
+        assert error.value.code is ErrorCode.EXECUTION_REFUSED
+    finally:
+        external.unlink()
+
+
+def test_malformed_kernel_build_manifest_leaves_no_anonymous_state(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    manifest_path = tmp_path / "kernel-build.json"
+    manifest_path.write_text('{"unique-invalid-manifest": true}')
+
+    with pytest.raises(DomainError) as error:
+        KernelBuildImportService(workspace).import_manifest(manifest_path)
+
+    assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+    assert tuple(workspace.paths.artifacts.rglob("artifact.json")) == ()
+    assert tuple(workspace.paths.runs.iterdir()) == ()
+    assert tuple(workspace.paths.staging.iterdir()) == ()
+
+
+def test_kernel_build_import_applies_manifest_document_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    manifest_path = tmp_path / "kernel-build.json"
+    manifest_path.write_text(_manifest().model_dump_json())
+    monkeypatch.setattr(
+        "flameox.application.kernel_builds._MAX_KERNEL_BUILD_MANIFEST_BYTES",
+        8,
+    )
+
+    with pytest.raises(DomainError) as error:
+        KernelBuildImportService(workspace).import_manifest(manifest_path)
+    assert error.value.code is ErrorCode.ARTIFACT_TOO_LARGE
 
 
 def test_kernel_build_bundle_rejects_digest_mismatch_before_registration(tmp_path: Path) -> None:

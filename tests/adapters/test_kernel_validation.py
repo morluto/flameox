@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -162,10 +164,132 @@ def test_kernel_validation_failed_output_requires_bounded_examples() -> None:
     with pytest.raises(ValidationError, match="representative failure"):
         KernelValidationV1.model_validate(payload)
 
+    payload["cases"][0]["outputs"][0]["representative_failures"] = [{}]
+    with pytest.raises(ValidationError, match="substantive witness"):
+        KernelValidationV1.model_validate(payload)
+
     payload["cases"][0]["outputs"][0]["representative_failures"] = [
         {"coordinates": [3, 7], "expected": 1.0, "actual": 1.1, "absolute_error": 0.1}
     ]
     assert KernelValidationV1.model_validate(payload).status == "fail"
+
+
+def test_kernel_validation_represents_inconclusive_metric_with_limitation() -> None:
+    payload = _document()
+    metric = payload["cases"][0]["outputs"][0]["metrics"][0]
+    metric.update(
+        value=None,
+        comparator=None,
+        threshold=None,
+        status="inconclusive",
+        limitation="Reference result was unavailable.",
+    )
+    payload["cases"][0]["outputs"][0].update(status="inconclusive")
+    payload["cases"][0].update(status="inconclusive")
+    payload.update(status="inconclusive")
+
+    document = KernelValidationV1.model_validate(payload)
+
+    assert document.cases[0].outputs[0].metrics[0].status == "inconclusive"
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "threshold", "match"),
+    (
+        ("max_abs_error", -0.1, 0.0, "must be nonnegative"),
+        ("max_rel_error", -0.1, 0.0, "must be nonnegative"),
+        ("mse", -1.0, 0.0, "must be nonnegative"),
+        ("rmse", -1.0, 0.0, "must be nonnegative"),
+        ("cosine_similarity", 1.1, 0.9, "between -1 and 1"),
+        ("cosine_similarity", 0.9, -1.1, "between -1 and 1"),
+    ),
+)
+def test_kernel_validation_rejects_impossible_metric_domains(
+    name: str,
+    value: float,
+    threshold: float,
+    match: str,
+) -> None:
+    payload = _document()
+    metric = payload["cases"][0]["outputs"][0]["metrics"][0]
+    metric.update(
+        name=name,
+        value=value,
+        threshold=threshold,
+        comparator=">=" if name == "cosine_similarity" else "<=",
+        status="pass",
+    )
+
+    with pytest.raises(ValidationError, match=match):
+        KernelValidationV1.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda payload: payload["cases"][0].update(seed="42"),
+        lambda payload: payload["cases"][0]["outputs"][0]["metrics"][0].update(value="0.0001"),
+        lambda payload: payload.update(coverage_complete=1),
+    ),
+)
+def test_kernel_validation_extractor_rejects_json_type_coercion(
+    tmp_path: Path,
+    mutation: Callable[[dict[str, Any]], None],
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    payload = _document()
+    mutation(payload)
+    source = tmp_path / "coerced.json"
+    source.write_text(json.dumps(payload))
+
+    with pytest.raises(DomainError) as error:
+        KernelValidationExtractor(workspace).extract(_import(workspace, source))
+
+    assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
+
+
+def test_kernel_validation_result_surfaces_nested_limitations(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    payload = _document()
+    metric = payload["cases"][0]["outputs"][0]["metrics"][0]
+    metric.update(
+        value=None,
+        comparator=None,
+        threshold=None,
+        status="unsupported",
+        limitation="Metric unavailable on the selected device.",
+    )
+    payload["cases"][0]["outputs"][0].update(status="inconclusive")
+    payload["cases"][0].update(status="inconclusive")
+    payload.update(status="inconclusive")
+    source = tmp_path / "limited.json"
+    source.write_text(json.dumps(payload))
+
+    result = KernelValidationExtractor(workspace).extract(_import(workspace, source))
+
+    assert result.limitations == ("Metric unavailable on the selected device.",)
+
+
+def test_kernel_validation_result_bounds_nested_limitation_summary(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    payload = _document()
+    template = payload["cases"][0]
+    cases = []
+    for index in range(101):
+        case = deepcopy(template)
+        case["case_id"] = f"case-{index}"
+        case["limitations"] = [f"limitation-{index}"]
+        cases.append(case)
+    payload["cases"] = cases
+    source = tmp_path / "many-limitations.json"
+    source.write_text(json.dumps(payload))
+
+    result = KernelValidationExtractor(workspace).extract(_import(workspace, source))
+
+    assert len(result.limitations) == 100
+    assert result.limitations[-1] == (
+        "Additional nested limitations were omitted from this bounded summary."
+    )
 
 
 def test_kernel_validation_extractor_rejects_unknown_schema(tmp_path: Path) -> None:

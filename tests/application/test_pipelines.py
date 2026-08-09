@@ -137,6 +137,9 @@ def _pipeline(
     second_ordinal: int = 1,
     schema: str = "ir-v1",
     generated_lines: int = 1,
+    producer_version: str = "1.0",
+    workload_identity: str | None = "workload",
+    device_identity: str | None = "device",
 ) -> str:
     registrations = RunStore(workspace).read(run_id).artifacts
     if second_status == "available" or second_status == "cached":
@@ -166,7 +169,9 @@ def _pipeline(
         pipeline_name="compiler",
         pipeline_schema="pipeline-v1",
         producer="example-compiler",
-        producer_version="1.0",
+        producer_version=producer_version,
+        workload_identity=workload_identity,
+        device_identity=device_identity,
         stages=(
             RegisteredPipelineStageDeclaration(
                 name="input",
@@ -304,3 +309,52 @@ def test_pipeline_identity_mismatch_invalidates_stage_comparison(tmp_path: Path)
     assert comparison.identity_mismatches == ("environment_id",)
     assert all(stage.disposition == "incompatible" for stage in comparison.stages)
     assert comparison.first_observed_divergent_stage is None
+
+
+def test_pipeline_missing_critical_identity_is_unknown_until_known_mismatch(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    left_run = _import(workspace, tmp_path / "left.txt", "same")
+    right_run = _import(workspace, tmp_path / "right.txt", "same")
+    _add_registration(workspace, left_run, "left-generated")
+    _add_registration(workspace, right_run, "right-generated")
+    service = ArtifactPipelineService(workspace)
+
+    both_missing = service.compare(
+        _pipeline(
+            service,
+            workspace,
+            left_run,
+            workload_identity=None,
+            device_identity=None,
+        ),
+        _pipeline(
+            service,
+            workspace,
+            right_run,
+            workload_identity=None,
+            device_identity=None,
+        ),
+    )
+    known_vs_missing = service.compare(
+        _pipeline(service, workspace, left_run),
+        _pipeline(
+            service,
+            workspace,
+            right_run,
+            workload_identity=None,
+            device_identity=None,
+        ),
+    )
+    known_mismatch = service.compare(
+        _pipeline(service, workspace, left_run, workload_identity="left"),
+        _pipeline(service, workspace, right_run, workload_identity="right"),
+    )
+
+    assert both_missing.compatibility == "unknown"
+    assert both_missing.identity_mismatches == ()
+    assert known_vs_missing.compatibility == "unknown"
+    assert known_vs_missing.identity_mismatches == ()
+    assert known_mismatch.compatibility == "incompatible"
+    assert known_mismatch.identity_mismatches == ("workload_identity",)
