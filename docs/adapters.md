@@ -375,6 +375,58 @@ the graph-trace table as the graph-launch source. The fixture is hardware- and
 timestamp-specific, so the test asserts event classes and identity coverage,
 not exact timestamps.
 
+#### `flameox.kernel-validation.v1`
+
+Producer-neutral kernel-correctness evidence is imported as strict JSON conforming to the
+`flameox.kernel-validation.v1` schema. The published JSON Schema lives at
+`src/flameox/schemas/kernel-validation-v1.schema.json` and is generated from the same Pydantic
+model used for validation. The artifact kind is `validation_output`; import does not require a
+GPU, CUDA, or a kernel runner.
+
+The contract binds producer and reference identity, bounded case inputs, seed and device,
+declared metrics and tolerances, output and case outcomes, up to eight representative failures,
+and coverage limitations. Supported metrics are `max_abs_error`, `max_rel_error`, `mse`, `rmse`,
+`psnr`, and `cosine_similarity`. Lower-is-better metrics require `<=`; higher-is-better metrics
+require `>=`. Metric, output, case, and aggregate statuses are checked for consistency. Passing
+the document requires complete coverage; non-finite values and incomplete coverage without a
+limitation are rejected.
+
+Extraction publishes additive schema-minor-9 tables `kernel_validation_cases` and
+`kernel_validation_metrics`. Native JSON remains authoritative, extracted tables are rebuildable,
+and repeated extraction reuses the existing generation. Fixtures are project-owned synthetic JSON
+documents generated in `tests/adapters/test_kernel_validation.py` under the project MIT license.
+
+Observed claims are the declared case outcomes, metric values and thresholds, coverage flag, and
+representative failure coordinates. Aggregate statuses are derived. The extractor makes no inferred
+correctness claim beyond the declared metrics, tolerances, and coverage.
+
+#### `compute-sanitizer`
+
+The maintained adapter runs NVIDIA Compute Sanitizer around a declared workload and preserves its
+XML report as `sanitizer_report`. It supports the official `memcheck`, `racecheck`, `initcheck`, and
+`synccheck` tools and fixes output to `--xml --save <path>`. Strict options cover launch skip/count,
+target-process scope and bounded filter, kernel name, demangling, a distinct finding exit code, and
+an optional project-relative suppression file whose SHA-256 digest enters capture-plan identity.
+Suppression files must be regular, non-linked, project-contained files; arbitrary flags are refused.
+
+Compatibility family `compute-sanitizer.xml.2026.v1` was observed with Compute Sanitizer 2026.2.1.
+NVIDIA does not publish a stable XML XSD, so extraction is version-bounded and unknown record shapes
+or tags become limitations. XML parsing runs in an isolated bounded worker using `defusedxml`, caps
+host stacks at 64 frames, and normalizes source paths. A configured finding exit plus parsed records
+is a completed failed validation, while other nonzero exits, missing or malformed reports, and
+timeouts remain failed attempts with preserved partial evidence.
+
+Linux and Windows are supported; GPU access and a CUDA toolkit installation are required and are
+not provisioned by Flameox. Overhead depends on the selected sanitizer tool and input. A clean report
+covers only the selected tool, launches, processes, and filters and does not prove numerical
+correctness.
+
+The live fixture `tests/fixtures/compute_sanitizer/kernel_probe.cu` is project-owned MIT-licensed
+CUDA C++. The optional live test compiles it with `nvcc -lineinfo` and checks both in-bounds and
+out-of-bounds captures. Deterministic tests use synthetic XML and cover clean, memory, API,
+sanitizer, malformed, truncated, unknown, and oversized reports. Observed claims come from XML;
+classification and path normalization are deterministic derivations; no root cause is inferred.
+
 ### Candidate adapters
 
 - GDB/LLDB and elfutils for core metadata, with user init files, autoload, and

@@ -15,6 +15,7 @@ PACKAGE_PROVIDERS = {
 EXECUTABLE_PROVIDERS = {
     "requires_bwrap": "bwrap",
     "requires_cargo": "cargo",
+    "requires_compute_sanitizer": "compute-sanitizer",
     "requires_perf": "perf",
     "requires_pyspy": "py-spy",
     "requires_systemd": "systemd-run",

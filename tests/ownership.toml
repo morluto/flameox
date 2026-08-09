@@ -23,11 +23,19 @@ markers = ["integration", "optional", "requires_memray"]
 owner = "adapters"
 lane = "adapters"
 paths = [
-  "tests/adapters/test_benchmark_samples.py",
-  "tests/adapters/test_pyperf.py",
+    "tests/adapters/test_benchmark_samples.py",
+    "tests/adapters/test_compute_sanitizer.py",
+    "tests/adapters/test_kernel_validation.py",
+    "tests/adapters/test_pyperf.py",
   "tests/adapters/test_python_startup.py",
 ]
 markers = ["unit"]
+
+[[ownership]]
+owner = "compute-sanitizer-live"
+lane = "adapters"
+paths = ["tests/adapters/test_compute_sanitizer_live.py"]
+markers = ["integration", "optional", "process", "serial", "requires_compute_sanitizer"]
 
 
 [[ownership]]

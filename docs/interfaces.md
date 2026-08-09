@@ -404,7 +404,7 @@ The supported tools are grouped as follows:
 | Family | Tools |
 | --- | --- |
 | Workspace | `initialize_workspace`, `workspace_status`, `workload_configuration_status`, `configure_workload`, `list_capabilities`, `start_capability_setup`, `get_capability_setup`, `cancel_capability_setup`, `prepare_adapter`, `prepare_workload_dependencies`, `validate_workspace` |
-| Capture and import | `plan_capture`, `execute_capture_plan`, `import_artifact`, `extract_benchmark_samples`, `extract_pyperf`, `extract_python_startup`, `extract_pytest`, `extract_coverage`, `extract_memray`, `extract_perfetto`, `extract_nsight_systems`, `extract_observations` |
+| Capture and import | `plan_capture`, `execute_capture_plan`, `import_artifact`, `extract_benchmark_samples`, `extract_pyperf`, `extract_python_startup`, `extract_pytest`, `extract_coverage`, `extract_memray`, `extract_perfetto`, `extract_nsight_systems`, `extract_kernel_validation`, `extract_compute_sanitizer`, `extract_observations` |
 | Detached capture | `start_detached_capture`, `get_detached_capture`, `cancel_detached_capture` |
 | Discovery | `list_declared_workflows`, `get_declared_workflow`, `list_runs`, `list_findings` |
 | Investigations | `create_investigation`, `list_investigations`, `get_investigation`, `record_hypothesis`, `get_hypothesis` |
@@ -821,6 +821,7 @@ flameox://experiments/{experiment_id}
 flameox://experiments/{experiment_id}/trials
 flameox://experiments/{experiment_id}/trials/{trial_id}
 flameox://run-sets/{run_set_id}
+flameox://schemas/kernel-validation/v1
 ```
 
 Resources return JSON or text summaries. Large native artifacts are represented

@@ -277,6 +277,87 @@ async def test_mcp_import_list_get_and_resource_workflow(tmp_path: Path) -> None
 
 
 @pytest.mark.anyio
+async def test_mcp_kernel_validation_extraction_reports_progress_and_resources(
+    tmp_path: Path,
+) -> None:
+    validation = {
+        "schema_version": "flameox.kernel-validation.v1",
+        "producer": "kernel-tests",
+        "producer_version": "1.0",
+        "reference": {"name": "cpu-reference", "identity": "reference-v1"},
+        "status": "pass",
+        "coverage_complete": True,
+        "cases": [
+            {
+                "case_id": "vector-add-fp32",
+                "dimensions": {"elements": 32},
+                "inputs": {"left": {"dtype": "float32", "shape": [32], "role": "input"}},
+                "device": "cuda:0-sm86",
+                "status": "pass",
+                "outputs": [
+                    {
+                        "name": "result",
+                        "dtype": "float32",
+                        "shape": [32],
+                        "status": "pass",
+                        "metrics": [
+                            {
+                                "name": "max_abs_error",
+                                "value": 0.0,
+                                "comparator": "<=",
+                                "threshold": 1e-6,
+                                "unit": "absolute",
+                                "status": "pass",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    (tmp_path / "validation.json").write_text(json.dumps(validation))
+    Workspace.initialize(tmp_path)
+    recorded_progress: list[tuple[float, float | None, str | None]] = []
+
+    async def record(progress: float, total: float | None, message: str | None) -> None:
+        recorded_progress.append((progress, total, message))
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        imported = await client.call_tool(
+            "import_artifact",
+            {
+                "path": "validation.json",
+                "kind": "validation_output",
+                "sensitivity": "internal",
+            },
+        )
+        assert imported.structured_content is not None
+        run_id = imported.structured_content["result"]["run_id"]
+        extracted = await client.call_tool(
+            "extract_kernel_validation",
+            {"run_id": run_id},
+            progress_callback=record,
+        )
+        run_resource = await client.read_resource(f"flameox://runs/{run_id}")
+
+    assert extracted.is_error is False
+    assert extracted.structured_content is not None
+    result = extracted.structured_content["result"]
+    assert result["status"] == "pass"
+    assert result["case_count"] == 1
+    assert [item[0] for item in recorded_progress] == [0, 1, 2]
+    assert {item[1] for item in recorded_progress} == {2}
+    assert all(item[2] for item in recorded_progress)
+    assert {item.uri for item in extracted.content if item.type == "resource_link"} == {
+        f"flameox://runs/{run_id}",
+        f"flameox://artifacts/{result['artifact_id']}",
+    }
+    contents = run_resource.contents[0]
+    assert isinstance(contents, TextResourceContents)
+    assert run_id in contents.text
+
+
+@pytest.mark.anyio
 async def test_mcp_run_discovery_filters_pages_and_rejects_stale_cursor(tmp_path: Path) -> None:
     for name in ("one.json", "two.json", "three.json"):
         (tmp_path / name).write_text(f'{{"name": "{name}"}}')

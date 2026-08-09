@@ -144,7 +144,8 @@ def test_missing_base_selects_full_plan(monkeypatch: pytest.MonkeyPatch) -> None
     assert plan["full"] is True
     assert plan["fallback_reason"] == "missing_base_revision"
     assert plan["lanes"] == list(runner.TEST_LANES)
-    assert plan["optional_lanes"] == list(runner.PROVIDER_LANES)
+    assert plan["optional_lanes"] == list(runner.CI_PROVIDER_LANES)
+    assert set(plan["optional_lanes"]).isdisjoint(runner.GPU_PROVIDER_LANES)
 
 
 def _remove_schema_version(plan: dict[str, Any]) -> None:

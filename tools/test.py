@@ -65,15 +65,25 @@ PLAN_KEYS = {
     "run_performance",
 }
 PROVIDER_LANES = {
+    "optional-compute-sanitizer": "optional and requires_compute_sanitizer",
     "optional-coverage": "optional and requires_coverage",
     "optional-memray": "optional and requires_memray",
     "optional-perfetto": "optional and requires_perfetto",
     "optional-pyspy": "optional and requires_pyspy",
     "optional-torch": "optional and requires_torch",
     "optional-host": (
-        "optional and not requires_coverage and not requires_memray "
+        "optional and not requires_compute_sanitizer and not requires_coverage "
+        "and not requires_memray "
         "and not requires_perfetto and not requires_pyspy and not requires_torch"
     ),
+}
+GPU_PROVIDER_LANES = frozenset({"optional-compute-sanitizer"})
+# GitHub-hosted runners do not provide CUDA GPUs. Keep the live lane available
+# as an explicit local command without emitting a job that can only skip.
+CI_PROVIDER_LANES = {
+    lane: expression
+    for lane, expression in PROVIDER_LANES.items()
+    if lane not in GPU_PROVIDER_LANES
 }
 TEST_LANES = (
     "core",
@@ -108,7 +118,7 @@ FULL_CHANGE_PATHS = {
     "tests/ownership.toml",
     "tests/collection-baseline.toml",
 }
-ALL_PLANNED_LANES = (*TEST_LANES, "performance", *PROVIDER_LANES)
+ALL_PLANNED_LANES = (*TEST_LANES, "performance", *CI_PROVIDER_LANES)
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -136,7 +146,7 @@ def topology_digest(records: tuple[Ownership, ...]) -> str:
         {
             "test_lanes": list(TEST_LANES),
             "coverage_lanes": list(COVERAGE_LANES),
-            "provider_lanes": PROVIDER_LANES,
+            "provider_lanes": CI_PROVIDER_LANES,
             "full_change_paths": sorted(FULL_CHANGE_PATHS),
             "ownership": [
                 {
@@ -217,7 +227,7 @@ def _matrix(value: object) -> dict[str, list[dict[str, str]]]:
         raw_items = matrix[field]
         if not isinstance(raw_items, list) or len(raw_items) > PLAN_MAX_MATRIX_ITEMS:
             raise PlanValidationError(f"matrix.{field} exceeds the provider bound")
-        allowed = set(TEST_LANES) if field == "lanes" else set(PROVIDER_LANES)
+        allowed = set(TEST_LANES) if field == "lanes" else set(CI_PROVIDER_LANES)
         items: list[dict[str, str]] = []
         seen: set[str] = set()
         for index, raw in enumerate(raw_items):
@@ -321,7 +331,7 @@ def _validate_plan_lanes(plan: Mapping[str, object]) -> list[str]:
         raise PlanValidationError("legacy lane fields do not match the matrix")
     if any(lane not in TEST_LANES for lane in lanes):
         raise PlanValidationError("lanes contains an unknown lane")
-    if any(lane not in PROVIDER_LANES for lane in optional_lanes):
+    if any(lane not in CI_PROVIDER_LANES for lane in optional_lanes):
         raise PlanValidationError("optional_lanes contains an unknown lane")
     return lanes
 
@@ -702,6 +712,7 @@ def affected_plan(  # noqa: C901
                 coverage = True
                 _reason_map_add(lane_reasons, record.lane, f"owned test path: {path}")
             provider_markers = (
+                ("requires_compute_sanitizer", "optional-compute-sanitizer"),
                 ("requires_coverage", "optional-coverage"),
                 ("requires_memray", "optional-memray"),
                 ("requires_perfetto", "optional-perfetto"),
@@ -711,13 +722,14 @@ def affected_plan(  # noqa: C901
             marked_provider = False
             for marker, provider_lane in provider_markers:
                 if marker in record.markers:
-                    optional_lanes.add(provider_lane)
                     marked_provider = True
-                    _reason_map_add(
-                        optional_reasons,
-                        provider_lane,
-                        f"owned provider test path: {path}",
-                    )
+                    if provider_lane in CI_PROVIDER_LANES:
+                        optional_lanes.add(provider_lane)
+                        _reason_map_add(
+                            optional_reasons,
+                            provider_lane,
+                            f"owned provider test path: {path}",
+                        )
             if "optional" in record.markers and not marked_provider:
                 optional_lanes.add("optional-host")
                 _reason_map_add(
@@ -731,7 +743,7 @@ def affected_plan(  # noqa: C901
 
     if full:
         lanes.update(TEST_LANES)
-        optional_lanes.update(PROVIDER_LANES)
+        optional_lanes.update(CI_PROVIDER_LANES)
         performance = True
         coverage = True
         npm = True
@@ -739,7 +751,7 @@ def affected_plan(  # noqa: C901
         for lane in TEST_LANES:
             _reason_map_add(lane_reasons, lane, f"conservative full plan: {reason}")
         _reason_map_add(lane_reasons, "performance", f"conservative full plan: {reason}")
-        for lane in PROVIDER_LANES:
+        for lane in CI_PROVIDER_LANES:
             _reason_map_add(optional_reasons, lane, f"conservative full plan: {reason}")
     elif coverage:
         for lane in COVERAGE_LANES:
@@ -747,7 +759,7 @@ def affected_plan(  # noqa: C901
             _reason_map_add(lane_reasons, lane, "coverage aggregation for affected tests")
 
     ordered_lanes = [lane for lane in TEST_LANES if lane in lanes]
-    ordered_optional = [lane for lane in PROVIDER_LANES if lane in optional_lanes]
+    ordered_optional = [lane for lane in CI_PROVIDER_LANES if lane in optional_lanes]
     fallback = _fallback_reason(fallback_reasons)
     selected = (
         [
