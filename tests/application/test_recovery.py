@@ -111,6 +111,45 @@ def test_recovery_closes_only_disappeared_exact_process_lease(tmp_path: Path) ->
     assert excluded.total_clusters == 0
 
 
+def test_recovery_skips_a_run_that_changes_after_inspection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    run = _running_run(
+        run_id="raced-run",
+        boot_id="wrong-boot",
+        start_identity="never-existed",
+    )
+    RunStore(workspace).create(run)
+    service = RecoveryService(workspace)
+    append = service.runs.append
+    raced = False
+
+    def append_after_concurrent_update(
+        manifest: RunManifest,
+        *,
+        expected_revision: int,
+    ) -> RunManifest:
+        nonlocal raced
+        if not raced:
+            raced = True
+            current = service.runs.read(manifest.run_id)
+            append(
+                current.model_copy(update={"revision": current.revision + 1}),
+                expected_revision=current.revision,
+            )
+        return append(manifest, expected_revision=expected_revision)
+
+    monkeypatch.setattr(service.runs, "append", append_after_concurrent_update)
+
+    result = service.recover()
+
+    assert result.recovered_runs == ()
+    assert result.inspection.recoverable_run_ids == ("raced-run",)
+    assert service.runs.read("raced-run").revision == 1
+
+
 def test_recovery_keeps_live_lease_when_process_name_contains_spaces(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

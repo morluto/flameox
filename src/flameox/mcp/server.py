@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import json
 import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
@@ -170,6 +169,7 @@ from flameox.domain import (
     Sensitivity,
     TrialOutcome,
 )
+from flameox.mcp.resources import register_resources
 from flameox.models import ContractModel
 from flameox.storage import RunStore, Workspace
 
@@ -3258,152 +3258,10 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.resource(
-        "flameox://runs/{run_id}",
-        mime_type="application/json",
-        description="Bounded run manifest projection.",
+    register_resources(
+        server,
+        lambda: _active_state(lifespan_state).require_workspace(),
     )
-    async def run_resource(run_id: str) -> str:
-        try:
-            if not lifespan_state:
-                raise DomainError(
-                    ErrorCode.WORKSPACE_NOT_FOUND,
-                    "The MCP server lifespan is not active.",
-                )
-            run = RunStore(lifespan_state[0].require_workspace()).read(run_id)
-            return run.model_dump_json(indent=2)
-        except DomainError as error:
-            return json.dumps({"ok": False, "error": error.to_detail()})
-
-    @server.resource(
-        "flameox://artifacts/{artifact_id}",
-        mime_type="application/json",
-        description="Artifact metadata without binary content.",
-    )
-    async def artifact_resource(artifact_id: str) -> str:
-        try:
-            state = _active_state(lifespan_state)
-            value = ArtifactService(state.require_workspace()).get(artifact_id)
-            return value.model_dump_json(indent=2)
-        except DomainError as error:
-            return json.dumps({"ok": False, "error": error.to_detail()})
-
-    @server.resource(
-        "flameox://investigations/{investigation_id}",
-        mime_type="application/json",
-        description="Current investigation projection.",
-    )
-    async def investigation_resource(investigation_id: str) -> str:
-        try:
-            state = _active_state(lifespan_state)
-            value = InvestigationService(state.require_workspace()).investigations.read(
-                investigation_id
-            )
-            return value.model_dump_json(indent=2)
-        except DomainError as error:
-            return json.dumps({"ok": False, "error": error.to_detail()})
-
-    @server.resource(
-        "flameox://hypotheses/{hypothesis_id}",
-        mime_type="application/json",
-        description="Current hypothesis revision.",
-    )
-    async def hypothesis_resource(hypothesis_id: str) -> str:
-        try:
-            state = _active_state(lifespan_state)
-            value = InvestigationService(state.require_workspace()).hypotheses.read(hypothesis_id)
-            return value.model_dump_json(indent=2)
-        except DomainError as error:
-            return json.dumps({"ok": False, "error": error.to_detail()})
-
-    @server.resource(
-        "flameox://findings/{finding_id}",
-        mime_type="application/json",
-        description="Current finding revision.",
-    )
-    async def finding_resource(finding_id: str) -> str:
-        try:
-            state = _active_state(lifespan_state)
-            value = FindingService(state.require_workspace()).findings.read(finding_id)
-            return value.model_dump_json(indent=2)
-        except DomainError as error:
-            return json.dumps({"ok": False, "error": error.to_detail()})
-
-    @server.resource(
-        "flameox://experiments/{experiment_id}",
-        mime_type="application/json",
-        description="Immutable experiment protocol.",
-    )
-    async def experiment_resource(experiment_id: str) -> str:
-        try:
-            state = _active_state(lifespan_state)
-            value = ExperimentService(state.require_workspace()).experiments.read(experiment_id)
-            return value.model_dump_json(indent=2)
-        except DomainError as error:
-            return json.dumps({"ok": False, "error": error.to_detail()})
-
-    @server.resource(
-        "flameox://experiments/{experiment_id}/trials",
-        mime_type="application/json",
-        description="Bounded immutable trial collection for an experiment.",
-    )
-    async def experiment_trials_resource(experiment_id: str) -> str:
-        try:
-            state = _active_state(lifespan_state)
-            value = ExperimentService(state.require_workspace()).list_trials(experiment_id)
-            return value.model_dump_json(indent=2)
-        except DomainError as error:
-            return json.dumps({"ok": False, "error": error.to_detail()})
-
-    @server.resource(
-        "flameox://experiments/{experiment_id}/trials/{trial_id}",
-        mime_type="application/json",
-        description="One immutable trial and its structured oracle receipt.",
-    )
-    async def experiment_trial_resource(experiment_id: str, trial_id: str) -> str:
-        try:
-            state = _active_state(lifespan_state)
-            value = ExperimentService(state.require_workspace()).get_trial(
-                trial_id,
-                experiment_id=experiment_id,
-            )
-            return value.model_dump_json(indent=2)
-        except DomainError as error:
-            return json.dumps({"ok": False, "error": error.to_detail()})
-
-    @server.resource(
-        "flameox://run-sets/{run_set_id}",
-        mime_type="application/json",
-        description="Immutable frozen run cohort.",
-    )
-    async def run_set_resource(run_set_id: str) -> str:
-        try:
-            state = _active_state(lifespan_state)
-            value = RunSetService(state.require_workspace()).store.read(run_set_id)
-            return value.model_dump_json(indent=2)
-        except DomainError as error:
-            return json.dumps({"ok": False, "error": error.to_detail()})
-
-    @server.resource(
-        "flameox://evidence/{ref_type}/{ref_id}",
-        mime_type="application/json",
-        description="Authoritative persisted analysis or comparison evidence.",
-    )
-    async def evidence_resource(ref_type: str, ref_id: str) -> str:
-        try:
-            if ref_type not in {"analysis", "comparison"}:
-                raise DomainError(
-                    ErrorCode.WORKSPACE_INVALID,
-                    f"Unsupported evidence resource type {ref_type!r}.",
-                )
-            state = _active_state(lifespan_state)
-            value = EvidenceLookupService(state.require_workspace()).get(
-                cast(Literal["analysis", "comparison"], ref_type),
-                ref_id,
-            )
-            return value.model_dump_json(indent=2)
-        except DomainError as error:
-            return json.dumps({"ok": False, "error": error.to_detail()})
 
     return server
 

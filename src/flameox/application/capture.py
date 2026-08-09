@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import secrets
@@ -237,8 +238,6 @@ class _CaptureExecution:
             try:
                 self.run = await asyncio.shield(lease_write)
             except Exception as lease_error:
-                import logging
-
                 logging.getLogger("flameox.capture").warning(
                     "Lease write after cancellation raised: %s",
                     lease_error,
@@ -247,6 +246,31 @@ class _CaptureExecution:
 
     async def record_cleanup(self, complete: bool) -> None:
         self.cleanup_complete = complete
+
+    async def terminate_cancelled(
+        self,
+        *,
+        message: str,
+        phase: str,
+        cleanup_complete: bool | None = None,
+    ) -> None:
+        """Persist cancellation without allowing finalization failures to mask it."""
+
+        try:
+            await asyncio.shield(
+                self.terminate(
+                    execution=ExecutionStatus.CANCELLED,
+                    message=message,
+                    phase=phase,
+                    error_code="cancelled",
+                    cleanup_complete=cleanup_complete,
+                )
+            )
+        except Exception as terminate_error:
+            logging.getLogger("flameox.capture").warning(
+                "Cleanup after cancellation raised: %s",
+                terminate_error,
+            )
 
     async def terminate(
         self,
@@ -374,8 +398,6 @@ class _CaptureExecution:
                 error_code=error_code,
             )
         except Exception as terminate_error:
-            import logging
-
             self.cleanup_staging()
             logging.getLogger("flameox.capture").warning(
                 "Finalizing a startup identity failure raised: %s",
@@ -833,24 +855,12 @@ class CaptureService:
                 dynamic_parameters=plan.dynamic_parameters,
             )
             await capture.report(3, "Source and environment identity collected")
-        except asyncio.CancelledError as cancellation:
-            try:
-                await asyncio.shield(
-                    capture.terminate(
-                        execution=ExecutionStatus.CANCELLED,
-                        message="Capture cancelled while collecting source identity.",
-                        phase="capture cancelled during source identity",
-                        error_code="cancelled",
-                    )
-                )
-            except Exception as terminate_error:
-                import logging
-
-                logging.getLogger("flameox.capture").warning(
-                    "Cleanup after cancellation raised: %s",
-                    terminate_error,
-                )
-            raise cancellation
+        except asyncio.CancelledError:
+            await capture.terminate_cancelled(
+                message="Capture cancelled while collecting source identity.",
+                phase="capture cancelled during source identity",
+            )
+            raise
         except DomainError as error:
             terminal = await capture.terminate_startup_failure(
                 message=error.message,
@@ -936,24 +946,12 @@ class CaptureService:
             )
             StorageQuota(self.workspace).require_capacity(staging=True)
             await capture.report(5, "Collector execution complete")
-        except asyncio.CancelledError as cancellation:
-            try:
-                await asyncio.shield(
-                    capture.terminate(
-                        execution=ExecutionStatus.CANCELLED,
-                        message="Capture cancelled by caller after bounded cleanup.",
-                        phase="capture cancelled during collector execution",
-                        error_code="cancelled",
-                    )
-                )
-            except Exception as terminate_error:
-                import logging
-
-                logging.getLogger("flameox.capture").warning(
-                    "Cleanup after cancellation raised: %s",
-                    terminate_error,
-                )
-            raise cancellation
+        except asyncio.CancelledError:
+            await capture.terminate_cancelled(
+                message="Capture cancelled by caller after bounded cleanup.",
+                phase="capture cancelled during collector execution",
+            )
+            raise
         except DomainError as error:
             status = (
                 ExecutionStatus.TIMED_OUT
@@ -1572,24 +1570,12 @@ class CaptureService:
                     }
                 )
             await capture.report(7, "Artifacts registered")
-        except asyncio.CancelledError as cancellation:
-            try:
-                await asyncio.shield(
-                    capture.terminate(
-                        execution=ExecutionStatus.CANCELLED,
-                        message=("Capture cancelled during validation or artifact registration."),
-                        phase="capture cancelled during validation or registration",
-                        error_code="cancelled",
-                    )
-                )
-            except Exception as terminate_error:
-                import logging
-
-                logging.getLogger("flameox.capture").warning(
-                    "Cleanup after cancellation raised: %s",
-                    terminate_error,
-                )
-            raise cancellation
+        except asyncio.CancelledError:
+            await capture.terminate_cancelled(
+                message="Capture cancelled during validation or artifact registration.",
+                phase="capture cancelled during validation or registration",
+            )
+            raise
         except DomainError as error:
             quarantined = await run_atomic_thread(
                 lambda: self._quarantine_native_output(
@@ -1766,25 +1752,13 @@ class CaptureService:
                     ),
                 )
             )
-        except asyncio.CancelledError as cancellation:
-            try:
-                await asyncio.shield(
-                    capture.terminate(
-                        execution=ExecutionStatus.CANCELLED,
-                        message="Capture cancelled during atomic evidence publication.",
-                        phase="capture cancelled during evidence publication",
-                        error_code="cancelled",
-                        cleanup_complete=True,
-                    )
-                )
-            except Exception as terminate_error:
-                import logging
-
-                logging.getLogger("flameox.capture").warning(
-                    "Cleanup after cancellation raised: %s",
-                    terminate_error,
-                )
-            raise cancellation
+        except asyncio.CancelledError:
+            await capture.terminate_cancelled(
+                message="Capture cancelled during atomic evidence publication.",
+                phase="capture cancelled during evidence publication",
+                cleanup_complete=True,
+            )
+            raise
         except Exception as error:
             message = (
                 error.message
