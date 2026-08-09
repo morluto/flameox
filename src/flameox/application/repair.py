@@ -7,7 +7,8 @@ from typing import Literal
 from flameox.application.quarantine import QuarantineManifest, QuarantineService
 from flameox.application.recoverable_move import lexical_path_beneath
 from flameox.atomic import atomic_write_bytes
-from flameox.domain import DomainError, ErrorCode, digest_model, parse_run_manifest_json
+from flameox.domain import DomainError, ErrorCode, digest_model
+from flameox.domain.models import parse_run_manifest_json
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 

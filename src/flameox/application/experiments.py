@@ -45,7 +45,6 @@ from flameox.domain import (
     Experiment,
     Hypothesis,
     Investigation,
-    NumericValue,
     OracleStrength,
     RunManifest,
     RunSet,
@@ -56,10 +55,9 @@ from flameox.domain import (
     canonical_json,
     digest_model,
     new_id,
-    parse_numeric_value,
-    parse_trial,
 )
-from flameox.domain.models import utc_now
+from flameox.domain.models import parse_trial, utc_now
+from flameox.domain.scalars import NumericValue, parse_numeric_value
 from flameox.evidence import (
     GenerationPublisher,
     PublishedGeneration,

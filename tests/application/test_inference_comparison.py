@@ -40,10 +40,10 @@ from flameox.domain import (
     CaptureStatus,
     ComparisonValidity,
     ExecutionStatus,
-    ImportRunManifest,
     ValidationStatus,
     digest_model,
 )
+from flameox.domain.models import ImportRunManifest
 from flameox.evidence import GenerationPublisher
 from flameox.storage import RunStore, Workspace
 

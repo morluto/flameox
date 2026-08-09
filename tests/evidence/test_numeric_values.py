@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from flameox.domain import DomainError, ErrorCode, FloatingValue, IntegerValue
+from flameox.domain import DomainError, ErrorCode
+from flameox.domain.scalars import FloatingValue, IntegerValue
 from flameox.evidence import numeric_value_from_columns, numeric_value_to_columns
 
 

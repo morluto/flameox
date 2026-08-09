@@ -12,12 +12,11 @@ from flameox.catalog import Catalog
 from flameox.domain import (
     CaptureLease,
     CaptureStatus,
-    ExecutionRunManifest,
     ExecutionStatus,
     RunManifest,
     ValidationStatus,
 )
-from flameox.domain.models import utc_now
+from flameox.domain.models import ExecutionRunManifest, utc_now
 from flameox.storage import RunStore, Workspace
 
 DIGEST = "sha256:" + ("a" * 64)

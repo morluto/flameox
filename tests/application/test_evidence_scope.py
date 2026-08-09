@@ -7,10 +7,10 @@ from flameox.domain import (
     CaptureStatus,
     DomainError,
     ErrorCode,
-    ExecutionRunManifest,
     ExecutionStatus,
     ValidationStatus,
 )
+from flameox.domain.models import ExecutionRunManifest
 from flameox.evidence_scope import EvidenceScope
 from flameox.storage import RunStore, Workspace
 

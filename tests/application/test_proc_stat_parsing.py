@@ -10,11 +10,11 @@ from flameox.application import RecoveryService
 from flameox.domain import (
     CaptureLease,
     CaptureStatus,
-    ExecutionRunManifest,
     ExecutionStatus,
     RunManifest,
     ValidationStatus,
 )
+from flameox.domain.models import ExecutionRunManifest
 from flameox.storage import RunStore, Workspace
 
 DIGEST = "sha256:" + ("a" * 64)

@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from flameox.domain import NumericValue
+from flameox.domain.scalars import NumericValue
 from flameox.evidence_status import EvidenceAvailability, available_availability
 from flameox.models import ContractModel
 

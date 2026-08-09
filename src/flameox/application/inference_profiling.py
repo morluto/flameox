@@ -37,7 +37,6 @@ from flameox.domain import (
     DomainError,
     EnvironmentRecord,
     ErrorCode,
-    ExecutionRunManifest,
     ExecutionStatus,
     ProcessResult,
     RunManifest,
@@ -47,7 +46,7 @@ from flameox.domain import (
     digest_model,
     new_id,
 )
-from flameox.domain.models import utc_now
+from flameox.domain.models import ExecutionRunManifest, utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.models import ContractModel

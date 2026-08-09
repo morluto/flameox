@@ -5,7 +5,8 @@ from typing import Literal
 from pydantic import Field
 
 from flameox.catalog import Catalog
-from flameox.domain import CursorCodec, DomainError, ErrorCode, NumericValue, digest_model
+from flameox.domain import CursorCodec, DomainError, ErrorCode, digest_model
+from flameox.domain.scalars import NumericValue
 from flameox.evidence import numeric_value_from_columns
 from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
 from flameox.models import ContractModel

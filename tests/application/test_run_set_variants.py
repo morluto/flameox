@@ -13,7 +13,8 @@ from flameox.application import (
     IncludedFreezeRunSetMember,
     RunSetService,
 )
-from flameox.domain import ExcludedRunSetMember, IncludedRunSetMember, digest_model
+from flameox.domain import digest_model
+from flameox.domain.models import ExcludedRunSetMember, IncludedRunSetMember
 from flameox.storage import Workspace
 from tests.support.comparisons import imported_benchmark
 

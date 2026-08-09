@@ -50,7 +50,6 @@ from flameox.domain import (
     CaptureStatus,
     DomainError,
     ErrorCode,
-    ExecutionRunManifest,
     ExecutionStatus,
     Experiment,
     Hypothesis,
@@ -64,6 +63,7 @@ from flameox.domain import (
     digest_model,
     new_id,
 )
+from flameox.domain.models import ExecutionRunManifest
 from flameox.evidence import GenerationPublisher
 from flameox.execution import ManagedSidecarLease, ManagedSidecarOutcome, SubprocessBroker
 from flameox.models import ContractModel

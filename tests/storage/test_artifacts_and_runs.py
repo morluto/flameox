@@ -12,10 +12,10 @@ from flameox.domain import (
     DomainError,
     ErrorCode,
     ExecutionStatus,
-    ImportRunManifest,
     RunManifest,
     ValidationStatus,
 )
+from flameox.domain.models import ImportRunManifest
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
 DIGEST = "sha256:" + ("a" * 64)

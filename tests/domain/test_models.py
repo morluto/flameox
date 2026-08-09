@@ -12,25 +12,24 @@ from flameox.domain import (
     ArtifactRegistration,
     CaptureStatus,
     CommandSpec,
-    DigestOracleReceiptValue,
     DomainError,
-    ExecutionRunManifest,
     ExecutionStatus,
-    FloatingValue,
-    ImportRunManifest,
-    IntegerValue,
-    NumericValue,
     OracleReceiptValue,
     RunManifest,
-    ScalarOracleReceiptValue,
     Sensitivity,
-    SucceededTrial,
     Trial,
     TrialOutcome,
     ValidationStatus,
     effective_sensitivity,
-    parse_numeric_value,
 )
+from flameox.domain.models import (
+    DigestOracleReceiptValue,
+    ExecutionRunManifest,
+    ImportRunManifest,
+    ScalarOracleReceiptValue,
+    SucceededTrial,
+)
+from flameox.domain.scalars import FloatingValue, IntegerValue, NumericValue, parse_numeric_value
 
 DIGEST = "sha256:" + ("a" * 64)
 

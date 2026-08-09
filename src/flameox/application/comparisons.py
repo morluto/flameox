@@ -29,15 +29,14 @@ from flameox.domain import (
     DomainError,
     ErrorCode,
     EvidenceReference,
-    ExcludedRunSetMember,
     Experiment,
     IdentityQuality,
-    IncludedRunSetMember,
     RunSet,
     RunSetMember,
     ValidationStatus,
     digest_model,
 )
+from flameox.domain.models import ExcludedRunSetMember, IncludedRunSetMember
 from flameox.evidence import GenerationPublisher, numeric_value_to_columns
 from flameox.models import ContractModel
 from flameox.storage import JsonRecordStore, RunStore, Workspace

@@ -79,7 +79,6 @@ from flameox.domain import (
     DomainError,
     EnvironmentRecord,
     ErrorCode,
-    ExecutionRunManifest,
     ExecutionStatus,
     OracleStrength,
     RunManifest,
@@ -89,7 +88,7 @@ from flameox.domain import (
     digest_model,
     new_id,
 )
-from flameox.domain.models import utc_now
+from flameox.domain.models import ExecutionRunManifest, utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.execution import (
     ExecutionOutcome,
