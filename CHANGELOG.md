@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to flameox are documented in this file.
+## [0.1.13] - 2026-08-09
+### Documentation
+
+- Align public descriptions and examples (#130) ([#130](https://github.com/morluto/flameox/pull/130))
+- Require changelog-ready pull request titles (#129) ([#129](https://github.com/morluto/flameox/pull/129))
+- **readme:** Mention SGLang inference replay
+- Clarify supported workflows
 ## [0.1.12] - 2026-08-08
 ### Bug Fixes
 
