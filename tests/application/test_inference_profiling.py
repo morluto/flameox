@@ -13,10 +13,16 @@ from flameox.application.inference import InferenceReplayService
 from flameox.application.inference_profiling import (
     InferenceProfilerControlClient,
     InferenceProfilingService,
+    NsightSystemsProfilingPlan,
     SglangProfileOptions,
+    SglangTorchProfilingPlan,
     VllmProfilerControlClient,
+    VllmTorchProfilingPlan,
 )
-from flameox.application.inference_providers import InferenceToolDiscovery
+from flameox.application.inference_providers import (
+    AvailableInferenceToolDiscovery,
+    InferenceToolDiscovery,
+)
 from flameox.domain import (
     CaptureStatus,
     DomainError,
@@ -126,7 +132,7 @@ def _patch_capture_dependencies(monkeypatch: pytest.MonkeyPatch, executable: Pat
     from flameox.application import inference as inference_module
 
     def fake_discover(tool: str) -> InferenceToolDiscovery:
-        return InferenceToolDiscovery(
+        return AvailableInferenceToolDiscovery(
             tool=tool,  # type: ignore[arg-type]
             executable=executable,
             version="0.12.0",
@@ -240,6 +246,7 @@ def test_torch_profile_plan_uses_managed_workload_and_trace_directory(tmp_path: 
     plan = service.plan("local", profiler="torch_profiler")
     second = service.plan("local", profiler="torch_profiler")
 
+    assert isinstance(plan, VllmTorchProfilingPlan)
     assert plan.diagnostic_only is True
     assert "VLLM_TORCH_PROFILER_DIR" in plan.environment_names
     assert plan.environment_digest.startswith("sha256:")
@@ -269,7 +276,7 @@ def test_sglang_torch_plan_has_stable_identity_and_derived_profile_id(
         "random_input_len = 4\nrandom_output_len = 2\n"
     )
 
-    discovery = InferenceToolDiscovery(
+    discovery = AvailableInferenceToolDiscovery(
         tool="sglang",
         executable=launcher,
         available=True,
@@ -286,6 +293,7 @@ def test_sglang_torch_plan_has_stable_identity_and_derived_profile_id(
     first = service.plan("local", profiler="torch_profiler")
     second = service.plan("local", profiler="torch_profiler")
 
+    assert isinstance(first, SglangTorchProfilingPlan)
     assert first.plan_id == second.plan_id
     assert first.sglang_profile_id == second.sglang_profile_id
     assert first.sglang_profile_id == f"flameox-{first.plan_id[7:31]}"
@@ -301,6 +309,8 @@ def test_nsight_plan_wraps_server_with_documented_cuda_capture_range(tmp_path: P
         "local", profiler="nsight_systems", nsys_executable=nsys
     )
 
+    assert isinstance(plan, NsightSystemsProfilingPlan)
+    assert plan.nsys_executable == nsys
     assert plan.server_argv[:3] == (str(nsys), "profile", "--trace-fork-before-exec=true")
     assert "--capture-range=cudaProfilerApi" in plan.server_argv
     assert plan.server_argv[-2:] == ("--profiler-config.profiler", "cuda")

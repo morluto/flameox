@@ -10,8 +10,10 @@ from flameox.analysis.inference_protocol import InferenceProtocolIdentity
 from flameox.application.environment import collect_environment
 from flameox.application.evidence_query import EvidenceQueryService
 from flameox.application.inference import (
+    AIPerfReplayPlan,
     InferenceReplayResult,
     InferenceReplayService,
+    parse_inference_replay_plan,
 )
 from flameox.domain import (
     CaptureStatus,
@@ -102,14 +104,18 @@ def _patch_providers(
     from flameox.application.inference_providers import (
         ExistingServerProbe,
         InferenceToolDiscovery,
+        parse_inference_tool_discovery,
     )
 
     def fake_discover(tool: str) -> InferenceToolDiscovery:
-        return InferenceToolDiscovery(
-            tool=tool,  # type: ignore[arg-type]
-            executable=executable,
-            available=executable is not None,
-            remediation=() if executable else ("Install the inference extra.",),
+        return parse_inference_tool_discovery(
+            {
+                "tool": tool,
+                "executable": executable,
+                "available": executable is not None,
+                "compatible": executable is not None,
+                "remediation": () if executable else ("Install the inference extra.",),
+            }
         )
 
     def fake_probe(base_url: str, *, timeout_seconds: float = 2.0) -> ExistingServerProbe:
@@ -182,9 +188,12 @@ def test_sglang_protocol_identity_binds_random_shape_and_provenance(
         "random_input_len = 4\nrandom_output_len = 2\n"
     )
     from flameox.application import inference as inference_module
-    from flameox.application.inference_providers import ExistingServerProbe, InferenceToolDiscovery
+    from flameox.application.inference_providers import (
+        AvailableInferenceToolDiscovery,
+        ExistingServerProbe,
+    )
 
-    discovery = InferenceToolDiscovery(
+    discovery = AvailableInferenceToolDiscovery(
         tool="sglang",
         executable=launcher,
         available=True,
@@ -229,6 +238,24 @@ def test_each_replay_plan_uses_an_isolated_output_directory(
     assert first.output_path is not None
     assert second.output_path is not None
     assert Path(first.output_path).parent.parent == Path(second.output_path).parent.parent
+
+
+def test_replay_plan_parses_provider_specific_fields_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    _write_project(tmp_path)
+    _patch_providers(monkeypatch, executable=Path("/tools/aiperf"))
+    plan = InferenceReplayService(workspace, broker=RecordingBroker()).plan("aiperf_replay")
+
+    assert isinstance(plan, AIPerfReplayPlan)
+    incompatible = plan.model_dump(mode="json") | {
+        "provider": "vllm_bench",
+        "trace_artifact_id": DIGEST,
+    }
+    with pytest.raises(ValueError):
+        parse_inference_replay_plan(incompatible)
 
 
 def test_plan_accepts_managed_server_without_probing_before_execution(

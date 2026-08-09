@@ -134,6 +134,29 @@ def test_global_project_root_initializes_and_invalid_request_exits_two(
     assert "Structured input is invalid" in invalid.output
 
 
+def test_analysis_record_rejects_fields_from_another_recipe(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    workspace = project / ".diagnostics"
+    runner = CliRunner()
+    assert runner.invoke(app, ["init", str(project)]).exit_code == 0
+
+    invalid = runner.invoke(
+        app,
+        [
+            "analyze",
+            "record",
+            '{"recipe":"failures","input_id":"run-1"}',
+            "--workspace",
+            str(workspace),
+        ],
+    )
+
+    assert invalid.exit_code == 2, invalid.output
+    assert "Structured input is invalid" in invalid.output
+    assert "input_id" in invalid.output
+
+
 def test_inference_configuration_errors_and_empty_list_are_structured(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()

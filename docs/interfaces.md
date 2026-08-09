@@ -339,13 +339,30 @@ async def compare_run_sets(
 ```
 
 `ToolPayload[T]` is an object-root schema with `schema_version`, `ok`,
-`result | null`, and `error | null`. Domain errors and malformed arguments use
-`isError=true` with that structured payload; malformed arguments use the
-`INVALID_ARGUMENTS` code and include the affected fields. Missing tools and
-invalid JSON-RPC requests remain protocol errors. The shared helpers return a
-JSON-compatible `CallToolResult`; the v2 SDK validates its structured content
-against the annotated `ToolPayload[T]` once at the tool boundary. Uncaught
-domain exceptions are forbidden because their structured detail is lost.
+`result | null`, and `error | null`. Flameox constructs this payload through
+closed Pydantic models before creating a `CallToolResult`; the v2 SDK then
+validates the structured content against the annotated `ToolPayload[T]` at the
+tool boundary. Domain failures and handler-owned cross-field input failures use
+`isError=true` with this typed payload. SDK signature failures (missing fields,
+wrong JSON scalar types, or violated field constraints) remain the SDK's native
+`isError=true` result with readable text and no `structuredContent`. Unknown
+tool names likewise use the SDK's native tool error; malformed JSON-RPC remains
+a protocol error. Uncaught domain exceptions are forbidden because their typed
+detail would be lost.
+
+The SDK-generated argument model ignores unknown top-level keys in 2.0.0 and
+does not expose a registration option that changes that policy. Flameox does
+not wrap or subclass the server to imitate stricter SDK behavior. Nested
+Flameox request models are closed with `extra="forbid"`, and wire-facing numeric
+and boolean parameters use Pydantic strict scalar types so booleans and numeric
+strings cannot be silently coerced. Contract tests pin the native unknown-key
+behavior so the interface does not claim a stronger contract than the SDK
+provides.
+
+Compatibility tests exercise both SDK protocol paths: the legacy initialize
+handshake negotiates `2025-11-25`, while modern direct adoption uses
+`2026-07-28`. The object-root result schema is valid in both eras even though
+the modern protocol permits broader JSON Schema roots.
 
 The concrete v2 SDK context, annotations, content blocks, and lifespan types are
 confined to `flameox.mcp`. The server calls synchronous `server.run()` for stdio.
@@ -401,10 +418,30 @@ The supported tools are grouped as follows:
 | Drill-down | `get_evidence`, `query_measurements`, `get_frame_callers`, `get_frame_callees`, `get_stack_examples`, `get_trace_window` |
 | Findings | `record_finding`, `list_findings`, `get_finding` |
 
+`freeze_run_set` accepts exactly one non-empty membership form: ordered
+`run_ids`, or ordered member records. An included member cannot carry an
+exclusion reason; an excluded member requires one. The transport parses these
+forms into distinct request and member variants before calling the run-set
+service.
+
 Reduction planning accepts only the Flameox-native `native_ddmin` engine and a
-declared partitioner. The predicate receives the candidate through
-`FLAMEOX_REDUCTION_CANDIDATE`; external reducer workloads, wrapper executables,
-and socket protocols are not accepted.
+declared partitioner. `binary_chunks` requires `chunk_size`; all other
+partitioners reject that field. Persisted plans and worker requests retain the
+same distinction rather than representing chunk size as optional. The
+predicate receives the candidate through `FLAMEOX_REDUCTION_CANDIDATE`;
+external reducer workloads, wrapper executables, and socket protocols are not
+accepted.
+
+Artifact-pipeline stage declarations are discriminated by `status`.
+`available` and `cached` stages require `registration_id`; `skipped`,
+`unavailable`, and `failed` stages cannot carry a registration identity.
+Materialized pipeline stages preserve the same distinction: registered stages
+carry artifact identity, length, and sensitivity, while unregistered stages
+cannot. Stage comparisons parse into `added`, `missing`, or paired cases, so a
+one-sided comparison cannot accidentally claim ordinals or artifacts for the
+absent side.
+Structural summaries remain a bounded all-or-none extractor name, version,
+and summary triple.
 
 The normal first-run sequence is:
 
@@ -626,6 +663,11 @@ When a trial identifier is reused by multiple historical experiments, callers
 must provide the experiment ID to resolve it; an unscoped lookup reports the
 ambiguity instead of selecting a newer row.
 
+Trial schema version 2 represents an optional numeric parameter as one tagged
+`parameter_value`: `{"kind": "integer", "value": 4}` or
+`{"kind": "floating", "value": 4.5}`. The tag preserves exact integer
+semantics and prevents a trial from carrying both representations.
+
 #### `plan_fault_experiment`, `run_fault_experiment`, and `get_fault_experiment`
 
 Fault planning binds a declared `fault_experiments` workflow and returns an
@@ -696,12 +738,24 @@ Read-only. Returns compatibility, metric differences, frame/operator changes,
 validation, attempted/failure counts, estimand, and limitations. Pairwise run
 IDs are accepted as one-element run-set shorthand.
 
+Comparison schema version 2 uses the same tagged numeric value for
+`baseline_value`, `candidate_value`, and `absolute_change`. Each field is one
+integer value, one floating value, or absent; the protocol does not expose
+independent integer and floating slots.
+
 #### `record_analysis` and `record_comparison`
 
 Mutating and additive. These execute the same curated deterministic recipes as
 the read-only tools, then persist an `AnalysisRecord`, result digest, exact
 input corpus commit, typed evidence references, coverage, and limitations.
 They do not accept arbitrary SQL or caller-supplied result bodies.
+
+`record_analysis` is a recipe-discriminated request. `hotspots`, `memory`,
+`pytorch`, `execution`, and `accelerator_launches` require `input_id`;
+`execution` and `accelerator_launches` may also accept `comparison_input_id`,
+and only `accelerator_launches` accepts `phase`. `failures` operates on the
+pinned corpus population, while `scaling` requires only `experiment_id`.
+Fields belonging to another recipe are rejected at the transport boundary.
 
 #### `analyze_pytorch`
 
@@ -719,7 +773,10 @@ typed partial result. Comparisons are descriptive and do not claim equivalent co
 
 #### `analyze_memory`
 
-Read-only over an existing memory artifact or run.
+Read-only over an existing memory artifact or run. Memory-analysis schema
+version 2 and `query_measurements` schema version 2 expose each scalar as one
+tagged `value`, using the same integer/floating envelope as trials and
+comparisons. The public result cannot contain both numeric representations.
 
 #### `analyze_execution`
 
@@ -769,13 +826,16 @@ flameox://run-sets/{run_set_id}
 Resources return JSON or text summaries. Large native artifacts are represented
 by metadata and opaque resource references, never host storage paths and never
 injected into model context. Template resources declare
-`mime_type="application/json"`, percent-encode identifiers, and resolve services
-through a server-local lifespan closure. Stable SDK 2.0.0 still passes template
-handlers through Pydantic call validation, which reconstructs `Context` without
-its private request state; resource handlers therefore omit `Context`. Tool
-handlers use injected `ctx.request_context.lifespan_context`. Contract tests
-cover both paths so SDK lifecycle changes cannot silently detach resources from
-the active workspace.
+`mime_type="application/json"`, percent-encode identifiers, and use the v2 SDK's
+native template-resource `Context` injection to resolve
+`ctx.request_context.lifespan_context`. Tools and resources therefore share the
+same request-scoped application state without a parallel registry or transport
+facade. Resource templates deliberately annotate the SDK's bare `Context`:
+parameterizing this Pydantic model causes the SDK's `validate_call` wrapper to
+reconstruct it without private request state. The application lifespan type is
+recovered with a static protocol cast after injection. Contract tests exercise
+resource reads through the real SDK request path so lifecycle changes cannot
+silently detach resources from the active workspace.
 
 Mutable workspace and capability views remain tools rather than static
 resources because they require current state and explicit recovery semantics.

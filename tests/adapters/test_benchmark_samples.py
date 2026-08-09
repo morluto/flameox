@@ -74,7 +74,17 @@ def test_structured_benchmark_extraction_preserves_samples_and_timing_semantics(
         name_prefix="decode.",
         include_warmups=True,
     )
-    assert {item.value_int for item in queried.measurements} == {45_000, 42_100, 41_900, 42_400}
+    assert all(
+        item.value is not None and item.value.kind == "integer" for item in queried.measurements
+    )
+    assert {
+        item.value.value if item.value is not None else None for item in queried.measurements
+    } == {
+        45_000,
+        42_100,
+        41_900,
+        42_400,
+    }
     assert all(
         item.dimensions
         == {
@@ -91,7 +101,11 @@ def test_structured_benchmark_extraction_preserves_samples_and_timing_semantics(
         }
         for item in queried.measurements
     )
-    assert [item.value_int for item in queried.measurements if item.is_warmup] == [45_000]
+    assert [
+        item.value.value if item.value is not None else None
+        for item in queried.measurements
+        if item.is_warmup
+    ] == [45_000]
     assert all(item.unit == "ns" for item in queried.measurements)
     assert queried.total == 4
 

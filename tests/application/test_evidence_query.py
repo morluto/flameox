@@ -47,6 +47,10 @@ def test_measurement_query_uses_bounded_snapshot_cursors(tmp_path: Path) -> None
     )
     assert first.returned == 2
     assert first.total == 3
+    assert first.schema_version == 2
+    assert all(
+        item.value is not None and item.value.kind == "integer" for item in first.measurements
+    )
     assert first.next_cursor is not None
     second = service.measurements(
         run_id=imported.run.run_id,

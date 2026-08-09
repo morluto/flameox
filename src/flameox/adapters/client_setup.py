@@ -69,6 +69,19 @@ class _ClientDefinition:
     detected: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _SetClientEntry:
+    value: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _RemoveClientEntry:
+    pass
+
+
+type _ClientEntryEdit = _SetClientEntry | _RemoveClientEntry
+
+
 class ClientConfigRegistry:
     """Resolve narrow, source-preserving edits to supported MCP client configs."""
 
@@ -194,7 +207,7 @@ class ClientConfigRegistry:
                     original,
                     mode,
                 )
-            updated = self._updated_content(definition, original, value=None, remove=True)
+            updated = self._updated_content(definition, original, _RemoveClientEntry())
             return ClientConfigEdit(
                 client,
                 definition.path,
@@ -216,7 +229,7 @@ class ClientConfigRegistry:
                 original,
                 mode,
             )
-        updated = self._updated_content(definition, original, value=wanted, remove=False)
+        updated = self._updated_content(definition, original, _SetClientEntry(wanted))
         action = ClientPlanAction.CREATE if original is None else ClientPlanAction.UPDATE
         return ClientConfigEdit(
             client,
@@ -289,20 +302,13 @@ class ClientConfigRegistry:
         self,
         definition: _ClientDefinition,
         original: bytes | None,
-        *,
-        value: dict[str, Any] | None,
-        remove: bool,
+        edit: _ClientEntryEdit,
     ) -> bytes:
         text = self._decode(definition.path, original) if original is not None else ""
         if definition.format == "toml":
-            return self._edit_toml(definition, text, value=value, remove=remove).encode()
+            return self._edit_toml(definition, text, edit).encode()
         if definition.format == "jsonc" and self.jsonc_helper is not None:
-            return self._edit_jsonc(
-                definition,
-                text,
-                value=value,
-                remove=remove,
-            ).encode()
+            return self._edit_jsonc(definition, text, edit, self.jsonc_helper).encode()
         if definition.format == "jsonc":
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
@@ -313,19 +319,17 @@ class ClientConfigRegistry:
         section = document.setdefault(definition.config_key, {})
         if not isinstance(section, dict):
             raise self._invalid_config(definition.path, f"{definition.config_key} is not an object")
-        if remove:
+        if isinstance(edit, _RemoveClientEntry):
             section.pop("flameox", None)
         else:
-            section["flameox"] = value
+            section["flameox"] = edit.value
         return (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode()
 
     def _edit_toml(
         self,
         definition: _ClientDefinition,
         text: str,
-        *,
-        value: dict[str, Any] | None,
-        remove: bool,
+        edit: _ClientEntryEdit,
     ) -> str:
         try:
             document = tomlkit.parse(text) if text else tomlkit.document()
@@ -337,13 +341,12 @@ class ClientConfigRegistry:
             document[definition.config_key] = section
         if not hasattr(section, "get") or not hasattr(section, "__setitem__"):
             raise self._invalid_config(definition.path, f"{definition.config_key} is not a table")
-        if remove:
+        if isinstance(edit, _RemoveClientEntry):
             section.pop("flameox", None)
         else:
             table = tomlkit.table()
-            assert value is not None
-            table.add("command", value["command"])
-            table.add("args", value["args"])
+            table.add("command", edit.value["command"])
+            table.add("args", edit.value["args"])
             section["flameox"] = table
         return tomlkit.dumps(document)
 
@@ -351,7 +354,8 @@ class ClientConfigRegistry:
         if not text.strip():
             return {}
         if definition.format == "jsonc":
-            if self.jsonc_helper is None:
+            helper = self.jsonc_helper
+            if helper is None:
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                     f"Editing {definition.path} requires the flameox npm JSONC helper.",
@@ -360,6 +364,7 @@ class ClientConfigRegistry:
             result = self._run_jsonc_helper(
                 {"operation": "parse", "text": text},
                 definition.path,
+                helper,
             )
             value = result.get("value")
         else:
@@ -378,31 +383,33 @@ class ClientConfigRegistry:
         self,
         definition: _ClientDefinition,
         text: str,
-        *,
-        value: dict[str, Any] | None,
-        remove: bool,
+        edit: _ClientEntryEdit,
+        helper: Path,
     ) -> str:
-        result = self._run_jsonc_helper(
-            {
-                "operation": "modify",
-                "text": text or "{}\n",
-                "path": [definition.config_key, "flameox"],
-                "remove": remove,
-                "value": value,
-            },
-            definition.path,
-        )
+        request: dict[str, Any] = {
+            "operation": "modify",
+            "text": text or "{}\n",
+            "path": [definition.config_key, "flameox"],
+            "remove": isinstance(edit, _RemoveClientEntry),
+        }
+        if isinstance(edit, _SetClientEntry):
+            request["value"] = edit.value
+        result = self._run_jsonc_helper(request, definition.path, helper)
         updated = result.get("text")
         if not isinstance(updated, str):
             raise self._invalid_config(definition.path, "JSONC helper returned no text")
         return updated
 
-    def _run_jsonc_helper(self, request: dict[str, Any], path: Path) -> dict[str, Any]:
-        assert self.jsonc_helper is not None
+    def _run_jsonc_helper(
+        self,
+        request: dict[str, Any],
+        path: Path,
+        helper: Path,
+    ) -> dict[str, Any]:
         try:
             outcome = self.broker.run_sync(
                 ExecutionRequest(
-                    argv=(self.node_executable, str(self.jsonc_helper)),
+                    argv=(self.node_executable, str(helper)),
                     cwd=path.parent,
                     stdin_bytes=json.dumps(request).encode("utf-8"),
                     environment_allowlist=("PATH",),

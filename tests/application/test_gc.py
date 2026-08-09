@@ -8,7 +8,7 @@ import pytest
 
 from flameox.application import (
     CompactionService,
-    FreezeRunSetRequest,
+    FreezeRunIdsRequest,
     GarbageCollector,
     GarbagePlan,
     ImportArtifactRequest,
@@ -140,7 +140,7 @@ def test_gc_retains_generations_reachable_from_a_pinned_run_set(
     source = tmp_path / "profile.bin"
     source.write_bytes(b"profile")
     imported = ImportService(workspace).import_artifact(ImportArtifactRequest(path=source))
-    run_set = RunSetService(workspace).freeze(FreezeRunSetRequest(run_ids=(imported.run.run_id,)))
+    run_set = RunSetService(workspace).freeze(FreezeRunIdsRequest(run_ids=(imported.run.run_id,)))
     pinned_commit = workspace.corpus.read_commit(run_set.corpus_commit_id)
     pinned_generation_ids = {
         Path(relative).parent.name for relative in pinned_commit.generation_manifests

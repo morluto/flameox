@@ -10,6 +10,7 @@ from flameox.application import (
     ProjectConfig,
     WorkloadConfig,
     WorkloadService,
+    parse_experiment_config,
 )
 from flameox.domain import DomainError, ErrorCode
 from flameox.storage import Workspace
@@ -121,6 +122,88 @@ def test_schema_one_legacy_experiment_fields_remain_loadable() -> None:
     assert experiment.variants == ("baseline", "candidate")
     assert experiment.scaling_parameter == "length"
     assert experiment.scaling_values == (1, 2)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    (
+        {"variants": ["baseline", "candidate"]},
+        {
+            "variants": ["baseline", "candidate"],
+            "scaling_parameter": "length",
+            "scaling_values": [1, 2],
+        },
+        {
+            "treatment_factor": "mode",
+            "factors": {"mode": ["baseline", "candidate"]},
+        },
+        {
+            "treatment_factor": "mode",
+            "factors": {"mode": ["baseline", "candidate"]},
+            "combination_policy": "explicit",
+            "combinations": [{"mode": "baseline"}],
+        },
+    ),
+)
+@pytest.mark.parametrize(
+    "analysis",
+    (
+        {},
+        {"analysis": "outcome", "outcome_goal": "equivalence"},
+    ),
+)
+def test_experiment_parser_round_trips_each_legal_case(
+    shape: dict[str, object],
+    analysis: dict[str, object],
+) -> None:
+    parsed = parse_experiment_config({"workload": "scan", **shape, **analysis})
+
+    reparsed = parse_experiment_config(parsed.model_dump(mode="python"))
+
+    assert reparsed == parsed
+
+
+@pytest.mark.parametrize(
+    "config",
+    (
+        {
+            "workload": "scan",
+            "variants": ["baseline", "candidate"],
+            "factors": {"mode": ["baseline", "candidate"]},
+            "treatment_factor": "mode",
+        },
+        {
+            "workload": "scan",
+            "factors": {"mode": ["baseline", "candidate"]},
+            "treatment_factor": "mode",
+            "combinations": [{"mode": "baseline"}],
+        },
+        {
+            "workload": "scan",
+            "factors": {"mode": ["baseline", "candidate"]},
+            "treatment_factor": "mode",
+            "combination_policy": "explicit",
+        },
+        {
+            "workload": "scan",
+            "variants": ["baseline", "candidate"],
+            "scaling_parameter": "length",
+        },
+        {
+            "workload": "scan",
+            "variants": ["baseline", "candidate"],
+            "outcome_goal": "equivalence",
+        },
+        {
+            "workload": "scan",
+            "variants": ["baseline", "candidate"],
+            "analysis": "outcome",
+        },
+    ),
+)
+def test_experiment_parser_rejects_cross_case_states(config: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        parse_experiment_config(config)
 
 
 def test_replace_requires_current_configuration_digest_and_preserves_unrelated_state(
@@ -244,12 +327,12 @@ mode = ["one", "two"]
 
 
 def test_experiment_requires_explicit_treatment_factor_and_factors() -> None:
-    from flameox.application.workloads import ExperimentConfig
-
-    config = ExperimentConfig(
-        workload="probe",
-        treatment_factor="mode",
-        factors={"mode": ("baseline", "candidate"), "length": (128, 256)},
+    config = parse_experiment_config(
+        {
+            "workload": "probe",
+            "treatment_factor": "mode",
+            "factors": {"mode": ("baseline", "candidate"), "length": (128, 256)},
+        }
     )
     assert config.treatment_factor == "mode"
     assert config.factors["length"] == (128, 256)

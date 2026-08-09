@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field
 
 from flameox.catalog import Catalog
 from flameox.domain import CursorCodec, DomainError, ErrorCode, digest_model
+from flameox.domain.scalars import NumericValue
+from flameox.evidence import numeric_value_from_columns
 from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
 from flameox.models import ContractModel
 from flameox.storage import RunStore, Workspace
@@ -14,8 +18,7 @@ class MeasurementItem(ContractModel):
     run_id: str
     artifact_id: str | None
     name: str
-    value_int: int | None
-    value_float: float | None
+    value: NumericValue | None
     unit: str
     aggregation: str
     scope: str
@@ -33,7 +36,7 @@ class MeasurementItem(ContractModel):
 
 
 class MeasurementQueryResult(ContractModel):
-    schema_version: int = 1
+    schema_version: Literal[2] = 2
     corpus_commit_id: str
     measurements: tuple[MeasurementItem, ...]
     total: int
@@ -171,8 +174,11 @@ class EvidenceQueryService:
                 run_id=row[1],
                 artifact_id=row[2],
                 name=row[3],
-                value_int=row[4],
-                value_float=row[5],
+                value=numeric_value_from_columns(
+                    row[4],
+                    row[5],
+                    field_name="measurement value",
+                ),
                 unit=row[6],
                 aggregation=row[7],
                 scope=row[8],

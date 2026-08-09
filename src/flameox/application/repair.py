@@ -7,7 +7,8 @@ from typing import Literal
 from flameox.application.quarantine import QuarantineManifest, QuarantineService
 from flameox.application.recoverable_move import lexical_path_beneath
 from flameox.atomic import atomic_write_bytes
-from flameox.domain import DomainError, ErrorCode, RunManifest, digest_model
+from flameox.domain import DomainError, ErrorCode, digest_model
+from flameox.domain.models import parse_run_manifest_json
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
@@ -51,7 +52,7 @@ class RepairService:
             relative = projection.relative_to(self.workspace.paths.root).as_posix()
             projection = self._resolve(relative)
             try:
-                RunManifest.model_validate_json(projection.read_text())
+                parse_run_manifest_json(projection.read_text())
                 continue
             except (OSError, ValueError) as exc:
                 logger.warning("run projection %s is unreadable: %s", projection, exc)
@@ -104,7 +105,7 @@ class RepairService:
             for entry in plan.entries:
                 source = self._resolve(entry.path)
                 recovery_source = self._resolve(entry.recovery_source)
-                recovered = RunManifest.model_validate_json(recovery_source.read_text())
+                recovered = parse_run_manifest_json(recovery_source.read_text())
                 quarantined.append(
                     self.quarantine.quarantine_locked(
                         source,
@@ -141,7 +142,7 @@ class RepairService:
     def _latest_valid_revision(run_root: Path) -> Path | None:
         for path in sorted((run_root / "revisions").glob("*.json"), reverse=True):
             try:
-                RunManifest.model_validate_json(path.read_text())
+                parse_run_manifest_json(path.read_text())
             except (OSError, ValueError):
                 continue
             return path

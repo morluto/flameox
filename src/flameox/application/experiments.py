@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import random
 import secrets
 import time
@@ -19,15 +18,24 @@ from flameox.adapters import PyPerfExtractor, PytestExtractor, PythonStartupExtr
 from flameox.application.async_work import run_atomic_thread
 from flameox.application.capture import CaptureService
 from flameox.application.comparisons import (
-    CompareRunSetsRequest,
     ComparisonResult,
     ComparisonService,
+    ExcludedFreezeRunSetMember,
+    FreezeRunMembersRequest,
     FreezeRunSetMember,
-    FreezeRunSetRequest,
+    IncludedFreezeRunSetMember,
     RunSetService,
+    parse_compare_run_sets_request,
 )
 from flameox.application.execution_policy import ExecutionPolicy
-from flameox.application.workloads import ExperimentConfig, Scalar, WorkloadService
+from flameox.application.workloads import (
+    ExperimentConfig,
+    Scalar,
+    WorkloadService,
+    _FactorExperimentConfig,
+    _OutcomeExperimentConfig,
+    _ScaledLegacyExperimentConfig,
+)
 from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,
@@ -48,8 +56,14 @@ from flameox.domain import (
     digest_model,
     new_id,
 )
-from flameox.domain.models import utc_now
-from flameox.evidence import GenerationPublisher, PublishedGeneration
+from flameox.domain.models import parse_trial, utc_now
+from flameox.domain.scalars import NumericValue, parse_numeric_value
+from flameox.evidence import (
+    GenerationPublisher,
+    PublishedGeneration,
+    numeric_value_from_columns,
+    numeric_value_to_columns,
+)
 from flameox.models import ContractModel
 from flameox.storage import JsonRecordStore, RunStore, Workspace
 
@@ -70,6 +84,24 @@ def _has_extractable_artifact(run: RunManifest, adapter: str) -> bool:
         "pytest": ArtifactKind.TEST_EXECUTION,
     }.get(adapter)
     return expected is not None and any(item.kind is expected for item in run.artifacts)
+
+
+def _freeze_trial_member(trial: Trial) -> FreezeRunSetMember:
+    if trial.run_id is None:
+        raise DomainError(ErrorCode.WORKSPACE_INVALID, "A run-set trial has no run identity.")
+    if trial.outcome is TrialOutcome.SUCCEEDED:
+        return IncludedFreezeRunSetMember(run_id=trial.run_id, trial_id=trial.trial_id)
+    if trial.exclusion_reason is None:
+        raise DomainError(
+            ErrorCode.WORKSPACE_INVALID,
+            "An excluded run-set trial has no exclusion reason.",
+            details={"trial_id": trial.trial_id, "outcome": trial.outcome.value},
+        )
+    return ExcludedFreezeRunSetMember(
+        run_id=trial.run_id,
+        trial_id=trial.trial_id,
+        reason=trial.exclusion_reason,
+    )
 
 
 class ExperimentCell(ContractModel):
@@ -108,7 +140,7 @@ class ExperimentPlan(ContractModel):
 
 
 class ExperimentRunResult(ContractModel):
-    schema_version: int = 1
+    schema_version: Literal[2] = 2
     experiment: Experiment
     variants: tuple[Variant, ...]
     trials: tuple[Trial, ...]
@@ -120,7 +152,7 @@ class ExperimentRunResult(ContractModel):
 
 
 class ExperimentTrialCollection(ContractModel):
-    schema_version: int = 1
+    schema_version: Literal[2] = 2
     experiment_id: str
     trials: tuple[Trial, ...]
     returned: int
@@ -332,7 +364,7 @@ class ExperimentService:
     @staticmethod
     def _trial_from_row(row: tuple[object, ...]) -> Trial:
         receipt_json = str(row[16]) if row[16] is not None else None
-        return Trial.model_validate(
+        return parse_trial(
             {
                 "trial_id": row[0],
                 "experiment_id": row[1],
@@ -343,8 +375,11 @@ class ExperimentService:
                 "block_id": row[6],
                 "order_in_block": row[7],
                 "parameter_name": row[8],
-                "parameter_value_int": row[9],
-                "parameter_value_float": row[10],
+                "parameter_value": numeric_value_from_columns(
+                    row[9],
+                    row[10],
+                    field_name="trial parameter value",
+                ),
                 "attempt": row[11],
                 "outcome": row[12],
                 "exclusion_reason": row[13],
@@ -669,7 +704,7 @@ class ExperimentService:
                     raise cancellation
             except DomainError as error:
                 if error.run_id is None:
-                    if config.analysis != "outcome":
+                    if not isinstance(config, _OutcomeExperimentConfig):
                         failed = self._make_trial(
                             plan=plan,
                             cell=cell,
@@ -764,14 +799,9 @@ class ExperimentService:
         run_sets = await run_atomic_thread(
             lambda: tuple(
                 RunSetService(self.workspace).freeze(
-                    FreezeRunSetRequest(
+                    FreezeRunMembersRequest(
                         members=tuple(
-                            FreezeRunSetMember(
-                                run_id=trial.run_id,
-                                trial_id=trial.trial_id,
-                                included=trial.outcome is TrialOutcome.SUCCEEDED,
-                                reason=trial.exclusion_reason,
-                            )
+                            _freeze_trial_member(trial)
                             for trial in trials_by_variant[name]
                             if trial.run_id is not None
                         ),
@@ -790,7 +820,7 @@ class ExperimentService:
         comparison: ComparisonResult | None = None
         outcome_result: OutcomeExperimentResult | None = None
         limitations: list[str] = []
-        if config.analysis == "outcome":
+        if isinstance(config, _OutcomeExperimentConfig):
             outcome_result = self._outcome_result(plan, config, trials)
             published = await run_atomic_thread(
                 lambda: self.publisher.publish_rows(
@@ -814,17 +844,19 @@ class ExperimentService:
         else:
             comparison = await run_atomic_thread(
                 lambda: ComparisonService(self.workspace).record(
-                    CompareRunSetsRequest(
-                        baseline_run_set_id=run_sets[0].run_set_id,
-                        candidate_run_set_id=run_sets[1].run_set_id,
-                        experiment_id=plan.experiment.experiment_id,
-                        metric=plan.experiment.primary_metric,
-                        unit=("bytes" if plan.metric_source == "runtime_resource" else "ns"),
-                        metric_source=plan.metric_source,
-                        polarity=plan.experiment.polarity,
-                        practical_threshold=plan.experiment.practical_threshold,
-                        confidence_level=plan.experiment.confidence_level,
-                        random_seed=plan.experiment.random_seed,
+                    parse_compare_run_sets_request(
+                        {
+                            "baseline_run_set_id": run_sets[0].run_set_id,
+                            "candidate_run_set_id": run_sets[1].run_set_id,
+                            "experiment_id": plan.experiment.experiment_id,
+                            "metric": plan.experiment.primary_metric,
+                            "unit": ("bytes" if plan.metric_source == "runtime_resource" else "ns"),
+                            "metric_source": plan.metric_source,
+                            "polarity": plan.experiment.polarity,
+                            "practical_threshold": plan.experiment.practical_threshold,
+                            "confidence_level": plan.experiment.confidence_level,
+                            "random_seed": plan.experiment.random_seed,
+                        }
                     )
                 )
             )
@@ -884,8 +916,7 @@ class ExperimentService:
         config: ExperimentConfig,
         workload_parameters: dict[str, tuple[Scalar, ...]],
     ) -> tuple[str, dict[str, tuple[Scalar, ...]], tuple[dict[str, Scalar], ...]]:
-        if config.factors:
-            assert config.treatment_factor is not None
+        if isinstance(config, _FactorExperimentConfig):
             treatment_factor = config.treatment_factor
             factors = dict(config.factors)
         else:
@@ -907,7 +938,7 @@ class ExperimentService:
                 )
             treatment_factor = matches[0]
             factors = {treatment_factor: config.variants}
-            if config.scaling_parameter is not None:
+            if isinstance(config, _ScaledLegacyExperimentConfig):
                 if config.scaling_parameter == treatment_factor:
                     raise DomainError(
                         ErrorCode.WORKSPACE_INVALID,
@@ -993,7 +1024,7 @@ class ExperimentService:
     def _outcome_result(
         self,
         plan: ExperimentPlan,
-        config: ExperimentConfig,
+        config: _OutcomeExperimentConfig,
         trials: list[Trial],
     ) -> OutcomeExperimentResult:
         counts: list[OutcomeCount] = []
@@ -1122,7 +1153,6 @@ class ExperimentService:
         else:
             disposition = "mixed"
         first_failure = failures[0] if failures else None
-        assert config.outcome_goal is not None
         return OutcomeExperimentResult(
             experiment_id=plan.experiment.experiment_id,
             goal=config.outcome_goal,
@@ -1196,85 +1226,65 @@ class ExperimentService:
             "infrastructure_failure",
         ],
     ) -> Trial:
-        parameter_name, parameter_int, parameter_float = self._trial_parameter_projection(
-            plan, cell
-        )
-        return Trial(
-            trial_id=cell.trial_id,
-            experiment_id=plan.experiment.experiment_id,
-            variant_id=digest_model(
-                {
-                    "experiment_id": plan.experiment.experiment_id,
-                    "name": cell.treatment,
-                }
-            ),
-            run_id=run.run_id if run is not None else None,
-            combination_id=cell.combination_id,
-            factors=cell.factors,
-            block_id=block_id,
-            order_in_block=order,
-            parameter_name=parameter_name,
-            parameter_value_int=parameter_int,
-            parameter_value_float=parameter_float,
-            attempt=1,
-            outcome=outcome,
-            exclusion_reason=(
-                None
-                if outcome is TrialOutcome.SUCCEEDED
-                else f"capture outcome was {outcome.value}"
-            ),
-            validation_status=(
-                run.validation_status if run is not None else ValidationStatus.NOT_REQUESTED
-            ),
-            oracle_receipt=(
-                run.oracle_receipt.receipt
-                if run is not None and run.oracle_receipt is not None
-                else None
-            ),
-            oracle_receipt_artifact_id=(
-                next(
-                    (
-                        artifact.artifact_id
-                        for artifact in run.artifacts
-                        if artifact.role == "validation_receipt"
-                    ),
-                    None,
-                )
-                if run is not None
-                else None
-            ),
-            failure_class=failure_class,
+        parameter_name, parameter_value = self._trial_parameter_value(plan, cell)
+        return parse_trial(
+            {
+                "trial_id": cell.trial_id,
+                "experiment_id": plan.experiment.experiment_id,
+                "variant_id": digest_model(
+                    {
+                        "experiment_id": plan.experiment.experiment_id,
+                        "name": cell.treatment,
+                    }
+                ),
+                "run_id": run.run_id if run is not None else None,
+                "combination_id": cell.combination_id,
+                "factors": cell.factors,
+                "block_id": block_id,
+                "order_in_block": order,
+                "parameter_name": parameter_name,
+                "parameter_value": parameter_value,
+                "attempt": 1,
+                "outcome": outcome,
+                "exclusion_reason": (
+                    None
+                    if outcome is TrialOutcome.SUCCEEDED
+                    else f"capture outcome was {outcome.value}"
+                ),
+                "validation_status": (
+                    run.validation_status if run is not None else ValidationStatus.NOT_REQUESTED
+                ),
+                "oracle_receipt": (
+                    run.oracle_receipt.receipt
+                    if run is not None and run.oracle_receipt is not None
+                    else None
+                ),
+                "oracle_receipt_artifact_id": (
+                    next(
+                        (
+                            artifact.artifact_id
+                            for artifact in run.artifacts
+                            if artifact.role == "validation_receipt"
+                        ),
+                        None,
+                    )
+                    if run is not None
+                    else None
+                ),
+                "failure_class": failure_class,
+            }
         )
 
     @staticmethod
-    def _trial_parameter_projection(
+    def _trial_parameter_value(
         plan: ExperimentPlan,
         cell: ExperimentCell,
-    ) -> tuple[str | None, int | None, float | None]:
-        """Populate the optional scalar parameter projection on the trial row."""
+    ) -> tuple[str | None, NumericValue | None]:
+        """Parse the optional scalar parameter represented by this trial."""
         context_factors = tuple(name for name in cell.factors if name != plan.variant_parameter)
         parameter_name = context_factors[0] if len(context_factors) == 1 else None
         parameter_value = cell.factors[parameter_name] if parameter_name is not None else None
-        parameter_int: int | None = None
-        parameter_float: float | None = None
-        if isinstance(parameter_value, int) and not isinstance(parameter_value, bool):
-            parameter_int = parameter_value
-        elif isinstance(parameter_value, float):
-            parameter_float = parameter_value if math.isfinite(parameter_value) else None
-        elif isinstance(parameter_value, str):
-            try:
-                parameter_int = int(parameter_value)
-            except ValueError:
-                try:
-                    parsed_float = float(parameter_value)
-                except ValueError:
-                    parsed_float = None
-                parameter_float = (
-                    parsed_float
-                    if parsed_float is not None and math.isfinite(parsed_float)
-                    else None
-                )
-        return parameter_name, parameter_int, parameter_float
+        return parameter_name, parse_numeric_value(parameter_value)
 
     @staticmethod
     def _classify_run(
@@ -1359,6 +1369,7 @@ class ExperimentService:
 
     def _trial_row(self, value: Trial) -> dict[str, object]:
         row = value.model_dump(mode="python")
+        parameter_value_int, parameter_value_float = numeric_value_to_columns(value.parameter_value)
         row.update(
             {
                 "outcome": value.outcome.value,
@@ -1369,8 +1380,11 @@ class ExperimentService:
                     if value.oracle_receipt is not None
                     else None
                 ),
+                "parameter_value_int": parameter_value_int,
+                "parameter_value_float": parameter_value_float,
             }
         )
         row.pop("factors")
+        row.pop("parameter_value")
         row.pop("schema_version")
         return row

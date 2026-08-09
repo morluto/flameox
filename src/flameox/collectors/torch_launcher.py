@@ -5,9 +5,69 @@ import json
 import runpy
 import sys
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
+from typing import assert_never
 
 from flameox.atomic import atomic_write_json
+
+
+@dataclass(frozen=True, slots=True)
+class _ModuleTarget:
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ScriptTarget:
+    path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _InlineTarget:
+    code: str
+
+
+type _Target = _ModuleTarget | _ScriptTarget | _InlineTarget
+
+
+def _parse_target(options: argparse.Namespace, parser: argparse.ArgumentParser) -> _Target:
+    if options.module is not None:
+        return _ModuleTarget(options.module)
+    if options.script is not None:
+        return _ScriptTarget(Path(options.script).resolve())
+    if options.inline_code is not None:
+        return _InlineTarget(options.inline_code)
+    parser.error("one Python target is required")
+
+
+def _prepare_target(target: _Target) -> str:
+    if isinstance(target, _ModuleTarget):
+        sys.path.insert(0, str(Path.cwd()))
+        return target.name
+    if isinstance(target, _ScriptTarget):
+        sys.path.insert(0, str(target.path.parent))
+        return str(target.path)
+    if isinstance(target, _InlineTarget):
+        sys.path.insert(0, str(Path.cwd()))
+        return "<flameox-inline-python>"
+    assert_never(target)
+
+
+def _run_target(target: _Target, target_name: str) -> None:
+    if isinstance(target, _ModuleTarget):
+        runpy.run_module(target.name, run_name="__main__", alter_sys=True)
+    elif isinstance(target, _InlineTarget):
+        namespace = {
+            "__name__": "__main__",
+            "__file__": target_name,
+            "__package__": None,
+            "__cached__": None,
+        }
+        exec(compile(target.code, target_name, "exec"), namespace, namespace)
+    elif isinstance(target, _ScriptTarget):
+        runpy.run_path(str(target.path), run_name="__main__")
+    else:
+        assert_never(target)
 
 
 def _write_diagnostic(
@@ -40,6 +100,7 @@ def main() -> None:
     target.add_argument("--inline-code")
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     options = parser.parse_args()
+    target_case = _parse_target(options, parser)
     workload_arguments = list(options.arguments)
     if workload_arguments[:1] == ["--"]:
         workload_arguments = workload_arguments[1:]
@@ -47,12 +108,7 @@ def main() -> None:
     _write_diagnostic(diagnostic_path, phase="wrapper_startup", status="started")
     phase = "wrapper_startup"
     try:
-        if options.module is not None or options.inline_code is not None:
-            sys.path.insert(0, str(Path.cwd()))
-            script_path = None
-        else:
-            script_path = Path(options.script).resolve()
-            sys.path.insert(0, str(script_path.parent))
+        target_name = _prepare_target(target_case)
         try:
             import torch
         except ImportError as exc:
@@ -79,11 +135,7 @@ def main() -> None:
             parser.error("No requested torch.profiler activity is available")
         output = Path(options.output)
         output.parent.mkdir(parents=True, exist_ok=True)
-        target_name = options.module or options.script
-        if options.inline_code is not None:
-            target_name = "<flameox-inline-python>"
-        assert target_name is not None
-        argv0 = "-c" if options.inline_code is not None else target_name
+        argv0 = "-c" if isinstance(target_case, _InlineTarget) else target_name
         sys.argv = [argv0, *workload_arguments]
         phase = "profiler_initialization"
         _write_diagnostic(diagnostic_path, phase=phase, status="running")
@@ -97,19 +149,7 @@ def main() -> None:
         ) as profile:
             phase = "workload_execution"
             _write_diagnostic(diagnostic_path, phase=phase, status="running")
-            if options.module is not None:
-                runpy.run_module(options.module, run_name="__main__", alter_sys=True)
-            elif options.inline_code is not None:
-                namespace = {
-                    "__name__": "__main__",
-                    "__file__": target_name,
-                    "__package__": None,
-                    "__cached__": None,
-                }
-                exec(compile(options.inline_code, target_name, "exec"), namespace, namespace)
-            else:
-                assert script_path is not None
-                runpy.run_path(str(script_path), run_name="__main__")
+            _run_target(target_case, target_name)
             phase = "profiler_finalization"
             _write_diagnostic(diagnostic_path, phase=phase, status="running")
         phase = "trace_finalization"

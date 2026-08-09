@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from urllib.response import addinfourl
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, TypeAdapter, field_validator, model_validator
 
 from flameox.domain import DomainError, ErrorCode
 from flameox.execution import ExecutionRequest, SubprocessBroker
@@ -134,7 +134,7 @@ class VllmBenchServeRequest(ContractModel):
     model: Annotated[str, Field(min_length=1, max_length=500)]
     result_path: Path
     endpoint_type: Literal["chat", "completions"] = "chat"
-    streaming: bool = True
+    streaming: Literal[True] = True
     num_prompts: Annotated[int, Field(gt=0, le=10_000_000)]
     request_rate: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
     burstiness: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
@@ -148,9 +148,7 @@ class VllmBenchServeRequest(ContractModel):
         return _loopback_http_url(value)
 
     @model_validator(mode="after")
-    def require_supported_streaming_mode(self) -> VllmBenchServeRequest:
-        if not self.streaming:
-            raise ValueError("vllm bench serve non-streaming response mode is unsupported in v1")
+    def burstiness_has_request_rate(self) -> VllmBenchServeRequest:
         if self.burstiness is not None and self.request_rate is None:
             raise ValueError("burstiness requires request_rate")
         return self
@@ -197,7 +195,7 @@ class SglangBenchServingRequest(ContractModel):
     tokenizer: Annotated[str, Field(min_length=1, max_length=500)] | None = None
     result_path: Path
     endpoint_type: Literal["chat", "completions"] = "chat"
-    streaming: bool = True
+    streaming: Literal[True] = True
     num_prompts: Annotated[int, Field(gt=0, le=10_000_000)]
     random_input_len: Annotated[int, Field(gt=0, le=1_000_000)]
     random_output_len: Annotated[int, Field(gt=0, le=1_000_000)]
@@ -210,19 +208,17 @@ class SglangBenchServingRequest(ContractModel):
     @field_validator("base_url")
     @classmethod
     def valid_url(cls, value: str) -> str:
-        return _loopback_http_url(value)
-
-    @model_validator(mode="after")
-    def valid_launcher_and_streaming(self) -> SglangBenchServingRequest:
-        if not self.benchmark_python.is_absolute():
-            raise ValueError("benchmark_python must be absolute")
-        if not self.streaming:
-            raise ValueError(
-                "sglang bench_serving non-streaming response mode is unsupported in v1"
-            )
-        if urlsplit(self.base_url).path not in ("", "/"):
+        value = _loopback_http_url(value)
+        if urlsplit(value).path not in ("", "/"):
             raise ValueError("sglang bench_serving requires a root base_url in v1")
-        return self
+        return value
+
+    @field_validator("benchmark_python")
+    @classmethod
+    def absolute_benchmark_python(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("benchmark_python must be absolute")
+        return value
 
     def argv(self) -> tuple[str, ...]:
         parsed = urlsplit(self.base_url)
@@ -264,15 +260,42 @@ class SglangBenchServingRequest(ContractModel):
         return tuple(values)
 
 
-class InferenceToolDiscovery(ContractModel):
+class _InferenceToolDiscovery(ContractModel):
     tool: Literal["aiperf", "vllm", "sglang"]
-    executable: Path | None
-    available: bool
     version: str | None = None
     executable_digest: str | None = None
-    compatible: bool = False
+
+
+class AvailableInferenceToolDiscovery(_InferenceToolDiscovery):
+    executable: Path
+    available: Literal[True] = True
+    compatible: Literal[True] = True
+    compatibility_reason: Literal[None] = None
+    remediation: tuple[()] = ()
+
+
+class UnavailableInferenceToolDiscovery(_InferenceToolDiscovery):
+    executable: Path | None = None
+    available: Literal[False] = False
+    compatible: Literal[False] = False
     compatibility_reason: str | None = None
     remediation: tuple[str, ...] = ()
+
+
+type InferenceToolDiscovery = Annotated[
+    AvailableInferenceToolDiscovery | UnavailableInferenceToolDiscovery,
+    Field(discriminator="available"),
+]
+
+_INFERENCE_TOOL_DISCOVERY_ADAPTER: TypeAdapter[InferenceToolDiscovery] = TypeAdapter(
+    InferenceToolDiscovery
+)
+
+
+def parse_inference_tool_discovery(value: object) -> InferenceToolDiscovery:
+    """Parse a probe result into an available or unavailable tool case."""
+
+    return _INFERENCE_TOOL_DISCOVERY_ADAPTER.validate_python(value)
 
 
 def discover_sglang(
@@ -304,23 +327,22 @@ def discover_sglang(
         except (DomainError, OSError, UnicodeDecodeError):
             pass
     compatible = tool_version == "0.5.16"
-    return InferenceToolDiscovery(
+    if executable.is_file() and os.access(executable, os.X_OK) and compatible:
+        return AvailableInferenceToolDiscovery(
+            tool="sglang",
+            executable=executable,
+            version=tool_version,
+            executable_digest=digest,
+        )
+    return UnavailableInferenceToolDiscovery(
         tool="sglang",
         executable=executable if executable.is_file() else None,
-        available=executable.is_file() and os.access(executable, os.X_OK) and compatible,
         version=tool_version,
         executable_digest=digest,
-        compatible=compatible,
-        compatibility_reason=None
-        if compatible
-        else "SGLang 0.5.16 is required in benchmark_python.",
+        compatibility_reason="SGLang 0.5.16 is required in benchmark_python.",
         remediation=(
-            ()
-            if compatible
-            else (
-                "Install sglang==0.5.16 in the declared benchmark_python runtime; "
-                "Flameox does not install it.",
-            )
+            "Install sglang==0.5.16 in the declared benchmark_python runtime; "
+            "Flameox does not install it.",
         ),
     )
 
@@ -362,22 +384,23 @@ def discover_inference_tool(tool: Literal["aiperf", "vllm"]) -> InferenceToolDis
             compatibility_reason = (
                 "AIPerf version is unknown or outside Flameox's supported >=0.12,<0.13 range."
             )
-    return InferenceToolDiscovery(
+    if executable is not None and compatible:
+        return AvailableInferenceToolDiscovery(
+            tool=tool,
+            executable=executable,
+            version=tool_version,
+            executable_digest=executable_digest,
+        )
+    return UnavailableInferenceToolDiscovery(
         tool=tool,
         executable=executable,
-        available=executable is not None and compatible,
         version=tool_version,
         executable_digest=executable_digest,
-        compatible=compatible,
         compatibility_reason=compatibility_reason,
         remediation=(
             ("Install a compatible AIPerf >=0.12,<0.13 in the Flameox runtime, then retry.",)
-            if tool == "aiperf" and (executable is None or not compatible)
-            else (
-                ("Install vLLM in the target runtime; Flameox does not install it.",)
-                if executable is None
-                else ()
-            )
+            if tool == "aiperf"
+            else ("Install vLLM in the target runtime; Flameox does not install it.",)
         ),
     )
 

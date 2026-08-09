@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from flameox.atomic import atomic_write_json
 from flameox.domain import DomainError, ErrorCode
@@ -20,13 +20,13 @@ class JsonRecordStore[RecordT: BaseModel]:
         workspace: Workspace,
         *,
         kind: str,
-        model: type[RecordT],
+        model: type[RecordT] | TypeAdapter[RecordT],
         id_field: str,
         revision_field: str | None = None,
     ) -> None:
         self.workspace = workspace
         self.kind = kind
-        self.model = model
+        self._adapter = TypeAdapter(model) if isinstance(model, type) else model
         self.id_field = id_field
         self.revision_field = revision_field
 
@@ -79,7 +79,7 @@ class JsonRecordStore[RecordT: BaseModel]:
                 f"{self.kind} {identifier!r} record path contains a symbolic link.",
             )
         try:
-            return self.model.model_validate_json(record_path.read_text())
+            return self._adapter.validate_json(record_path.read_text())
         except (FileNotFoundError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
@@ -103,7 +103,7 @@ class JsonRecordStore[RecordT: BaseModel]:
                     f"Invalid {self.kind} record at {path}: contains a symbolic link.",
                 )
             try:
-                records.append(self.model.model_validate_json(path.read_text()))
+                records.append(self._adapter.validate_json(path.read_text()))
             except ValueError as exc:
                 raise DomainError(
                     ErrorCode.WORKSPACE_INVALID,
@@ -187,7 +187,7 @@ class JsonRecordStore[RecordT: BaseModel]:
         revision = self._revision(record)
         path = self._root(self._identifier(record)) / "revisions" / f"{revision:08d}.json"
         if path.exists():
-            existing = self.model.model_validate_json(path.read_text())
+            existing = self._adapter.validate_json(path.read_text())
             if existing != record:
                 raise DomainError(
                     ErrorCode.ARTIFACT_INTEGRITY_FAILED,

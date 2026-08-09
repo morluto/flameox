@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, assert_never
 
 from pydantic import Field, JsonValue, model_validator
 
@@ -23,12 +23,10 @@ StageDisposition = Literal[
 ]
 
 
-class PipelineStageDeclaration(ContractModel):
+class _PipelineStageDeclaration(ContractModel):
     name: Annotated[str, Field(min_length=1, max_length=100)]
     ordinal: Annotated[int, Field(ge=0, le=99)]
     predecessor: str | None = None
-    status: Literal["available", "cached", "skipped", "unavailable", "failed"]
-    registration_id: str | None = None
     format: Annotated[str, Field(min_length=1, max_length=100)]
     format_schema: Annotated[str, Field(min_length=1, max_length=100)]
     extractor: str | None = None
@@ -38,9 +36,7 @@ class PipelineStageDeclaration(ContractModel):
     limitations: Annotated[tuple[str, ...], Field(max_length=20)] = ()
 
     @model_validator(mode="after")
-    def complete_stage_contract(self) -> PipelineStageDeclaration:
-        if (self.status in {"available", "cached"}) != (self.registration_id is not None):
-            raise ValueError("available or cached stages require exactly one artifact registration")
+    def complete_structural_summary(self) -> _PipelineStageDeclaration:
         supplied = (
             self.extractor is not None,
             self.extractor_version is not None,
@@ -51,6 +47,22 @@ class PipelineStageDeclaration(ContractModel):
         if self.structural_summary is not None:
             _validate_bounded_json(self.structural_summary)
         return self
+
+
+class RegisteredPipelineStageDeclaration(_PipelineStageDeclaration):
+    status: Literal["available", "cached"]
+    registration_id: str
+
+
+class UnregisteredPipelineStageDeclaration(_PipelineStageDeclaration):
+    status: Literal["skipped", "unavailable", "failed"]
+    registration_id: None = None
+
+
+type PipelineStageDeclaration = Annotated[
+    RegisteredPipelineStageDeclaration | UnregisteredPipelineStageDeclaration,
+    Field(discriminator="status"),
+]
 
 
 class RegisterPipelineRequest(ContractModel):
@@ -78,15 +90,10 @@ class RegisterPipelineRequest(ContractModel):
         return self
 
 
-class PipelineStage(ContractModel):
+class _PipelineStage(ContractModel):
     name: str
     ordinal: int
     predecessor: str | None
-    status: str
-    registration_id: str | None
-    artifact_id: str | None
-    artifact_length: int | None
-    sensitivity: str | None
     format: str
     format_schema: str
     producer: str
@@ -96,6 +103,28 @@ class PipelineStage(ContractModel):
     structural_summary: dict[str, JsonValue] | None
     elapsed_ns: int | None
     limitations: tuple[str, ...]
+
+
+class RegisteredPipelineStage(_PipelineStage):
+    status: Literal["available", "cached"]
+    registration_id: str
+    artifact_id: str
+    artifact_length: int
+    sensitivity: str
+
+
+class UnregisteredPipelineStage(_PipelineStage):
+    status: Literal["skipped", "unavailable", "failed"]
+    registration_id: Literal[None] = None
+    artifact_id: Literal[None] = None
+    artifact_length: Literal[None] = None
+    sensitivity: Literal[None] = None
+
+
+type PipelineStage = Annotated[
+    RegisteredPipelineStage | UnregisteredPipelineStage,
+    Field(discriminator="status"),
+]
 
 
 class ArtifactPipeline(ContractModel):
@@ -113,18 +142,58 @@ class ArtifactPipeline(ContractModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
-class PipelineStageComparison(ContractModel):
+class _PipelineStageComparison(ContractModel):
     stage_name: str
-    baseline_ordinal: int | None
-    candidate_ordinal: int | None
-    disposition: StageDisposition
+    limitations: tuple[str, ...] = ()
+
+
+class AddedPipelineStageComparison(_PipelineStageComparison):
+    baseline_ordinal: Literal[None] = None
+    candidate_ordinal: int
+    disposition: Literal["added"] = "added"
+    baseline_artifact_id: Literal[None] = None
+    candidate_artifact_id: str | None = None
+    artifact_length_change: Literal[None] = None
+    extraction_short_circuited: Literal[False] = False
+    baseline_summary: Literal[None] = None
+    candidate_summary: Literal[None] = None
+
+
+class MissingPipelineStageComparison(_PipelineStageComparison):
+    baseline_ordinal: int
+    candidate_ordinal: Literal[None] = None
+    disposition: Literal["missing"] = "missing"
+    baseline_artifact_id: str | None = None
+    candidate_artifact_id: Literal[None] = None
+    artifact_length_change: Literal[None] = None
+    extraction_short_circuited: Literal[False] = False
+    baseline_summary: Literal[None] = None
+    candidate_summary: Literal[None] = None
+
+
+class PairedPipelineStageComparison(_PipelineStageComparison):
+    baseline_ordinal: int
+    candidate_ordinal: int
+    disposition: Literal[
+        "identical",
+        "changed",
+        "content_changed",
+        "reordered",
+        "incompatible",
+        "uninspectable",
+    ]
     baseline_artifact_id: str | None = None
     candidate_artifact_id: str | None = None
     artifact_length_change: int | None = None
     extraction_short_circuited: bool = False
     baseline_summary: dict[str, JsonValue] | None = None
     candidate_summary: dict[str, JsonValue] | None = None
-    limitations: tuple[str, ...] = ()
+
+
+type PipelineStageComparison = Annotated[
+    AddedPipelineStageComparison | MissingPipelineStageComparison | PairedPipelineStageComparison,
+    Field(discriminator="disposition"),
+]
 
 
 class PipelineComparison(ContractModel):
@@ -166,31 +235,31 @@ class ArtifactPipelineService:
         registrations = {item.registration_id: item for item in run.artifacts}
         stages: list[PipelineStage] = []
         for declaration in request.stages:
-            registration = (
-                registrations.get(declaration.registration_id)
-                if declaration.registration_id is not None
-                else None
-            )
-            if declaration.registration_id is not None and registration is None:
-                raise DomainError(
-                    ErrorCode.WORKSPACE_INVALID,
-                    f"Artifact registration {declaration.registration_id!r} is not on the run.",
-                )
-            content = (
-                self.artifacts.get(registration.artifact_id).content
-                if registration is not None
-                else None
-            )
-            stages.append(
-                PipelineStage(
+            if isinstance(declaration, RegisteredPipelineStageDeclaration):
+                registration = registrations.get(declaration.registration_id)
+                if registration is None:
+                    raise DomainError(
+                        ErrorCode.WORKSPACE_INVALID,
+                        f"Artifact registration {declaration.registration_id!r} is not on the run.",
+                    )
+                content = self.artifacts.get(registration.artifact_id).content
+                stage: PipelineStage = RegisteredPipelineStage(
                     **declaration.model_dump(),
-                    artifact_id=registration.artifact_id if registration else None,
-                    artifact_length=content.byte_length if content else None,
-                    sensitivity=registration.sensitivity.value if registration else None,
+                    artifact_id=registration.artifact_id,
+                    artifact_length=content.byte_length,
+                    sensitivity=registration.sensitivity.value,
                     producer=request.producer,
                     producer_version=request.producer_version,
                 )
-            )
+            elif isinstance(declaration, UnregisteredPipelineStageDeclaration):
+                stage = UnregisteredPipelineStage(
+                    **declaration.model_dump(),
+                    producer=request.producer,
+                    producer_version=request.producer_version,
+                )
+            else:
+                assert_never(declaration)
+            stages.append(stage)
         identity = {
             **request.model_dump(mode="json"),
             "source_state_id": run.source_state_id,
@@ -277,7 +346,25 @@ class ArtifactPipelineService:
         for name in ordered_names:
             left = baseline_by_name.get(name)
             right = candidate_by_name.get(name)
-            stages.append(self._compare_stage(name, left, right, compatibility))
+            if left is None:
+                added = candidate_by_name[name]
+                stages.append(
+                    AddedPipelineStageComparison(
+                        stage_name=name,
+                        candidate_ordinal=added.ordinal,
+                        candidate_artifact_id=added.artifact_id,
+                    )
+                )
+            elif right is None:
+                stages.append(
+                    MissingPipelineStageComparison(
+                        stage_name=name,
+                        baseline_ordinal=left.ordinal,
+                        baseline_artifact_id=left.artifact_id,
+                    )
+                )
+            else:
+                stages.append(self._compare_paired_stage(name, left, right, compatibility))
         first_divergence = None
         if compatibility == "compatible":
             for stage in stages:
@@ -371,29 +458,12 @@ class ArtifactPipelineService:
         return created
 
     @staticmethod
-    def _compare_stage(
+    def _compare_paired_stage(
         name: str,
-        left: PipelineStage | None,
-        right: PipelineStage | None,
+        left: PipelineStage,
+        right: PipelineStage,
         compatibility: str,
-    ) -> PipelineStageComparison:
-        if left is None:
-            assert right is not None
-            return PipelineStageComparison(
-                stage_name=name,
-                baseline_ordinal=None,
-                candidate_ordinal=right.ordinal,
-                disposition="added",
-                candidate_artifact_id=right.artifact_id,
-            )
-        if right is None:
-            return PipelineStageComparison(
-                stage_name=name,
-                baseline_ordinal=left.ordinal,
-                candidate_ordinal=None,
-                disposition="missing",
-                baseline_artifact_id=left.artifact_id,
-            )
+    ) -> PairedPipelineStageComparison:
         disposition: StageDisposition
         stage_limitations = (*left.limitations, *right.limitations)
         incompatible = (
@@ -427,7 +497,7 @@ class ArtifactPipelineService:
                 if left.structural_summary == right.structural_summary
                 else "changed"
             )
-        return PipelineStageComparison(
+        return PairedPipelineStageComparison(
             stage_name=name,
             baseline_ordinal=left.ordinal,
             candidate_ordinal=right.ordinal,

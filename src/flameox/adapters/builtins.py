@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from flameox.adapters.torch_profiler import torch_profiler_options
+from flameox.adapters.torch_profiler import SdkTorchProfilerOptions, torch_profiler_options
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 
 DependencyKind = Literal["internal", "executable", "package"]
@@ -443,7 +443,7 @@ def _torch_capture_invocation(
         if expensive_features
         else "Operator tracing without shapes, memory, stacks, FLOPs, or modules."
     )
-    if selected.mode == "sdk":
+    if isinstance(selected, SdkTorchProfilerOptions):
         return CaptureInvocation(
             argv=workload_argv,
             artifact_kinds=adapter.artifact_kinds,

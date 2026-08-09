@@ -1,21 +1,49 @@
 from __future__ import annotations
 
-import json
 import secrets
 import shutil
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Annotated, Any, Literal, TypeVar, cast
 
-from pydantic import JsonValue
+from pydantic import ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
 from flameox.atomic import atomic_write_json
 from flameox.domain import DomainError, ErrorCode
 from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
+from flameox.models import ContractModel
 from flameox.storage import Workspace
 
 T = TypeVar("T")
+
+
+class WorkerSuccess(ContractModel):
+    """A successful worker envelope with worker-specific JSON payload fields."""
+
+    model_config = ConfigDict(extra="allow", frozen=True, validate_default=True)
+
+    ok: Literal[True]
+    __pydantic_extra__: dict[str, JsonValue] = Field(init=False)
+
+    def payload(self) -> dict[str, JsonValue]:
+        return {"ok": self.ok, **self.__pydantic_extra__}
+
+
+class WorkerFailure(ContractModel):
+    """A failed worker envelope whose code remains part of the IPC contract."""
+
+    ok: Literal[False]
+    code: ErrorCode
+    message: str
+
+
+type WorkerResponse = Annotated[
+    WorkerSuccess | WorkerFailure,
+    Field(discriminator="ok"),
+]
+
+_WORKER_RESPONSE: TypeAdapter[WorkerResponse] = TypeAdapter(WorkerResponse)
 
 
 class ArtifactWorker:
@@ -157,22 +185,12 @@ class ArtifactWorker:
                 details={"byte_length": response_size, "max_bytes": response_limit},
             )
         try:
-            payload = json.loads(response_path.read_text())
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            response = _WORKER_RESPONSE.validate_json(response_path.read_text())
+        except (OSError, ValidationError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
                 f"{name} worker response is invalid.",
             ) from exc
-        if not isinstance(payload, dict):
-            raise DomainError(
-                ErrorCode.ARTIFACT_PARSE_FAILED,
-                f"{name} worker response is invalid.",
-            )
-        if payload.get("ok") is not True:
-            raw_code = payload.get("code")
-            try:
-                code = ErrorCode(str(raw_code))
-            except ValueError:
-                code = ErrorCode.INTERNAL_ERROR
-            raise DomainError(code, str(payload.get("message", f"{name} worker failed.")))
-        return payload
+        if isinstance(response, WorkerFailure):
+            raise DomainError(response.code, response.message)
+        return cast(dict[str, Any], response.payload())

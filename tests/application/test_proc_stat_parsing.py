@@ -12,9 +12,9 @@ from flameox.domain import (
     CaptureStatus,
     ExecutionStatus,
     RunManifest,
-    RunType,
     ValidationStatus,
 )
+from flameox.domain.models import ExecutionRunManifest
 from flameox.storage import RunStore, Workspace
 
 DIGEST = "sha256:" + ("a" * 64)
@@ -33,9 +33,8 @@ def _write_proc_record(root: Path, pid: int, comm: str, starttime: str) -> None:
 
 
 def _running_run(run_id: str, pid: int, starttime: str, boot_id: str) -> RunManifest:
-    return RunManifest(
+    return ExecutionRunManifest(
         run_id=run_id,
-        run_type=RunType.EXECUTION,
         execution_status=ExecutionStatus.RUNNING,
         capture_status=CaptureStatus.RUNNING,
         validation_status=ValidationStatus.PENDING,

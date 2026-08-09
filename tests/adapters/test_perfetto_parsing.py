@@ -12,9 +12,9 @@ from flameox.application import (
     ArtifactService,
     DrilldownService,
     EvidenceLookupService,
+    HotspotAnalysisRequest,
     ImportArtifactRequest,
     ImportService,
-    MaterializeAnalysisRequest,
     NativeViewerService,
 )
 from flameox.catalog import Catalog
@@ -86,7 +86,7 @@ async def test_perfetto_extractor_uses_local_binary_and_curated_query(
     result = await PerfettoExtractor(workspace).extract(imported.run.run_id)
     hotspots = RecipeService(workspace).hotspots(imported.run.run_id)
     materialized = AnalysisMaterializationService(workspace).record(
-        MaterializeAnalysisRequest(
+        HotspotAnalysisRequest(
             recipe="hotspots",
             input_id=imported.run.run_id,
             limit=10,

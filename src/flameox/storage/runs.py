@@ -4,7 +4,7 @@ from pathlib import Path
 
 from flameox.atomic import atomic_write_json
 from flameox.domain.errors import DomainError, ErrorCode
-from flameox.domain.models import RunManifest
+from flameox.domain.models import RunManifest, parse_run_manifest_json
 from flameox.storage.workspace import Workspace
 
 
@@ -32,9 +32,7 @@ class RunStore:
 
     def read(self, run_id: str) -> RunManifest:
         try:
-            return RunManifest.model_validate_json(
-                (self._run_root(run_id) / "manifest.json").read_text()
-            )
+            return parse_run_manifest_json((self._run_root(run_id) / "manifest.json").read_text())
         except FileNotFoundError as exc:
             raise DomainError(
                 ErrorCode.RUN_NOT_FOUND,
@@ -90,7 +88,7 @@ class RunStore:
     def _write_revision(self, manifest: RunManifest) -> None:
         path = self._run_root(manifest.run_id) / "revisions" / f"{manifest.revision:08d}.json"
         if path.exists():
-            existing = RunManifest.model_validate_json(path.read_text())
+            existing = parse_run_manifest_json(path.read_text())
             if existing != manifest:
                 raise DomainError(
                     ErrorCode.ARTIFACT_INTEGRITY_FAILED,

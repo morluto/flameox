@@ -6,10 +6,23 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from flameox.application.native_reducer import (
+    BinaryChunkPartitioning,
     NativeDdminReducer,
     NativePredicateClassification,
     NativeReductionLimits,
+    StructuredPartitioning,
 )
+
+
+def test_binary_partitioning_carries_its_required_chunk_size() -> None:
+    reducer = NativeDdminReducer(BinaryChunkPartitioning(chunk_size=2))
+
+    result = reducer.reduce(
+        b"KEEPxx", lambda payload: "interesting" if b"KEEP" in payload else "not_interesting"
+    )
+
+    assert result.final_payload == b"KEEP"
+    assert result.minimality == "one_minimal"
 
 
 @settings(max_examples=20, deadline=None)
@@ -34,7 +47,7 @@ def test_text_reduction_is_deterministic_and_preserves_interesting_candidates(
         return "interesting" if b"KEEP\n" in payload else "not_interesting"
 
     reducer = NativeDdminReducer(
-        "text_lines",
+        StructuredPartitioning(partitioner="text_lines"),
         limits=NativeReductionLimits(max_attempts=100, wall_time_seconds=5),
     )
     first = reducer.reduce(original, predicate)
@@ -66,7 +79,7 @@ def test_text_reduction_is_deterministic_and_preserves_interesting_candidates(
 
 
 def test_unresolved_candidates_are_never_accepted() -> None:
-    result = NativeDdminReducer("text_lines").reduce(
+    result = NativeDdminReducer(StructuredPartitioning(partitioner="text_lines")).reduce(
         b"KEEP\nother\n", lambda _payload: "unresolved"
     )
 
@@ -76,7 +89,7 @@ def test_unresolved_candidates_are_never_accepted() -> None:
 
 
 def test_single_unit_reduction_tests_empty_selection() -> None:
-    result = NativeDdminReducer("text_lines").reduce(
+    result = NativeDdminReducer(StructuredPartitioning(partitioner="text_lines")).reduce(
         b"KEEP\n",
         lambda _payload: "interesting",
     )
@@ -88,7 +101,7 @@ def test_single_unit_reduction_tests_empty_selection() -> None:
 
 def test_json_normalization_incompatibility_preserves_original() -> None:
     original = b'{ "keep": true, "discard": false }'
-    result = NativeDdminReducer("json_top_level").reduce(
+    result = NativeDdminReducer(StructuredPartitioning(partitioner="json_top_level")).reduce(
         original,
         lambda payload: "interesting" if payload == original else "not_interesting",
     )
@@ -111,7 +124,7 @@ def test_chrome_trace_duration_dependencies_are_kept_together() -> None:
         },
         separators=(",", ":"),
     ).encode()
-    result = NativeDdminReducer("chrome_trace_events").reduce(
+    result = NativeDdminReducer(StructuredPartitioning(partitioner="chrome_trace_events")).reduce(
         original,
         lambda payload: "interesting" if b'"name":"end"' in payload else "not_interesting",
     )

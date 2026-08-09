@@ -12,6 +12,7 @@ from flameox.analysis.recipe_models import (
     WritableRootObservation,
 )
 from flameox.catalog import Snapshot
+from flameox.evidence import numeric_value_from_columns
 from flameox.evidence_scope import EvidenceScope, resolve_evidence_scope
 from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
 
@@ -290,8 +291,11 @@ class HotspotRecipes(RecipeContext):
             measurements=tuple(
                 MeasurementSummary(
                     name=row[0],
-                    value_int=row[1],
-                    value_float=row[2],
+                    value=numeric_value_from_columns(
+                        row[1],
+                        row[2],
+                        field_name="memory measurement value",
+                    ),
                     unit=row[3],
                     aggregation=row[4],
                     scope=row[5],

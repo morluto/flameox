@@ -276,7 +276,9 @@ hierarchy, and the full bounded schedule. Whole-entrypoint mode rejects a
 schedule because an external launcher cannot infer iteration boundaries. SDK
 mode requires an explicit schedule and an approved workload using
 `flameox.sdk.torch_profiler()`; the yielded session exposes `step()` and a
-trace-visible `phase()` range. Every active cycle is exported to a distinct
+trace-visible `phase()` range. These are parsed as separate option variants, so
+the launcher never receives a nullable schedule paired with a mode flag. Every
+active cycle is exported to a distinct
 planned filename and registered with a cycle role. Missing, extra, empty, or
 overwritten cycle outputs fail the native-output publication gate.
 Normalize a multi-cycle run by calling `extract_perfetto` once per exact trace

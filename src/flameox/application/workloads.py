@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import tomllib
+from collections.abc import Mapping
 from ipaddress import ip_address
 from pathlib import Path, PurePath
 from string import Formatter
@@ -11,7 +12,15 @@ from typing import Annotated, Literal, cast
 from urllib.parse import urlsplit
 
 import tomlkit
-from pydantic import Field, JsonValue, model_validator
+from pydantic import (
+    Discriminator,
+    Field,
+    JsonValue,
+    Tag,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 from tomlkit.exceptions import ParseError
 from tomlkit.items import Table
 
@@ -129,83 +138,224 @@ class WorkloadConfig(ContractModel):
         return self
 
 
-class ExperimentConfig(ContractModel):
+class _CommonExperimentConfig(ContractModel):
     workload: str
-    # These fields remain readable for schema-1 workspaces. New configurations
-    # should use factors/treatment_factor; planning projects the legacy shape
-    # into the same factor representation below.
-    variants: Annotated[tuple[str, ...], Field(max_length=16)] = ()
     design: Literal[
         "randomized_complete_blocks",
         "randomized",
         "fixed_order",
     ] = "randomized_complete_blocks"
     blocks: Annotated[int, Field(gt=0, le=1_000)] = 1
-    factors: dict[str, Annotated[tuple[Scalar, ...], Field(min_length=1, max_length=32)]] = Field(
-        default_factory=dict, max_length=8
-    )
-    combination_policy: Literal["cartesian", "explicit"] = "cartesian"
-    combinations: Annotated[tuple[dict[str, Scalar], ...], Field(max_length=10_000)] = ()
-    exclude: Annotated[tuple[dict[str, Scalar], ...], Field(max_length=1_000)] = ()
-    treatment_factor: str | None = None
     max_trials: Annotated[int, Field(gt=0, le=100_000)] = 10_000
-    analysis: Literal["performance", "outcome"] = "performance"
-    outcome_goal: Literal["equivalence", "absence_of_failure", "bounded_rate"] | None = None
-    minimum_attempts: Annotated[int, Field(gt=0, le=1_000)] | None = None
-    maximum_attempts: Annotated[int, Field(gt=0, le=1_000)] | None = None
     primary_metric: str = "categorical_outcome"
     polarity: Literal["lower_is_better", "higher_is_better", "neutral"] = "neutral"
     estimand: str = "median_paired_log_ratio"
     practical_threshold: Annotated[float, Field(ge=0)] = 0
     confidence_level: Annotated[float, Field(gt=0, lt=1)] = 0.95
     random_seed: Annotated[int, Field(ge=0)] = 0
-    scaling_parameter: str | None = None
-    scaling_values: Annotated[tuple[Scalar, ...], Field(max_length=1_000)] = ()
 
-    @model_validator(mode="after")
-    def valid_design(self) -> ExperimentConfig:
-        if self.primary_metric.startswith("runtime_resource.") and (
-            self.primary_metric not in RUNTIME_RESOURCE_METRICS
-        ):
+    @field_validator("primary_metric")
+    @classmethod
+    def runtime_resource_metric_is_known(cls, value: str) -> str:
+        if value.startswith("runtime_resource.") and value not in RUNTIME_RESOURCE_METRICS:
             raise ValueError(
                 "runtime-resource primary_metric must be one of "
                 "runtime_resource.peak_rss_bytes, runtime_resource.minimum_free_bytes, "
                 "or runtime_resource.staging_growth_bytes"
             )
-        if self.factors:
-            if self.variants or self.scaling_parameter is not None or self.scaling_values:
-                raise ValueError("factor experiments cannot use legacy variant or scaling fields")
-            if self.treatment_factor not in self.factors:
-                raise ValueError("factor experiments require a declared treatment_factor")
-            if self.combination_policy == "cartesian" and self.combinations:
-                raise ValueError("cartesian experiments cannot declare explicit combinations")
-            if self.combination_policy == "explicit" and not self.combinations:
-                raise ValueError("explicit experiments require combinations")
-        else:
-            if not self.variants:
-                raise ValueError("experiments require at least one factor or legacy variants")
-            if len(set(self.variants)) != len(self.variants):
-                raise ValueError("experiment variants must be unique")
-            if self.combinations or self.exclude or self.treatment_factor is not None:
-                raise ValueError("combination fields require factors")
-            if bool(self.scaling_parameter) != bool(self.scaling_values):
-                raise ValueError("scaling_parameter and scaling_values must be declared together")
-            if len(set(self.scaling_values)) != len(self.scaling_values):
-                raise ValueError("experiment scaling values must be unique")
-        if self.analysis == "outcome":
-            if self.outcome_goal is None:
-                raise ValueError("outcome experiments require outcome_goal")
-            minimum = self.minimum_attempts or self.blocks
-            maximum = self.maximum_attempts or self.blocks
-            if minimum > self.blocks or maximum < self.blocks or minimum > maximum:
-                raise ValueError("fixed blocks must lie within declared attempt bounds")
-        elif (
-            self.outcome_goal is not None
-            or self.minimum_attempts is not None
-            or self.maximum_attempts is not None
-        ):
-            raise ValueError("outcome settings require analysis='outcome'")
+        return value
+
+
+class _FactorExperimentConfig(_CommonExperimentConfig):
+    # Empty legacy fields remain in the wire model so existing config digests
+    # and schema-1 round trips retain their shape.
+    variants: Annotated[tuple[Scalar, ...], Field(max_length=0)] = ()
+    factors: dict[str, Annotated[tuple[Scalar, ...], Field(min_length=1, max_length=32)]] = Field(
+        min_length=1,
+        max_length=8,
+    )
+    exclude: Annotated[tuple[dict[str, Scalar], ...], Field(max_length=1_000)] = ()
+    treatment_factor: str
+    scaling_parameter: Literal[None] = None
+    scaling_values: Annotated[tuple[Scalar, ...], Field(max_length=0)] = ()
+
+    @model_validator(mode="after")
+    def treatment_is_declared(self) -> _FactorExperimentConfig:
+        if self.treatment_factor not in self.factors:
+            raise ValueError("factor experiments require a declared treatment_factor")
         return self
+
+
+class _CartesianFactorExperimentConfig(_FactorExperimentConfig):
+    combination_policy: Literal["cartesian"] = "cartesian"
+    combinations: Annotated[tuple[dict[str, Scalar], ...], Field(max_length=0)] = ()
+
+
+class _ExplicitFactorExperimentConfig(_FactorExperimentConfig):
+    combination_policy: Literal["explicit"]
+    combinations: Annotated[
+        tuple[dict[str, Scalar], ...],
+        Field(min_length=1, max_length=10_000),
+    ]
+
+
+class _LegacyExperimentConfig(_CommonExperimentConfig):
+    # Legacy variants remain a supported schema-1 input. Parsing gives them a
+    # distinct type before planning projects them into the factor model.
+    variants: Annotated[tuple[str, ...], Field(min_length=1, max_length=16)]
+    factors: Annotated[dict[str, tuple[Scalar, ...]], Field(max_length=0)] = Field(
+        default_factory=dict
+    )
+    combination_policy: Literal["cartesian"] = "cartesian"
+    combinations: Annotated[tuple[dict[str, Scalar], ...], Field(max_length=0)] = ()
+    exclude: Annotated[tuple[dict[str, Scalar], ...], Field(max_length=0)] = ()
+    treatment_factor: Literal[None] = None
+
+    @field_validator("variants")
+    @classmethod
+    def variants_are_unique(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("experiment variants must be unique")
+        return value
+
+
+class _UnscaledLegacyExperimentConfig(_LegacyExperimentConfig):
+    scaling_parameter: Literal[None] = None
+    scaling_values: Annotated[tuple[Scalar, ...], Field(max_length=0)] = ()
+
+
+class _ScaledLegacyExperimentConfig(_LegacyExperimentConfig):
+    scaling_parameter: str
+    scaling_values: Annotated[tuple[Scalar, ...], Field(min_length=1, max_length=1_000)]
+
+    @field_validator("scaling_values")
+    @classmethod
+    def scaling_values_are_unique(cls, value: tuple[Scalar, ...]) -> tuple[Scalar, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("experiment scaling values must be unique")
+        return value
+
+
+class _PerformanceExperimentConfig(_CommonExperimentConfig):
+    analysis: Literal["performance"] = "performance"
+    outcome_goal: Literal[None] = None
+    minimum_attempts: Literal[None] = None
+    maximum_attempts: Literal[None] = None
+
+
+class _OutcomeExperimentConfig(_CommonExperimentConfig):
+    analysis: Literal["outcome"]
+    outcome_goal: Literal["equivalence", "absence_of_failure", "bounded_rate"]
+    minimum_attempts: Annotated[int, Field(gt=0, le=1_000)] | None = None
+    maximum_attempts: Annotated[int, Field(gt=0, le=1_000)] | None = None
+
+    @model_validator(mode="after")
+    def fixed_blocks_fit_attempt_bounds(self) -> _OutcomeExperimentConfig:
+        minimum = self.minimum_attempts or self.blocks
+        maximum = self.maximum_attempts or self.blocks
+        if minimum > self.blocks or maximum < self.blocks or minimum > maximum:
+            raise ValueError("fixed blocks must lie within declared attempt bounds")
+        return self
+
+
+class _CartesianFactorPerformanceExperimentConfig(
+    _CartesianFactorExperimentConfig,
+    _PerformanceExperimentConfig,
+):
+    pass
+
+
+class _CartesianFactorOutcomeExperimentConfig(
+    _CartesianFactorExperimentConfig,
+    _OutcomeExperimentConfig,
+):
+    pass
+
+
+class _ExplicitFactorPerformanceExperimentConfig(
+    _ExplicitFactorExperimentConfig,
+    _PerformanceExperimentConfig,
+):
+    pass
+
+
+class _ExplicitFactorOutcomeExperimentConfig(
+    _ExplicitFactorExperimentConfig,
+    _OutcomeExperimentConfig,
+):
+    pass
+
+
+class _UnscaledLegacyPerformanceExperimentConfig(
+    _UnscaledLegacyExperimentConfig,
+    _PerformanceExperimentConfig,
+):
+    pass
+
+
+class _UnscaledLegacyOutcomeExperimentConfig(
+    _UnscaledLegacyExperimentConfig,
+    _OutcomeExperimentConfig,
+):
+    pass
+
+
+class _ScaledLegacyPerformanceExperimentConfig(
+    _ScaledLegacyExperimentConfig,
+    _PerformanceExperimentConfig,
+):
+    pass
+
+
+class _ScaledLegacyOutcomeExperimentConfig(
+    _ScaledLegacyExperimentConfig,
+    _OutcomeExperimentConfig,
+):
+    pass
+
+
+def _experiment_config_kind(value: object) -> str:
+    if isinstance(value, Mapping):
+        analysis = value.get("analysis", "performance")
+        if value.get("factors"):
+            shape = f"factor_{value.get('combination_policy', 'cartesian')}"
+        elif value.get("scaling_parameter") is not None or value.get("scaling_values"):
+            shape = "legacy_scaled"
+        else:
+            shape = "legacy_unscaled"
+        return f"{shape}_{analysis}"
+
+    analysis = "outcome" if isinstance(value, _OutcomeExperimentConfig) else "performance"
+    if isinstance(value, _ExplicitFactorExperimentConfig):
+        shape = "factor_explicit"
+    elif isinstance(value, _CartesianFactorExperimentConfig):
+        shape = "factor_cartesian"
+    elif isinstance(value, _ScaledLegacyExperimentConfig):
+        shape = "legacy_scaled"
+    else:
+        shape = "legacy_unscaled"
+    return f"{shape}_{analysis}"
+
+
+type ExperimentConfig = Annotated[
+    Annotated[_CartesianFactorPerformanceExperimentConfig, Tag("factor_cartesian_performance")]
+    | Annotated[_CartesianFactorOutcomeExperimentConfig, Tag("factor_cartesian_outcome")]
+    | Annotated[_ExplicitFactorPerformanceExperimentConfig, Tag("factor_explicit_performance")]
+    | Annotated[_ExplicitFactorOutcomeExperimentConfig, Tag("factor_explicit_outcome")]
+    | Annotated[_UnscaledLegacyPerformanceExperimentConfig, Tag("legacy_unscaled_performance")]
+    | Annotated[_UnscaledLegacyOutcomeExperimentConfig, Tag("legacy_unscaled_outcome")]
+    | Annotated[_ScaledLegacyPerformanceExperimentConfig, Tag("legacy_scaled_performance")]
+    | Annotated[_ScaledLegacyOutcomeExperimentConfig, Tag("legacy_scaled_outcome")],
+    Discriminator(_experiment_config_kind),
+]
+
+_EXPERIMENT_CONFIG_ADAPTER: TypeAdapter[ExperimentConfig] = TypeAdapter(ExperimentConfig)
+
+
+def parse_experiment_config(value: object) -> ExperimentConfig:
+    """Parse a flat schema-1 experiment into its single legal configuration case."""
+
+    return _EXPERIMENT_CONFIG_ADAPTER.validate_python(value)
 
 
 class LatencyFault(ContractModel):
@@ -326,18 +476,7 @@ class FaultExperimentConfig(ContractModel):
         return self
 
 
-class InferenceServerConfig(ContractModel):
-    """A declared inference server target for replay scenarios.
-
-    The first slice supports only vLLM. A ``managed`` server is launched through
-    a declared flameox workload; an ``existing_local`` server is a loopback
-    endpoint Flameox probes but never starts.
-    """
-
-    provider: Literal["vllm", "sglang"] = "vllm"
-    benchmark_python: str | None = None
-    mode: Literal["managed", "existing_local"]
-    workload: str | None = None
+class _CommonInferenceServerConfig(ContractModel):
     base_url: str = "http://127.0.0.1:8000"
     model: Annotated[str, Field(min_length=1, max_length=500)]
     model_revision: Annotated[str, Field(min_length=1, max_length=200)] | None = None
@@ -345,88 +484,194 @@ class InferenceServerConfig(ContractModel):
     tokenizer_revision: Annotated[str, Field(min_length=1, max_length=200)] | None = None
     quantization: Annotated[str, Field(min_length=1, max_length=100)] | None = None
 
-    @model_validator(mode="after")
-    def mode_fields_are_consistent(self) -> InferenceServerConfig:
-        if self.provider == "sglang":
-            if self.benchmark_python is None or not Path(self.benchmark_python).is_absolute():
-                raise ValueError(
-                    "sglang inference servers require an absolute benchmark_python launcher"
-                )
-            if urlsplit(self.base_url).path not in ("", "/"):
-                raise ValueError("sglang inference servers require a root base_url in v1")
-        elif self.benchmark_python is not None:
-            raise ValueError("benchmark_python is only supported by sglang inference servers")
-        if self.mode == "managed":
-            if self.workload is None:
-                raise ValueError("managed inference servers require a workload")
-            # Managed servers are bind-probed by the broker, which deliberately
-            # accepts an IP literal so it can prove ownership of the endpoint.
-            # Keep the configuration contract aligned with that lifecycle.
-            hostname = urlsplit(self.base_url).hostname
-            if hostname is not None and hostname.lower() == "localhost":
-                raise ValueError(
-                    "managed inference servers require an IP-literal loopback base_url"
-                )
-        else:
-            if self.workload is not None:
-                raise ValueError("existing_local inference servers do not declare a workload")
-        _loopback_http_url(self.base_url)
-        return self
+    @field_validator("base_url")
+    @classmethod
+    def base_url_is_loopback_http(cls, value: str) -> str:
+        _loopback_http_url(value)
+        return value
 
 
-class InferenceScenarioConfig(ContractModel):
-    """A declared replay scenario binding a server and maintained provider.
+class _VllmInferenceServerConfig(_CommonInferenceServerConfig):
+    provider: Literal["vllm"] = "vllm"
+    benchmark_python: Literal[None] = None
+
+
+class _SglangInferenceServerConfig(_CommonInferenceServerConfig):
+    provider: Literal["sglang"]
+    benchmark_python: str
+
+    @field_validator("benchmark_python")
+    @classmethod
+    def benchmark_launcher_is_absolute(cls, value: str) -> str:
+        if not Path(value).is_absolute():
+            raise ValueError(
+                "sglang inference servers require an absolute benchmark_python launcher"
+            )
+        return value
+
+    @field_validator("base_url")
+    @classmethod
+    def base_url_is_root(cls, value: str) -> str:
+        if urlsplit(value).path not in ("", "/"):
+            raise ValueError("sglang inference servers require a root base_url in v1")
+        return value
+
+
+class _ManagedInferenceServerConfig(_CommonInferenceServerConfig):
+    mode: Literal["managed"]
+    workload: str
+
+    @field_validator("base_url")
+    @classmethod
+    def base_url_uses_ip_literal(cls, value: str) -> str:
+        # Managed servers are bind-probed by the broker, which deliberately
+        # accepts an IP literal so it can prove ownership of the endpoint.
+        hostname = urlsplit(value).hostname
+        if hostname is not None and hostname.lower() == "localhost":
+            raise ValueError("managed inference servers require an IP-literal loopback base_url")
+        return value
+
+
+class _ExistingLocalInferenceServerConfig(_CommonInferenceServerConfig):
+    mode: Literal["existing_local"]
+    workload: Literal[None] = None
+
+
+class _ManagedVllmInferenceServerConfig(
+    _ManagedInferenceServerConfig,
+    _VllmInferenceServerConfig,
+):
+    pass
+
+
+class _ExistingLocalVllmInferenceServerConfig(
+    _ExistingLocalInferenceServerConfig,
+    _VllmInferenceServerConfig,
+):
+    pass
+
+
+class _ManagedSglangInferenceServerConfig(
+    _ManagedInferenceServerConfig,
+    _SglangInferenceServerConfig,
+):
+    pass
+
+
+class _ExistingLocalSglangInferenceServerConfig(
+    _ExistingLocalInferenceServerConfig,
+    _SglangInferenceServerConfig,
+):
+    pass
+
+
+def _inference_server_config_kind(value: object) -> str:
+    if isinstance(value, Mapping):
+        return f"{value.get('provider', 'vllm')}_{value.get('mode')}"
+    provider = "sglang" if isinstance(value, _SglangInferenceServerConfig) else "vllm"
+    mode = "managed" if isinstance(value, _ManagedInferenceServerConfig) else "existing_local"
+    return f"{provider}_{mode}"
+
+
+type InferenceServerConfig = Annotated[
+    Annotated[_ManagedVllmInferenceServerConfig, Tag("vllm_managed")]
+    | Annotated[_ExistingLocalVllmInferenceServerConfig, Tag("vllm_existing_local")]
+    | Annotated[_ManagedSglangInferenceServerConfig, Tag("sglang_managed")]
+    | Annotated[_ExistingLocalSglangInferenceServerConfig, Tag("sglang_existing_local")],
+    Discriminator(_inference_server_config_kind),
+]
+
+_INFERENCE_SERVER_CONFIG_ADAPTER: TypeAdapter[InferenceServerConfig] = TypeAdapter(
+    InferenceServerConfig
+)
+
+
+def parse_inference_server_config(value: object) -> InferenceServerConfig:
+    """Parse a flat server declaration into one provider/lifecycle case."""
+
+    return _INFERENCE_SERVER_CONFIG_ADAPTER.validate_python(value)
+
+
+class _CommonInferenceScenarioConfig(ContractModel):
+    """Fields shared by every maintained inference replay provider.
 
     Trace input, repetition, and timing-scale parameters are bounded and
     forward-compatible with the maintained AIPerf and vLLM bench providers.
     """
 
     server: str
-    provider: Literal["aiperf", "vllm_bench", "sglang_bench"]
     endpoint_type: Literal["chat", "completions"] = "chat"
-    streaming: bool = True
-    trace_artifact_id: Digest | None = None
     num_prompts: Annotated[int, Field(gt=0, le=10_000_000)] = 1
     concurrency: Annotated[int, Field(gt=0, le=100_000)] | None = None
     request_rate: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
-    burstiness: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
     warmup_request_count: Annotated[int, Field(ge=0, le=1_000_000)] = 0
     seed: Annotated[int, Field(ge=0, le=2**31 - 1)] = 0
-    speedup_ratio: Annotated[float, Field(gt=0, le=100)] = 1.0
     semantic_oracle_workload: str | None = None
-    random_input_len: Annotated[int, Field(gt=0, le=1_000_000)] | None = None
-    random_output_len: Annotated[int, Field(gt=0, le=1_000_000)] | None = None
-    random_range_ratio: Annotated[float, Field(gt=0, le=1)] | None = None
+
+
+class _AIPerfInferenceScenarioConfig(_CommonInferenceScenarioConfig):
+    provider: Literal["aiperf"]
+    streaming: bool = True
+    trace_artifact_id: Digest | None = None
+    burstiness: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
+    speedup_ratio: Annotated[float, Field(gt=0, le=100)] = 1.0
+    random_input_len: Literal[None] = None
+    random_output_len: Literal[None] = None
+    random_range_ratio: Literal[None] = None
 
     @model_validator(mode="after")
-    def trace_requires_aiperf(self) -> InferenceScenarioConfig:
-        if self.trace_artifact_id is not None and self.provider != "aiperf":
-            raise ValueError("trace_artifact_id is only supported by the aiperf provider")
-        if self.provider == "vllm_bench" and not self.streaming:
-            raise ValueError("vllm_bench non-streaming response mode is unsupported in v1")
-        if self.provider != "aiperf" and self.speedup_ratio != 1.0:
-            raise ValueError("speedup_ratio is only supported by aiperf trace replays")
-        if (
-            self.provider == "aiperf"
-            and self.trace_artifact_id is None
-            and self.speedup_ratio != 1.0
-        ):
+    def trace_options_are_consistent(self) -> _AIPerfInferenceScenarioConfig:
+        if self.trace_artifact_id is None and self.speedup_ratio != 1.0:
             raise ValueError("speedup_ratio requires an aiperf trace_artifact_id")
-        if self.provider == "sglang_bench":
-            if not self.streaming:
-                raise ValueError("sglang_bench non-streaming response mode is unsupported in v1")
-            if self.random_input_len is None or self.random_output_len is None:
-                raise ValueError("sglang_bench requires random_input_len and random_output_len")
-            if self.burstiness is not None:
-                raise ValueError("sglang_bench burstiness is unsupported in v1")
-        elif any(
-            value is not None
-            for value in (self.random_input_len, self.random_output_len, self.random_range_ratio)
-        ):
-            raise ValueError("random workload fields are only supported by sglang_bench")
         if self.burstiness is not None and self.request_rate is None:
             raise ValueError("burstiness requires request_rate")
         return self
+
+
+class _VllmBenchInferenceScenarioConfig(_CommonInferenceScenarioConfig):
+    provider: Literal["vllm_bench"]
+    streaming: Literal[True] = True
+    trace_artifact_id: Literal[None] = None
+    burstiness: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
+    speedup_ratio: Annotated[float, Field(ge=1, le=1)] = 1.0
+    random_input_len: Literal[None] = None
+    random_output_len: Literal[None] = None
+    random_range_ratio: Literal[None] = None
+
+    @model_validator(mode="after")
+    def burstiness_has_request_rate(self) -> _VllmBenchInferenceScenarioConfig:
+        if self.burstiness is not None and self.request_rate is None:
+            raise ValueError("burstiness requires request_rate")
+        return self
+
+
+class _SglangBenchInferenceScenarioConfig(_CommonInferenceScenarioConfig):
+    provider: Literal["sglang_bench"]
+    streaming: Literal[True] = True
+    trace_artifact_id: Literal[None] = None
+    burstiness: Literal[None] = None
+    speedup_ratio: Annotated[float, Field(ge=1, le=1)] = 1.0
+    random_input_len: Annotated[int, Field(gt=0, le=1_000_000)]
+    random_output_len: Annotated[int, Field(gt=0, le=1_000_000)]
+    random_range_ratio: Annotated[float, Field(gt=0, le=1)] | None = None
+
+
+type InferenceScenarioConfig = Annotated[
+    _AIPerfInferenceScenarioConfig
+    | _VllmBenchInferenceScenarioConfig
+    | _SglangBenchInferenceScenarioConfig,
+    Field(discriminator="provider"),
+]
+
+_INFERENCE_SCENARIO_CONFIG_ADAPTER: TypeAdapter[InferenceScenarioConfig] = TypeAdapter(
+    InferenceScenarioConfig
+)
+
+
+def parse_inference_scenario_config(value: object) -> InferenceScenarioConfig:
+    """Parse a scenario declaration into one maintained provider case."""
+
+    return _INFERENCE_SCENARIO_CONFIG_ADAPTER.validate_python(value)
 
 
 class ProjectConfig(ContractModel):
@@ -493,11 +738,8 @@ class ProjectConfig(ContractModel):
             {
                 server.workload
                 for server in self.inference_servers.values()
-                if (
-                    server.mode == "managed"
-                    and server.workload is not None
-                    and server.workload not in self.workloads
-                )
+                if isinstance(server, _ManagedInferenceServerConfig)
+                and server.workload not in self.workloads
             }
         )
         if missing_server_workloads:

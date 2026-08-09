@@ -5,15 +5,15 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any
+
+from pydantic import ValidationError
 
 from flameox.application.native_reducer import (
     NativeDdminReducer,
     NativePredicateClassification,
-    NativeReductionLimits,
 )
+from flameox.application.reduction_worker import NativeReductionWorkerRequest
 from flameox.domain import DomainError, ErrorCode
-from flameox.domain.models import CommandSpec
 from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
 
 
@@ -25,12 +25,11 @@ def _write_response(path: Path, payload: dict[str, object]) -> None:
     os.replace(temporary, path)
 
 
-def _reduce(request: dict[str, Any], job_root: Path) -> dict[str, object]:
-    original_path = Path(str(request["artifact_path"]))
-    original = original_path.read_bytes()
-    command = CommandSpec.model_validate(request["predicate_command"])
-    limits = NativeReductionLimits.model_validate(request["limits"])
-    predicate_timeout = float(request["predicate_timeout_seconds"])
+def _reduce(request: NativeReductionWorkerRequest, job_root: Path) -> dict[str, object]:
+    original = request.artifact_path.read_bytes()
+    command = request.predicate_command
+    limits = request.limits
+    predicate_timeout = request.predicate_timeout_seconds
     wall_deadline = time.monotonic() + limits.wall_time_seconds
     candidate = job_root / "candidate"
     latest_output: tuple[bytes, bytes] | None = None
@@ -55,17 +54,17 @@ def _reduce(request: dict[str, Any], job_root: Path) -> dict[str, object]:
                         **command.env_overrides,
                         "FLAMEOX_REDUCTION_CANDIDATE": str(candidate),
                     },
-                    allowed_working_roots=(Path(str(request["project_root"])),),
+                    allowed_working_roots=(request.project_root,),
                     timeout_seconds=min(predicate_timeout, remaining),
-                    max_output_bytes=int(request["max_output_bytes"]),
+                    max_output_bytes=request.max_output_bytes,
                     resource_policy=ResourcePolicy(
-                        filesystem_path=Path(str(request["workspace_root"])),
-                        staging_root=Path(str(request["staging_root"])),
+                        filesystem_path=request.workspace_root,
+                        staging_root=request.staging_root,
                         writable_roots=(job_root,),
-                        minimum_free_bytes=int(request["minimum_free_bytes"]),
-                        maximum_rss_bytes=int(request["maximum_rss_bytes"]),
-                        sampling_interval_ms=int(request["sampling_interval_ms"]),
-                        max_observed_files=int(request["max_observed_files"]),
+                        minimum_free_bytes=request.minimum_free_bytes,
+                        maximum_rss_bytes=request.maximum_rss_bytes,
+                        sampling_interval_ms=request.sampling_interval_ms,
+                        max_observed_files=request.max_observed_files,
                     ),
                 )
             )
@@ -82,8 +81,7 @@ def _reduce(request: dict[str, Any], job_root: Path) -> dict[str, object]:
         accepted_paths.append(path.name)
 
     reducer = NativeDdminReducer(
-        str(request["partitioner"]),  # type: ignore[arg-type]
-        chunk_size=(int(request["chunk_size"]) if request.get("chunk_size") is not None else None),
+        request.partitioning,
         limits=limits,
     )
     native = reducer.reduce(
@@ -116,13 +114,11 @@ def main() -> int:
     parser.add_argument("--response", type=Path, required=True)
     arguments = parser.parse_args()
     try:
-        request = json.loads(arguments.request.read_text())
-        if not isinstance(request, dict):
-            raise ValueError("request must be a JSON object")
+        request = NativeReductionWorkerRequest.model_validate_json(arguments.request.read_text())
         response = _reduce(request, arguments.request.parent)
     except DomainError as exc:
         response = {"ok": False, "code": exc.code.value, "message": exc.message}
-    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, ValidationError, ValueError) as exc:
         response = {
             "ok": False,
             "code": ErrorCode.ARTIFACT_PARSE_FAILED.value,

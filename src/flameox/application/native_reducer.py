@@ -5,7 +5,7 @@ import json
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
-from typing import Literal, cast
+from typing import Annotated, Literal, assert_never, cast
 
 from pydantic import Field
 
@@ -18,6 +18,27 @@ class NativeReductionLimits(ContractModel):
     max_attempts: int = Field(default=1_000, ge=1, le=100_000)
     wall_time_seconds: float = Field(default=900, gt=0, le=86_400)
     repetitions: int = Field(default=1, ge=1, le=20)
+
+
+class BinaryChunkPartitioning(ContractModel):
+    partitioner: Literal["binary_chunks"] = "binary_chunks"
+    chunk_size: Annotated[int, Field(ge=1, le=16 * 1024 * 1024)]
+
+
+class StructuredPartitioning(ContractModel):
+    partitioner: Literal[
+        "text_lines",
+        "json_top_level",
+        "jsonl_records",
+        "otlp_spans",
+        "chrome_trace_events",
+    ]
+
+
+type NativePartitioning = Annotated[
+    BinaryChunkPartitioning | StructuredPartitioning,
+    Field(discriminator="partitioner"),
+]
 
 
 class NativeReductionAttempt(ContractModel):
@@ -63,24 +84,11 @@ class NativeDdminReducer:
 
     def __init__(
         self,
-        partitioner: Literal[
-            "text_lines",
-            "binary_chunks",
-            "json_top_level",
-            "jsonl_records",
-            "otlp_spans",
-            "chrome_trace_events",
-        ],
+        partitioning: NativePartitioning,
         *,
-        chunk_size: int | None = None,
         limits: NativeReductionLimits | None = None,
     ) -> None:
-        if partitioner == "binary_chunks" and chunk_size is None:
-            raise ValueError("binary_chunks requires chunk_size")
-        if chunk_size is not None and not 1 <= chunk_size <= 16 * 1024 * 1024:
-            raise ValueError("chunk_size must be between 1 and 16777216")
-        self.partitioner = partitioner
-        self.chunk_size = chunk_size
+        self.partitioning = partitioning
         self.limits = limits or NativeReductionLimits()
 
     def reduce(  # noqa: C901 - deterministic ddmin control flow is intentionally explicit
@@ -328,80 +336,90 @@ class NativeDdminReducer:
         )
 
     def _partition(self, original: bytes) -> tuple[list[_Unit], Callable[[list[_Unit]], bytes]]:
-        if self.partitioner == "text_lines":
+        if isinstance(self.partitioning, BinaryChunkPartitioning):
+            chunk_size = self.partitioning.chunk_size
+            units = [
+                _Unit(f"chunk-{index:08d}", original[offset : offset + chunk_size])
+                for index, offset in enumerate(range(0, len(original), chunk_size))
+            ]
+            return units, lambda selected: b"".join(unit.payload for unit in selected)
+        partitioner = self.partitioning.partitioner
+        if partitioner == "text_lines":
             units = [
                 _Unit(f"line-{index:08d}", line)
                 for index, line in enumerate(original.splitlines(keepends=True))
             ]
             return units, lambda selected: b"".join(unit.payload for unit in selected)
-        if self.partitioner == "binary_chunks":
-            assert self.chunk_size is not None
-            units = [
-                _Unit(f"chunk-{index:08d}", original[offset : offset + self.chunk_size])
-                for index, offset in enumerate(range(0, len(original), self.chunk_size))
-            ]
-            return units, lambda selected: b"".join(unit.payload for unit in selected)
-        if self.partitioner == "jsonl_records":
+        if partitioner == "jsonl_records":
             lines = original.splitlines(keepends=True)
             for line in lines:
                 if line.strip():
                     json.loads(line)
             units = [_Unit(f"record-{index:08d}", line) for index, line in enumerate(lines)]
             return units, lambda selected: b"".join(unit.payload for unit in selected)
-        if self.partitioner in {"json_top_level", "chrome_trace_events"}:
-            value = json.loads(original)
-            if self.partitioner == "chrome_trace_events":
-                if not isinstance(value, dict) or not isinstance(value.get("traceEvents"), list):
-                    raise ValueError("Chrome trace must contain a traceEvents array")
-                values = value["traceEvents"]
-                begin_by_key: dict[tuple[object, object, object], str] = {}
-                dependencies: dict[str, tuple[str, ...]] = {}
-                units = [
-                    _Unit(f"event-{index:08d}", _json_bytes(item))
-                    for index, item in enumerate(values)
-                ]
-                for index, item in enumerate(values):
-                    if not isinstance(item, dict):
-                        continue
-                    phase = item.get("ph")
-                    event_id = item.get("id")
-                    if event_id is None:
-                        continue
-                    key = (item.get("pid"), item.get("tid"), event_id)
-                    unit_id = units[index].unit_id
-                    if phase in {"b", "S"}:
-                        begin_by_key[key] = unit_id
-                    elif phase in {"e", "F"} and key in begin_by_key:
-                        dependencies[unit_id] = (begin_by_key[key],)
-                units = [
-                    replace(unit, dependencies=dependencies.get(unit.unit_id, ())) for unit in units
-                ]
-                return units, lambda selected: _rebuild_chrome(value, selected)
-            if isinstance(value, list):
-                units = [
-                    _Unit(f"item-{index:08d}", _json_bytes(item))
-                    for index, item in enumerate(value)
-                ]
-                return units, lambda selected: _json_bytes(
-                    [json.loads(unit.payload) for unit in selected]
-                )
-            if isinstance(value, dict):
-                units = [
-                    _Unit(f"member-{key}", _json_bytes({key: item})) for key, item in value.items()
-                ]
-                return units, lambda selected: _json_bytes(
-                    {
-                        key: json.loads(unit.payload)[key]
-                        for unit in selected
-                        for key in json.loads(unit.payload)
-                    }
-                )
-            raise ValueError("JSON top level must be an array or object")
-        if self.partitioner == "otlp_spans":
+        if partitioner == "json_top_level":
+            return self._partition_json_top_level(original)
+        if partitioner == "chrome_trace_events":
+            return self._partition_chrome_trace(original)
+        if partitioner == "otlp_spans":
             if original.lstrip().startswith((b"{", b"[")):
                 return self._partition_json_otlp(original)
             return self._partition_binary_otlp(original)
-        raise ValueError(f"unsupported partitioner {self.partitioner}")
+        assert_never(partitioner)
+
+    @staticmethod
+    def _partition_json_top_level(
+        original: bytes,
+    ) -> tuple[list[_Unit], Callable[[list[_Unit]], bytes]]:
+        value = json.loads(original)
+        if isinstance(value, list):
+            units = [
+                _Unit(f"item-{index:08d}", _json_bytes(item)) for index, item in enumerate(value)
+            ]
+            return units, lambda selected: _json_bytes(
+                [json.loads(unit.payload) for unit in selected]
+            )
+        if isinstance(value, dict):
+            units = [
+                _Unit(f"member-{key}", _json_bytes({key: item})) for key, item in value.items()
+            ]
+            return units, lambda selected: _json_bytes(
+                {
+                    key: json.loads(unit.payload)[key]
+                    for unit in selected
+                    for key in json.loads(unit.payload)
+                }
+            )
+        raise ValueError("JSON top level must be an array or object")
+
+    @staticmethod
+    def _partition_chrome_trace(
+        original: bytes,
+    ) -> tuple[list[_Unit], Callable[[list[_Unit]], bytes]]:
+        value = json.loads(original)
+        if not isinstance(value, dict) or not isinstance(value.get("traceEvents"), list):
+            raise ValueError("Chrome trace must contain a traceEvents array")
+        values = value["traceEvents"]
+        begin_by_key: dict[tuple[object, object, object], str] = {}
+        dependencies: dict[str, tuple[str, ...]] = {}
+        units = [
+            _Unit(f"event-{index:08d}", _json_bytes(item)) for index, item in enumerate(values)
+        ]
+        for index, item in enumerate(values):
+            if not isinstance(item, dict):
+                continue
+            phase = item.get("ph")
+            event_id = item.get("id")
+            if event_id is None:
+                continue
+            key = (item.get("pid"), item.get("tid"), event_id)
+            unit_id = units[index].unit_id
+            if phase in {"b", "S"}:
+                begin_by_key[key] = unit_id
+            elif phase in {"e", "F"} and key in begin_by_key:
+                dependencies[unit_id] = (begin_by_key[key],)
+        units = [replace(unit, dependencies=dependencies.get(unit.unit_id, ())) for unit in units]
+        return units, lambda selected: _rebuild_chrome(value, selected)
 
     @staticmethod
     def _partition_json_otlp(original: bytes) -> tuple[list[_Unit], Callable[[list[_Unit]], bytes]]:

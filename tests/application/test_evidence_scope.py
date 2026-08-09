@@ -8,10 +8,9 @@ from flameox.domain import (
     DomainError,
     ErrorCode,
     ExecutionStatus,
-    RunManifest,
-    RunType,
     ValidationStatus,
 )
+from flameox.domain.models import ExecutionRunManifest
 from flameox.evidence_scope import EvidenceScope
 from flameox.storage import RunStore, Workspace
 
@@ -19,9 +18,8 @@ from flameox.storage import RunStore, Workspace
 def test_drilldown_rejects_run_absent_from_pinned_corpus(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     RunStore(workspace).create(
-        RunManifest(
+        ExecutionRunManifest(
             run_id="projection-only",
-            run_type=RunType.EXECUTION,
             execution_status=ExecutionStatus.PLANNED,
             capture_status=CaptureStatus.PENDING,
             validation_status=ValidationStatus.NOT_REQUESTED,

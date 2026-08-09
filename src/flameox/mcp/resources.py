@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
-from typing import Any, Literal, cast
+from typing import Literal, Protocol, cast
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
 
 from flameox.application import (
     ArtifactService,
@@ -18,10 +18,16 @@ from flameox.domain import DomainError, ErrorCode
 from flameox.storage import RunStore, Workspace
 
 
-def register_resources(  # noqa: C901
-    server: MCPServer[Any],
-    workspace: Callable[[], Workspace],
-) -> None:
+class WorkspaceContext(Protocol):
+    def require_workspace(self) -> Workspace: ...
+
+
+def _workspace(ctx: Context) -> Workspace:
+    state = cast(WorkspaceContext, ctx.request_context.lifespan_context)
+    return state.require_workspace()
+
+
+def register_resources[T: WorkspaceContext](server: MCPServer[T]) -> None:  # noqa: C901
     """Register resource projections independently from the MCP tool transport."""
 
     def error_payload(error: DomainError) -> str:
@@ -32,9 +38,10 @@ def register_resources(  # noqa: C901
         mime_type="application/json",
         description="Bounded run manifest projection.",
     )
-    async def run_resource(run_id: str) -> str:
+    async def run_resource(run_id: str, ctx: Context) -> str:
         try:
-            return RunStore(workspace()).read(run_id).model_dump_json(indent=2)
+            workspace = _workspace(ctx)
+            return RunStore(workspace).read(run_id).model_dump_json(indent=2)
         except DomainError as error:
             return error_payload(error)
 
@@ -43,9 +50,10 @@ def register_resources(  # noqa: C901
         mime_type="application/json",
         description="Artifact metadata without binary content.",
     )
-    async def artifact_resource(artifact_id: str) -> str:
+    async def artifact_resource(artifact_id: str, ctx: Context) -> str:
         try:
-            return ArtifactService(workspace()).get(artifact_id).model_dump_json(indent=2)
+            workspace = _workspace(ctx)
+            return ArtifactService(workspace).get(artifact_id).model_dump_json(indent=2)
         except DomainError as error:
             return error_payload(error)
 
@@ -54,10 +62,14 @@ def register_resources(  # noqa: C901
         mime_type="application/json",
         description="Current investigation projection.",
     )
-    async def investigation_resource(investigation_id: str) -> str:
+    async def investigation_resource(
+        investigation_id: str,
+        ctx: Context,
+    ) -> str:
         try:
+            workspace = _workspace(ctx)
             return (
-                InvestigationService(workspace())
+                InvestigationService(workspace)
                 .investigations.read(investigation_id)
                 .model_dump_json(indent=2)
             )
@@ -69,10 +81,11 @@ def register_resources(  # noqa: C901
         mime_type="application/json",
         description="Current hypothesis revision.",
     )
-    async def hypothesis_resource(hypothesis_id: str) -> str:
+    async def hypothesis_resource(hypothesis_id: str, ctx: Context) -> str:
         try:
+            workspace = _workspace(ctx)
             return (
-                InvestigationService(workspace())
+                InvestigationService(workspace)
                 .hypotheses.read(hypothesis_id)
                 .model_dump_json(indent=2)
             )
@@ -84,9 +97,10 @@ def register_resources(  # noqa: C901
         mime_type="application/json",
         description="Current finding revision.",
     )
-    async def finding_resource(finding_id: str) -> str:
+    async def finding_resource(finding_id: str, ctx: Context) -> str:
         try:
-            return FindingService(workspace()).findings.read(finding_id).model_dump_json(indent=2)
+            workspace = _workspace(ctx)
+            return FindingService(workspace).findings.read(finding_id).model_dump_json(indent=2)
         except DomainError as error:
             return error_payload(error)
 
@@ -95,10 +109,11 @@ def register_resources(  # noqa: C901
         mime_type="application/json",
         description="Immutable experiment protocol.",
     )
-    async def experiment_resource(experiment_id: str) -> str:
+    async def experiment_resource(experiment_id: str, ctx: Context) -> str:
         try:
+            workspace = _workspace(ctx)
             return (
-                ExperimentService(workspace())
+                ExperimentService(workspace)
                 .experiments.read(experiment_id)
                 .model_dump_json(indent=2)
             )
@@ -110,11 +125,13 @@ def register_resources(  # noqa: C901
         mime_type="application/json",
         description="Bounded immutable trial collection for an experiment.",
     )
-    async def experiment_trials_resource(experiment_id: str) -> str:
+    async def experiment_trials_resource(
+        experiment_id: str,
+        ctx: Context,
+    ) -> str:
         try:
-            return (
-                ExperimentService(workspace()).list_trials(experiment_id).model_dump_json(indent=2)
-            )
+            workspace = _workspace(ctx)
+            return ExperimentService(workspace).list_trials(experiment_id).model_dump_json(indent=2)
         except DomainError as error:
             return error_payload(error)
 
@@ -123,10 +140,15 @@ def register_resources(  # noqa: C901
         mime_type="application/json",
         description="One immutable trial and its structured oracle receipt.",
     )
-    async def experiment_trial_resource(experiment_id: str, trial_id: str) -> str:
+    async def experiment_trial_resource(
+        experiment_id: str,
+        trial_id: str,
+        ctx: Context,
+    ) -> str:
         try:
+            workspace = _workspace(ctx)
             return (
-                ExperimentService(workspace())
+                ExperimentService(workspace)
                 .get_trial(trial_id, experiment_id=experiment_id)
                 .model_dump_json(indent=2)
             )
@@ -138,9 +160,10 @@ def register_resources(  # noqa: C901
         mime_type="application/json",
         description="Immutable frozen run cohort.",
     )
-    async def run_set_resource(run_set_id: str) -> str:
+    async def run_set_resource(run_set_id: str, ctx: Context) -> str:
         try:
-            return RunSetService(workspace()).store.read(run_set_id).model_dump_json(indent=2)
+            workspace = _workspace(ctx)
+            return RunSetService(workspace).store.read(run_set_id).model_dump_json(indent=2)
         except DomainError as error:
             return error_payload(error)
 
@@ -149,15 +172,20 @@ def register_resources(  # noqa: C901
         mime_type="application/json",
         description="Authoritative persisted analysis or comparison evidence.",
     )
-    async def evidence_resource(ref_type: str, ref_id: str) -> str:
+    async def evidence_resource(
+        ref_type: str,
+        ref_id: str,
+        ctx: Context,
+    ) -> str:
         try:
             if ref_type not in {"analysis", "comparison"}:
                 raise DomainError(
                     ErrorCode.WORKSPACE_INVALID,
                     f"Unsupported evidence resource type {ref_type!r}.",
                 )
+            workspace = _workspace(ctx)
             return (
-                EvidenceLookupService(workspace())
+                EvidenceLookupService(workspace)
                 .get(cast(Literal["analysis", "comparison"], ref_type), ref_id)
                 .model_dump_json(indent=2)
             )

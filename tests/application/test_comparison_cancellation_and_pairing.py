@@ -8,10 +8,11 @@ from pathlib import Path
 import pytest
 
 from flameox.application import (
-    CompareRunSetsRequest,
     ComparisonService,
-    FreezeRunSetMember,
-    FreezeRunSetRequest,
+    FreezeRunIdsRequest,
+    FreezeRunMembersRequest,
+    IncludedFreezeRunSetMember,
+    MeasurementCompareRunSetsRequest,
     RunSetService,
 )
 from flameox.catalog import Catalog, Snapshot
@@ -43,9 +44,9 @@ async def test_async_comparison_cancellation_interrupts_duckdb(
         (0.005, 0.0055, 0.006),
     )
     run_sets = RunSetService(workspace)
-    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
-    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
-    request = CompareRunSetsRequest(
+    baseline = run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
+    candidate = run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
+    request = MeasurementCompareRunSetsRequest(
         baseline_run_set_id=baseline.run_set_id,
         candidate_run_set_id=candidate.run_set_id,
         metric="pyperf.scan",
@@ -124,9 +125,9 @@ def test_trial_block_identity_makes_pairing_independent_of_member_order(
     )
     run_sets = RunSetService(workspace)
     baseline = run_sets.freeze(
-        FreezeRunSetRequest(
+        FreezeRunMembersRequest(
             members=tuple(
-                FreezeRunSetMember(run_id=run_id, trial_id=trial_id)
+                IncludedFreezeRunSetMember(run_id=run_id, trial_id=trial_id)
                 for trial_id, run_id, variant, _ in trials
                 if variant == "baseline"
             )
@@ -136,17 +137,17 @@ def test_trial_block_identity_makes_pairing_independent_of_member_order(
         (trial_id, run_id) for trial_id, run_id, variant, _ in trials if variant == "candidate"
     ]
     candidate_forward = run_sets.freeze(
-        FreezeRunSetRequest(
+        FreezeRunMembersRequest(
             members=tuple(
-                FreezeRunSetMember(run_id=run_id, trial_id=trial_id)
+                IncludedFreezeRunSetMember(run_id=run_id, trial_id=trial_id)
                 for trial_id, run_id in candidates
             )
         )
     )
     candidate_reversed = run_sets.freeze(
-        FreezeRunSetRequest(
+        FreezeRunMembersRequest(
             members=tuple(
-                FreezeRunSetMember(run_id=run_id, trial_id=trial_id)
+                IncludedFreezeRunSetMember(run_id=run_id, trial_id=trial_id)
                 for trial_id, run_id in reversed(candidates)
             )
         )
@@ -154,7 +155,7 @@ def test_trial_block_identity_makes_pairing_independent_of_member_order(
     service = ComparisonService(workspace)
 
     forward = service.compare(
-        CompareRunSetsRequest(
+        MeasurementCompareRunSetsRequest(
             baseline_run_set_id=baseline.run_set_id,
             candidate_run_set_id=candidate_forward.run_set_id,
             metric="pyperf.scan",
@@ -164,7 +165,7 @@ def test_trial_block_identity_makes_pairing_independent_of_member_order(
         )
     )
     reversed_result = service.compare(
-        CompareRunSetsRequest(
+        MeasurementCompareRunSetsRequest(
             baseline_run_set_id=baseline.run_set_id,
             candidate_run_set_id=candidate_reversed.run_set_id,
             metric="pyperf.scan",

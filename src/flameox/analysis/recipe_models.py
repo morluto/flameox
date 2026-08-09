@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from flameox.domain.scalars import NumericValue
 from flameox.evidence_status import EvidenceAvailability, available_availability
 from flameox.models import ContractModel
 
@@ -39,15 +40,14 @@ class HotspotResult(ContractModel):
 
 class MeasurementSummary(ContractModel):
     name: str
-    value_int: int | None
-    value_float: float | None
+    value: NumericValue | None
     unit: str
     aggregation: str
     scope: str
 
 
 class MemoryAnalysisResult(ContractModel):
-    schema_version: int = 1
+    schema_version: Literal[2] = 2
     corpus_commit_id: str
     input_id: str
     measurements: tuple[MeasurementSummary, ...]

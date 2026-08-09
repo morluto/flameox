@@ -55,7 +55,6 @@ from flameox.domain import (
     Hypothesis,
     Investigation,
     RunManifest,
-    RunType,
     Sensitivity,
     Trial,
     TrialOutcome,
@@ -64,6 +63,7 @@ from flameox.domain import (
     digest_model,
     new_id,
 )
+from flameox.domain.models import ExecutionRunManifest
 from flameox.evidence import GenerationPublisher
 from flameox.execution import ManagedSidecarLease, ManagedSidecarOutcome, SubprocessBroker
 from flameox.models import ContractModel
@@ -187,7 +187,6 @@ class FaultExperimentService:
     ) -> FaultExperimentPlan:
         config = self._config(experiment_name)
         self._validate_investigation(investigation_id, hypothesis_id)
-        receipt = await run_atomic_thread(self.tools.stage)
         overrides = parameter_overrides or {}
         endpoint = config.endpoint_template.format(
             host=config.upstream_host,
@@ -199,6 +198,20 @@ class FaultExperimentService:
             dynamic_parameters=(config.endpoint_parameter,),
         )
         definition = self.workloads.definition(config.workload)
+        # Planning must not download or write a managed binary. Capability setup owns
+        # that mutation and records its verification separately; planning merely binds
+        # the already-prepared identity into the immutable plan.
+        receipt = self.tools.staged_receipt()
+        if receipt is None:
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "Managed Toxiproxy is not prepared for fault-experiment planning.",
+                details={"adapter": "toxiproxy", "next_tool": "start_capability_setup"},
+                remediation=(
+                    "Call list_capabilities(adapter='toxiproxy'), then start_capability_setup "
+                    "with adapters=['toxiproxy'] before planning again.",
+                ),
+            )
         treatments = (_BASELINE, *tuple(config.scenarios))
         config_digest = digest_model(config.model_dump(mode="json"))
         experiment = Experiment(
@@ -394,19 +407,19 @@ class FaultExperimentService:
             cancellation: asyncio.CancelledError | None = None
             try:
                 proxy_name = f"flameox-{plan.plan_id[:12]}-{index:04d}"
-                lease, admin_port, listen_port = await self._start_sidecar(
+                active_lease, admin_port, listen_port = await self._start_sidecar(
                     receipt.executable,
                     receipt,
                     plan,
                     proxy_name,
                 )
-                assert lease is not None
+                lease = active_lease
                 if cell.treatment != _BASELINE:
                     scenario = config.scenarios[cell.treatment]
                     if isinstance(scenario, ProxyFault):
-                        lease.update_proxy(proxy_name, enabled=scenario.enabled)
+                        active_lease.update_proxy(proxy_name, enabled=scenario.enabled)
                     else:
-                        lease.add_toxic(
+                        active_lease.add_toxic(
                             proxy=proxy_name,
                             name="treatment",
                             toxic_type=scenario.type,
@@ -759,9 +772,8 @@ class FaultExperimentService:
     ) -> RunManifest:
         environment = collect_environment()
         source_state = collect_partial_source_state(self.workspace)
-        run = RunManifest(
+        run = ExecutionRunManifest(
             run_id=new_id(),
-            run_type=RunType.EXECUTION,
             started_at=outcome.started_at,
             finished_at=outcome.finished_at,
             execution_status=ExecutionStatus.FAILED,

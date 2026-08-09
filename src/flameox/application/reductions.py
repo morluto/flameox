@@ -7,10 +7,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, TypeAdapter
 
 from flameox.application.artifact_workers import ArtifactWorker
-from flameox.application.native_reducer import NativeReductionResult
+from flameox.application.native_reducer import (
+    BinaryChunkPartitioning,
+    NativePartitioning,
+    NativePredicateClassification,
+    NativeReductionLimits,
+    NativeReductionResult,
+    StructuredPartitioning,
+)
+from flameox.application.reduction_worker import NativeReductionWorkerRequest
 from flameox.application.workloads import WorkloadService
 from flameox.domain import DomainError, ErrorCode, digest_model
 from flameox.domain.models import CommandSpec, utc_now
@@ -37,34 +45,50 @@ class ReductionLimits(ContractModel):
     predicate_repetitions: Annotated[int, Field(ge=1, le=20)] = 1
 
 
-class PlanReductionRequest(ContractModel):
+class _PlanReductionRequest(ContractModel):
     original_artifact_id: str
     engine: Literal["native_ddmin"] = "native_ddmin"
-    partitioner: ReductionPartitioner
-    chunk_size: int | None = Field(default=None, ge=1, le=16 * 1024 * 1024)
     predicate_workload: str
-    predicate_parameters: dict[str, str | int | float | bool] = Field(default_factory=dict)
+    predicate_parameters: dict[str, str | int | float | bool] = Field(
+        default_factory=dict,
+        max_length=128,
+    )
     limits: ReductionLimits = Field(default_factory=ReductionLimits)
     expected_determinism: Literal["deterministic", "repeated"] = "deterministic"
 
-    @model_validator(mode="after")
-    def validate_chunk_size(self) -> PlanReductionRequest:
-        if self.partitioner == "binary_chunks" and self.chunk_size is None:
-            raise ValueError("binary_chunks reductions require chunk_size")
-        if self.partitioner != "binary_chunks" and self.chunk_size is not None:
-            raise ValueError("chunk_size is only valid for binary_chunks reductions")
-        return self
+
+class BinaryChunkReductionRequest(_PlanReductionRequest):
+    """A binary reduction whose chunk size is part of its executable contract."""
+
+    partitioner: Literal["binary_chunks"]
+    chunk_size: Annotated[int, Field(ge=1, le=16 * 1024 * 1024)]
 
 
-class ReductionPlan(ContractModel):
+class StructuredReductionRequest(_PlanReductionRequest):
+    """A structured reduction, which never accepts binary chunking configuration."""
+
+    partitioner: Literal[
+        "text_lines",
+        "json_top_level",
+        "jsonl_records",
+        "otlp_spans",
+        "chrome_trace_events",
+    ]
+
+
+type PlanReductionRequest = Annotated[
+    BinaryChunkReductionRequest | StructuredReductionRequest,
+    Field(discriminator="partitioner"),
+]
+
+
+class _ReductionPlan(ContractModel):
     schema_version: Literal[2] = 2
     plan_id: str
     request_digest: str
     workspace_id: str
     original_artifact_id: str
     engine: Literal["native_ddmin"] = "native_ddmin"
-    partitioner: ReductionPartitioner
-    chunk_size: int | None = None
     predicate_workload: str
     predicate_definition_id: str
     predicate_instance_id: str
@@ -74,6 +98,31 @@ class ReductionPlan(ContractModel):
     limits: ReductionLimits
     expected_determinism: Literal["deterministic", "repeated"]
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class BinaryChunkReductionPlan(_ReductionPlan):
+    partitioner: Literal["binary_chunks"]
+    chunk_size: Annotated[int, Field(ge=1, le=16 * 1024 * 1024)]
+
+
+class StructuredReductionPlan(_ReductionPlan):
+    partitioner: Literal[
+        "text_lines",
+        "json_top_level",
+        "jsonl_records",
+        "otlp_spans",
+        "chrome_trace_events",
+    ]
+    # Kept in schema 2's durable projection for byte-for-byte compatible records.
+    chunk_size: Literal[None] = None
+
+
+type ReductionPlan = Annotated[
+    BinaryChunkReductionPlan | StructuredReductionPlan,
+    Field(discriminator="partitioner"),
+]
+
+_REDUCTION_PLAN_ADAPTER: TypeAdapter[ReductionPlan] = TypeAdapter(ReductionPlan)
 
 
 class ReductionAttemptSummary(ContractModel):
@@ -104,7 +153,7 @@ class ReductionResult(ContractModel):
     final_unit_count: int | None = None
     minimality: Literal["one_minimal", "not_claimed", "partitioner_incompatible"] | None = None
     best_known_artifact_id: str | None = None
-    final_revalidation_status: str | None = None
+    final_revalidation_status: NativePredicateClassification | None = None
     budget_exhausted: bool = False
     finished_at: datetime = Field(default_factory=utc_now)
 
@@ -117,10 +166,10 @@ class ReductionService:
         self.artifacts = ArtifactStore(workspace)
         self.workloads = WorkloadService(workspace)
         self.broker = SubprocessBroker()
-        self.plans = JsonRecordStore(
+        self.plans: JsonRecordStore[ReductionPlan] = JsonRecordStore(
             workspace,
             kind="reduction_plans",
-            model=ReductionPlan,
+            model=_REDUCTION_PLAN_ADAPTER,
             id_field="plan_id",
         )
         self.results = JsonRecordStore(
@@ -146,24 +195,43 @@ class ReductionService:
             "predicate_executable_digest": _executable_digest(predicate.command),
         }
         request_digest = digest_model(bound)
-        plan = ReductionPlan(
-            schema_version=2,
-            plan_id=request_digest,
-            request_digest=request_digest,
-            workspace_id=self.workspace.identity.workspace_id,
-            original_artifact_id=request.original_artifact_id,
-            engine="native_ddmin",
-            partitioner=request.partitioner,
-            chunk_size=request.chunk_size,
-            predicate_workload=request.predicate_workload,
-            predicate_definition_id=predicate.workload_definition_id,
-            predicate_instance_id=predicate.workload_instance_id,
-            predicate_command=predicate.command,
-            predicate_parameters=request.predicate_parameters,
-            predicate_executable_digest=_executable_digest(predicate.command),
-            limits=request.limits,
-            expected_determinism=request.expected_determinism,
-        )
+        if isinstance(request, BinaryChunkReductionRequest):
+            plan: ReductionPlan = BinaryChunkReductionPlan(
+                schema_version=2,
+                plan_id=request_digest,
+                request_digest=request_digest,
+                workspace_id=self.workspace.identity.workspace_id,
+                original_artifact_id=request.original_artifact_id,
+                engine="native_ddmin",
+                partitioner=request.partitioner,
+                chunk_size=request.chunk_size,
+                predicate_workload=request.predicate_workload,
+                predicate_definition_id=predicate.workload_definition_id,
+                predicate_instance_id=predicate.workload_instance_id,
+                predicate_command=predicate.command,
+                predicate_parameters=request.predicate_parameters,
+                predicate_executable_digest=_executable_digest(predicate.command),
+                limits=request.limits,
+                expected_determinism=request.expected_determinism,
+            )
+        else:
+            plan = StructuredReductionPlan(
+                schema_version=2,
+                plan_id=request_digest,
+                request_digest=request_digest,
+                workspace_id=self.workspace.identity.workspace_id,
+                original_artifact_id=request.original_artifact_id,
+                engine="native_ddmin",
+                partitioner=request.partitioner,
+                predicate_workload=request.predicate_workload,
+                predicate_definition_id=predicate.workload_definition_id,
+                predicate_instance_id=predicate.workload_instance_id,
+                predicate_command=predicate.command,
+                predicate_parameters=request.predicate_parameters,
+                predicate_executable_digest=_executable_digest(predicate.command),
+                limits=request.limits,
+                expected_determinism=request.expected_determinism,
+            )
         return self._create_plan(plan)
 
     def _create_plan(self, plan: ReductionPlan) -> ReductionPlan:
@@ -260,32 +328,35 @@ class ReductionService:
                 stderr_id = self._import_worker_output(worker_root, response.get("stderr_path"))
                 return native, accepted_ids, final_id, stdout_id, stderr_id, worker_root
 
+            partitioning: NativePartitioning
+            if isinstance(plan, BinaryChunkReductionPlan):
+                partitioning = BinaryChunkPartitioning(chunk_size=plan.chunk_size)
+            else:
+                partitioning = StructuredPartitioning(partitioner=plan.partitioner)
+            request = NativeReductionWorkerRequest(
+                artifact_path=artifact_path,
+                partitioning=partitioning,
+                predicate_command=plan.predicate_command,
+                limits=NativeReductionLimits(
+                    max_attempts=plan.limits.max_attempts,
+                    wall_time_seconds=plan.limits.wall_time_seconds,
+                    repetitions=plan.limits.predicate_repetitions,
+                ),
+                predicate_timeout_seconds=plan.limits.predicate_timeout_seconds,
+                project_root=self.workspace.project_root,
+                workspace_root=self.workspace.paths.root,
+                staging_root=self.workspace.paths.staging,
+                max_output_bytes=self.workspace.config.execution.max_output_bytes,
+                minimum_free_bytes=self.workspace.config.storage.min_free_bytes,
+                maximum_rss_bytes=self.workspace.config.execution.max_memory_bytes,
+                sampling_interval_ms=(
+                    self.workspace.config.execution.resource_sampling_interval_ms
+                ),
+                max_observed_files=(self.workspace.config.execution.max_resource_observed_files),
+            )
             worker_result = await ArtifactWorker(self.workspace, broker=self.broker).run(
                 "flameox.workers.reduction",
-                {
-                    "artifact_path": str(artifact_path),
-                    "partitioner": plan.partitioner,
-                    "chunk_size": plan.chunk_size,
-                    "predicate_command": plan.predicate_command.model_dump(mode="json"),
-                    "limits": {
-                        "max_attempts": plan.limits.max_attempts,
-                        "wall_time_seconds": plan.limits.wall_time_seconds,
-                        "repetitions": plan.limits.predicate_repetitions,
-                    },
-                    "predicate_timeout_seconds": plan.limits.predicate_timeout_seconds,
-                    "project_root": str(self.workspace.project_root),
-                    "workspace_root": str(self.workspace.paths.root),
-                    "staging_root": str(self.workspace.paths.staging),
-                    "max_output_bytes": self.workspace.config.execution.max_output_bytes,
-                    "minimum_free_bytes": self.workspace.config.storage.min_free_bytes,
-                    "maximum_rss_bytes": self.workspace.config.execution.max_memory_bytes,
-                    "sampling_interval_ms": (
-                        self.workspace.config.execution.resource_sampling_interval_ms
-                    ),
-                    "max_observed_files": (
-                        self.workspace.config.execution.max_resource_observed_files
-                    ),
-                },
+                request.model_dump(mode="json"),
                 name="reduction",
                 timeout_seconds=(
                     plan.limits.wall_time_seconds + plan.limits.predicate_timeout_seconds + 10

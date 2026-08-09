@@ -12,6 +12,7 @@ from flameox.application.inference_providers import (
     VllmBenchServeRequest,
     discover_inference_tool,
     discover_sglang,
+    parse_inference_tool_discovery,
     probe_existing_vllm_server,
 )
 
@@ -64,6 +65,18 @@ def test_provider_requests_refuse_non_loopback_servers(tmp_path: Path) -> None:
         )
 
 
+def test_tool_discovery_requires_an_executable_when_available() -> None:
+    with pytest.raises(ValidationError):
+        parse_inference_tool_discovery(
+            {
+                "tool": "aiperf",
+                "available": True,
+                "compatible": True,
+                "executable": None,
+            }
+        )
+
+
 def test_aiperf_synthetic_argv_bounds_request_count(tmp_path: Path) -> None:
     request = AIPerfProfileRequest(
         executable=Path("/tools/aiperf"),
@@ -98,14 +111,32 @@ def test_vllm_bench_argv_requires_structured_result_file(tmp_path: Path) -> None
 
 
 def test_vllm_bench_refuses_unsupported_non_streaming_mode(tmp_path: Path) -> None:
-    with pytest.raises(ValidationError, match="non-streaming"):
-        VllmBenchServeRequest(
-            executable=Path("/tools/vllm"),
-            base_url="http://localhost:8000",
-            model="model",
-            result_path=tmp_path / "results.json",
-            num_prompts=5,
-            streaming=False,
+    with pytest.raises(ValidationError, match="literal_error"):
+        VllmBenchServeRequest.model_validate(
+            {
+                "executable": Path("/tools/vllm"),
+                "base_url": "http://localhost:8000",
+                "model": "model",
+                "result_path": tmp_path / "results.json",
+                "num_prompts": 5,
+                "streaming": False,
+            }
+        )
+
+
+def test_sglang_bench_refuses_unsupported_non_streaming_mode(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="literal_error"):
+        SglangBenchServingRequest.model_validate(
+            {
+                "benchmark_python": Path("/opt/sglang/bin/python"),
+                "base_url": "http://127.0.0.1:8000",
+                "model": "model",
+                "result_path": tmp_path / "result.jsonl",
+                "num_prompts": 1,
+                "random_input_len": 4,
+                "random_output_len": 2,
+                "streaming": False,
+            }
         )
 
 

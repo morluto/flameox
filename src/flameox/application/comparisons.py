@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import math
 import statistics
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, JsonValue, model_validator
+from pydantic import Discriminator, Field, JsonValue, Tag, TypeAdapter
 
 from flameox.analysis import compare_paired_samples
 from flameox.analysis.inference_protocol import (
@@ -36,7 +36,8 @@ from flameox.domain import (
     ValidationStatus,
     digest_model,
 )
-from flameox.evidence import GenerationPublisher
+from flameox.domain.models import ExcludedRunSetMember, IncludedRunSetMember
+from flameox.evidence import GenerationPublisher, numeric_value_to_columns
 from flameox.models import ContractModel
 from flameox.storage import JsonRecordStore, RunStore, Workspace
 
@@ -45,57 +46,117 @@ _RUNTIME_RESOURCE_COLUMNS = {
     "runtime_resource.minimum_free_bytes": "minimum_free_bytes",
     "runtime_resource.staging_growth_bytes": "staging_growth_bytes",
 }
+RuntimeResourceMetric = Literal[
+    "runtime_resource.peak_rss_bytes",
+    "runtime_resource.minimum_free_bytes",
+    "runtime_resource.staging_growth_bytes",
+]
 
 
-class FreezeRunSetMember(ContractModel):
+class _FreezeRunSetMember(ContractModel):
     run_id: str
     trial_id: str | None = None
-    included: bool = True
-    reason: str | None = None
-
-    @model_validator(mode="after")
-    def excluded_members_have_reasons(self) -> FreezeRunSetMember:
-        if not self.included and self.reason is None:
-            raise ValueError("excluded run-set members require a reason")
-        return self
 
 
-class FreezeRunSetRequest(ContractModel):
-    run_ids: tuple[str, ...] = ()
-    members: tuple[FreezeRunSetMember, ...] = ()
+class IncludedFreezeRunSetMember(_FreezeRunSetMember):
+    included: Literal[True] = True
+    reason: Literal[None] = None
+
+
+class ExcludedFreezeRunSetMember(_FreezeRunSetMember):
+    included: Literal[False] = False
+    reason: str
+
+
+def _freeze_member_variant(value: Any) -> Literal["included", "excluded"]:
+    if isinstance(value, ExcludedFreezeRunSetMember):
+        return "excluded"
+    if isinstance(value, Mapping) and value.get("included") is False:
+        return "excluded"
+    return "included"
+
+
+type FreezeRunSetMember = Annotated[
+    Annotated[IncludedFreezeRunSetMember, Tag("included")]
+    | Annotated[ExcludedFreezeRunSetMember, Tag("excluded")],
+    Discriminator(_freeze_member_variant),
+]
+
+
+class _FreezeRunSetRequest(ContractModel):
     selection: dict[str, JsonValue] = Field(default_factory=dict)
 
-    @model_validator(mode="after")
-    def choose_one_membership_form(self) -> FreezeRunSetRequest:
-        if bool(self.run_ids) == bool(self.members):
-            raise ValueError("provide exactly one of run_ids or members")
-        return self
+
+class FreezeRunIdsRequest(_FreezeRunSetRequest):
+    run_ids: Annotated[tuple[str, ...], Field(min_length=1)]
+    members: Annotated[tuple[FreezeRunSetMember, ...], Field(max_length=0)] = ()
 
 
-class CompareRunSetsRequest(ContractModel):
+class FreezeRunMembersRequest(_FreezeRunSetRequest):
+    run_ids: Annotated[tuple[str, ...], Field(max_length=0)] = ()
+    members: Annotated[tuple[FreezeRunSetMember, ...], Field(min_length=1)]
+
+
+def _freeze_request_variant(value: Any) -> Literal["run_ids", "members"]:
+    if isinstance(value, FreezeRunMembersRequest):
+        return "members"
+    if isinstance(value, Mapping) and value.get("members"):
+        return "members"
+    return "run_ids"
+
+
+type FreezeRunSetRequest = Annotated[
+    Annotated[FreezeRunIdsRequest, Tag("run_ids")]
+    | Annotated[FreezeRunMembersRequest, Tag("members")],
+    Discriminator(_freeze_request_variant),
+]
+
+
+class _CompareRunSetsRequest(ContractModel):
     baseline_run_set_id: str
     candidate_run_set_id: str
     experiment_id: str | None = None
-    metric: str
-    unit: str
-    metric_source: Literal["measurement", "runtime_resource"] = "measurement"
     polarity: Literal["lower_is_better", "higher_is_better", "neutral"]
     practical_threshold: float = Field(ge=0)
     confidence_level: float = Field(default=0.95, gt=0, lt=1)
     random_seed: int = Field(default=0, ge=0)
 
-    @model_validator(mode="after")
-    def validate_metric_source(self) -> CompareRunSetsRequest:
-        if self.metric_source == "runtime_resource":
-            if self.metric not in _RUNTIME_RESOURCE_COLUMNS:
-                raise ValueError("runtime-resource comparisons require a catalog metric")
-            if self.unit != "bytes":
-                raise ValueError("runtime-resource comparisons require unit='bytes'")
-        return self
+
+class MeasurementCompareRunSetsRequest(_CompareRunSetsRequest):
+    metric: str
+    unit: str
+    metric_source: Literal["measurement"] = "measurement"
+
+
+class RuntimeResourceCompareRunSetsRequest(_CompareRunSetsRequest):
+    metric: RuntimeResourceMetric
+    unit: Literal["bytes"]
+    metric_source: Literal["runtime_resource"] = "runtime_resource"
+
+
+def _comparison_metric_source(value: Any) -> Literal["measurement", "runtime_resource"]:
+    if isinstance(value, RuntimeResourceCompareRunSetsRequest):
+        return "runtime_resource"
+    if isinstance(value, Mapping) and value.get("metric_source") == "runtime_resource":
+        return "runtime_resource"
+    return "measurement"
+
+
+type CompareRunSetsRequest = Annotated[
+    Annotated[MeasurementCompareRunSetsRequest, Tag("measurement")]
+    | Annotated[RuntimeResourceCompareRunSetsRequest, Tag("runtime_resource")],
+    Discriminator(_comparison_metric_source),
+]
+
+_COMPARE_RUN_SETS_REQUEST: TypeAdapter[CompareRunSetsRequest] = TypeAdapter(CompareRunSetsRequest)
+
+
+def parse_compare_run_sets_request(value: Any) -> CompareRunSetsRequest:
+    return _COMPARE_RUN_SETS_REQUEST.validate_python(value)
 
 
 class ComparisonResult(ContractModel):
-    schema_version: int = 1
+    schema_version: Literal[2] = 2
     comparison: Comparison
     baseline_run_set: RunSet
     candidate_run_set: RunSet
@@ -144,9 +205,13 @@ class RunSetService:
     def freeze(self, request: FreezeRunSetRequest) -> RunSet:
         members: list[RunSetMember] = []
         head = self.workspace.corpus.read_head()
-        requested = request.members or tuple(
-            FreezeRunSetMember(run_id=run_id) for run_id in request.run_ids
-        )
+        requested: tuple[FreezeRunSetMember, ...]
+        if isinstance(request, FreezeRunIdsRequest):
+            requested = tuple(
+                IncludedFreezeRunSetMember(run_id=run_id) for run_id in request.run_ids
+            )
+        else:
+            requested = request.members
         with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
             for order, item in enumerate(requested):
                 RunStore(self.workspace).read(item.run_id)
@@ -172,15 +237,20 @@ class RunSetService:
                                 "trial_id": item.trial_id,
                             },
                         )
-                members.append(
-                    RunSetMember(
+                if isinstance(item, ExcludedFreezeRunSetMember):
+                    member: RunSetMember = ExcludedRunSetMember(
                         run_id=item.run_id,
                         trial_id=item.trial_id,
-                        included=item.included,
                         reason=item.reason,
                         order=order,
                     )
-                )
+                else:
+                    member = IncludedRunSetMember(
+                        run_id=item.run_id,
+                        trial_id=item.trial_id,
+                        order=order,
+                    )
+                members.append(member)
         membership = [member.model_dump(mode="json") for member in members]
         membership_digest = digest_model(membership)
         run_set_id = digest_model(
@@ -1205,6 +1275,9 @@ class ComparisonService:
 
     def _comparison_row(self, value: Comparison) -> dict[str, object]:
         row = value.model_dump(mode="python")
+        baseline_value_int, baseline_value_float = numeric_value_to_columns(value.baseline_value)
+        candidate_value_int, candidate_value_float = numeric_value_to_columns(value.candidate_value)
+        absolute_change_int, absolute_change_float = numeric_value_to_columns(value.absolute_change)
         row.update(
             {
                 "polarity": value.polarity,
@@ -1221,8 +1294,17 @@ class ComparisonService:
                     if value.multiplicity is not None
                     else None
                 ),
+                "baseline_value_int": baseline_value_int,
+                "baseline_value_float": baseline_value_float,
+                "candidate_value_int": candidate_value_int,
+                "candidate_value_float": candidate_value_float,
+                "absolute_change_int": absolute_change_int,
+                "absolute_change_float": absolute_change_float,
             }
         )
         row.pop("multiplicity")
+        row.pop("baseline_value")
+        row.pop("candidate_value")
+        row.pop("absolute_change")
         row.pop("schema_version")
         return row

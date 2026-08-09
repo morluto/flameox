@@ -12,8 +12,67 @@ from flameox.application.workloads import (
     InferenceServerConfig,
     ProjectConfig,
     WorkloadService,
+    parse_inference_scenario_config,
+    parse_inference_server_config,
 )
 from flameox.storage import Workspace
+
+
+def _server(**config: object) -> InferenceServerConfig:
+    return parse_inference_server_config(config)
+
+
+def _scenario(**config: object) -> InferenceScenarioConfig:
+    return parse_inference_scenario_config(config)
+
+
+@pytest.mark.parametrize(
+    "config",
+    (
+        {"mode": "managed", "workload": "serve", "model": "model"},
+        {"mode": "existing_local", "model": "model"},
+        {
+            "provider": "sglang",
+            "benchmark_python": "/opt/sglang/bin/python",
+            "mode": "managed",
+            "workload": "serve",
+            "model": "model",
+        },
+        {
+            "provider": "sglang",
+            "benchmark_python": "/opt/sglang/bin/python",
+            "mode": "existing_local",
+            "model": "model",
+        },
+    ),
+)
+def test_inference_server_parser_round_trips_each_legal_case(
+    config: dict[str, object],
+) -> None:
+    parsed = parse_inference_server_config(config)
+
+    assert parse_inference_server_config(parsed.model_dump(mode="python")) == parsed
+
+
+@pytest.mark.parametrize(
+    "config",
+    (
+        {"server": "local", "provider": "aiperf"},
+        {"server": "local", "provider": "vllm_bench"},
+        {
+            "server": "local",
+            "provider": "sglang_bench",
+            "random_input_len": 4,
+            "random_output_len": 2,
+        },
+    ),
+)
+def test_inference_scenario_parser_round_trips_each_provider(
+    config: dict[str, object],
+) -> None:
+    parsed = parse_inference_scenario_config(config)
+
+    assert parse_inference_scenario_config(parsed.model_dump(mode="python")) == parsed
 
 
 def test_inference_configuration_references_managed_workload() -> None:
@@ -64,7 +123,7 @@ def test_inference_scenario_requires_declared_server() -> None:
 
 def test_managed_inference_server_rejects_localhost_name() -> None:
     with pytest.raises(ValidationError, match="IP-literal loopback"):
-        InferenceServerConfig(
+        _server(
             mode="managed",
             workload="serve",
             base_url="http://localhost:8000",
@@ -74,8 +133,8 @@ def test_managed_inference_server_rejects_localhost_name() -> None:
 
 @pytest.mark.parametrize("launcher", [None, "python", "relative/python"])
 def test_sglang_server_requires_an_absolute_benchmark_launcher(launcher: str | None) -> None:
-    with pytest.raises(ValidationError, match="absolute benchmark_python"):
-        InferenceServerConfig(
+    with pytest.raises(ValidationError, match="benchmark_python"):
+        _server(
             provider="sglang",
             benchmark_python=launcher,
             mode="existing_local",
@@ -85,7 +144,7 @@ def test_sglang_server_requires_an_absolute_benchmark_launcher(launcher: str | N
 
 def test_sglang_server_rejects_non_root_base_url() -> None:
     with pytest.raises(ValidationError, match="root base_url"):
-        InferenceServerConfig(
+        _server(
             provider="sglang",
             benchmark_python="/opt/sglang/bin/python",
             mode="existing_local",
@@ -95,8 +154,8 @@ def test_sglang_server_rejects_non_root_base_url() -> None:
 
 
 def test_sglang_scenario_requires_random_workload_and_sglang_server() -> None:
-    with pytest.raises(ValidationError, match="requires random_input_len"):
-        InferenceScenarioConfig(server="local", provider="sglang_bench")
+    with pytest.raises(ValidationError, match="random_input_len"):
+        _scenario(server="local", provider="sglang_bench")
     with pytest.raises(ValidationError, match="require an sglang inference server"):
         ProjectConfig.model_validate(
             {
@@ -114,8 +173,8 @@ def test_sglang_scenario_requires_random_workload_and_sglang_server() -> None:
 
 
 def test_sglang_scenario_rejects_dropped_burstiness() -> None:
-    with pytest.raises(ValidationError, match="burstiness is unsupported"):
-        InferenceScenarioConfig(
+    with pytest.raises(ValidationError, match="burstiness"):
+        _scenario(
             server="local",
             provider="sglang_bench",
             random_input_len=4,
@@ -129,8 +188,8 @@ def test_sglang_scenario_rejects_dropped_burstiness() -> None:
     ("provider", "trace_artifact_id", "random_input_len", "random_output_len", "message"),
     [
         ("aiperf", None, None, None, "requires an aiperf trace_artifact_id"),
-        ("vllm_bench", None, None, None, "only supported by aiperf trace replays"),
-        ("sglang_bench", None, 4, 2, "only supported by aiperf trace replays"),
+        ("vllm_bench", None, None, None, "speedup_ratio"),
+        ("sglang_bench", None, 4, 2, "speedup_ratio"),
     ],
 )
 def test_inference_scenario_rejects_speedup_when_provider_cannot_apply_it(
@@ -141,9 +200,9 @@ def test_inference_scenario_rejects_speedup_when_provider_cannot_apply_it(
     message: str,
 ) -> None:
     with pytest.raises(ValidationError, match=message):
-        InferenceScenarioConfig(
+        _scenario(
             server="local",
-            provider=provider,  # type: ignore[arg-type]
+            provider=provider,
             trace_artifact_id=trace_artifact_id,
             random_input_len=random_input_len,
             random_output_len=random_output_len,
@@ -153,7 +212,7 @@ def test_inference_scenario_rejects_speedup_when_provider_cannot_apply_it(
 
 def test_sglang_config_rejects_non_cuda_v1_escape_hatches() -> None:
     with pytest.raises(ValidationError, match="extra_forbidden"):
-        InferenceServerConfig.model_validate(
+        parse_inference_server_config(
             {
                 "provider": "sglang",
                 "benchmark_python": "/opt/sglang/bin/python",
@@ -175,7 +234,7 @@ def test_structured_inference_configuration_preserves_existing_sections(tmp_path
         ConfigureInferenceServerRequest(
             name="local",
             operation="create",
-            config=InferenceServerConfig(
+            config=_server(
                 mode="managed",
                 workload="serve",
                 model="model",
@@ -190,7 +249,7 @@ def test_structured_inference_configuration_preserves_existing_sections(tmp_path
         ConfigureInferenceScenarioRequest(
             name="replay",
             operation="create",
-            config=InferenceScenarioConfig(
+            config=_scenario(
                 server="local",
                 provider="aiperf",
                 request_rate=12.5,
@@ -248,9 +307,7 @@ def test_structured_inference_replace_requires_current_digest(tmp_path: Path) ->
         ConfigureInferenceServerRequest(
             name="local",
             operation="create",
-            config=InferenceServerConfig(
-                mode="existing_local", model="model", base_url="http://127.0.0.1:8000"
-            ),
+            config=_server(mode="existing_local", model="model", base_url="http://127.0.0.1:8000"),
         )
     )
 
@@ -259,7 +316,7 @@ def test_structured_inference_replace_requires_current_digest(tmp_path: Path) ->
             name="local",
             operation="replace",
             expected_configuration_id=created.configuration_id,
-            config=InferenceServerConfig(
+            config=_server(
                 mode="existing_local", model="model-2", base_url="http://127.0.0.1:8000"
             ),
         )

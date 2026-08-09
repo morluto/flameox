@@ -304,7 +304,7 @@ class CapabilityService:
                 )
             )
         if self.workspace is not None:
-            reports.append(self._toxiproxy_report(system, architecture))
+            reports.append(self._toxiproxy_report(self.workspace, system, architecture))
             for descriptor in AdapterRegistry(self.workspace).discover().adapters:
                 reports.append(
                     CapabilityReport(
@@ -1076,9 +1076,13 @@ class CapabilityService:
             next_tool="start_capability_setup",
         )
 
-    def _toxiproxy_report(self, system: str, architecture: str) -> CapabilityReport:
-        assert self.workspace is not None
-        manager = ToxiproxyToolManager(self.workspace.paths.root)
+    def _toxiproxy_report(
+        self,
+        workspace: Workspace,
+        system: str,
+        architecture: str,
+    ) -> CapabilityReport:
+        manager = ToxiproxyToolManager(workspace.paths.root)
         release = manager.release_for_host()
         receipt = manager.staged_receipt()
         if release is None:

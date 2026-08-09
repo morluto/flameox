@@ -1434,7 +1434,10 @@ def test_aiperf_extractor_publishes_prompt_free_request_evidence(tmp_path: Path)
     measurements = EvidenceQueryService(workspace).measurements(
         run_id=imported.run.run_id, name_prefix="aiperf.", limit=100
     )
-    by_name = {row.name: row.value_float for row in measurements.measurements}
+    by_name = {
+        row.name: row.value.value if row.value is not None else None
+        for row in measurements.measurements
+    }
     assert by_name["aiperf.ttft.median_ms"] == pytest.approx(1.0)
     assert by_name["aiperf.end_to_end_latency.p95_ms"] == pytest.approx(3.0)
 
