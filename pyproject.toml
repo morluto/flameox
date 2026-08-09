@@ -104,6 +104,9 @@ markers = [
     "requires_systemd: requires a systemd user manager",
     "requires_toxiproxy: requires the pinned Toxiproxy server binary",
     "requires_torch: requires the optional PyTorch provider",
+    "requires_triton: requires the optional Triton provider and a compatible GPU",
+    "requires_nvbench: requires a configured NVBench benchmark executable and compatible GPU",
+    "requires_cute: requires the optional CuTe DSL provider and a compatible GPU",
 ]
 xfail_strict = true
 

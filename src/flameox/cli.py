@@ -25,6 +25,7 @@ from flameox.adapters import (
     KernelValidationExtractor,
     MemrayExtractor,
     NsightSystemsExtractor,
+    NvbenchExtractor,
     ObservationExtractor,
     PerfettoExtractor,
     PyPerfExtractor,
@@ -35,6 +36,7 @@ from flameox.adapters import (
 from flameox.analysis import RecipeService
 from flameox.application import (
     AnalysisMaterializationService,
+    ArtifactPipelineService,
     ArtifactService,
     CapabilityService,
     CaptureService,
@@ -61,14 +63,17 @@ from flameox.application import (
     InferenceReplayService,
     IntegrityService,
     InvestigationService,
+    KernelBuildImportService,
     LifecycleEvidenceService,
     MaterializeAnalysisRequest,
     NativeViewerService,
+    NvbenchImportService,
     OtlpTraceService,
     QuarantineService,
     RecordFindingRequest,
     RecordHypothesisRequest,
     RecoveryService,
+    RegisterPipelineRequest,
     RepairPlan,
     RepairService,
     RunDiscoveryService,
@@ -116,6 +121,7 @@ inference_app = typer.Typer(help="Configure, plan, and run local inference scena
 stacks_app = typer.Typer(help="Inspect bounded call relationships and stacks.")
 trace_app = typer.Typer(help="Inspect bounded temporal trace windows.")
 adapters_app = typer.Typer(help="Discover and approve third-party adapter entry points.")
+pipelines_app = typer.Typer(help="Register and compare immutable artifact pipelines.")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(runs_app, name="runs")
 app.add_typer(extract_app, name="extract")
@@ -137,6 +143,7 @@ app.add_typer(inference_app, name="inference")
 app.add_typer(stacks_app, name="stacks")
 app.add_typer(trace_app, name="trace")
 app.add_typer(adapters_app, name="adapters")
+app.add_typer(pipelines_app, name="pipelines")
 
 WorkspaceOption = Annotated[
     Path | None,
@@ -835,6 +842,101 @@ def import_artifact(
         )
     except DomainError as error:
         _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@app.command("import-kernel-build")
+def import_kernel_build(
+    path: Annotated[Path, typer.Argument(help="flameox.kernel-build.v1 manifest to import.")],
+    sensitivity: Annotated[
+        Sensitivity,
+        typer.Option("--sensitivity", case_sensitive=False),
+    ] = Sensitivity.INTERNAL,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Import a bounded compiler-artifact bundle and register its pipeline."""
+    try:
+        result = KernelBuildImportService(_workspace(workspace)).import_manifest(
+            path,
+            sensitivity=sensitivity,
+            allow_external_path=True,
+        )
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@app.command("import-nvbench")
+def import_nvbench(
+    path: Annotated[Path, typer.Argument(help="NVBench --json output file to import.")],
+    sensitivity: Annotated[
+        Sensitivity,
+        typer.Option("--sensitivity", case_sensitive=False),
+    ] = Sensitivity.INTERNAL,
+    expected_sha256: Annotated[
+        str | None,
+        typer.Option("--expected-sha256", help="Declared SHA-256 digest of the JSON file."),
+    ] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Import an NVBench JSON and its provider-declared sidecars as one bundle."""
+    try:
+        result = NvbenchImportService(_workspace(workspace)).import_json(
+            path,
+            sensitivity=sensitivity,
+            allow_external_path=True,
+            expected_sha256=expected_sha256,
+        )
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@pipelines_app.command("register")
+def pipeline_register(
+    request_path: Annotated[
+        Path,
+        typer.Argument(help="JSON file containing a RegisterPipelineRequest."),
+    ],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Register a bounded pipeline over artifacts already attached to one run."""
+    try:
+        request = RegisterPipelineRequest.model_validate_json(request_path.read_text())
+        result = ArtifactPipelineService(_workspace(workspace)).register(request)
+    except ValidationError as error:
+        _fail(_validation_error(error), as_json=json_output)
+    except OSError as error:
+        _fail(
+            DomainError(
+                ErrorCode.ARTIFACT_PARSE_FAILED,
+                f"Pipeline request could not be read: {error}.",
+            ),
+            as_json=json_output,
+        )
+    except DomainError as error:
+        _fail(error, as_json=json_output)
+    _emit(result, as_json=json_output)
+
+
+@pipelines_app.command("compare")
+def pipeline_compare(
+    baseline_pipeline_id: Annotated[str, typer.Argument()],
+    candidate_pipeline_id: Annotated[str, typer.Argument()],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Compare two compatible ordered artifact pipelines."""
+    try:
+        result = ArtifactPipelineService(_workspace(workspace)).compare(
+            baseline_pipeline_id,
+            candidate_pipeline_id,
+        )
+    except DomainError as error:
+        _fail(error, as_json=json_output)
     _emit(result, as_json=json_output)
 
 
@@ -2273,6 +2375,23 @@ def extract_compute_sanitizer(
     """Extract bounded sanitizer findings through the isolated XML worker."""
     try:
         result = ComputeSanitizerExtractor(_workspace(workspace)).extract(run_id)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@extract_app.command("nvbench")
+def extract_nvbench(
+    run_id: Annotated[
+        str,
+        typer.Argument(help="Import run containing an NVBench JSON + jsonbin bundle."),
+    ],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Extract NVBench sample times and frequencies from a preserved bundle."""
+    try:
+        result = NvbenchExtractor(_workspace(workspace)).extract(run_id)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)

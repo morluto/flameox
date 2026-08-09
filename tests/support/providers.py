@@ -11,6 +11,10 @@ PACKAGE_PROVIDERS = {
     "requires_coverage": "coverage",
     "requires_memray": "memray",
     "requires_torch": "torch",
+    "requires_triton": "triton",
+}
+CONFIGURED_EXECUTABLE_PROVIDERS = {
+    "requires_nvbench": "FLAMEOX_NVBENCH_EXECUTABLE",
 }
 EXECUTABLE_PROVIDERS = {
     "requires_bwrap": "bwrap",
@@ -23,7 +27,9 @@ EXECUTABLE_PROVIDERS = {
 PROVIDER_MARKERS = frozenset(
     {
         *PACKAGE_PROVIDERS,
+        *CONFIGURED_EXECUTABLE_PROVIDERS,
         *EXECUTABLE_PROVIDERS,
+        "requires_cute",
         "requires_perfetto",
         "requires_toxiproxy",
     }
@@ -84,6 +90,18 @@ def provider_available(marker: str) -> bool:
         return bool(configured and Path(configured).is_file())
     if marker == "requires_systemd":
         return systemd_user_scope_available()
+    if marker == "requires_triton":
+        configured = os.environ.get("FLAMEOX_TRITON_PYTHON")
+        if configured:
+            return Path(configured).expanduser().is_file()
+        return importlib.util.find_spec("triton") is not None
+    if marker == "requires_cute":
+        configured = os.environ.get("FLAMEOX_CUTE_WORKLOAD")
+        return bool(configured and Path(configured).expanduser().is_file())
+    configured_variable = CONFIGURED_EXECUTABLE_PROVIDERS.get(marker)
+    if configured_variable is not None:
+        configured = os.environ.get(configured_variable)
+        return bool(configured and Path(configured).expanduser().is_file())
     package = PACKAGE_PROVIDERS.get(marker)
     if package is not None:
         return importlib.util.find_spec(package) is not None
@@ -98,7 +116,9 @@ def provider_inventory() -> tuple[tuple[str, bool], ...]:
         (marker, provider_available(marker))
         for marker in (
             *PACKAGE_PROVIDERS,
+            *CONFIGURED_EXECUTABLE_PROVIDERS,
             *EXECUTABLE_PROVIDERS,
+            "requires_cute",
             "requires_perfetto",
             "requires_toxiproxy",
         )

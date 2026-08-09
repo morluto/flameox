@@ -40,6 +40,7 @@ def test_list_reports_lanes_and_metadata_commands() -> None:
 
     assert result.returncode == 0, result.stderr
     assert "  golden" in result.stdout
+    assert "  optional-nvbench" in result.stdout
     assert "Metadata commands:" in result.stdout
     assert "  capabilities validate managed setup metadata against extras" in result.stdout
 
@@ -110,6 +111,33 @@ def test_performance_marked_test_selects_performance_lane_on_pull_request(
     assert plan["run_performance"] is True
     assert any(item["lane"] == "performance" for item in plan["selected_lanes"])
     assert all(item["lane"] != "performance" for item in plan["unselected_lanes"])
+
+
+@pytest.mark.parametrize(
+    "event", ["pull_request", "merge_group", "push", "schedule", "workflow_dispatch"]
+)
+def test_gpu_provider_lanes_are_local_only_and_never_emitted_to_hosted_plans(
+    monkeypatch: pytest.MonkeyPatch,
+    event: str,
+) -> None:
+    plan = _plan(monkeypatch, {"tests/adapters/test_nvbench_live.py"}, event=event)
+
+    emitted = {
+        *plan["optional_lanes"],
+        *(item["lane"] for item in plan["selected_lanes"]),
+        *(item["lane"] for item in plan["unselected_lanes"]),
+        *(item["lane"] for item in plan["matrix"]["optional_lanes"]),
+    }
+    assert emitted.isdisjoint(runner.GPU_PROVIDER_LANES)
+    assert runner.validate_affected_plan(plan, RECORDS) == plan
+
+
+def test_hosted_optional_provider_lane_remains_schedulable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _plan(monkeypatch, {"tests/adapters/test_coverage.py"}, event="pull_request")
+
+    assert "optional-coverage" in plan["optional_lanes"]
 
 
 @pytest.mark.parametrize(

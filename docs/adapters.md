@@ -427,6 +427,80 @@ out-of-bounds captures. Deterministic tests use synthetic XML and cover clean, m
 sanitizer, malformed, truncated, unknown, and oversized reports. Observed claims come from XML;
 classification and path normalization are deterministic derivations; no root cause is inferred.
 
++#### `nvbench`
+
+The NVBench integration targets the JSON schema and JSON-binary behavior verified at
+`NVIDIA/nvbench@c18488992e313240166f588b9ee4da3e0de76004`. NVBench is linked into each benchmark
+executable, so Flameox runs the declared benchmark directly and injects exactly one official
+output mode: `--jsonbin <path>` to preserve JSON plus binary samples, or `--json <path>` for
+JSON-only output. Existing JSON output arguments are rejected instead of being overridden.
+
+Provider import reads the bounded JSON first and selects only the `file/sample_times` and
+`file/sample_freqs` sidecars it declares. Relative paths must remain inside the JSON bundle;
+unknown file encodings, missing declarations, traversal, symlinks, hard links, duplicate paths,
+count/byte mismatches, and bundles over 100 members or the workspace byte quotas fail explicitly.
+The current binary encoding is little-endian float32, with element counts serialized by NVBench
+as decimal strings. JSON and sidecars remain unchanged and authoritative. Extraction publishes
+raw timing samples in seconds and frequency samples in hertz through the existing measurements
+table; derived benchmark conclusions are not synthesized.
+
+Deterministic fixtures are generated in `tests/adapters/test_nvbench.py` from the pinned upstream
+shape and contain only Flameox-authored metadata and float32 samples under the project MIT
+license. They cover nested sidecar paths, strict encodings, partial process output, integrity and
+quota failures, and idempotent extraction. A local build of the pinned official
+`nvbench.example.cpp17.stream` benchmark ran through the managed adapter on CUDA 13.3 and an
+`sm_86` RTX 3060. The live test preserved the JSON, timing and frequency float32 sidecars, and
+then published their samples idempotently. That build used GCC 15, which is newer than NVBench's
+published GCC 7–14 compatibility range, so it is observed local compatibility rather than a
+supported-version claim. Linux and Windows CUDA hosts are expected upstream platforms; GPU
+access, the benchmark's own CUDA compatibility, and workload-dependent benchmark overhead remain
+operator responsibilities. Flameox owns containment, quotas, cancellation, and artifact
+registration; NVBench owns the native bytes.
+
+Observed claims are benchmark/state identity, producer/schema versions, device index, declared
+sample type and count, and preserved float32 samples. Derived claims are stable measurement IDs,
+SI-unit labeling from the two documented hints, and bounded row counts. Inferred claims: none —
+samples alone do not establish correctness, representativeness, or a performance improvement.
+
+#### `triton.compiler` and `cute.compiler`
+
+Compiler capture uses only upstream dump controls. Triton support is verified against Triton
+`3.7.1` (`triton-lang/triton@f797708c0626e5f9840ca5b0a98790e2c7cb09ad`) with
+`TRITON_DUMP_DIR`, `TRITON_KERNEL_DUMP`, and optional `TRITON_REPRODUCER_PATH`. CuTe DSL controls
+and retained kinds were verified against CUTLASS `4.6.2`
+(`NVIDIA/cutlass@6c65a175668952f09bcbf66cb97a8de1b734b4a0`) using
+`CUTE_DSL_DUMP_DIR` and the documented `CUTE_DSL_KEEP` tokens. Conflicting workload environment
+values are rejected unless identical. Flameox never deletes or rewrites a compiler cache.
+
+The wrappers run the named workload directly, inventory only allowlisted native files inside the
+staging root, enforce the shared 100-member and byte quotas, and atomically write a strict
+`flameox.kernel-build.v1` manifest even when compilation fails. TTIR, TTGIR, LLVM IR, PTX,
+AMDGCN, SASS, CUBIN, HSACO, metadata, debug IR, and reproducers remain immutable native
+artifacts; Flameox does not parse or translate them. The manifest records deterministic inventory
+stages, artifact integrity, producer/workload identity, cache status when known, normalized
+official environment values, diagnostics, and limitations. Import verifies declared size and
+digest through the shared bounded bundle importer and registers the result in the existing
+`ArtifactPipeline` service, enabling the existing comparison path rather than a second compiler
+pipeline store. Managed captures register that same pipeline directly. Provider dumps do not
+declare predecessor lineage, so Flameox leaves predecessor edges unset rather than deriving them
+from filenames or directories.
+
+A local `sm_86` run with Triton `3.7.1` produced and registered real compiler dumps through the
+managed adapter. Deterministic process tests cover both wrappers, failed compilation, missing
+output, environment conflicts, CuTe IR retention, absent lineage, containment, links, and
+reproducer handling. CUTLASS/CuTe DSL `4.6.2` was installed from its official CUDA 13 wheel, and
+the pinned official Ampere `call_bypass_dlpack.py` GEMM ran through the managed adapter on the
+same `sm_86` GPU. It verified its output against PyTorch and preserved MLIR, PTX, and SM86 CUBIN
+artifacts. Both integrations require a workload that actually invokes the matching compiler and
+a compatible accelerator/toolchain; compile and dump overhead is workload- and cache-dependent.
+The normal execution policy owns containment, staging, timeout, cancellation, and quotas.
+
+Observed claims are compiler exit status, preserved filenames/bytes/digests, producer version,
+and declared dump environment. Derived claims are deterministic inventory ordering, normalized
+staging paths, manifest outcome, and pipeline identity. Cache
+status remains `unknown` unless the producer supplies evidence. Inferred claims: none — an
+available stage does not prove semantic correctness, optimal code generation, or a cache hit.
+
 ### Candidate adapters
 
 - GDB/LLDB and elfutils for core metadata, with user init files, autoload, and

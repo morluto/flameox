@@ -65,21 +65,34 @@ PLAN_KEYS = {
     "run_performance",
 }
 PROVIDER_LANES = {
-    "optional-compute-sanitizer": "optional and requires_compute_sanitizer",
     "optional-coverage": "optional and requires_coverage",
+    "optional-compute-sanitizer": "optional and requires_compute_sanitizer",
+    "optional-cute": "optional and requires_cute",
+    "optional-nvbench": "optional and requires_nvbench",
+    "optional-triton": "optional and requires_triton",
     "optional-memray": "optional and requires_memray",
     "optional-perfetto": "optional and requires_perfetto",
     "optional-pyspy": "optional and requires_pyspy",
     "optional-torch": "optional and requires_torch",
     "optional-host": (
-        "optional and not requires_compute_sanitizer and not requires_coverage "
+        "optional and not requires_compute_sanitizer and not requires_cute "
+        "and not requires_nvbench and not requires_triton "
+        "and not requires_coverage "
         "and not requires_memray "
         "and not requires_perfetto and not requires_pyspy and not requires_torch"
     ),
 }
-GPU_PROVIDER_LANES = frozenset({"optional-compute-sanitizer"})
-# GitHub-hosted runners do not provide CUDA GPUs. Keep the live lane available
-# as an explicit local command without emitting a job that can only skip.
+GPU_PROVIDER_LANES = frozenset(
+    {
+        "optional-compute-sanitizer",
+        "optional-cute",
+        "optional-nvbench",
+        "optional-triton",
+    }
+)
+# The affected plan is consumed by GitHub-hosted ubuntu-latest runners. Keep
+# GPU lanes as explicit local commands, but never emit them into that hosted
+# matrix where their hardware requirements would turn the job into a skip.
 CI_PROVIDER_LANES = {
     lane: expression
     for lane, expression in PROVIDER_LANES.items()
@@ -712,8 +725,11 @@ def affected_plan(  # noqa: C901
                 coverage = True
                 _reason_map_add(lane_reasons, record.lane, f"owned test path: {path}")
             provider_markers = (
-                ("requires_compute_sanitizer", "optional-compute-sanitizer"),
                 ("requires_coverage", "optional-coverage"),
+                ("requires_compute_sanitizer", "optional-compute-sanitizer"),
+                ("requires_cute", "optional-cute"),
+                ("requires_nvbench", "optional-nvbench"),
+                ("requires_triton", "optional-triton"),
                 ("requires_memray", "optional-memray"),
                 ("requires_perfetto", "optional-perfetto"),
                 ("requires_pyspy", "optional-pyspy"),

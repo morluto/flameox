@@ -33,6 +33,8 @@ from flameox.adapters import (
     MemrayExtractor,
     NsightSystemsExtractionResult,
     NsightSystemsExtractor,
+    NvbenchExtractionResult,
+    NvbenchExtractor,
     ObservationExtractionResult,
     ObservationExtractor,
     PerfettoExtractionResult,
@@ -115,12 +117,16 @@ from flameox.application import (
     IntegrityService,
     InvestigationListResult,
     InvestigationService,
+    KernelBuildImportResult,
+    KernelBuildImportService,
     LifecycleEvidenceService,
     LifecycleQueryResult,
     MaterializeAnalysisRequest,
     MeasurementQueryResult,
     NativeViewerPlan,
     NativeViewerService,
+    NvbenchImportResult,
+    NvbenchImportService,
     OtlpExtractionResult,
     OtlpTraceService,
     PipelineComparison,
@@ -2152,6 +2158,108 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
+    @server.tool(name="import_kernel_build", annotations=ADDITIVE)
+    async def import_kernel_build_tool(
+        path: Annotated[
+            str,
+            Field(description="Kernel-build manifest path within the selected bounded root."),
+        ],
+        sensitivity: Sensitivity,
+        ctx: Context[AppContext],
+        source_root: Literal["project", "temp"] = "project",
+    ) -> Annotated[CallToolResult, ToolPayload[KernelBuildImportResult]]:
+        """Import declared native compiler files and register the existing pipeline model."""
+        try:
+            state = ctx.request_context.lifespan_context
+            result = await run_atomic_thread(
+                lambda: KernelBuildImportService(state.require_workspace()).import_manifest(
+                    _safe_import_path(state.project_root, path, source_root),
+                    sensitivity=sensitivity,
+                    allow_external_path=source_root == "temp",
+                )
+            )
+            return _success(
+                result,
+                f"Imported kernel-build pipeline {result.pipeline.pipeline_id}.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Run {result.run.run_id}",
+                        uri=f"flameox://runs/{result.run.run_id}",
+                        description="Immutable kernel-build import run.",
+                        mime_type="application/json",
+                    ),
+                    ResourceLink(
+                        name=f"Pipeline {result.pipeline.pipeline_id}",
+                        uri=f"flameox://pipelines/{result.pipeline.pipeline_id}",
+                        description="Immutable compiler artifact pipeline.",
+                        mime_type="application/json",
+                    ),
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="import_nvbench", annotations=ADDITIVE)
+    async def import_nvbench_tool(
+        path: Annotated[
+            str,
+            Field(description="NVBench --json output path within the selected bounded root."),
+        ],
+        sensitivity: Sensitivity,
+        ctx: Context[AppContext],
+        source_root: Literal["project", "temp"] = "project",
+        expected_sha256: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Declared SHA-256 digest of the JSON file (with or without sha256: prefix)."
+                ),
+                max_length=200,
+                pattern=r"^(?:sha256:)?[0-9a-fA-F]{64}$",
+            ),
+        ] = None,
+    ) -> Annotated[CallToolResult, ToolPayload[NvbenchImportResult]]:
+        """Import an NVBench JSON and its provider-declared sidecars as one atomic bundle.
+
+        Parses the primary JSON first to discover which sidecar files the
+        document references.  Only those files are imported — no arbitrary
+        sibling files are accepted.  Each sidecar's expected byte length is
+        bound to ``declared_size * 4`` (float32) and verified after import.
+        """
+        try:
+            state = ctx.request_context.lifespan_context
+            result = await run_atomic_thread(
+                lambda: NvbenchImportService(state.require_workspace()).import_json(
+                    _safe_import_path(state.project_root, path, source_root),
+                    sensitivity=sensitivity,
+                    allow_external_path=source_root == "temp",
+                    expected_sha256=expected_sha256,
+                )
+            )
+            run_uri = f"flameox://runs/{result.run.run_id}"
+            artifact_uri = f"flameox://artifacts/{result.primary_artifact_id}"
+            return _success(
+                result,
+                f"Imported NVBench bundle with {result.sidecar_count} sidecar(s) "
+                f"in run {result.run.run_id}.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Run {result.run.run_id}",
+                        uri=run_uri,
+                        description="Immutable NVBench import run.",
+                        mime_type="application/json",
+                    ),
+                    ResourceLink(
+                        name=f"Artifact {result.primary_artifact_id}",
+                        uri=artifact_uri,
+                        description="Imported NVBench JSON artifact metadata.",
+                        mime_type="application/json",
+                    ),
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
     @server.tool(annotations=READ_ONLY)
     async def list_runs(
         limit: Annotated[StrictInt, Field(ge=1, le=1_000)],
@@ -2217,7 +2325,18 @@ def create_server(
             pipeline = ArtifactPipelineService(
                 ctx.request_context.lifespan_context.require_workspace()
             ).register(request)
-            return _success(pipeline, f"Registered artifact pipeline {pipeline.pipeline_id}.")
+            return _success(
+                pipeline,
+                f"Registered artifact pipeline {pipeline.pipeline_id}.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Pipeline {pipeline.pipeline_id}",
+                        uri=f"flameox://pipelines/{pipeline.pipeline_id}",
+                        description="Immutable artifact-pipeline resource.",
+                        mime_type="application/json",
+                    ),
+                ),
+            )
         except DomainError as error:
             return _failure(error)
 
@@ -3235,6 +3354,46 @@ def create_server(
                         name=f"Artifact {result.artifact_id}",
                         uri=artifact_uri,
                         description="Authoritative Compute Sanitizer report metadata.",
+                        mime_type="application/json",
+                    ),
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="extract_nvbench", annotations=ADDITIVE)
+    async def extract_nvbench_tool(
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[NvbenchExtractionResult]]:
+        """Extract NVBench sample times and frequencies from a preserved bundle.
+
+        The run must contain exactly one primary NVBench JSON artifact and
+        zero or more sidecar artifacts declared by the JSON document.
+        """
+        try:
+            result = await run_atomic_thread(
+                lambda: NvbenchExtractor(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).extract(run_id)
+            )
+            run_uri = f"flameox://runs/{result.run_id}"
+            artifact_uri = f"flameox://artifacts/{result.artifact_id}"
+            return _success(
+                result,
+                f"Extracted {result.measurement_count} measurements from "
+                f"{result.benchmark_count} benchmark(s).",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Run {result.run_id}",
+                        uri=run_uri,
+                        description="Authoritative NVBench import run.",
+                        mime_type="application/json",
+                    ),
+                    ResourceLink(
+                        name=f"Artifact {result.artifact_id}",
+                        uri=artifact_uri,
+                        description="Imported NVBench JSON artifact metadata.",
                         mime_type="application/json",
                     ),
                 ),

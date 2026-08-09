@@ -1,0 +1,259 @@
+{
+  "$defs": {
+    "KernelBuildArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "byte_length": {
+          "minimum": 0,
+          "title": "Byte Length",
+          "type": "integer"
+        },
+        "media_type": {
+          "default": "application/octet-stream",
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Media Type",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "role": {
+          "default": "compiler_stage",
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Role",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "byte_length",
+        "sha256"
+      ],
+      "title": "KernelBuildArtifact",
+      "type": "object"
+    },
+    "KernelBuildStage": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KernelBuildArtifact"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "elapsed_ns": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Elapsed Ns"
+        },
+        "format": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Format",
+          "type": "string"
+        },
+        "format_schema": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Format Schema",
+          "type": "string"
+        },
+        "limitations": {
+          "default": [],
+          "items": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "title": "Limitations",
+          "type": "array"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "ordinal": {
+          "maximum": 99,
+          "minimum": 0,
+          "title": "Ordinal",
+          "type": "integer"
+        },
+        "predecessor": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Predecessor"
+        },
+        "status": {
+          "enum": [
+            "available",
+            "cached",
+            "skipped",
+            "unavailable",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "ordinal",
+        "status",
+        "format",
+        "format_schema"
+      ],
+      "title": "KernelBuildStage",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "cache_status": {
+      "default": "unknown",
+      "enum": [
+        "hit",
+        "miss",
+        "mixed",
+        "unknown"
+      ],
+      "title": "Cache Status",
+      "type": "string"
+    },
+    "device_identity": {
+      "anyOf": [
+        {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Device Identity"
+    },
+    "diagnostics": {
+      "default": [],
+      "items": {
+        "maxLength": 2000,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 50,
+      "title": "Diagnostics",
+      "type": "array"
+    },
+    "limitations": {
+      "default": [],
+      "items": {
+        "maxLength": 500,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 20,
+      "title": "Limitations",
+      "type": "array"
+    },
+    "outcome": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "inconclusive"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    },
+    "producer": {
+      "enum": [
+        "triton",
+        "cute"
+      ],
+      "title": "Producer",
+      "type": "string"
+    },
+    "producer_version": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Producer Version",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "flameox.kernel-build.v1",
+      "default": "flameox.kernel-build.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_environment": {
+      "additionalProperties": {
+        "maxLength": 500,
+        "type": "string"
+      },
+      "propertyNames": {
+        "maxLength": 100,
+        "minLength": 1
+      },
+      "title": "Source Environment",
+      "type": "object"
+    },
+    "stages": {
+      "items": {
+        "$ref": "#/$defs/KernelBuildStage"
+      },
+      "maxItems": 100,
+      "minItems": 1,
+      "title": "Stages",
+      "type": "array"
+    },
+    "workload_identity": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Workload Identity",
+      "type": "string"
+    }
+  },
+  "required": [
+    "producer",
+    "producer_version",
+    "workload_identity",
+    "outcome",
+    "stages"
+  ],
+  "title": "KernelBuildManifestV1",
+  "type": "object"
+}

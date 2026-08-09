@@ -10,6 +10,9 @@ from flameox.adapters.options import (
     adapter_accepts_options,
     compute_sanitizer_options,
     compute_sanitizer_suppression_path,
+    cute_compiler_options,
+    nvbench_options,
+    triton_compiler_options,
 )
 from flameox.adapters.torch_profiler import SdkTorchProfilerOptions, torch_profiler_options
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
@@ -251,6 +254,84 @@ BUILTIN_ADAPTERS = {
             preserve_artifact_on_nonzero=True,
         ),
         BuiltinAdapter(
+            name="nvbench",
+            dependency_kind="internal",
+            dependency=None,
+            supported_modes=("benchmark",),
+            supported_formats=("nvbench-json", "nvbench-jsonbin"),
+            features=("gpu_benchmark", "sample_times", "sample_freqs"),
+            remediation=(
+                "Build the benchmark executable with NVBench linked "
+                "(nvbench::main or NVBENCH_MAIN); verify CUDA toolkit and GPU access.",
+            ),
+            version_args=("--version",),
+            supported_platforms=("linux",),
+            output_filename="nvbench.json",
+            artifact_kinds=(ArtifactKind.BENCHMARK_SAMPLES,),
+            expected_overhead=(
+                "GPU benchmark with configurable stopping criterion and sample count."
+            ),
+            capture_limitations=(
+                "NVBench is linked into each benchmark executable; "
+                "the workload argv[0] is the benchmark binary, not a wrapper.",
+                "The adapter injects --jsonbin (or --json) into the declared argv; "
+                "pre-existing --json or --jsonbin flags are rejected as conflicts.",
+                "NVBench JSON schema is versioned; extraction is bounded to documented fields.",
+                "Binary sidecars store sample data as little-endian float32.",
+                "Warm-up samples are not separated in the jsonbin sidecar data.",
+            ),
+            preserve_artifact_on_nonzero=True,
+        ),
+        BuiltinAdapter(
+            name="triton.compiler",
+            dependency_kind="internal",
+            dependency=None,
+            supported_modes=("env_dump",),
+            supported_formats=("ttir", "ttgir", "llir", "ptx", "cubin"),
+            features=("compiler_ir", "ptx", "cubin"),
+            remediation=(
+                "Install Triton and ensure the workload invokes triton.compile or "
+                "@triton.jit kernels.",
+            ),
+            output_filename="kernel-build.json",
+            artifact_kinds=(ArtifactKind.KERNEL_BUILD,),
+            expected_overhead=(
+                "Env-var dump adds per-kernel IR emission overhead; no separate process is "
+                "launched."
+            ),
+            capture_limitations=(
+                "Only TRITON_DUMP_DIR, TRITON_KERNEL_DUMP, and TRITON_REPRODUCER_PATH are set; "
+                "the broker runs the workload directly.",
+                "Only allowlisted native extensions are inventoried; unknown files are ignored.",
+                "The manifest is emitted after success or compiler nonzero exit.",
+            ),
+            preserve_artifact_on_nonzero=True,
+        ),
+        BuiltinAdapter(
+            name="cute.compiler",
+            dependency_kind="internal",
+            dependency=None,
+            supported_modes=("env_dump",),
+            supported_formats=("cute_dsl_ir", "ptx", "cubin"),
+            features=("compiler_ir", "ptx", "cubin"),
+            remediation=(
+                "Install CuTe DSL and ensure the workload invokes cute.compiler kernels.",
+            ),
+            output_filename="kernel-build.json",
+            artifact_kinds=(ArtifactKind.KERNEL_BUILD,),
+            expected_overhead=(
+                "Env-var dump adds per-kernel IR emission overhead; no separate process is "
+                "launched."
+            ),
+            capture_limitations=(
+                "Only CUTE_DSL_DUMP_DIR and CUTE_DSL_KEEP are set; the broker runs the workload "
+                "directly.",
+                "Only allowlisted native extensions matching CUTE_DSL_KEEP are inventoried.",
+                "The manifest is emitted after success or compiler nonzero exit.",
+            ),
+            preserve_artifact_on_nonzero=True,
+        ),
+        BuiltinAdapter(
             name="coverage",
             dependency_kind="package",
             dependency="coverage",
@@ -362,6 +443,28 @@ def build_capture_invocation(
             options=options,
             project_root=project_root,
         )
+    elif adapter_name == "nvbench":
+        return _nvbench_capture_invocation(
+            adapter,
+            workload_argv,
+            output,
+            executable=executable,
+            options=options,
+        )
+    elif adapter_name == "triton.compiler":
+        return _triton_compiler_capture_invocation(
+            adapter,
+            workload_argv,
+            output_root,
+            options=options,
+        )
+    elif adapter_name == "cute.compiler":
+        return _cute_compiler_capture_invocation(
+            adapter,
+            workload_argv,
+            output_root,
+            options=options,
+        )
     elif adapter_name == "pyperf":
         python, _ = _python_target(workload_argv)
         argv = (
@@ -419,68 +522,6 @@ def build_capture_invocation(
         limitations=limitations,
         environment=environment,
     )
-
-
-def _compute_sanitizer_capture_invocation(
-    adapter: BuiltinAdapter,
-    workload_argv: tuple[str, ...],
-    output: str,
-    *,
-    executable: str | None,
-    options: dict[str, object] | None,
-    project_root: Path | None,
-) -> CaptureInvocation:
-    selected = compute_sanitizer_options(options)
-    argv_parts: list[str] = [
-        _require_executable(adapter.name, executable),
-        "--tool",
-        selected.tool,
-        "--xml",
-        "--save",
-        output,
-        "--error-exitcode",
-        str(selected.finding_exit_code),
-        "--launch-skip",
-        str(selected.launch_skip),
-        "--launch-count",
-        str(selected.launch_count),
-        "--target-processes",
-        selected.target_processes,
-        "--demangle",
-        selected.demangle,
-    ]
-    if selected.target_processes_filter is not None:
-        argv_parts.extend(("--target-processes-filter", selected.target_processes_filter))
-    if selected.kernel_name is not None:
-        argv_parts.extend(("--kernel-name", selected.kernel_name))
-    suppression = compute_sanitizer_suppression_path(
-        selected,
-        project_root=project_root or Path.cwd(),
-    )
-    if suppression is not None:
-        argv_parts.extend(("--suppressions", str(suppression)))
-    return CaptureInvocation(
-        argv=(*argv_parts, *workload_argv),
-        artifact_kinds=adapter.artifact_kinds,
-        expected_overhead=adapter.expected_overhead or "",
-        limitations=adapter.capture_limitations,
-        environment={},
-    )
-
-
-def replace_compute_sanitizer_suppression(
-    argv: tuple[str, ...],
-    staged_path: Path,
-) -> tuple[str, ...]:
-    """Point a planned Compute Sanitizer invocation at its verified staged input."""
-    indexes = [index for index, value in enumerate(argv[:-1]) if value == "--suppressions"]
-    if len(indexes) != 1:
-        raise DomainError(
-            ErrorCode.INTERNAL_ERROR,
-            "Planned Compute Sanitizer suppression argument is missing or ambiguous.",
-        )
-    index = indexes[0] + 1
-    return (*argv[:index], str(staged_path), *argv[index + 1 :])
 
 
 def _torch_capture_invocation(
@@ -588,6 +629,189 @@ def _torch_capture_invocation(
             *feature_limitations,
         ),
         environment={},
+    )
+
+
+def _compute_sanitizer_capture_invocation(
+    adapter: BuiltinAdapter,
+    workload_argv: tuple[str, ...],
+    output: str,
+    *,
+    executable: str | None,
+    options: dict[str, object] | None,
+    project_root: Path | None,
+) -> CaptureInvocation:
+    selected = compute_sanitizer_options(options)
+    argv_parts: list[str] = [
+        _require_executable(adapter.name, executable),
+        "--tool",
+        selected.tool,
+        "--xml",
+        "--save",
+        output,
+        "--error-exitcode",
+        str(selected.finding_exit_code),
+        "--launch-skip",
+        str(selected.launch_skip),
+        "--launch-count",
+        str(selected.launch_count),
+        "--target-processes",
+        selected.target_processes,
+        "--demangle",
+        selected.demangle,
+    ]
+    if selected.target_processes_filter is not None:
+        argv_parts.extend(("--target-processes-filter", selected.target_processes_filter))
+    if selected.kernel_name is not None:
+        argv_parts.extend(("--kernel-name", selected.kernel_name))
+    suppression = compute_sanitizer_suppression_path(
+        selected,
+        project_root=project_root or Path.cwd(),
+    )
+    if suppression is not None:
+        argv_parts.extend(("--suppressions", str(suppression)))
+    argv = (*argv_parts, *workload_argv)
+    return CaptureInvocation(
+        argv=argv,
+        artifact_kinds=adapter.artifact_kinds,
+        expected_overhead=adapter.expected_overhead or "",
+        limitations=adapter.capture_limitations,
+        environment={},
+    )
+
+
+def replace_compute_sanitizer_suppression(
+    argv: tuple[str, ...],
+    staged_path: Path,
+) -> tuple[str, ...]:
+    """Point a planned Compute Sanitizer invocation at its verified staged input."""
+    indexes = [index for index, value in enumerate(argv[:-1]) if value == "--suppressions"]
+    if len(indexes) != 1:
+        raise DomainError(
+            ErrorCode.INTERNAL_ERROR,
+            "Planned Compute Sanitizer suppression argument is missing or ambiguous.",
+        )
+    index = indexes[0] + 1
+    return (*argv[:index], str(staged_path), *argv[index + 1 :])
+
+
+def _nvbench_capture_invocation(
+    adapter: BuiltinAdapter,
+    workload_argv: tuple[str, ...],
+    output: str,
+    *,
+    executable: str | None,
+    options: dict[str, object] | None,
+) -> CaptureInvocation:
+    """Inject the official output flag into the declared benchmark argv.
+
+    NVBench is linked into each benchmark executable via ``NVBENCH_MAIN``
+    (``nvbench/main.cuh``); there is no universal ``nvbench`` wrapper that
+    runs a workload after ``--``.  The declared ``workload_argv[0]`` IS the
+    benchmark binary.  This function injects the official output flag
+    (verified from ``nvbench/option_parser.cu`` at commit c184889):
+
+    ``--json`` and ``--jsonbin`` are **alternative** output modes, not
+    complementary:
+
+    - ``--jsonbin <path>`` (default, ``enable_jsonbin=True``): creates a
+      ``json_printer`` with ``enable_binary_output=true`` that writes the
+      JSON document **and** binary sidecar directories ``<path>-bin/`` and
+      ``<path>-freqs-bin/``.
+    - ``--json <path>`` (``enable_jsonbin=False``): creates a
+      ``json_printer`` with ``enable_binary_output=false`` that writes only
+      the JSON document, with no binary sidecars.
+
+    Emitting both would create two competing JSON printers writing to the
+    same file, so exactly one is injected.
+
+    Pre-existing ``--json`` or ``--jsonbin`` flags (in either
+    space-separated ``--json <path>`` or equals-separated ``--json=<path>``
+    form) in ``workload_argv`` are rejected as conflicts.
+    Optional NVBench flags (``--stopping-criterion``, ``--min-samples``,
+    ``--timeout``, ``-d``) are injected before the workload's own arguments.
+    """
+    if not workload_argv:
+        raise DomainError(
+            ErrorCode.INVALID_CAPTURE_PLAN,
+            "NVBench capture requires a benchmark executable as workload argv[0].",
+        )
+    for arg in workload_argv:
+        if arg == "--json" or arg == "--jsonbin" or arg.startswith(("--json=", "--jsonbin=")):
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                f"Workload argv already contains an NVBench output flag "
+                f"({arg!r}); the managed nvbench adapter injects its own "
+                "and conflicts must be removed.",
+            )
+    selected = nvbench_options(options)
+    benchmark_exe = workload_argv[0]
+    rest_argv = workload_argv[1:]
+    output_flag = "--jsonbin" if selected.enable_jsonbin else "--json"
+    injected: list[str] = [benchmark_exe, output_flag, output]
+    if selected.stopping_criterion is not None:
+        injected.extend(("--stopping-criterion", selected.stopping_criterion))
+    if selected.min_samples is not None:
+        injected.extend(("--min-samples", str(selected.min_samples)))
+    if selected.timeout is not None:
+        injected.extend(("--timeout", str(selected.timeout)))
+    if selected.devices is not None:
+        injected.extend(("-d", selected.devices))
+    argv = (*injected, *rest_argv)
+    return CaptureInvocation(
+        argv=argv,
+        artifact_kinds=adapter.artifact_kinds,
+        expected_overhead=adapter.expected_overhead or "",
+        limitations=adapter.capture_limitations,
+        environment={},
+    )
+
+
+def _triton_compiler_capture_invocation(
+    adapter: BuiltinAdapter,
+    workload_argv: tuple[str, ...],
+    output_root: Path,
+    *,
+    options: dict[str, object] | None,
+) -> CaptureInvocation:
+    """Set Triton env-var dump controls; the broker runs the workload directly."""
+    selected = triton_compiler_options(options)
+    dump_dir = output_root / selected.dump_subdir
+    environment: dict[str, str] = {
+        "TRITON_DUMP_DIR": str(dump_dir),
+        "TRITON_KERNEL_DUMP": "1" if selected.kernel_dump else "0",
+    }
+    if selected.reproducer_filename is not None:
+        environment["TRITON_REPRODUCER_PATH"] = str(output_root / selected.reproducer_filename)
+    return CaptureInvocation(
+        argv=workload_argv,
+        artifact_kinds=adapter.artifact_kinds,
+        expected_overhead=adapter.expected_overhead or "",
+        limitations=adapter.capture_limitations,
+        environment=environment,
+    )
+
+
+def _cute_compiler_capture_invocation(
+    adapter: BuiltinAdapter,
+    workload_argv: tuple[str, ...],
+    output_root: Path,
+    *,
+    options: dict[str, object] | None,
+) -> CaptureInvocation:
+    """Set CuTe DSL env-var dump controls; the broker runs the workload directly."""
+    selected = cute_compiler_options(options)
+    dump_dir = output_root / selected.dump_subdir
+    environment: dict[str, str] = {
+        "CUTE_DSL_DUMP_DIR": str(dump_dir),
+        "CUTE_DSL_KEEP": ",".join(selected.keep_allowlist),
+    }
+    return CaptureInvocation(
+        argv=workload_argv,
+        artifact_kinds=adapter.artifact_kinds,
+        expected_overhead=adapter.expected_overhead or "",
+        limitations=adapter.capture_limitations,
+        environment=environment,
     )
 
 
