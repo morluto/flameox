@@ -180,8 +180,10 @@ async def _exercise_invalid_configuration(call: ToolCall, workspace: Workspace) 
     assert _structured(status)["result"]["next_tool"] == "configure_workload"
 
 
-async def _exercise_attempted_adhoc_capture(call: ToolCall, workspace: Workspace) -> None:
-    del workspace
+async def _exercise_ignored_adhoc_capture_arguments(
+    call: ToolCall,
+    workspace: Workspace,
+) -> None:
     result = await call(
         "plan_capture",
         {
@@ -192,8 +194,11 @@ async def _exercise_attempted_adhoc_capture(call: ToolCall, workspace: Workspace
         },
     )
 
-    assert result.is_error is True
-    assert _structured(result)["error"]["code"] == "INVALID_ARGUMENTS"
+    assert result.is_error is False
+    command = _structured(result)["result"]["workload_instance"]["command"]
+    assert command["argv"][-1] == "pass"
+    assert "not-declared" not in command["argv"]
+    assert command["cwd"] == str(workspace.project_root)
 
 
 async def _exercise_normal_workflow(call: ToolCall, workspace: Workspace) -> None:
@@ -278,13 +283,13 @@ CASES = (
         exercise=_exercise_invalid_configuration,
     ),
     WorkflowCase(
-        name="attempted_adhoc_capture",
+        name="ignored_adhoc_capture_arguments_cannot_override_workload",
         allowed_paths=(),
         expected_tool_calls=1,
-        expected_invalid_calls=1,
+        expected_invalid_calls=0,
         expected_repeated_calls=0,
         setup=_setup_probe_workload,
-        exercise=_exercise_attempted_adhoc_capture,
+        exercise=_exercise_ignored_adhoc_capture_arguments,
     ),
     WorkflowCase(
         name="normal_configure_discover_plan_execute",

@@ -45,6 +45,13 @@ markers = ["unit"]
 
 
 [[ownership]]
+owner = "torch-profiler-options"
+lane = "adapters"
+paths = ["tests/adapters/test_torch_profiler_options.py"]
+markers = ["unit"]
+
+
+[[ownership]]
 owner = "toxiproxy-integration"
 lane = "adapters"
 paths = ["tests/adapters/test_toxiproxy_integration.py"]
@@ -77,6 +84,13 @@ owner = "artifact-service"
 lane = "application"
 paths = ["tests/application/test_artifact_service.py"]
 markers = ["integration"]
+
+
+[[ownership]]
+owner = "artifact-workers"
+lane = "application"
+paths = ["tests/application/test_artifact_workers.py"]
+markers = ["unit"]
 
 
 [[ownership]]
@@ -219,6 +233,13 @@ markers = ["integration", "process", "serial"]
 
 
 [[ownership]]
+owner = "run-sets"
+lane = "application"
+paths = ["tests/application/test_run_set_variants.py"]
+markers = ["integration", "serial"]
+
+
+[[ownership]]
 owner = "native-reducer-properties"
 lane = "application"
 paths = ["tests/application/test_native_reducer_properties.py"]
@@ -285,6 +306,13 @@ markers = ["unit"]
 owner = "domain-models"
 lane = "core"
 paths = ["tests/domain/test_models.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "numeric-value-projection"
+lane = "storage"
+paths = ["tests/evidence/test_numeric_values.py"]
 markers = ["unit"]
 
 

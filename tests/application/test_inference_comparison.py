@@ -26,9 +26,10 @@ from flameox.analysis.inference_protocol import (
     TraceIdentity,
 )
 from flameox.application import (
-    CompareRunSetsRequest,
     ComparisonService,
-    FreezeRunSetRequest,
+    FreezeRunIdsRequest,
+    FreezeRunMembersRequest,
+    MeasurementCompareRunSetsRequest,
     RunSetService,
 )
 from flameox.application.environment import collect_environment
@@ -39,8 +40,7 @@ from flameox.domain import (
     CaptureStatus,
     ComparisonValidity,
     ExecutionStatus,
-    RunManifest,
-    RunType,
+    ImportRunManifest,
     ValidationStatus,
     digest_model,
 )
@@ -118,9 +118,8 @@ def _publish_inference_run(
         separators=(",", ":"),
         sort_keys=True,
     )
-    manifest = RunManifest(
+    manifest = ImportRunManifest(
         run_id=run_id,
-        run_type=RunType.IMPORT,
         execution_status=ExecutionStatus.NOT_APPLICABLE,
         capture_status=CaptureStatus.REGISTERED,
         validation_status=validation_status,
@@ -178,10 +177,10 @@ def _compare(
     unit: str = "ns",
 ) -> ComparisonValidity:
     run_sets = RunSetService(workspace)
-    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
-    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
+    baseline = run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
+    candidate = run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
     result = ComparisonService(workspace).compare(
-        CompareRunSetsRequest(
+        MeasurementCompareRunSetsRequest(
             baseline_run_set_id=baseline.run_set_id,
             candidate_run_set_id=candidate.run_set_id,
             metric=metric,
@@ -301,9 +300,8 @@ def test_non_inference_runs_still_produce_invalid_for_missing_source_state(
         ("sha256:" + "7" * 64, (100, 110, 120), "a"),
         ("sha256:" + "8" * 64, (80, 85, 90), "b"),
     ):
-        manifest = RunManifest(
+        manifest = ImportRunManifest(
             run_id=run_id,
-            run_type=RunType.IMPORT,
             execution_status=ExecutionStatus.NOT_APPLICABLE,
             capture_status=CaptureStatus.REGISTERED,
             validation_status=ValidationStatus.NOT_REQUESTED,
@@ -368,9 +366,8 @@ def test_mixed_inference_and_non_inference_runs_are_invalid(
     # Non-inference run
     environment = collect_environment()
     non_inference_id = "sha256:" + "0" * 64
-    manifest = RunManifest(
+    manifest = ImportRunManifest(
         run_id=non_inference_id,
-        run_type=RunType.IMPORT,
         execution_status=ExecutionStatus.NOT_APPLICABLE,
         capture_status=CaptureStatus.REGISTERED,
         validation_status=ValidationStatus.NOT_REQUESTED,
@@ -439,10 +436,10 @@ def test_inference_comparison_mismatches_include_protocol_and_exploratory_reason
         values=(80, 85, 90),
     )
     run_sets = RunSetService(workspace)
-    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
-    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
+    baseline = run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
+    candidate = run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
     result = ComparisonService(workspace).compare(
-        CompareRunSetsRequest(
+        MeasurementCompareRunSetsRequest(
             baseline_run_set_id=baseline.run_set_id,
             candidate_run_set_id=candidate.run_set_id,
             metric="inference.latency",
@@ -524,24 +521,30 @@ def test_within_treatment_protocol_difference_is_invalid(
         publisher_version="1",
         input_run_ids=(baseline_run_a, baseline_run_b, candidate_id),
     )
-    from flameox.application import FreezeRunSetMember
+    from flameox.application import IncludedFreezeRunSetMember
 
     run_sets = RunSetService(workspace)
     baseline = run_sets.freeze(
-        FreezeRunSetRequest(
+        FreezeRunMembersRequest(
             members=(
-                FreezeRunSetMember(run_id=baseline_run_a, trial_id=f"trial-{baseline_run_a}"),
-                FreezeRunSetMember(run_id=baseline_run_b, trial_id=f"trial-{baseline_run_b}"),
+                IncludedFreezeRunSetMember(
+                    run_id=baseline_run_a, trial_id=f"trial-{baseline_run_a}"
+                ),
+                IncludedFreezeRunSetMember(
+                    run_id=baseline_run_b, trial_id=f"trial-{baseline_run_b}"
+                ),
             )
         )
     )
     candidate = run_sets.freeze(
-        FreezeRunSetRequest(
-            members=(FreezeRunSetMember(run_id=candidate_id, trial_id=f"trial-{candidate_id}"),)
+        FreezeRunMembersRequest(
+            members=(
+                IncludedFreezeRunSetMember(run_id=candidate_id, trial_id=f"trial-{candidate_id}"),
+            )
         )
     )
     result = ComparisonService(workspace).compare(
-        CompareRunSetsRequest(
+        MeasurementCompareRunSetsRequest(
             baseline_run_set_id=baseline.run_set_id,
             candidate_run_set_id=candidate.run_set_id,
             metric="inference.latency",
@@ -571,9 +574,8 @@ def test_malformed_protocol_json_is_invalidating_not_leaking(
     # Publish a run with malformed protocol JSON
     environment = collect_environment()
     run_id = "sha256:" + "f" * 64
-    manifest = RunManifest(
+    manifest = ImportRunManifest(
         run_id=run_id,
-        run_type=RunType.IMPORT,
         execution_status=ExecutionStatus.NOT_APPLICABLE,
         capture_status=CaptureStatus.REGISTERED,
         validation_status=ValidationStatus.NOT_REQUESTED,

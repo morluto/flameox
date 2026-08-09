@@ -24,10 +24,10 @@ import shutil
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, assert_never
 from urllib.parse import urlsplit
 
-from pydantic import Field
+from pydantic import Field, TypeAdapter
 
 from flameox.analysis.inference_protocol import (
     HardwareIdentity,
@@ -64,6 +64,11 @@ from flameox.application.workloads import (
     InferenceServerConfig,
     ProjectConfig,
     WorkloadService,
+    _AIPerfInferenceScenarioConfig,
+    _ManagedInferenceServerConfig,
+    _SglangBenchInferenceScenarioConfig,
+    _SglangInferenceServerConfig,
+    _VllmBenchInferenceScenarioConfig,
 )
 from flameox.atomic import atomic_write_bytes
 from flameox.domain import (
@@ -74,10 +79,10 @@ from flameox.domain import (
     DomainError,
     EnvironmentRecord,
     ErrorCode,
+    ExecutionRunManifest,
     ExecutionStatus,
     OracleStrength,
     RunManifest,
-    RunType,
     Sensitivity,
     SourceState,
     ValidationStatus,
@@ -103,15 +108,13 @@ _PROVIDER_TOOL: dict[str, Literal["aiperf", "vllm"]] = {
 _MAX_RESULT_LIMITATIONS = 16
 
 
-class InferenceReplayPlan(ContractModel):
+class _InferenceReplayPlan(ContractModel):
     """A validated, side-effect-free plan for one inference replay run."""
 
     schema_version: Literal[1] = 1
     plan_id: str
     scenario_name: str
     server_name: str
-    provider: Literal["aiperf", "vllm_bench", "sglang_bench"]
-    server_provider: Literal["vllm", "sglang"] = "vllm"
     server_mode: Literal["managed", "existing_local"]
     base_url: str
     model: Annotated[str, Field(min_length=1, max_length=500)]
@@ -120,7 +123,6 @@ class InferenceReplayPlan(ContractModel):
     tokenizer_revision: str | None = None
     quantization: str | None = None
     endpoint_type: Literal["chat", "completions"] = "chat"
-    streaming: bool = True
     tool_executable: str | None = None
     tool_version: str | None = None
     tool_executable_digest: str | None = None
@@ -134,23 +136,67 @@ class InferenceReplayPlan(ContractModel):
     probed_model_ids: Annotated[tuple[str, ...], Field(max_length=64)] = ()
     argv: Annotated[tuple[str, ...], Field(max_length=1_024)] = ()
     output_path: str | None = None
-    trace_artifact_id: str | None = None
     num_prompts: Annotated[int, Field(gt=0, le=10_000_000)] = 1
     concurrency: Annotated[int, Field(gt=0, le=100_000)] | None = None
     request_rate: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
-    burstiness: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
     warmup_request_count: Annotated[int, Field(ge=0, le=1_000_000)] = 0
     seed: Annotated[int, Field(ge=0, le=2**31 - 1)] = 0
-    speedup_ratio: Annotated[float, Field(gt=0, le=100)] = 1.0
     semantic_oracle_workload: str | None = None
-    random_input_len: Annotated[int, Field(gt=0, le=1_000_000)] | None = None
-    random_output_len: Annotated[int, Field(gt=0, le=1_000_000)] | None = None
-    random_range_ratio: Annotated[float, Field(gt=0, le=1)] | None = None
     timeout_seconds: Annotated[float, Field(gt=0, le=86_400)]
     deadline_at: datetime
     exploratory_reason: Annotated[str, Field(min_length=1, max_length=500)]
     configuration_id: str
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class AIPerfReplayPlan(_InferenceReplayPlan):
+    provider: Literal["aiperf"]
+    server_provider: Literal["vllm"] = "vllm"
+    streaming: bool = True
+    trace_artifact_id: str | None = None
+    burstiness: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
+    speedup_ratio: Annotated[float, Field(gt=0, le=100)] = 1.0
+    random_input_len: Literal[None] = None
+    random_output_len: Literal[None] = None
+    random_range_ratio: Literal[None] = None
+
+
+class VllmBenchReplayPlan(_InferenceReplayPlan):
+    provider: Literal["vllm_bench"]
+    server_provider: Literal["vllm"] = "vllm"
+    streaming: Literal[True] = True
+    trace_artifact_id: Literal[None] = None
+    burstiness: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
+    speedup_ratio: Annotated[float, Field(ge=1, le=1)] = 1.0
+    random_input_len: Literal[None] = None
+    random_output_len: Literal[None] = None
+    random_range_ratio: Literal[None] = None
+
+
+class SglangBenchReplayPlan(_InferenceReplayPlan):
+    provider: Literal["sglang_bench"]
+    server_provider: Literal["sglang"] = "sglang"
+    streaming: Literal[True] = True
+    trace_artifact_id: Literal[None] = None
+    burstiness: Literal[None] = None
+    speedup_ratio: Annotated[float, Field(ge=1, le=1)] = 1.0
+    random_input_len: Annotated[int, Field(gt=0, le=1_000_000)]
+    random_output_len: Annotated[int, Field(gt=0, le=1_000_000)]
+    random_range_ratio: Annotated[float, Field(gt=0, le=1)] = 1.0
+
+
+type InferenceReplayPlan = Annotated[
+    AIPerfReplayPlan | VllmBenchReplayPlan | SglangBenchReplayPlan,
+    Field(discriminator="provider"),
+]
+
+_INFERENCE_REPLAY_PLAN_ADAPTER: TypeAdapter[InferenceReplayPlan] = TypeAdapter(InferenceReplayPlan)
+
+
+def parse_inference_replay_plan(value: object) -> InferenceReplayPlan:
+    """Parse a replay plan into the provider case that can execute it."""
+
+    return _INFERENCE_REPLAY_PLAN_ADAPTER.validate_python(value)
 
 
 class InferenceReplayResult(ContractModel):
@@ -288,57 +334,59 @@ class InferenceReplayService:
                 remediation=("Plan the scenario again and review the replacement plan.",),
                 details={"expected_plan_id": expected_plan_id, "actual_plan_id": plan_id},
             )
-        return InferenceReplayPlan(
-            plan_id=plan_id,
-            scenario_name=scenario_name,
-            server_name=scenario.server,
-            provider=scenario.provider,
-            server_provider=server.provider,
-            server_mode=server.mode,
-            base_url=server.base_url,
-            model=server.model,
-            model_revision=server.model_revision,
-            tokenizer=server.tokenizer,
-            tokenizer_revision=server.tokenizer_revision,
-            quantization=server.quantization,
-            endpoint_type=scenario.endpoint_type,
-            streaming=scenario.streaming,
-            tool_executable=str(discovery.executable) if discovery.executable else None,
-            tool_version=discovery.version,
-            tool_executable_digest=discovery.executable_digest,
-            server_executable_digest=server_executable_digest,
-            server_version=server_version,
-            tool_available=discovery.available,
-            tool_compatible=discovery.compatible,
-            tool_compatibility_reason=discovery.compatibility_reason,
-            tool_remediation=discovery.remediation,
-            health_ready=probe.health_ready if probe is not None else None,
-            probed_model_ids=probe.model_ids if probe is not None else (),
-            argv=request.argv() if request is not None else (),
-            output_path=str(output_path),
-            trace_artifact_id=scenario.trace_artifact_id,
-            num_prompts=scenario.num_prompts,
-            concurrency=scenario.concurrency,
-            request_rate=scenario.request_rate,
-            burstiness=scenario.burstiness,
-            warmup_request_count=scenario.warmup_request_count,
-            seed=scenario.seed,
-            speedup_ratio=scenario.speedup_ratio,
-            semantic_oracle_workload=scenario.semantic_oracle_workload,
-            random_input_len=scenario.random_input_len,
-            random_output_len=scenario.random_output_len,
-            random_range_ratio=(
-                scenario.random_range_ratio or 1.0
-                if scenario.provider == "sglang_bench"
-                else scenario.random_range_ratio
-            ),
-            timeout_seconds=deadline,
-            deadline_at=deadline_at,
-            exploratory_reason=(
-                "Single replay run is exploratory; equivalence or causality requires "
-                "a predeclared confirmatory experiment with a semantic oracle."
-            ),
-            configuration_id=configuration_id,
+        return parse_inference_replay_plan(
+            dict(
+                plan_id=plan_id,
+                scenario_name=scenario_name,
+                server_name=scenario.server,
+                provider=scenario.provider,
+                server_provider=server.provider,
+                server_mode=server.mode,
+                base_url=server.base_url,
+                model=server.model,
+                model_revision=server.model_revision,
+                tokenizer=server.tokenizer,
+                tokenizer_revision=server.tokenizer_revision,
+                quantization=server.quantization,
+                endpoint_type=scenario.endpoint_type,
+                streaming=scenario.streaming,
+                tool_executable=str(discovery.executable) if discovery.executable else None,
+                tool_version=discovery.version,
+                tool_executable_digest=discovery.executable_digest,
+                server_executable_digest=server_executable_digest,
+                server_version=server_version,
+                tool_available=discovery.available,
+                tool_compatible=discovery.compatible,
+                tool_compatibility_reason=discovery.compatibility_reason,
+                tool_remediation=discovery.remediation,
+                health_ready=probe.health_ready if probe is not None else None,
+                probed_model_ids=probe.model_ids if probe is not None else (),
+                argv=request.argv() if request is not None else (),
+                output_path=str(output_path),
+                trace_artifact_id=scenario.trace_artifact_id,
+                num_prompts=scenario.num_prompts,
+                concurrency=scenario.concurrency,
+                request_rate=scenario.request_rate,
+                burstiness=scenario.burstiness,
+                warmup_request_count=scenario.warmup_request_count,
+                seed=scenario.seed,
+                speedup_ratio=scenario.speedup_ratio,
+                semantic_oracle_workload=scenario.semantic_oracle_workload,
+                random_input_len=scenario.random_input_len,
+                random_output_len=scenario.random_output_len,
+                random_range_ratio=(
+                    scenario.random_range_ratio or 1.0
+                    if scenario.provider == "sglang_bench"
+                    else scenario.random_range_ratio
+                ),
+                timeout_seconds=deadline,
+                deadline_at=deadline_at,
+                exploratory_reason=(
+                    "Single replay run is exploratory; equivalence or causality requires "
+                    "a predeclared confirmatory experiment with a semantic oracle."
+                ),
+                configuration_id=configuration_id,
+            )
         )
 
     async def run(self, plan: InferenceReplayPlan) -> InferenceReplayResult:
@@ -873,7 +921,7 @@ class InferenceReplayService:
         return scenario, server
 
     def _server_tool_identity(self, server: InferenceServerConfig) -> tuple[str | None, str | None]:
-        if server.mode != "managed" or server.workload is None:
+        if not isinstance(server, _ManagedInferenceServerConfig):
             return None, None
         command = self.workloads.resolve(server.workload).command
         executable = self._resolve_server_executable(command)
@@ -995,7 +1043,7 @@ class InferenceReplayService:
             if scenario.trace_artifact_id is not None
             else None
         )
-        if scenario.provider == "aiperf":
+        if isinstance(scenario, _AIPerfInferenceScenarioConfig):
             return AIPerfProfileRequest(
                 executable=executable,
                 base_url=server.base_url,
@@ -1014,10 +1062,12 @@ class InferenceReplayService:
                 request_count=scenario.num_prompts if trace_path is None else None,
                 speedup_ratio=scenario.speedup_ratio,
             )
-        if scenario.provider == "sglang_bench":
-            assert server.benchmark_python is not None
-            assert scenario.random_input_len is not None
-            assert scenario.random_output_len is not None
+        if isinstance(scenario, _SglangBenchInferenceScenarioConfig):
+            if not isinstance(server, _SglangInferenceServerConfig):
+                raise DomainError(
+                    ErrorCode.WORKSPACE_INVALID,
+                    "sglang_bench scenarios require an sglang inference server",
+                )
             return SglangBenchServingRequest(
                 benchmark_python=Path(server.benchmark_python),
                 base_url=server.base_url,
@@ -1035,20 +1085,22 @@ class InferenceReplayService:
                 seed=scenario.seed,
                 result_path=output_path,
             )
-        return VllmBenchServeRequest(
-            executable=executable,
-            base_url=server.base_url,
-            model=server.model,
-            endpoint_type=scenario.endpoint_type,
-            streaming=scenario.streaming,
-            num_prompts=scenario.num_prompts,
-            request_rate=scenario.request_rate,
-            burstiness=scenario.burstiness,
-            max_concurrency=scenario.concurrency,
-            warmup_request_count=scenario.warmup_request_count,
-            seed=scenario.seed,
-            result_path=output_path,
-        )
+        if isinstance(scenario, _VllmBenchInferenceScenarioConfig):
+            return VllmBenchServeRequest(
+                executable=executable,
+                base_url=server.base_url,
+                model=server.model,
+                endpoint_type=scenario.endpoint_type,
+                streaming=scenario.streaming,
+                num_prompts=scenario.num_prompts,
+                request_rate=scenario.request_rate,
+                burstiness=scenario.burstiness,
+                max_concurrency=scenario.concurrency,
+                warmup_request_count=scenario.warmup_request_count,
+                seed=scenario.seed,
+                result_path=output_path,
+            )
+        assert_never(scenario)
 
     def _result(
         self,
@@ -1160,9 +1212,8 @@ class InferenceReplayService:
             sort_keys=True,
         )
         protocol_id = digest_model(protocol.model_dump(mode="json"))
-        run = RunManifest(
+        run = ExecutionRunManifest(
             run_id=new_id(),
-            run_type=RunType.EXECUTION,
             started_at=utc_now(),
             execution_status=ExecutionStatus.RUNNING,
             capture_status=CaptureStatus.RUNNING,
@@ -1216,7 +1267,11 @@ class InferenceReplayService:
         if plan.server_mode == "managed":
             project = self.workloads.load()
             _scenario, server = self._resolve(plan.scenario_name, project)
-            assert server.workload is not None
+            if not isinstance(server, _ManagedInferenceServerConfig):
+                raise DomainError(
+                    ErrorCode.REVISION_CONFLICT,
+                    "Inference server lifecycle changed after planning.",
+                )
             instance = self.workloads.resolve(server.workload)
             managed_command_digest = digest_model(instance.command.model_dump(mode="json"))
         oracle_identity = OracleIdentity(kind="none")

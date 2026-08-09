@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -10,10 +9,12 @@ from pydantic import (
     Field,
     JsonValue,
     StringConstraints,
+    TypeAdapter,
     field_validator,
     model_validator,
 )
 
+from flameox.domain.scalars import NumericValue
 from flameox.models import ContractModel
 
 Identifier = Annotated[str, StringConstraints(min_length=1, max_length=200)]
@@ -158,7 +159,6 @@ class TrialOutcome(StrEnum):
     RESOURCE_POLICY = "resource_policy"
     ORACLE_FAILED = "oracle_failed"
     INFRASTRUCTURE_FAILED = "infrastructure_failed"
-    OOM = "oom"
     INVALID = "invalid"
 
 
@@ -171,28 +171,31 @@ class OracleStrength(StrEnum):
 OracleScalar = None | bool | int | float | str
 
 
-class OracleReceiptValue(ContractModel):
-    kind: Literal["scalar", "digest"]
+class ScalarOracleReceiptValue(ContractModel):
+    kind: Literal["scalar"]
     value: OracleScalar
 
-    @model_validator(mode="after")
-    def valid_value(self) -> OracleReceiptValue:
-        if self.kind == "digest":
-            if not isinstance(self.value, str) or not re.fullmatch(
-                r"sha256:[0-9a-f]{64}", self.value
-            ):
-                raise ValueError("digest receipt values require a sha256 identity")
-        elif isinstance(self.value, str) and len(self.value) > 500:
+    @field_validator("value")
+    @classmethod
+    def bounded_value(cls, value: OracleScalar) -> OracleScalar:
+        if isinstance(value, str) and len(value) > 500:
             raise ValueError("scalar receipt strings are limited to 500 characters")
-        elif (
-            isinstance(self.value, int)
-            and not isinstance(self.value, bool)
-            and abs(self.value) > 10**18
-        ):
+        if isinstance(value, int) and not isinstance(value, bool) and abs(value) > 10**18:
             raise ValueError("scalar receipt integers are limited to 18 digits")
-        if isinstance(self.value, float) and not math.isfinite(self.value):
+        if isinstance(value, float) and not math.isfinite(value):
             raise ValueError("receipt scalar numbers must be finite")
-        return self
+        return value
+
+
+class DigestOracleReceiptValue(ContractModel):
+    kind: Literal["digest"]
+    value: Digest
+
+
+type OracleReceiptValue = Annotated[
+    ScalarOracleReceiptValue | DigestOracleReceiptValue,
+    Field(discriminator="kind"),
+]
 
 
 class OracleTolerance(ContractModel):
@@ -336,20 +339,17 @@ class ArtifactRegistration(ContractModel):
         return self
 
 
+CommandArgument = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=32_768, pattern=r"^[^\x00]*$"),
+]
+
+
 class CommandSpec(ContractModel):
-    argv: tuple[Annotated[str, StringConstraints(min_length=1, max_length=32_768)], ...]
+    argv: Annotated[tuple[CommandArgument, ...], Field(min_length=1)]
     cwd: Annotated[str, StringConstraints(min_length=1, max_length=4096)]
     env_overrides: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: Annotated[float, Field(gt=0, le=86_400)] = 300
-
-    @field_validator("argv")
-    @classmethod
-    def require_command(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if not value:
-            raise ValueError("argv must contain an executable")
-        if any("\x00" in item for item in value):
-            raise ValueError("argv cannot contain NUL bytes")
-        return value
 
 
 class EnvironmentRecord(ContractModel):
@@ -661,15 +661,13 @@ class CaptureLease(ContractModel):
         return self
 
 
-class RunManifest(ContractModel):
+class _RunManifest(ContractModel):
     schema_version: Literal[1] = 1
     revision: Annotated[int, Field(ge=0)] = 0
     run_id: Identifier
-    run_type: RunType
     created_at: datetime = Field(default_factory=utc_now)
     started_at: datetime | None = None
     finished_at: datetime | None = None
-    execution_status: ExecutionStatus
     capture_status: CaptureStatus
     validation_status: ValidationStatus
     workload_definition_id: Digest | None = None
@@ -695,12 +693,7 @@ class RunManifest(ContractModel):
     inference_protocol_identity_json: str | None = None
 
     @model_validator(mode="after")
-    def validate_run_type(self) -> RunManifest:
-        if self.run_type is RunType.IMPORT:
-            if self.execution_status is not ExecutionStatus.NOT_APPLICABLE:
-                raise ValueError("import runs do not execute a workload")
-            if self.command is not None:
-                raise ValueError("import runs cannot contain a command")
+    def finish_follows_start(self) -> _RunManifest:
         if (
             self.finished_at is not None
             and self.started_at is not None
@@ -708,6 +701,53 @@ class RunManifest(ContractModel):
         ):
             raise ValueError("finished_at cannot precede started_at")
         return self
+
+
+class ImportRunManifest(_RunManifest):
+    run_type: Literal[RunType.IMPORT] = RunType.IMPORT
+    execution_status: Literal[ExecutionStatus.NOT_APPLICABLE] = ExecutionStatus.NOT_APPLICABLE
+    started_at: Literal[None] = None
+    finished_at: Literal[None] = None
+    workload_definition_id: Literal[None] = None
+    workload_instance_id: Literal[None] = None
+    measurement_protocol_id: Literal[None] = None
+    source_measurement_run_id: Literal[None] = None
+    command: Literal[None] = None
+    process: Literal[None] = None
+    lease: Literal[None] = None
+    preflight: Literal[None] = None
+    writable_roots: tuple[()] = ()
+    external_context: Literal[None] = None
+    execution_identity: Literal[None] = None
+    oracle_receipt: Literal[None] = None
+
+
+class ExecutionRunManifest(_RunManifest):
+    run_type: Literal[RunType.EXECUTION] = RunType.EXECUTION
+    execution_status: Literal[
+        ExecutionStatus.PLANNED,
+        ExecutionStatus.RUNNING,
+        ExecutionStatus.SUCCEEDED,
+        ExecutionStatus.FAILED,
+        ExecutionStatus.TIMED_OUT,
+        ExecutionStatus.CANCELLED,
+    ]
+
+
+type RunManifest = Annotated[
+    ImportRunManifest | ExecutionRunManifest,
+    Field(discriminator="run_type"),
+]
+
+_RUN_MANIFEST_ADAPTER: TypeAdapter[RunManifest] = TypeAdapter(RunManifest)
+
+
+def parse_run_manifest(value: object) -> RunManifest:
+    return _RUN_MANIFEST_ADAPTER.validate_python(value)
+
+
+def parse_run_manifest_json(value: str | bytes) -> RunManifest:
+    return _RUN_MANIFEST_ADAPTER.validate_json(value)
 
 
 class Investigation(ContractModel):
@@ -767,8 +807,8 @@ class Variant(ContractModel):
     parameters: dict[str, JsonValue] = Field(default_factory=dict)
 
 
-class Trial(ContractModel):
-    schema_version: Literal[1] = 1
+class _Trial(ContractModel):
+    schema_version: Literal[2] = 2
     trial_id: Identifier
     experiment_id: Identifier
     variant_id: Identifier
@@ -778,42 +818,118 @@ class Trial(ContractModel):
     block_id: Identifier | None = None
     order_in_block: Annotated[int, Field(ge=0)] | None = None
     parameter_name: str | None = None
-    parameter_value_int: int | None = None
-    parameter_value_float: float | None = None
+    parameter_value: NumericValue | None = None
     attempt: Annotated[int, Field(ge=1)] = 1
-    outcome: TrialOutcome
-    exclusion_reason: str | None = None
     validation_status: ValidationStatus
     oracle_receipt: OracleReceiptV1 | None = None
     oracle_receipt_artifact_id: Digest | None = None
-    failure_class: Literal[
-        "none",
-        "unattempted",
-        "oracle_failure",
-        "oracle_inconclusive",
-        "oracle_unsupported",
-        "oracle_receipt_error",
-        "process_failure",
-        "timeout",
-        "cancellation",
-        "unsupported_environment",
-        "resource_policy",
-        "infrastructure_failure",
-    ] = "none"
-
-    @model_validator(mode="after")
-    def only_one_parameter_value(self) -> Trial:
-        if self.parameter_value_int is not None and self.parameter_value_float is not None:
-            raise ValueError("only one parameter value representation may be set")
-        return self
 
 
-class RunSetMember(ContractModel):
+class SucceededTrial(_Trial):
+    outcome: Literal[TrialOutcome.SUCCEEDED] = TrialOutcome.SUCCEEDED
+    exclusion_reason: Literal[None] = None
+    failure_class: Literal["none"] = "none"
+
+
+class UnattemptedTrial(_Trial):
+    outcome: Literal[TrialOutcome.UNATTEMPTED] = TrialOutcome.UNATTEMPTED
+    exclusion_reason: str
+    failure_class: Literal["unattempted"] = "unattempted"
+
+
+class FailedTrial(_Trial):
+    outcome: Literal[TrialOutcome.FAILED] = TrialOutcome.FAILED
+    exclusion_reason: str
+    failure_class: Literal["process_failure"] = "process_failure"
+
+
+class TimedOutTrial(_Trial):
+    outcome: Literal[TrialOutcome.TIMED_OUT] = TrialOutcome.TIMED_OUT
+    exclusion_reason: str
+    failure_class: Literal["timeout"] = "timeout"
+
+
+class CancelledTrial(_Trial):
+    outcome: Literal[TrialOutcome.CANCELLED] = TrialOutcome.CANCELLED
+    exclusion_reason: str
+    failure_class: Literal["cancellation"] = "cancellation"
+
+
+class UnsupportedTrial(_Trial):
+    outcome: Literal[TrialOutcome.UNSUPPORTED] = TrialOutcome.UNSUPPORTED
+    exclusion_reason: str
+    failure_class: Literal["oracle_unsupported", "unsupported_environment"]
+
+
+class ResourcePolicyTrial(_Trial):
+    outcome: Literal[TrialOutcome.RESOURCE_POLICY] = TrialOutcome.RESOURCE_POLICY
+    exclusion_reason: str
+    failure_class: Literal["resource_policy"] = "resource_policy"
+
+
+class OracleFailedTrial(_Trial):
+    outcome: Literal[TrialOutcome.ORACLE_FAILED] = TrialOutcome.ORACLE_FAILED
+    exclusion_reason: str
+    failure_class: Literal["oracle_failure"] = "oracle_failure"
+
+
+class InfrastructureFailedTrial(_Trial):
+    outcome: Literal[TrialOutcome.INFRASTRUCTURE_FAILED] = TrialOutcome.INFRASTRUCTURE_FAILED
+    exclusion_reason: str
+    failure_class: Literal["infrastructure_failure"] = "infrastructure_failure"
+
+
+class InvalidTrial(_Trial):
+    outcome: Literal[TrialOutcome.INVALID] = TrialOutcome.INVALID
+    exclusion_reason: str
+    failure_class: Literal["oracle_inconclusive", "oracle_receipt_error"]
+
+
+type Trial = Annotated[
+    SucceededTrial
+    | UnattemptedTrial
+    | FailedTrial
+    | TimedOutTrial
+    | CancelledTrial
+    | UnsupportedTrial
+    | ResourcePolicyTrial
+    | OracleFailedTrial
+    | InfrastructureFailedTrial
+    | InvalidTrial,
+    Field(discriminator="outcome"),
+]
+
+_TRIAL_ADAPTER: TypeAdapter[Trial] = TypeAdapter(Trial)
+
+
+def parse_trial(value: object) -> Trial:
+    return _TRIAL_ADAPTER.validate_python(value)
+
+
+def parse_trial_json(value: str | bytes) -> Trial:
+    return _TRIAL_ADAPTER.validate_json(value)
+
+
+class _RunSetMember(ContractModel):
     run_id: Identifier
     trial_id: Identifier | None = None
-    included: bool = True
-    reason: str | None = None
     order: Annotated[int, Field(ge=0)]
+
+
+class IncludedRunSetMember(_RunSetMember):
+    included: Literal[True] = True
+    reason: Literal[None] = None
+
+
+class ExcludedRunSetMember(_RunSetMember):
+    included: Literal[False] = False
+    reason: str
+
+
+type RunSetMember = Annotated[
+    IncludedRunSetMember | ExcludedRunSetMember,
+    Field(discriminator="included"),
+]
 
 
 class RunSet(ContractModel):
@@ -864,7 +980,7 @@ class EvidenceReference(ContractModel):
 
 
 class Comparison(ContractModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     comparison_id: Identifier
     experiment_id: Identifier | None = None
     baseline_run_set_id: Digest
@@ -874,12 +990,9 @@ class Comparison(ContractModel):
     polarity: Literal["lower_is_better", "higher_is_better", "neutral"]
     estimand: Identifier
     practical_threshold: Annotated[float, Field(ge=0)]
-    baseline_value_int: int | None = None
-    baseline_value_float: float | None = None
-    candidate_value_int: int | None = None
-    candidate_value_float: float | None = None
-    absolute_change_int: int | None = None
-    absolute_change_float: float | None = None
+    baseline_value: NumericValue | None = None
+    candidate_value: NumericValue | None = None
+    absolute_change: NumericValue | None = None
     relative_change: float | None = None
     # ``effect_size`` holds the relative median effect (exp(median(log(
     # candidate/baseline))) - 1), a dimensionless ratio, not a standardized

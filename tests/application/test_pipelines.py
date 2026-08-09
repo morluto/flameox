@@ -1,17 +1,92 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
+
+import pytest
+from pydantic import TypeAdapter, ValidationError
 
 from flameox.application import (
     ArtifactPipelineService,
     ImportArtifactRequest,
     ImportService,
+    PipelineStageComparison,
     PipelineStageDeclaration,
+    RegisteredPipelineStage,
+    RegisteredPipelineStageDeclaration,
     RegisterPipelineRequest,
+    UnregisteredPipelineStageDeclaration,
 )
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, Sensitivity, digest_model
 from flameox.storage import RunStore, Workspace
+
+_STAGE_ADAPTER: TypeAdapter[PipelineStageDeclaration] = TypeAdapter(PipelineStageDeclaration)
+_STAGE_COMPARISON_ADAPTER: TypeAdapter[PipelineStageComparison] = TypeAdapter(
+    PipelineStageComparison
+)
+type StageStatus = Literal["available", "cached", "skipped", "unavailable", "failed"]
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["available", "cached", "skipped", "unavailable", "failed"],
+)
+def test_pipeline_stage_status_routes_to_registration_variant(status: StageStatus) -> None:
+    payload: dict[str, object] = {
+        "name": "generated",
+        "ordinal": 1,
+        "status": status,
+        "registration_id": "registration-1" if status in {"available", "cached"} else None,
+        "format": "text",
+        "format_schema": "source-v1",
+    }
+
+    stage = _STAGE_ADAPTER.validate_python(payload)
+
+    if status in {"available", "cached"}:
+        assert isinstance(stage, RegisteredPipelineStageDeclaration)
+    else:
+        assert isinstance(stage, UnregisteredPipelineStageDeclaration)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "name": "generated",
+            "ordinal": 1,
+            "status": "available",
+            "format": "text",
+            "format_schema": "source-v1",
+        },
+        {
+            "name": "generated",
+            "ordinal": 1,
+            "status": "skipped",
+            "registration_id": "registration-1",
+            "format": "text",
+            "format_schema": "source-v1",
+        },
+    ],
+)
+def test_pipeline_stage_rejects_registration_status_mismatch(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        _STAGE_ADAPTER.validate_python(payload)
+
+
+def test_pipeline_stage_comparison_requires_the_side_named_by_its_disposition() -> None:
+    with pytest.raises(ValidationError):
+        _STAGE_COMPARISON_ADAPTER.validate_python(
+            {
+                "stage_name": "generated",
+                "disposition": "added",
+                "baseline_ordinal": 0,
+                "candidate_ordinal": 1,
+            }
+        )
 
 
 def _import(workspace: Workspace, path: Path, content: str, *, sensitive: bool = False) -> str:
@@ -58,12 +133,34 @@ def _pipeline(
     workspace: Workspace,
     run_id: str,
     *,
-    second_status: str = "available",
+    second_status: StageStatus = "available",
     second_ordinal: int = 1,
     schema: str = "ir-v1",
     generated_lines: int = 1,
 ) -> str:
     registrations = RunStore(workspace).read(run_id).artifacts
+    if second_status == "available" or second_status == "cached":
+        second_stage: PipelineStageDeclaration = RegisteredPipelineStageDeclaration(
+            name="generated",
+            ordinal=second_ordinal,
+            predecessor="input",
+            status=second_status,
+            registration_id=registrations[1].registration_id,
+            format="text",
+            format_schema=schema,
+            extractor="line-summary",
+            extractor_version="1",
+            structural_summary={"lines": generated_lines},
+        )
+    else:
+        second_stage = UnregisteredPipelineStageDeclaration(
+            name="generated",
+            ordinal=second_ordinal,
+            predecessor="input",
+            status=second_status,
+            format="text",
+            format_schema=schema,
+        )
     request = RegisterPipelineRequest(
         run_id=run_id,
         pipeline_name="compiler",
@@ -71,7 +168,7 @@ def _pipeline(
         producer="example-compiler",
         producer_version="1.0",
         stages=(
-            PipelineStageDeclaration(
+            RegisteredPipelineStageDeclaration(
                 name="input",
                 ordinal=0,
                 status="available",
@@ -82,24 +179,7 @@ def _pipeline(
                 extractor_version="1",
                 structural_summary={"lines": 1},
             ),
-            PipelineStageDeclaration(
-                name="generated",
-                ordinal=second_ordinal,
-                predecessor="input",
-                status=second_status,  # type: ignore[arg-type]
-                registration_id=(
-                    registrations[1].registration_id
-                    if second_status in {"available", "cached"}
-                    else None
-                ),
-                format="text",
-                format_schema=schema,
-                extractor=("line-summary" if second_status in {"available", "cached"} else None),
-                extractor_version=("1" if second_status in {"available", "cached"} else None),
-                structural_summary=(
-                    {"lines": generated_lines} if second_status in {"available", "cached"} else None
-                ),
-            ),
+            second_stage,
         ),
     )
     return service.register(request).pipeline_id
@@ -115,11 +195,14 @@ def test_identical_pipeline_short_circuits_content_addressed_artifacts(
     _add_registration(workspace, right_run, "right-generated")
     service = ArtifactPipelineService(workspace)
 
-    comparison = service.compare(
-        _pipeline(service, workspace, left_run),
-        _pipeline(service, workspace, right_run),
-    )
+    left_pipeline_id = _pipeline(service, workspace, left_run)
+    right_pipeline_id = _pipeline(service, workspace, right_run)
+    comparison = service.compare(left_pipeline_id, right_pipeline_id)
 
+    assert all(
+        isinstance(stage, RegisteredPipelineStage)
+        for stage in service.pipelines.read(left_pipeline_id).stages
+    )
     assert [stage.disposition for stage in comparison.stages] == ["identical", "identical"]
     assert all(stage.extraction_short_circuited for stage in comparison.stages)
     assert len(comparison.input_artifact_ids) == 1

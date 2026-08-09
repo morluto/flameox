@@ -9,16 +9,13 @@ from typing import Annotated, Any, Literal
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
-from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import (
     CallToolResult,
-    InputRequiredResult,
     ResourceLink,
     TextContent,
-    Tool,
     ToolAnnotations,
 )
-from pydantic import BaseModel, Field, RootModel, StrictInt, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, RootModel, StrictBool, StrictFloat, StrictInt
 
 from flameox import __version__
 from flameox.adapters import (
@@ -110,8 +107,6 @@ from flameox.application import (
     InferenceReplayResult,
     InferenceReplayService,
     InferenceRequestQueryResult,
-    InferenceScenarioConfig,
-    InferenceServerConfig,
     IntegrityResult,
     IntegrityService,
     InvestigationListResult,
@@ -148,6 +143,8 @@ from flameox.application import (
     WorkloadRequirementsConfig,
     WorkloadService,
     WorkspaceStatus,
+    parse_inference_scenario_config,
+    parse_inference_server_config,
     workspace_status,
 )
 from flameox.application.async_work import run_atomic_thread
@@ -233,43 +230,144 @@ class ExtractPerfettoRecoveryContext(ContractModel):
     run_id: str = Field(min_length=1)
 
 
-type RecoveryContext = Annotated[
-    ConfigureWorkloadRecoveryContext
-    | ManualConfigurationRecoveryContext
-    | ExtractPerfettoRecoveryContext,
+class _NonRetryRecovery(ContractModel):
+    safe_to_repeat_same_call: Literal[False] = False
+    retry_after_ms: None = None
+
+
+class _SafeNextToolRecovery(ContractModel):
+    safe_to_repeat_same_call: Literal[True] = True
+    retry_after_ms: None = None
+
+
+class RepeatSameCallRecovery(ContractModel):
+    kind: Literal["repeat_same_call"]
+    safe_to_repeat_same_call: Literal[True] = True
+    retry_after_ms: int = Field(ge=0)
+    next_tool: None = None
+
+
+class WaitThenRepeatRecovery(ContractModel):
+    kind: Literal["wait_then_repeat"]
+    safe_to_repeat_same_call: Literal[True] = True
+    retry_after_ms: int = Field(ge=0)
+    next_tool: None = None
+
+
+class ReplanCaptureRecovery(_NonRetryRecovery):
+    kind: Literal["replan_capture"]
+    next_tool: Literal["plan_capture"]
+
+
+class InitializeWorkspaceRecovery(_NonRetryRecovery):
+    kind: Literal["initialize_workspace"]
+    next_tool: Literal["initialize_workspace"]
+
+
+class ConfigureWorkloadRecovery(_NonRetryRecovery):
+    kind: Literal["configure_workload"]
+    next_tool: Literal["configure_workload"]
+    context: ConfigureWorkloadRecoveryContext | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+
+class InspectWorkloadConfigurationRecovery(_NonRetryRecovery):
+    kind: Literal["inspect_workload_configuration"]
+    next_tool: Literal["workload_configuration_status"]
+
+
+class StartCapabilitySetupRecovery(_SafeNextToolRecovery):
+    kind: Literal["start_capability_setup"]
+    next_tool: Literal["start_capability_setup"]
+
+
+class PrepareAdapterRecovery(_SafeNextToolRecovery):
+    kind: Literal["prepare_adapter"]
+    next_tool: Literal["prepare_adapter"]
+
+
+class PrepareWorkloadDependenciesRecovery(_SafeNextToolRecovery):
+    kind: Literal["prepare_workload_dependencies"]
+    next_tool: Literal["prepare_workload_dependencies"]
+
+
+class InspectCapabilitiesRecovery(_NonRetryRecovery):
+    kind: Literal["inspect_capabilities"]
+    next_tool: Literal["list_capabilities"]
+
+
+class DiscoverWorkflowsRecovery(_NonRetryRecovery):
+    kind: Literal["discover_workflows"]
+    next_tool: Literal["list_declared_workflows", "get_declared_workflow"]
+
+
+class DiscoverRunsRecovery(_NonRetryRecovery):
+    kind: Literal["discover_runs"]
+    next_tool: Literal["list_runs"]
+
+
+class DiscoverArtifactsRecovery(_NonRetryRecovery):
+    kind: Literal["discover_artifacts"]
+    next_tool: Literal["list_artifacts"]
+
+
+class ImportArtifactRecovery(_NonRetryRecovery):
+    kind: Literal["import_artifact"]
+    next_tool: Literal["import_artifact"]
+
+
+class ExtractPerfettoRecovery(_SafeNextToolRecovery):
+    kind: Literal["extract_perfetto"]
+    next_tool: Literal["extract_perfetto"]
+    context: ExtractPerfettoRecoveryContext | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+
+class ConfigureInferenceRecovery(_NonRetryRecovery):
+    kind: Literal["configure_inference"]
+    next_tool: Literal["configure_inference_server", "list_inference_configurations"]
+
+
+class ReplanInferenceRecovery(_NonRetryRecovery):
+    kind: Literal["replan_inference"]
+    next_tool: Literal["plan_inference_scenario"]
+
+
+class ManualRecovery(_NonRetryRecovery):
+    kind: Literal["manual"]
+    next_tool: None = None
+    context: ManualConfigurationRecoveryContext | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+
+type RecoveryAction = Annotated[
+    RepeatSameCallRecovery
+    | WaitThenRepeatRecovery
+    | ReplanCaptureRecovery
+    | InitializeWorkspaceRecovery
+    | ConfigureWorkloadRecovery
+    | InspectWorkloadConfigurationRecovery
+    | StartCapabilitySetupRecovery
+    | PrepareAdapterRecovery
+    | PrepareWorkloadDependenciesRecovery
+    | InspectCapabilitiesRecovery
+    | DiscoverWorkflowsRecovery
+    | DiscoverRunsRecovery
+    | DiscoverArtifactsRecovery
+    | ImportArtifactRecovery
+    | ExtractPerfettoRecovery
+    | ConfigureInferenceRecovery
+    | ReplanInferenceRecovery
+    | ManualRecovery,
     Field(discriminator="kind"),
 ]
 
 
-class RecoveryAction(ContractModel):
-    kind: Literal[
-        "repeat_same_call",
-        "wait_then_repeat",
-        "replan_capture",
-        "initialize_workspace",
-        "configure_workload",
-        "inspect_workload_configuration",
-        "start_capability_setup",
-        "prepare_adapter",
-        "prepare_workload_dependencies",
-        "inspect_capabilities",
-        "discover_workflows",
-        "discover_runs",
-        "discover_artifacts",
-        "import_artifact",
-        "extract_perfetto",
-        "configure_inference",
-        "replan_inference",
-        "manual",
-    ]
-    safe_to_repeat_same_call: bool
-    retry_after_ms: int | None = Field(default=None, ge=0)
-    next_tool: str | None = None
-    context: RecoveryContext | None = None
-
-
 class ErrorDetail(ContractModel):
-    code: str
+    code: ErrorCode
     message: str
     retryable: bool
     details: dict[str, Any]
@@ -279,16 +377,16 @@ class ErrorDetail(ContractModel):
 
 
 class SuccessPayload[T: BaseModel](ContractModel):
-    schema_version: int = 1
-    ok: Literal[True] = True
+    schema_version: Literal[1]
+    ok: Literal[True]
     result: T
-    error: None = None
+    error: None
 
 
 class FailurePayload(ContractModel):
-    schema_version: int = 1
-    ok: Literal[False] = False
-    result: None = None
+    schema_version: Literal[1]
+    ok: Literal[False]
+    result: None
     error: ErrorDetail
 
 
@@ -300,55 +398,9 @@ class ToolPayload[T: BaseModel](
         ]
     ]
 ):
-    """Advertised success/failure union matching the structured wire payload."""
+    """Success/failure union represented by the object schema required by MCP tools."""
 
-
-class StrictMCPServer[LifespanResultT](MCPServer[LifespanResultT]):
-    """Close generated argument schemas and enforce the same boundary at runtime."""
-
-    async def list_tools(self) -> list[Tool]:
-        tools = await super().list_tools()
-        listed: list[Tool] = []
-        for tool in tools:
-            update: dict[str, Any] = {
-                "input_schema": {
-                    **tool.input_schema,
-                    "additionalProperties": False,
-                }
-            }
-            if tool.output_schema is not None:
-                update["output_schema"] = {**tool.output_schema, "type": "object"}
-            listed.append(tool.model_copy(update=update))
-        return listed
-
-    async def call_tool(
-        self,
-        name: str,
-        arguments: dict[str, Any],
-        context: Context[LifespanResultT, Any] | None = None,
-    ) -> CallToolResult | InputRequiredResult:
-        tool = next((item for item in await self.list_tools() if item.name == name), None)
-        if tool is not None:
-            allowed = set(tool.input_schema.get("properties", {}))
-            unknown = sorted(set(arguments) - allowed)
-            if unknown:
-                return _invalid_arguments(
-                    name,
-                    tuple(
-                        {
-                            "field": field,
-                            "message": "Unknown argument field.",
-                            "type": "extra_forbidden",
-                        }
-                        for field in unknown
-                    ),
-                )
-        try:
-            return await super().call_tool(name, arguments, context)
-        except ToolError as error:
-            if isinstance(error.__cause__, ValidationError):
-                return _invalid_arguments(name, _validation_fields(error.__cause__))
-            raise
+    model_config = ConfigDict(json_schema_extra={"type": "object"})
 
 
 class CaptureReceipt(ContractModel):
@@ -462,17 +514,15 @@ def _success[T: BaseModel](
     *,
     resource_links: tuple[ResourceLink, ...] = (),
 ) -> CallToolResult:
+    payload = SuccessPayload[T](
+        schema_version=1,
+        ok=True,
+        result=result,
+        error=None,
+    )
     return CallToolResult(
         content=[TextContent(type="text", text=summary), *resource_links],
-        # MCPServer's v2 converter validates this against ToolPayload[T] exactly once.
-        # The application result is already a typed Pydantic model; constructing the
-        # envelope here would validate the same payload a second time.
-        structured_content={
-            "schema_version": 1,
-            "ok": True,
-            "result": result.model_dump(mode="json"),
-            "error": None,
-        },
+        structured_content=payload.model_dump(mode="json"),
     )
 
 
@@ -483,22 +533,23 @@ def _failure(error: DomainError) -> CallToolResult:
         visible_message += f" Next tool: {recovery.next_tool}."
     if error.remediation:
         visible_message += f" {error.remediation[0]}"
-    recovery_payload = recovery.model_dump(mode="json")
-    if recovery.context is None:
-        recovery_payload.pop("context", None)
+    payload = FailurePayload(
+        schema_version=1,
+        ok=False,
+        result=None,
+        error=ErrorDetail(
+            code=error.code,
+            message=error.message,
+            retryable=error.retryable,
+            details=error.details,
+            remediation=list(error.remediation),
+            run_id=error.run_id,
+            recovery=recovery,
+        ),
+    )
     return CallToolResult(
         content=[TextContent(type="text", text=visible_message)],
-        # As with success, the SDK output model is the single wire-boundary
-        # validation point for this structured result.
-        structured_content={
-            "schema_version": 1,
-            "ok": False,
-            "result": None,
-            "error": {
-                **error.to_detail(),
-                "recovery": recovery_payload,
-            },
-        },
+        structured_content=payload.model_dump(mode="json"),
         is_error=True,
     )
 
@@ -517,52 +568,37 @@ def _invalid_arguments(
             "extract_perfetto before analyze_pytorch.",
         )
     message = f"{message} {remediation[0]}"
+    payload = FailurePayload(
+        schema_version=1,
+        ok=False,
+        result=None,
+        error=ErrorDetail(
+            code=ErrorCode.INVALID_ARGUMENTS,
+            message=message,
+            retryable=False,
+            details={"fields": list(fields)},
+            remediation=remediation,
+            run_id=None,
+            recovery=ManualRecovery(kind="manual"),
+        ),
+    )
     return CallToolResult(
         content=[TextContent(type="text", text=message)],
-        structured_content={
-            "schema_version": 1,
-            "ok": False,
-            "result": None,
-            "error": {
-                "code": "INVALID_ARGUMENTS",
-                "message": message,
-                "retryable": False,
-                "details": {"fields": list(fields)},
-                "remediation": remediation,
-                "run_id": None,
-                "recovery": {
-                    "kind": "manual",
-                    "safe_to_repeat_same_call": False,
-                    "retry_after_ms": None,
-                    "next_tool": None,
-                },
-            },
-        },
+        structured_content=payload.model_dump(mode="json"),
         is_error=True,
-    )
-
-
-def _validation_fields(error: ValidationError) -> tuple[dict[str, str], ...]:
-    return tuple(
-        {
-            "field": ".".join(str(part) for part in item["loc"]),
-            "message": item["msg"],
-            "type": item["type"],
-        }
-        for item in error.errors()
     )
 
 
 def _recovery_for(error: DomainError) -> RecoveryAction:
     if error.details.get("invalid_configuration") is True:
         if error.details.get("next_tool") == "configure_workload":
-            return RecoveryAction(
+            return ConfigureWorkloadRecovery(
                 kind="configure_workload",
                 safe_to_repeat_same_call=False,
                 next_tool="configure_workload",
                 context=ConfigureWorkloadRecoveryContext(kind="configure_workload"),
             )
-        return RecoveryAction(
+        return ManualRecovery(
             kind="manual",
             safe_to_repeat_same_call=False,
             context=ManualConfigurationRecoveryContext(
@@ -571,67 +607,67 @@ def _recovery_for(error: DomainError) -> RecoveryAction:
             ),
         )
     if error.code is ErrorCode.RUN_NOT_FOUND or error.details.get("missing_entity") == "run":
-        return RecoveryAction(
+        return DiscoverRunsRecovery(
             kind="discover_runs",
             safe_to_repeat_same_call=False,
             next_tool="list_runs",
         )
     if error.details.get("missing_entity") == "artifact":
-        return RecoveryAction(
+        return DiscoverArtifactsRecovery(
             kind="discover_artifacts",
             safe_to_repeat_same_call=False,
             next_tool="list_artifacts",
         )
     if error.details.get("next_tool") == "list_declared_workflows":
-        return RecoveryAction(
+        return DiscoverWorkflowsRecovery(
             kind="discover_workflows",
             safe_to_repeat_same_call=False,
             next_tool="list_declared_workflows",
         )
     if error.details.get("next_tool") == "configure_workload":
-        return RecoveryAction(
+        return ConfigureWorkloadRecovery(
             kind="configure_workload",
             safe_to_repeat_same_call=False,
             next_tool="configure_workload",
         )
     if error.details.get("next_tool") == "workload_configuration_status":
-        return RecoveryAction(
+        return InspectWorkloadConfigurationRecovery(
             kind="inspect_workload_configuration",
             safe_to_repeat_same_call=False,
             next_tool="workload_configuration_status",
         )
     if error.details.get("next_tool") == "start_capability_setup":
-        return RecoveryAction(
+        return StartCapabilitySetupRecovery(
             kind="start_capability_setup",
             safe_to_repeat_same_call=True,
             next_tool="start_capability_setup",
         )
     if error.details.get("next_tool") == "prepare_adapter":
-        return RecoveryAction(
+        return PrepareAdapterRecovery(
             kind="prepare_adapter",
             safe_to_repeat_same_call=True,
             next_tool="prepare_adapter",
         )
     if error.details.get("next_tool") == "prepare_workload_dependencies":
-        return RecoveryAction(
+        return PrepareWorkloadDependenciesRecovery(
             kind="prepare_workload_dependencies",
             safe_to_repeat_same_call=True,
             next_tool="prepare_workload_dependencies",
         )
     if error.details.get("next_tool") == "get_declared_workflow":
-        return RecoveryAction(
+        return DiscoverWorkflowsRecovery(
             kind="discover_workflows",
             safe_to_repeat_same_call=False,
             next_tool="get_declared_workflow",
         )
     if error.details.get("next_tool") == "plan_capture":
-        return RecoveryAction(
+        return ReplanCaptureRecovery(
             kind="replan_capture",
             safe_to_repeat_same_call=False,
             next_tool="plan_capture",
         )
     if error.details.get("next_tool") == "import_artifact":
-        return RecoveryAction(
+        return ImportArtifactRecovery(
             kind="import_artifact",
             safe_to_repeat_same_call=False,
             next_tool="import_artifact",
@@ -643,72 +679,72 @@ def _recovery_for(error: DomainError) -> RecoveryAction:
             if isinstance(run_id, str)
             else None
         )
-        return RecoveryAction(
+        return ExtractPerfettoRecovery(
             kind="extract_perfetto",
             safe_to_repeat_same_call=True,
             next_tool="extract_perfetto",
             context=context,
         )
     if error.details.get("next_tool") == "list_capabilities":
-        return RecoveryAction(
+        return InspectCapabilitiesRecovery(
             kind="inspect_capabilities",
             safe_to_repeat_same_call=False,
             next_tool="list_capabilities",
         )
     if error.details.get("next_tool") == "configure_inference_server":
-        return RecoveryAction(
+        return ConfigureInferenceRecovery(
             kind="configure_inference",
             safe_to_repeat_same_call=False,
             next_tool="configure_inference_server",
         )
     if error.details.get("next_tool") == "list_inference_configurations":
-        return RecoveryAction(
+        return ConfigureInferenceRecovery(
             kind="configure_inference",
             safe_to_repeat_same_call=False,
             next_tool="list_inference_configurations",
         )
     if error.details.get("next_tool") == "plan_inference_scenario":
-        return RecoveryAction(
+        return ReplanInferenceRecovery(
             kind="replan_inference",
             safe_to_repeat_same_call=False,
             next_tool="plan_inference_scenario",
         )
     if error.details.get("next_tool") == "manual":
-        return RecoveryAction(
+        return ManualRecovery(
             kind="manual",
             safe_to_repeat_same_call=False,
         )
     if error.code is ErrorCode.WORKSPACE_NOT_FOUND:
-        return RecoveryAction(
+        return InitializeWorkspaceRecovery(
             kind="initialize_workspace",
             safe_to_repeat_same_call=False,
             next_tool="initialize_workspace",
         )
     if error.code is ErrorCode.CAPABILITY_UNAVAILABLE:
-        return RecoveryAction(
+        return InspectCapabilitiesRecovery(
             kind="inspect_capabilities",
             safe_to_repeat_same_call=False,
             next_tool="list_capabilities",
         )
     if error.code in {ErrorCode.INVALID_CAPTURE_PLAN, ErrorCode.PROCESS_TIMEOUT}:
-        return RecoveryAction(
+        return ReplanCaptureRecovery(
             kind="replan_capture",
             safe_to_repeat_same_call=False,
             next_tool="plan_capture",
         )
     if error.code is ErrorCode.WRITE_LOCK_TIMEOUT:
-        return RecoveryAction(
+        return WaitThenRepeatRecovery(
             kind="wait_then_repeat",
             safe_to_repeat_same_call=True,
             retry_after_ms=100,
         )
     if error.retryable:
-        return RecoveryAction(
+        return RepeatSameCallRecovery(
             kind="repeat_same_call",
             safe_to_repeat_same_call=True,
             retry_after_ms=250,
         )
-    return RecoveryAction(
+    return ManualRecovery(
         kind="manual",
         safe_to_repeat_same_call=False,
     )
@@ -753,7 +789,7 @@ def create_server(
     *,
     initialize: bool = False,
     workspace_root: Path | None = None,
-) -> StrictMCPServer[AppContext]:
+) -> MCPServer[AppContext]:
     project_root = project_root.resolve()
     if workspace_root is not None and "\x00" in str(workspace_root):
         raise DomainError(
@@ -764,7 +800,6 @@ def create_server(
     selected_workspace_root = (
         workspace_root.resolve() if workspace_root is not None else project_root / ".diagnostics"
     )
-    lifespan_state: list[AppContext] = []
 
     @asynccontextmanager
     async def lifespan(_: MCPServer[AppContext]) -> AsyncIterator[AppContext]:
@@ -802,7 +837,6 @@ def create_server(
                 state.capture_service(),
             )
             state.capability_setup = CapabilitySetupManager(workspace, state.capabilities)
-        lifespan_state.append(state)
         try:
             yield state
         finally:
@@ -810,9 +844,8 @@ def create_server(
                 await state.detached_captures.shutdown()
             if state.capability_setup is not None:
                 await state.capability_setup.shutdown()
-            lifespan_state.clear()
 
-    server = StrictMCPServer(
+    server = MCPServer(
         "flameox",
         version=__version__,
         description="Query and collect local runtime evidence.",
@@ -953,7 +986,7 @@ def create_server(
         ],
         ctx: Context[AppContext],
         cwd: Annotated[str, Field(min_length=1, max_length=4_096)] = ".",
-        timeout_seconds: Annotated[float, Field(gt=0, le=86_400)] = 300,
+        timeout_seconds: Annotated[StrictFloat, Field(gt=0, le=86_400)] = 300.0,
         parameters: Annotated[
             dict[str, tuple[Scalar, ...]],
             Field(max_length=128),
@@ -1046,17 +1079,19 @@ def create_server(
                     name=name,
                     operation=operation,
                     expected_configuration_id=expected_configuration_id,
-                    config=InferenceServerConfig(
-                        provider=provider,
-                        benchmark_python=benchmark_python,
-                        mode=mode,
-                        workload=workload,
-                        base_url=base_url,
-                        model=model,
-                        model_revision=model_revision,
-                        tokenizer=tokenizer,
-                        tokenizer_revision=tokenizer_revision,
-                        quantization=quantization,
+                    config=parse_inference_server_config(
+                        {
+                            "provider": provider,
+                            "benchmark_python": benchmark_python,
+                            "mode": mode,
+                            "workload": workload,
+                            "base_url": base_url,
+                            "model": model,
+                            "model_revision": model_revision,
+                            "tokenizer": tokenizer,
+                            "tokenizer_revision": tokenizer_revision,
+                            "quantization": quantization,
+                        }
                     ),
                 )
             )
@@ -1075,7 +1110,7 @@ def create_server(
         provider: Literal["aiperf", "vllm_bench", "sglang_bench"],
         ctx: Context[AppContext],
         endpoint_type: Literal["chat", "completions"] = "chat",
-        streaming: bool = True,
+        streaming: StrictBool = True,
         trace_artifact_id: Annotated[
             str | None,
             Field(
@@ -1083,16 +1118,16 @@ def create_server(
                 description="Mooncake JSONL artifact; supported only by the AIPerf provider.",
             ),
         ] = None,
-        num_prompts: Annotated[int, Field(gt=0, le=10_000_000)] = 1,
-        concurrency: Annotated[int | None, Field(gt=0, le=100_000)] = None,
-        request_rate: Annotated[float | None, Field(gt=0, le=1_000_000)] = None,
+        num_prompts: Annotated[StrictInt, Field(gt=0, le=10_000_000)] = 1,
+        concurrency: Annotated[StrictInt | None, Field(gt=0, le=100_000)] = None,
+        request_rate: Annotated[StrictFloat | None, Field(gt=0, le=1_000_000)] = None,
         burstiness: Annotated[
-            float | None,
+            StrictFloat | None,
             Field(gt=0, le=1_000_000, description="Requires request_rate when supplied."),
         ] = None,
-        warmup_request_count: Annotated[int, Field(ge=0, le=1_000_000)] = 0,
-        seed: Annotated[int, Field(ge=0, le=2**31 - 1)] = 0,
-        speedup_ratio: Annotated[float, Field(gt=0, le=100)] = 1.0,
+        warmup_request_count: Annotated[StrictInt, Field(ge=0, le=1_000_000)] = 0,
+        seed: Annotated[StrictInt, Field(ge=0, le=2**31 - 1)] = 0,
+        speedup_ratio: Annotated[StrictFloat, Field(gt=0, le=100)] = 1.0,
         semantic_oracle_workload: Annotated[
             str | None,
             Field(
@@ -1100,9 +1135,9 @@ def create_server(
                 description="Declared workload with an oracle contract, not an ordinary workload.",
             ),
         ] = None,
-        random_input_len: Annotated[int | None, Field(gt=0, le=1_000_000)] = None,
-        random_output_len: Annotated[int | None, Field(gt=0, le=1_000_000)] = None,
-        random_range_ratio: Annotated[float | None, Field(gt=0, le=1)] = None,
+        random_input_len: Annotated[StrictInt | None, Field(gt=0, le=1_000_000)] = None,
+        random_output_len: Annotated[StrictInt | None, Field(gt=0, le=1_000_000)] = None,
+        random_range_ratio: Annotated[StrictFloat | None, Field(gt=0, le=1)] = None,
         expected_configuration_id: Annotated[
             str | None, Field(pattern=r"^sha256:[0-9a-f]{64}$")
         ] = None,
@@ -1116,23 +1151,25 @@ def create_server(
                     name=name,
                     operation=operation,
                     expected_configuration_id=expected_configuration_id,
-                    config=InferenceScenarioConfig(
-                        server=server_name,
-                        provider=provider,
-                        endpoint_type=endpoint_type,
-                        streaming=streaming,
-                        trace_artifact_id=trace_artifact_id,
-                        num_prompts=num_prompts,
-                        concurrency=concurrency,
-                        request_rate=request_rate,
-                        burstiness=burstiness,
-                        warmup_request_count=warmup_request_count,
-                        seed=seed,
-                        speedup_ratio=speedup_ratio,
-                        semantic_oracle_workload=semantic_oracle_workload,
-                        random_input_len=random_input_len,
-                        random_output_len=random_output_len,
-                        random_range_ratio=random_range_ratio,
+                    config=parse_inference_scenario_config(
+                        {
+                            "server": server_name,
+                            "provider": provider,
+                            "endpoint_type": endpoint_type,
+                            "streaming": streaming,
+                            "trace_artifact_id": trace_artifact_id,
+                            "num_prompts": num_prompts,
+                            "concurrency": concurrency,
+                            "request_rate": request_rate,
+                            "burstiness": burstiness,
+                            "warmup_request_count": warmup_request_count,
+                            "seed": seed,
+                            "speedup_ratio": speedup_ratio,
+                            "semantic_oracle_workload": semantic_oracle_workload,
+                            "random_input_len": random_input_len,
+                            "random_output_len": random_output_len,
+                            "random_range_ratio": random_range_ratio,
+                        }
                     ),
                 )
             )
@@ -1160,7 +1197,7 @@ def create_server(
     async def plan_inference_scenario_tool(
         scenario_name: Annotated[str, Field(min_length=1, max_length=100)],
         ctx: Context[AppContext],
-        timeout_seconds: Annotated[float | None, Field(gt=0, le=86_400)] = None,
+        timeout_seconds: Annotated[StrictFloat | None, Field(gt=0, le=86_400)] = None,
     ) -> Annotated[CallToolResult, ToolPayload[InferenceReplayPlan]]:
         """Preflight a managed or existing-local server and construct a typed replay plan."""
         try:
@@ -1180,7 +1217,7 @@ def create_server(
     async def run_inference_scenario_tool(
         scenario_name: Annotated[str, Field(min_length=1, max_length=100)],
         ctx: Context[AppContext],
-        timeout_seconds: Annotated[float | None, Field(gt=0, le=86_400)] = None,
+        timeout_seconds: Annotated[StrictFloat | None, Field(gt=0, le=86_400)] = None,
         expected_plan_id: Annotated[str | None, Field(pattern=r"^sha256:[0-9a-f]{64}$")] = None,
     ) -> Annotated[CallToolResult, ToolPayload[InferenceReplayResult]]:
         """Plan and execute one bounded replay against a managed or existing-local server."""
@@ -1203,7 +1240,7 @@ def create_server(
     async def list_inference_requests_tool(
         run_id: Annotated[str, Field(min_length=1, max_length=200)],
         ctx: Context[AppContext],
-        limit: Annotated[int | None, Field(ge=1, le=1_000)] = None,
+        limit: Annotated[StrictInt | None, Field(ge=1, le=1_000)] = None,
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[InferenceRequestQueryResult]]:
         """Page through bounded normalized inference requests without prompt or error text."""
@@ -1253,7 +1290,7 @@ def create_server(
             ),
         ],
         ctx: Context[AppContext],
-        timeout_seconds: Annotated[float, Field(gt=0, le=86_400)] = 300,
+        timeout_seconds: Annotated[StrictFloat, Field(gt=0, le=86_400)] = 300.0,
         expected_plan_id: Annotated[str | None, Field(pattern=r"^sha256:[0-9a-f]{64}$")] = None,
     ) -> Annotated[CallToolResult, ToolPayload[InferenceProfilingResult]]:
         """Run one diagnostic-only profile window against a managed vLLM server."""
@@ -1482,7 +1519,7 @@ def create_server(
     async def list_declared_workflows_tool(
         ctx: Context[AppContext],
         kind: Literal["workload", "experiment", "fault_experiment"] = "workload",
-        limit: Annotated[int, Field(ge=1, le=100)] = 50,
+        limit: Annotated[StrictInt, Field(ge=1, le=100)] = 50,
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[DeclaredWorkflowList]]:
         """Discover declared workflows before planning; this never runs them.
@@ -1535,7 +1572,10 @@ def create_server(
         ],
         parameters: Annotated[
             dict[str, Scalar],
-            Field(description="Declared workload parameters; inspect get_declared_workflow first."),
+            Field(
+                max_length=128,
+                description="Declared workload parameters; inspect get_declared_workflow first.",
+            ),
         ],
         ctx: Context[AppContext],
         preflight_mode: Literal["auto", "passive", "active"] = "auto",
@@ -1696,7 +1736,10 @@ def create_server(
         ],
         parameters: Annotated[
             dict[str, Scalar],
-            Field(description="Declared parameters; inspect get_declared_workflow first."),
+            Field(
+                max_length=128,
+                description="Declared parameters; inspect get_declared_workflow first.",
+            ),
         ],
         ctx: Context[AppContext],
         hypothesis_id: str | None = None,
@@ -1819,13 +1862,44 @@ def create_server(
 
     @server.tool(name="plan_fault_experiment", annotations=ADDITIVE)
     async def plan_fault_experiment_tool(
-        experiment_name: Annotated[str, Field(min_length=1)],
-        investigation_id: Annotated[str, Field(min_length=1)],
-        parameters: dict[str, Scalar],
+        experiment_name: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=100,
+                description="Declared fault experiment from list_declared_workflows.",
+            ),
+        ],
+        investigation_id: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=200,
+                description="Investigation ID from create_investigation or list_investigations.",
+            ),
+        ],
+        parameters: Annotated[
+            dict[str, Scalar],
+            Field(
+                max_length=128,
+                description="Declared overrides; inspect get_declared_workflow before planning.",
+            ),
+        ],
         ctx: Context[AppContext],
-        hypothesis_id: str | None = None,
+        hypothesis_id: Annotated[
+            str | None,
+            Field(
+                min_length=1,
+                max_length=200,
+                description="Optional hypothesis ID already attached to the investigation.",
+            ),
+        ] = None,
     ) -> Annotated[CallToolResult, ToolPayload[FaultExperimentPlan]]:
-        """Bind a declared loopback Toxiproxy experiment and its exact toxic scenarios."""
+        """Bind a declared loopback Toxiproxy experiment and its exact toxic scenarios.
+
+        Toxiproxy must already be prepared by start_capability_setup; planning neither
+        downloads nor starts it.
+        """
         try:
             result = await FaultExperimentService(
                 ctx.request_context.lifespan_context.require_workspace()
@@ -1950,7 +2024,7 @@ def create_server(
     @server.tool(name="list_experiment_trials", annotations=READ_ONLY)
     async def list_experiment_trials_tool(
         experiment_id: str,
-        limit: Annotated[int, Field(ge=1, le=1_000)],
+        limit: Annotated[StrictInt, Field(ge=1, le=1_000)],
         ctx: Context[AppContext],
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[ExperimentTrialCollection]]:
@@ -2074,7 +2148,7 @@ def create_server(
 
     @server.tool(annotations=READ_ONLY)
     async def list_runs(
-        limit: Annotated[int, Field(ge=1, le=1_000)],
+        limit: Annotated[StrictInt, Field(ge=1, le=1_000)],
         ctx: Context[AppContext],
         filter: RunFilter | None = None,
         cursor: str | None = None,
@@ -2178,7 +2252,7 @@ def create_server(
 
     @server.tool(name="list_artifacts", annotations=READ_ONLY)
     async def list_artifacts_tool(
-        limit: Annotated[int, Field(ge=1, le=1_000)],
+        limit: Annotated[StrictInt, Field(ge=1, le=1_000)],
         ctx: Context[AppContext],
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[ArtifactListResult]]:
@@ -2211,7 +2285,7 @@ def create_server(
 
     @server.tool(name="list_investigations", annotations=READ_ONLY)
     async def list_investigations_tool(
-        limit: Annotated[int, Field(ge=1, le=1_000)],
+        limit: Annotated[StrictInt, Field(ge=1, le=1_000)],
         ctx: Context[AppContext],
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[InvestigationListResult]]:
@@ -2311,7 +2385,7 @@ def create_server(
 
     @server.tool(name="list_findings", annotations=READ_ONLY)
     async def list_findings_tool(
-        limit: Annotated[int, Field(ge=1, le=1_000)],
+        limit: Annotated[StrictInt, Field(ge=1, le=1_000)],
         ctx: Context[AppContext],
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[FindingListResult]]:
@@ -2466,7 +2540,7 @@ def create_server(
             ),
         ],
         limit: Annotated[
-            int, Field(ge=1, le=1_000, description="Maximum hotspots to return (1-1000).")
+            StrictInt, Field(ge=1, le=1_000, description="Maximum hotspots to return (1-1000).")
         ],
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[HotspotResult]]:
@@ -2501,7 +2575,7 @@ def create_server(
             ),
         ],
         limit: Annotated[
-            int,
+            StrictInt,
             Field(ge=1, le=1_000, description="Maximum memory observations to return (1-1000)."),
         ],
         ctx: Context[AppContext],
@@ -2539,7 +2613,7 @@ def create_server(
             ),
         ],
         limit: Annotated[
-            int,
+            StrictInt,
             Field(ge=1, le=1_000, description="Maximum execution observations to return (1-1000)."),
         ],
         ctx: Context[AppContext],
@@ -2583,7 +2657,7 @@ def create_server(
             ),
         ],
         limit: Annotated[
-            int, Field(ge=1, le=1_000, description="Maximum operators to return (1-1000).")
+            StrictInt, Field(ge=1, le=1_000, description="Maximum operators to return (1-1000).")
         ],
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[PyTorchAnalysisResult]]:
@@ -2678,7 +2752,7 @@ def create_server(
 
     @server.tool(name="analyze_failures", annotations=READ_ONLY)
     async def analyze_failures_tool(
-        limit: Annotated[int, Field(ge=1, le=1_000)],
+        limit: Annotated[StrictInt, Field(ge=1, le=1_000)],
         ctx: Context[AppContext],
         filter: RunFilter | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[FailureAnalysisResult]]:
@@ -2719,7 +2793,7 @@ def create_server(
             str, Field(min_length=1, description="Frame ID returned by an analysis result.")
         ],
         limit: Annotated[
-            int, Field(ge=1, le=1_000, description="Maximum caller edges to return (1-1000).")
+            StrictInt, Field(ge=1, le=1_000, description="Maximum caller edges to return (1-1000).")
         ],
         ctx: Context[AppContext],
         cursor: str | None = None,
@@ -2743,7 +2817,7 @@ def create_server(
             str, Field(min_length=1, description="Frame ID returned by an analysis result.")
         ],
         limit: Annotated[
-            int, Field(ge=1, le=1_000, description="Maximum callee edges to return (1-1000).")
+            StrictInt, Field(ge=1, le=1_000, description="Maximum callee edges to return (1-1000).")
         ],
         ctx: Context[AppContext],
         cursor: str | None = None,
@@ -2767,7 +2841,8 @@ def create_server(
             str, Field(min_length=1, description="Frame ID returned by an analysis result.")
         ],
         limit: Annotated[
-            int, Field(ge=1, le=1_000, description="Maximum stack examples to return (1-1000).")
+            StrictInt,
+            Field(ge=1, le=1_000, description="Maximum stack examples to return (1-1000)."),
         ],
         ctx: Context[AppContext],
         cursor: str | None = None,
@@ -2786,16 +2861,19 @@ def create_server(
         artifact_id: Annotated[
             str, Field(min_length=1, description="Trace artifact ID from list_artifacts.")
         ],
-        start_ns: Annotated[int, Field(ge=0, description="Inclusive window start in nanoseconds.")],
+        start_ns: Annotated[
+            StrictInt, Field(ge=0, description="Inclusive window start in nanoseconds.")
+        ],
         end_ns: Annotated[
-            int,
+            StrictInt,
             Field(
                 gt=0,
                 description="Exclusive window end in nanoseconds; greater than start_ns.",
             ),
         ],
         limit: Annotated[
-            int, Field(ge=1, le=1_000, description="Maximum trace slices to return (1-1000).")
+            StrictInt,
+            Field(ge=1, le=1_000, description="Maximum trace slices to return (1-1000)."),
         ],
         ctx: Context[AppContext],
         cursor: str | None = None,
@@ -2846,11 +2924,11 @@ def create_server(
     @server.tool(name="get_operation_window", annotations=READ_ONLY)
     async def get_operation_window_tool(
         artifact_id: Annotated[str, Field(min_length=1, max_length=200)],
-        start_ns: Annotated[int, Field(ge=0)],
-        end_ns: Annotated[int, Field(gt=0)],
+        start_ns: Annotated[StrictInt, Field(ge=0)],
+        end_ns: Annotated[StrictInt, Field(gt=0)],
         ctx: Context[AppContext],
         trace_id: Annotated[str | None, Field(min_length=1, max_length=100)] = None,
-        limit: Annotated[int | None, Field(ge=1, le=1_000)] = None,
+        limit: Annotated[StrictInt | None, Field(ge=1, le=1_000)] = None,
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[LifecycleQueryResult]]:
         """Return normalized OTLP spans overlapping a bounded time range."""
@@ -2876,8 +2954,8 @@ def create_server(
         artifact_id: Annotated[str, Field(min_length=1, max_length=200)],
         ctx: Context[AppContext],
         trace_id: Annotated[str | None, Field(min_length=1, max_length=100)] = None,
-        max_depth: Annotated[int, Field(ge=0, le=32)] = 8,
-        limit: Annotated[int | None, Field(ge=1, le=1_000)] = None,
+        max_depth: Annotated[StrictInt, Field(ge=0, le=32)] = 8,
+        limit: Annotated[StrictInt | None, Field(ge=1, le=1_000)] = None,
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[LifecycleQueryResult]]:
         """Return bounded parent/child transitions without interpreting causality."""
@@ -2901,8 +2979,8 @@ def create_server(
     async def find_repeated_operation_sequences_tool(
         artifact_id: Annotated[str, Field(min_length=1, max_length=200)],
         ctx: Context[AppContext],
-        minimum_repetitions: Annotated[int, Field(ge=2, le=100)] = 2,
-        limit: Annotated[int | None, Field(ge=1, le=1_000)] = None,
+        minimum_repetitions: Annotated[StrictInt, Field(ge=2, le=100)] = 2,
+        limit: Annotated[StrictInt | None, Field(ge=1, le=1_000)] = None,
         cursor: Annotated[str | None, Field(max_length=4_096)] = None,
     ) -> Annotated[CallToolResult, ToolPayload[LifecycleQueryResult]]:
         """Return repeated span signatures as bounded derived evidence."""
@@ -2925,7 +3003,7 @@ def create_server(
     async def get_lifecycle_gaps_tool(
         artifact_id: Annotated[str, Field(min_length=1, max_length=200)],
         ctx: Context[AppContext],
-        limit: Annotated[int | None, Field(ge=1, le=1_000)] = None,
+        limit: Annotated[StrictInt | None, Field(ge=1, le=1_000)] = None,
     ) -> Annotated[CallToolResult, ToolPayload[LifecycleQueryResult]]:
         """Return explicit timestamp, identity, and missing-parent evidence."""
         try:
@@ -2943,7 +3021,7 @@ def create_server(
         run_id: Annotated[str, Field(min_length=1, max_length=200)],
         ctx: Context[AppContext],
         phase: Annotated[str | None, Field(min_length=1, max_length=50)] = None,
-        limit: Annotated[int | None, Field(ge=1, le=1_000)] = None,
+        limit: Annotated[StrictInt | None, Field(ge=1, le=1_000)] = None,
     ) -> Annotated[CallToolResult, ToolPayload[LifecycleQueryResult]]:
         """Return bounded privacy-limited process observations for one run."""
         try:
@@ -2976,8 +3054,8 @@ def create_server(
         run_id: str | None = None,
         artifact_id: str | None = None,
         name_prefix: str | None = None,
-        include_warmups: bool = False,
-        limit: Annotated[int, Field(ge=1, le=1_000)] = 100,
+        include_warmups: StrictBool = False,
+        limit: Annotated[StrictInt, Field(ge=1, le=1_000)] = 100,
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[MeasurementQueryResult]]:
         """Query normalized measurements through reviewed filters and cursors."""
@@ -3258,21 +3336,9 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    register_resources(
-        server,
-        lambda: _active_state(lifespan_state).require_workspace(),
-    )
+    register_resources(server)
 
     return server
-
-
-def _active_state(states: list[AppContext]) -> AppContext:
-    if not states:
-        raise DomainError(
-            ErrorCode.WORKSPACE_NOT_FOUND,
-            "The MCP server lifespan is not active.",
-        )
-    return states[0]
 
 
 def run_server(

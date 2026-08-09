@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Annotated, Literal, assert_never
 
-from pydantic import Field, model_validator
+from pydantic import Field
 
 from flameox.analysis import (
     AcceleratorLaunchAnalysisResult,
@@ -33,15 +33,6 @@ from flameox.evidence_scope import resolve_evidence_scope
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, GenerationManifest, Workspace
 
-AnalysisRecipe = Literal[
-    "accelerator_launches",
-    "hotspots",
-    "memory",
-    "execution",
-    "pytorch",
-    "failures",
-    "scaling",
-]
 AnalysisValue = (
     AcceleratorLaunchAnalysisResult
     | HotspotResult
@@ -53,42 +44,54 @@ AnalysisValue = (
 )
 
 
-class MaterializeAnalysisRequest(ContractModel):
-    recipe: AnalysisRecipe
-    input_id: str | None = None
-    comparison_input_id: str | None = None
-    experiment_id: str | None = None
+class _InputAnalysisRequest(ContractModel):
+    input_id: str
     limit: int | None = Field(default=None, ge=1, le=1_000)
+
+
+class HotspotAnalysisRequest(_InputAnalysisRequest):
+    recipe: Literal["hotspots"]
+
+
+class MemoryAnalysisRequest(_InputAnalysisRequest):
+    recipe: Literal["memory"]
+
+
+class ExecutionAnalysisRequest(_InputAnalysisRequest):
+    recipe: Literal["execution"]
+    comparison_input_id: str | None = None
+
+
+class PyTorchAnalysisRequest(_InputAnalysisRequest):
+    recipe: Literal["pytorch"]
+
+
+class AcceleratorLaunchAnalysisRequest(_InputAnalysisRequest):
+    recipe: Literal["accelerator_launches"]
+    comparison_input_id: str | None = None
     phase: str | None = Field(default=None, min_length=1, max_length=200)
 
-    @model_validator(mode="after")
-    def validate_scope(self) -> MaterializeAnalysisRequest:
-        if self.recipe == "scaling":
-            if (
-                self.experiment_id is None
-                or self.input_id is not None
-                or self.comparison_input_id is not None
-            ):
-                raise ValueError("scaling requires only experiment_id")
-        elif self.recipe == "failures":
-            if (
-                self.input_id is not None
-                or self.comparison_input_id is not None
-                or self.experiment_id is not None
-            ):
-                raise ValueError("failures uses the pinned corpus population")
-        elif self.input_id is None or self.experiment_id is not None:
-            raise ValueError(f"{self.recipe} requires only input_id")
-        elif self.comparison_input_id is not None and self.recipe not in {
-            "execution",
-            "accelerator_launches",
-        }:
-            raise ValueError(
-                "comparison_input_id is supported only by execution and accelerator_launches"
-            )
-        if self.phase is not None and self.recipe != "accelerator_launches":
-            raise ValueError("phase is supported only by accelerator_launches")
-        return self
+
+class FailureAnalysisRequest(ContractModel):
+    recipe: Literal["failures"]
+    limit: int | None = Field(default=None, ge=1, le=1_000)
+
+
+class ScalingAnalysisRequest(ContractModel):
+    recipe: Literal["scaling"]
+    experiment_id: str
+
+
+type MaterializeAnalysisRequest = Annotated[
+    AcceleratorLaunchAnalysisRequest
+    | HotspotAnalysisRequest
+    | MemoryAnalysisRequest
+    | ExecutionAnalysisRequest
+    | PyTorchAnalysisRequest
+    | FailureAnalysisRequest
+    | ScalingAnalysisRequest,
+    Field(discriminator="recipe"),
+]
 
 
 class MaterializedAnalysisResult(ContractModel):
@@ -246,47 +249,43 @@ class AnalysisMaterializationService:
         *,
         recipes: RecipeService,
     ) -> AnalysisValue:
-        if request.recipe == "hotspots":
-            assert request.input_id is not None
+        if isinstance(request, HotspotAnalysisRequest):
             return recipes.hotspots(
                 request.input_id,
                 limit=request.limit,
             )
-        if request.recipe == "memory":
-            assert request.input_id is not None
+        if isinstance(request, MemoryAnalysisRequest):
             return recipes.memory(
                 request.input_id,
                 limit=request.limit,
             )
-        if request.recipe == "execution":
-            assert request.input_id is not None
+        if isinstance(request, ExecutionAnalysisRequest):
             return recipes.execution(
                 request.input_id,
                 comparison_input_id=request.comparison_input_id,
                 limit=request.limit,
             )
-        if request.recipe == "pytorch":
-            assert request.input_id is not None
+        if isinstance(request, PyTorchAnalysisRequest):
             return recipes.pytorch(
                 request.input_id,
                 limit=request.limit,
             )
-        if request.recipe == "accelerator_launches":
-            assert request.input_id is not None
+        if isinstance(request, AcceleratorLaunchAnalysisRequest):
             return recipes.accelerator_launches(
                 request.input_id,
                 comparison_input_id=request.comparison_input_id,
                 phase=request.phase,
                 limit=request.limit,
             )
-        if request.recipe == "failures":
+        if isinstance(request, FailureAnalysisRequest):
             return recipes.failures(
                 limit=request.limit,
             )
-        assert request.experiment_id is not None
-        return recipes.scaling(
-            request.experiment_id,
-        )
+        if isinstance(request, ScalingAnalysisRequest):
+            return recipes.scaling(
+                request.experiment_id,
+            )
+        assert_never(request)
 
     def _inputs(
         self,
@@ -294,26 +293,33 @@ class AnalysisMaterializationService:
         *,
         snapshot: Snapshot,
     ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-        input_ids = tuple(
-            value for value in (request.input_id, request.comparison_input_id) if value is not None
-        )
-        if input_ids:
-            scope = resolve_evidence_scope(snapshot, input_ids)
-            for artifact_id in (value for value in input_ids if value.startswith("sha256:")):
-                ArtifactStore(self.workspace).get(artifact_id)
-            return scope.run_ids, scope.artifact_ids, ()
-        if request.experiment_id is not None:
+        if isinstance(request, ScalingAnalysisRequest):
             rows = snapshot.execute(
                 "SELECT DISTINCT run_id FROM trials "
                 "WHERE experiment_id = ? AND run_id IS NOT NULL ORDER BY run_id",
                 (request.experiment_id,),
             ).fetchall()
             return tuple(str(row[0]) for row in rows), (), ()
-        commit = self.workspace.corpus.read_commit(snapshot.commit.commit_id)
-        generations = tuple(
-            GenerationManifest.model_validate_json(
-                (self.workspace.paths.root / path).read_text()
-            ).generation_id
-            for path in commit.generation_manifests
+        if isinstance(request, FailureAnalysisRequest):
+            commit = self.workspace.corpus.read_commit(snapshot.commit.commit_id)
+            generations = tuple(
+                GenerationManifest.model_validate_json(
+                    (self.workspace.paths.root / path).read_text()
+                ).generation_id
+                for path in commit.generation_manifests
+            )
+            return (), (), generations
+        if not isinstance(request, _InputAnalysisRequest):
+            assert_never(request)
+        comparison_input_id = (
+            request.comparison_input_id
+            if isinstance(request, (ExecutionAnalysisRequest, AcceleratorLaunchAnalysisRequest))
+            else None
         )
-        return (), (), generations
+        input_ids = tuple(
+            value for value in (request.input_id, comparison_input_id) if value is not None
+        )
+        scope = resolve_evidence_scope(snapshot, input_ids)
+        for artifact_id in (value for value in input_ids if value.startswith("sha256:")):
+            ArtifactStore(self.workspace).get(artifact_id)
+        return scope.run_ids, scope.artifact_ids, ()

@@ -47,6 +47,14 @@ def test_memory_reports_phase_correlated_growth(tmp_path: Path) -> None:
 
     result = RecipeService(workspace).memory("memory-run")
 
+    assert result.schema_version == 2
+    assert [
+        item.value.value if item.value is not None else None for item in result.measurements
+    ] == [
+        100,
+        240,
+        260,
+    ]
     assert [point.phase for point in result.phase_growth] == [
         "warmup",
         "steady_state",

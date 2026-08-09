@@ -10,10 +10,10 @@ from flameox.analysis import RecipeService
 from flameox.application import (
     CreateInvestigationRequest,
     ExecutionPolicy,
-    ExperimentConfig,
     ExperimentPlan,
     ExperimentService,
     InvestigationService,
+    parse_experiment_config,
 )
 from flameox.catalog import Catalog
 from flameox.config import WorkspaceConfig
@@ -46,10 +46,12 @@ def _git(project: Path, *args: str) -> None:
     ),
 )
 def test_experiment_config_accepts_closed_runtime_resource_catalog(metric: str) -> None:
-    config = ExperimentConfig(
-        workload="scan",
-        variants=("baseline", "candidate"),
-        primary_metric=metric,
+    config = parse_experiment_config(
+        {
+            "workload": "scan",
+            "variants": ("baseline", "candidate"),
+            "primary_metric": metric,
+        }
     )
 
     assert config.primary_metric == metric
@@ -57,10 +59,12 @@ def test_experiment_config_accepts_closed_runtime_resource_catalog(metric: str) 
 
 def test_experiment_config_rejects_writable_root_growth_metric() -> None:
     with pytest.raises(ValueError, match="runtime-resource primary_metric"):
-        ExperimentConfig(
-            workload="scan",
-            variants=("baseline", "candidate"),
-            primary_metric="runtime_resource.writable_root_growth_bytes",
+        parse_experiment_config(
+            {
+                "workload": "scan",
+                "variants": ("baseline", "candidate"),
+                "primary_metric": "runtime_resource.writable_root_growth_bytes",
+            }
         )
 
 

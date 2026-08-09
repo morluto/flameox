@@ -215,7 +215,11 @@ execution or one import, including failed and cancelled attempts. Repeating an
 identical command creates a new run because time, machine state, and samples
 differ. Runs have `run_type = execution | import`. Every imported artifact
 creates a new import run; completed runs are never mutated to attach later
-imports.
+imports. Schema-v1 manifests parse into distinct import and execution variants.
+Import manifests always use `execution_status = not_applicable` and cannot
+carry workload execution state; execution manifests cannot use
+`not_applicable`. Their persisted JSON projection and revision layout are
+unchanged.
 
 Run identity is deliberately distinct from:
 
@@ -579,11 +583,22 @@ values.
 | `parameter_value_int` | int64 nullable | exact integral value |
 | `parameter_value_float` | double nullable | fractional value |
 | `attempt` | integer | retry/attempt number |
-| `outcome` | string | succeeded, failed, timed_out, cancelled, oom, invalid |
+| `outcome` | string | unattempted, succeeded, failed, timed_out, cancelled, unsupported, resource_policy, oracle_failed, infrastructure_failed, invalid |
 | `exclusion_reason` | string nullable | predeclared analysis exclusion |
 | `validation_status` | string | oracle outcome |
+| `failure_class` | string | failure category fixed by the outcome variant |
 | `oracle_receipt_json` | string nullable | bounded parsed structured receipt |
 | `oracle_receipt_artifact_id` | string nullable | authoritative raw receipt identity |
+
+The two parameter columns are the stable physical projection of one tagged
+trial value. At most one is populated in a row. Domain and protocol models
+parse the pair immediately into either an integer or floating variant, so the
+ambiguous dual-populated state does not cross the evidence boundary.
+Trial outcome is also parsed as a tagged variant: success has no exclusion
+reason and uses `failure_class = none`; every non-success outcome requires an
+exclusion reason and admits only its declared failure category. The unused
+`oom` outcome was removed rather than retaining a state no producer could
+create or classify.
 
 Every attempted trial remains visible, including failures and exclusions.
 Analyses report counts and reasons rather than filtering them silently.
@@ -594,13 +609,20 @@ artifact identities, same-run diagnostic artifact identities, and
 Flameox-observed parsing limitations. Older manifests and evidence generations
 omit these additive fields. Parquet remains authoritative across mixed schema
 minor versions through name-based union, and DuckDB remains rebuildable.
+Receipt `expected` and `observed` values are discriminated as `scalar` or
+`digest`. A digest variant requires a `sha256:` identity, while scalar bounds
+are parsed only for the scalar variant; a kind/value mismatch never enters the
+persisted domain model.
 
 `run_sets` freeze a cohort for analysis. A run set records its ID, creation
 time, pinned corpus commit, normalized selection parameters, ordered run/trial
 membership, inclusion and exclusion reasons, and membership digest. Membership
 never changes after creation. A new selection produces a new run set even when
 it currently resolves to the same members. This prevents later imports from
-silently changing a completed comparison.
+silently changing a completed comparison. Included and excluded membership are
+distinct persisted variants: included members have no reason, while excluded
+members have a required reason. Existing schema-v1 records retain the same JSON
+projection and digest inputs.
 
 Multi-run paired comparisons require explicit `trial_id` membership and pair
 on the trial's `block_id`. Member order is presentation metadata and never a
@@ -689,6 +711,9 @@ measurements. pyperf calibration, warm-ups, workers, runs, values, and loop
 counts are not flattened into a single iteration index. Exactly one of
 `value_int` and `value_float` is set. Durations, byte quantities, and counts use
 `value_int`; ratios and derived fractional statistics use `value_float`.
+These columns are the physical projection of the single tagged value returned
+by measurement queries and analysis summaries; the paired representation does
+not leak into those domain contracts.
 
 ### `frames`
 
@@ -839,6 +864,10 @@ One row per comparison metric:
 | `decision` | string | meaningful_improvement, meaningful_regression, no_meaningful_difference, inconclusive, descriptive_only |
 | `validity` | string | valid, exploratory, invalid |
 | `mismatches` | list<string> | incompatible dimensions |
+
+Each integer/float pair is likewise a physical projection of one tagged
+comparison value. Exactly one column in a populated pair is set; readers reject
+ambiguous rows rather than constructing a comparison with two numeric kinds.
 
 Pairwise `baseline_run_id` and `candidate_run_id` inputs are syntactic sugar
 that create frozen one-element run sets.

@@ -13,7 +13,7 @@ from typing import Annotated, Any, Literal, NoReturn, cast
 import anyio
 import typer
 from mcp import Client
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from flameox import __version__, setup_ui
 from flameox.adapters import (
@@ -51,14 +51,12 @@ from flameox.application import (
     ExperimentService,
     FaultExperimentService,
     FindingService,
-    FreezeRunSetRequest,
+    FreezeRunIdsRequest,
     GarbageCollector,
     ImportArtifactRequest,
     ImportService,
     InferenceProfilingService,
     InferenceReplayService,
-    InferenceScenarioConfig,
-    InferenceServerConfig,
     IntegrityService,
     InvestigationService,
     LifecycleEvidenceService,
@@ -77,12 +75,18 @@ from flameox.application import (
     SetupOperation,
     SetupService,
     WorkloadService,
+    parse_inference_scenario_config,
+    parse_inference_server_config,
     workspace_status,
 )
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, Sensitivity
 from flameox.mcp import create_server, run_server
 from flameox.storage import RunStore, Workspace
+
+_MATERIALIZE_ANALYSIS_REQUEST_ADAPTER: TypeAdapter[MaterializeAnalysisRequest] = TypeAdapter(
+    MaterializeAnalysisRequest
+)
 
 app = typer.Typer(
     name="flameox",
@@ -273,10 +277,14 @@ def _run_async[T](operation: Callable[[], Awaitable[T]]) -> T:
 
 
 def _request[RequestT: BaseModel](model: type[RequestT], value: str) -> RequestT:
+    return _adapt_request(TypeAdapter(model), value)
+
+
+def _adapt_request[RequestT](adapter: TypeAdapter[RequestT], value: str) -> RequestT:
     try:
         if value.startswith("@"):
-            return model.model_validate_json(Path(value[1:]).read_text())
-        return model.model_validate_json(value)
+            return adapter.validate_json(Path(value[1:]).read_text())
+        return adapter.validate_json(value)
     except (OSError, ValueError) as exc:
         raise typer.BadParameter(f"Structured input is invalid: {exc}") from exc
 
@@ -959,17 +967,19 @@ def inference_configure_server(
                 name=name,
                 operation=operation,
                 expected_configuration_id=expected_configuration_id,
-                config=InferenceServerConfig(
-                    provider=provider,
-                    benchmark_python=benchmark_python,
-                    mode=mode,
-                    workload=workload,
-                    base_url=base_url,
-                    model=model,
-                    model_revision=model_revision,
-                    tokenizer=tokenizer,
-                    tokenizer_revision=tokenizer_revision,
-                    quantization=quantization,
+                config=parse_inference_server_config(
+                    {
+                        "provider": provider,
+                        "benchmark_python": benchmark_python,
+                        "mode": mode,
+                        "workload": workload,
+                        "base_url": base_url,
+                        "model": model,
+                        "model_revision": model_revision,
+                        "tokenizer": tokenizer,
+                        "tokenizer_revision": tokenizer_revision,
+                        "quantization": quantization,
+                    }
                 ),
             )
         )
@@ -1017,23 +1027,25 @@ def inference_configure_scenario(
                 name=name,
                 operation=operation,
                 expected_configuration_id=expected_configuration_id,
-                config=InferenceScenarioConfig(
-                    server=server,
-                    provider=provider,
-                    endpoint_type=endpoint_type,
-                    streaming=streaming,
-                    trace_artifact_id=trace_artifact_id,
-                    num_prompts=num_prompts,
-                    concurrency=concurrency,
-                    request_rate=request_rate,
-                    burstiness=burstiness,
-                    warmup_request_count=warmup_request_count,
-                    seed=seed,
-                    speedup_ratio=speedup_ratio,
-                    semantic_oracle_workload=semantic_oracle_workload,
-                    random_input_len=random_input_len,
-                    random_output_len=random_output_len,
-                    random_range_ratio=random_range_ratio,
+                config=parse_inference_scenario_config(
+                    {
+                        "server": server,
+                        "provider": provider,
+                        "endpoint_type": endpoint_type,
+                        "streaming": streaming,
+                        "trace_artifact_id": trace_artifact_id,
+                        "num_prompts": num_prompts,
+                        "concurrency": concurrency,
+                        "request_rate": request_rate,
+                        "burstiness": burstiness,
+                        "warmup_request_count": warmup_request_count,
+                        "seed": seed,
+                        "speedup_ratio": speedup_ratio,
+                        "semantic_oracle_workload": semantic_oracle_workload,
+                        "random_input_len": random_input_len,
+                        "random_output_len": random_output_len,
+                        "random_range_ratio": random_range_ratio,
+                    }
                 ),
             )
         )
@@ -1707,7 +1719,7 @@ def run_sets_freeze(
     """Freeze a cohort against the current corpus snapshot."""
     try:
         result = RunSetService(_workspace(workspace)).freeze(
-            FreezeRunSetRequest(run_ids=tuple(run_ids))
+            FreezeRunIdsRequest(run_ids=tuple(run_ids))
         )
     except DomainError as error:
         _fail(error)
@@ -1737,7 +1749,7 @@ def analyze_compare(
     """Compare frozen cohorts using the declared paired estimand."""
     try:
         result = ComparisonService(_workspace(workspace)).compare(
-            _request(CompareRunSetsRequest, structured_input)
+            _adapt_request(TypeAdapter(CompareRunSetsRequest), structured_input)
         )
     except DomainError as error:
         _fail(error)
@@ -1753,7 +1765,7 @@ def analyze_record_comparison(
     """Persist a comparison and its typed analysis provenance."""
     try:
         result = ComparisonService(_workspace(workspace)).record(
-            _request(CompareRunSetsRequest, structured_input)
+            _adapt_request(TypeAdapter(CompareRunSetsRequest), structured_input)
         )
     except DomainError as error:
         _fail(error)
@@ -1769,7 +1781,7 @@ def analyze_record(
     """Run and persist one versioned analysis recipe."""
     try:
         result = AnalysisMaterializationService(_workspace(workspace)).record(
-            _request(MaterializeAnalysisRequest, structured_input)
+            _adapt_request(_MATERIALIZE_ANALYSIS_REQUEST_ADAPTER, structured_input)
         )
     except DomainError as error:
         _fail(error)

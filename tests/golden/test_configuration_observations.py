@@ -9,15 +9,15 @@ from flameox.analysis import RecipeService
 from flameox.application import (
     AnalysisMaterializationService,
     CaptureService,
-    CompareRunSetsRequest,
     ComparisonService,
     CreateInvestigationRequest,
     EvidenceInput,
+    ExecutionAnalysisRequest,
     ExecutionPolicy,
     FindingService,
-    FreezeRunSetRequest,
+    FreezeRunIdsRequest,
     InvestigationService,
-    MaterializeAnalysisRequest,
+    MeasurementCompareRunSetsRequest,
     RecordFindingRequest,
     RecordHypothesisRequest,
     RunSetService,
@@ -97,17 +97,17 @@ mode = ["bad", "fixed"]
     fixed_by_name = {item.name: item for item in analyses["fixed"].observations}
     assert fixed_by_name["policy.clipping_enabled"].value_json == '{"value":true}'
     recorded_execution = AnalysisMaterializationService(workspace).record(
-        MaterializeAnalysisRequest(
+        ExecutionAnalysisRequest(
             recipe="execution",
             input_id=runs["bad"].run_id,
         )
     )
 
     cohorts = RunSetService(workspace)
-    baseline = cohorts.freeze(FreezeRunSetRequest(run_ids=(runs["bad"].run_id,)))
-    candidate = cohorts.freeze(FreezeRunSetRequest(run_ids=(runs["fixed"].run_id,)))
+    baseline = cohorts.freeze(FreezeRunIdsRequest(run_ids=(runs["bad"].run_id,)))
+    candidate = cohorts.freeze(FreezeRunIdsRequest(run_ids=(runs["fixed"].run_id,)))
     comparison = ComparisonService(workspace).record(
-        CompareRunSetsRequest(
+        MeasurementCompareRunSetsRequest(
             baseline_run_set_id=baseline.run_set_id,
             candidate_run_set_id=candidate.run_set_id,
             metric="process.wall_time",

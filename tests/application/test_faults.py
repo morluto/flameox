@@ -101,8 +101,13 @@ class _ToolManager(ToxiproxyToolManager):
     def __init__(self, executable: Path) -> None:
         super().__init__(executable.parent)
         self.receipt = ToxiproxyToolReceipt("2.12.0", "test.tar.gz", "a" * 64, executable)
+        self.stage_calls = 0
 
     def stage(self) -> ToxiproxyToolReceipt:
+        self.stage_calls += 1
+        return self.receipt
+
+    def staged_receipt(self) -> ToxiproxyToolReceipt:
         return self.receipt
 
 
@@ -195,10 +200,8 @@ latency_ms = 10
         CreateInvestigationRequest(question="does transport latency change the outcome?")
     )
 
-    plan = await FaultExperimentService(
-        workspace,
-        tool_manager=_ToolManager(Path("/bin/true")),
-    ).plan(
+    tool_manager = _ToolManager(Path("/bin/true"))
+    plan = await FaultExperimentService(workspace, tool_manager=tool_manager).plan(
         experiment_name="transport",
         investigation_id=investigation.investigation_id,
         execution_policy=ExecutionPolicy.APPROVED_AGENT,
@@ -206,6 +209,7 @@ latency_ms = 10
 
     assert plan.workload_containment == ExecutionPolicy.APPROVED_AGENT.value
     assert plan.containment == "managed_process_group"
+    assert tool_manager.stage_calls == 0
 
     (tmp_path / "flameox.toml").write_text(
         (tmp_path / "flameox.toml").read_text().replace("print(1)", "print(2)")

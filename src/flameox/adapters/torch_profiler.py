@@ -1,8 +1,18 @@
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Mapping
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import Field, StrictBool, StrictInt, ValidationError, model_validator
+from pydantic import (
+    Discriminator,
+    Field,
+    StrictBool,
+    StrictInt,
+    Tag,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
 from flameox.domain import DomainError, ErrorCode
 from flameox.models import ContractModel
@@ -16,8 +26,7 @@ class TorchProfilerSchedule(ContractModel):
     skip_first: StrictInt = Field(default=0, ge=0, le=10_000)
 
 
-class TorchProfilerCaptureOptions(ContractModel):
-    mode: Literal["whole_entrypoint", "sdk"] = "whole_entrypoint"
+class _TorchProfilerCaptureOptions(ContractModel):
     activities: tuple[Literal["cpu", "cuda", "cuda_if_available"], ...] = (
         "cpu",
         "cuda_if_available",
@@ -27,40 +36,68 @@ class TorchProfilerCaptureOptions(ContractModel):
     with_stack: StrictBool = True
     with_flops: StrictBool = False
     with_modules: StrictBool = False
-    schedule: TorchProfilerSchedule | None = None
 
     @model_validator(mode="after")
-    def validate_mode(self) -> TorchProfilerCaptureOptions:
+    def unique_activities(self) -> Self:
         if not self.activities:
             raise ValueError("at least one torch.profiler activity is required")
         if len(set(self.activities)) != len(self.activities):
             raise ValueError("torch.profiler activities must be unique")
         if {"cuda", "cuda_if_available"}.issubset(self.activities):
             raise ValueError("choose either cuda or cuda_if_available, not both")
-        if self.mode == "whole_entrypoint" and self.schedule is not None:
-            raise ValueError(
-                "a torch.profiler schedule requires SDK mode and explicit profile.step() calls"
-            )
-        if self.mode == "sdk" and self.schedule is None:
-            raise ValueError("SDK mode requires an explicit bounded torch.profiler schedule")
         return self
+
+
+class WholeEntrypointTorchProfilerOptions(_TorchProfilerCaptureOptions):
+    mode: Literal["whole_entrypoint"] = "whole_entrypoint"
+    schedule: Literal[None] = None
 
     @property
     def expected_cycles(self) -> int:
-        return self.schedule.repeat if self.schedule is not None else 1
+        return 1
 
     @property
     def output_filenames(self) -> tuple[str, ...]:
-        if self.mode == "whole_entrypoint":
-            return ("torch-trace.json",)
+        return ("torch-trace.json",)
+
+
+class SdkTorchProfilerOptions(_TorchProfilerCaptureOptions):
+    mode: Literal["sdk"] = "sdk"
+    schedule: TorchProfilerSchedule
+
+    @property
+    def expected_cycles(self) -> int:
+        return self.schedule.repeat
+
+    @property
+    def output_filenames(self) -> tuple[str, ...]:
         return tuple(f"torch-trace-cycle-{cycle:04d}.json" for cycle in range(self.expected_cycles))
+
+
+def _torch_profiler_variant(value: Any) -> Literal["whole_entrypoint", "sdk"]:
+    if isinstance(value, SdkTorchProfilerOptions):
+        return "sdk"
+    if isinstance(value, Mapping) and value.get("mode") == "sdk":
+        return "sdk"
+    return "whole_entrypoint"
+
+
+type TorchProfilerCaptureOptions = Annotated[
+    Annotated[WholeEntrypointTorchProfilerOptions, Tag("whole_entrypoint")]
+    | Annotated[SdkTorchProfilerOptions, Tag("sdk")],
+    Discriminator(_torch_profiler_variant),
+]
+
+_TORCH_PROFILER_OPTIONS: TypeAdapter[TorchProfilerCaptureOptions] = TypeAdapter(
+    TorchProfilerCaptureOptions
+)
 
 
 def torch_profiler_options(
     value: dict[str, object] | None,
 ) -> TorchProfilerCaptureOptions:
     try:
-        return TorchProfilerCaptureOptions.model_validate(value or {})
+        return _TORCH_PROFILER_OPTIONS.validate_python(value or {})
     except ValidationError as exc:
         raise DomainError(
             ErrorCode.INVALID_CAPTURE_PLAN,

@@ -145,9 +145,15 @@ experiment's metric, estimand, repetition policy, and semantic oracle.
 Native reductions use sequential `native_ddmin` with a declared partitioner
 and predicate workload. Supported partitioners are text lines, bounded binary
 chunks, top-level JSON, JSONL, OTLP JSON spans, and Chrome trace events. The
+request is a tagged partitioner contract: only `binary_chunks` accepts a
+required `chunk_size`; every other partitioner rejects it. The
 predicate is tri-state, unresolved candidates are never accepted, and final
-revalidation bypasses the cache. Reduction plans are schema v2 and do not run
-an external reducer workload or expose a reducer socket protocol.
+revalidation bypasses the cache. Persisted final revalidation uses that same
+closed `interesting`, `not_interesting`, or `unresolved` classification rather
+than an arbitrary status string. Reduction plans are schema v2 and do not run
+an external reducer workload or expose a reducer socket protocol. Schema-v2
+plans preserve their flat JSON projection, but parse into binary-chunk and
+structured variants so execution never carries an optional chunk size.
 
 ### Repetition ordering
 
@@ -193,8 +199,12 @@ every value against the workload declaration, materializes the exact ordered
 cells, and rejects products beyond `max_trials`. Every trial carries its stable
 `combination_id` and typed `factors`; names are not parsed to reconstruct
 coordinates. Cancellation or fatal planning failure publishes remaining cells
-as `unattempted`. Factor configuration is required; the removed variants and
-scaling fields are not accepted by the current configuration contract.
+as `unattempted`. Schema-1 variants and scaling fields remain readable as a
+legacy shape but cannot be mixed with factor fields. Cartesian and explicit
+matrices are separate parsed cases: cartesian experiments cannot carry
+`combinations`, while explicit experiments require a non-empty list. Planning
+therefore receives a declared
+treatment factor rather than a nullable field it must revalidate.
 
 ### Correctness and reliability outcomes
 
@@ -205,6 +215,11 @@ process-failed, timed-out, cancelled, unsupported-environment,
 resource-policy, and infrastructure-failed trials by treatment. Pairing uses
 the materialized block and factor coordinates, and incomplete cells remain
 visible.
+
+Performance and outcome configurations are parsed as distinct cases. Outcome
+settings require `analysis = "outcome"` and a non-null `outcome_goal`;
+performance configurations cannot carry outcome-only fields. This distinction
+is preserved across both current factor matrices and schema-1 legacy variants.
 
 Results distinguish all-clean, base-only failure, candidate-only failure,
 mixed, unsupported, and insufficient-evidence dispositions. An all-clean

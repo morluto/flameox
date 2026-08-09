@@ -80,6 +80,7 @@ __all__ = [
     "PythonStartupExtractionResult",
     "PythonStartupExtractor",
     "RuntimeInstallation",
+    "SdkTorchProfilerOptions",
     "SetupClient",
     "SglangResultDocument",
     "SglangResultParser",
@@ -96,6 +97,7 @@ __all__ = [
     "VllmMeasurementRow",
     "VllmResultDocument",
     "VllmResultParser",
+    "WholeEntrypointTorchProfilerOptions",
     "install_trace_processor",
 ]
 

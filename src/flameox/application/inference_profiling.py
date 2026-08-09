@@ -5,14 +5,15 @@ import json
 import os
 import shutil
 import time
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from pydantic import Field, model_validator
+from pydantic import Discriminator, Field, Tag, TypeAdapter
 
 from flameox.analysis.inference_protocol import InferenceProtocolIdentity, ProfilerState
 from flameox.application.evidence_query import EvidenceQueryService
@@ -26,7 +27,7 @@ from flameox.application.inference import InferenceReplayService
 from flameox.application.inference_providers import _loopback_http_url, discover_sglang
 from flameox.application.run_rows import run_row
 from flameox.application.source import collect_partial_source_state
-from flameox.application.workloads import WorkloadService
+from flameox.application.workloads import WorkloadService, _ManagedInferenceServerConfig
 from flameox.atomic import atomic_write_bytes
 from flameox.domain import (
     ArtifactKind,
@@ -36,10 +37,10 @@ from flameox.domain import (
     DomainError,
     EnvironmentRecord,
     ErrorCode,
+    ExecutionRunManifest,
     ExecutionStatus,
     ProcessResult,
     RunManifest,
-    RunType,
     Sensitivity,
     SourceState,
     ValidationStatus,
@@ -64,38 +65,73 @@ class SglangProfileOptions(ContractModel):
     with_stack: Literal[True] = True
 
 
-class InferenceProfilingPlan(ContractModel):
+class _InferenceProfilingPlan(ContractModel):
     schema_version: Literal[1] = 1
     plan_id: str
     server_name: str
-    server_provider: Literal["vllm", "sglang"] = "vllm"
-    profiler: Literal["torch_profiler", "nsight_systems"]
     base_url: str
     server_argv: tuple[str, ...]
     server_cwd: Path
     environment_names: tuple[str, ...]
     environment_digest: str
     output_path: Path
-    nsys_executable: Path | None = None
     configuration_id: str
     server_executable_digest: str | None = None
     server_version: str | None = None
     benchmark_executable_digest: str | None = None
     diagnostic_only: Literal[True] = True
     limitations: tuple[str, ...]
-    sglang_profile_id: Annotated[str, Field(min_length=1, max_length=100)] | None = None
-    sglang_profile_options: SglangProfileOptions | None = None
 
-    @model_validator(mode="after")
-    def sglang_profile_contract_is_consistent(self) -> InferenceProfilingPlan:
-        requires_sglang_options = (
-            self.server_provider == "sglang" and self.profiler == "torch_profiler"
-        )
-        if requires_sglang_options != (self.sglang_profile_options is not None):
-            raise ValueError("SGLang Torch profiling requires fixed SGLang profile options")
-        if requires_sglang_options != (self.sglang_profile_id is not None):
-            raise ValueError("SGLang Torch profiling requires a generated profile id")
-        return self
+
+class VllmTorchProfilingPlan(_InferenceProfilingPlan):
+    server_provider: Literal["vllm"] = "vllm"
+    profiler: Literal["torch_profiler"] = "torch_profiler"
+    nsys_executable: Literal[None] = None
+    sglang_profile_id: Literal[None] = None
+    sglang_profile_options: Literal[None] = None
+
+
+class SglangTorchProfilingPlan(_InferenceProfilingPlan):
+    server_provider: Literal["sglang"] = "sglang"
+    profiler: Literal["torch_profiler"] = "torch_profiler"
+    nsys_executable: Literal[None] = None
+    sglang_profile_id: Annotated[str, Field(min_length=1, max_length=100)]
+    sglang_profile_options: SglangProfileOptions
+
+
+class NsightSystemsProfilingPlan(_InferenceProfilingPlan):
+    server_provider: Literal["vllm", "sglang"]
+    profiler: Literal["nsight_systems"] = "nsight_systems"
+    nsys_executable: Path
+    sglang_profile_id: Literal[None] = None
+    sglang_profile_options: Literal[None] = None
+
+
+def _profiling_plan_variant(value: Any) -> Literal["vllm_torch", "sglang_torch", "nsight"]:
+    if isinstance(value, NsightSystemsProfilingPlan):
+        return "nsight"
+    if isinstance(value, SglangTorchProfilingPlan):
+        return "sglang_torch"
+    if isinstance(value, Mapping):
+        if value.get("profiler") == "nsight_systems":
+            return "nsight"
+        if value.get("server_provider") == "sglang":
+            return "sglang_torch"
+    return "vllm_torch"
+
+
+type InferenceProfilingPlan = Annotated[
+    Annotated[VllmTorchProfilingPlan, Tag("vllm_torch")]
+    | Annotated[SglangTorchProfilingPlan, Tag("sglang_torch")]
+    | Annotated[NsightSystemsProfilingPlan, Tag("nsight")],
+    Discriminator(_profiling_plan_variant),
+]
+
+_INFERENCE_PROFILING_PLAN: TypeAdapter[InferenceProfilingPlan] = TypeAdapter(InferenceProfilingPlan)
+
+
+def parse_inference_profiling_plan(value: Any) -> InferenceProfilingPlan:
+    return _INFERENCE_PROFILING_PLAN.validate_python(value)
 
 
 class InferenceProfilingResult(ContractModel):
@@ -256,28 +292,32 @@ class InferenceProfilingService:
                 remediation=("Plan the inference profile again and review the replacement.",),
                 details={"expected_plan_id": expected_plan_id, "actual_plan_id": plan_id},
             )
-        return InferenceProfilingPlan(
-            plan_id=plan_id,
-            server_name=server_name,
-            server_provider=server.provider,
-            profiler=profiler,
-            base_url=server.base_url,
-            server_argv=argv,
-            server_cwd=Path(workload.command.cwd),
-            environment_names=tuple(sorted(environment_names)),
-            environment_digest=environment_digest,
-            output_path=output_path,
-            nsys_executable=nsys_executable,
-            configuration_id=digest_model(project.model_dump(mode="json")),
-            server_executable_digest=server_executable_digest,
-            server_version=server_version,
-            benchmark_executable_digest=(
-                sglang_discovery.executable_digest if sglang_discovery is not None else None
-            ),
-            limitations=limitations,
-            # This is a server-side operation token, not a source of plan churn.
-            sglang_profile_id=(f"flameox-{plan_id[7:31]}" if sglang_profile_options else None),
-            sglang_profile_options=sglang_profile_options,
+        return parse_inference_profiling_plan(
+            {
+                "plan_id": plan_id,
+                "server_name": server_name,
+                "server_provider": server.provider,
+                "profiler": profiler,
+                "base_url": server.base_url,
+                "server_argv": argv,
+                "server_cwd": Path(workload.command.cwd),
+                "environment_names": tuple(sorted(environment_names)),
+                "environment_digest": environment_digest,
+                "output_path": output_path,
+                "nsys_executable": nsys_executable,
+                "configuration_id": digest_model(project.model_dump(mode="json")),
+                "server_executable_digest": server_executable_digest,
+                "server_version": server_version,
+                "benchmark_executable_digest": (
+                    sglang_discovery.executable_digest if sglang_discovery is not None else None
+                ),
+                "limitations": limitations,
+                # This is a server-side operation token, not a source of plan churn.
+                "sglang_profile_id": (
+                    f"flameox-{plan_id[7:31]}" if sglang_profile_options else None
+                ),
+                "sglang_profile_options": sglang_profile_options,
+            }
         )
 
     async def capture(  # noqa: C901 - one lifecycle boundary owns every terminal transition
@@ -301,7 +341,11 @@ class InferenceProfilingService:
         server = project.inference_servers.get(plan.server_name)
         if server is None:
             raise DomainError(ErrorCode.REVISION_CONFLICT, "Planned inference server was removed.")
-        assert server.workload is not None
+        if not isinstance(server, _ManagedInferenceServerConfig):
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                "Planned inference server is no longer managed.",
+            )
         server_environment = dict(self.workloads.resolve(server.workload).command.env_overrides)
         if digest_model(server_environment) != plan.environment_digest:
             raise DomainError(
@@ -568,9 +612,8 @@ class InferenceProfilingService:
             sort_keys=True,
         )
         diagnostic_id = digest_model(diagnostic_protocol.model_dump(mode="json"))
-        run = RunManifest(
+        run = ExecutionRunManifest(
             run_id=new_id(),
-            run_type=RunType.EXECUTION,
             started_at=utc_now(),
             execution_status=ExecutionStatus.RUNNING,
             capture_status=CaptureStatus.RUNNING,

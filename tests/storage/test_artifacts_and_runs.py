@@ -5,14 +5,15 @@ import os
 from pathlib import Path
 
 import pytest
+from pydantic import TypeAdapter
 
 from flameox.domain import (
     CaptureStatus,
     DomainError,
     ErrorCode,
     ExecutionStatus,
+    ImportRunManifest,
     RunManifest,
-    RunType,
     ValidationStatus,
 )
 from flameox.storage import ArtifactStore, RunStore, Workspace
@@ -21,10 +22,9 @@ DIGEST = "sha256:" + ("a" * 64)
 
 
 def import_manifest(run_id: str, *, revision: int = 0) -> RunManifest:
-    return RunManifest(
+    return ImportRunManifest(
         revision=revision,
         run_id=run_id,
-        run_type=RunType.IMPORT,
         execution_status=ExecutionStatus.NOT_APPLICABLE,
         capture_status=CaptureStatus.PENDING,
         validation_status=ValidationStatus.NOT_REQUESTED,
@@ -389,7 +389,12 @@ def test_record_store_rejects_dotdot_identifier(tmp_path: Path) -> None:
     from flameox.storage.records import JsonRecordStore
 
     workspace = Workspace.initialize(tmp_path)
-    store = JsonRecordStore(workspace, kind="test", model=RunManifest, id_field="run_id")
+    store: JsonRecordStore[RunManifest] = JsonRecordStore(
+        workspace,
+        kind="test",
+        model=TypeAdapter(RunManifest),
+        id_field="run_id",
+    )
 
     with pytest.raises(DomainError) as error:
         store.read("..")
@@ -404,7 +409,12 @@ def test_record_store_rejects_dot_prefix_identifier(tmp_path: Path) -> None:
     from flameox.storage.records import JsonRecordStore
 
     workspace = Workspace.initialize(tmp_path)
-    store = JsonRecordStore(workspace, kind="test", model=RunManifest, id_field="run_id")
+    store: JsonRecordStore[RunManifest] = JsonRecordStore(
+        workspace,
+        kind="test",
+        model=TypeAdapter(RunManifest),
+        id_field="run_id",
+    )
 
     with pytest.raises(DomainError) as error:
         store.read(".hidden")

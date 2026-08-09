@@ -90,7 +90,9 @@ timeout_seconds = 5
 
 
 @pytest.mark.anyio
-async def test_mcp_plan_capture_rejects_adhoc_argv_and_cwd_inputs(tmp_path: Path) -> None:
+async def test_mcp_plan_capture_ignores_adhoc_arguments_without_overriding_workload(
+    tmp_path: Path,
+) -> None:
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
@@ -121,11 +123,13 @@ argv = ["python", "-c", "print('ok')"]
         )
 
     assert workspace.project_root == tmp_path.resolve()
-    for result, field in ((argv, "argv"), (cwd, "cwd")):
-        assert result.is_error is True
+    for result in (argv, cwd):
+        assert result.is_error is False
         assert result.structured_content is not None
-        assert result.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
-        assert result.structured_content["error"]["details"]["fields"][0]["field"] == field
+        command = result.structured_content["result"]["workload_instance"]["command"]
+        assert command["argv"][-2:] == ["-c", "print('ok')"]
+        assert "unsafe" not in command["argv"]
+        assert command["cwd"] == str(tmp_path.resolve())
 
 
 @pytest.mark.anyio

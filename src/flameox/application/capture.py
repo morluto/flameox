@@ -25,7 +25,7 @@ from flameox.adapters.builtins import (
     builtin_adapter,
 )
 from flameox.adapters.registry import AdapterRegistry
-from flameox.adapters.torch_profiler import torch_profiler_options
+from flameox.adapters.torch_profiler import SdkTorchProfilerOptions, torch_profiler_options
 from flameox.application.async_work import run_atomic_thread
 from flameox.application.capabilities import CapabilityService
 from flameox.application.environment import AcceleratorIdentityService, collect_environment
@@ -65,6 +65,7 @@ from flameox.domain import (
     CommandSpec,
     DomainError,
     ErrorCode,
+    ExecutionRunManifest,
     ExecutionStatus,
     ExternalExecutionContext,
     IdentityQuality,
@@ -74,7 +75,6 @@ from flameox.domain import (
     PreflightReport,
     ProcessResult,
     RunManifest,
-    RunType,
     Sensitivity,
     ValidationStatus,
     WritableRootBinding,
@@ -786,9 +786,8 @@ class CaptureService:
         )
         environment = collect_environment(planned_accelerator)
         run_id = plan.run_id
-        initial = RunManifest(
+        initial = ExecutionRunManifest(
             run_id=plan.run_id,
-            run_type=RunType.EXECUTION,
             execution_status=ExecutionStatus.PLANNED,
             capture_status=CaptureStatus.PENDING,
             validation_status=ValidationStatus.NOT_REQUESTED,
@@ -1928,7 +1927,7 @@ class CaptureService:
         if plan.adapter != "torch.profiler":
             return ()
         options = torch_profiler_options(cast(dict[str, object], plan.adapter_options))
-        if options.mode != "sdk":
+        if not isinstance(options, SdkTorchProfilerOptions):
             return ()
         expected = set(self._native_output_paths(plan, output_root))
         return tuple(
@@ -1945,7 +1944,7 @@ class CaptureService:
         if plan.adapter != "torch.profiler":
             return True
         options = torch_profiler_options(cast(dict[str, object], plan.adapter_options))
-        if options.mode != "sdk":
+        if not isinstance(options, SdkTorchProfilerOptions):
             return True
         path = output_root / "torch-profiler-cycles.json"
         try:

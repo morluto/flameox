@@ -48,6 +48,21 @@ semantic_oracle_workload = "semantic-check"
 scheduler, and cache settings. Managed servers reuse the broker's sidecar lease and one absolute
 deadline across startup, readiness, replay, and cleanup.
 
+Server declarations are parsed by both provider and lifecycle. Managed servers
+always carry a workload; existing-local servers cannot carry one. SGLang
+servers always carry an absolute `benchmark_python` launcher, while vLLM
+servers cannot carry that field. Scenario declarations are likewise parsed by
+provider: SGLang bench scenarios require random input and output lengths,
+vLLM/SGLang bench scenarios are streaming-only in v1, and trace timing options
+belong only to AIPerf. Invalid mixtures are rejected at configuration load,
+before replay or profiling code receives them.
+
+Tool discovery is parsed into available and unavailable cases. An available
+tool always has a resolved executable and cannot carry compatibility failure
+or remediation fields. Replay plans remain flat on the wire but are parsed by
+provider, preserving the scenario-specific trace, streaming, and random-input
+constraints instead of widening them back into optional plan fields.
+
 Confirmatory inference comparisons require immutable model and tokenizer revisions, exact
 provider and managed-vLLM executable/version identities, a managed-server command identity,
 complete accelerator identity, and a passing declared contract-check oracle. The oracle runs after a successful benchmark while the
@@ -90,6 +105,9 @@ them with request correlation. Prefix reuse is not treated as proof of a cache h
 
 Profiling is diagnostic and `profile-run` requires the ID of a successful, protocol-compatible,
 unprofiled measurement run. The diagnostic result and manifest limitations preserve that link.
+Profiling plans are parsed into vLLM Torch, SGLang Torch, or Nsight Systems variants. Only the
+SGLang Torch variant carries a profile ID and fixed SGLang options, while only the Nsight variant
+carries an Nsight executable.
 The canonical diagnostic manifest also records it as `source_measurement_run_id`, and evidence
 publication includes the measurement run as an input. The linked run must have succeeded, retained
 provider artifacts, published measurements, and carry the same unprofiled inference protocol.

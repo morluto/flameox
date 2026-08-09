@@ -19,9 +19,8 @@ from flameox.domain.models import (
     ArtifactKind,
     ArtifactRegistration,
     CaptureStatus,
-    ExecutionStatus,
+    ImportRunManifest,
     RunManifest,
-    RunType,
     Sensitivity,
     ValidationStatus,
 )
@@ -78,10 +77,8 @@ class ImportService:
         environment = collect_environment()
         source_state = collect_partial_source_state(self.workspace)
         run_id = new_id()
-        initial = RunManifest(
+        initial = ImportRunManifest(
             run_id=run_id,
-            run_type=RunType.IMPORT,
-            execution_status=ExecutionStatus.NOT_APPLICABLE,
             capture_status=CaptureStatus.PENDING,
             validation_status=ValidationStatus.NOT_REQUESTED,
             environment_id=environment.environment_id,

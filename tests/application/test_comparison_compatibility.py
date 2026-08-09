@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 
 from flameox.application import (
-    CompareRunSetsRequest,
     ComparisonService,
     EvidenceInput,
     FindingService,
-    FreezeRunSetRequest,
+    FreezeRunIdsRequest,
+    MeasurementCompareRunSetsRequest,
     RecordFindingRequest,
     RunSetService,
 )
@@ -138,10 +138,10 @@ def test_frozen_run_set_comparison_and_evidence_linked_finding(
         publisher_version="1",
     )
     run_sets = RunSetService(workspace)
-    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
-    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
+    baseline = run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
+    candidate = run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
 
-    comparison_request = CompareRunSetsRequest(
+    comparison_request = MeasurementCompareRunSetsRequest(
         baseline_run_set_id=baseline.run_set_id,
         candidate_run_set_id=candidate.run_set_id,
         metric="pyperf.scan",
@@ -223,7 +223,7 @@ def test_comparison_reads_both_run_sets_from_one_pinned_corpus_commit(
         (0.005, 0.0055, 0.006),
     )
     run_sets = RunSetService(workspace)
-    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
+    baseline = run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
     GenerationPublisher(workspace).publish_rows(
         {
             "measurements": [
@@ -235,10 +235,10 @@ def test_comparison_reads_both_run_sets_from_one_pinned_corpus_commit(
         publisher_version="1",
         input_run_ids=(baseline_id, candidate_id),
     )
-    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
+    candidate = run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
 
     result = ComparisonService(workspace).compare(
-        CompareRunSetsRequest(
+        MeasurementCompareRunSetsRequest(
             baseline_run_set_id=baseline.run_set_id,
             candidate_run_set_id=candidate.run_set_id,
             metric="pyperf.scan",
@@ -268,7 +268,7 @@ def test_comparison_rejects_different_or_partial_accelerator_identity(
         (0.005, 0.0055, 0.006),
     )
     run_sets = RunSetService(workspace)
-    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
+    baseline = run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
 
     candidate_environment = collect_environment(
         AcceleratorIdentityFacet(
@@ -293,8 +293,8 @@ def test_comparison_rejects_different_or_partial_accelerator_identity(
         publisher_version="1",
         input_run_ids=(candidate_id,),
     )
-    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
-    request = CompareRunSetsRequest(
+    candidate = run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
+    request = MeasurementCompareRunSetsRequest(
         baseline_run_set_id=baseline.run_set_id,
         candidate_run_set_id=candidate.run_set_id,
         metric="pyperf.scan",
@@ -385,11 +385,11 @@ def test_comparison_reports_differing_declared_artifact_paths_and_digests(
         input_run_ids=(baseline_id, candidate_id),
     )
     run_sets = RunSetService(workspace)
-    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
-    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
+    baseline = run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
+    candidate = run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
 
     result = ComparisonService(workspace).compare(
-        CompareRunSetsRequest(
+        MeasurementCompareRunSetsRequest(
             baseline_run_set_id=baseline.run_set_id,
             candidate_run_set_id=candidate.run_set_id,
             metric="pyperf.scan",
@@ -453,11 +453,11 @@ def test_distinct_remote_leases_do_not_change_environment_compatibility(
         input_run_ids=(baseline_id, candidate_id),
     )
     run_sets = RunSetService(workspace)
-    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
-    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
+    baseline = run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
+    candidate = run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
 
     result = ComparisonService(workspace).compare(
-        CompareRunSetsRequest(
+        MeasurementCompareRunSetsRequest(
             baseline_run_set_id=baseline.run_set_id,
             candidate_run_set_id=candidate.run_set_id,
             metric="pyperf.scan",

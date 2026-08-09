@@ -13,6 +13,7 @@ from flameox.domain.models import (
     ComparisonDecision,
     ComparisonValidity,
 )
+from flameox.domain.scalars import FloatingValue
 
 
 def _median_log_ratio(baseline: np.ndarray, candidate: np.ndarray) -> float:
@@ -116,10 +117,14 @@ def compare_paired_samples(
         polarity=polarity,
         estimand="median_paired_log_ratio",
         practical_threshold=practical_threshold,
-        baseline_value_float=baseline_median,
-        candidate_value_float=candidate_median,
-        absolute_change_float=(
-            candidate_median - baseline_median
+        baseline_value=(
+            FloatingValue(value=baseline_median) if baseline_median is not None else None
+        ),
+        candidate_value=(
+            FloatingValue(value=candidate_median) if candidate_median is not None else None
+        ),
+        absolute_change=(
+            FloatingValue(value=candidate_median - baseline_median)
             if candidate_median is not None and baseline_median is not None
             else None
         ),

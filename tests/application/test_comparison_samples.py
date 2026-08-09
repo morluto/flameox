@@ -5,10 +5,11 @@ from pathlib import Path
 import pytest
 
 from flameox.application import (
-    CompareRunSetsRequest,
     ComparisonService,
-    FreezeRunSetRequest,
+    FreezeRunIdsRequest,
+    MeasurementCompareRunSetsRequest,
     RunSetService,
+    RuntimeResourceCompareRunSetsRequest,
 )
 from flameox.catalog import Catalog
 from flameox.domain import ComparisonValidity, DomainError, ErrorCode
@@ -21,11 +22,11 @@ def _comparison_request(
     workspace: Workspace,
     baseline_id: str,
     candidate_id: str,
-) -> CompareRunSetsRequest:
+) -> MeasurementCompareRunSetsRequest:
     run_sets = RunSetService(workspace)
-    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
-    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
-    return CompareRunSetsRequest(
+    baseline = run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
+    candidate = run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
+    return MeasurementCompareRunSetsRequest(
         baseline_run_set_id=baseline.run_set_id,
         candidate_run_set_id=candidate.run_set_id,
         metric="pyperf.scan",
@@ -140,11 +141,11 @@ def test_comparison_pairs_runtime_resource_catalog_metric(
         input_run_ids=(baseline_id, candidate_id),
     )
     run_sets = RunSetService(workspace)
-    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
-    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
+    baseline = run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
+    candidate = run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
 
     result = ComparisonService(workspace).compare(
-        CompareRunSetsRequest(
+        RuntimeResourceCompareRunSetsRequest(
             baseline_run_set_id=baseline.run_set_id,
             candidate_run_set_id=candidate.run_set_id,
             metric="runtime_resource.peak_rss_bytes",
@@ -155,21 +156,27 @@ def test_comparison_pairs_runtime_resource_catalog_metric(
         )
     )
 
-    assert result.comparison.baseline_value_float == 200
-    assert result.comparison.candidate_value_float == 100
+    assert result.comparison.baseline_value is not None
+    assert result.comparison.baseline_value.kind == "floating"
+    assert result.comparison.baseline_value.value == 200
+    assert result.comparison.candidate_value is not None
+    assert result.comparison.candidate_value.kind == "floating"
+    assert result.comparison.candidate_value.value == 100
     assert result.comparison.complete_pair_n == 1
 
 
 def test_runtime_resource_comparison_rejects_wrong_unit() -> None:
-    with pytest.raises(ValueError, match="unit='bytes'"):
-        CompareRunSetsRequest(
-            baseline_run_set_id="baseline",
-            candidate_run_set_id="candidate",
-            metric="runtime_resource.peak_rss_bytes",
-            metric_source="runtime_resource",
-            unit="ns",
-            polarity="lower_is_better",
-            practical_threshold=0,
+    with pytest.raises(ValueError, match="bytes"):
+        RuntimeResourceCompareRunSetsRequest.model_validate(
+            {
+                "baseline_run_set_id": "baseline",
+                "candidate_run_set_id": "candidate",
+                "metric": "runtime_resource.peak_rss_bytes",
+                "metric_source": "runtime_resource",
+                "unit": "ns",
+                "polarity": "lower_is_better",
+                "practical_threshold": 0,
+            }
         )
 
 
@@ -206,11 +213,11 @@ def test_runtime_resource_zero_is_invalid_for_log_ratio_estimation(tmp_path: Pat
         input_run_ids=(baseline_id, candidate_id),
     )
     run_sets = RunSetService(workspace)
-    baseline = run_sets.freeze(FreezeRunSetRequest(run_ids=(baseline_id,)))
-    candidate = run_sets.freeze(FreezeRunSetRequest(run_ids=(candidate_id,)))
+    baseline = run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
+    candidate = run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
 
     result = ComparisonService(workspace).compare(
-        CompareRunSetsRequest(
+        RuntimeResourceCompareRunSetsRequest(
             baseline_run_set_id=baseline.run_set_id,
             candidate_run_set_id=candidate.run_set_id,
             metric="runtime_resource.staging_growth_bytes",

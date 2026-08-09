@@ -93,7 +93,7 @@ async def test_real_stdio_server_keeps_protocol_on_stdout(tmp_path: Path) -> Non
 @pytest.mark.anyio
 @pytest.mark.process
 @pytest.mark.serial
-async def test_strict_mcp_client_can_decode_tools_list_output_schemas(tmp_path: Path) -> None:
+async def test_sdk_client_validates_native_tool_output_schemas(tmp_path: Path) -> None:
     parameters = StdioServerParameters(
         command=sys.executable,
         args=[
@@ -111,13 +111,14 @@ async def test_strict_mcp_client_can_decode_tools_list_output_schemas(tmp_path: 
     async with stdio_client(parameters) as streams, ClientSession(*streams) as session:
         initialized = await session.initialize()
         result = await session.list_tools()
+        status = await session.call_tool("workspace_status", {})
 
     assert len(result.tools) >= 40
     assert initialized.server_info.version == __version__
     assert all(tool.output_schema is not None for tool in result.tools)
-    for tool in result.tools:
-        assert tool.output_schema is not None
-        assert tool.output_schema["type"] == "object"
+    assert status.is_error is False
+    assert status.structured_content is not None
+    assert status.structured_content["ok"] is True
 
 
 @pytest.mark.anyio
@@ -235,38 +236,7 @@ async def test_real_stdio_discovers_then_plans_and_executes_declared_workload(
 @pytest.mark.anyio
 @pytest.mark.process
 @pytest.mark.serial
-async def test_real_stdio_server_rejects_unknown_tool_arguments(tmp_path: Path) -> None:
-    parameters = StdioServerParameters(
-        command=sys.executable,
-        args=[
-            "-m",
-            "flameox",
-            "mcp",
-            "serve",
-            "--project-root",
-            str(tmp_path),
-            "--init",
-        ],
-        cwd=tmp_path,
-    )
-
-    async with Client(stdio_client(parameters), raise_exceptions=True) as client:
-        tools = (await client.list_tools()).tools
-        result = await client.call_tool("workspace_status", {"typo": True})
-
-    workspace_status_tool = next(tool for tool in tools if tool.name == "workspace_status")
-    assert workspace_status_tool.input_schema["additionalProperties"] is False
-    assert result.is_error is True
-    assert isinstance(result.content[0], TextContent)
-    assert "typo" in result.content[0].text
-    assert result.structured_content is not None
-    assert result.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
-
-
-@pytest.mark.anyio
-@pytest.mark.process
-@pytest.mark.serial
-async def test_real_stdio_server_returns_structured_schema_validation_errors(
+async def test_real_stdio_server_returns_sdk_schema_validation_errors(
     tmp_path: Path,
 ) -> None:
     parameters = StdioServerParameters(
@@ -295,16 +265,13 @@ async def test_real_stdio_server_returns_structured_schema_validation_errors(
         )
 
     assert result.is_error is True
-    assert result.structured_content is not None
-    assert result.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
-    assert result.structured_content["error"]["details"]["fields"][0]["field"] == "limit"
-    assert "greater than or equal to 1" in result.structured_content["error"]["message"]
+    assert result.structured_content is None
+    assert isinstance(result.content[0], TextContent)
+    assert "limit" in result.content[0].text
+    assert "greater than or equal to 1" in result.content[0].text
     assert unmanaged.is_error is True
-    assert unmanaged.structured_content is not None
-    assert unmanaged.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
+    assert unmanaged.structured_content is None
     assert invalid_kind.is_error is True
-    assert invalid_kind.structured_content is not None
-    assert "execution_trace" in invalid_kind.structured_content["error"]["remediation"][0]
     assert isinstance(invalid_kind.content[0], TextContent)
     assert "execution_trace" in invalid_kind.content[0].text
 

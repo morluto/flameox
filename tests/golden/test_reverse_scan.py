@@ -15,9 +15,9 @@ from flameox.application import (
     ExperimentService,
     FindingService,
     InvestigationService,
-    MaterializeAnalysisRequest,
     RecordFindingRequest,
     RecordHypothesisRequest,
+    ScalingAnalysisRequest,
 )
 from flameox.domain import (
     ComparisonDecision,
@@ -142,7 +142,7 @@ length = [32768, 65536, 131072]
     assert all(trial.validation_status is ValidationStatus.PASSED for trial in experiment.trials)
     scaling = RecipeService(workspace).scaling(experiment.experiment.experiment_id)
     scaling_record = AnalysisMaterializationService(workspace).record(
-        MaterializeAnalysisRequest(
+        ScalingAnalysisRequest(
             recipe="scaling",
             experiment_id=experiment.experiment.experiment_id,
         )

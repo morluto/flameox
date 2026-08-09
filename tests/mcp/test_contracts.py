@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import sys
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
@@ -10,8 +11,31 @@ from mcp import Client
 from mcp_types import TextContent
 
 from flameox.catalog import Catalog
+from flameox.domain import ErrorCode
 from flameox.mcp import create_server
 from flameox.storage import Workspace
+
+
+def _open_object_schema_paths(schema: object, path: str = "$") -> list[str]:
+    if isinstance(schema, dict):
+        paths = (
+            [path]
+            if path != "$"
+            and schema.get("type") == "object"
+            and schema.get("additionalProperties") is not False
+            else []
+        )
+        for key, value in schema.items():
+            if key != "additionalProperties":
+                paths.extend(_open_object_schema_paths(value, f"{path}.{key}"))
+        return paths
+    if isinstance(schema, list):
+        return [
+            nested_path
+            for index, value in enumerate(schema)
+            for nested_path in _open_object_schema_paths(value, f"{path}[{index}]")
+        ]
+    return []
 
 
 @pytest.mark.anyio
@@ -43,6 +67,31 @@ async def test_mcp_tools_use_explicit_envelopes_and_annotations(
         "operation",
         "argv",
     ]
+    output_schema = by_name["workspace_status"].output_schema
+    assert output_schema is not None
+    assert output_schema["type"] == "object"
+    assert output_schema["discriminator"]["propertyName"] == "ok"
+    definitions = output_schema["$defs"]
+    success_name = next(name for name in definitions if name.startswith("SuccessPayload_"))
+    assert definitions[success_name]["required"] == [
+        "schema_version",
+        "ok",
+        "result",
+        "error",
+    ]
+    assert definitions[success_name]["properties"]["schema_version"]["const"] == 1
+    assert definitions[success_name]["properties"]["ok"]["const"] is True
+    assert definitions["FailurePayload"]["required"] == [
+        "schema_version",
+        "ok",
+        "result",
+        "error",
+    ]
+    assert definitions["FailurePayload"]["properties"]["schema_version"]["const"] == 1
+    assert definitions["FailurePayload"]["properties"]["ok"]["const"] is False
+    assert set(definitions["ErrorCode"]["enum"]) == {code.value for code in ErrorCode}
+    assert definitions["RecoveryAction"]["discriminator"]["propertyName"] == "kind"
+    assert "context" not in definitions["InitializeWorkspaceRecovery"]["properties"]
     assert "never executes" in (by_name["configure_workload"].description or "")
     assert result.is_error is False
     assert result.structured_content is not None
@@ -71,7 +120,7 @@ async def test_mcp_tools_use_explicit_envelopes_and_annotations(
 
 
 @pytest.mark.anyio
-async def test_every_mcp_tool_has_bounded_object_schemas_and_annotations(
+async def test_every_mcp_tool_uses_sdk_generated_schemas_and_annotations(
     tmp_path: Path,
 ) -> None:
     Workspace.initialize(tmp_path)
@@ -82,8 +131,8 @@ async def test_every_mcp_tool_has_bounded_object_schemas_and_annotations(
     assert len(tools) >= 40
     for tool in tools:
         assert tool.input_schema["type"] == "object"
-        assert tool.input_schema["additionalProperties"] is False
         assert tool.output_schema is not None
+        assert tool.output_schema["type"] == "object"
         validator = Draft202012Validator(tool.output_schema)
         assert list(validator.iter_errors({"ok": True}))
         assert list(validator.iter_errors({"ok": False}))
@@ -101,6 +150,29 @@ async def test_every_mcp_tool_has_bounded_object_schemas_and_annotations(
     )
     assert by_name["get_evidence"].description is not None
     assert "ref_type and its ID separately" in by_name["get_evidence"].description
+
+
+@pytest.mark.anyio
+async def test_mcp_nested_models_only_advertise_intentional_flexible_object_maps(
+    tmp_path: Path,
+) -> None:
+    Workspace.initialize(tmp_path)
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        tools = (await client.list_tools()).tools
+
+    open_object_tools = {
+        tool.name for tool in tools if _open_object_schema_paths(tool.input_schema)
+    }
+    assert open_object_tools == {
+        "configure_workload",  # environment and declared parameter names
+        "freeze_run_set",  # persisted comparison-selection projection
+        "plan_capture",  # names declared by the selected workload
+        "plan_experiment",  # names declared by the selected experiment
+        "plan_fault_experiment",  # names declared by the selected fault experiment
+        "plan_reduction",  # names accepted by the declared predicate workload
+        "record_finding",  # bounded JSON handoff to a human investigation
+        "register_artifact_pipeline",  # bounded extractor-provided structural summary
+    }
 
 
 @pytest.mark.anyio
@@ -128,7 +200,12 @@ async def test_accelerator_tools_advertise_bounded_v2_schemas(tmp_path: Path) ->
     assert perfetto["run_id"]["minLength"] == 1
     assert perfetto["artifact_id"]["anyOf"][0]["minLength"] == 1
     profiler = tools["plan_capture"].input_schema["$defs"]["TorchProfilerCaptureOptions"]
-    assert profiler["additionalProperties"] is False
+    assert profiler["oneOf"] == [
+        {"$ref": "#/$defs/WholeEntrypointTorchProfilerOptions"},
+        {"$ref": "#/$defs/SdkTorchProfilerOptions"},
+    ]
+    for variant in ("WholeEntrypointTorchProfilerOptions", "SdkTorchProfilerOptions"):
+        assert tools["plan_capture"].input_schema["$defs"][variant]["additionalProperties"] is False
     schedule = tools["plan_capture"].input_schema["$defs"]["TorchProfilerSchedule"]
     assert schedule["additionalProperties"] is False
     assert schedule["properties"]["repeat"]["maximum"] == 100
@@ -159,13 +236,13 @@ async def test_accelerator_tools_advertise_bounded_v2_schemas(tmp_path: Path) ->
                 },
             },
             (
-                "torch_profiler_options.record_shapes",
-                "torch_profiler_options.schedule.active",
+                "torch_profiler_options.sdk.record_shapes",
+                "torch_profiler_options.sdk.schedule.active",
             ),
         ),
     ],
 )
-async def test_accelerator_tools_return_typed_errors_for_invalid_wire_values(
+async def test_sdk_rejects_invalid_accelerator_tool_values(
     tmp_path: Path,
     tool_name: str,
     arguments: dict[str, object],
@@ -173,17 +250,108 @@ async def test_accelerator_tools_return_typed_errors_for_invalid_wire_values(
 ) -> None:
     Workspace.initialize(tmp_path)
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:
-        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
         result = await client.call_tool(tool_name, arguments)
 
     assert result.is_error is True
+    assert result.structured_content is None
+    assert isinstance(result.content[0], TextContent)
+    for field in expected_fields:
+        assert field in result.content[0].text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "expected_field"),
+    [
+        ("list_runs", {"limit": True}, "limit"),
+        ("list_runs", {"limit": "1"}, "limit"),
+        (
+            "configure_workload",
+            {
+                "name": "probe",
+                "operation": "create",
+                "argv": ["python", "-c", "pass"],
+                "timeout_seconds": True,
+            },
+            "timeout_seconds",
+        ),
+        (
+            "configure_inference_scenario",
+            {
+                "name": "probe",
+                "operation": "create",
+                "server_name": "server",
+                "provider": "aiperf",
+                "streaming": 1,
+            },
+            "streaming",
+        ),
+    ],
+)
+async def test_sdk_strict_scalars_reject_json_coercions(
+    tmp_path: Path,
+    tool_name: str,
+    arguments: dict[str, object],
+    expected_field: str,
+) -> None:
+    Workspace.initialize(tmp_path)
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        result = await client.call_tool(tool_name, arguments)
+
+    assert result.is_error is True
+    assert result.structured_content is None
+    assert isinstance(result.content[0], TextContent)
+    assert expected_field in result.content[0].text
+
+
+@pytest.mark.anyio
+async def test_native_sdk_ignores_unknown_top_level_tool_arguments(tmp_path: Path) -> None:
+    Workspace.initialize(tmp_path)
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        tool = {item.name: item for item in (await client.list_tools()).tools}["workspace_status"]
+        result = await client.call_tool("workspace_status", {"unknown": True})
+
+    assert "additionalProperties" not in tool.input_schema
+    assert result.is_error is False
     assert result.structured_content is not None
-    assert result.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
-    fields = result.structured_content["error"]["details"]["fields"]
-    assert set(expected_fields) <= {item["field"] for item in fields}
-    assert not list(
-        Draft202012Validator(tools[tool_name].output_schema).iter_errors(result.structured_content)
-    )
+    assert result.structured_content["ok"] is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("mode", "expected_protocol"),
+    [
+        ("legacy", "2025-11-25"),
+        ("2026-07-28", "2026-07-28"),
+    ],
+)
+async def test_mcp_contract_is_native_in_both_supported_protocol_eras(
+    tmp_path: Path,
+    mode: Literal["legacy", "2026-07-28"],
+    expected_protocol: str,
+) -> None:
+    Workspace.initialize(tmp_path)
+    async with Client(
+        create_server(tmp_path),
+        mode=mode,
+        raise_exceptions=True,
+    ) as client:
+        assert client.protocol_version == expected_protocol
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+        success = await client.call_tool("workspace_status", {})
+        domain_failure = await client.call_tool("get_run", {"run_id": "missing"})
+        sdk_failure = await client.call_tool("list_runs", {"limit": True})
+
+    assert tools["workspace_status"].output_schema is not None
+    assert tools["workspace_status"].output_schema["type"] == "object"
+    assert success.is_error is False
+    assert success.structured_content is not None
+    assert success.structured_content["ok"] is True
+    assert domain_failure.is_error is True
+    assert domain_failure.structured_content is not None
+    assert domain_failure.structured_content["error"]["code"] == "RUN_NOT_FOUND"
+    assert sdk_failure.is_error is True
+    assert sdk_failure.structured_content is None
 
 
 @pytest.mark.anyio
@@ -374,7 +542,6 @@ async def test_mcp_modes_make_capability_and_integrity_choices_explicit(tmp_path
             "list_capabilities",
             {"mode": "passive", "adapter": "torch.profiler"},
         )
-        invalid = await client.call_tool("list_capabilities", {"refresh": True})
         standard = await client.call_tool("validate_workspace", {"mode": "standard"})
 
     capability_mode = tools["list_capabilities"].input_schema["properties"]["mode"]
@@ -389,18 +556,6 @@ async def test_mcp_modes_make_capability_and_integrity_choices_explicit(tmp_path
     assert scoped.is_error is False
     assert scoped.structured_content is not None
     assert scoped.structured_content["result"]["recommendation_scope"] == "torch.profiler"
-    assert invalid.is_error is True
-    assert isinstance(invalid.content[0], TextContent)
-    assert "refresh" in invalid.content[0].text
-    assert invalid.structured_content is not None
-    assert invalid.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
-    assert invalid.structured_content["error"]["details"]["fields"] == [
-        {
-            "field": "refresh",
-            "message": "Unknown argument field.",
-            "type": "extra_forbidden",
-        }
-    ]
     assert standard.is_error is False
 
 

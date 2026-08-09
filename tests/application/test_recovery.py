@@ -12,9 +12,9 @@ from flameox.catalog import Catalog
 from flameox.domain import (
     CaptureLease,
     CaptureStatus,
+    ExecutionRunManifest,
     ExecutionStatus,
     RunManifest,
-    RunType,
     ValidationStatus,
 )
 from flameox.domain.models import utc_now
@@ -25,9 +25,8 @@ DIGEST = "sha256:" + ("a" * 64)
 
 def _running_run(*, run_id: str, boot_id: str, start_identity: str) -> RunManifest:
     observed = utc_now()
-    return RunManifest(
+    return ExecutionRunManifest(
         run_id=run_id,
-        run_type=RunType.EXECUTION,
         execution_status=ExecutionStatus.RUNNING,
         capture_status=CaptureStatus.RUNNING,
         validation_status=ValidationStatus.PENDING,
@@ -62,9 +61,8 @@ def _write_proc_identity(root: Path, *, boot_id: str, stat_text: str | None) -> 
 def test_recovery_closes_only_disappeared_exact_process_lease(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     observed = datetime(2025, 1, 2, 3, 4, tzinfo=UTC)
-    run = RunManifest(
+    run = ExecutionRunManifest(
         run_id="abandoned-run",
-        run_type=RunType.EXECUTION,
         execution_status=ExecutionStatus.RUNNING,
         capture_status=CaptureStatus.RUNNING,
         validation_status=ValidationStatus.PENDING,

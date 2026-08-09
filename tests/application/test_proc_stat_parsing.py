@@ -10,9 +10,9 @@ from flameox.application import RecoveryService
 from flameox.domain import (
     CaptureLease,
     CaptureStatus,
+    ExecutionRunManifest,
     ExecutionStatus,
     RunManifest,
-    RunType,
     ValidationStatus,
 )
 from flameox.storage import RunStore, Workspace
@@ -33,9 +33,8 @@ def _write_proc_record(root: Path, pid: int, comm: str, starttime: str) -> None:
 
 
 def _running_run(run_id: str, pid: int, starttime: str, boot_id: str) -> RunManifest:
-    return RunManifest(
+    return ExecutionRunManifest(
         run_id=run_id,
-        run_type=RunType.EXECUTION,
         execution_status=ExecutionStatus.RUNNING,
         capture_status=CaptureStatus.RUNNING,
         validation_status=ValidationStatus.PENDING,
