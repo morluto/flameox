@@ -19,8 +19,10 @@ from flameox import __version__, setup_ui
 from flameox.adapters import (
     AdapterRegistry,
     BenchmarkSamplesExtractor,
+    ComputeSanitizerExtractor,
     CoverageExtractor,
     InferenceArtifactExtractor,
+    KernelValidationExtractor,
     MemrayExtractor,
     NsightSystemsExtractor,
     ObservationExtractor,
@@ -2237,6 +2239,40 @@ def extract_benchmark_samples(
     """Extract producer-neutral raw benchmark samples and timing semantics."""
     try:
         result = BenchmarkSamplesExtractor(_workspace(workspace)).extract(run_id)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@extract_app.command("kernel-validation")
+def extract_kernel_validation(
+    run_id: Annotated[
+        str,
+        typer.Argument(help="Import run containing flameox kernel-validation v1 JSON."),
+    ],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Extract bounded per-case numerical validation evidence."""
+    try:
+        result = KernelValidationExtractor(_workspace(workspace)).extract(run_id)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@extract_app.command("compute-sanitizer")
+def extract_compute_sanitizer(
+    run_id: Annotated[
+        str,
+        typer.Argument(help="Run containing an official Compute Sanitizer XML report."),
+    ],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Extract bounded sanitizer findings through the isolated XML worker."""
+    try:
+        result = ComputeSanitizerExtractor(_workspace(workspace)).extract(run_id)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)

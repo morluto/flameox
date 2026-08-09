@@ -21,10 +21,14 @@ from flameox import __version__
 from flameox.adapters import (
     BenchmarkSamplesExtractionResult,
     BenchmarkSamplesExtractor,
+    ComputeSanitizerExtractionResult,
+    ComputeSanitizerExtractor,
     CoverageExtractionResult,
     CoverageExtractor,
     InferenceArtifactExtractor,
     InferenceExtractionResult,
+    KernelValidationExtractionResult,
+    KernelValidationExtractor,
     MemrayExtractionResult,
     MemrayExtractor,
     NsightSystemsExtractionResult,
@@ -2077,6 +2081,7 @@ def create_server(
                 "py-spy",
                 "memray",
                 "coverage",
+                "compute-sanitizer",
                 "pyperf",
                 "pytest",
                 "aiperf",
@@ -3157,6 +3162,82 @@ def create_server(
                 result,
                 f"Extracted {result.measurement_count} measured values and "
                 f"{result.warmup_count} warmups.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="extract_kernel_validation", annotations=ADDITIVE)
+    async def extract_kernel_validation_tool(
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[KernelValidationExtractionResult]]:
+        """Extract bounded per-case metrics from kernel-validation v1 evidence."""
+        try:
+            await ctx.report_progress(0, 2, "Kernel-validation extraction started")
+            result = await run_atomic_thread(
+                lambda: KernelValidationExtractor(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).extract(run_id)
+            )
+            await ctx.report_progress(1, 2, "Kernel-validation evidence published")
+            run_uri = f"flameox://runs/{result.run_id}"
+            artifact_uri = f"flameox://artifacts/{result.artifact_id}"
+            await ctx.report_progress(2, 2, "Kernel-validation result ready")
+            return _success(
+                result,
+                f"Extracted {result.case_count} validation cases with status {result.status}.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Run {result.run_id}",
+                        uri=run_uri,
+                        description="Authoritative validation import run.",
+                        mime_type="application/json",
+                    ),
+                    ResourceLink(
+                        name=f"Artifact {result.artifact_id}",
+                        uri=artifact_uri,
+                        description="Authoritative kernel-validation artifact metadata.",
+                        mime_type="application/json",
+                    ),
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="extract_compute_sanitizer", annotations=ADDITIVE)
+    async def extract_compute_sanitizer_tool(
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[ComputeSanitizerExtractionResult]]:
+        """Extract bounded findings from an official Compute Sanitizer XML report."""
+        try:
+            await ctx.report_progress(0, 2, "Compute Sanitizer extraction started")
+            result = await run_atomic_thread(
+                lambda: ComputeSanitizerExtractor(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).extract(run_id)
+            )
+            await ctx.report_progress(1, 2, "Compute Sanitizer evidence published")
+            run_uri = f"flameox://runs/{result.run_id}"
+            artifact_uri = f"flameox://artifacts/{result.artifact_id}"
+            await ctx.report_progress(2, 2, "Compute Sanitizer result ready")
+            return _success(
+                result,
+                f"Compute Sanitizer extraction returned {result.finding_count} findings.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Run {result.run_id}",
+                        uri=run_uri,
+                        description="Authoritative sanitizer run manifest.",
+                        mime_type="application/json",
+                    ),
+                    ResourceLink(
+                        name=f"Artifact {result.artifact_id}",
+                        uri=artifact_uri,
+                        description="Authoritative Compute Sanitizer report metadata.",
+                        mime_type="application/json",
+                    ),
+                ),
             )
         except DomainError as error:
             return _failure(error)

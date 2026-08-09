@@ -10,6 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
+    "defusedxml>=0.7.1,<0.8",
     "anyio>=4.9,<5",
     "duckdb>=1.5.4,<1.6",
     "ijson>=3.4,<4",
@@ -86,6 +87,7 @@ packages = ["src/flameox"]
 addopts = "-ra --strict-config --strict-markers --durations=10 -p no:randomly -m 'not performance and not optional and not process'"
 testpaths = ["tests"]
 markers = [
+    "requires_compute_sanitizer: requires NVIDIA Compute Sanitizer and a compatible GPU",
     "unit: deterministic tests for one semantic owner",
     "integration: tests crossing two or more Flameox services",
     "process: tests that spawn, transport to, or cancel another process",

@@ -5,7 +5,7 @@ from typing import Any
 import pyarrow as pa
 
 SCHEMA_MAJOR = 1
-SCHEMA_MINOR = 8
+SCHEMA_MINOR = 9
 UTC_TIMESTAMP = pa.timestamp("us", tz="UTC")
 
 COMMON_FIELDS: tuple[Any, ...] = (
@@ -132,6 +132,50 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("stages_json", pa.string(), nullable=False),
             pa.field("limitations", pa.list_(pa.string()), nullable=False),
             pa.field("created_at", UTC_TIMESTAMP, nullable=False),
+        ),
+    ),
+    "kernel_validation_cases": _schema(
+        "kernel_validation_cases",
+        (
+            pa.field("case_output_id", pa.string(), nullable=False),
+            pa.field("run_id", pa.string(), nullable=False),
+            pa.field("artifact_id", pa.string(), nullable=False),
+            pa.field("case_id", pa.string(), nullable=False),
+            pa.field("output_name", pa.string(), nullable=False),
+            pa.field("case_status", pa.string(), nullable=False),
+            pa.field("output_status", pa.string(), nullable=False),
+            pa.field("coverage_complete", pa.bool_(), nullable=False),
+            pa.field("producer", pa.string(), nullable=False),
+            pa.field("producer_version", pa.string()),
+            pa.field("reference_name", pa.string(), nullable=False),
+            pa.field("reference_version", pa.string()),
+            pa.field("reference_identity", pa.string(), nullable=False),
+            pa.field("device", pa.string(), nullable=False),
+            pa.field("seed", pa.int64()),
+            pa.field("dimensions_json", pa.string(), nullable=False),
+            pa.field("inputs_json", pa.string(), nullable=False),
+            pa.field("dtype", pa.string(), nullable=False),
+            pa.field("shape", pa.list_(pa.int64()), nullable=False),
+            pa.field("representative_failures_json", pa.string(), nullable=False),
+            pa.field("limitations", pa.list_(pa.string()), nullable=False),
+        ),
+    ),
+    "kernel_validation_metrics": _schema(
+        "kernel_validation_metrics",
+        (
+            pa.field("metric_id", pa.string(), nullable=False),
+            pa.field("case_output_id", pa.string(), nullable=False),
+            pa.field("run_id", pa.string(), nullable=False),
+            pa.field("artifact_id", pa.string(), nullable=False),
+            pa.field("case_id", pa.string(), nullable=False),
+            pa.field("output_name", pa.string(), nullable=False),
+            pa.field("metric_name", pa.string(), nullable=False),
+            pa.field("value", pa.float64()),
+            pa.field("comparator", pa.string()),
+            pa.field("threshold", pa.float64()),
+            pa.field("unit", pa.string(), nullable=False),
+            pa.field("status", pa.string(), nullable=False),
+            pa.field("limitation", pa.string()),
         ),
     ),
     "pipeline_comparisons": _schema(

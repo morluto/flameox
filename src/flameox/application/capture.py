@@ -23,6 +23,13 @@ from flameox.adapters.builtins import (
     BUILTIN_ADAPTERS,
     build_capture_invocation,
     builtin_adapter,
+    replace_compute_sanitizer_suppression,
+)
+from flameox.adapters.compute_sanitizer import inspect_compute_sanitizer_report
+from flameox.adapters.options import (
+    bind_adapter_options,
+    compute_sanitizer_options,
+    read_compute_sanitizer_suppression,
 )
 from flameox.adapters.registry import AdapterRegistry
 from flameox.adapters.torch_profiler import SdkTorchProfilerOptions, torch_profiler_options
@@ -575,17 +582,11 @@ class CaptureService:
         collector_environment = {
             "FLAMEOX_OBSERVATIONS_PATH": str(output_root / "observations.jsonl")
         }
-        if adapter == "torch.profiler":
-            bound_adapter_options = torch_profiler_options(
-                cast(dict[str, object] | None, adapter_options)
-            ).model_dump(mode="json")
-        elif adapter_options:
-            raise DomainError(
-                ErrorCode.INVALID_CAPTURE_PLAN,
-                f"Adapter {adapter!r} does not accept capture options.",
-            )
-        else:
-            bound_adapter_options = {}
+        bound_adapter_options = bind_adapter_options(
+            adapter,
+            adapter_options,
+            project_root=self.workspace.project_root,
+        )
         adapter_binding = await self._adapter_command(
             adapter,
             instance.command,
@@ -902,9 +903,23 @@ class CaptureService:
             await self.plans.acquire_capture_slot()
             acquired_slot = True
             await capture.report(4, "Capture slot acquired")
+            collector_argv = plan.collector_argv
+            if plan.adapter == "compute-sanitizer":
+                selected = compute_sanitizer_options(cast(dict[str, object], plan.adapter_options))
+                suppression = read_compute_sanitizer_suppression(
+                    selected,
+                    project_root=self.workspace.project_root,
+                )
+                if suppression is not None:
+                    staged_suppression = output_root / "inputs" / "compute-sanitizer.supp"
+                    atomic_write_bytes(staged_suppression, suppression, mode=0o400)
+                    collector_argv = replace_compute_sanitizer_suppression(
+                        collector_argv,
+                        staged_suppression,
+                    )
             outcome = await self.broker.run(
                 ExecutionRequest(
-                    argv=plan.collector_argv,
+                    argv=collector_argv,
                     cwd=Path(plan.workload_instance.command.cwd),
                     environment_allowlist=(
                         self.workspace.config.execution.child_environment_allowlist
@@ -1091,7 +1106,12 @@ class CaptureService:
                 "capture run disappeared after collector execution",
             )
 
-        collector_succeeded = outcome.process.exit_code == 0
+        sanitizer_finding_exit = (
+            plan.adapter == "compute-sanitizer"
+            and outcome.process.exit_code == plan.adapter_options.get("finding_exit_code")
+        )
+        sanitizer_finding = False
+        collector_succeeded = outcome.process.exit_code == 0 or sanitizer_finding_exit
         native_paths = self._native_output_paths(plan, output_root)
         valid_native_paths = self._valid_native_output_paths(plan, output_root)
         unexpected_native_paths = self._unexpected_native_output_paths(plan, output_root)
@@ -1131,7 +1151,12 @@ class CaptureService:
                 collector_limitation_details.append(quarantined)
             valid_native_paths = ()
             native_complete = False
-        elif native_paths and not native_complete and not outcome.process.timed_out:
+        elif (
+            native_paths
+            and not native_complete
+            and not outcome.process.timed_out
+            and not preserve_nonzero_artifact
+        ):
             reason = (
                 "Collector completed without every expected native output."
                 if not any(path.exists() for path in native_paths)
@@ -1146,6 +1171,21 @@ class CaptureService:
                 _limitation("artifact", "expected_output_invalid", reason)
             )
             valid_native_paths = ()
+        elif (
+            native_paths
+            and not native_complete
+            and not outcome.process.timed_out
+            and preserve_nonzero_artifact
+        ):
+            reason = (
+                "Collector completed without every expected native output."
+                if not any(path.exists() for path in native_paths)
+                else "Collector emitted an incomplete, extra, empty, or non-regular output set."
+            )
+            collector_limitation_details.append(
+                _limitation("artifact", "expected_output_invalid", reason)
+            )
+            collector_succeeded = False
         if native_paths and outcome.process.timed_out and valid_native_paths:
             collector_limitation_details.append(
                 _limitation(
@@ -1498,19 +1538,62 @@ class CaptureService:
                         role = f"cycle_{cycle_index:04d}"
                     else:
                         role = "primary"
-                    registrations.append(
-                        await self._register_path_async(
-                            run_id,
-                            native,
-                            kind=plan.expected_artifact_kinds[0],
-                            role=role,
-                            media_type=(
-                                mimetypes.guess_type(native.name)[0] or "application/octet-stream"
-                            ),
-                            producer=plan.adapter,
-                            producer_version=plan.adapter_version,
-                        )
+                    registration = await self._register_path_async(
+                        run_id,
+                        native,
+                        kind=plan.expected_artifact_kinds[0],
+                        role=role,
+                        media_type=(
+                            mimetypes.guess_type(native.name)[0] or "application/octet-stream"
+                        ),
+                        producer=plan.adapter,
+                        producer_version=plan.adapter_version,
                     )
+                    registrations.append(registration)
+                    if plan.adapter == "compute-sanitizer":
+                        immutable = self.artifacts.get(registration[0].artifact_id)
+                        try:
+                            inspection = await run_atomic_thread(
+                                partial(
+                                    inspect_compute_sanitizer_report,
+                                    self.workspace,
+                                    str(immutable.payload_path),
+                                    max_records=max(
+                                        1,
+                                        min(
+                                            10_000,
+                                            self.workspace.config.storage.max_rows_per_generation
+                                            - 1,
+                                        ),
+                                    ),
+                                )
+                            )
+                        except DomainError as error:
+                            collector_succeeded = False
+                            validation_status = ValidationStatus.ERROR
+                            validation_limitations.append(
+                                f"Compute Sanitizer report validation failed: {error.message}"
+                            )
+                        else:
+                            has_findings = bool(inspection.records)
+                            supported_exit = outcome.process.exit_code in {
+                                0,
+                                plan.adapter_options.get("finding_exit_code"),
+                            }
+                            sanitizer_finding = has_findings and supported_exit
+                            if not supported_exit or (sanitizer_finding_exit and not has_findings):
+                                collector_succeeded = False
+                                validation_status = ValidationStatus.ERROR
+                                validation_limitations.append(
+                                    "Compute Sanitizer exit status contradicts the parsed report."
+                                )
+                            else:
+                                validation_status = (
+                                    ValidationStatus.FAILED
+                                    if has_findings
+                                    else ValidationStatus.PASSED
+                                )
+                            validation_limitations.extend(inspection.limitations)
                 manifest = output_root / "torch-profiler-cycles.json"
                 if (
                     plan.adapter == "torch.profiler"
@@ -1599,7 +1682,7 @@ class CaptureService:
             )
             error.run_id = terminal.run_id
             raise
-        succeeded = outcome.process.exit_code == 0
+        succeeded = collector_succeeded and (not sanitizer_finding or native_complete)
         timed_out = outcome.process.timed_out
         detail_groups = [
             tuple(collector_limitation_details),
@@ -2063,6 +2146,7 @@ class CaptureService:
                 executable=capability.executable,
                 timeout_seconds=workload.timeout_seconds,
                 options=cast(dict[str, object] | None, options),
+                project_root=self.workspace.project_root,
             )
             return _AdapterBinding(
                 argv=invocation.argv,

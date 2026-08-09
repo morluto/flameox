@@ -6,6 +6,7 @@ from typing import Literal, Protocol, cast
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 
+from flameox.adapters.kernel_validation import kernel_validation_json_schema
 from flameox.application import (
     ArtifactService,
     EvidenceLookupService,
@@ -29,6 +30,14 @@ def _workspace(ctx: Context) -> Workspace:
 
 def register_resources[T: WorkspaceContext](server: MCPServer[T]) -> None:  # noqa: C901
     """Register resource projections independently from the MCP tool transport."""
+
+    @server.resource(
+        "flameox://schemas/kernel-validation/v1",
+        mime_type="application/schema+json",
+        description="Published JSON Schema for flameox.kernel-validation.v1.",
+    )
+    async def kernel_validation_schema_resource() -> str:
+        return json.dumps(kernel_validation_json_schema(), indent=2, sort_keys=True)
 
     def error_payload(error: DomainError) -> str:
         return json.dumps({"ok": False, "error": error.to_detail()})
