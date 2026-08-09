@@ -1,3 +1,10 @@
+<!--
+PR title: type(optional-scope): imperative outcome
+Example: fix(storage): preserve comparison evidence
+
+The squash-merge commit and generated changelog use the PR title.
+-->
+
 ## Description
 
 <!-- What problem does this PR solve? Link related issues. -->

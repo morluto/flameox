@@ -140,6 +140,10 @@ feat(adapters): add bounded provider readiness probe
 docs: explain comparison compatibility
 ```
 
+Pull request titles follow the same `type(optional-scope): imperative outcome`
+format. GitHub uses the title as the squash-merge commit subject, and `git-cliff`
+uses that subject to place and describe the change in the generated changelog.
+
 Open the pull request against `main` and complete the pull request template.
 Explain the concrete problem, the chosen approach, and why it fits flameox's
 architecture. Link related issues and list only commands that actually ran.
