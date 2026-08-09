@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from flameox.adapters.options import (
+    adapter_accepts_options,
+    compute_sanitizer_options,
+    compute_sanitizer_suppression_path,
+)
 from flameox.adapters.torch_profiler import SdkTorchProfilerOptions, torch_profiler_options
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 
@@ -225,6 +230,27 @@ BUILTIN_ADAPTERS = {
             ),
         ),
         BuiltinAdapter(
+            name="compute-sanitizer",
+            dependency_kind="executable",
+            dependency="compute-sanitizer",
+            supported_modes=("memcheck", "racecheck", "initcheck", "synccheck"),
+            supported_formats=("compute-sanitizer-xml",),
+            features=("memory_safety", "race_detection", "initialization", "synchronization"),
+            remediation=(
+                "Install NVIDIA Compute Sanitizer from the CUDA toolkit and verify GPU access.",
+            ),
+            version_args=("--version",),
+            supported_platforms=("linux", "windows"),
+            output_filename="compute-sanitizer.xml",
+            artifact_kinds=(ArtifactKind.SANITIZER_REPORT,),
+            expected_overhead="GPU instrumentation overhead; exact cost depends on sanitizer tool.",
+            capture_limitations=(
+                "A clean report covers only the selected tool, launches, processes, and filters.",
+                "Compute Sanitizer XML has no published stable XSD; extraction is version-bounded.",
+            ),
+            preserve_artifact_on_nonzero=True,
+        ),
+        BuiltinAdapter(
             name="coverage",
             dependency_kind="package",
             dependency="coverage",
@@ -254,6 +280,7 @@ def build_capture_invocation(
     executable: str | None,
     timeout_seconds: float = 300,
     options: dict[str, object] | None = None,
+    project_root: Path | None = None,
 ) -> CaptureInvocation:
     adapter = BUILTIN_ADAPTERS.get(adapter_name)
     if (
@@ -266,7 +293,7 @@ def build_capture_invocation(
             ErrorCode.CAPABILITY_UNAVAILABLE,
             f"Adapter {adapter_name!r} does not support capture planning.",
         )
-    if options and adapter_name != "torch.profiler":
+    if options and not adapter_accepts_options(adapter_name):
         raise DomainError(
             ErrorCode.INVALID_CAPTURE_PLAN,
             f"Adapter {adapter_name!r} does not accept capture options.",
@@ -326,6 +353,15 @@ def build_capture_invocation(
             output,
             options=options,
         )
+    elif adapter_name == "compute-sanitizer":
+        return _compute_sanitizer_capture_invocation(
+            adapter,
+            workload_argv,
+            output,
+            executable=executable,
+            options=options,
+            project_root=project_root,
+        )
     elif adapter_name == "pyperf":
         python, _ = _python_target(workload_argv)
         argv = (
@@ -383,6 +419,68 @@ def build_capture_invocation(
         limitations=limitations,
         environment=environment,
     )
+
+
+def _compute_sanitizer_capture_invocation(
+    adapter: BuiltinAdapter,
+    workload_argv: tuple[str, ...],
+    output: str,
+    *,
+    executable: str | None,
+    options: dict[str, object] | None,
+    project_root: Path | None,
+) -> CaptureInvocation:
+    selected = compute_sanitizer_options(options)
+    argv_parts: list[str] = [
+        _require_executable(adapter.name, executable),
+        "--tool",
+        selected.tool,
+        "--xml",
+        "--save",
+        output,
+        "--error-exitcode",
+        str(selected.finding_exit_code),
+        "--launch-skip",
+        str(selected.launch_skip),
+        "--launch-count",
+        str(selected.launch_count),
+        "--target-processes",
+        selected.target_processes,
+        "--demangle",
+        selected.demangle,
+    ]
+    if selected.target_processes_filter is not None:
+        argv_parts.extend(("--target-processes-filter", selected.target_processes_filter))
+    if selected.kernel_name is not None:
+        argv_parts.extend(("--kernel-name", selected.kernel_name))
+    suppression = compute_sanitizer_suppression_path(
+        selected,
+        project_root=project_root or Path.cwd(),
+    )
+    if suppression is not None:
+        argv_parts.extend(("--suppressions", str(suppression)))
+    return CaptureInvocation(
+        argv=(*argv_parts, *workload_argv),
+        artifact_kinds=adapter.artifact_kinds,
+        expected_overhead=adapter.expected_overhead or "",
+        limitations=adapter.capture_limitations,
+        environment={},
+    )
+
+
+def replace_compute_sanitizer_suppression(
+    argv: tuple[str, ...],
+    staged_path: Path,
+) -> tuple[str, ...]:
+    """Point a planned Compute Sanitizer invocation at its verified staged input."""
+    indexes = [index for index, value in enumerate(argv[:-1]) if value == "--suppressions"]
+    if len(indexes) != 1:
+        raise DomainError(
+            ErrorCode.INTERNAL_ERROR,
+            "Planned Compute Sanitizer suppression argument is missing or ambiguous.",
+        )
+    index = indexes[0] + 1
+    return (*argv[:index], str(staged_path), *argv[index + 1 :])
 
 
 def _torch_capture_invocation(

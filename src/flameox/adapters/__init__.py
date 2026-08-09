@@ -8,11 +8,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from flameox.adapters.benchmark_samples import *  # noqa: F403
     from flameox.adapters.client_setup import *  # noqa: F403
+    from flameox.adapters.compute_sanitizer import *  # noqa: F403
     from flameox.adapters.coverage import *  # noqa: F403
     from flameox.adapters.inference import *  # noqa: F403
+    from flameox.adapters.kernel_validation import *  # noqa: F403
     from flameox.adapters.memray import *  # noqa: F403
     from flameox.adapters.nsight_systems import *  # noqa: F403
     from flameox.adapters.observations import *  # noqa: F403
+    from flameox.adapters.options import *  # noqa: F403
     from flameox.adapters.perfetto import *  # noqa: F403
     from flameox.adapters.pyperf import *  # noqa: F403
     from flameox.adapters.pytest import *  # noqa: F403
@@ -26,11 +29,14 @@ if TYPE_CHECKING:
 _MODULES = (
     "benchmark_samples",
     "client_setup",
+    "compute_sanitizer",
     "coverage",
     "inference",
+    "kernel_validation",
     "memray",
     "nsight_systems",
     "observations",
+    "options",
     "perfetto",
     "pyperf",
     "pytest",
@@ -56,10 +62,16 @@ __all__ = [
     "ClientConfigEdit",
     "ClientConfigRegistry",
     "ClientPlanAction",
+    "ComputeSanitizerExtractionResult",
+    "ComputeSanitizerExtractor",
+    "ComputeSanitizerOptions",
     "CoverageExtractionResult",
     "CoverageExtractor",
     "InferenceArtifactExtractor",
     "InferenceExtractionResult",
+    "KernelValidationExtractionResult",
+    "KernelValidationExtractor",
+    "KernelValidationV1",
     "Launcher",
     "ManagedRuntime",
     "MemrayExtractionResult",
@@ -98,6 +110,7 @@ __all__ = [
     "VllmResultDocument",
     "VllmResultParser",
     "WholeEntrypointTorchProfilerOptions",
+    "bind_adapter_options",
     "install_trace_processor",
 ]
 
