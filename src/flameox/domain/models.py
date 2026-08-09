@@ -104,6 +104,7 @@ class ArtifactKind(StrEnum):
     INFERENCE_REQUEST_TRACE = "inference_request_trace"
     INFERENCE_RESULT = "inference_result"
     KERNEL_BUILD = "kernel_build"
+    KERNEL_PROFILE = "kernel_profile"
 
 
 class RunType(StrEnum):

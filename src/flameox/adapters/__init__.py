@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from flameox.adapters.kernel_build import *  # noqa: F403
     from flameox.adapters.kernel_validation import *  # noqa: F403
     from flameox.adapters.memray import *  # noqa: F403
+    from flameox.adapters.nsight_compute import *  # noqa: F403
     from flameox.adapters.nsight_systems import *  # noqa: F403
     from flameox.adapters.nvbench import *  # noqa: F403
     from flameox.adapters.observations import *  # noqa: F403
@@ -31,13 +32,14 @@ if TYPE_CHECKING:
 _MODULES = (
     "benchmark_samples",
     "client_setup",
-    "compute_sanitizer",
     "coverage",
+    "compute_sanitizer",
     "inference",
     "kernel_build",
     "kernel_validation",
     "memray",
     "nsight_systems",
+    "nsight_compute",
     "nvbench",
     "observations",
     "options",
@@ -89,6 +91,9 @@ __all__ = [
     "MooncakeRequestRow",
     "MooncakeTraceParser",
     "MooncakeTraceSummary",
+    "NsightComputeExtractionResult",
+    "NsightComputeExtractor",
+    "NsightComputeOptions",
     "NsightSystemsExtractionResult",
     "NsightSystemsExtractor",
     "NvbenchBenchmark",

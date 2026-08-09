@@ -4,7 +4,7 @@ import hashlib
 import os
 import stat
 from pathlib import Path
-from typing import Annotated, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 from pydantic import Field, JsonValue, StringConstraints, field_validator, model_validator
 
@@ -59,6 +59,80 @@ class NvbenchOptions(ContractModel):
     min_samples: Annotated[int, Field(ge=1, le=1_000_000)] | None = None
     timeout: Annotated[float, Field(gt=0, le=86_400)] | None = None
     devices: Annotated[str, StringConstraints(min_length=1, max_length=200)] | None = None
+
+
+class NsightComputeOptions(ContractModel):
+    """Bounded selections accepted by the managed Nsight Compute capture."""
+
+    set: (
+        Annotated[
+            str,
+            StringConstraints(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$"),
+        ]
+        | None
+    ) = "basic"
+    sections: (
+        Annotated[
+            tuple[
+                Annotated[
+                    str,
+                    StringConstraints(
+                        min_length=1,
+                        max_length=100,
+                        pattern=r"^[A-Za-z0-9_.-]+$",
+                    ),
+                ],
+                ...,
+            ],
+            Field(min_length=1, max_length=32),
+        ]
+        | None
+    ) = None
+    kernel_name: BoundedFilter | None = None
+    launch_skip: Annotated[int, Field(ge=0, le=1_000_000)] = 0
+    launch_count: Annotated[int, Field(ge=1, le=1_000_000)] = 1
+    replay_mode: Literal["kernel", "application", "range", "app-range"] = "kernel"
+
+    @model_validator(mode="before")
+    @classmethod
+    def explicit_sections_replace_default_set(cls, value: Any) -> Any:
+        if isinstance(value, dict) and value.get("sections") is not None and "set" not in value:
+            return {**value, "set": None}
+        return value
+
+    @model_validator(mode="after")
+    def one_profile_selection(self) -> NsightComputeOptions:
+        if (self.set is None) == (self.sections is None):
+            raise ValueError("exactly one of set or sections must be selected")
+        if self.sections is not None and len(set(self.sections)) != len(self.sections):
+            raise ValueError("sections must not contain duplicates")
+        return self
+
+
+class Rocprofv3Options(ContractModel):
+    """Trace domains exposed by rocprofv3's documented PFTrace CLI."""
+
+    hip_trace: bool = False
+    kernel_trace: bool = True
+    memory_copy_trace: bool = False
+    memory_allocation_trace: bool = False
+    scratch_memory_trace: bool = False
+    marker_trace: bool = False
+
+    @model_validator(mode="after")
+    def at_least_one_domain(self) -> Rocprofv3Options:
+        if not any(
+            (
+                self.hip_trace,
+                self.kernel_trace,
+                self.memory_copy_trace,
+                self.memory_allocation_trace,
+                self.scratch_memory_trace,
+                self.marker_trace,
+            )
+        ):
+            raise ValueError("at least one rocprofv3 trace domain must be enabled")
+        return self
 
 
 _BoundedSubdir = Annotated[
@@ -117,7 +191,9 @@ class CuteCompilerOptions(ContractModel):
 _ADAPTER_OPTION_MODELS: dict[str, type[ContractModel]] = {
     "compute-sanitizer": ComputeSanitizerOptions,
     "cute.compiler": CuteCompilerOptions,
+    "nsight.compute": NsightComputeOptions,
     "nvbench": NvbenchOptions,
+    "rocprofv3": Rocprofv3Options,
     "triton.compiler": TritonCompilerOptions,
 }
 
@@ -250,6 +326,14 @@ def read_compute_sanitizer_suppression(
 
 def nvbench_options(options: dict[str, object] | None) -> NvbenchOptions:
     return cast(NvbenchOptions, _validate_adapter_options("nvbench", options))
+
+
+def nsight_compute_options(options: dict[str, object] | None) -> NsightComputeOptions:
+    return cast(NsightComputeOptions, _validate_adapter_options("nsight.compute", options))
+
+
+def rocprofv3_options(options: dict[str, object] | None) -> Rocprofv3Options:
+    return cast(Rocprofv3Options, _validate_adapter_options("rocprofv3", options))
 
 
 def triton_compiler_options(options: dict[str, object] | None) -> TritonCompilerOptions:

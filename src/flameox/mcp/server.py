@@ -31,6 +31,8 @@ from flameox.adapters import (
     KernelValidationExtractor,
     MemrayExtractionResult,
     MemrayExtractor,
+    NsightComputeExtractionResult,
+    NsightComputeExtractor,
     NsightSystemsExtractionResult,
     NsightSystemsExtractor,
     NvbenchExtractionResult,
@@ -2088,6 +2090,8 @@ def create_server(
                 "memray",
                 "coverage",
                 "compute-sanitizer",
+                "nsight.compute",
+                "rocprofv3",
                 "pyperf",
                 "pytest",
                 "aiperf",
@@ -3394,6 +3398,42 @@ def create_server(
                         name=f"Artifact {result.artifact_id}",
                         uri=artifact_uri,
                         description="Imported NVBench JSON artifact metadata.",
+                        mime_type="application/json",
+                    ),
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="extract_nsight_compute", annotations=ADDITIVE)
+    async def extract_nsight_compute_tool(
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[NsightComputeExtractionResult]]:
+        """Extract bounded metrics through NVIDIA's installed ncu_report interface."""
+        try:
+            await ctx.report_progress(0, 2, "Nsight Compute extraction started")
+            result = await run_atomic_thread(
+                lambda: NsightComputeExtractor(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).extract(run_id)
+            )
+            await ctx.report_progress(1, 2, "Nsight Compute evidence published")
+            await ctx.report_progress(2, 2, "Nsight Compute result ready")
+            return _success(
+                result,
+                f"Extracted {result.metric_count} Nsight Compute metrics.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Run {result.run_id}",
+                        uri=f"flameox://runs/{result.run_id}",
+                        description="Authoritative Nsight Compute run manifest.",
+                        mime_type="application/json",
+                    ),
+                    ResourceLink(
+                        name=f"Artifact {result.artifact_id}",
+                        uri=f"flameox://artifacts/{result.artifact_id}",
+                        description="Authoritative native Nsight Compute report metadata.",
                         mime_type="application/json",
                     ),
                 ),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import platform
 import re
 import shutil
@@ -20,6 +21,7 @@ import portalocker
 from platformdirs import user_data_path
 
 from flameox.adapters.builtins import BUILTIN_ADAPTERS, BuiltinAdapter, builtin_adapter
+from flameox.adapters.nsight_compute import find_ncu_report_interface
 from flameox.adapters.registry import AdapterRegistry
 from flameox.adapters.setup_runtime import install_trace_processor
 from flameox.adapters.toxiproxy import ToxiproxyClient, ToxiproxyToolManager, ToxiproxyToolReceipt
@@ -220,7 +222,7 @@ class CapabilityService:
                     permissions=adapter.permissions,
                     permission_status=(
                         "unknown_until_active_probe"
-                        if adapter.name in {"py-spy", "perf"} and resolved
+                        if adapter.name in {"py-spy", "perf", "nsight.compute"} and resolved
                         else None
                     ),
                     restrictions=self._platform_restrictions(adapter),
@@ -403,6 +405,10 @@ class CapabilityService:
             result = result.model_copy(update={"version": version_report.version})
             self._active_cache[adapter] = result
             return result
+        if adapter == "nsight.compute":
+            result = await self._probe_nsight_compute(version_report)
+            self._active_cache[adapter] = result
+            return result
         result = version_report
         if adapter == "py-spy":
             result = result.model_copy(update={"permission_status": "not_exercised"})
@@ -432,14 +438,23 @@ class CapabilityService:
                 "utf-8",
                 errors="replace",
             )
-            first_line = next((line.strip() for line in output.splitlines() if line.strip()), None)
+            lines = tuple(line.strip() for line in output.splitlines() if line.strip())
+            version_line = next(
+                (
+                    line
+                    for line in lines
+                    if passive.adapter in {"compute-sanitizer", "nsight.compute"}
+                    and line.casefold().startswith("version ")
+                ),
+                lines[0] if lines else None,
+            )
             succeeded = outcome.process.exit_code == 0
             return passive.model_copy(
                 update={
                     "status": CapabilityStatus.AVAILABLE
                     if succeeded
                     else CapabilityStatus.DEGRADED,
-                    "version": first_line or passive.version,
+                    "version": version_line or passive.version,
                     "limitations": (
                         ()
                         if succeeded
@@ -541,6 +556,169 @@ class CapabilityService:
         if self._is_perf_permission_denial(diagnostic):
             return self._perf_permission_failure(passive, diagnostic)
         return self._perf_failure(passive, diagnostic or "perf sampling probe failed.")
+
+    async def _probe_nsight_compute(self, passive: CapabilityReport) -> CapabilityReport:
+        """Check the shipped report interface and map NVIDIA's counter diagnostic."""
+        if self.workspace is None or passive.executable is None:
+            return passive.model_copy(update={"permission_status": "not_exercised"})
+        if find_ncu_report_interface(executable=passive.executable) is None:
+            return passive.model_copy(
+                update={
+                    "status": CapabilityStatus.DEGRADED,
+                    "permission_status": "unknown",
+                    "limitations": ("The official ncu_report Python interface is unavailable.",),
+                    "remediation": (
+                        "Install the Nsight Compute extras/python interface; FlameOx does not "
+                        "decode NVIDIA report binaries.",
+                    ),
+                    "probe_kind": "active",
+                    "probed_at": utc_now(),
+                }
+            )
+        restriction = self._nvidia_counter_access_restriction()
+        if restriction is not None:
+            return self._nsight_compute_permission_failure(passive, restriction)
+        staging_root = self.workspace.paths.staging
+        staging_root.mkdir(parents=True, exist_ok=True)
+        try:
+            with tempfile.TemporaryDirectory(
+                dir=staging_root, prefix="capability-ncu-"
+            ) as temporary:
+                output = Path(temporary) / "probe.ncu-rep"
+                request = ExecutionRequest(
+                    argv=(
+                        passive.executable,
+                        "--set",
+                        "basic",
+                        "--launch-count",
+                        "1",
+                        "--export",
+                        str(output),
+                        "--force-overwrite",
+                        sys.executable,
+                        "-I",
+                        "-S",
+                        "-c",
+                        "pass",
+                    ),
+                    cwd=self.workspace.project_root,
+                    environment_allowlist=(),
+                    allowed_working_roots=(self.workspace.project_root,),
+                    timeout_seconds=10,
+                    max_output_bytes=self.workspace.config.execution.max_output_bytes,
+                    resource_policy=ResourcePolicy(
+                        filesystem_path=self.workspace.paths.root,
+                        staging_root=Path(temporary),
+                        minimum_free_bytes=self.workspace.config.storage.min_free_bytes,
+                        sampling_interval_ms=(
+                            self.workspace.config.execution.resource_sampling_interval_ms
+                        ),
+                        max_observed_files=(
+                            self.workspace.config.execution.max_resource_observed_files
+                        ),
+                    ),
+                )
+                try:
+                    outcome = await self.broker.run(request)
+                except DomainError as error:
+                    process = error.details.get("process")
+                    diagnostic = error.message
+                    if isinstance(process, dict):
+                        diagnostic = (
+                            " ".join(
+                                str(value)
+                                for value in (process.get("stdout"), process.get("stderr"))
+                                if value
+                            )
+                            or diagnostic
+                        )
+                    diagnostic = self._bounded_diagnostic(diagnostic)
+                    if "ERR_NVGPUCTRPERM" in diagnostic:
+                        return self._nsight_compute_permission_failure(passive, diagnostic)
+                    return self._nsight_compute_probe_failure(passive, diagnostic)
+        except (OSError, ValueError) as error:
+            return self._nsight_compute_probe_failure(passive, str(error))
+        diagnostic = self._bounded_diagnostic(
+            (outcome.stdout + b"\n" + outcome.stderr).decode("utf-8", errors="replace")
+        )
+        if "ERR_NVGPUCTRPERM" in diagnostic:
+            return self._nsight_compute_permission_failure(passive, diagnostic)
+        if outcome.process.exit_code != 0:
+            return self._nsight_compute_probe_failure(passive, diagnostic)
+        return passive.model_copy(
+            update={
+                "permission_status": "not_exercised",
+                "limitations": (
+                    "The official report interface is available, but the bounded probe did not "
+                    "execute a CUDA kernel; counter permission remains unexercised.",
+                ),
+                "probe_kind": "active",
+                "probed_at": utc_now(),
+            }
+        )
+
+    @staticmethod
+    def _nsight_compute_permission_failure(
+        passive: CapabilityReport,
+        diagnostic: str,
+    ) -> CapabilityReport:
+        return passive.model_copy(
+            update={
+                "status": CapabilityStatus.PERMISSION_REQUIRED,
+                "permission_status": "denied",
+                "limitations": (diagnostic,),
+                "remediation": (
+                    "Enable NVIDIA GPU performance-counter access following NVIDIA's "
+                    "ERR_NVGPUCTRPERM guidance, then refresh capabilities; FlameOx will not "
+                    "change system privileges.",
+                ),
+                "probe_kind": "active",
+                "probed_at": utc_now(),
+            }
+        )
+
+    @staticmethod
+    def _nvidia_counter_access_restriction() -> str | None:
+        """Read NVIDIA's Linux driver policy without attempting a privilege change."""
+        parameters = Path("/proc/driver/nvidia/params")
+        if not parameters.is_file() or os.geteuid() == 0:
+            return None
+        try:
+            admin_only = any(
+                line.strip() == "RmProfilingAdminOnly: 1"
+                for line in parameters.read_text(encoding="utf-8").splitlines()
+            )
+            status_lines = Path("/proc/self/status").read_text(encoding="utf-8").splitlines()
+            effective = next(
+                int(line.split(":", 1)[1].strip(), 16)
+                for line in status_lines
+                if line.startswith("CapEff:")
+            )
+        except (OSError, StopIteration, ValueError):
+            return None
+        cap_sys_admin = bool(effective & (1 << 21))
+        if admin_only and not cap_sys_admin:
+            return (
+                "ERR_NVGPUCTRPERM: NVIDIA driver reports RmProfilingAdminOnly=1 and this "
+                "process lacks CAP_SYS_ADMIN."
+            )
+        return None
+
+    @staticmethod
+    def _nsight_compute_probe_failure(
+        passive: CapabilityReport,
+        diagnostic: str,
+    ) -> CapabilityReport:
+        return passive.model_copy(
+            update={
+                "status": CapabilityStatus.DEGRADED,
+                "permission_status": "unknown",
+                "limitations": (diagnostic or "Nsight Compute active probe failed.",),
+                "remediation": ("Inspect the bounded Nsight Compute probe diagnostic.",),
+                "probe_kind": "active",
+                "probed_at": utc_now(),
+            }
+        )
 
     def _perf_permission_failure(
         self,
