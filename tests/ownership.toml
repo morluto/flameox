@@ -25,7 +25,9 @@ lane = "adapters"
 paths = [
     "tests/adapters/test_benchmark_samples.py",
     "tests/adapters/test_compute_sanitizer.py",
+    "tests/adapters/test_kernel_build.py",
     "tests/adapters/test_kernel_validation.py",
+    "tests/adapters/test_nvbench.py",
     "tests/adapters/test_pyperf.py",
   "tests/adapters/test_python_startup.py",
 ]
@@ -531,6 +533,12 @@ paths = ["tests/application/test_capture_torch_provider.py"]
 markers = ["integration", "optional", "process", "serial", "requires_torch"]
 
 [[ownership]]
+owner = "capture-nvbench-provider"
+lane = "process"
+paths = ["tests/application/test_capture_nvbench_provider.py"]
+markers = ["integration", "process", "serial"]
+
+[[ownership]]
 owner = "torch-launcher"
 lane = "process"
 paths = ["tests/collectors/test_torch_launcher.py"]
@@ -631,6 +639,30 @@ owner = "nsight-systems-adapter"
 lane = "process"
 paths = ["tests/adapters/test_nsight_systems.py"]
 markers = ["integration", "process", "serial"]
+
+[[ownership]]
+owner = "kernel-build-capture"
+lane = "adapters"
+paths = ["tests/adapters/test_kernel_build_capture.py"]
+markers = ["integration", "process"]
+
+[[ownership]]
+owner = "triton-compiler-live"
+lane = "adapters"
+paths = ["tests/adapters/test_triton_compiler_live.py"]
+markers = ["integration", "optional", "process", "serial", "requires_triton"]
+
+[[ownership]]
+owner = "nvbench-live"
+lane = "adapters"
+paths = ["tests/adapters/test_nvbench_live.py"]
+markers = ["integration", "optional", "process", "serial", "requires_nvbench"]
+
+[[ownership]]
+owner = "cute-compiler-live"
+lane = "adapters"
+paths = ["tests/adapters/test_cute_compiler_live.py"]
+markers = ["integration", "optional", "process", "serial", "requires_cute"]
 
 [[ownership]]
 owner = "perfetto-phase-normalization"
