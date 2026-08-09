@@ -986,6 +986,7 @@ def create_server(
         ],
         ctx: Context[AppContext],
         cwd: Annotated[str, Field(min_length=1, max_length=4_096)] = ".",
+        # StrictFloat accepts JSON integers as numbers while rejecting booleans and strings.
         timeout_seconds: Annotated[StrictFloat, Field(gt=0, le=86_400)] = 300.0,
         parameters: Annotated[
             dict[str, tuple[Scalar, ...]],

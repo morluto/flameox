@@ -305,6 +305,25 @@ async def test_sdk_strict_scalars_reject_json_coercions(
 
 
 @pytest.mark.anyio
+async def test_sdk_strict_float_accepts_integer_json_numbers(tmp_path: Path) -> None:
+    Workspace.initialize(tmp_path)
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        result = await client.call_tool(
+            "configure_workload",
+            {
+                "name": "probe",
+                "operation": "create",
+                "argv": [sys.executable, "-c", "pass"],
+                "timeout_seconds": 5,
+            },
+        )
+
+    assert result.is_error is False
+    assert result.structured_content is not None
+    assert result.structured_content["ok"] is True
+
+
+@pytest.mark.anyio
 async def test_native_sdk_ignores_unknown_top_level_tool_arguments(tmp_path: Path) -> None:
     Workspace.initialize(tmp_path)
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:

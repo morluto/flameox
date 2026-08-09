@@ -980,6 +980,8 @@ class EvidenceReference(ContractModel):
 
 
 class Comparison(ContractModel):
+    # This is the public result envelope, not the durable comparison format. Persisted
+    # comparisons retain the separate schema-v1 Parquet projection in evidence/schemas.py.
     schema_version: Literal[2] = 2
     comparison_id: Identifier
     experiment_id: Identifier | None = None

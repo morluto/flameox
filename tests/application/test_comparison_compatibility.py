@@ -8,6 +8,7 @@ import pytest
 from flameox.application import (
     ComparisonService,
     EvidenceInput,
+    EvidenceLookupService,
     FindingService,
     FreezeRunIdsRequest,
     MeasurementCompareRunSetsRequest,
@@ -174,6 +175,11 @@ def test_frozen_run_set_comparison_and_evidence_linked_finding(
     assert result.analysis is not None
     assert result.materialized_commit_id == workspace.corpus.read_head().commit_id
     assert result.materialized_commit_id != head_before
+    persisted = EvidenceLookupService(workspace).get("comparison", result.comparison.comparison_id)
+    assert persisted.data["schema_version"] == 1
+    assert (persisted.data["baseline_value_int"] is None) is not (
+        persisted.data["baseline_value_float"] is None
+    )
     request = RecordFindingRequest(
         kind="performance",
         title="Candidate halves reverse-scan time",
