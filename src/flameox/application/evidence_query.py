@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from flameox.catalog import Catalog
-from flameox.domain import CursorCodec, DomainError, ErrorCode, digest_model
+from flameox.domain import CursorCodec, DomainError, ErrorCode, EvidenceLevel, digest_model
 from flameox.domain.scalars import NumericValue
 from flameox.evidence import numeric_value_from_columns
-from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
+from flameox.evidence_status import (
+    EvidenceAvailability,
+    available_availability,
+    empty_availability,
+    unavailable_availability,
+)
 from flameox.models import ContractModel
 from flameox.storage import RunStore, Workspace
 
@@ -32,7 +37,7 @@ class MeasurementItem(ContractModel):
     order_in_block: int | None
     phase: str | None
     dimensions: dict[str, str] = Field(default_factory=dict)
-    evidence_level: str
+    evidence_level: EvidenceLevel
 
 
 class MeasurementQueryResult(ContractModel):
@@ -69,7 +74,23 @@ class InferenceRequestItem(ContractModel):
     decode_ns: int | None
     cache_hit: bool | None
     prefix_hash_count: int | None
-    evidence_level: str
+    evidence_level: EvidenceLevel
+
+    @model_validator(mode="after")
+    def outcome_is_coherent(self) -> InferenceRequestItem:
+        if self.success is True and (
+            self.cancelled is not False
+            or self.error_type is not None
+            or self.error_code is not None
+        ):
+            raise ValueError("a successful request cannot be cancelled or carry an error")
+        if self.cancelled is True and self.success is not False:
+            raise ValueError("a cancelled request must be unsuccessful")
+        if (
+            self.error_type is not None or self.error_code is not None
+        ) and self.success is not False:
+            raise ValueError("request errors require a failed outcome")
+        return self
 
 
 class InferenceRequestQueryResult(ContractModel):
@@ -214,15 +235,12 @@ class EvidenceQueryService:
             truncated=has_more,
             next_cursor=next_cursor,
             evidence=(
-                EvidenceAvailability(
-                    status="unavailable",
-                    reason="measurements_not_published",
-                )
+                unavailable_availability("measurements_not_published")
                 if not measurements and int(published_count_row[0]) == 0
                 else (
                     empty_availability("no_matching_measurements")
                     if not measurements
-                    else EvidenceAvailability(status="available", reason="measurements_present")
+                    else available_availability("measurements_present")
                 )
             ),
         )
@@ -306,11 +324,8 @@ class EvidenceQueryService:
             truncated=has_more,
             next_cursor=next_cursor,
             evidence=(
-                EvidenceAvailability(status="available", reason="inference_requests_present")
+                available_availability("inference_requests_present")
                 if int(count_row[0]) > 0
-                else EvidenceAvailability(
-                    status="unavailable",
-                    reason="inference_requests_not_published",
-                )
+                else unavailable_availability("inference_requests_not_published")
             ),
         )

@@ -11,6 +11,7 @@ from flameox.domain import (
     DomainError,
     ErrorCode,
     ExecutionStatus,
+    ProcessCancellationCause,
     ProcessResult,
     RunManifest,
 )
@@ -92,14 +93,14 @@ class RecoveryService:
         recovered: list[RunManifest] = []
         for run_id in inspection.recoverable_run_ids:
             current = self.runs.read(run_id)
-            terminal = current.model_copy(
+            terminal = current.validated_copy(
                 update={
                     "revision": current.revision + 1,
                     "finished_at": utc_now(),
                     "execution_status": ExecutionStatus.CANCELLED,
                     "capture_status": CaptureStatus.CANCELLED,
                     "process": ProcessResult(
-                        cancellation_cause="crash_recovery",
+                        cancellation_cause=ProcessCancellationCause.CRASH_RECOVERY,
                         cleanup_complete=None,
                     ),
                     "limitations": (

@@ -25,10 +25,14 @@ from flameox.domain import (
     DomainError,
     ErrorCode,
     EvidenceLevel,
+    EvidenceReferenceType,
+    EvidenceRelation,
     ExecutionIdentityInput,
     ExternalExecutionContext,
     FindingAssessment,
+    FindingConfidence,
     IdentityQuality,
+    MetricPolarity,
     WorkloadExecutionIdentity,
     digest_model,
 )
@@ -147,7 +151,7 @@ def test_frozen_run_set_comparison_and_evidence_linked_finding(
         candidate_run_set_id=candidate.run_set_id,
         metric="pyperf.scan",
         unit="ns",
-        polarity="lower_is_better",
+        polarity=MetricPolarity.LOWER_IS_BETTER,
         practical_threshold=0.05,
     )
     service = ComparisonService(workspace)
@@ -164,7 +168,9 @@ def test_frozen_run_set_comparison_and_evidence_linked_finding(
     assert changes["removed_helper"].direction == "improved"
     assert changes["added_helper"].baseline_value == 0
     assert changes["added_helper"].direction == "regressed"
-    neutral = service.compare(comparison_request.model_copy(update={"polarity": "neutral"}))
+    neutral = service.compare(
+        comparison_request.model_copy(update={"polarity": MetricPolarity.NEUTRAL})
+    )
     assert {
         item.direction
         for item in neutral.profile_changes
@@ -175,7 +181,10 @@ def test_frozen_run_set_comparison_and_evidence_linked_finding(
     assert result.analysis is not None
     assert result.materialized_commit_id == workspace.corpus.read_head().commit_id
     assert result.materialized_commit_id != head_before
-    persisted = EvidenceLookupService(workspace).get("comparison", result.comparison.comparison_id)
+    persisted = EvidenceLookupService(workspace).get(
+        EvidenceReferenceType.COMPARISON,
+        result.comparison.comparison_id,
+    )
     assert persisted.data["schema_version"] == 1
     assert (persisted.data["baseline_value_int"] is None) is not (
         persisted.data["baseline_value_float"] is None
@@ -185,13 +194,13 @@ def test_frozen_run_set_comparison_and_evidence_linked_finding(
         title="Candidate halves reverse-scan time",
         claim="The candidate is materially faster on the frozen cohort.",
         evidence_level=EvidenceLevel.DERIVED,
-        confidence="high",
+        confidence=FindingConfidence.HIGH,
         assessment=FindingAssessment.SUPPORTED,
         evidence=(
             EvidenceInput(
-                ref_type="comparison",
+                ref_type=EvidenceReferenceType.COMPARISON,
                 ref_id=result.comparison.comparison_id,
-                relation="supports",
+                relation=EvidenceRelation.SUPPORTS,
             ),
         ),
     )
@@ -249,7 +258,7 @@ def test_comparison_reads_both_run_sets_from_one_pinned_corpus_commit(
             candidate_run_set_id=candidate.run_set_id,
             metric="pyperf.scan",
             unit="ns",
-            polarity="lower_is_better",
+            polarity=MetricPolarity.LOWER_IS_BETTER,
             practical_threshold=0.05,
         )
     )
@@ -305,7 +314,7 @@ def test_comparison_rejects_different_or_partial_accelerator_identity(
         candidate_run_set_id=candidate.run_set_id,
         metric="pyperf.scan",
         unit="ns",
-        polarity="lower_is_better",
+        polarity=MetricPolarity.LOWER_IS_BETTER,
         practical_threshold=0.05,
     )
 
@@ -368,7 +377,11 @@ def test_comparison_reports_differing_declared_artifact_paths_and_digests(
             content_digest="sha256:" + digest_character * 64,
             status="exact",
         )
-        values = {"quality": "exact", "inputs": [item.model_dump(mode="json")]}
+        values = {
+            "quality": "exact",
+            "inputs": [item.model_dump(mode="json")],
+            "missing_inputs": [],
+        }
         return WorkloadExecutionIdentity(
             identity_id=digest_model(values),
             quality="exact",
@@ -400,7 +413,7 @@ def test_comparison_reports_differing_declared_artifact_paths_and_digests(
             candidate_run_set_id=candidate.run_set_id,
             metric="pyperf.scan",
             unit="ns",
-            polarity="lower_is_better",
+            polarity=MetricPolarity.LOWER_IS_BETTER,
             practical_threshold=0.05,
         )
     )
@@ -468,7 +481,7 @@ def test_distinct_remote_leases_do_not_change_environment_compatibility(
             candidate_run_set_id=candidate.run_set_id,
             metric="pyperf.scan",
             unit="ns",
-            polarity="lower_is_better",
+            polarity=MetricPolarity.LOWER_IS_BETTER,
             practical_threshold=0.05,
         )
     )

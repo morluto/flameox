@@ -11,10 +11,12 @@ from flameox.application import CaptureResult, CaptureService, ExecutionPolicy
 from flameox.domain import (
     ArtifactKind,
     ArtifactRegistration,
+    CapabilityPermissionStatus,
     CapabilityReport,
     CapabilityStatus,
     CaptureStatus,
     ExecutionStatus,
+    ProbeKind,
 )
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
@@ -135,8 +137,8 @@ def _make_service(
         version="fake-nvbench",
         supported_modes=("benchmark",),
         supported_formats=("nvbench-json", "nvbench-jsonbin"),
-        permission_status="granted",
-        probe_kind="active",
+        permission_status=CapabilityPermissionStatus.GRANTED,
+        probe_kind=ProbeKind.ACTIVE,
     )
     service = CaptureService(workspace)
     monkeypatch.setattr(service.capabilities, "get", lambda _adapter: report)

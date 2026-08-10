@@ -14,7 +14,9 @@ from flameox.domain import (
     CapabilityReport,
     CapabilityStatus,
     DomainError,
+    PreflightDisposition,
     PreflightReport,
+    ProbeKind,
     RequirementResult,
     digest_model,
 )
@@ -39,7 +41,7 @@ class PreflightService:
         self,
         workload_name: str,
         *,
-        mode: Literal["passive", "active"],
+        mode: ProbeKind,
     ) -> PreflightReport:
         config = self.workloads.load().workloads[workload_name]
         requirements = config.requirements
@@ -56,7 +58,7 @@ class PreflightService:
         for name in requirements.capabilities:
             active = name in requirements.active
             report = passive.get(name)
-            if active and mode == "active":
+            if active and mode is ProbeKind.ACTIVE:
                 try:
                     report = await self.capabilities.probe(name, refresh=True)
                 except DomainError as error:
@@ -65,20 +67,20 @@ class PreflightService:
                             requirement=name,
                             kind="capability",
                             required=name not in requirements.optional,
-                            probe_kind="active",
+                            probe_kind=ProbeKind.ACTIVE,
                             status="probe_failed",
                             limitations=(error.message,),
                             remediation=error.remediation,
                         )
                     )
                     continue
-            if active and mode == "passive":
+            if active and mode is ProbeKind.PASSIVE:
                 results.append(
                     RequirementResult(
                         requirement=name,
                         kind="capability",
                         required=name not in requirements.optional,
-                        probe_kind="active",
+                        probe_kind=ProbeKind.ACTIVE,
                         status="unknown",
                         limitations=("Active probe was not requested for this planning call.",),
                         remediation=("Re-plan with preflight_mode='active' to request the probe.",),
@@ -94,13 +96,12 @@ class PreflightService:
                 )
             )
         blocked = any(item.required and item.status != "available" for item in results)
-        disposition: Literal["ready", "blocked", "exploratory"]
         if blocked and requirements.allow_exploratory:
-            disposition = "exploratory"
+            disposition = PreflightDisposition.EXPLORATORY
         elif blocked:
-            disposition = "blocked"
+            disposition = PreflightDisposition.BLOCKED
         else:
-            disposition = "ready"
+            disposition = PreflightDisposition.READY
         limitations = tuple(
             f"{item.requirement}: {item.status}" for item in results if item.status != "available"
         )
@@ -124,7 +125,7 @@ class PreflightService:
                 requirement=name,
                 kind="executable",
                 required=required,
-                probe_kind="passive",
+                probe_kind=ProbeKind.PASSIVE,
                 status="absent",
                 remediation=(
                     f"FlameOx cannot install host executable {name!r}; install it in the local "
@@ -141,7 +142,7 @@ class PreflightService:
                 requirement=name,
                 kind="executable",
                 required=required,
-                probe_kind="passive",
+                probe_kind=ProbeKind.PASSIVE,
                 status="unsupported",
                 evidence=(str(path),),
                 limitations=("Repository-controlled executables are not probed during preflight.",),
@@ -150,7 +151,7 @@ class PreflightService:
             requirement=name,
             kind="executable",
             required=required,
-            probe_kind="passive",
+            probe_kind=ProbeKind.PASSIVE,
             status="available",
             identity=str(path),
             evidence=(str(path),),
@@ -160,7 +161,7 @@ class PreflightService:
         self,
         *,
         required: bool,
-        mode: Literal["passive", "active"],
+        mode: ProbeKind,
     ) -> RequirementResult:
         resolved = shutil.which("nvcc")
         if resolved is None:
@@ -175,19 +176,19 @@ class PreflightService:
                 requirement="nvcc",
                 kind="executable",
                 required=required,
-                probe_kind="active" if mode == "active" else "passive",
+                probe_kind=(ProbeKind.ACTIVE if mode is ProbeKind.ACTIVE else ProbeKind.PASSIVE),
                 status="unsupported",
                 evidence=(str(path),),
                 limitations=(
                     "Repository-controlled nvcc is not used for CUDA toolkit readiness checks.",
                 ),
             )
-        if mode == "passive":
+        if mode is ProbeKind.PASSIVE:
             return RequirementResult(
                 requirement="nvcc",
                 kind="executable",
                 required=required,
-                probe_kind="active",
+                probe_kind=ProbeKind.ACTIVE,
                 status="unknown",
                 identity=str(path),
                 evidence=(str(path),),
@@ -246,7 +247,7 @@ class PreflightService:
                         requirement="nvcc",
                         kind="executable",
                         required=required,
-                        probe_kind="active",
+                        probe_kind=ProbeKind.ACTIVE,
                         status="available",
                         identity=str(path),
                         evidence=(str(path), "bounded_cuda_header_compile"),
@@ -298,7 +299,7 @@ class PreflightService:
             requirement="nvcc",
             kind="executable",
             required=required,
-            probe_kind="active",
+            probe_kind=ProbeKind.ACTIVE,
             status="probe_failed",
             identity=str(path),
             evidence=(str(path), diagnostic),
@@ -354,7 +355,7 @@ class PreflightService:
             requirement="nvcc",
             kind="executable",
             required=required,
-            probe_kind="active",
+            probe_kind=ProbeKind.ACTIVE,
             status=status,
             identity=str(path),
             evidence=(str(path), diagnostic),
@@ -376,7 +377,7 @@ class PreflightService:
                 requirement=name,
                 kind="python_distribution",
                 required=required,
-                probe_kind="passive",
+                probe_kind=ProbeKind.PASSIVE,
                 status="unsupported",
                 remediation=(
                     "Use a package name with an optional version specifier in the workload "
@@ -390,7 +391,7 @@ class PreflightService:
                 requirement=name,
                 kind="python_distribution",
                 required=required,
-                probe_kind="passive",
+                probe_kind=ProbeKind.PASSIVE,
                 status="absent",
                 remediation=(
                     f"Call prepare_workload_dependencies for workload dependencies including "
@@ -404,7 +405,7 @@ class PreflightService:
                 requirement=name,
                 kind="python_distribution",
                 required=required,
-                probe_kind="passive",
+                probe_kind=ProbeKind.PASSIVE,
                 status="absent",
                 identity=identity,
                 evidence=(identity,),
@@ -417,7 +418,7 @@ class PreflightService:
             requirement=name,
             kind="python_distribution",
             required=required,
-            probe_kind="passive",
+            probe_kind=ProbeKind.PASSIVE,
             status="available",
             identity=identity,
             evidence=(identity,),
@@ -437,7 +438,7 @@ class PreflightService:
                 requirement=name,
                 kind="capability",
                 required=required,
-                probe_kind="active" if active else "passive",
+                probe_kind=ProbeKind.ACTIVE if active else ProbeKind.PASSIVE,
                 status="unknown",
                 limitations=("Flameox does not own a probe for this capability.",),
                 next_tool="list_capabilities",
@@ -464,7 +465,7 @@ class PreflightService:
             requirement=name,
             kind="capability",
             required=required,
-            probe_kind="active" if active else "passive",
+            probe_kind=ProbeKind.ACTIVE if active else ProbeKind.PASSIVE,
             status=statuses[report.status],
             identity=report.version or report.executable or report.import_location,
             evidence=tuple(

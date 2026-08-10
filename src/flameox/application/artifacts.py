@@ -3,7 +3,14 @@ from __future__ import annotations
 from datetime import datetime
 
 from flameox.catalog import Catalog
-from flameox.domain import ArtifactContent, CursorCodec, DomainError, ErrorCode, Sensitivity
+from flameox.domain import (
+    ArtifactContent,
+    ArtifactKind,
+    CursorCodec,
+    DomainError,
+    ErrorCode,
+    Sensitivity,
+)
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, Workspace
 
@@ -12,7 +19,7 @@ class ArtifactRegistrationSummary(ContractModel):
     registration_id: str
     run_id: str
     display_name: str
-    kind: str
+    kind: ArtifactKind
     media_type: str
     sensitivity: Sensitivity
     role: str
@@ -35,7 +42,7 @@ class ArtifactListItem(ContractModel):
     byte_length: int
     effective_sensitivity: Sensitivity
     registration_count: int
-    kinds: tuple[str, ...]
+    kinds: tuple[ArtifactKind, ...]
 
 
 class ArtifactListResult(ContractModel):

@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from flameox.analysis import RecipeService
 from flameox.application import (
@@ -15,6 +16,7 @@ from flameox.application import (
     InvestigationService,
     parse_experiment_config,
 )
+from flameox.application.experiments import OutcomeExperimentResult
 from flameox.catalog import Catalog
 from flameox.config import WorkspaceConfig
 from flameox.domain import (
@@ -22,6 +24,8 @@ from flameox.domain import (
     DomainError,
     ErrorCode,
     ExecutionStatus,
+    ExperimentOutcomeDisposition,
+    ExperimentOutcomeGoal,
     TrialOutcome,
 )
 from flameox.storage import RunStore, Workspace
@@ -35,6 +39,19 @@ def _git(project: Path, *args: str) -> None:
         capture_output=True,
         text=True,
     )
+
+
+def test_outcome_result_rejects_half_a_first_failure() -> None:
+    with pytest.raises(ValidationError):
+        OutcomeExperimentResult(
+            experiment_id="experiment",
+            goal=ExperimentOutcomeGoal.EQUIVALENCE,
+            disposition=ExperimentOutcomeDisposition.INSUFFICIENT_EVIDENCE,
+            counts=(),
+            complete_pairs=0,
+            unmatched_cells=0,
+            first_failure_trial_id="trial",
+        )
 
 
 @pytest.mark.parametrize(
@@ -113,9 +130,11 @@ random_seed = 1984
 implementation = ["baseline", "candidate"]
 """
     )
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
         }
     )
     assert isinstance(config, WorkspaceConfig)
@@ -312,9 +331,11 @@ random_seed = 7
 variant = ["baseline", "candidate"]
 """
     )
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())
@@ -611,9 +632,11 @@ mode = ["base", "candidate"]
 case = ["bad", "clean"]
 """
     )
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())
@@ -694,9 +717,11 @@ maximum_attempts = 1
 treatment = ["base", "candidate"]
 """
     )
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())
@@ -788,9 +813,11 @@ mode = ["base", "candidate"]
 case = ["bad"]
 """
     )
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())
@@ -887,9 +914,11 @@ outcome_goal = "bounded_rate"
 mode = ["base", "candidate"]
 """
     )
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())

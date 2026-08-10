@@ -19,6 +19,7 @@ from typing import Literal
 
 import portalocker
 from platformdirs import user_data_path
+from pydantic import ConfigDict, Field, TypeAdapter, computed_field, model_validator
 
 from flameox.adapters.builtins import BUILTIN_ADAPTERS, BuiltinAdapter, builtin_adapter
 from flameox.adapters.nsight_compute import find_ncu_report_interface
@@ -29,12 +30,15 @@ from flameox.application.operations import OperationFailure, OperationRunner, Op
 from flameox.atomic import atomic_write_json
 from flameox.domain import (
     AdapterSetup,
+    CapabilityPermissionStatus,
     CapabilityProvisioning,
     CapabilityReport,
     CapabilitySetup,
+    CapabilitySetupVerification,
     CapabilityStatus,
     DomainError,
     ErrorCode,
+    ProbeKind,
 )
 from flameox.domain.models import utc_now
 from flameox.execution import (
@@ -47,65 +51,250 @@ from flameox.execution import (
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
+type CapabilitySetupProgressPhase = Literal[
+    "installing_packages",
+    "staging_trace_processor",
+    "staging_toxiproxy",
+]
+
+
+class _CapabilitySetupReceipt(ContractModel):
+    """Fields shared by every durable capability-setup state."""
+
+    schema_version: Literal[1] = 1
+    requested: tuple[str, ...]
+    updated_at: datetime
+    next_tool: Literal["list_capabilities"] = "list_capabilities"
+
+
+class _IncompleteCapabilitySetupReceipt(_CapabilitySetupReceipt):
+    completed: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def completed_is_an_ordered_subset(self) -> _IncompleteCapabilitySetupReceipt:
+        completed = set(self.completed)
+        if (
+            len(completed) != len(self.completed)
+            or tuple(item for item in self.requested if item in completed) != self.completed
+        ):
+            raise ValueError("completed adapters must be an ordered subset of requested adapters")
+        return self
+
+
+class CapabilitySetupProgressReceipt(_IncompleteCapabilitySetupReceipt):
+    phase: CapabilitySetupProgressPhase
+    error: Literal[None] = None
+
+
+class CapabilitySetupCompletedReceipt(_CapabilitySetupReceipt):
+    phase: Literal["completed"] = "completed"
+    completed: tuple[str, ...]
+    error: Literal[None] = None
+
+    @model_validator(mode="after")
+    def completed_includes_every_requested_adapter(self) -> CapabilitySetupCompletedReceipt:
+        if self.completed != self.requested:
+            raise ValueError("completed setup must include every requested adapter")
+        return self
+
+
+class CapabilitySetupFailedReceipt(_IncompleteCapabilitySetupReceipt):
+    phase: Literal["failed"] = "failed"
+    error: str = Field(min_length=1, max_length=500)
+
+
+type CapabilitySetupReceipt = (
+    CapabilitySetupProgressReceipt | CapabilitySetupCompletedReceipt | CapabilitySetupFailedReceipt
+)
+
+_CAPABILITY_SETUP_RECEIPT_ADAPTER: TypeAdapter[CapabilitySetupReceipt] = TypeAdapter(
+    CapabilitySetupReceipt
+)
+
 
 class CapabilityList(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: int = 1
     capabilities: tuple[CapabilityReport, ...]
-    setup_adapters: tuple[str, ...] = ()
-    setup_third_party_adapters: tuple[str, ...] = ()
-    available_setup_adapters: tuple[str, ...] = ()
-    available_setup_third_party_adapters: tuple[str, ...] = ()
     recommendation_scope: str | None = None
     latest_setup: CapabilitySetupReceipt | None = None
-    next_tool: (
-        Literal[
-            "start_capability_setup",
-            "prepare_adapter",
-            "list_capabilities",
-        ]
-        | None
-    ) = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_legacy_setup_projections(cls, value: object) -> object:
+        projection_names = (
+            "setup_adapters",
+            "setup_third_party_adapters",
+            "available_setup_adapters",
+            "available_setup_third_party_adapters",
+            "next_tool",
+        )
+        if not isinstance(value, dict):
+            return value
+        parsed = dict(value)
+        raw_capabilities = parsed.get("capabilities")
+        scope = parsed.get("recommendation_scope")
+        if isinstance(raw_capabilities, (list, tuple)) and (
+            scope is None or isinstance(scope, str)
+        ):
+            capabilities = tuple(
+                CapabilityReport.model_validate(report) for report in raw_capabilities
+            )
+            projections = dict(
+                zip(
+                    projection_names,
+                    _capability_setup_projections(capabilities, scope),
+                    strict=True,
+                )
+            )
+            for name, expected in projections.items():
+                supplied = parsed.get(name, expected)
+                if isinstance(expected, tuple) and isinstance(supplied, list):
+                    supplied = tuple(supplied)
+                if supplied != expected:
+                    raise ValueError(f"{name} must agree with capability reports")
+            parsed["capabilities"] = capabilities
+        for name in projection_names:
+            parsed.pop(name, None)
+        return parsed
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def setup_adapters(self) -> tuple[str, ...]:
+        return _capability_setup_projections(self.capabilities, self.recommendation_scope)[0]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def setup_third_party_adapters(self) -> tuple[str, ...]:
+        return _capability_setup_projections(self.capabilities, self.recommendation_scope)[1]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def available_setup_adapters(self) -> tuple[str, ...]:
+        return _capability_setup_projections(self.capabilities, self.recommendation_scope)[2]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def available_setup_third_party_adapters(self) -> tuple[str, ...]:
+        return _capability_setup_projections(self.capabilities, self.recommendation_scope)[3]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def next_tool(
+        self,
+    ) -> Literal["start_capability_setup", "prepare_adapter"] | None:
+        return _capability_setup_projections(self.capabilities, self.recommendation_scope)[4]
 
 
 class SetupVerification(ContractModel):
     """Evidence that a setup action was checked before it returned success."""
 
-    status: Literal["verified", "partial"]
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     checked_adapters: tuple[str, ...]
     available_adapters: tuple[str, ...]
-    unavailable_adapters: tuple[str, ...] = ()
     method: Literal["capability_scan"] = "capability_scan"
 
+    @model_validator(mode="before")
+    @classmethod
+    def parse_legacy_projections(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        parsed = dict(value)
+        checked = parsed.get("checked_adapters")
+        available = parsed.get("available_adapters")
+        if isinstance(checked, (list, tuple)) and isinstance(available, (list, tuple)):
+            checked_values = tuple(checked)
+            available_values = tuple(available)
+            unavailable = tuple(
+                item for item in checked_values if item not in set(available_values)
+            )
+            expected_status = "verified" if not unavailable else "partial"
+            supplied_unavailable = parsed.get("unavailable_adapters", unavailable)
+            if isinstance(supplied_unavailable, list):
+                supplied_unavailable = tuple(supplied_unavailable)
+            if supplied_unavailable != unavailable:
+                raise ValueError("unavailable adapters must agree with checked availability")
+            if parsed.get("status", expected_status) != expected_status:
+                raise ValueError("verification status must agree with adapter availability")
+        parsed.pop("unavailable_adapters", None)
+        parsed.pop("status", None)
+        return parsed
 
-class CapabilitySetupReceipt(ContractModel):
-    """Latest durable state for a managed capability setup request."""
+    @model_validator(mode="after")
+    def availability_is_a_partition(self) -> SetupVerification:
+        if len(set(self.checked_adapters)) != len(self.checked_adapters):
+            raise ValueError("checked adapters must be unique")
+        if len(set(self.available_adapters)) != len(self.available_adapters):
+            raise ValueError("available adapters must be unique")
+        available = set(self.available_adapters)
+        if (
+            tuple(item for item in self.checked_adapters if item in available)
+            != self.available_adapters
+        ):
+            raise ValueError("available adapters must be an ordered subset of checked adapters")
+        return self
 
-    schema_version: int = 1
-    requested: tuple[str, ...]
-    completed: tuple[str, ...] = ()
-    phase: Literal[
-        "installing_packages",
-        "staging_trace_processor",
-        "staging_toxiproxy",
-        "completed",
-        "failed",
-    ]
-    error: str | None = None
-    updated_at: datetime
-    next_tool: Literal["list_capabilities"] = "list_capabilities"
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def unavailable_adapters(self) -> tuple[str, ...]:
+        available = set(self.available_adapters)
+        return tuple(item for item in self.checked_adapters if item not in available)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def status(self) -> Literal["verified", "partial"]:
+        return "verified" if not self.unavailable_adapters else "partial"
 
 
 class CapabilitySetupResult(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: int = 1
     requested: tuple[str, ...]
-    installed: tuple[str, ...]
     already_available: tuple[str, ...]
     next_tool: Literal["list_capabilities"] = "list_capabilities"
     setup_verification: SetupVerification
-    workload_executed: bool = False
+    workload_executed: Literal[False] = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_legacy_installed_projection(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        parsed = dict(value)
+        requested = parsed.get("requested")
+        available = parsed.get("already_available")
+        if isinstance(requested, (list, tuple)) and isinstance(available, (list, tuple)):
+            expected = tuple(item for item in requested if item not in set(available))
+            supplied = parsed.get("installed", expected)
+            if isinstance(supplied, list):
+                supplied = tuple(supplied)
+            if supplied != expected:
+                raise ValueError("installed adapters must complete the requested partition")
+        parsed.pop("installed", None)
+        return parsed
+
+    @model_validator(mode="after")
+    def availability_is_a_partition(self) -> CapabilitySetupResult:
+        if len(set(self.requested)) != len(self.requested):
+            raise ValueError("requested adapters must be unique")
+        available = set(self.already_available)
+        if tuple(item for item in self.requested if item in available) != self.already_available:
+            raise ValueError("already-available adapters must be an ordered requested subset")
+        return self
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def installed(self) -> tuple[str, ...]:
+        available = set(self.already_available)
+        return tuple(item for item in self.requested if item not in available)
 
 
 class AdapterPreparationResult(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: int = 1
     adapter: str
     distribution: str
@@ -114,7 +303,61 @@ class AdapterPreparationResult(ContractModel):
     approval_provenance: Literal["agent"] = "agent"
     next_tool: Literal["list_capabilities"] = "list_capabilities"
     setup_verification: SetupVerification
-    workload_executed: bool = False
+    workload_executed: Literal[False] = False
+
+
+def _capability_setup_projections(
+    capabilities: tuple[CapabilityReport, ...],
+    recommendation_scope: str | None,
+) -> tuple[
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    Literal["start_capability_setup", "prepare_adapter"] | None,
+]:
+    available_setup_adapters = tuple(
+        sorted(
+            item.adapter
+            for item in capabilities
+            if item.status is not CapabilityStatus.AVAILABLE
+            and isinstance(item.setup, CapabilitySetup)
+        )
+    )
+    available_setup_third_party_adapters = tuple(
+        sorted(
+            item.adapter
+            for item in capabilities
+            if item.status is not CapabilityStatus.AVAILABLE
+            and isinstance(item.setup, AdapterSetup)
+        )
+    )
+    scoped = (
+        tuple(item for item in capabilities if item.adapter == recommendation_scope)
+        if recommendation_scope is not None
+        else ()
+    )
+    setup_adapters = tuple(
+        item.adapter
+        for item in scoped
+        if item.status is not CapabilityStatus.AVAILABLE and isinstance(item.setup, CapabilitySetup)
+    )
+    third_party = tuple(
+        item.adapter
+        for item in scoped
+        if item.status is not CapabilityStatus.AVAILABLE and isinstance(item.setup, AdapterSetup)
+    )
+    return (
+        setup_adapters,
+        third_party,
+        available_setup_adapters,
+        available_setup_third_party_adapters,
+        (
+            "start_capability_setup"
+            if setup_adapters
+            else ("prepare_adapter" if third_party else None)
+        ),
+    )
 
 
 _CONTAINMENT_VERSION_ARGS = {
@@ -233,7 +476,7 @@ class CapabilityService:
                     architecture=architecture,
                     permissions=adapter.permissions,
                     permission_status=(
-                        "unknown_until_active_probe"
+                        CapabilityPermissionStatus.UNKNOWN_UNTIL_ACTIVE_PROBE
                         if adapter.name in {"py-spy", "perf", "nsight.compute"} and resolved
                         else None
                     ),
@@ -253,9 +496,13 @@ class CapabilityService:
                     ),
                     setup=self._setup(adapter),
                     setup_verification=(
-                        "pending"
+                        CapabilitySetupVerification.PENDING
                         if resolved is None and adapter.managed_extra is not None
-                        else ("passive" if resolved else "not_required")
+                        else (
+                            CapabilitySetupVerification.PASSIVE
+                            if resolved
+                            else CapabilitySetupVerification.NOT_REQUIRED
+                        )
                     ),
                     limitations=(("Version not probed in passive mode.",) if resolved else ()),
                 )
@@ -311,9 +558,13 @@ class CapabilityService:
                     ),
                     setup=self._setup(adapter),
                     setup_verification=(
-                        "pending"
+                        CapabilitySetupVerification.PENDING
                         if package_version is None and adapter.managed_extra is not None
-                        else ("passive" if package_version is not None else "not_required")
+                        else (
+                            CapabilitySetupVerification.PASSIVE
+                            if package_version is not None
+                            else CapabilitySetupVerification.NOT_REQUIRED
+                        )
                     ),
                 )
             )
@@ -360,7 +611,11 @@ class CapabilityService:
                                 next_tool="prepare_adapter",
                             )
                         ),
-                        setup_verification=("pending" if not descriptor.approved else "passive"),
+                        setup_verification=(
+                            CapabilitySetupVerification.PENDING
+                            if not descriptor.approved
+                            else CapabilitySetupVerification.PASSIVE
+                        ),
                     )
                 )
         return self._finish(
@@ -414,7 +669,7 @@ class CapabilityService:
             return version_report
         if adapter == "perf":
             result = await self._probe_perf(passive)
-            result = result.model_copy(update={"version": version_report.version})
+            result = result.validated_copy(update={"version": version_report.version})
             self._active_cache[adapter] = result
             return result
         if adapter == "nsight.compute":
@@ -423,7 +678,9 @@ class CapabilityService:
             return result
         result = version_report
         if adapter == "py-spy":
-            result = result.model_copy(update={"permission_status": "not_exercised"})
+            result = result.validated_copy(
+                update={"permission_status": CapabilityPermissionStatus.NOT_EXERCISED}
+            )
         self._active_cache[adapter] = result
         return result
 
@@ -461,7 +718,7 @@ class CapabilityService:
                 lines[0] if lines else None,
             )
             succeeded = outcome.process.exit_code == 0
-            return passive.model_copy(
+            return passive.validated_copy(
                 update={
                     "status": CapabilityStatus.AVAILABLE
                     if succeeded
@@ -472,18 +729,18 @@ class CapabilityService:
                         if succeeded
                         else (f"Active version probe exited with {outcome.process.exit_code}.",)
                     ),
-                    "probe_kind": "active",
-                    "setup_verification": "active",
+                    "probe_kind": ProbeKind.ACTIVE,
+                    "setup_verification": CapabilitySetupVerification.ACTIVE,
                     "probed_at": utc_now(),
                 }
             )
         except (DomainError, OSError, ValueError) as exc:
-            return passive.model_copy(
+            return passive.validated_copy(
                 update={
                     "status": CapabilityStatus.DEGRADED,
                     "limitations": (f"Active version probe failed with {type(exc).__name__}.",),
-                    "probe_kind": "active",
-                    "setup_verification": "active",
+                    "probe_kind": ProbeKind.ACTIVE,
+                    "setup_verification": CapabilitySetupVerification.ACTIVE,
                     "probed_at": utc_now(),
                 }
             )
@@ -555,13 +812,13 @@ class CapabilityService:
             (outcome.stdout + b"\n" + outcome.stderr).decode("utf-8", errors="replace")
         )
         if outcome.process.exit_code == 0:
-            return passive.model_copy(
+            return passive.validated_copy(
                 update={
                     "status": CapabilityStatus.AVAILABLE,
-                    "permission_status": "granted",
+                    "permission_status": CapabilityPermissionStatus.GRANTED,
                     "limitations": (),
                     "remediation": (),
-                    "probe_kind": "active",
+                    "probe_kind": ProbeKind.ACTIVE,
                     "probed_at": utc_now(),
                 }
             )
@@ -572,18 +829,20 @@ class CapabilityService:
     async def _probe_nsight_compute(self, passive: CapabilityReport) -> CapabilityReport:
         """Check the shipped report interface and map NVIDIA's counter diagnostic."""
         if self.workspace is None or passive.executable is None:
-            return passive.model_copy(update={"permission_status": "not_exercised"})
+            return passive.validated_copy(
+                update={"permission_status": CapabilityPermissionStatus.NOT_EXERCISED}
+            )
         if find_ncu_report_interface(executable=passive.executable) is None:
-            return passive.model_copy(
+            return passive.validated_copy(
                 update={
                     "status": CapabilityStatus.DEGRADED,
-                    "permission_status": "unknown",
+                    "permission_status": CapabilityPermissionStatus.UNKNOWN,
                     "limitations": ("The official ncu_report Python interface is unavailable.",),
                     "remediation": (
                         "Install the Nsight Compute extras/python interface; FlameOx does not "
                         "decode NVIDIA report binaries.",
                     ),
-                    "probe_kind": "active",
+                    "probe_kind": ProbeKind.ACTIVE,
                     "probed_at": utc_now(),
                 }
             )
@@ -657,14 +916,14 @@ class CapabilityService:
             return self._nsight_compute_permission_failure(passive, diagnostic)
         if outcome.process.exit_code != 0:
             return self._nsight_compute_probe_failure(passive, diagnostic)
-        return passive.model_copy(
+        return passive.validated_copy(
             update={
-                "permission_status": "not_exercised",
+                "permission_status": CapabilityPermissionStatus.NOT_EXERCISED,
                 "limitations": (
                     "The official report interface is available, but the bounded probe did not "
                     "execute a CUDA kernel; counter permission remains unexercised.",
                 ),
-                "probe_kind": "active",
+                "probe_kind": ProbeKind.ACTIVE,
                 "probed_at": utc_now(),
             }
         )
@@ -674,17 +933,17 @@ class CapabilityService:
         passive: CapabilityReport,
         diagnostic: str,
     ) -> CapabilityReport:
-        return passive.model_copy(
+        return passive.validated_copy(
             update={
                 "status": CapabilityStatus.PERMISSION_REQUIRED,
-                "permission_status": "denied",
+                "permission_status": CapabilityPermissionStatus.DENIED,
                 "limitations": (diagnostic,),
                 "remediation": (
                     "Enable NVIDIA GPU performance-counter access following NVIDIA's "
                     "ERR_NVGPUCTRPERM guidance, then refresh capabilities; FlameOx will not "
                     "change system privileges.",
                 ),
-                "probe_kind": "active",
+                "probe_kind": ProbeKind.ACTIVE,
                 "probed_at": utc_now(),
             }
         )
@@ -721,13 +980,13 @@ class CapabilityService:
         passive: CapabilityReport,
         diagnostic: str,
     ) -> CapabilityReport:
-        return passive.model_copy(
+        return passive.validated_copy(
             update={
                 "status": CapabilityStatus.DEGRADED,
-                "permission_status": "unknown",
+                "permission_status": CapabilityPermissionStatus.UNKNOWN,
                 "limitations": (diagnostic or "Nsight Compute active probe failed.",),
                 "remediation": ("Inspect the bounded Nsight Compute probe diagnostic.",),
-                "probe_kind": "active",
+                "probe_kind": ProbeKind.ACTIVE,
                 "probed_at": utc_now(),
             }
         )
@@ -737,27 +996,27 @@ class CapabilityService:
         passive: CapabilityReport,
         diagnostic: str,
     ) -> CapabilityReport:
-        return passive.model_copy(
+        return passive.validated_copy(
             update={
                 "status": CapabilityStatus.PERMISSION_REQUIRED,
-                "permission_status": "denied",
+                "permission_status": CapabilityPermissionStatus.DENIED,
                 "limitations": (diagnostic or "perf event access was denied.",),
                 "remediation": (self._perf_remediation(diagnostic),),
-                "probe_kind": "active",
+                "probe_kind": ProbeKind.ACTIVE,
                 "probed_at": utc_now(),
             }
         )
 
     def _perf_failure(self, passive: CapabilityReport, diagnostic: str) -> CapabilityReport:
-        return passive.model_copy(
+        return passive.validated_copy(
             update={
                 "status": CapabilityStatus.DEGRADED,
-                "permission_status": "unknown",
+                "permission_status": CapabilityPermissionStatus.UNKNOWN,
                 "limitations": (diagnostic,),
                 "remediation": (
                     "Inspect the bounded perf probe diagnostic and refresh capabilities.",
                 ),
-                "probe_kind": "active",
+                "probe_kind": ProbeKind.ACTIVE,
                 "probed_at": utc_now(),
             }
         )
@@ -873,7 +1132,6 @@ class CapabilityService:
             )
             return CapabilitySetupResult(
                 requested=requested,
-                installed=(),
                 already_available=already_available,
                 setup_verification=self._verification(requested, reports),
             )
@@ -888,27 +1146,30 @@ class CapabilityService:
         )
         pending_trace = "perfetto" in pending
         pending_toxiproxy = "toxiproxy" in pending
-        self._record_setup_receipt(
-            requested,
-            completed=already_available,
-            phase=(
-                "installing_packages"
-                if requirements
-                else (
-                    "staging_trace_processor"
-                    if pending_trace
-                    else ("staging_toxiproxy" if pending_toxiproxy else "completed")
-                )
-            ),
+        initial_phase: CapabilitySetupProgressPhase | None = (
+            "installing_packages"
+            if requirements
+            else (
+                "staging_trace_processor"
+                if pending_trace
+                else ("staging_toxiproxy" if pending_toxiproxy else None)
+            )
         )
-        staging_phase: str | None = None
+        if initial_phase is None:
+            self._record_setup_completed(requested)
+        else:
+            self._record_setup_progress(
+                requested,
+                completed=already_available,
+                phase=initial_phase,
+            )
+        staging_phase: CapabilitySetupProgressPhase | None = None
         lock_path = Path(sys.executable).parent / ".flameox-capability-setup.lock"
         uv = shutil.which("uv") if requirements else None
         if requirements and uv is None:
-            self._record_setup_receipt(
+            self._record_setup_failure(
                 requested,
                 completed=already_available,
-                phase="failed",
                 error="uv is missing from PATH.",
             )
             raise DomainError(
@@ -960,15 +1221,19 @@ class CapabilityService:
                             "error.",
                         ),
                     )
-                self._record_setup_receipt(
-                    requested,
-                    completed=self._available_requested(requested),
-                    phase=(
-                        "staging_trace_processor"
-                        if pending_trace
-                        else ("staging_toxiproxy" if pending_toxiproxy else "completed")
-                    ),
+                next_phase: CapabilitySetupProgressPhase | None = (
+                    "staging_trace_processor"
+                    if pending_trace
+                    else ("staging_toxiproxy" if pending_toxiproxy else None)
                 )
+                if next_phase is None:
+                    self._record_setup_completed(requested)
+                else:
+                    self._record_setup_progress(
+                        requested,
+                        completed=self._available_requested(requested),
+                        phase=next_phase,
+                    )
             if pending_trace:
                 self._check_cancelled(cancel_event)
                 if self.workspace is None:
@@ -978,7 +1243,7 @@ class CapabilityService:
                         details={"next_tool": "initialize_workspace"},
                     )
                 staging_phase = "staging_trace_processor"
-                self._record_setup_receipt(
+                self._record_setup_progress(
                     requested,
                     completed=self._available_requested(requested),
                     phase="staging_trace_processor",
@@ -1000,7 +1265,7 @@ class CapabilityService:
                         details={"next_tool": "initialize_workspace"},
                     )
                 staging_phase = "staging_toxiproxy"
-                self._record_setup_receipt(
+                self._record_setup_progress(
                     requested,
                     completed=self._available_requested(requested),
                     phase="staging_toxiproxy",
@@ -1012,10 +1277,9 @@ class CapabilityService:
                 self._check_cancelled(cancel_event)
         except DomainError as exc:
             failure = self._annotate_setup_phase(exc, staging_phase=staging_phase)
-            self._record_setup_receipt(
+            self._record_setup_failure(
                 requested,
                 completed=self._available_requested(requested),
-                phase="failed",
                 error=self._setup_failure_message(failure),
             )
             if failure is exc:
@@ -1024,10 +1288,9 @@ class CapabilityService:
         except (OSError, portalocker.exceptions.LockException) as exc:
             detail = self._bounded_setup_detail(exc)
             phase_detail = f" [phase={staging_phase}]" if staging_phase is not None else ""
-            self._record_setup_receipt(
+            self._record_setup_failure(
                 requested,
                 completed=self._available_requested(requested),
-                phase="failed",
                 error=f"Capability setup failed{phase_detail}: {detail}",
             )
             raise DomainError(
@@ -1050,10 +1313,9 @@ class CapabilityService:
             if refreshed[adapter].status is not CapabilityStatus.AVAILABLE
         )
         if not_ready:
-            self._record_setup_receipt(
+            self._record_setup_failure(
                 requested,
                 completed=self._available_requested(requested),
-                phase="failed",
                 error="One or more requested capabilities did not become available.",
             )
             raise DomainError(
@@ -1072,14 +1334,9 @@ class CapabilityService:
                 if isinstance(item, CapabilitySetup)
             )
         )
-        self._record_setup_receipt(
-            requested,
-            completed=requested,
-            phase="completed",
-        )
+        self._record_setup_completed(requested)
         return CapabilitySetupResult(
             requested=requested,
-            installed=pending,
             already_available=already_available,
             setup_verification=self._verification(requested, refreshed),
         )
@@ -1139,7 +1396,6 @@ class CapabilityService:
             version=descriptor.version,
             package_identity=descriptor.package_identity,
             setup_verification=SetupVerification(
-                status="verified",
                 checked_adapters=(descriptor.adapter,),
                 available_adapters=(descriptor.adapter,),
             ),
@@ -1152,52 +1408,10 @@ class CapabilityService:
         latest_setup: CapabilitySetupReceipt | None = None,
         recommendation_adapter: str | None = None,
     ) -> CapabilityList:
-        available_setup_adapters = tuple(
-            sorted(
-                item.adapter
-                for item in reports
-                if item.status is not CapabilityStatus.AVAILABLE
-                and isinstance(item.setup, CapabilitySetup)
-            )
-        )
-        available_setup_third_party_adapters = tuple(
-            sorted(
-                item.adapter
-                for item in reports
-                if item.status is not CapabilityStatus.AVAILABLE
-                and isinstance(item.setup, AdapterSetup)
-            )
-        )
-        scoped_reports = (
-            tuple(item for item in reports if item.adapter == recommendation_adapter)
-            if recommendation_adapter is not None
-            else ()
-        )
-        setup_adapters = tuple(
-            item.adapter
-            for item in scoped_reports
-            if item.status is not CapabilityStatus.AVAILABLE
-            and isinstance(item.setup, CapabilitySetup)
-        )
-        setup_third_party_adapters = tuple(
-            item.adapter
-            for item in scoped_reports
-            if item.status is not CapabilityStatus.AVAILABLE
-            and isinstance(item.setup, AdapterSetup)
-        )
         return CapabilityList(
             capabilities=tuple(reports),
-            setup_adapters=setup_adapters,
-            setup_third_party_adapters=setup_third_party_adapters,
-            available_setup_adapters=available_setup_adapters,
-            available_setup_third_party_adapters=available_setup_third_party_adapters,
             recommendation_scope=recommendation_adapter,
             latest_setup=latest_setup,
-            next_tool=(
-                "start_capability_setup"
-                if setup_adapters
-                else ("prepare_adapter" if setup_third_party_adapters else None)
-            ),
         )
 
     def _available_requested(self, requested: tuple[str, ...]) -> tuple[str, ...]:
@@ -1208,32 +1422,58 @@ class CapabilityService:
             if reports[adapter].status is CapabilityStatus.AVAILABLE
         )
 
-    def _record_setup_receipt(
+    def _write_setup_receipt(self, receipt: CapabilitySetupReceipt) -> None:
+        atomic_write_json(self.setup_receipt_path, receipt.model_dump(mode="json"))
+
+    def _record_setup_progress(
         self,
         requested: tuple[str, ...],
         *,
         completed: tuple[str, ...],
-        phase: Literal[
-            "installing_packages",
-            "staging_trace_processor",
-            "staging_toxiproxy",
-            "completed",
-            "failed",
-        ],
-        error: str | None = None,
+        phase: CapabilitySetupProgressPhase,
     ) -> None:
-        receipt = CapabilitySetupReceipt(
-            requested=requested,
-            completed=completed,
-            phase=phase,
-            error=error,
-            updated_at=utc_now(),
+        self._write_setup_receipt(
+            CapabilitySetupProgressReceipt(
+                requested=requested,
+                completed=completed,
+                phase=phase,
+                updated_at=utc_now(),
+            )
         )
-        atomic_write_json(self.setup_receipt_path, receipt.model_dump(mode="json"))
+
+    def _record_setup_completed(
+        self,
+        requested: tuple[str, ...],
+    ) -> None:
+        self._write_setup_receipt(
+            CapabilitySetupCompletedReceipt(
+                requested=requested,
+                completed=requested,
+                updated_at=utc_now(),
+            )
+        )
+
+    def _record_setup_failure(
+        self,
+        requested: tuple[str, ...],
+        *,
+        completed: tuple[str, ...],
+        error: str,
+    ) -> None:
+        self._write_setup_receipt(
+            CapabilitySetupFailedReceipt(
+                requested=requested,
+                completed=completed,
+                error=error,
+                updated_at=utc_now(),
+            )
+        )
 
     def _read_setup_receipt(self) -> CapabilitySetupReceipt | None:
         try:
-            return CapabilitySetupReceipt.model_validate_json(self.setup_receipt_path.read_text())
+            return _CAPABILITY_SETUP_RECEIPT_ADAPTER.validate_json(
+                self.setup_receipt_path.read_text()
+            )
         except (OSError, ValueError):
             return None
 
@@ -1247,12 +1487,9 @@ class CapabilityService:
             for adapter in requested
             if reports[adapter].status is CapabilityStatus.AVAILABLE
         )
-        unavailable = tuple(adapter for adapter in requested if adapter not in available)
         return SetupVerification(
-            status="verified" if not unavailable else "partial",
             checked_adapters=requested,
             available_adapters=available,
-            unavailable_adapters=unavailable,
         )
 
     @staticmethod
@@ -1284,7 +1521,7 @@ class CapabilityService:
                 architecture=architecture,
                 features=("loopback_transport_faults",),
                 limitations=("No pinned Toxiproxy release asset exists for this platform.",),
-                setup_verification="not_required",
+                setup_verification=CapabilitySetupVerification.NOT_REQUIRED,
             )
         return CapabilityReport(
             adapter="toxiproxy",
@@ -1308,7 +1545,11 @@ class CapabilityService:
                 requirement=None,
                 next_tool="start_capability_setup",
             ),
-            setup_verification="passive" if receipt is not None else "pending",
+            setup_verification=(
+                CapabilitySetupVerification.PASSIVE
+                if receipt is not None
+                else CapabilitySetupVerification.PENDING
+            ),
         )
 
     def _verify_toxiproxy(self, receipt: ToxiproxyToolReceipt) -> None:

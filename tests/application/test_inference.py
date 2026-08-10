@@ -197,7 +197,6 @@ def test_sglang_protocol_identity_binds_random_shape_and_provenance(
         tool="sglang",
         executable=launcher,
         available=True,
-        compatible=True,
         version="0.5.16",
         executable_digest="sha256:" + "c" * 64,
     )
@@ -256,6 +255,17 @@ def test_replay_plan_parses_provider_specific_fields_once(
     }
     with pytest.raises(ValueError):
         parse_inference_replay_plan(incompatible)
+
+    contradictory = plan.model_dump(mode="json")
+    contradictory["tool_compatible"] = False
+    with pytest.raises(ValueError, match="availability and compatibility must agree"):
+        parse_inference_replay_plan(contradictory)
+
+    unavailable_with_executable = plan.model_dump(mode="json")
+    del unavailable_with_executable["tool_compatible"]
+    unavailable_with_executable["tool_available"] = False
+    with pytest.raises(ValueError, match="availability must match executable argv"):
+        parse_inference_replay_plan(unavailable_with_executable)
 
 
 def test_plan_accepts_managed_server_without_probing_before_execution(
@@ -345,6 +355,11 @@ async def test_run_executes_through_broker_and_preserves_argv_and_output_path(
     assert result.argv == plan.argv
     assert result.exit_code == 0
     assert result.timed_out is False
+    assert InferenceReplayResult.model_validate(result.model_dump(mode="json")) == result
+    contradictory = result.model_dump(mode="json")
+    contradictory["cancellation_cause"] = "timeout"
+    with pytest.raises(ValueError, match="timed_out must match"):
+        InferenceReplayResult.model_validate(contradictory)
     assert result.health_ready is True
     assert result.probed_model_ids == ("test-model",)
     assert result.containment == "process_group"

@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from flameox.application import (
+    AdapterOption,
     CapabilityList,
     CapabilityService,
     CaptureService,
@@ -14,10 +15,12 @@ from flameox.application import (
     WorkloadService,
 )
 from flameox.domain import (
+    CapabilityPermissionStatus,
     CapabilityReport,
     CapabilityStatus,
     DomainError,
     ErrorCode,
+    ProbeKind,
     ProcessResult,
 )
 from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
@@ -154,15 +157,29 @@ active = ["perf"]
     requirements = {item.name: item for item in detail.requirements}
     assert requirements["python"].kind == "executable"
     assert requirements["python"].required is True
+    assert requirements["python"].optional is False
+    assert requirements["perf"].required is False
     assert requirements["perf"].optional is True
     assert requirements["perf"].probe_kind == "active"
     assert detail.adapter_option_total >= len(detail.adapter_options)
     assert detail.adapter_option_total <= 64 or detail.adapter_options_truncated is True
+    assert detail.adapter_options_total == detail.adapter_option_total
+    assert type(detail).model_validate(detail.model_dump()) == detail
+    contradictory_counts = detail.model_dump()
+    contradictory_counts["adapter_options_total"] = detail.adapter_option_total + 1
+    with pytest.raises(ValueError, match="adapter option totals must agree"):
+        type(detail).model_validate(contradictory_counts)
     assert tuple(item.adapter for item in detail.adapter_options) == tuple(
         sorted(item.adapter for item in detail.adapter_options)
     )
     command = next(item for item in detail.adapter_options if item.adapter == "command")
     assert command.planning_disposition == "ready"
+    assert command.capability_status is command.status
+    assert AdapterOption.model_validate(command.model_dump()) == command
+    contradictory = command.model_dump()
+    contradictory["capability_status"] = CapabilityStatus.UNAVAILABLE
+    with pytest.raises(ValueError, match="status and capability_status must agree"):
+        AdapterOption.model_validate(contradictory)
     assert inspection.command_template == ("python", "-c", "print('ok')")
     assert inspection.configuration_id == detail.configuration_id
 
@@ -187,8 +204,8 @@ allow_exploratory = true
 """
     )
 
-    passive = await PreflightService(workspace).inspect("probe", mode="passive")
-    active = await PreflightService(workspace).inspect("probe", mode="active")
+    passive = await PreflightService(workspace).inspect("probe", mode=ProbeKind.PASSIVE)
+    active = await PreflightService(workspace).inspect("probe", mode=ProbeKind.ACTIVE)
     by_name = {item.requirement: item for item in passive.requirements}
 
     assert by_name["python"].status == "available"
@@ -233,15 +250,15 @@ active = ["permission.probe"]
             return CapabilityReport(
                 adapter=adapter,
                 status=CapabilityStatus.PERMISSION_REQUIRED,
-                permission_status="denied",
+                permission_status=CapabilityPermissionStatus.DENIED,
                 remediation=("Grant the documented local permission.",),
-                probe_kind="active",
+                probe_kind=ProbeKind.ACTIVE,
             )
 
     result = await PreflightService(
         workspace,
         capabilities=PermissionCapabilities(workspace),
-    ).inspect("probe", mode="active")
+    ).inspect("probe", mode=ProbeKind.ACTIVE)
 
     assert result.disposition == "blocked"
     assert result.requirements[0].status == "permission_denied"
@@ -268,7 +285,7 @@ executables = ["nvcc"]
     result = await PreflightService(
         workspace,
         broker=_NvccProbeBroker(),
-    ).inspect("gpu", mode="active")
+    ).inspect("gpu", mode=ProbeKind.ACTIVE)
 
     requirement = result.requirements[0]
     assert result.disposition == "blocked"
@@ -298,7 +315,7 @@ executables = ["nvcc"]
     result = await PreflightService(
         workspace,
         broker=_NvccProbeFailureBroker(),
-    ).inspect("gpu", mode="active")
+    ).inspect("gpu", mode=ProbeKind.ACTIVE)
 
     requirement = result.requirements[0]
     assert requirement.status == "probe_failed"
@@ -323,8 +340,8 @@ executables = ["nvcc"]
     monkeypatch.setattr("flameox.application.preflight.shutil.which", lambda _: "/usr/bin/nvcc")
     service = PreflightService(workspace, broker=_PathReportingNvccProbeBroker())
 
-    first = await service.inspect("gpu", mode="active")
-    second = await service.inspect("gpu", mode="active")
+    first = await service.inspect("gpu", mode=ProbeKind.ACTIVE)
+    second = await service.inspect("gpu", mode=ProbeKind.ACTIVE)
 
     assert first.preflight_id == second.preflight_id
     assert first.requirements[0].evidence[1] == (

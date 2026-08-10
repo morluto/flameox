@@ -17,6 +17,7 @@ from flameox.application import (
 )
 from flameox.catalog import Catalog, Snapshot
 from flameox.domain import (
+    MetricPolarity,
     RunSet,
     digest_model,
 )
@@ -51,7 +52,7 @@ async def test_async_comparison_cancellation_interrupts_duckdb(
         candidate_run_set_id=candidate.run_set_id,
         metric="pyperf.scan",
         unit="ns",
-        polarity="lower_is_better",
+        polarity=MetricPolarity.LOWER_IS_BETTER,
         practical_threshold=0.05,
     )
     query_started = threading.Event()
@@ -160,7 +161,7 @@ def test_trial_block_identity_makes_pairing_independent_of_member_order(
             candidate_run_set_id=candidate_forward.run_set_id,
             metric="pyperf.scan",
             unit="ns",
-            polarity="lower_is_better",
+            polarity=MetricPolarity.LOWER_IS_BETTER,
             practical_threshold=0.01,
         )
     )
@@ -170,7 +171,7 @@ def test_trial_block_identity_makes_pairing_independent_of_member_order(
             candidate_run_set_id=candidate_reversed.run_set_id,
             metric="pyperf.scan",
             unit="ns",
-            polarity="lower_is_better",
+            polarity=MetricPolarity.LOWER_IS_BETTER,
             practical_threshold=0.01,
         )
     )

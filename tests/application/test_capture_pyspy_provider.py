@@ -38,10 +38,12 @@ cwd = "."
 timeout_seconds = 30
 """
     )
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"}),
-            "analysis": workspace.config.analysis.model_copy(
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            ),
+            "analysis": workspace.config.analysis.validated_copy(
                 update={"trace_processor_path": str(binary)}
             ),
         }

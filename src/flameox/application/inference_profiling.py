@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 
 from pydantic import Discriminator, Field, Tag, TypeAdapter
 
-from flameox.analysis.inference_protocol import InferenceProtocolIdentity, ProfilerState
+from flameox.analysis.inference_protocol import AttachedProfilerState, InferenceProtocolIdentity
 from flameox.application.evidence_query import EvidenceQueryService
 from flameox.application.evidence_rows import (
     artifact_registration_row,
@@ -387,8 +387,11 @@ class InferenceProfilingService:
         measurement_protocol = replay._protocol_identity(replay_plan, environment=environment)
         measurement_protocol_id = digest_model(measurement_protocol.model_dump(mode="json"))
         self._validate_measurement_run(measurement_run_id, measurement_protocol_id)
-        diagnostic_protocol = measurement_protocol.model_copy(
-            update={"profiler": ProfilerState(profiler=plan.profiler, attached=True)}
+        diagnostic_protocol = InferenceProtocolIdentity.model_validate(
+            {
+                **measurement_protocol.model_dump(mode="python"),
+                "profiler": AttachedProfilerState(profiler=plan.profiler),
+            }
         )
         replay_output = Path(replay_plan.output_path or self.workspace.paths.staging)
         replay_output.parent.mkdir(parents=True, exist_ok=True)
@@ -726,7 +729,7 @@ class InferenceProfilingService:
             else ExecutionStatus.FAILED
         )
         registrations = self._canonical_registrations(run.run_id, artifact_run_ids)
-        finished = run.model_copy(
+        finished = run.validated_copy(
             update={
                 "revision": 1,
                 "finished_at": utc_now(),
@@ -739,7 +742,7 @@ class InferenceProfilingService:
                 "limitations": tuple(dict.fromkeys(limitations)),
             }
         )
-        self.runs.append(finished, expected_revision=0)
+        finished = self.runs.append(finished, expected_revision=0)
         self._publish_run(finished, environment, source_state, artifact_ids)
         return finished
 
@@ -752,7 +755,7 @@ class InferenceProfilingService:
         artifact_run_ids: tuple[str, ...],
     ) -> RunManifest:
         registrations = self._canonical_registrations(run.run_id, artifact_run_ids)
-        finished = run.model_copy(
+        finished = run.validated_copy(
             update={
                 "revision": 1,
                 "finished_at": utc_now(),
@@ -766,7 +769,7 @@ class InferenceProfilingService:
                 ),
             }
         )
-        self.runs.append(finished, expected_revision=0)
+        finished = self.runs.append(finished, expected_revision=0)
         self._publish_run(finished, environment, source_state, artifact_ids)
         return finished
 
@@ -780,7 +783,7 @@ class InferenceProfilingService:
         artifact_run_ids: tuple[str, ...],
     ) -> RunManifest:
         registrations = self._canonical_registrations(run.run_id, artifact_run_ids)
-        finished = run.model_copy(
+        finished = run.validated_copy(
             update={
                 "revision": 1,
                 "finished_at": utc_now(),
@@ -796,7 +799,7 @@ class InferenceProfilingService:
                 "limitations": tuple(dict.fromkeys((*run.limitations, error.message))),
             }
         )
-        self.runs.append(finished, expected_revision=0)
+        finished = self.runs.append(finished, expected_revision=0)
         self._publish_run(finished, environment, source_state, artifact_ids)
         return finished
 
@@ -807,7 +810,13 @@ class InferenceProfilingService:
         for artifact_run_id in artifact_run_ids:
             source = self.runs.read(artifact_run_id)
             registrations.extend(
-                registration.model_copy(update={"registration_id": new_id(), "run_id": run_id})
+                ArtifactRegistration.model_validate(
+                    {
+                        **registration.model_dump(mode="python"),
+                        "registration_id": new_id(),
+                        "run_id": run_id,
+                    }
+                )
                 for registration in source.artifacts
             )
         return tuple(registrations)
@@ -820,13 +829,13 @@ class InferenceProfilingService:
         artifact_ids: tuple[str, ...],
         limitation: str,
     ) -> RunManifest:
-        updated = run.model_copy(
+        updated = run.validated_copy(
             update={
                 "revision": run.revision + 1,
                 "limitations": tuple(dict.fromkeys((*run.limitations, limitation))),
             }
         )
-        self.runs.append(updated, expected_revision=run.revision)
+        updated = self.runs.append(updated, expected_revision=run.revision)
         self._publish_run(updated, environment, source_state, artifact_ids)
         return updated
 

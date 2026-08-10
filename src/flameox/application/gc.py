@@ -3,8 +3,10 @@ from __future__ import annotations
 import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal, Self
 from uuid import uuid4
+
+from pydantic import Field, TypeAdapter, model_validator
 
 from flameox.application.recoverable_move import (
     lexical_path_beneath,
@@ -36,7 +38,7 @@ class GarbagePlan(ContractModel):
     root_artifact_ids: tuple[str, ...]
     entries: tuple[GarbageEntry, ...]
     total_bytes: int
-    recoverable: bool = True
+    recoverable: Literal[True] = True
 
 
 class GarbageApplyResult(ContractModel):
@@ -47,17 +49,94 @@ class GarbageApplyResult(ContractModel):
     trash_root: str
 
 
-class TrashManifest(ContractModel):
+class _TrashManifest(ContractModel):
     schema_version: int = 1
     trash_manifest_id: str
     operation: Literal["garbage_collection"] = "garbage_collection"
-    state: Literal["moving", "recoverable", "restoring", "restored"]
     created_at: datetime
     expires_at: datetime
     source_corpus_commit_id: str
-    recoverable: bool
     entries: tuple[GarbageEntry, ...]
     moved_paths: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def moved_paths_reference_manifest_entries(self) -> Self:
+        moved_paths = set(self.moved_paths)
+        if len(moved_paths) != len(self.moved_paths):
+            raise ValueError("moved_paths must not contain duplicates")
+        entry_paths = {entry.path for entry in self.entries}
+        if not moved_paths <= entry_paths:
+            raise ValueError("moved_paths must reference manifest entries")
+        return self
+
+
+class MovingTrashManifest(_TrashManifest):
+    state: Literal["moving"] = "moving"
+    recoverable: Literal[True] = True
+
+    def record_moved_paths(self, moved_paths: tuple[str, ...]) -> Self:
+        return self.__class__.model_validate(
+            {**self.model_dump(mode="python"), "moved_paths": moved_paths}
+        )
+
+    def complete(self) -> RecoverableTrashManifest:
+        return RecoverableTrashManifest.model_validate(
+            {
+                **self.model_dump(mode="python"),
+                "state": "recoverable",
+                "moved_paths": tuple(entry.path for entry in self.entries),
+            }
+        )
+
+
+class RecoverableTrashManifest(_TrashManifest):
+    state: Literal["recoverable"] = "recoverable"
+    recoverable: Literal[True] = True
+
+    @model_validator(mode="after")
+    def all_entries_are_moved(self) -> Self:
+        if set(self.moved_paths) != {entry.path for entry in self.entries}:
+            raise ValueError("a recoverable manifest must contain every entry in moved_paths")
+        return self
+
+    def restoring(self) -> RestoringTrashManifest:
+        return RestoringTrashManifest.model_validate(
+            {**self.model_dump(mode="python"), "state": "restoring"}
+        )
+
+
+class RestoringTrashManifest(_TrashManifest):
+    state: Literal["restoring"] = "restoring"
+    recoverable: Literal[True] = True
+
+    def record_pending_paths(self, moved_paths: tuple[str, ...]) -> Self:
+        return self.__class__.model_validate(
+            {**self.model_dump(mode="python"), "moved_paths": moved_paths}
+        )
+
+    def restored(self) -> RestoredTrashManifest:
+        return RestoredTrashManifest.model_validate(
+            {
+                **self.model_dump(mode="python"),
+                "state": "restored",
+                "recoverable": False,
+                "moved_paths": (),
+            }
+        )
+
+
+class RestoredTrashManifest(_TrashManifest):
+    state: Literal["restored"] = "restored"
+    recoverable: Literal[False] = False
+    moved_paths: tuple[()] = ()
+
+
+type TrashManifest = Annotated[
+    MovingTrashManifest | RecoverableTrashManifest | RestoringTrashManifest | RestoredTrashManifest,
+    Field(discriminator="state"),
+]
+
+_TRASH_MANIFEST: TypeAdapter[TrashManifest] = TypeAdapter(TrashManifest)
 
 
 class GarbagePurgeResult(ContractModel):
@@ -214,13 +293,11 @@ class GarbageCollector:
         manifest_id = str(uuid4())
         trash_root = self.workspace.paths.trash / manifest_id
         created_at = datetime.now(UTC)
-        manifest = TrashManifest(
+        manifest = MovingTrashManifest(
             trash_manifest_id=manifest_id,
-            state="moving",
             created_at=created_at,
             expires_at=created_at + timedelta(hours=recovery_window_hours),
             source_corpus_commit_id=plan.corpus_commit_id,
-            recoverable=True,
             entries=plan.entries,
             moved_paths=(),
         )
@@ -248,15 +325,10 @@ class GarbageCollector:
                 destination = trash_root / "objects" / relative
                 move_path(source, destination)
                 moved_paths.append(entry.path)
-                manifest = manifest.model_copy(update={"moved_paths": tuple(moved_paths)})
+                manifest = manifest.record_moved_paths(tuple(moved_paths))
                 self._write_manifest(trash_root, manifest)
-            manifest = manifest.model_copy(
-                update={
-                    "state": "recoverable",
-                    "moved_paths": tuple(entry.path for entry in plan.entries),
-                }
-            )
-            self._write_manifest(trash_root, manifest)
+            recoverable = manifest.complete()
+            self._write_manifest(trash_root, recoverable)
         return GarbageApplyResult(
             trash_manifest_id=manifest_id,
             moved=plan.entries,
@@ -271,9 +343,9 @@ class GarbageCollector:
             self.workspace.retention_locked(shared=False),
         ):
             trash_root, manifest = self._read_manifest(trash_manifest_id)
-            if manifest.state == "restoring":
+            if isinstance(manifest, RestoringTrashManifest):
                 return self._resume_restore_locked(trash_root, manifest)
-            if manifest.state != "moving":
+            if not isinstance(manifest, MovingTrashManifest):
                 return manifest
             moved_paths = set(manifest.moved_paths)
             for entry in manifest.entries:
@@ -285,11 +357,11 @@ class GarbageCollector:
                     subject=f"garbage candidate {entry.path}",
                 )
                 moved_paths.add(entry.path)
-                manifest = manifest.model_copy(update={"moved_paths": tuple(sorted(moved_paths))})
+                manifest = manifest.record_moved_paths(tuple(sorted(moved_paths)))
                 self._write_manifest(trash_root, manifest)
-            manifest = manifest.model_copy(update={"state": "recoverable"})
-            self._write_manifest(trash_root, manifest)
-            return manifest
+            recoverable = manifest.complete()
+            self._write_manifest(trash_root, recoverable)
+            return recoverable
 
     def restore(self, trash_manifest_id: str) -> GarbageRestoreResult:
         """Restore one recoverable trash manifest without guessing its scope."""
@@ -298,17 +370,17 @@ class GarbageCollector:
             self.workspace.retention_locked(shared=False),
         ):
             trash_root, manifest = self._read_manifest(trash_manifest_id)
-            if manifest.state != "recoverable":
+            if not isinstance(manifest, RecoverableTrashManifest):
                 raise DomainError(
                     ErrorCode.REVISION_CONFLICT,
                     f"Trash manifest is not recoverable (state={manifest.state}).",
                 )
-            manifest = manifest.model_copy(update={"state": "restoring"})
-            self._write_manifest(trash_root, manifest)
-            manifest = self._resume_restore_locked(trash_root, manifest)
+            restoring = manifest.restoring()
+            self._write_manifest(trash_root, restoring)
+            restored = self._resume_restore_locked(trash_root, restoring)
             return GarbageRestoreResult(
                 trash_manifest_id=trash_manifest_id,
-                restored=manifest.entries,
+                restored=restored.entries,
             )
 
     def purge(self, trash_manifest_id: str) -> GarbagePurgeResult:
@@ -318,7 +390,7 @@ class GarbageCollector:
             self.workspace.retention_locked(shared=False),
         ):
             trash_root, manifest = self._read_manifest(trash_manifest_id)
-            if manifest.state != "recoverable" or not manifest.recoverable:
+            if not isinstance(manifest, RecoverableTrashManifest):
                 raise DomainError(
                     ErrorCode.EXECUTION_REFUSED,
                     "Only a complete recoverable trash manifest can be purged.",
@@ -356,7 +428,7 @@ class GarbageCollector:
         manifests: list[str] = []
         for path in sorted(self.workspace.paths.trash.glob("*/manifest.json")):
             try:
-                manifest = TrashManifest.model_validate_json(path.read_text())
+                manifest = _TRASH_MANIFEST.validate_json(path.read_text())
             except (OSError, ValueError):
                 continue
             if manifest.state in {"moving", "restoring"}:
@@ -366,8 +438,8 @@ class GarbageCollector:
     def _resume_restore_locked(
         self,
         trash_root: Path,
-        manifest: TrashManifest,
-    ) -> TrashManifest:
+        manifest: RestoringTrashManifest,
+    ) -> RestoredTrashManifest:
         pending = set(manifest.moved_paths)
         for entry in reversed(manifest.entries):
             destination, relative = self._source(entry)
@@ -380,19 +452,17 @@ class GarbageCollector:
                 pending.discard(entry.path)
                 continue
             pending.discard(entry.path)
-            manifest = manifest.model_copy(update={"moved_paths": tuple(sorted(pending))})
+            manifest = manifest.record_pending_paths(tuple(sorted(pending)))
             self._write_manifest(trash_root, manifest)
-        manifest = manifest.model_copy(
-            update={"state": "restored", "recoverable": False, "moved_paths": ()}
-        )
-        self._write_manifest(trash_root, manifest)
-        return manifest
+        restored = manifest.restored()
+        self._write_manifest(trash_root, restored)
+        return restored
 
     def _read_manifest(self, trash_manifest_id: str) -> tuple[Path, TrashManifest]:
         validate_manifest_id(trash_manifest_id, kind="trash manifest")
         trash_root = self.workspace.paths.trash / trash_manifest_id
         try:
-            manifest = TrashManifest.model_validate_json((trash_root / "manifest.json").read_text())
+            manifest = _TRASH_MANIFEST.validate_json((trash_root / "manifest.json").read_text())
         except (OSError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,

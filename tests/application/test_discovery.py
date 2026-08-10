@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from flameox.application import (
     ArtifactService,
@@ -21,8 +22,11 @@ from flameox.domain import (
     DomainError,
     ErrorCode,
     EvidenceLevel,
+    ExecutionStatus,
     FindingAssessment,
+    FindingConfidence,
     Sensitivity,
+    ValidationStatus,
 )
 from flameox.storage import Workspace
 
@@ -39,6 +43,24 @@ def _import(workspace: Workspace, name: str) -> None:
     )
 
 
+def test_run_filter_uses_authoritative_lifecycle_vocabularies() -> None:
+    parsed = RunFilter.model_validate(
+        {
+            "execution_status": ["planned"],
+            "validation_status": ["running", "error", "cancelled"],
+        }
+    )
+
+    assert parsed.execution_status == (ExecutionStatus.PLANNED,)
+    assert parsed.validation_status == (
+        ValidationStatus.RUNNING,
+        ValidationStatus.ERROR,
+        ValidationStatus.CANCELLED,
+    )
+    with pytest.raises(ValidationError):
+        RunFilter.model_validate({"execution_status": ["pending"]})
+
+
 def test_run_and_artifact_pagination_are_snapshot_bound_and_filtered(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     Catalog(workspace).rebuild()
@@ -47,7 +69,7 @@ def test_run_and_artifact_pagination_are_snapshot_bound_and_filtered(tmp_path: P
 
     runs = RunDiscoveryService(workspace)
     first = runs.list(
-        filter=RunFilter(execution_status=("not_applicable",)),
+        filter=RunFilter(execution_status=(ExecutionStatus.NOT_APPLICABLE,)),
         limit=1,
     )
     assert first.returned == 1
@@ -56,7 +78,7 @@ def test_run_and_artifact_pagination_are_snapshot_bound_and_filtered(tmp_path: P
     matching_identity = first.runs[0].environment_id
     assert first.runs[0].artifact_kinds == ("collector_metadata",)
     second = runs.list(
-        filter=RunFilter(execution_status=("not_applicable",)),
+        filter=RunFilter(execution_status=(ExecutionStatus.NOT_APPLICABLE,)),
         limit=1,
         cursor=first.next_cursor,
     )
@@ -77,7 +99,13 @@ def test_run_and_artifact_pagination_are_snapshot_bound_and_filtered(tmp_path: P
         ).total
         == 0
     )
-    assert runs.list(filter=RunFilter(validation_status=("unsupported",)), limit=10).total == 0
+    assert (
+        runs.list(
+            filter=RunFilter(validation_status=(ValidationStatus.UNSUPPORTED,)),
+            limit=10,
+        ).total
+        == 0
+    )
 
     artifacts = ArtifactService(workspace)
     artifact_first = artifacts.list(limit=1)
@@ -88,14 +116,14 @@ def test_run_and_artifact_pagination_are_snapshot_bound_and_filtered(tmp_path: P
     _import(workspace, "three.json")
     with pytest.raises(DomainError) as stale:
         runs.list(
-            filter=RunFilter(execution_status=("not_applicable",)),
+            filter=RunFilter(execution_status=(ExecutionStatus.NOT_APPLICABLE,)),
             limit=1,
             cursor=first.next_cursor,
         )
     assert stale.value.code is ErrorCode.STALE_CURSOR
     with pytest.raises(DomainError) as changed_filter:
         runs.list(
-            filter=RunFilter(validation_status=("not_requested",)),
+            filter=RunFilter(validation_status=(ValidationStatus.NOT_REQUESTED,)),
             limit=1,
             cursor=first.next_cursor,
         )
@@ -122,7 +150,7 @@ def test_investigation_and_finding_lists_page_without_duplicates(tmp_path: Path)
                 title=title,
                 claim=f"{title} claim",
                 evidence_level=EvidenceLevel.INFERRED,
-                confidence="unknown",
+                confidence=FindingConfidence.UNKNOWN,
                 assessment=FindingAssessment.UNASSESSED,
             )
         )

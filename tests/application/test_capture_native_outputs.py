@@ -8,10 +8,12 @@ import pytest
 from flameox.application import CaptureService, ExecutionPolicy
 from flameox.domain import (
     ArtifactKind,
+    CapabilityPermissionStatus,
     CapabilityReport,
     CapabilityStatus,
     CaptureStatus,
     ExecutionStatus,
+    ProbeKind,
 )
 from flameox.storage import ArtifactStore, RunStore, Workspace
 from tests.support.capture import disable_containment
@@ -79,8 +81,8 @@ timeout_seconds = {timeout}
         version="fake-perf",
         supported_modes=("record",),
         supported_formats=("perf.data",),
-        permission_status="granted",
-        probe_kind="active",
+        permission_status=CapabilityPermissionStatus.GRANTED,
+        probe_kind=ProbeKind.ACTIVE,
     )
     service = CaptureService(workspace)
     monkeypatch.setattr(service.capabilities, "get", lambda _adapter: report)

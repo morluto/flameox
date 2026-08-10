@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import Annotated, Literal, assert_never, cast
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from flameox.models import ContractModel
 
@@ -55,6 +55,12 @@ class NativeReductionAttempt(ContractModel):
     became_best: bool = False
     failure: str | None = None
 
+    @model_validator(mode="after")
+    def accepted_candidates_are_interesting(self) -> NativeReductionAttempt:
+        if self.became_best and self.classification != "interesting":
+            raise ValueError("only an interesting candidate can become the best candidate")
+        return self
+
 
 class NativeReductionResult(ContractModel):
     disposition: Literal["succeeded", "unchanged", "inconclusive", "original_not_interesting"]
@@ -70,6 +76,31 @@ class NativeReductionResult(ContractModel):
     # These fields are execution handoff data, not part of the persisted result contract.
     final_payload: bytes | None = Field(default=None, exclude=True)
     accepted_best_payloads: tuple[bytes, ...] = Field(default_factory=tuple, exclude=True)
+
+    @model_validator(mode="after")
+    def disposition_is_coherent(self) -> NativeReductionResult:
+        if self.final_unit_count > self.original_unit_count:
+            raise ValueError("reduction cannot add units")
+        if self.disposition == "succeeded" and (
+            self.final_digest == self.original_digest or self.final_revalidation != "interesting"
+        ):
+            raise ValueError("a successful reduction requires a changed interesting result")
+        if self.disposition == "unchanged" and (
+            self.final_digest != self.original_digest or self.final_revalidation != "interesting"
+        ):
+            raise ValueError("an unchanged reduction must revalidate the original result")
+        if self.disposition == "original_not_interesting" and (
+            self.final_digest != self.original_digest
+            or self.final_revalidation != "not_interesting"
+        ):
+            raise ValueError("an uninteresting original must remain the final result")
+        if self.minimality == "one_minimal" and (
+            self.budget_exhausted or self.final_revalidation != "interesting"
+        ):
+            raise ValueError("one-minimality requires completed interesting revalidation")
+        if self.final_payload is not None and _digest(self.final_payload) != self.final_digest:
+            raise ValueError("the final payload must match the final digest")
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,7 +273,7 @@ class NativeDdminReducer:
                 payload = rebuild(candidate_units)
                 removed = tuple(unit.unit_id for unit in current if unit not in candidate_units)
                 outcome = classify(payload, requested, removed)
-                attempts[-1] = attempts[-1].model_copy(
+                attempts[-1] = attempts[-1].validated_copy(
                     update={"dependency_added_unit_ids": dependency_added}
                 )
                 if outcome == "interesting":
@@ -251,7 +282,7 @@ class NativeDdminReducer:
                         accepted_best_payloads.append(payload)
                     else:
                         on_best(payload)
-                    attempts[-1] = attempts[-1].model_copy(update={"became_best": True})
+                    attempts[-1] = attempts[-1].validated_copy(update={"became_best": True})
                     granularity = max(granularity - 1, 2)
                     changed = True
                     break

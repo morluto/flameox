@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Annotated, Literal, assert_never
 from urllib.parse import urlsplit
 
-from pydantic import Field, TypeAdapter
+from pydantic import ConfigDict, Field, TypeAdapter, computed_field, model_validator
 
 from flameox.analysis.inference_protocol import (
     HardwareIdentity,
@@ -80,7 +80,9 @@ from flameox.domain import (
     EnvironmentRecord,
     ErrorCode,
     ExecutionStatus,
+    OracleStatus,
     OracleStrength,
+    ProcessCancellationCause,
     RunManifest,
     Sensitivity,
     SourceState,
@@ -94,6 +96,7 @@ from flameox.execution import (
     ExecutionOutcome,
     ExecutionRequest,
     ManagedSidecarOutcome,
+    ProcessContainment,
     SubprocessBroker,
 )
 from flameox.models import ContractModel
@@ -108,6 +111,8 @@ _MAX_RESULT_LIMITATIONS = 16
 
 
 class _InferenceReplayPlan(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     """A validated, side-effect-free plan for one inference replay run."""
 
     schema_version: Literal[1] = 1
@@ -127,8 +132,6 @@ class _InferenceReplayPlan(ContractModel):
     tool_executable_digest: str | None = None
     server_executable_digest: str | None = None
     server_version: str | None = None
-    tool_available: bool
-    tool_compatible: bool = False
     tool_compatibility_reason: str | None = None
     tool_remediation: Annotated[tuple[str, ...], Field(max_length=8)] = ()
     health_ready: bool | None = None
@@ -146,6 +149,43 @@ class _InferenceReplayPlan(ContractModel):
     exploratory_reason: Annotated[str, Field(min_length=1, max_length=500)]
     configuration_id: str
     created_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_tool_readiness_projections(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        available = value.get("tool_available")
+        compatible = value.get("tool_compatible")
+        if available is not None and compatible is not None and available != compatible:
+            raise ValueError("tool availability and compatibility must agree")
+        parsed = dict(value)
+        parsed.pop("tool_available", None)
+        parsed.pop("tool_compatible", None)
+        planned = bool(parsed.get("argv", ()))
+        if available is not None and available != planned:
+            raise ValueError("tool availability must match executable argv")
+        if compatible is not None and compatible != planned:
+            raise ValueError("tool compatibility must match executable argv")
+        return parsed
+
+    @model_validator(mode="after")
+    def tool_readiness_is_coherent(self) -> _InferenceReplayPlan:
+        if self.argv and self.tool_executable is None:
+            raise ValueError("an available tool requires an executable")
+        if self.argv and (self.tool_compatibility_reason is not None or self.tool_remediation):
+            raise ValueError("an available tool cannot carry incompatibility recovery")
+        return self
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def tool_available(self) -> bool:
+        return bool(self.argv)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def tool_compatible(self) -> bool:
+        return self.tool_available
 
 
 class AIPerfReplayPlan(_InferenceReplayPlan):
@@ -201,6 +241,8 @@ def parse_inference_replay_plan(value: object) -> InferenceReplayPlan:
 class InferenceReplayResult(ContractModel):
     """The bounded outcome of one executed inference replay plan."""
 
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: Literal[1] = 1
     result_id: str
     run_id: str
@@ -214,11 +256,10 @@ class InferenceReplayResult(ContractModel):
     exit_code: int | None = None
     terminating_signal: int | None = None
     wall_time_ns: Annotated[int, Field(ge=0)] | None = None
-    timed_out: bool = False
-    cancellation_cause: str | None = None
+    cancellation_cause: ProcessCancellationCause | None = None
     stdout_bytes: Annotated[int, Field(ge=0)] = 0
     stderr_bytes: Annotated[int, Field(ge=0)] = 0
-    containment: str = "broker"
+    containment: ProcessContainment = "broker"
     peak_rss_backend: str | None = None
     health_ready: bool
     probed_model_ids: Annotated[tuple[str, ...], Field(max_length=64)] = ()
@@ -227,8 +268,34 @@ class InferenceReplayResult(ContractModel):
     server_cleanup_complete: bool | None = None
     artifact_ids: tuple[str, ...] = ()
     artifact_run_ids: tuple[str, ...] = ()
-    oracle_status: Literal["pass", "fail", "inconclusive", "unsupported"] | None = None
+    oracle_status: OracleStatus | None = None
     completed_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_legacy_timed_out(cls, value: object) -> object:
+        if not isinstance(value, dict) or "timed_out" not in value:
+            return value
+        timed_out = value["timed_out"]
+        cause = value.get("cancellation_cause")
+        if cause is not None and (cause == ProcessCancellationCause.TIMEOUT) != timed_out:
+            raise ValueError("timed_out must match a timeout cancellation cause")
+        parsed = dict(value)
+        del parsed["timed_out"]
+        if timed_out:
+            parsed["cancellation_cause"] = ProcessCancellationCause.TIMEOUT
+        return parsed
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def timed_out(self) -> bool:
+        return self.cancellation_cause is ProcessCancellationCause.TIMEOUT
+
+    @model_validator(mode="after")
+    def termination_is_coherent(self) -> InferenceReplayResult:
+        if self.exit_code is not None and self.terminating_signal is not None:
+            raise ValueError("replay cannot have both an exit code and a terminating signal")
+        return self
 
 
 class _OracleObservation(ContractModel):
@@ -354,8 +421,6 @@ class InferenceReplayService:
                 tool_executable_digest=discovery.executable_digest,
                 server_executable_digest=server_executable_digest,
                 server_version=server_version,
-                tool_available=discovery.available,
-                tool_compatible=discovery.compatible,
                 tool_compatibility_reason=discovery.compatibility_reason,
                 tool_remediation=discovery.remediation,
                 health_ready=probe.health_ready if probe is not None else None,
@@ -710,7 +775,7 @@ class InferenceReplayService:
         return outcome, probe, output_path, oracle
 
     def _prepare(self, plan: InferenceReplayPlan) -> tuple[Path, ExistingServerProbe]:
-        if not plan.tool_available or not plan.argv:
+        if not plan.tool_available:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 f"Inference replay tool for scenario {plan.scenario_name!r} is unavailable.",
@@ -869,20 +934,21 @@ class InferenceReplayService:
             relative_error=receipt.relative_error,
         )
         tolerance = receipt.tolerance
-        observed_identity = identity.model_copy(
-            update={
+        observed_identity = OracleIdentity.model_validate(
+            {
+                **identity.model_dump(mode="python"),
                 "tolerance_absolute": tolerance.absolute if tolerance is not None else None,
                 "tolerance_relative": tolerance.relative if tolerance is not None else None,
             }
         )
         status = {
-            "pass": ValidationStatus.PASSED,
-            "fail": ValidationStatus.FAILED,
-            "inconclusive": ValidationStatus.INCONCLUSIVE,
-            "unsupported": ValidationStatus.UNSUPPORTED,
+            OracleStatus.PASS: ValidationStatus.PASSED,
+            OracleStatus.FAIL: ValidationStatus.FAILED,
+            OracleStatus.INCONCLUSIVE: ValidationStatus.INCONCLUSIVE,
+            OracleStatus.UNSUPPORTED: ValidationStatus.UNSUPPORTED,
         }[receipt.status]
         limitations = tuple(receipt.limitations)
-        if receipt.status != "pass":
+        if receipt.status is not OracleStatus.PASS:
             limitations = (*limitations, f"Semantic oracle reported {receipt.status}.")
         return _OracleObservation(
             identity=observed_identity,
@@ -973,7 +1039,7 @@ class InferenceReplayService:
             if plan.provider == "sglang_bench" and plan.tool_executable is not None
             else discover_inference_tool(_PROVIDER_TOOL[plan.provider])
         )
-        if not plan.tool_available or not plan.argv:
+        if not plan.tool_available:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 f"Inference replay tool for scenario {plan.scenario_name!r} is unavailable.",
@@ -1145,7 +1211,6 @@ class InferenceReplayService:
             exit_code=process.exit_code,
             terminating_signal=process.terminating_signal,
             wall_time_ns=process.wall_time_ns,
-            timed_out=process.timed_out,
             cancellation_cause=process.cancellation_cause,
             stdout_bytes=len(outcome.stdout),
             stderr_bytes=len(outcome.stderr),
@@ -1394,9 +1459,16 @@ class InferenceReplayService:
             else ExecutionStatus.FAILED
         )
         limitations = tuple(dict.fromkeys((*run.limitations, *extraction_limitations)))
-        protocol = InferenceProtocolIdentity.model_validate_json(
+        initial_protocol = InferenceProtocolIdentity.model_validate_json(
             run.inference_protocol_identity_json or "{}"
-        ).model_copy(update={"oracle": oracle.identity, "oracle_result": oracle.result})
+        )
+        protocol = InferenceProtocolIdentity.model_validate(
+            {
+                **initial_protocol.model_dump(mode="python"),
+                "oracle": oracle.identity,
+                "oracle_result": oracle.result,
+            }
+        )
         protocol_json = json.dumps(
             protocol.model_dump(mode="json"),
             allow_nan=False,
@@ -1405,7 +1477,7 @@ class InferenceReplayService:
         )
         protocol_id = digest_model(protocol.model_dump(mode="json"))
         registrations = self._canonical_registrations(run.run_id, artifact_run_ids)
-        finished = run.model_copy(
+        finished = run.validated_copy(
             update={
                 "revision": 1,
                 "finished_at": utc_now(),
@@ -1421,7 +1493,7 @@ class InferenceReplayService:
                 "inference_protocol_identity_json": protocol_json,
             }
         )
-        self.runs.append(finished, expected_revision=0)
+        finished = self.runs.append(finished, expected_revision=0)
         self._publish_run(finished, environment, source_state, artifact_ids)
         return finished
 
@@ -1434,7 +1506,7 @@ class InferenceReplayService:
         artifact_run_ids: tuple[str, ...],
     ) -> RunManifest:
         registrations = self._canonical_registrations(run.run_id, artifact_run_ids)
-        finished = run.model_copy(
+        finished = run.validated_copy(
             update={
                 "revision": 1,
                 "finished_at": utc_now(),
@@ -1448,7 +1520,7 @@ class InferenceReplayService:
                 ),
             }
         )
-        self.runs.append(finished, expected_revision=0)
+        finished = self.runs.append(finished, expected_revision=0)
         self._publish_run(finished, environment, source_state, artifact_ids)
         return finished
 
@@ -1463,7 +1535,7 @@ class InferenceReplayService:
         extra_limitations: tuple[str, ...] = (),
     ) -> RunManifest:
         registrations = self._canonical_registrations(run.run_id, artifact_run_ids)
-        finished = run.model_copy(
+        finished = run.validated_copy(
             update={
                 "revision": 1,
                 "finished_at": utc_now(),
@@ -1481,7 +1553,7 @@ class InferenceReplayService:
                 ),
             }
         )
-        self.runs.append(finished, expected_revision=0)
+        finished = self.runs.append(finished, expected_revision=0)
         self._publish_run(finished, environment, source_state, artifact_ids)
         return finished
 
@@ -1492,7 +1564,13 @@ class InferenceReplayService:
         for artifact_run_id in artifact_run_ids:
             source = self.runs.read(artifact_run_id)
             registrations.extend(
-                registration.model_copy(update={"registration_id": new_id(), "run_id": run_id})
+                ArtifactRegistration.model_validate(
+                    {
+                        **registration.model_dump(mode="python"),
+                        "registration_id": new_id(),
+                        "run_id": run_id,
+                    }
+                )
                 for registration in source.artifacts
             )
         return tuple(registrations)
@@ -1505,13 +1583,13 @@ class InferenceReplayService:
         artifact_ids: tuple[str, ...],
         limitation: str,
     ) -> RunManifest:
-        updated = run.model_copy(
+        updated = run.validated_copy(
             update={
                 "revision": run.revision + 1,
                 "limitations": tuple(dict.fromkeys((*run.limitations, limitation))),
             }
         )
-        self.runs.append(updated, expected_revision=run.revision)
+        updated = self.runs.append(updated, expected_revision=run.revision)
         self._publish_run(updated, environment, source_state, artifact_ids)
         return updated
 

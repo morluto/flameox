@@ -11,10 +11,16 @@ from flameox.application.evidence_lookup import EvidenceLookupService
 from flameox.catalog import Catalog, Snapshot
 from flameox.domain import (
     ArtifactKind,
+    EvidenceLevel,
+    EvidenceReferenceType,
+    ExecutionStatus,
     Finding,
     FindingAssessment,
     LimitationDetail,
     Sensitivity,
+    TrialFailureClass,
+    TrialOutcome,
+    ValidationStatus,
     digest_model,
 )
 from flameox.models import ContractModel
@@ -72,9 +78,9 @@ class EvidenceSummaryRequest(ContractModel):
 
 class SummaryArtifact(ContractModel):
     artifact_id: str
-    kind: str
+    kind: ArtifactKind
     role: str
-    sensitivity: str
+    sensitivity: Sensitivity
     producer: str | None = None
     producer_version: str | None = None
     excerpt: tuple[str, ...] = ()
@@ -83,8 +89,8 @@ class SummaryArtifact(ContractModel):
 
 class SummaryAttempt(ContractModel):
     trial_id: str
-    outcome: str
-    failure_class: str
+    outcome: TrialOutcome
+    failure_class: TrialFailureClass
     exclusion_reason: str | None = None
     combination_id: str
     factors: dict[str, JsonValue] = Field(default_factory=dict)
@@ -93,8 +99,8 @@ class SummaryAttempt(ContractModel):
 class SummaryRun(ContractModel):
     run_id: str
     proof_role: Literal["baseline", "candidate", "context"]
-    execution_status: str
-    validation_status: str
+    execution_status: ExecutionStatus
+    validation_status: ValidationStatus
     workload_definition_id: str | None
     workload_instance_id: str | None
     argv: tuple[str, ...]
@@ -118,8 +124,8 @@ class SummaryClaim(ContractModel):
     finding_id: str
     title: str
     claim: str
-    evidence_level: str
-    assessment: str
+    evidence_level: EvidenceLevel
+    assessment: FindingAssessment
     support_status: Literal["as_recorded", "not_supporting", "candidate_only"]
     evidence: tuple[dict[str, JsonValue], ...]
     limitations: tuple[str, ...] = ()
@@ -185,7 +191,7 @@ class EvidenceSummaryService:
                         ref_id=ref_id,
                         data=self._compact_reference(
                             "comparison",
-                            self.lookup.get("comparison", ref_id).data,
+                            self.lookup.get(EvidenceReferenceType.COMPARISON, ref_id).data,
                         ),
                     )
                     for ref_id in request.comparison_ids
@@ -196,7 +202,7 @@ class EvidenceSummaryService:
                         ref_id=ref_id,
                         data=self._compact_reference(
                             "analysis",
-                            self.lookup.get("analysis", ref_id).data,
+                            self.lookup.get(EvidenceReferenceType.ANALYSIS, ref_id).data,
                         ),
                     )
                     for ref_id in request.analysis_ids
@@ -286,9 +292,9 @@ class EvidenceSummaryService:
             artifacts.append(
                 SummaryArtifact(
                     artifact_id=registration.artifact_id,
-                    kind=registration.kind.value,
+                    kind=registration.kind,
                     role=registration.role,
-                    sensitivity=registration.sensitivity.value,
+                    sensitivity=registration.sensitivity,
                     producer=registration.producer,
                     producer_version=registration.producer_version,
                     excerpt=excerpt,
@@ -335,8 +341,8 @@ class EvidenceSummaryService:
         return SummaryRun(
             run_id=run_id,
             proof_role=role,
-            execution_status=run.execution_status.value,
-            validation_status=run.validation_status.value,
+            execution_status=run.execution_status,
+            validation_status=run.validation_status,
             workload_definition_id=run.workload_definition_id,
             workload_instance_id=run.workload_instance_id,
             argv=argv,
@@ -398,8 +404,8 @@ class EvidenceSummaryService:
             tuple(
                 SummaryAttempt(
                     trial_id=str(row[0]),
-                    outcome=str(row[1]),
-                    failure_class=str(row[2] or "unknown"),
+                    outcome=TrialOutcome(str(row[1])),
+                    failure_class=TrialFailureClass(str(row[2])),
                     exclusion_reason=str(row[3]) if row[3] is not None else None,
                     combination_id=str(row[4] or row[0]),
                     factors=(
@@ -438,7 +444,7 @@ class EvidenceSummaryService:
         for item in evidence:
             if item["ref_type"] == "comparison":
                 comparison = self.lookup.get(
-                    "comparison",
+                    EvidenceReferenceType.COMPARISON,
                     cast(str, item["ref_id"]),
                 ).data
                 invalid_comparison = invalid_comparison or comparison.get("validity") != "valid"
@@ -461,8 +467,8 @@ class EvidenceSummaryService:
             finding_id=finding.finding_id,
             title=finding.title,
             claim=finding.claim,
-            evidence_level=finding.evidence_level.value,
-            assessment=finding.assessment.value,
+            evidence_level=finding.evidence_level,
+            assessment=finding.assessment,
             support_status=status,
             evidence=evidence,
             limitations=tuple(limitations),

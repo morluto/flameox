@@ -12,7 +12,7 @@ from flameox.application import (
     RuntimeResourceCompareRunSetsRequest,
 )
 from flameox.catalog import Catalog
-from flameox.domain import ComparisonValidity, DomainError, ErrorCode
+from flameox.domain import ComparisonValidity, DomainError, ErrorCode, MetricPolarity
 from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
 from tests.support.comparisons import imported_benchmark, measurement_row
@@ -31,7 +31,7 @@ def _comparison_request(
         candidate_run_set_id=candidate.run_set_id,
         metric="pyperf.scan",
         unit="ns",
-        polarity="lower_is_better",
+        polarity=MetricPolarity.LOWER_IS_BETTER,
         practical_threshold=0.05,
     )
 
@@ -151,7 +151,7 @@ def test_comparison_pairs_runtime_resource_catalog_metric(
             metric="runtime_resource.peak_rss_bytes",
             metric_source="runtime_resource",
             unit="bytes",
-            polarity="lower_is_better",
+            polarity=MetricPolarity.LOWER_IS_BETTER,
             practical_threshold=0.05,
         )
     )
@@ -223,7 +223,7 @@ def test_runtime_resource_zero_is_invalid_for_log_ratio_estimation(tmp_path: Pat
             metric="runtime_resource.staging_growth_bytes",
             metric_source="runtime_resource",
             unit="bytes",
-            polarity="lower_is_better",
+            polarity=MetricPolarity.LOWER_IS_BETTER,
             practical_threshold=0,
         )
     )

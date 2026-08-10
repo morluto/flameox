@@ -1,15 +1,73 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import cast
 
 import pytest
 
-from flameox.application.operations import OperationFailure, OperationRunner
+from flameox.application.operations import (
+    ActiveOperationRecord,
+    OperationFailure,
+    OperationProgress,
+    OperationRunner,
+    OperationStore,
+)
 from flameox.domain import DomainError, ErrorCode
+from flameox.domain.models import utc_now
 from flameox.storage import Workspace
+
+
+@pytest.mark.parametrize(
+    ("completed", "total"),
+    ((1, None), (None, 1), (2, 1)),
+)
+def test_operation_progress_rejects_incoherent_bounds(
+    completed: float | None,
+    total: float | None,
+) -> None:
+    with pytest.raises(ValueError):
+        OperationProgress(
+            phase="running",
+            completed=completed,
+            total=total,
+            message="invalid progress",
+        )
+
+
+def test_operation_store_rejects_terminal_state_without_a_receipt(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    record = ActiveOperationRecord(
+        operation_id="op-invalid-terminal",
+        operation="test.operation",
+        workspace_id=workspace.identity.workspace_id,
+        request_digest="sha256:" + "1" * 64,
+        request={"value": 1},
+        idempotency_digest="sha256:" + "2" * 64,
+        owner_id="test-owner",
+        owner_heartbeat_at=utc_now(),
+    )
+    store = OperationStore(workspace)
+    store.records.create(record)
+    serialized = record.model_dump(mode="json")
+    serialized.update(
+        {
+            "state": "terminal",
+            "phase": "completed",
+            "cleanup_status": "complete",
+            "owner_id": None,
+            "owner_heartbeat_at": None,
+        }
+    )
+    record_path = workspace.paths.records / "operations" / record.operation_id / "record.json"
+    record_path.write_text(json.dumps(serialized))
+
+    with pytest.raises(DomainError) as error:
+        store.read(record.operation_id)
+
+    assert error.value.code is ErrorCode.WORKSPACE_INVALID
 
 
 @pytest.mark.anyio

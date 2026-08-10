@@ -13,11 +13,13 @@ from urllib.parse import urlsplit
 
 import tomlkit
 from pydantic import (
+    ConfigDict,
     Discriminator,
     Field,
     JsonValue,
     Tag,
     TypeAdapter,
+    computed_field,
     field_validator,
     model_validator,
 )
@@ -30,13 +32,17 @@ from flameox.application.capabilities import CapabilityService
 from flameox.application.inference_providers import _loopback_http_url
 from flameox.atomic import atomic_write_text
 from flameox.domain import (
+    CapabilityPermissionStatus,
     CapabilityReport,
     CapabilityStatus,
     CommandSpec,
     CursorCodec,
     DomainError,
     ErrorCode,
+    ExperimentOutcomeGoal,
+    MetricPolarity,
     OracleStrength,
+    ProbeKind,
     WorkloadDefinition,
     WorkloadInstance,
     digest_model,
@@ -148,7 +154,7 @@ class _CommonExperimentConfig(ContractModel):
     blocks: Annotated[int, Field(gt=0, le=1_000)] = 1
     max_trials: Annotated[int, Field(gt=0, le=100_000)] = 10_000
     primary_metric: str = "categorical_outcome"
-    polarity: Literal["lower_is_better", "higher_is_better", "neutral"] = "neutral"
+    polarity: MetricPolarity = MetricPolarity.NEUTRAL
     estimand: str = "median_paired_log_ratio"
     practical_threshold: Annotated[float, Field(ge=0)] = 0
     confidence_level: Annotated[float, Field(gt=0, lt=1)] = 0.95
@@ -245,7 +251,7 @@ class _PerformanceExperimentConfig(_CommonExperimentConfig):
 
 class _OutcomeExperimentConfig(_CommonExperimentConfig):
     analysis: Literal["outcome"]
-    outcome_goal: Literal["equivalence", "absence_of_failure", "bounded_rate"]
+    outcome_goal: ExperimentOutcomeGoal
     minimum_attempts: Annotated[int, Field(gt=0, le=1_000)] | None = None
     maximum_attempts: Annotated[int, Field(gt=0, le=1_000)] | None = None
 
@@ -358,60 +364,51 @@ def parse_experiment_config(value: object) -> ExperimentConfig:
     return _EXPERIMENT_CONFIG_ADAPTER.validate_python(value)
 
 
-class LatencyFault(ContractModel):
+class _ToxicFault(ContractModel):
+    stream: Literal["upstream", "downstream"] = "downstream"
+    toxicity: float = Field(default=1.0, ge=0, le=1)
+
+
+class LatencyFault(_ToxicFault):
     type: Literal["latency"]
     latency_ms: int = Field(gt=0, le=3_600_000)
     jitter_ms: int = Field(default=0, ge=0, le=3_600_000)
-    stream: Literal["upstream", "downstream"] = "downstream"
-    toxicity: float = Field(default=1.0, ge=0, le=1)
 
 
-class TimeoutFault(ContractModel):
+class TimeoutFault(_ToxicFault):
     type: Literal["timeout"]
     timeout_ms: int = Field(gt=0, le=3_600_000)
-    stream: Literal["upstream", "downstream"] = "downstream"
-    toxicity: float = Field(default=1.0, ge=0, le=1)
 
 
-class ResetPeerFault(ContractModel):
+class ResetPeerFault(_ToxicFault):
     type: Literal["reset_peer"]
-    stream: Literal["upstream", "downstream"] = "downstream"
-    toxicity: float = Field(default=1.0, ge=0, le=1)
 
 
-class BandwidthFault(ContractModel):
+class BandwidthFault(_ToxicFault):
     type: Literal["bandwidth"]
     bandwidth_limit: int = Field(gt=0, le=10_000_000_000)
-    stream: Literal["upstream", "downstream"] = "downstream"
-    toxicity: float = Field(default=1.0, ge=0, le=1)
 
 
-class SlicerFault(ContractModel):
+class SlicerFault(_ToxicFault):
     type: Literal["slicer"]
     average_size: int = Field(gt=0, le=10_000_000)
     size_variation: int = Field(default=0, ge=0, le=10_000_000)
     delay_ms: int = Field(default=0, ge=0, le=3_600_000)
-    stream: Literal["upstream", "downstream"] = "downstream"
-    toxicity: float = Field(default=1.0, ge=0, le=1)
 
 
-class LimitDataFault(ContractModel):
+class LimitDataFault(_ToxicFault):
     type: Literal["limit_data"]
     bytes: int = Field(gt=0, le=10_000_000_000)
-    stream: Literal["upstream", "downstream"] = "downstream"
-    toxicity: float = Field(default=1.0, ge=0, le=1)
 
 
-class SlowCloseFault(ContractModel):
+class SlowCloseFault(_ToxicFault):
     type: Literal["slow_close"]
     delay_ms: int = Field(gt=0, le=3_600_000)
-    stream: Literal["upstream", "downstream"] = "downstream"
-    toxicity: float = Field(default=1.0, ge=0, le=1)
 
 
 class ProxyFault(ContractModel):
     type: Literal["proxy"]
-    enabled: bool = True
+    enabled: Literal[False]
 
 
 FaultScenario = Annotated[
@@ -437,7 +434,7 @@ class FaultExperimentConfig(ContractModel):
     blocks: int = Field(default=1, gt=0, le=1_000)
     repetitions: int = Field(default=1, gt=0, le=1_000)
     primary_metric: str = "categorical_outcome"
-    polarity: Literal["lower_is_better", "higher_is_better", "neutral"] = "neutral"
+    polarity: MetricPolarity = MetricPolarity.NEUTRAL
     estimand: str = "median_paired_log_ratio"
     practical_threshold: float = Field(default=0, ge=0)
     confidence_level: float = Field(default=0.95, gt=0, lt=1)
@@ -463,15 +460,15 @@ class FaultExperimentConfig(ContractModel):
         if self.blocks * self.repetitions * (len(self.scenarios) + 1) > 100_000:
             raise ValueError("fault experiment schedule exceeds the 100000-trial bound")
         for scenario in self.scenarios.values():
-            if isinstance(scenario, ProxyFault) and scenario.enabled:
-                raise ValueError("proxy treatment is non-discriminating when enabled")
+            if isinstance(scenario, ProxyFault):
+                continue
             if (
-                hasattr(scenario, "jitter_ms")
-                and getattr(scenario, "toxicity", 1.0) == 1
-                and getattr(scenario, "jitter_ms", 0) != 0
+                isinstance(scenario, LatencyFault)
+                and scenario.toxicity == 1
+                and scenario.jitter_ms != 0
             ):
                 raise ValueError("deterministic latency faults require zero jitter")
-            if getattr(scenario, "toxicity", 1.0) < 1 and self.repetitions < 2:
+            if scenario.toxicity < 1 and self.repetitions < 2:
                 raise ValueError("stochastic fault scenarios require repeated trials")
         return self
 
@@ -812,11 +809,32 @@ class ConfigureWorkloadRequest(ContractModel):
     expected_configuration_id: str | None = None
 
 
-class WorkloadConfigurationStatus(ContractModel):
+class _WorkloadConfigurationStatus(ContractModel):
     schema_version: Literal[1] = 1
-    status: Literal["missing", "valid", "invalid"]
     config_path: Literal["flameox.toml"] = "flameox.toml"
-    configuration_id: str | None = None
+
+
+class _UnavailableWorkloadConfigurationStatus(_WorkloadConfigurationStatus):
+    configuration_id: Literal[None] = None
+    workload_names: tuple[()] = ()
+    diagnostics: Annotated[
+        tuple[Annotated[str, Field(max_length=512)], ...],
+        Field(min_length=1, max_length=8),
+    ]
+    next_tool: Literal["configure_workload"] = "configure_workload"
+
+
+class MissingWorkloadConfigurationStatus(_UnavailableWorkloadConfigurationStatus):
+    status: Literal["missing"] = "missing"
+
+
+class InvalidWorkloadConfigurationStatus(_UnavailableWorkloadConfigurationStatus):
+    status: Literal["invalid"] = "invalid"
+
+
+class ValidWorkloadConfigurationStatus(_WorkloadConfigurationStatus):
+    status: Literal["valid"] = "valid"
+    configuration_id: Digest
     workload_names: Annotated[
         tuple[Annotated[str, Field(max_length=100)], ...],
         Field(max_length=1_000),
@@ -825,21 +843,65 @@ class WorkloadConfigurationStatus(ContractModel):
         tuple[Annotated[str, Field(max_length=512)], ...],
         Field(max_length=8),
     ] = ()
-    next_tool: Literal["configure_workload", "list_declared_workflows"] | None = None
+    next_tool: Literal["configure_workload", "list_declared_workflows"]
+
+    @model_validator(mode="after")
+    def recovery_matches_declared_workloads(self) -> ValidWorkloadConfigurationStatus:
+        expected_diagnostics = (
+            () if self.workload_names else ("No named workloads are declared yet.",)
+        )
+        expected_next_tool = (
+            "list_declared_workflows" if self.workload_names else "configure_workload"
+        )
+        if self.diagnostics != expected_diagnostics or self.next_tool != expected_next_tool:
+            raise ValueError("valid configuration recovery must match declared workloads")
+        return self
+
+
+type WorkloadConfigurationStatus = Annotated[
+    MissingWorkloadConfigurationStatus
+    | InvalidWorkloadConfigurationStatus
+    | ValidWorkloadConfigurationStatus,
+    Field(discriminator="status"),
+]
+
+
+def _parse_configuration_changed_paths(value: object) -> object:
+    if not isinstance(value, dict):
+        return value
+    parsed = dict(value)
+    action = parsed.get("action")
+    if action in {"created", "updated", "unchanged"}:
+        expected = () if action == "unchanged" else ("flameox.toml",)
+        supplied = parsed.get("changed_paths", expected)
+        if isinstance(supplied, list):
+            supplied = tuple(supplied)
+        if supplied != expected:
+            raise ValueError("changed paths must agree with the configuration action")
+    parsed.pop("changed_paths", None)
+    return parsed
 
 
 class WorkloadConfigurationResult(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: Literal[1] = 1
     action: Literal["created", "updated", "unchanged"]
     name: str
     configuration_id: str
     workload_definition_id: str
     configuration_source: Literal["agent"] = "agent"
-    changed_paths: Annotated[
-        tuple[Annotated[str, Field(max_length=200)], ...],
-        Field(max_length=8),
-    ]
     next_tool: Literal["list_declared_workflows"] = "list_declared_workflows"
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_legacy_changed_paths(cls, value: object) -> object:
+        return _parse_configuration_changed_paths(value)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def changed_paths(self) -> tuple[Literal["flameox.toml"], ...]:
+        return () if self.action == "unchanged" else ("flameox.toml",)
 
 
 class ConfigureInferenceServerRequest(ContractModel):
@@ -863,13 +925,24 @@ class ConfigureInferenceScenarioRequest(ContractModel):
 
 
 class InferenceConfigurationResult(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: Literal[1] = 1
     kind: Literal["server", "scenario"]
     action: Literal["created", "updated", "unchanged"]
     name: str
     configuration_id: Digest
     definition_id: Digest
-    changed_paths: tuple[Literal["flameox.toml"], ...]
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_legacy_changed_paths(cls, value: object) -> object:
+        return _parse_configuration_changed_paths(value)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def changed_paths(self) -> tuple[Literal["flameox.toml"], ...]:
+        return () if self.action == "unchanged" else ("flameox.toml",)
 
 
 class InferenceConfigurationList(ContractModel):
@@ -903,7 +976,21 @@ class DeclaredWorkflowList(ContractModel):
     next_cursor: str | None
 
 
+def _parse_legacy_adapter_options_total(value: object) -> object:
+    if not isinstance(value, dict) or "adapter_options_total" not in value:
+        return value
+    legacy_total = value["adapter_options_total"]
+    if "adapter_option_total" in value and value["adapter_option_total"] != legacy_total:
+        raise ValueError("adapter option totals must agree")
+    parsed = dict(value)
+    del parsed["adapter_options_total"]
+    parsed["adapter_option_total"] = legacy_total
+    return parsed
+
+
 class DeclaredWorkflowDetail(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: int = 1
     configuration_id: str
     summary: DeclaredWorkflowSummary
@@ -913,28 +1000,52 @@ class DeclaredWorkflowDetail(ContractModel):
     design: str | None = None
     blocks: int | None = None
     primary_metric: str | None = None
-    polarity: str | None = None
+    polarity: MetricPolarity | None = None
     estimand: str | None = None
     validation_spec_id: str | None = None
     requirements: tuple[DeclaredWorkflowRequirement, ...] = ()
     adapter_options: tuple[AdapterOption, ...] = ()
     adapter_option_total: int = 0
-    adapter_options_total: int = 0
     adapter_options_truncated: bool = False
 
+    @model_validator(mode="before")
+    @classmethod
+    def parse_legacy_adapter_options_total(cls, value: object) -> object:
+        return _parse_legacy_adapter_options_total(value)
 
-class DeclaredWorkflowRequirement(ContractModel):
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def adapter_options_total(self) -> int:
+        return self.adapter_option_total
+
+
+class _DeclaredWorkflowRequirement(ContractModel):
     name: str
     kind: Literal["executable", "python_distribution", "capability"]
-    required: bool
-    optional: bool
-    probe_kind: Literal["passive", "active"]
+    probe_kind: ProbeKind
+
+
+class RequiredDeclaredWorkflowRequirement(_DeclaredWorkflowRequirement):
+    required: Literal[True] = True
+    optional: Literal[False] = False
+
+
+class OptionalDeclaredWorkflowRequirement(_DeclaredWorkflowRequirement):
+    required: Literal[False] = False
+    optional: Literal[True] = True
+
+
+type DeclaredWorkflowRequirement = Annotated[
+    RequiredDeclaredWorkflowRequirement | OptionalDeclaredWorkflowRequirement,
+    Field(discriminator="required"),
+]
 
 
 class AdapterOption(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     adapter: str
     status: CapabilityStatus
-    capability_status: CapabilityStatus
     planning_disposition: Literal[
         "ready",
         "active_probe_required",
@@ -942,22 +1053,51 @@ class AdapterOption(ContractModel):
         "unsupported",
         "degraded",
     ]
-    required_preflight_mode: Literal["passive", "active"]
-    permission_status: str | None = None
+    required_preflight_mode: ProbeKind
+    permission_status: CapabilityPermissionStatus | None = None
     supported_modes: tuple[str, ...] = ()
     supported_formats: tuple[str, ...] = ()
     features: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     remediation: tuple[str, ...] = ()
 
+    @model_validator(mode="before")
+    @classmethod
+    def parse_legacy_capability_status(cls, value: object) -> object:
+        if not isinstance(value, dict) or "capability_status" not in value:
+            return value
+        capability_status = value["capability_status"]
+        if "status" in value and value["status"] != capability_status:
+            raise ValueError("status and capability_status must agree")
+        parsed = dict(value)
+        del parsed["capability_status"]
+        parsed["status"] = capability_status
+        return parsed
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def capability_status(self) -> CapabilityStatus:
+        return self.status
+
 
 class WorkloadInspection(WorkloadDefinition):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     configuration_id: str
     requirements: tuple[DeclaredWorkflowRequirement, ...] = ()
     adapter_options: tuple[AdapterOption, ...] = ()
     adapter_option_total: int = 0
-    adapter_options_total: int = 0
     adapter_options_truncated: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_legacy_adapter_options_total(cls, value: object) -> object:
+        return _parse_legacy_adapter_options_total(value)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def adapter_options_total(self) -> int:
+        return self.adapter_option_total
 
 
 _TEMPLATE_FIELD = re.compile(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -1039,22 +1179,17 @@ class WorkloadService:
 
     def configuration_status(self) -> WorkloadConfigurationStatus:
         if not self.project_config_path.exists():
-            return WorkloadConfigurationStatus(
-                status="missing",
+            return MissingWorkloadConfigurationStatus(
                 diagnostics=("No named workload configuration exists yet.",),
-                next_tool="configure_workload",
             )
         try:
             project = self.load()
         except DomainError as error:
-            return WorkloadConfigurationStatus(
-                status="invalid",
+            return InvalidWorkloadConfigurationStatus(
                 diagnostics=(error.message[:512],),
-                next_tool="configure_workload",
             )
         has_workloads = bool(project.workloads)
-        return WorkloadConfigurationStatus(
-            status="valid",
+        return ValidWorkloadConfigurationStatus(
             configuration_id=digest_model(project),
             workload_names=tuple(sorted(project.workloads)),
             diagnostics=(("No named workloads are declared yet.",) if not has_workloads else ()),
@@ -1154,7 +1289,6 @@ class WorkloadService:
                 requirements=requirements,
                 adapter_options=adapter_options,
                 adapter_option_total=option_total,
-                adapter_options_total=option_total,
                 adapter_options_truncated=options_truncated,
             )
         if kind == "fault_experiment":
@@ -1172,7 +1306,6 @@ class WorkloadService:
                 requirements=requirements,
                 adapter_options=adapter_options,
                 adapter_option_total=option_total,
-                adapter_options_total=option_total,
                 adapter_options_truncated=options_truncated,
             )
         experiment = project.experiments[name]
@@ -1192,7 +1325,6 @@ class WorkloadService:
             requirements=requirements,
             adapter_options=adapter_options,
             adapter_option_total=option_total,
-            adapter_options_total=option_total,
             adapter_options_truncated=options_truncated,
         )
 
@@ -1207,7 +1339,6 @@ class WorkloadService:
             requirements=requirements,
             adapter_options=options,
             adapter_option_total=total,
-            adapter_options_total=total,
             adapter_options_truncated=truncated,
         )
 
@@ -1229,12 +1360,16 @@ class WorkloadService:
             ("capability", config.requirements.capabilities),
         )
         requirements = tuple(
-            DeclaredWorkflowRequirement(
+            (
+                OptionalDeclaredWorkflowRequirement
+                if name in config.requirements.optional
+                else RequiredDeclaredWorkflowRequirement
+            )(
                 name=name,
                 kind=kind,
-                required=name not in config.requirements.optional,
-                optional=name in config.requirements.optional,
-                probe_kind=("active" if name in config.requirements.active else "passive"),
+                probe_kind=(
+                    ProbeKind.ACTIVE if name in config.requirements.active else ProbeKind.PASSIVE
+                ),
             )
             for kind, values in requirement_groups
             for name in values
@@ -1260,12 +1395,10 @@ class WorkloadService:
     @staticmethod
     def _adapter_option(capability: CapabilityReport) -> AdapterOption:
         permission_sensitive = capability.permission_status in {
-            "unknown_until_active_probe",
-            "not_exercised",
+            CapabilityPermissionStatus.UNKNOWN_UNTIL_ACTIVE_PROBE,
+            CapabilityPermissionStatus.NOT_EXERCISED,
         }
-        required_mode: Literal["passive", "active"] = (
-            "active" if permission_sensitive else "passive"
-        )
+        required_mode = ProbeKind.ACTIVE if permission_sensitive else ProbeKind.PASSIVE
         if permission_sensitive and capability.status is CapabilityStatus.AVAILABLE:
             disposition: Literal[
                 "ready",
@@ -1285,7 +1418,6 @@ class WorkloadService:
         return AdapterOption(
             adapter=capability.adapter,
             status=capability.status,
-            capability_status=capability.status,
             planning_disposition=disposition,
             required_preflight_mode=required_mode,
             permission_status=capability.permission_status,
@@ -1454,7 +1586,6 @@ class WorkloadService:
                 }
             )
             definition_id = digest_model(self._definition_content(name, config))
-            changed_paths: list[str] = []
             if action != "unchanged":
                 rendered = (
                     recovered_text
@@ -1468,7 +1599,6 @@ class WorkloadService:
                     else 0o644
                 )
                 atomic_write_text(self.project_config_path, rendered, mode=mode)
-                changed_paths.append("flameox.toml")
 
         return WorkloadConfigurationResult(
             action=action,
@@ -1476,7 +1606,6 @@ class WorkloadService:
             configuration_id=digest_model(updated),
             workload_definition_id=definition_id,
             configuration_source="agent",
-            changed_paths=tuple(changed_paths),
         )
 
     def configure_inference_server(
@@ -1553,7 +1682,6 @@ class WorkloadService:
                     section: updated_values,
                 }
             )
-            changed_paths: tuple[Literal["flameox.toml"], ...] = ()
             if action != "unchanged":
                 rendered = self._render_named_config(text, section, name, config)
                 mode = (
@@ -1562,14 +1690,12 @@ class WorkloadService:
                     else 0o644
                 )
                 atomic_write_text(self.project_config_path, rendered, mode=mode)
-                changed_paths = ("flameox.toml",)
         return InferenceConfigurationResult(
             kind=kind,
             action=action,
             name=name,
             configuration_id=digest_model(updated),
             definition_id=digest_model(config),
-            changed_paths=changed_paths,
         )
 
     def resolve(

@@ -10,6 +10,8 @@ from typing import Literal
 from pydantic import ValidationError
 
 from flameox.adapters.kernel_build import (
+    ArtifactKernelBuildStage,
+    ArtifactlessKernelBuildStage,
     KernelBuildArtifact,
     KernelBuildManifestV1,
     KernelBuildStage,
@@ -403,7 +405,7 @@ class KernelBuildCaptureCollector:
             name_counts[base_name] = count + 1
             stage_name = base_name if count == 0 else f"{base_name}_{count + 1}"
             stages.append(
-                KernelBuildStage(
+                ArtifactKernelBuildStage(
                     name=stage_name,
                     ordinal=ordinal,
                     predecessor=None,
@@ -423,7 +425,7 @@ class KernelBuildCaptureCollector:
                 "failed" if outcome == "failed" else "unavailable"
             )
             stages.append(
-                KernelBuildStage(
+                ArtifactlessKernelBuildStage(
                     name="empty",
                     ordinal=0,
                     status=empty_status,
@@ -433,7 +435,7 @@ class KernelBuildCaptureCollector:
             )
         elif outcome == "failed":
             stages.append(
-                KernelBuildStage(
+                ArtifactlessKernelBuildStage(
                     name="build_failed",
                     ordinal=len(stages),
                     predecessor=None,

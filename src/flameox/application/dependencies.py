@@ -9,10 +9,17 @@ from typing import Literal
 
 import portalocker
 from packaging.requirements import InvalidRequirement, Requirement
+from pydantic import ConfigDict, computed_field, model_validator
 
 from flameox.application.preflight import PreflightService
 from flameox.application.workloads import WorkloadService
-from flameox.domain import DomainError, ErrorCode, PreflightReport
+from flameox.domain import (
+    DomainError,
+    ErrorCode,
+    PreflightDisposition,
+    PreflightReport,
+    ProbeKind,
+)
 from flameox.execution import (
     INSTALLER_ENVIRONMENT_ALLOWLIST,
     ExecutionRequest,
@@ -23,15 +30,88 @@ from flameox.storage import Workspace
 
 
 class WorkloadDependencySetupResult(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: int = 1
     workload_name: str
     requested: tuple[str, ...]
-    installed: tuple[str, ...]
     already_available: tuple[str, ...]
     preflight: PreflightReport
-    status: Literal["ready", "blocked", "exploratory"]
-    next_tool: Literal["plan_capture", "list_capabilities", "prepare_workload_dependencies"] | None
-    workload_executed: bool = False
+    workload_executed: Literal[False] = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_legacy_projections(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        parsed = dict(value)
+        requested = parsed.get("requested")
+        available = parsed.get("already_available")
+        raw_preflight = parsed.get("preflight")
+        if (
+            isinstance(requested, (list, tuple))
+            and isinstance(available, (list, tuple))
+            and raw_preflight is not None
+        ):
+            preflight = PreflightReport.model_validate(raw_preflight)
+            expected_installed = tuple(item for item in requested if item not in set(available))
+            expected_next = _dependency_next_tool(preflight)
+            supplied_installed = parsed.get("installed", expected_installed)
+            if isinstance(supplied_installed, list):
+                supplied_installed = tuple(supplied_installed)
+            if supplied_installed != expected_installed:
+                raise ValueError("installed requirements must complete the requested partition")
+            if parsed.get("status", preflight.disposition) != preflight.disposition:
+                raise ValueError("setup status must agree with preflight disposition")
+            if parsed.get("next_tool", expected_next) != expected_next:
+                raise ValueError("next tool must agree with preflight evidence")
+            parsed["preflight"] = preflight
+        for name in ("installed", "status", "next_tool"):
+            parsed.pop(name, None)
+        return parsed
+
+    @model_validator(mode="after")
+    def availability_is_a_partition(self) -> WorkloadDependencySetupResult:
+        if len(set(self.requested)) != len(self.requested):
+            raise ValueError("requested requirements must be unique")
+        available = set(self.already_available)
+        if tuple(item for item in self.requested if item in available) != self.already_available:
+            raise ValueError("already-available requirements must be an ordered requested subset")
+        return self
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def installed(self) -> tuple[str, ...]:
+        available = set(self.already_available)
+        return tuple(item for item in self.requested if item not in available)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def status(self) -> PreflightDisposition:
+        return self.preflight.disposition
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def next_tool(
+        self,
+    ) -> Literal["plan_capture", "list_capabilities", "prepare_workload_dependencies"]:
+        return _dependency_next_tool(self.preflight)
+
+
+def _dependency_next_tool(
+    preflight: PreflightReport,
+) -> Literal["plan_capture", "list_capabilities", "prepare_workload_dependencies"]:
+    if any(
+        item.kind == "python_distribution" and item.status != "available"
+        for item in preflight.requirements
+    ):
+        return "prepare_workload_dependencies"
+    if preflight.disposition in {
+        PreflightDisposition.READY,
+        PreflightDisposition.EXPLORATORY,
+    }:
+        return "plan_capture"
+    return "list_capabilities"
 
 
 class WorkloadDependencyService:
@@ -153,30 +233,15 @@ class WorkloadDependencyService:
                     ),
                 )
 
-        preflight = await PreflightService(self.workspace).inspect(workload_name, mode="active")
-        installed = tuple(item for item in names if item not in already_available)
-        missing_after = tuple(
-            item.requirement
-            for item in preflight.requirements
-            if item.kind == "python_distribution" and item.status != "available"
+        preflight = await PreflightService(self.workspace).inspect(
+            workload_name,
+            mode=ProbeKind.ACTIVE,
         )
-        next_tool: (
-            Literal["plan_capture", "list_capabilities", "prepare_workload_dependencies"] | None
-        )
-        if missing_after:
-            next_tool = "prepare_workload_dependencies"
-        elif preflight.disposition == "ready" or preflight.disposition == "exploratory":
-            next_tool = "plan_capture"
-        else:
-            next_tool = "list_capabilities"
         return WorkloadDependencySetupResult(
             workload_name=workload_name,
             requested=names,
-            installed=installed,
             already_available=already_available,
             preflight=preflight,
-            status=preflight.disposition,
-            next_tool=next_tool,
         )
 
     async def _run_install(self, command: list[str]) -> subprocess.CompletedProcess[str]:

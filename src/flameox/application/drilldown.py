@@ -205,7 +205,7 @@ class DrilldownService:
             evidence=(
                 empty_availability("no_matching_stacks")
                 if not examples
-                else EvidenceAvailability(status="available", reason="stacks_present")
+                else available_availability("stacks_present")
             ),
             next_cursor=next_cursor,
         )
@@ -298,7 +298,7 @@ class DrilldownService:
                 {str(row[0]) for row in selected},
             )
         frames = tuple(
-            metadata[str(row[0])].model_copy(
+            metadata[str(row[0])].validated_copy(
                 update={
                     "sample_count": int(row[1]),
                     "duration_ns": int(row[2]),
@@ -330,7 +330,7 @@ class DrilldownService:
             evidence=(
                 empty_availability("no_matching_edges")
                 if not frames
-                else EvidenceAvailability(status="available", reason="edges_present")
+                else available_availability("edges_present")
             ),
             next_cursor=next_cursor,
         )

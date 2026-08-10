@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from flameox.application import ImportArtifactRequest, ImportService, IntegrityService
+import pytest
+from pydantic import ValidationError
+
+from flameox.application import (
+    ImportArtifactRequest,
+    ImportService,
+    IntegrityIssue,
+    IntegrityResult,
+    IntegrityService,
+)
 from flameox.catalog import Catalog
 from flameox.storage import ArtifactStore, Workspace
 
@@ -26,3 +35,21 @@ def test_full_integrity_detects_altered_artifact_bytes(tmp_path: Path) -> None:
     assert full.valid is False
     assert any(issue.code == "INVALID_ARTIFACT" for issue in quick.issues)
     assert any(issue.code == "INVALID_ARTIFACT" for issue in full.issues)
+
+
+def test_integrity_validity_is_derived_from_issue_severity() -> None:
+    result = IntegrityResult(
+        level="quick",
+        corpus_commit_id="sha256:commit",
+        checked_artifacts=0,
+        checked_generations=0,
+        checked_parquet_files=0,
+        issues=(IntegrityIssue(severity="warning", code="STALE", message="Catalog is stale."),),
+    )
+
+    assert result.valid is True
+    assert IntegrityResult.model_validate(result.model_dump()).valid is True
+
+    contradictory = {**result.model_dump(), "valid": False}
+    with pytest.raises(ValidationError, match="validity must agree"):
+        IntegrityResult.model_validate(contradictory)

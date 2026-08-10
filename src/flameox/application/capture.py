@@ -67,6 +67,7 @@ from flameox.application.run_rows import run_row
 from flameox.application.source import collect_source_state
 from flameox.application.workloads import Scalar, WorkloadService
 from flameox.atomic import atomic_write_bytes
+from flameox.config import ContainmentPolicy, NetworkPolicy
 from flameox.domain import (
     AcceleratorIdentityFacet,
     AdapterExecutionPlan,
@@ -77,8 +78,10 @@ from flameox.domain import (
     AdapterValidationResult,
     ArtifactKind,
     ArtifactRegistration,
+    CapabilityPermissionStatus,
     CapabilityReport,
     CapabilityStatus,
+    CaptureContainment,
     CaptureLease,
     CapturePlan,
     CaptureStatus,
@@ -90,8 +93,13 @@ from flameox.domain import (
     IdentityQuality,
     LimitationDetail,
     OracleReceiptRecord,
+    OracleStatus,
     OracleStrength,
+    PreflightDisposition,
+    PreflightMode,
     PreflightReport,
+    ProbeKind,
+    ProcessCancellationCause,
     ProcessResult,
     RunManifest,
     Sensitivity,
@@ -100,7 +108,7 @@ from flameox.domain import (
     digest_model,
     new_id,
 )
-from flameox.domain.models import ExecutionRunManifest, utc_now
+from flameox.domain.models import ExecutionRunManifest, parse_capture_plan, utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.execution import (
     ExecutionOutcome,
@@ -203,7 +211,6 @@ class _AdapterBinding:
 class _PlanEntry:
     plan: CapturePlan
     expires_monotonic: float
-    consumed: bool = False
 
 
 @dataclass(slots=True)
@@ -237,7 +244,7 @@ class _CaptureExecution:
         if lease is None:
             return
         current = self.run
-        leased = current.model_copy(
+        leased = current.validated_copy(
             update={
                 "revision": current.revision + 1,
                 "lease": lease,
@@ -470,12 +477,6 @@ class CapturePlanRegistry:
                     ErrorCode.INVALID_CAPTURE_PLAN,
                     "Capture plan is missing, expired, or belongs to another server process.",
                 )
-            if entry.consumed:
-                raise DomainError(
-                    ErrorCode.INVALID_CAPTURE_PLAN,
-                    "Capture plan has already been consumed.",
-                )
-            entry.consumed = True
             plan = entry.plan
             # Evict immediately after consumption to prevent unbounded
             # memory growth when capture frequency exceeds TTL expiry.
@@ -528,7 +529,7 @@ class CaptureService:
         adapter_options: dict[str, JsonValue] | None = None,
         execution_policy: ExecutionPolicy,
         dynamic_parameters: tuple[str, ...] = (),
-        preflight_mode: Literal["auto", "passive", "active"] = "auto",
+        preflight_mode: PreflightMode = PreflightMode.AUTO,
         external_context: ExternalExecutionContext | None = None,
     ) -> CapturePlan:
         instance = self.workloads.resolve(
@@ -537,14 +538,14 @@ class CaptureService:
             dynamic_parameters=dynamic_parameters,
         )
         definition = self.workloads.definition(workload_name)
-        inspection_mode: Literal["passive", "active"] = (
-            "active" if preflight_mode == "auto" else preflight_mode
+        inspection_mode = (
+            ProbeKind.ACTIVE if preflight_mode is PreflightMode.AUTO else ProbeKind(preflight_mode)
         )
         preflight = await PreflightService(
             self.workspace,
             capabilities=self.capabilities,
         ).inspect(workload_name, mode=inspection_mode)
-        if preflight.disposition == "blocked":
+        if preflight.disposition is PreflightDisposition.BLOCKED:
             missing_distributions = tuple(
                 item.requirement
                 for item in preflight.requirements
@@ -704,57 +705,59 @@ class CaptureService:
             "containment": containment,
             "systemd_scope_unit": systemd_scope_unit,
         }
-        plan = CapturePlan(
-            plan_id=plan_id,
-            run_id=run_id,
-            request_digest=digest_model(request),
-            workspace_id=self.workspace.identity.workspace_id,
-            workload_name=workload_name,
-            workload_definition_id=definition.workload_definition_id,
-            workload_instance=instance,
-            adapter=adapter,
-            dynamic_parameters=dynamic_parameters,
-            adapter_options=bound_adapter_options,
-            adapter_version=adapter_version,
-            adapter_execution_plan=(
-                adapter_binding.execution_plan.model_dump(mode="json")
-                if adapter_binding.execution_plan is not None
-                else None
-            ),
-            execution_policy=execution_policy.value,
-            collector_argv=collector_argv,
-            collector_environment=collector_environment,
-            expected_artifact_kinds=kinds,
-            expected_overhead=overhead,
-            containment=containment,
-            network_contained=network_contained,
-            systemd_scope_unit=systemd_scope_unit,
-            permissions=adapter_binding.permissions,
-            preflight=preflight,
-            writable_roots=writable_roots,
-            external_context=external_context,
-            planned_execution_identity=planned_execution_identity,
-            adapter_capability=adapter_capability,
-            bound_identities=identities,
-            limits={
-                "timeout_seconds": instance.command.timeout_seconds,
-                "max_output_bytes": self.workspace.config.execution.max_output_bytes,
-                "max_artifact_bytes": self.workspace.config.capture.max_artifact_bytes,
-                "max_cpu_percent": self.workspace.config.execution.max_cpu_percent,
-                "max_memory_bytes": self.workspace.config.execution.max_memory_bytes,
-                "max_processes": self.workspace.config.execution.max_processes,
-                "minimum_free_bytes": self.workspace.config.storage.min_free_bytes,
-                "resource_sampling_interval_ms": (
-                    self.workspace.config.execution.resource_sampling_interval_ms
+        plan = parse_capture_plan(
+            {
+                "plan_id": plan_id,
+                "run_id": run_id,
+                "request_digest": digest_model(request),
+                "workspace_id": self.workspace.identity.workspace_id,
+                "workload_name": workload_name,
+                "workload_definition_id": definition.workload_definition_id,
+                "workload_instance": instance,
+                "adapter": adapter,
+                "dynamic_parameters": dynamic_parameters,
+                "adapter_options": bound_adapter_options,
+                "adapter_version": adapter_version,
+                "adapter_execution_plan": (
+                    adapter_binding.execution_plan.model_dump(mode="json")
+                    if adapter_binding.execution_plan is not None
+                    else None
                 ),
-                "max_resource_observed_files": (
-                    self.workspace.config.execution.max_resource_observed_files
-                ),
-            },
-            warnings=warnings,
-            limitation_details=limitation_details,
-            created_at=created_at,
-            expires_at=created_at + timedelta(seconds=self.plans.ttl_seconds),
+                "execution_policy": execution_policy.value,
+                "collector_argv": collector_argv,
+                "collector_environment": collector_environment,
+                "expected_artifact_kinds": kinds,
+                "expected_overhead": overhead,
+                "containment": containment,
+                "network_contained": network_contained,
+                "systemd_scope_unit": systemd_scope_unit,
+                "permissions": adapter_binding.permissions,
+                "preflight": preflight,
+                "writable_roots": writable_roots,
+                "external_context": external_context,
+                "planned_execution_identity": planned_execution_identity,
+                "adapter_capability": adapter_capability,
+                "bound_identities": identities,
+                "limits": {
+                    "timeout_seconds": instance.command.timeout_seconds,
+                    "max_output_bytes": self.workspace.config.execution.max_output_bytes,
+                    "max_artifact_bytes": self.workspace.config.capture.max_artifact_bytes,
+                    "max_cpu_percent": self.workspace.config.execution.max_cpu_percent,
+                    "max_memory_bytes": self.workspace.config.execution.max_memory_bytes,
+                    "max_processes": self.workspace.config.execution.max_processes,
+                    "minimum_free_bytes": self.workspace.config.storage.min_free_bytes,
+                    "resource_sampling_interval_ms": (
+                        self.workspace.config.execution.resource_sampling_interval_ms
+                    ),
+                    "max_resource_observed_files": (
+                        self.workspace.config.execution.max_resource_observed_files
+                    ),
+                },
+                "warnings": warnings,
+                "limitation_details": limitation_details,
+                "created_at": created_at,
+                "expires_at": created_at + timedelta(seconds=self.plans.ttl_seconds),
+            }
         )
         await self.plans.issue(plan)
         return plan
@@ -900,7 +903,7 @@ class CaptureService:
                 error_code=ErrorCode.INTERNAL_ERROR.value,
             )
             raise
-        prepared = initial.model_copy(
+        prepared = initial.validated_copy(
             update={
                 "revision": 1,
                 "environment_id": environment.environment_id,
@@ -909,7 +912,7 @@ class CaptureService:
             }
         )
         self.runs.append(prepared, expected_revision=0)
-        running = initial.model_copy(
+        running = initial.validated_copy(
             update={
                 "revision": 2,
                 "started_at": utc_now(),
@@ -920,7 +923,7 @@ class CaptureService:
                 "execution_identity": execution_identity,
             }
         )
-        self.runs.append(running, expected_revision=1)
+        running = self.runs.append(running, expected_revision=1)
         capture.run = running
         acquired_slot = False
         collector_limitation_details: list[LimitationDetail] = []
@@ -1009,9 +1012,10 @@ class CaptureService:
             )
             if partial_process is None:
                 partial_process = ProcessResult(
-                    timed_out=status is ExecutionStatus.TIMED_OUT,
                     cancellation_cause=(
-                        "timeout" if status is ExecutionStatus.TIMED_OUT else "process_error"
+                        ProcessCancellationCause.TIMEOUT
+                        if status is ExecutionStatus.TIMED_OUT
+                        else ProcessCancellationCause.PROCESS_ERROR
                     ),
                     cleanup_complete=True,
                 )
@@ -1027,7 +1031,11 @@ class CaptureService:
                     stdout=(partial_process.stdout or "").encode(),
                     stderr=(partial_process.stderr or "").encode(),
                     resolved_executable=Path(plan.collector_argv[0]).resolve(),
-                    containment=plan.containment,
+                    containment=(
+                        "systemd_scope"
+                        if plan.systemd_scope_unit is not None
+                        else ("process_group" if os.name == "posix" else "process")
+                    ),
                     process_observations=process_observations,
                 )
                 collector_limitation_details.append(
@@ -1410,12 +1418,12 @@ class CaptureService:
                             )
                             if validation.process.exit_code == 0:
                                 validation_status = {
-                                    "pass": ValidationStatus.PASSED,
-                                    "fail": ValidationStatus.FAILED,
-                                    "inconclusive": ValidationStatus.INCONCLUSIVE,
-                                    "unsupported": ValidationStatus.UNSUPPORTED,
+                                    OracleStatus.PASS: ValidationStatus.PASSED,
+                                    OracleStatus.FAIL: ValidationStatus.FAILED,
+                                    OracleStatus.INCONCLUSIVE: ValidationStatus.INCONCLUSIVE,
+                                    OracleStatus.UNSUPPORTED: ValidationStatus.UNSUPPORTED,
                                 }[receipt.status]
-                            elif receipt.status == "pass":
+                            elif receipt.status is OracleStatus.PASS:
                                 validation_limitations.append(
                                     "The oracle process failed despite claiming a passing receipt."
                                 )
@@ -1620,7 +1628,7 @@ class CaptureService:
                             compatibility_limitations = compute_sanitizer_compatibility_limitations(
                                 plan.adapter_version
                             )
-                            inspection = inspection.model_copy(
+                            inspection = inspection.validated_copy(
                                 update={
                                     "limitations": tuple(
                                         dict.fromkeys(
@@ -1709,7 +1717,7 @@ class CaptureService:
                     for role in oracle_receipt_record.receipt.diagnostic_roles
                     if role not in by_role
                 )
-                oracle_receipt_record = oracle_receipt_record.model_copy(
+                oracle_receipt_record = oracle_receipt_record.validated_copy(
                     update={
                         "diagnostic_artifact_ids": tuple(
                             by_role[role]
@@ -1795,7 +1803,7 @@ class CaptureService:
             running.limitation_details,
             *detail_groups,
         )
-        terminal = running.model_copy(
+        terminal = running.validated_copy(
             update={
                 "revision": running.revision + 1,
                 "finished_at": utc_now(),
@@ -1842,7 +1850,7 @@ class CaptureService:
                 "limitation_details": terminal_limitation_details,
             }
         )
-        self.runs.append(terminal, expected_revision=running.revision)
+        terminal = self.runs.append(terminal, expected_revision=running.revision)
         capture.run = terminal
         if kernel_build_manifest is not None:
             registration_ids_by_path = {
@@ -1861,14 +1869,17 @@ class CaptureService:
                     )
                 )
             except DomainError as error:
-                pipeline_failed = terminal.model_copy(
+                pipeline_failed = terminal.validated_copy(
                     update={
                         "revision": terminal.revision + 1,
                         "execution_status": ExecutionStatus.FAILED,
                         "limitations": (*terminal.limitations, error.message),
                     }
                 )
-                self.runs.append(pipeline_failed, expected_revision=terminal.revision)
+                pipeline_failed = self.runs.append(
+                    pipeline_failed,
+                    expected_revision=terminal.revision,
+                )
                 capture.run = pipeline_failed
                 error.run_id = pipeline_failed.run_id
                 raise
@@ -1986,7 +1997,7 @@ class CaptureService:
         self,
         adapter: str,
         *,
-        mode: Literal["auto", "passive", "active"],
+        mode: PreflightMode,
     ) -> CapabilityReport:
         choices = self._capture_adapter_choices()
         approved_third_party = self._is_approved_third_party(adapter)
@@ -2004,11 +2015,11 @@ class CaptureService:
             )
         report = self.capabilities.get(adapter)
         permission_sensitive = report.permission_status in {
-            "unknown_until_active_probe",
-            "not_exercised",
+            CapabilityPermissionStatus.UNKNOWN_UNTIL_ACTIVE_PROBE,
+            CapabilityPermissionStatus.NOT_EXERCISED,
         }
         if permission_sensitive:
-            if mode == "passive":
+            if mode is PreflightMode.PASSIVE:
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                     f"Adapter {adapter!r} requires an active permission probe before planning.",
@@ -2594,14 +2605,14 @@ class CaptureService:
         required: bool,
         use_containment: bool = True,
     ) -> tuple[
-        Literal["active", "degraded", "uncontained", "unavailable"],
+        CaptureContainment,
         bool,
         str | None,
         tuple[str, ...],
     ]:
         if not use_containment:
             return "uncontained", False, None, argv
-        if self.workspace.config.execution.containment == "disabled":
+        if self.workspace.config.execution.containment is ContainmentPolicy.DISABLED:
             if required:
                 raise DomainError(
                     ErrorCode.EXECUTION_REFUSED,
@@ -2636,7 +2647,7 @@ class CaptureService:
                 )
             return (
                 "degraded",
-                self.workspace.config.execution.network == "deny_when_contained",
+                self.workspace.config.execution.network is NetworkPolicy.DENY_WHEN_CONTAINED,
                 None,
                 bwrap_argv,
             )
@@ -2657,7 +2668,7 @@ class CaptureService:
         )
         return (
             "active",
-            self.workspace.config.execution.network == "deny_when_contained",
+            self.workspace.config.execution.network is NetworkPolicy.DENY_WHEN_CONTAINED,
             unit_name,
             wrapped,
         )
@@ -2717,7 +2728,7 @@ class CaptureService:
             "--unsetenv",
             "XDG_RUNTIME_DIR",
         ]
-        if self.workspace.config.execution.network == "deny_when_contained":
+        if self.workspace.config.execution.network is NetworkPolicy.DENY_WHEN_CONTAINED:
             wrapped.append("--unshare-net")
         wrapped.extend(("--tmpfs", "/tmp"))
         for path in ("/usr", "/usr/local", "/bin", "/lib", "/lib64", "/sbin", "/sys"):
@@ -2904,7 +2915,7 @@ class CaptureService:
         ).inspect(plan.workload_name, mode=plan.preflight.mode)
         if (
             current_preflight.preflight_id != plan.preflight.preflight_id
-            or current_preflight.disposition == "blocked"
+            or current_preflight.disposition is PreflightDisposition.BLOCKED
         ):
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
@@ -2938,11 +2949,14 @@ class CaptureService:
         artifacts: tuple[ArtifactRegistration, ...] = (),
     ) -> RunManifest:
         process = process or ProcessResult(
-            timed_out=execution is ExecutionStatus.TIMED_OUT,
             cancellation_cause=(
-                "caller_cancelled"
+                ProcessCancellationCause.CALLER_CANCELLED
                 if execution is ExecutionStatus.CANCELLED
-                else ("timeout" if execution is ExecutionStatus.TIMED_OUT else "process_error")
+                else (
+                    ProcessCancellationCause.TIMEOUT
+                    if execution is ExecutionStatus.TIMED_OUT
+                    else ProcessCancellationCause.PROCESS_ERROR
+                )
             ),
             cleanup_complete=cleanup_complete,
         )
@@ -2977,7 +2991,7 @@ class CaptureService:
             limitation_details,
             tuple(process_details),
         )
-        terminal = running.model_copy(
+        terminal = running.validated_copy(
             update={
                 "revision": running.revision + 1,
                 "finished_at": utc_now(),

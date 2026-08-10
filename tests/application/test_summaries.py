@@ -15,7 +15,7 @@ from flameox.application import (
     render_evidence_summary_markdown,
 )
 from flameox.catalog import Catalog
-from flameox.domain import ExternalExecutionContext, Sensitivity
+from flameox.domain import EvidenceLevel, ExternalExecutionContext, FindingAssessment, Sensitivity
 from flameox.storage import RunStore, Workspace
 from tests.support.capture import disable_containment
 
@@ -126,8 +126,8 @@ def test_markdown_renderer_contains_untrusted_text_without_structure_injection()
         finding_id="finding",
         title="heading\n# injected <img src=x onerror=alert(1)>",
         claim="`````\n# not a heading\n\x1b[31mred",
-        evidence_level="inferred",
-        assessment="inconclusive",
+        evidence_level=EvidenceLevel.INFERRED,
+        assessment=FindingAssessment.INCONCLUSIVE,
         support_status="not_supporting",
         evidence=(),
         limitations=("unsafe `inline`",),

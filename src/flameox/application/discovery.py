@@ -6,7 +6,17 @@ from typing import Literal
 from pydantic import Field
 
 from flameox.catalog import Catalog
-from flameox.domain import CursorCodec, DomainError, ErrorCode, digest_model
+from flameox.domain import (
+    ArtifactKind,
+    CaptureStatus,
+    CursorCodec,
+    DomainError,
+    ErrorCode,
+    ExecutionStatus,
+    RunType,
+    ValidationStatus,
+    digest_model,
+)
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
@@ -20,22 +30,8 @@ class RunFilter(ContractModel):
     lease_id: str | None = None
     worker_id: str | None = None
     orchestration_run_id: str | None = None
-    execution_status: tuple[
-        Literal[
-            "pending",
-            "running",
-            "succeeded",
-            "failed",
-            "timed_out",
-            "cancelled",
-            "not_applicable",
-        ],
-        ...,
-    ] = Field(default=(), max_length=8)
-    validation_status: tuple[
-        Literal["not_requested", "passed", "failed", "inconclusive", "unsupported"],
-        ...,
-    ] = Field(default=(), max_length=5)
+    execution_status: tuple[ExecutionStatus, ...] = Field(default=(), max_length=8)
+    validation_status: tuple[ValidationStatus, ...] = Field(default=(), max_length=9)
     created_after: datetime | None = None
     created_before: datetime | None = None
 
@@ -43,10 +39,10 @@ class RunFilter(ContractModel):
 class RunSummary(ContractModel):
     run_id: str
     created_at: datetime
-    run_type: str
-    execution_status: str
-    capture_status: str
-    validation_status: str
+    run_type: RunType
+    execution_status: ExecutionStatus
+    capture_status: CaptureStatus
+    validation_status: ValidationStatus
     source_state_id: str | None
     environment_id: str
     workload_definition_id: str | None
@@ -55,7 +51,7 @@ class RunSummary(ContractModel):
     lease_id: str | None
     worker_id: str | None
     orchestration_run_id: str | None
-    artifact_kinds: tuple[str, ...]
+    artifact_kinds: tuple[ArtifactKind, ...]
     resource_availability: Literal["available", "partial", "unavailable"] = "unavailable"
 
 
@@ -133,7 +129,7 @@ class RunDiscoveryService:
             if values:
                 placeholders = ", ".join("?" for _ in values)
                 predicates.append(f"{field} IN ({placeholders})")
-                parameters.extend(values)
+                parameters.extend(value.value for value in values)
                 applied.append(field)
         if filter.created_after is not None:
             predicates.append("created_at >= ?")

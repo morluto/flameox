@@ -52,11 +52,13 @@ from flameox.domain import (
     ErrorCode,
     ExecutionStatus,
     Experiment,
+    ExperimentOutcomeMethod,
     Hypothesis,
     Investigation,
     RunManifest,
     Sensitivity,
     Trial,
+    TrialFailureClass,
     TrialOutcome,
     ValidationStatus,
     Variant,
@@ -89,8 +91,8 @@ class FaultExperimentPlan(ContractModel):
     tool_version: str
     tool_asset: str
     tool_digest: str
-    containment: str = "managed_process_group"
-    workload_containment: str = "trusted_local"
+    containment: Literal["managed_process_group"] = "managed_process_group"
+    workload_containment: ExecutionPolicy = ExecutionPolicy.TRUSTED_LOCAL
     limitations: tuple[str, ...] = ()
     revision: int = 0
     consumed_at: datetime | None = None
@@ -232,7 +234,7 @@ class FaultExperimentService:
             practical_threshold=config.practical_threshold,
             confidence_level=config.confidence_level,
             stopping_rule={
-                "method": "fixed_attempts_v1",
+                "method": ExperimentOutcomeMethod.FIXED_ATTEMPTS_V1,
                 "blocks": config.blocks,
                 "repetitions": config.repetitions,
             },
@@ -320,8 +322,7 @@ class FaultExperimentService:
             tool_version=receipt.version,
             tool_asset=receipt.asset,
             tool_digest=receipt.sha256,
-            containment="managed_process_group",
-            workload_containment=execution_policy.value,
+            workload_containment=execution_policy,
             limitations=(
                 "The sidecar is a controlled transport perturbation; it does not establish "
                 "causality "
@@ -389,19 +390,7 @@ class FaultExperimentService:
                 await progress(index, total, f"Running fault treatment {cell.treatment}")
             run: RunManifest | None = None
             capture_plan: CapturePlan | None = None
-            failure_class: Literal[
-                "none",
-                "oracle_failure",
-                "oracle_inconclusive",
-                "oracle_unsupported",
-                "oracle_receipt_error",
-                "process_failure",
-                "timeout",
-                "cancellation",
-                "unsupported_environment",
-                "resource_policy",
-                "infrastructure_failure",
-            ] = "infrastructure_failure"
+            failure_class = TrialFailureClass.INFRASTRUCTURE_FAILURE
             lease: ManagedSidecarLease | None = None
             sidecar_ids: tuple[str, ...] = ()
             cancellation: asyncio.CancelledError | None = None
@@ -423,8 +412,8 @@ class FaultExperimentService:
                             proxy=proxy_name,
                             name="treatment",
                             toxic_type=scenario.type,
-                            stream=getattr(scenario, "stream", "downstream"),
-                            toxicity=getattr(scenario, "toxicity", 1.0),
+                            stream=scenario.stream,
+                            toxicity=scenario.toxicity,
                             attributes=_scenario_attributes(scenario),
                         )
                 endpoint = plan.endpoint_template.format(host="127.0.0.1", port=listen_port)
@@ -447,19 +436,25 @@ class FaultExperimentService:
                     run_path = self.workspace.paths.runs / capture_plan.run_id
                     if run_path.exists():
                         run = RunStore(self.workspace).read(capture_plan.run_id)
-                outcome, failure_class = TrialOutcome.CANCELLED, "cancellation"
+                outcome, failure_class = (
+                    TrialOutcome.CANCELLED,
+                    TrialFailureClass.CANCELLATION,
+                )
             except (ToxiproxyApiError, OSError, ValueError):
                 outcome, failure_class = (
                     TrialOutcome.INFRASTRUCTURE_FAILED,
-                    "infrastructure_failure",
+                    TrialFailureClass.INFRASTRUCTURE_FAILURE,
                 )
             except DomainError as error:
                 if error.run_id is not None:
                     run = RunStore(self.workspace).read(error.run_id)
                 outcome, failure_class = (
-                    (TrialOutcome.UNSUPPORTED, "unsupported_environment")
+                    (TrialOutcome.UNSUPPORTED, TrialFailureClass.UNSUPPORTED_ENVIRONMENT)
                     if error.code is ErrorCode.CAPABILITY_UNAVAILABLE
-                    else (TrialOutcome.INFRASTRUCTURE_FAILED, "infrastructure_failure")
+                    else (
+                        TrialOutcome.INFRASTRUCTURE_FAILED,
+                        TrialFailureClass.INFRASTRUCTURE_FAILURE,
+                    )
                 )
             finally:
                 if lease is not None:
@@ -498,7 +493,7 @@ class FaultExperimentService:
                         block_id=remaining_block.block_id,
                         order=remaining_order,
                         outcome=TrialOutcome.UNATTEMPTED,
-                        failure_class="unattempted",
+                        failure_class=TrialFailureClass.UNATTEMPTED,
                     )
                     helper._publish_trial(unattempted)
                     trials.append(unattempted)
@@ -577,7 +572,9 @@ class FaultExperimentService:
                     ErrorCode.INVALID_CAPTURE_PLAN,
                     "Fault experiment plan has expired.",
                 )
-            consumed = plan.model_copy(update={"revision": plan.revision + 1, "consumed_at": now})
+            consumed = plan.validated_copy(
+                update={"revision": plan.revision + 1, "consumed_at": now}
+            )
             self.plans.append_locked(consumed, expected_revision=plan.revision)
             return consumed
 
@@ -741,7 +738,7 @@ class FaultExperimentService:
             registrations.append(registration)
             byte_lengths.append(byte_length)
             ids.append(registration.artifact_id)
-        updated = run.model_copy(
+        updated = run.validated_copy(
             update={"revision": run.revision + 1, "artifacts": run.artifacts + tuple(registrations)}
         )
         RunStore(self.workspace).append(updated, expected_revision=run.revision)

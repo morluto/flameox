@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import uuid4
+
+from pydantic import Field, TypeAdapter
 
 from flameox.application.recoverable_move import (
     lexical_path_beneath,
@@ -19,11 +21,10 @@ from flameox.models import ContractModel
 from flameox.storage import Workspace
 
 
-class QuarantineManifest(ContractModel):
+class _QuarantineManifest(ContractModel):
     schema_version: int = 1
     quarantine_id: str
     operation: str
-    state: Literal["moving", "quarantined", "restoring", "restored"]
     detected_at: datetime
     original_path: str
     stored_path: str
@@ -33,7 +34,60 @@ class QuarantineManifest(ContractModel):
     adapter: str | None = None
     originating_run_id: str | None = None
     sha256: str
-    recovery_options: tuple[Literal["restore"], ...] = ("restore",)
+
+
+class MovingQuarantineManifest(_QuarantineManifest):
+    state: Literal["moving"] = "moving"
+    recovery_options: tuple[()] = ()
+
+    def quarantined(self) -> QuarantinedManifest:
+        return QuarantinedManifest.model_validate(
+            {
+                **self.model_dump(mode="python"),
+                "state": "quarantined",
+                "recovery_options": ("restore",),
+            }
+        )
+
+
+class QuarantinedManifest(_QuarantineManifest):
+    state: Literal["quarantined"] = "quarantined"
+    recovery_options: tuple[Literal["restore"]] = ("restore",)
+
+    def restoring(self) -> RestoringQuarantineManifest:
+        return RestoringQuarantineManifest.model_validate(
+            {
+                **self.model_dump(mode="python"),
+                "state": "restoring",
+                "recovery_options": (),
+            }
+        )
+
+
+class RestoringQuarantineManifest(_QuarantineManifest):
+    state: Literal["restoring"] = "restoring"
+    recovery_options: tuple[()] = ()
+
+    def restored(self) -> RestoredQuarantineManifest:
+        return RestoredQuarantineManifest.model_validate(
+            {**self.model_dump(mode="python"), "state": "restored"}
+        )
+
+
+class RestoredQuarantineManifest(_QuarantineManifest):
+    state: Literal["restored"] = "restored"
+    recovery_options: tuple[()] = ()
+
+
+type QuarantineManifest = Annotated[
+    MovingQuarantineManifest
+    | QuarantinedManifest
+    | RestoringQuarantineManifest
+    | RestoredQuarantineManifest,
+    Field(discriminator="state"),
+]
+
+_QUARANTINE_MANIFEST: TypeAdapter[QuarantineManifest] = TypeAdapter(QuarantineManifest)
 
 
 class QuarantineRestoreResult(ContractModel):
@@ -94,10 +148,9 @@ class QuarantineService:
         quarantine_root = self.workspace.paths.quarantine / quarantine_id
         stored_relative = Path("object") / relative
         stored_path = quarantine_root / stored_relative
-        manifest = QuarantineManifest(
+        manifest = MovingQuarantineManifest(
             quarantine_id=quarantine_id,
             operation=operation,
-            state="moving",
             detected_at=utc_now(),
             original_path=relative.as_posix(),
             stored_path=stored_relative.as_posix(),
@@ -111,9 +164,9 @@ class QuarantineService:
         self._write_manifest(quarantine_root, manifest)
         move_path(source, stored_path)
         self._verify_digest(stored_path, manifest)
-        manifest = manifest.model_copy(update={"state": "quarantined"})
-        self._write_manifest(quarantine_root, manifest)
-        return manifest
+        quarantined = manifest.quarantined()
+        self._write_manifest(quarantine_root, quarantined)
+        return quarantined
 
     def restore(self, quarantine_id: str) -> QuarantineRestoreResult:
         with (
@@ -121,7 +174,7 @@ class QuarantineService:
             self.workspace.retention_locked(shared=False),
         ):
             quarantine_root, manifest = self._read_manifest(quarantine_id)
-            if manifest.state != "quarantined":
+            if not isinstance(manifest, QuarantinedManifest):
                 raise DomainError(
                     ErrorCode.REVISION_CONFLICT,
                     f"Quarantine item is not restorable (state={manifest.state}).",
@@ -137,10 +190,10 @@ class QuarantineService:
                     ErrorCode.ARTIFACT_INTEGRITY_FAILED,
                     "Quarantined content is missing or differs from its manifest.",
                 )
-            manifest = manifest.model_copy(update={"state": "restoring"})
+            manifest = manifest.restoring()
             self._write_manifest(quarantine_root, manifest)
             move_path(source, destination)
-            manifest = manifest.model_copy(update={"state": "restored"})
+            manifest = manifest.restored()
             self._write_manifest(quarantine_root, manifest)
             return QuarantineRestoreResult(
                 quarantine_id=quarantine_id,
@@ -154,14 +207,14 @@ class QuarantineService:
             self.workspace.retention_locked(shared=False),
         ):
             quarantine_root, manifest = self._read_manifest(quarantine_id)
-            if manifest.state == "restoring":
+            if isinstance(manifest, RestoringQuarantineManifest):
                 return self._resume_restore_locked(quarantine_root, manifest)
-            if manifest.state != "moving":
+            if not isinstance(manifest, MovingQuarantineManifest):
                 return manifest
             source, destination = self._manifest_paths(quarantine_root, manifest)
             resume_move(source, destination, subject="quarantine move")
             self._verify_digest(destination, manifest)
-            manifest = manifest.model_copy(update={"state": "quarantined"})
+            manifest = manifest.quarantined()
             self._write_manifest(quarantine_root, manifest)
             return manifest
 
@@ -169,7 +222,7 @@ class QuarantineService:
         result: list[str] = []
         for path in sorted(self.workspace.paths.quarantine.glob("*/manifest.json")):
             try:
-                manifest = QuarantineManifest.model_validate_json(path.read_text())
+                manifest = _QUARANTINE_MANIFEST.validate_json(path.read_text())
             except (OSError, ValueError):
                 continue
             if manifest.state in {"moving", "restoring"}:
@@ -179,20 +232,20 @@ class QuarantineService:
     def _resume_restore_locked(
         self,
         quarantine_root: Path,
-        manifest: QuarantineManifest,
-    ) -> QuarantineManifest:
+        manifest: RestoringQuarantineManifest,
+    ) -> RestoredQuarantineManifest:
         destination, source = self._manifest_paths(quarantine_root, manifest)
         resume_move(source, destination, subject="quarantine restore")
         self._verify_digest(destination, manifest)
-        manifest = manifest.model_copy(update={"state": "restored"})
-        self._write_manifest(quarantine_root, manifest)
-        return manifest
+        restored = manifest.restored()
+        self._write_manifest(quarantine_root, restored)
+        return restored
 
     def list_manifests(self) -> tuple[QuarantineManifest, ...]:
         result: list[QuarantineManifest] = []
         for path in sorted(self.workspace.paths.quarantine.glob("*/manifest.json")):
             try:
-                result.append(QuarantineManifest.model_validate_json(path.read_text()))
+                result.append(_QUARANTINE_MANIFEST.validate_json(path.read_text()))
             except (OSError, ValueError):
                 continue
         return tuple(result)
@@ -204,7 +257,7 @@ class QuarantineService:
         validate_manifest_id(quarantine_id, kind="quarantine")
         root = self.workspace.paths.quarantine / quarantine_id
         try:
-            manifest = QuarantineManifest.model_validate_json((root / "manifest.json").read_text())
+            manifest = _QUARANTINE_MANIFEST.validate_json((root / "manifest.json").read_text())
         except (OSError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,

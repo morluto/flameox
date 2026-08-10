@@ -40,6 +40,8 @@ from flameox.domain import (
     CaptureStatus,
     ComparisonValidity,
     ExecutionStatus,
+    MetricPolarity,
+    OracleStatus,
     ValidationStatus,
     digest_model,
 )
@@ -96,7 +98,7 @@ def _complete_protocol_identity() -> InferenceProtocolIdentity:
             kind="contract_check",
             command_digest="sha256:" + "4" * 64,
         ),
-        oracle_result=OracleResult(status="pass", reason="contract_passed"),
+        oracle_result=OracleResult(status=OracleStatus.PASS, reason="contract_passed"),
     )
 
 
@@ -185,7 +187,7 @@ def _compare(
             candidate_run_set_id=candidate.run_set_id,
             metric=metric,
             unit=unit,
-            polarity="lower_is_better",
+            polarity=MetricPolarity.LOWER_IS_BETTER,
             practical_threshold=0.05,
         )
     )
@@ -444,7 +446,7 @@ def test_inference_comparison_mismatches_include_protocol_and_exploratory_reason
             candidate_run_set_id=candidate.run_set_id,
             metric="inference.latency",
             unit="ns",
-            polarity="lower_is_better",
+            polarity=MetricPolarity.LOWER_IS_BETTER,
             practical_threshold=0.05,
         )
     )
@@ -549,7 +551,7 @@ def test_within_treatment_protocol_difference_is_invalid(
             candidate_run_set_id=candidate.run_set_id,
             metric="inference.latency",
             unit="ns",
-            polarity="lower_is_better",
+            polarity=MetricPolarity.LOWER_IS_BETTER,
             practical_threshold=0.05,
         )
     )

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from flameox.application.capture import CaptureService
 from flameox.domain import (
@@ -25,6 +25,12 @@ class DetachedProgress(ContractModel):
     message: Annotated[str, Field(min_length=1, max_length=500)]
     observed_at: datetime = Field(default_factory=utc_now)
 
+    @model_validator(mode="after")
+    def completed_does_not_exceed_total(self) -> Self:
+        if self.completed > self.total:
+            raise ValueError("detached progress cannot exceed its total")
+        return self
+
 
 class DetachedCaptureRecord(ContractModel):
     schema_version: Literal[1] = 1
@@ -33,12 +39,48 @@ class DetachedCaptureRecord(ContractModel):
     idempotency_digest: str
     plan_digest: str
     plan_request: dict[str, object] = Field(default_factory=dict)
-    state: Literal["starting", "running", "terminal", "failed_to_start"] = "starting"
     progress: Annotated[tuple[DetachedProgress, ...], Field(max_length=16)] = ()
     failure_code: str | None = None
     failure_message: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_duplicate_state(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "state" not in value:
+            return value
+        state = value["state"]
+        if state not in {"starting", "running", "terminal", "failed_to_start"}:
+            raise ValueError("legacy detached capture state is invalid")
+        return {key: item for key, item in value.items() if key != "state"}
+
+    @model_validator(mode="after")
+    def failure_fields_are_atomic(self) -> Self:
+        if (self.failure_code is None) != (self.failure_message is None):
+            raise ValueError("detached capture failure code and message must appear together")
+        return self
+
+    def with_progress(self, progress: DetachedProgress) -> Self:
+        return self.__class__.model_validate(
+            {
+                **self.model_dump(mode="python"),
+                "revision": self.revision + 1,
+                "progress": (*self.progress[-15:], progress),
+                "updated_at": utc_now(),
+            }
+        )
+
+    def with_failure(self, *, code: str, message: str) -> Self:
+        return self.__class__.model_validate(
+            {
+                **self.model_dump(mode="python"),
+                "revision": self.revision + 1,
+                "failure_code": code,
+                "failure_message": message,
+                "updated_at": utc_now(),
+            }
+        )
 
 
 class DetachedRecovery(ContractModel):
@@ -65,6 +107,31 @@ class DetachedCaptureStatus(ContractModel):
     failure_message: str | None = None
     limitations: tuple[str, ...] = ()
     recovery: DetachedRecovery | None = None
+
+    @model_validator(mode="after")
+    def projected_state_is_coherent(self) -> Self:
+        if (self.failure_code is None) != (self.failure_message is None):
+            raise ValueError("detached capture failure code and message must appear together")
+        if (self.execution_status is None) != (self.capture_status is None):
+            raise ValueError("detached execution and capture status must appear together")
+        if self.recovery is not None and self.state != "failed_to_start":
+            raise ValueError("only a failed-to-start capture can carry recovery")
+        if self.state == "unmanaged_after_restart" and (
+            self.execution_status is not ExecutionStatus.RUNNING
+            or self.capture_status is not CaptureStatus.RUNNING
+        ):
+            raise ValueError("an unmanaged capture must still be running")
+        if self.state == "terminal":
+            if self.execution_status not in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.TIMED_OUT,
+                ExecutionStatus.CANCELLED,
+            }:
+                raise ValueError("a terminal detached capture requires terminal execution")
+            if self.capture_status in {CaptureStatus.PENDING, CaptureStatus.RUNNING}:
+                raise ValueError("a terminal detached capture requires terminal capture state")
+        return self
 
 
 class DetachedCaptureManager:
@@ -203,20 +270,21 @@ class DetachedCaptureManager:
             "unmanaged_after_restart",
         ]
         limitations: tuple[str, ...] = ()
-        if terminal and (task is None or task.done()):
-            state = "terminal"
-        elif terminal:
-            state = "running"
-        elif not managed and run.execution_status is ExecutionStatus.RUNNING:
-            state = "unmanaged_after_restart"
-            limitations = (
-                "The server that owned this capture is unavailable; status is read-only. "
-                "Run recovery after the exact process lease disappears.",
-            )
+        if terminal:
+            state = "running" if managed else "terminal"
         elif run.execution_status is ExecutionStatus.RUNNING:
-            state = "running"
+            if managed:
+                state = "running"
+            else:
+                state = "unmanaged_after_restart"
+                limitations = (
+                    "The server that owned this capture is unavailable; status is read-only. "
+                    "Run recovery after the exact process lease disappears.",
+                )
+        elif managed:
+            state = "starting"
         else:
-            state = record.state
+            state = "failed_to_start"
         return DetachedCaptureStatus(
             run_id=run_id,
             state=state,
@@ -269,21 +337,19 @@ class DetachedCaptureManager:
                 ),
             )
         except asyncio.CancelledError:
-            await self._sync_state(run_id)
+            pass
         except DomainError as error:
-            await self._sync_state(
+            await self._record_failure(
                 run_id,
                 failure_code=error.code.value,
                 failure_message=error.message,
             )
         except Exception as error:
-            await self._sync_state(
+            await self._record_failure(
                 run_id,
                 failure_code=ErrorCode.INTERNAL_ERROR.value,
                 failure_message=f"Detached capture failed: {type(error).__name__}.",
             )
-        else:
-            await self._sync_state(run_id)
 
     async def _record_progress(
         self,
@@ -294,56 +360,26 @@ class DetachedCaptureManager:
     ) -> None:
         async with self._record_lock:
             current = self.records.read(run_id)
-            progress = (
-                *current.progress[-15:],
-                DetachedProgress(completed=completed, total=total, message=message),
+            updated = current.with_progress(
+                DetachedProgress(completed=completed, total=total, message=message)
             )
             self.records.append(
-                current.model_copy(
-                    update={
-                        "revision": current.revision + 1,
-                        "state": "running",
-                        "progress": progress,
-                        "updated_at": utc_now(),
-                    }
-                ),
+                updated,
                 expected_revision=current.revision,
             )
 
-    async def _sync_state(
+    async def _record_failure(
         self,
         run_id: str,
         *,
-        failure_code: str | None = None,
-        failure_message: str | None = None,
+        failure_code: str,
+        failure_message: str,
     ) -> None:
         async with self._record_lock:
             current = self.records.read(run_id)
-            try:
-                run = self.runs.read(run_id)
-                state = (
-                    "terminal"
-                    if run.execution_status
-                    in {
-                        ExecutionStatus.SUCCEEDED,
-                        ExecutionStatus.FAILED,
-                        ExecutionStatus.TIMED_OUT,
-                        ExecutionStatus.CANCELLED,
-                    }
-                    else "failed_to_start"
-                )
-            except DomainError:
-                state = "failed_to_start"
+            updated = current.with_failure(code=failure_code, message=failure_message)
             self.records.append(
-                current.model_copy(
-                    update={
-                        "revision": current.revision + 1,
-                        "state": state,
-                        "failure_code": failure_code,
-                        "failure_message": failure_message,
-                        "updated_at": utc_now(),
-                    }
-                ),
+                updated,
                 expected_revision=current.revision,
             )
 

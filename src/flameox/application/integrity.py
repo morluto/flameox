@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 import pyarrow.parquet as pq
+from pydantic import ConfigDict, computed_field, model_validator
 
 from flameox.catalog import Catalog
 from flameox.domain import DomainError
@@ -21,14 +22,35 @@ class IntegrityIssue(ContractModel):
 
 
 class IntegrityResult(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: int = 1
     level: Literal["quick", "full"]
     corpus_commit_id: str
-    valid: bool
     checked_artifacts: int
     checked_generations: int
     checked_parquet_files: int
     issues: tuple[IntegrityIssue, ...]
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_legacy_valid_projection(cls, value: object) -> object:
+        if not isinstance(value, dict) or "valid" not in value:
+            return value
+        parsed = dict(value)
+        valid = parsed.pop("valid")
+        raw_issues = parsed.get("issues")
+        if isinstance(raw_issues, (list, tuple)):
+            issues = tuple(IntegrityIssue.model_validate(issue) for issue in raw_issues)
+            if valid != (not any(issue.severity == "error" for issue in issues)):
+                raise ValueError("validity must agree with integrity issue severity")
+            parsed["issues"] = issues
+        return parsed
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def valid(self) -> bool:
+        return not any(issue.severity == "error" for issue in self.issues)
 
 
 class IntegrityService:
@@ -174,7 +196,6 @@ class IntegrityService:
         return IntegrityResult(
             level="full" if full else "quick",
             corpus_commit_id=head.commit_id,
-            valid=not any(issue.severity == "error" for issue in issues),
             checked_artifacts=checked_artifacts,
             checked_generations=checked_generations,
             checked_parquet_files=checked_parquet,

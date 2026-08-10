@@ -5,7 +5,7 @@ from typing import Annotated, Literal, assert_never
 
 from pydantic import Field, JsonValue, model_validator
 
-from flameox.domain import DomainError, ErrorCode, canonical_json, digest_model
+from flameox.domain import DomainError, ErrorCode, Sensitivity, canonical_json, digest_model
 from flameox.domain.models import utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
@@ -112,7 +112,7 @@ class RegisteredPipelineStage(_PipelineStage):
     registration_id: str
     artifact_id: str
     artifact_length: int
-    sensitivity: str
+    sensitivity: Sensitivity
 
 
 class UnregisteredPipelineStage(_PipelineStage):
@@ -284,7 +284,7 @@ class ArtifactPipelineService:
                     **declaration.model_dump(),
                     artifact_id=registration.artifact_id,
                     artifact_length=content.byte_length,
-                    sensitivity=registration.sensitivity.value,
+                    sensitivity=registration.sensitivity,
                     producer=request.producer,
                     producer_version=request.producer_version,
                 )

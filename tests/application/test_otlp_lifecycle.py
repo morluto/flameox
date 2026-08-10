@@ -5,8 +5,9 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from pydantic import ValidationError
 
-from flameox.application import ImportArtifactRequest, ImportService
+from flameox.application import ImportArtifactRequest, ImportService, OtlpExtractionResult
 from flameox.application.lifecycle import LifecycleEvidenceService
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
@@ -332,9 +333,11 @@ def test_otlp_row_limit_refuses_partial_generation_and_retains_raw_artifact(
         request.SerializeToString(deterministic=True),
         "application/x-protobuf",
     )
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "storage": workspace.config.storage.model_copy(update={"max_rows_per_generation": 1})
+            "storage": workspace.config.storage.validated_copy(
+                update={"max_rows_per_generation": 1}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())
@@ -345,6 +348,17 @@ def test_otlp_row_limit_refuses_partial_generation_and_retains_raw_artifact(
     assert result.evidence_generation_id is None
     assert "otlp_row_limit_exceeded" in result.limitations
     assert ImportService(workspace).artifacts.get(artifact_id).payload_path.is_file()
+
+
+def test_otlp_failure_is_derived_from_evidence_publication() -> None:
+    failed = OtlpExtractionResult(run_id="run", artifact_id="artifact")
+
+    assert failed.failed is True
+    assert OtlpExtractionResult.model_validate(failed.model_dump()).failed is True
+
+    contradictory = {**failed.model_dump(), "failed": False}
+    with pytest.raises(ValidationError, match="failure status must agree"):
+        OtlpExtractionResult.model_validate(contradictory)
 
 
 def test_otlp_extraction_does_not_read_artifact_bytes_in_application_process(

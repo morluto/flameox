@@ -2,16 +2,44 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from pydantic import ValidationError
 
 from flameox.application.native_reducer import (
     BinaryChunkPartitioning,
     NativeDdminReducer,
     NativePredicateClassification,
+    NativeReductionAttempt,
     NativeReductionLimits,
+    NativeReductionResult,
     StructuredPartitioning,
 )
+
+
+def test_native_reduction_rejects_incoherent_outcome_state() -> None:
+    with pytest.raises(ValidationError):
+        NativeReductionAttempt(
+            attempt_id="attempt",
+            candidate_digest="sha256:" + "0" * 64,
+            candidate_size_bytes=1,
+            classification="unresolved",
+            cache_status="miss",
+            duration_ms=0,
+            became_best=True,
+        )
+
+    with pytest.raises(ValidationError):
+        NativeReductionResult(
+            disposition="succeeded",
+            original_digest="sha256:" + "0" * 64,
+            final_digest="sha256:" + "0" * 64,
+            original_unit_count=1,
+            final_unit_count=1,
+            minimality="one_minimal",
+            final_revalidation="interesting",
+        )
 
 
 def test_binary_partitioning_carries_its_required_chunk_size() -> None:

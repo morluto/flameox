@@ -34,7 +34,7 @@ def test_fault_configuration_rejects_non_discriminating_transport_definitions() 
                 "scenarios": {"off": {"type": "proxy", "enabled": False}},
             }
         )
-    with pytest.raises(ValueError, match="non-discriminating"):
+    with pytest.raises(ValueError, match="Input should be False"):
         FaultExperimentConfig.model_validate(
             {
                 "workload": "client",
@@ -228,9 +228,11 @@ async def test_fault_run_preserves_proxy_config_process_evidence_and_endpoint_in
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())

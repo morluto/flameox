@@ -31,6 +31,7 @@ from flameox.domain import (
     EvidenceReference,
     Experiment,
     IdentityQuality,
+    MetricPolarity,
     RunSet,
     RunSetMember,
     ValidationStatus,
@@ -116,7 +117,7 @@ class _CompareRunSetsRequest(ContractModel):
     baseline_run_set_id: str
     candidate_run_set_id: str
     experiment_id: str | None = None
-    polarity: Literal["lower_is_better", "higher_is_better", "neutral"]
+    polarity: MetricPolarity
     practical_threshold: float = Field(ge=0)
     confidence_level: float = Field(default=0.95, gt=0, lt=1)
     random_seed: int = Field(default=0, ge=0)
@@ -402,8 +403,9 @@ class ComparisonService:
             random_seed=request.random_seed,
             experiment_id=request.experiment_id,
         )
-        comparison = comparison.model_copy(
-            update={
+        comparison = Comparison.model_validate(
+            {
+                **comparison.model_dump(mode="python"),
                 "baseline_attempted_n": baseline.attempted,
                 "baseline_eligible_n": baseline.eligible,
                 "baseline_failed_n": baseline.failed,
@@ -416,15 +418,17 @@ class ComparisonService:
         )
         all_reasons = (*invalidating, *exploratory)
         if invalidating:
-            comparison = comparison.model_copy(
-                update={
+            comparison = Comparison.model_validate(
+                {
+                    **comparison.model_dump(mode="python"),
                     "validity": ComparisonValidity.INVALID,
                     "mismatches": tuple(all_reasons),
                 }
             )
         elif exploratory:
-            comparison = comparison.model_copy(
-                update={
+            comparison = Comparison.model_validate(
+                {
+                    **comparison.model_dump(mode="python"),
                     "validity": ComparisonValidity.EXPLORATORY,
                     "mismatches": tuple(all_reasons),
                 }
@@ -534,7 +538,7 @@ class ComparisonService:
             publisher_version="1",
             input_run_ids=input_run_ids,
         )
-        return result.model_copy(
+        return result.validated_copy(
             update={
                 "analysis": provenance.analysis,
                 "evidence": provenance.evidence,
@@ -1184,7 +1188,7 @@ class ComparisonService:
         baseline: RunSet,
         candidate: RunSet,
         *,
-        polarity: Literal["lower_is_better", "higher_is_better", "neutral"],
+        polarity: MetricPolarity,
     ) -> tuple[ProfileChange, ...]:
         baseline_values = self._frame_aggregates(snapshot, baseline)
         candidate_values = self._frame_aggregates(snapshot, candidate)

@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from flameox.application import (
     CapturePlanRegistry,
@@ -13,6 +14,7 @@ from flameox.application import (
     DetachedCaptureManager,
     DetachedCaptureRecord,
     DetachedCaptureStatus,
+    DetachedProgress,
     ExecutionPolicy,
 )
 from flameox.catalog import Catalog
@@ -30,9 +32,11 @@ argv = [{json.dumps(sys.executable)}, "-c", {json.dumps(command)}]
 timeout_seconds = {timeout}
 """
     )
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())
@@ -43,6 +47,47 @@ def _manager(workspace: Workspace) -> tuple[CaptureService, DetachedCaptureManag
     plans = CapturePlanRegistry()
     captures = CaptureService(workspace, plans=plans)
     return captures, DetachedCaptureManager(workspace, captures)
+
+
+def test_detached_record_parses_and_discards_legacy_duplicate_state() -> None:
+    record = DetachedCaptureRecord.model_validate(
+        {
+            "run_id": "legacy-run",
+            "idempotency_digest": "sha256:legacy-idempotency",
+            "plan_digest": "sha256:legacy-plan",
+            "state": "running",
+        }
+    )
+
+    assert "state" not in record.model_dump()
+
+
+def test_detached_progress_rejects_completed_work_beyond_total() -> None:
+    with pytest.raises(ValidationError):
+        DetachedProgress(completed=2, total=1, message="invalid")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"state": "running", "failure_code": "failed"},
+        {
+            "state": "terminal",
+            "execution_status": "running",
+            "capture_status": "running",
+        },
+        {
+            "state": "unmanaged_after_restart",
+            "execution_status": "failed",
+            "capture_status": "failed",
+        },
+    ),
+)
+def test_detached_status_rejects_contradictory_projection(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        DetachedCaptureStatus.model_validate({"run_id": "run", **payload})
 
 
 @pytest.mark.anyio
@@ -275,9 +320,9 @@ async def test_detached_timeout_is_terminal_and_published_once(tmp_path: Path) -
 @pytest.mark.anyio
 async def test_detached_output_limit_failure_remains_inspectable(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path, "print('x' * 10000)")
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(
+            "execution": workspace.config.execution.validated_copy(
                 update={"containment": "disabled", "max_output_bytes": 100}
             )
         }

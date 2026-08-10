@@ -4,11 +4,15 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
+from pydantic import TypeAdapter, ValidationError
 
 from flameox.application import (
     ConfigureWorkloadRequest,
+    InferenceConfigurationResult,
     ProjectConfig,
     WorkloadConfig,
+    WorkloadConfigurationResult,
+    WorkloadConfigurationStatus,
     WorkloadService,
     parse_experiment_config,
 )
@@ -30,6 +34,61 @@ def _request(
         config=WorkloadConfig(argv=argv, parameters=parameters or {}),
         expected_configuration_id=expected_configuration_id,
     )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "status": "missing",
+            "configuration_id": "sha256:" + "1" * 64,
+            "diagnostics": ["missing"],
+            "next_tool": "configure_workload",
+        },
+        {
+            "status": "invalid",
+            "diagnostics": [],
+            "next_tool": "configure_workload",
+        },
+        {
+            "status": "valid",
+            "configuration_id": "sha256:" + "1" * 64,
+            "workload_names": [],
+            "diagnostics": [],
+            "next_tool": "list_declared_workflows",
+        },
+    ],
+)
+def test_workload_configuration_status_rejects_contradictory_states(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        TypeAdapter(WorkloadConfigurationStatus).validate_python(payload)
+
+
+def test_configuration_receipts_reject_changed_paths_that_contradict_the_action() -> None:
+    digest = "sha256:" + "1" * 64
+    with pytest.raises(ValidationError):
+        WorkloadConfigurationResult.model_validate(
+            {
+                "action": "unchanged",
+                "name": "probe",
+                "configuration_id": digest,
+                "workload_definition_id": digest,
+                "changed_paths": ["flameox.toml"],
+            }
+        )
+    with pytest.raises(ValidationError):
+        InferenceConfigurationResult.model_validate(
+            {
+                "kind": "server",
+                "action": "updated",
+                "name": "local",
+                "configuration_id": digest,
+                "definition_id": digest,
+                "changed_paths": [],
+            }
+        )
 
 
 def test_configure_workload_is_idempotent_and_records_configuration_source(tmp_path: Path) -> None:

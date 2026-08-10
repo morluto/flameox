@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, ClassVar, Literal, cast
+from typing import Any, ClassVar, cast
 
 from pydantic import JsonValue
 
 from flameox.application.artifacts import ArtifactService
 from flameox.application.recoverable_move import validate_manifest_id
 from flameox.catalog import Catalog
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import DomainError, ErrorCode, EvidenceReferenceType
 from flameox.models import ContractModel
 from flameox.storage import GenerationManifest, RunStore, Workspace
 
@@ -17,16 +17,7 @@ from flameox.storage import GenerationManifest, RunStore, Workspace
 class EvidenceLookupResult(ContractModel):
     schema_version: int = 1
     corpus_commit_id: str
-    ref_type: Literal[
-        "analysis",
-        "artifact",
-        "comparison",
-        "generation",
-        "observation",
-        "run",
-        "run_set",
-        "trial",
-    ]
+    ref_type: EvidenceReferenceType
     ref_id: str
     data: dict[str, JsonValue]
 
@@ -45,16 +36,7 @@ class EvidenceLookupService:
 
     def get(
         self,
-        ref_type: Literal[
-            "analysis",
-            "artifact",
-            "comparison",
-            "generation",
-            "observation",
-            "run",
-            "run_set",
-            "trial",
-        ],
+        ref_type: EvidenceReferenceType,
         ref_id: str,
     ) -> EvidenceLookupResult:
         head = self.workspace.corpus.read_head()

@@ -211,7 +211,7 @@ class ImportService:
                 max_bytes=self.workspace.config.capture.max_artifact_bytes,
             )
         except DomainError as error:
-            failed = initial.model_copy(
+            failed = initial.validated_copy(
                 update={
                     "revision": 1,
                     "capture_status": CaptureStatus.FAILED,
@@ -236,14 +236,14 @@ class ImportService:
             producer_version=request.producer_version,
             sensitivity=request.sensitivity,
         )
-        registered = initial.model_copy(
+        registered = initial.validated_copy(
             update={
                 "revision": 1,
                 "capture_status": CaptureStatus.REGISTERED,
                 "artifacts": (registration,),
             }
         )
-        self.runs.append(registered, expected_revision=0)
+        registered = self.runs.append(registered, expected_revision=0)
         published = self.publisher.publish_rows(
             {
                 "runs": [run_row(registered)],
@@ -344,7 +344,7 @@ class ImportService:
                     )
                 )
         except DomainError as error:
-            failed = initial.model_copy(
+            failed = initial.validated_copy(
                 update={
                     "revision": 1,
                     "capture_status": CaptureStatus.FAILED,
@@ -355,14 +355,14 @@ class ImportService:
             error.run_id = run_id
             raise
 
-        registered = initial.model_copy(
+        registered = initial.validated_copy(
             update={
                 "revision": 1,
                 "capture_status": CaptureStatus.REGISTERED,
                 "artifacts": tuple(registrations),
             }
         )
-        self.runs.append(registered, expected_revision=0)
+        registered = self.runs.append(registered, expected_revision=0)
         published = self.publisher.publish_rows(
             {
                 "runs": [run_row(registered)],

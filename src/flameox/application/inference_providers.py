@@ -23,7 +23,14 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from urllib.response import addinfourl
 
-from pydantic import Field, TypeAdapter, field_validator, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 from flameox.domain import DomainError, ErrorCode
 from flameox.execution import ExecutionRequest, SubprocessBroker
@@ -261,15 +268,35 @@ class SglangBenchServingRequest(ContractModel):
 
 
 class _InferenceToolDiscovery(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     tool: Literal["aiperf", "vllm", "sglang"]
     version: str | None = None
     executable_digest: str | None = None
+    available: bool
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_legacy_compatible(cls, value: object) -> object:
+        if not isinstance(value, dict) or "compatible" not in value:
+            return value
+        compatible = value["compatible"]
+        if "available" in value and value["available"] != compatible:
+            raise ValueError("availability and compatibility must agree")
+        parsed = dict(value)
+        del parsed["compatible"]
+        parsed["available"] = compatible
+        return parsed
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def compatible(self) -> bool:
+        return self.available
 
 
 class AvailableInferenceToolDiscovery(_InferenceToolDiscovery):
     executable: Path
     available: Literal[True] = True
-    compatible: Literal[True] = True
     compatibility_reason: Literal[None] = None
     remediation: tuple[()] = ()
 
@@ -277,7 +304,6 @@ class AvailableInferenceToolDiscovery(_InferenceToolDiscovery):
 class UnavailableInferenceToolDiscovery(_InferenceToolDiscovery):
     executable: Path | None = None
     available: Literal[False] = False
-    compatible: Literal[False] = False
     compatibility_reason: str | None = None
     remediation: tuple[str, ...] = ()
 

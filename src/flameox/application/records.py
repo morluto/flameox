@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import ClassVar, Literal
+from typing import ClassVar
 
 from pydantic import Field, JsonValue
 
@@ -13,8 +13,11 @@ from flameox.domain import (
     ErrorCode,
     EvidenceLevel,
     EvidenceReference,
+    EvidenceReferenceType,
+    EvidenceRelation,
     Finding,
     FindingAssessment,
+    FindingConfidence,
     FindingLifecycle,
     Hypothesis,
     Investigation,
@@ -44,18 +47,9 @@ class RecordHypothesisRequest(ContractModel):
 
 
 class EvidenceInput(ContractModel):
-    ref_type: Literal[
-        "analysis",
-        "artifact",
-        "comparison",
-        "generation",
-        "observation",
-        "run",
-        "run_set",
-        "trial",
-    ]
+    ref_type: EvidenceReferenceType
     ref_id: str
-    relation: Literal["supports", "contradicts", "context", "validates"]
+    relation: EvidenceRelation
 
 
 class RecordFindingRequest(ContractModel):
@@ -63,7 +57,7 @@ class RecordFindingRequest(ContractModel):
     title: str = Field(min_length=1, max_length=500)
     claim: str = Field(min_length=1, max_length=500)
     evidence_level: EvidenceLevel
-    confidence: Literal["high", "medium", "low", "unknown"]
+    confidence: FindingConfidence
     assessment: FindingAssessment
     lifecycle: FindingLifecycle = FindingLifecycle.ACTIVE
     limitations: tuple[str, ...] = ()
@@ -196,7 +190,7 @@ class InvestigationService:
                     ErrorCode.WORKSPACE_INVALID,
                     "A hypothesis cannot move between investigations.",
                 )
-            hypothesis = current.model_copy(
+            hypothesis = current.validated_copy(
                 update={
                     "revision": request.expected_revision + 1,
                     "claim": request.claim,
@@ -304,7 +298,7 @@ class FindingService:
                     "A finding revision requires expected_revision.",
                 )
             current = self.findings.read(request.finding_id)
-            finding = current.model_copy(
+            finding = current.validated_copy(
                 update={
                     "revision": request.expected_revision + 1,
                     "kind": request.kind,

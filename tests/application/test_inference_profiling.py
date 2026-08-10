@@ -280,7 +280,6 @@ def test_sglang_torch_plan_has_stable_identity_and_derived_profile_id(
         tool="sglang",
         executable=launcher,
         available=True,
-        compatible=True,
         version="0.5.16",
         executable_digest="sha256:" + "b" * 64,
     )
