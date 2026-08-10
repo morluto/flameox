@@ -42,7 +42,8 @@ class JsonRecordStore[RecordT: BaseModel]:
         that must inspect and create records in one cross-process critical
         section. Callers must hold ``workspace.write_locked()``.
         """
-        identifier = self._identifier(record)
+        persisted = self._canonical(record)
+        identifier = self._identifier(persisted)
         root = self._root(identifier)
         try:
             root.mkdir(parents=True)
@@ -53,8 +54,8 @@ class JsonRecordStore[RecordT: BaseModel]:
             ) from None
         if self.revision_field is not None:
             (root / "revisions").mkdir()
-            self._write_revision(record)
-        self._write_projection(record)
+            self._write_revision(persisted)
+        self._write_projection(persisted)
         return record
 
     def _any_ancestor_is_symlink(self, path: Path) -> bool:
@@ -123,10 +124,11 @@ class JsonRecordStore[RecordT: BaseModel]:
                 ErrorCode.REVISION_CONFLICT,
                 f"{self.kind} records do not support revisions.",
             )
-        identifier = self._identifier(record)
+        persisted = self._canonical(record)
+        identifier = self._identifier(persisted)
         current = self.read(identifier)
         actual = self._revision(current)
-        next_revision = self._revision(record)
+        next_revision = self._revision(persisted)
         if next_revision != expected_revision + 1:
             # Caller bug: the supplied next revision does not match the
             # expected sequence. Retrying would loop forever, so this is
@@ -150,9 +152,18 @@ class JsonRecordStore[RecordT: BaseModel]:
                     "actual_revision": actual,
                 },
             )
-        self._write_revision(record)
-        self._write_projection(record)
+        self._write_revision(persisted)
+        self._write_projection(persisted)
         return record
+
+    def _canonical(self, record: RecordT) -> RecordT:
+        try:
+            return self._adapter.validate_python(record.model_dump(mode="python"))
+        except ValueError as exc:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                f"Invalid {self.kind} record cannot be persisted.",
+            ) from exc
 
     def _root(self, identifier: str) -> Path:
         if (

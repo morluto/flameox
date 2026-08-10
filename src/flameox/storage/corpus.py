@@ -70,7 +70,7 @@ def build_commit(
         generation_manifests=generation_manifests,
         inventory_digest=inventory_digest,
     )
-    return commit.model_copy(update={"commit_id": digest_model(commit.content_without_id())})
+    return commit.validated_copy(update={"commit_id": digest_model(commit.content_without_id())})
 
 
 class CorpusStore:

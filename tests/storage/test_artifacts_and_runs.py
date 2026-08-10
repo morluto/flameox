@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from pydantic import TypeAdapter
 
 from flameox.domain import (
+    CaptureLease,
     CaptureStatus,
     DomainError,
     ErrorCode,
@@ -15,7 +17,7 @@ from flameox.domain import (
     RunManifest,
     ValidationStatus,
 )
-from flameox.domain.models import ImportRunManifest
+from flameox.domain.models import ExecutionRunManifest, ImportRunManifest
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
 DIGEST = "sha256:" + ("a" * 64)
@@ -360,6 +362,54 @@ def test_run_revisions_use_compare_and_swap(tmp_path: Path) -> None:
     assert store.read("run") == completed
     revisions = list((workspace.paths.runs / "run" / "revisions").glob("*.json"))
     assert len(revisions) == 2
+
+
+def test_run_store_reparses_unchecked_updates_before_persistence(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    started = datetime(2025, 1, 2, 3, 4, tzinfo=UTC)
+    run = ExecutionRunManifest(
+        run_id="invalid-transition",
+        started_at=started,
+        execution_status=ExecutionStatus.RUNNING,
+        capture_status=CaptureStatus.RUNNING,
+        validation_status=ValidationStatus.PENDING,
+        environment_id=DIGEST,
+    )
+    invalid = run.model_copy(update={"finished_at": started - timedelta(seconds=1)})
+
+    with pytest.raises(DomainError) as error:
+        RunStore(workspace).create(invalid)
+
+    assert error.value.code is ErrorCode.WORKSPACE_INVALID
+    assert not (workspace.paths.runs / run.run_id).exists()
+
+
+def test_record_store_reparses_unchecked_updates_before_persistence(tmp_path: Path) -> None:
+    from flameox.storage.records import JsonRecordStore
+
+    workspace = Workspace.initialize(tmp_path)
+    observed = datetime(2025, 1, 2, 3, 4, tzinfo=UTC)
+    lease = CaptureLease(
+        process_id=123,
+        process_start_identity="456",
+        boot_id="boot-id",
+        heartbeat_monotonic_ns=0,
+        observed_at=observed,
+        expires_at=observed + timedelta(seconds=1),
+    )
+    invalid = lease.model_copy(update={"expires_at": observed})
+    store = JsonRecordStore(
+        workspace,
+        kind="leases",
+        model=CaptureLease,
+        id_field="boot_id",
+    )
+
+    with pytest.raises(DomainError) as error:
+        store.create(invalid)
+
+    assert error.value.code is ErrorCode.WORKSPACE_INVALID
+    assert not (workspace.paths.records / "leases" / lease.boot_id).exists()
 
 
 def test_artifact_get_rejects_race_symlink_swap(tmp_path: Path) -> None:
