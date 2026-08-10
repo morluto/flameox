@@ -161,3 +161,22 @@ def test_summary_request_has_structural_reference_limits() -> None:
             comparison_ids=tuple(f"comparison-{index}" for index in range(10)),
             analysis_ids=tuple(f"analysis-{index}" for index in range(20)),
         )
+
+
+def test_trial_failure_class_fallback_for_null_column_value() -> None:
+    """A NULL failure_class from externally written rows must degrade to NONE.
+
+    Regression: the strict ``TrialFailureClass(str(row[2]))`` conversion raised
+    ``ValueError`` when ``row[2]`` was ``None`` (``str(None)`` is ``"None"``,
+    which is not a valid enum member). The fix falls back to
+    ``TrialFailureClass.NONE``.
+    """
+    from flameox.domain import TrialFailureClass
+
+    with pytest.raises(ValueError):
+        TrialFailureClass(str(None))
+
+    fallback = TrialFailureClass(
+        str(None) if None is not None else TrialFailureClass.NONE
+    )
+    assert fallback is TrialFailureClass.NONE

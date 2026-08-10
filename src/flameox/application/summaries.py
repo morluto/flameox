@@ -405,7 +405,9 @@ class EvidenceSummaryService:
                 SummaryAttempt(
                     trial_id=str(row[0]),
                     outcome=TrialOutcome(str(row[1])),
-                    failure_class=TrialFailureClass(str(row[2])),
+                    failure_class=TrialFailureClass(
+                        str(row[2]) if row[2] is not None else TrialFailureClass.NONE
+                    ),
                     exclusion_reason=str(row[3]) if row[3] is not None else None,
                     combination_id=str(row[4] or row[0]),
                     factors=(

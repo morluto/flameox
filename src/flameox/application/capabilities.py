@@ -152,6 +152,8 @@ class CapabilityList(ContractModel):
                 supplied = parsed.get(name, expected)
                 if isinstance(expected, tuple) and isinstance(supplied, list):
                     supplied = tuple(supplied)
+                if name == "next_tool" and supplied == "list_capabilities":
+                    supplied = None
                 if supplied != expected:
                     raise ValueError(f"{name} must agree with capability reports")
             parsed["capabilities"] = capabilities

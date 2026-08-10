@@ -332,6 +332,61 @@ def test_plan_unavailable_tool_records_remediation_and_empty_argv(
     assert plan.tool_remediation == ("Install the inference extra.",)
 
 
+def test_plan_incompatible_but_present_tool_returns_remediation_without_argv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool that is installed but incompatible must still produce an actionable plan.
+
+    Regression: previously the plan built argv from the executable path even when
+    the discovery was unavailable, and the coherence validator rejected argv +
+    compatibility_reason, causing a ValidationError instead of a plan.
+    """
+    from flameox.application import inference as inference_module
+    from flameox.application.inference_providers import (
+        ExistingServerProbe,
+        InferenceToolDiscovery,
+    )
+
+    def fake_discover(tool: str) -> InferenceToolDiscovery:
+        from flameox.application.inference_providers import (
+            UnavailableInferenceToolDiscovery,
+        )
+
+        return UnavailableInferenceToolDiscovery(
+            tool="aiperf",
+            executable=Path("/tools/aiperf"),
+            version="0.11.0",
+            executable_digest="sha256:" + "a" * 64,
+            compatibility_reason="AIPerf version is outside the supported >=0.12,<0.13 range.",
+            remediation=("Install a compatible AIPerf >=0.12,<0.13 in the Flameox runtime.",),
+        )
+
+    def fake_probe(base_url: str, *, timeout_seconds: float = 2.0) -> ExistingServerProbe:
+        del base_url, timeout_seconds
+        return ExistingServerProbe(
+            base_url="http://127.0.0.1:8000",
+            health_ready=True,
+            model_ids=("test-model",),
+        )
+
+    monkeypatch.setattr(inference_module, "discover_inference_tool", fake_discover)
+    monkeypatch.setattr(inference_module, "probe_existing_vllm_server", fake_probe)
+
+    workspace = Workspace.initialize(tmp_path)
+    _write_project(tmp_path)
+    service = InferenceReplayService(workspace, broker=RecordingBroker())
+
+    plan = service.plan("aiperf_replay")
+
+    assert plan.tool_available is False
+    assert plan.tool_compatible is False
+    assert plan.argv == ()
+    assert plan.tool_executable is not None
+    assert plan.tool_compatibility_reason is not None
+    assert plan.tool_remediation != ()
+
+
 @pytest.mark.anyio
 async def test_run_executes_through_broker_and_preserves_argv_and_output_path(
     tmp_path: Path,

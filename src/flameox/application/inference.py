@@ -369,16 +369,16 @@ class InferenceReplayService:
         output_path = self._output_path(scenario_name, new_id())
         if scenario.provider == "sglang_bench":
             output_path = output_path.with_suffix(".jsonl")
-        request = (
-            self._build_request(
+        if discovery.available:
+            assert discovery.executable is not None
+            request = self._build_request(
                 scenario,
                 server,
                 discovery.executable,
                 output_path=output_path,
             )
-            if discovery.executable is not None
-            else None
-        )
+        else:
+            request = None
         configuration_id = digest_model(project.model_dump(mode="json"))
         plan_id = digest_model(
             {
