@@ -8,6 +8,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from flameox.application.oracle_receipts import parse_oracle_receipt
 from flameox.domain import (
+    ArtifactContent,
     ArtifactKind,
     ArtifactRegistration,
     CaptureStatus,
@@ -15,23 +16,79 @@ from flameox.domain import (
     DomainError,
     ExecutionStatus,
     OracleReceiptValue,
+    ProcessCancellationCause,
+    ProcessResult,
     RunManifest,
+    RuntimeResourceSummary,
     Sensitivity,
     Trial,
     TrialOutcome,
     ValidationStatus,
+    digest_model,
     effective_sensitivity,
 )
 from flameox.domain.models import (
+    ActiveCapturePlan,
     DigestOracleReceiptValue,
     ExecutionRunManifest,
     ImportRunManifest,
+    Integrity,
     ScalarOracleReceiptValue,
     SucceededTrial,
+    parse_capture_plan,
 )
 from flameox.domain.scalars import FloatingValue, IntegerValue, NumericValue, parse_numeric_value
 
 DIGEST = "sha256:" + ("a" * 64)
+
+
+def _capture_plan_payload(**overrides: object) -> dict[str, object]:
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    command = CommandSpec(argv=("python",), cwd=".")
+    instance_content = {
+        "workload_definition_id": DIGEST,
+        "command": command.model_dump(mode="json"),
+        "parameters": {},
+    }
+    execution_identity_content = {
+        "quality": "not_applicable",
+        "inputs": [],
+        "missing_inputs": [],
+    }
+    payload: dict[str, object] = {
+        "plan_id": "plan",
+        "run_id": "run",
+        "request_digest": DIGEST,
+        "workspace_id": "workspace",
+        "workload_name": "workload",
+        "workload_definition_id": DIGEST,
+        "workload_instance": {
+            "workload_instance_id": digest_model(instance_content),
+            **instance_content,
+        },
+        "adapter": "adapter",
+        "execution_policy": "trusted_local",
+        "collector_argv": ["python"],
+        "expected_artifact_kinds": [],
+        "expected_overhead": "low",
+        "containment": "active",
+        "network_contained": True,
+        "systemd_scope_unit": "flameox-plan.scope",
+        "preflight": {
+            "preflight_id": DIGEST,
+            "mode": "passive",
+            "disposition": "ready",
+            "requirements": [],
+        },
+        "planned_execution_identity": {
+            "identity_id": digest_model(execution_identity_content),
+            **execution_identity_content,
+        },
+        "created_at": created_at,
+        "expires_at": datetime(2026, 1, 1, 0, 5, tzinfo=UTC),
+    }
+    payload.update(overrides)
+    return payload
 
 
 def test_sensitivity_is_monotonic_across_registrations() -> None:
@@ -52,6 +109,37 @@ def test_core_dump_has_mandatory_sensitivity_floor() -> None:
             kind=ArtifactKind.CORE_DUMP,
             role="primary",
             sensitivity=Sensitivity.INTERNAL,
+        )
+
+
+def test_artifact_metadata_rejects_an_id_that_disagrees_with_integrity() -> None:
+    with pytest.raises(ValidationError):
+        ArtifactContent(
+            artifact_id=DIGEST,
+            byte_length=0,
+            payload_name="payload",
+            integrity=Integrity(sha256="b" * 64),
+        )
+
+
+def test_workload_instance_rejects_tampered_bound_content() -> None:
+    command = CommandSpec(argv=("python",), cwd=".")
+    content = {
+        "workload_definition_id": DIGEST,
+        "command": command.model_dump(mode="json"),
+        "parameters": {"workers": 1},
+    }
+    payload = {
+        "workload_instance_id": digest_model(content),
+        **content,
+    }
+    payload["parameters"] = {"workers": 2}
+
+    with pytest.raises(ValidationError):
+        parse_capture_plan(
+            _capture_plan_payload(
+                workload_instance=payload,
+            )
         )
 
 
@@ -127,6 +215,39 @@ def test_run_manifest_parser_routes_schema_one_json_to_legal_variants() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "updates",
+    (
+        {"execution_status": "planned", "capture_status": "running"},
+        {
+            "execution_status": "running",
+            "capture_status": "running",
+            "started_at": None,
+        },
+        {
+            "execution_status": "failed",
+            "capture_status": "failed",
+            "finished_at": None,
+        },
+    ),
+)
+def test_execution_run_rejects_contradictory_lifecycle(updates: dict[str, object]) -> None:
+    payload: dict[str, object] = {
+        "run_id": "run",
+        "environment_id": DIGEST,
+        "validation_status": "not_requested",
+        "created_at": "2026-01-01T00:00:00Z",
+        "started_at": "2026-01-01T00:00:01Z",
+        "finished_at": "2026-01-01T00:00:02Z",
+        "execution_status": "failed",
+        "capture_status": "failed",
+    }
+    payload.update(updates)
+
+    with pytest.raises(ValidationError):
+        ExecutionRunManifest.model_validate(payload)
+
+
 def test_import_run_rejects_execution_only_identity() -> None:
     with pytest.raises(ValidationError, match="workload_definition_id"):
         ImportRunManifest.model_validate(
@@ -138,6 +259,57 @@ def test_import_run_rejects_execution_only_identity() -> None:
                 "workload_definition_id": DIGEST,
             }
         )
+
+
+def test_capture_plan_parses_containment_into_a_legal_variant() -> None:
+    plan = parse_capture_plan(_capture_plan_payload())
+
+    assert isinstance(plan, ActiveCapturePlan)
+    assert parse_capture_plan(plan.model_dump(mode="json")) == plan
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"containment": "active", "systemd_scope_unit": None},
+        {"containment": "degraded", "systemd_scope_unit": "unexpected.scope"},
+        {"containment": "uncontained", "network_contained": True},
+        {"containment": "unavailable", "network_contained": True},
+    ),
+)
+def test_capture_plan_rejects_contradictory_containment(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        parse_capture_plan(_capture_plan_payload(**overrides))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"exit_code": 1, "terminating_signal": 9},
+        {"timed_out": True, "cancellation_cause": "caller_cancelled"},
+        {"timed_out": False, "cancellation_cause": "timeout"},
+        {
+            "peak_rss_bytes": 10,
+            "resources": RuntimeResourceSummary(
+                sampling_interval_ms=10,
+                peak_rss_bytes=20,
+            ),
+        },
+    ),
+)
+def test_process_result_rejects_incoherent_termination(payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        ProcessResult.model_validate(payload)
+
+
+def test_process_result_parses_legacy_timeout_flag_into_authoritative_cause() -> None:
+    result = ProcessResult.model_validate({"timed_out": True})
+
+    assert result.cancellation_cause is ProcessCancellationCause.TIMEOUT
+    assert result.timed_out is True
+    assert ProcessResult.model_validate(result.model_dump(mode="json")) == result
 
 
 @pytest.mark.parametrize("argv", [(), ("python", "bad\x00arg"), ("",)])

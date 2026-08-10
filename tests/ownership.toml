@@ -335,6 +335,13 @@ markers = ["unit"]
 
 
 [[ownership]]
+owner = "evidence-status"
+lane = "analysis"
+paths = ["tests/evidence/test_evidence_status.py"]
+markers = ["unit"]
+
+
+[[ownership]]
 owner = "publication-and-catalog"
 lane = "storage"
 paths = ["tests/evidence/test_publication_and_catalog.py"]

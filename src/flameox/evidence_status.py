@@ -1,26 +1,100 @@
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, TypeAdapter
 
 from flameox.models import ContractModel
 
-EvidenceStatus = Literal["available", "empty", "unavailable", "partial", "unknown"]
+
+class EvidenceStatus(StrEnum):
+    AVAILABLE = "available"
+    EMPTY = "empty"
+    UNAVAILABLE = "unavailable"
+    PARTIAL = "partial"
+    UNKNOWN = "unknown"
 
 
-class EvidenceAvailability(ContractModel):
-    """Machine-readable evidence presence shared by analysis and query results."""
+class _EvidenceAvailability(ContractModel):
+    """Fields shared by every machine-readable evidence state."""
 
-    status: EvidenceStatus
     reason: str = Field(min_length=1, max_length=200)
-    next_tool: str | None = None
-    next_arguments: dict[str, object] | None = None
 
 
-def available_availability() -> EvidenceAvailability:
-    return EvidenceAvailability(status="available", reason="evidence_present")
+class _EvidenceWithoutRecovery(_EvidenceAvailability):
+    next_tool: Literal[None] = None
+    next_arguments: Literal[None] = None
+
+
+class AvailableEvidence(_EvidenceWithoutRecovery):
+    status: Literal[EvidenceStatus.AVAILABLE] = EvidenceStatus.AVAILABLE
+
+
+class EmptyEvidence(_EvidenceWithoutRecovery):
+    status: Literal[EvidenceStatus.EMPTY] = EvidenceStatus.EMPTY
+
+
+class PartialEvidence(_EvidenceWithoutRecovery):
+    status: Literal[EvidenceStatus.PARTIAL] = EvidenceStatus.PARTIAL
+
+
+class UnknownEvidence(_EvidenceWithoutRecovery):
+    status: Literal[EvidenceStatus.UNKNOWN] = EvidenceStatus.UNKNOWN
+
+
+class UnavailableEvidence(_EvidenceWithoutRecovery):
+    status: Literal[EvidenceStatus.UNAVAILABLE] = EvidenceStatus.UNAVAILABLE
+
+
+class RecoverableUnavailableEvidence(_EvidenceAvailability):
+    status: Literal[EvidenceStatus.UNAVAILABLE] = EvidenceStatus.UNAVAILABLE
+    next_tool: str = Field(min_length=1, max_length=100)
+    next_arguments: dict[str, object]
+
+
+type EvidenceAvailability = (
+    AvailableEvidence
+    | EmptyEvidence
+    | PartialEvidence
+    | UnknownEvidence
+    | RecoverableUnavailableEvidence
+    | UnavailableEvidence
+)
+
+_EVIDENCE_AVAILABILITY_ADAPTER: TypeAdapter[EvidenceAvailability] = TypeAdapter(
+    EvidenceAvailability
+)
+
+
+def parse_evidence_availability(value: object) -> EvidenceAvailability:
+    return _EVIDENCE_AVAILABILITY_ADAPTER.validate_python(value)
+
+
+def available_availability(reason: str = "evidence_present") -> EvidenceAvailability:
+    return AvailableEvidence(reason=reason)
 
 
 def empty_availability(reason: str = "no_matching_evidence") -> EvidenceAvailability:
-    return EvidenceAvailability(status="empty", reason=reason)
+    return EmptyEvidence(reason=reason)
+
+
+def partial_availability(reason: str) -> EvidenceAvailability:
+    return PartialEvidence(reason=reason)
+
+
+def unavailable_availability(reason: str) -> EvidenceAvailability:
+    return UnavailableEvidence(reason=reason)
+
+
+def recoverable_unavailable_evidence(
+    reason: str,
+    *,
+    next_tool: str,
+    next_arguments: dict[str, object],
+) -> EvidenceAvailability:
+    return RecoverableUnavailableEvidence(
+        reason=reason,
+        next_tool=next_tool,
+        next_arguments=next_arguments,
+    )

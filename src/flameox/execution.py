@@ -22,7 +22,11 @@ import psutil
 from pydantic import Field, field_validator
 
 from flameox.domain.errors import DomainError, ErrorCode
-from flameox.domain.models import ProcessResult, RuntimeResourceSummary
+from flameox.domain.models import (
+    ProcessCancellationCause,
+    ProcessResult,
+    RuntimeResourceSummary,
+)
 from flameox.models import ContractModel
 
 _DANGEROUS_ENVIRONMENT = {
@@ -81,6 +85,7 @@ INSTALLER_ENVIRONMENT_ALLOWLIST = (
 )
 
 _T = TypeVar("_T")
+type ProcessContainment = Literal["broker", "process", "process_group", "systemd_scope"]
 
 
 def _is_dangerous_environment_name(name: str) -> bool:
@@ -146,7 +151,7 @@ class ExecutionOutcome:
     stdout: bytes
     stderr: bytes
     resolved_executable: Path
-    containment: str
+    containment: ProcessContainment
     peak_rss_backend: str | None = None
     process_observations: tuple[ProcessObservation, ...] = ()
 
@@ -156,7 +161,7 @@ class ManagedSidecarOutcome:
     process: ProcessResult
     stdout: bytes
     stderr: bytes
-    containment: str
+    containment: ProcessContainment
     process_observations: tuple[ProcessObservation, ...]
     started_at: datetime
     finished_at: datetime
@@ -204,21 +209,21 @@ class _ObservedWait:
     returncode: int
     peak_rss_bytes: int | None
     peak_rss_backend: str
-    cancellation_cause: (
-        Literal["timeout", "caller_cancelled", "output_limit", "io_failure"] | None
-    ) = None
+    cancellation_cause: ProcessCancellationCause | None = None
 
 
 @dataclass(slots=True)
 class _OutputBudget:
     remaining: int
-    exceeded: bool = False
 
     def consume(self, byte_count: int) -> None:
         self.remaining -= byte_count
         if self.remaining < 0:
-            self.exceeded = True
             raise _OutputLimitExceeded
+
+    @property
+    def exceeded(self) -> bool:
+        return self.remaining < 0
 
 
 @dataclass(slots=True)
@@ -468,8 +473,7 @@ class SubprocessBroker:
                 await asyncio.shield(on_cleanup(cleanup_complete))
             timeout_process = ProcessResult(
                 wall_time_ns=time.monotonic_ns() - started,
-                timed_out=True,
-                cancellation_cause="timeout",
+                cancellation_cause=ProcessCancellationCause.TIMEOUT,
                 cleanup_complete=cleanup_complete,
             )
             raise DomainError(
@@ -501,8 +505,6 @@ class SubprocessBroker:
         if request.stdin_bytes is not None:
             assert process.stdin is not None
             stdin_task = asyncio.create_task(self._write_stdin(process.stdin, request.stdin_bytes))
-        timed_out = False
-        cancellation_cause: str | None = None
         try:
             async with asyncio.timeout_at(deadline):
                 if on_started is not None:
@@ -534,8 +536,6 @@ class SubprocessBroker:
                 stderr = cast(bytes, results[1])
                 resources = cast(RuntimeResourceSummary | None, results[3])
         except TimeoutError as exc:
-            timed_out = True
-            cancellation_cause = "timeout"
             cleanup_complete = await self._terminate_with_observation(
                 process,
                 request,
@@ -557,8 +557,7 @@ class SubprocessBroker:
                     else None
                 ),
                 wall_time_ns=time.monotonic_ns() - started,
-                timed_out=True,
-                cancellation_cause=cancellation_cause,
+                cancellation_cause=ProcessCancellationCause.TIMEOUT,
                 cleanup_complete=cleanup_complete,
                 peak_rss_bytes=resources.peak_rss_bytes if resources is not None else None,
                 resources=resources,
@@ -577,7 +576,6 @@ class SubprocessBroker:
                 retryable=True,
             ) from exc
         except _OutputLimitExceeded as exc:
-            cancellation_cause = "output_limit"
             cleanup_complete = await self._terminate_with_observation(
                 process,
                 request,
@@ -600,7 +598,7 @@ class SubprocessBroker:
                     else None
                 ),
                 wall_time_ns=time.monotonic_ns() - started,
-                cancellation_cause=cancellation_cause,
+                cancellation_cause=ProcessCancellationCause.OUTPUT_LIMIT,
                 cleanup_complete=cleanup_complete,
             )
             raise DomainError(
@@ -614,7 +612,6 @@ class SubprocessBroker:
                 },
             ) from exc
         except _ResourcePolicyExceeded as exc:
-            cancellation_cause = exc.cause
             cleanup_complete = await self._terminate_with_observation(
                 process,
                 request,
@@ -642,7 +639,7 @@ class SubprocessBroker:
                 message,
                 details={
                     "process": ProcessResult(
-                        cancellation_cause=cancellation_cause,
+                        cancellation_cause=ProcessCancellationCause(exc.cause),
                         cleanup_complete=cleanup_complete,
                         peak_rss_bytes=exc.summary.peak_rss_bytes,
                         resources=exc.summary,
@@ -655,7 +652,6 @@ class SubprocessBroker:
                 },
             ) from exc
         except asyncio.CancelledError:
-            cancellation_cause = "caller_cancelled"
             cleanup_complete = await self._terminate_with_observation(
                 process,
                 request,
@@ -702,8 +698,6 @@ class SubprocessBroker:
                 else None
             ),
             wall_time_ns=finished - started,
-            timed_out=timed_out,
-            cancellation_cause=cancellation_cause,
             cleanup_complete=True,
             peak_rss_bytes=resources.peak_rss_bytes if resources is not None else None,
             resources=resources,
@@ -804,7 +798,7 @@ class SubprocessBroker:
         )
         if truncated and observations:
             observations = (
-                observations[0].model_copy(
+                observations[0].validated_copy(
                     update={
                         "failures": (
                             *observations[0].failures,
@@ -1080,12 +1074,12 @@ class SubprocessBroker:
                 None,
             )
         )
-        if observed.cancellation_cause == "io_failure" or output.io_failed:
+        if observed.cancellation_cause is ProcessCancellationCause.IO_FAILURE or output.io_failed:
             io_process = ProcessResult(
                 exit_code=observed.returncode if observed.returncode >= 0 else None,
                 terminating_signal=(-observed.returncode if observed.returncode < 0 else None),
                 wall_time_ns=finished - started,
-                cancellation_cause="io_failure",
+                cancellation_cause=ProcessCancellationCause.IO_FAILURE,
                 cleanup_complete=cleanup_complete,
             )
             raise DomainError(
@@ -1098,12 +1092,15 @@ class SubprocessBroker:
                     ],
                 },
             )
-        if observed.cancellation_cause == "output_limit" or output.limit_exceeded:
+        if (
+            observed.cancellation_cause is ProcessCancellationCause.OUTPUT_LIMIT
+            or output.limit_exceeded
+        ):
             output_process = ProcessResult(
                 exit_code=observed.returncode if observed.returncode >= 0 else None,
                 terminating_signal=(-observed.returncode if observed.returncode < 0 else None),
                 wall_time_ns=finished - started,
-                cancellation_cause="output_limit",
+                cancellation_cause=ProcessCancellationCause.OUTPUT_LIMIT,
                 cleanup_complete=cleanup_complete,
             )
             raise DomainError(
@@ -1116,13 +1113,12 @@ class SubprocessBroker:
                     ],
                 },
             )
-        if observed.cancellation_cause == "timeout":
+        if observed.cancellation_cause is ProcessCancellationCause.TIMEOUT:
             timeout_process = ProcessResult(
                 exit_code=None,
                 terminating_signal=(-observed.returncode if observed.returncode < 0 else None),
                 wall_time_ns=finished - started,
-                timed_out=True,
-                cancellation_cause="timeout",
+                cancellation_cause=ProcessCancellationCause.TIMEOUT,
                 cleanup_complete=cleanup_complete,
                 peak_rss_bytes=observed.peak_rss_bytes,
                 stdout=stdout.decode(errors="replace"),
@@ -1167,24 +1163,22 @@ class SubprocessBroker:
         cancellation: threading.Event | None,
         observations: list[ProcessObservation],
     ) -> _ObservedWait:
-        terminating: Literal["timeout", "caller_cancelled", "output_limit", "io_failure"] | None = (
-            None
-        )
+        terminating: ProcessCancellationCause | None = None
         wait4 = getattr(os, "wait4", None)
         if wait4 is not None:
             while True:
                 if terminating is None:
                     if cancellation is not None and cancellation.is_set():
-                        terminating = "caller_cancelled"
+                        terminating = ProcessCancellationCause.CALLER_CANCELLED
                         self._terminate_observed_with_observation(process, observations, force=True)
                     elif output.limit_exceeded:
-                        terminating = "output_limit"
+                        terminating = ProcessCancellationCause.OUTPUT_LIMIT
                         self._terminate_observed_with_observation(process, observations, force=True)
                     elif output.io_failed:
-                        terminating = "io_failure"
+                        terminating = ProcessCancellationCause.IO_FAILURE
                         self._terminate_observed_with_observation(process, observations, force=True)
                     elif time.monotonic() >= deadline:
-                        terminating = "timeout"
+                        terminating = ProcessCancellationCause.TIMEOUT
                         self._terminate_observed_with_observation(process, observations, force=True)
                 waited_pid, status, usage = wait4(process.pid, os.WNOHANG)
                 if waited_pid == process.pid:
@@ -1205,16 +1199,16 @@ class SubprocessBroker:
             peak = max(peak, self._observed_peak_rss(process.pid))
             if terminating is None:
                 if cancellation is not None and cancellation.is_set():
-                    terminating = "caller_cancelled"
+                    terminating = ProcessCancellationCause.CALLER_CANCELLED
                     self._terminate_observed_with_observation(process, observations, force=True)
                 elif output.limit_exceeded:
-                    terminating = "output_limit"
+                    terminating = ProcessCancellationCause.OUTPUT_LIMIT
                     self._terminate_observed_with_observation(process, observations, force=True)
                 elif output.io_failed:
-                    terminating = "io_failure"
+                    terminating = ProcessCancellationCause.IO_FAILURE
                     self._terminate_observed_with_observation(process, observations, force=True)
                 elif time.monotonic() >= deadline:
-                    terminating = "timeout"
+                    terminating = ProcessCancellationCause.TIMEOUT
                     self._terminate_observed_with_observation(process, observations, force=True)
             time.sleep(0.005)
         peak = max(peak, self._observed_peak_rss(process.pid))
