@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Literal, Protocol, cast
+from typing import Protocol, cast
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
@@ -17,7 +17,7 @@ from flameox.application import (
     InvestigationService,
     RunSetService,
 )
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import DomainError, ErrorCode, EvidenceReferenceType
 from flameox.storage import RunStore, Workspace
 
 
@@ -213,7 +213,17 @@ def register_resources[T: WorkspaceContext](server: MCPServer[T]) -> None:  # no
         ctx: Context,
     ) -> str:
         try:
-            if ref_type not in {"analysis", "comparison"}:
+            try:
+                parsed_ref_type = EvidenceReferenceType(ref_type)
+            except ValueError:
+                raise DomainError(
+                    ErrorCode.WORKSPACE_INVALID,
+                    f"Unsupported evidence resource type {ref_type!r}.",
+                ) from None
+            if parsed_ref_type not in {
+                EvidenceReferenceType.ANALYSIS,
+                EvidenceReferenceType.COMPARISON,
+            }:
                 raise DomainError(
                     ErrorCode.WORKSPACE_INVALID,
                     f"Unsupported evidence resource type {ref_type!r}.",
@@ -221,7 +231,7 @@ def register_resources[T: WorkspaceContext](server: MCPServer[T]) -> None:  # no
             workspace = _workspace(ctx)
             return (
                 EvidenceLookupService(workspace)
-                .get(cast(Literal["analysis", "comparison"], ref_type), ref_id)
+                .get(parsed_ref_type, ref_id)
                 .model_dump_json(indent=2)
             )
         except DomainError as error:

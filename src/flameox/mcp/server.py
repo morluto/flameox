@@ -168,16 +168,22 @@ from flameox.domain import (
     CapturePlan,
     DomainError,
     ErrorCode,
+    EvidenceReferenceType,
+    ExecutionStatus,
     Experiment,
+    ExperimentOutcomeDisposition,
+    ExperimentOutcomeMethod,
     ExternalExecutionContext,
     Finding,
     Hypothesis,
     Investigation,
     LimitationDetail,
+    PreflightMode,
     RunManifest,
     RunSet,
     Sensitivity,
     TrialOutcome,
+    ValidationStatus,
 )
 from flameox.mcp.resources import register_resources
 from flameox.models import ContractModel
@@ -421,8 +427,8 @@ class CaptureReceipt(ContractModel):
 
     schema_version: int = 1
     run_id: str
-    execution_status: str
-    validation_status: str
+    execution_status: ExecutionStatus
+    validation_status: ValidationStatus
     source_state_id: str | None
     environment_id: str
     artifact_ids: tuple[str, ...]
@@ -447,8 +453,8 @@ class ExperimentReceipt(ContractModel):
     attempted_trials: int
     run_set_ids: tuple[str, ...]
     comparison_id: str | None
-    outcome_disposition: str | None = None
-    outcome_method: str | None = None
+    outcome_disposition: ExperimentOutcomeDisposition | None = None
+    outcome_method: ExperimentOutcomeMethod | None = None
     corpus_commit_id: str
     limitations: tuple[str, ...]
     resource_uri: str
@@ -1592,7 +1598,7 @@ def create_server(
             ),
         ],
         ctx: Context[AppContext],
-        preflight_mode: Literal["auto", "passive", "active"] = "auto",
+        preflight_mode: PreflightMode = PreflightMode.AUTO,
         capture_mode: Literal["auto", "managed", "trusted_local"] = "auto",
         external_context: ExternalExecutionContext | None = None,
         compute_sanitizer_options: ComputeSanitizerCaptureOptions | None = None,
@@ -1678,8 +1684,8 @@ def create_server(
             resource_uri = f"flameox://runs/{result.run.run_id}"
             receipt = CaptureReceipt(
                 run_id=result.run.run_id,
-                execution_status=result.run.execution_status.value,
-                validation_status=result.run.validation_status.value,
+                execution_status=result.run.execution_status,
+                validation_status=result.run.validation_status,
                 source_state_id=result.run.source_state_id,
                 environment_id=result.run.environment_id,
                 artifact_ids=tuple(item.artifact_id for item in result.run.artifacts),
@@ -3224,16 +3230,7 @@ def create_server(
 
     @server.tool(name="get_evidence", annotations=READ_ONLY)
     async def get_evidence_tool(
-        ref_type: Literal[
-            "analysis",
-            "artifact",
-            "comparison",
-            "generation",
-            "observation",
-            "run",
-            "run_set",
-            "trial",
-        ],
+        ref_type: EvidenceReferenceType,
         ref_id: Annotated[
             str, Field(min_length=1, description="ID of the reference, paired with ref_type.")
         ],

@@ -88,7 +88,13 @@ from flameox.application import (
     workspace_status,
 )
 from flameox.catalog import Catalog
-from flameox.domain import ArtifactKind, DomainError, ErrorCode, Sensitivity
+from flameox.domain import (
+    ArtifactKind,
+    DomainError,
+    ErrorCode,
+    EvidenceReferenceType,
+    Sensitivity,
+)
 from flameox.mcp import create_server, run_server
 from flameox.storage import RunStore, Workspace
 
@@ -2233,17 +2239,9 @@ def evidence_get(
     json_output: JsonOption = False,
 ) -> None:
     """Retrieve bounded evidence metadata without binary artifact content."""
-    allowed = {
-        "analysis",
-        "artifact",
-        "comparison",
-        "generation",
-        "observation",
-        "run",
-        "run_set",
-        "trial",
-    }
-    if ref_type not in allowed:
+    try:
+        parsed_ref_type = EvidenceReferenceType(ref_type)
+    except ValueError:
         _fail(
             DomainError(
                 ErrorCode.WORKSPACE_INVALID,
@@ -2252,19 +2250,7 @@ def evidence_get(
         )
     try:
         result = EvidenceLookupService(_workspace(workspace)).get(
-            cast(
-                Literal[
-                    "analysis",
-                    "artifact",
-                    "comparison",
-                    "generation",
-                    "observation",
-                    "run",
-                    "run_set",
-                    "trial",
-                ],
-                ref_type,
-            ),
+            parsed_ref_type,
             ref_id,
         )
     except DomainError as error:
