@@ -354,9 +354,9 @@ def test_extractor_clamps_rows_to_worker_response_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(
+            "execution": workspace.config.execution.validated_copy(
                 update={"max_output_bytes": 96 * 1024}
             )
         }
@@ -399,9 +399,11 @@ def test_action_limit_reports_unvisited_later_ranges(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "storage": workspace.config.storage.model_copy(update={"max_rows_per_generation": 5})
+            "storage": workspace.config.storage.validated_copy(
+                update={"max_rows_per_generation": 5}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())
@@ -458,9 +460,11 @@ def test_source_markers_share_the_observation_budget_and_report_omissions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "storage": workspace.config.storage.model_copy(update={"max_rows_per_generation": 7})
+            "storage": workspace.config.storage.validated_copy(
+                update={"max_rows_per_generation": 7}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())

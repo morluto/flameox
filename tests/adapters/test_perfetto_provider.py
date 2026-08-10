@@ -67,9 +67,9 @@ async def test_torch_profiler_trace_preserves_shapes_memory_phases_and_sync(
     )
     trace.write_text(json.dumps({"traceEvents": events}))
     workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "analysis": workspace.config.analysis.model_copy(
+            "analysis": workspace.config.analysis.validated_copy(
                 update={"trace_processor_path": str(binary)}
             )
         }
@@ -162,9 +162,9 @@ async def test_pytorch_analysis_keeps_same_named_frames_and_mixed_phases_separat
         )
     )
     workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "analysis": workspace.config.analysis.model_copy(
+            "analysis": workspace.config.analysis.validated_copy(
                 update={"trace_processor_path": str(binary)}
             )
         }
@@ -238,9 +238,9 @@ async def test_perfetto_inherits_sdk_phase_ranges_for_launch_analysis(
         )
     )
     workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "analysis": workspace.config.analysis.model_copy(
+            "analysis": workspace.config.analysis.validated_copy(
                 update={"trace_processor_path": str(binary)}
             )
         }

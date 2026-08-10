@@ -67,30 +67,23 @@ class KernelValidationInput(ContractModel):
         return value
 
 
-class KernelValidationMetric(ContractModel):
+class _KernelValidationMetric(ContractModel):
     name: MetricName
-    value: float | None
-    comparator: Comparator | None
-    threshold: float | None
     unit: Annotated[str, StringConstraints(min_length=1, max_length=100)]
-    status: ValidationStatus
+
+
+class EvaluatedKernelValidationMetric(_KernelValidationMetric):
+    value: float
+    comparator: Comparator
+    threshold: float
+    status: Literal["pass", "fail"]
     limitation: Annotated[str, StringConstraints(max_length=500)] | None = None
 
     @model_validator(mode="after")
-    def coherent_result(self) -> KernelValidationMetric:
+    def coherent_result(self) -> EvaluatedKernelValidationMetric:
         _require_finite(self.value, "metric value")
         _require_finite(self.threshold, "metric threshold")
         expected = "<=" if self.name in _LOWER_IS_BETTER else ">="
-        if self.status in {"inconclusive", "unsupported"}:
-            if self.limitation is None:
-                raise ValueError(f"{self.status} metrics require a limitation")
-            if any(item is not None for item in (self.value, self.comparator, self.threshold)):
-                raise ValueError(
-                    f"{self.status} metrics cannot declare a value, comparator, or threshold"
-                )
-            return self
-        if self.value is None or self.threshold is None or self.comparator is None:
-            raise ValueError("supported metrics require value, comparator, and threshold")
         if self.comparator != expected:
             raise ValueError(f"{self.name} requires comparator {expected}")
         if self.name in _LOWER_IS_BETTER and (self.value < 0 or self.threshold < 0):
@@ -108,6 +101,20 @@ class KernelValidationMetric(ContractModel):
         if self.status != expected_status:
             raise ValueError("metric status contradicts its value and threshold")
         return self
+
+
+class UnavailableKernelValidationMetric(_KernelValidationMetric):
+    value: Literal[None]
+    comparator: Literal[None]
+    threshold: Literal[None]
+    status: Literal["inconclusive", "unsupported"]
+    limitation: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+
+
+type KernelValidationMetric = Annotated[
+    EvaluatedKernelValidationMetric | UnavailableKernelValidationMetric,
+    Field(discriminator="status"),
+]
 
 
 class KernelValidationFailure(ContractModel):

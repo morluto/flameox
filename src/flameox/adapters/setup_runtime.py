@@ -327,9 +327,9 @@ def install_trace_processor(
             _check_staging_cancelled(cancel_event)
             os.replace(temporary, target)
             config = workspace.config
-            updated = config.model_copy(
+            updated = config.validated_copy(
                 update={
-                    "analysis": config.analysis.model_copy(
+                    "analysis": config.analysis.validated_copy(
                         update={"trace_processor_path": str(target)}
                     )
                 }

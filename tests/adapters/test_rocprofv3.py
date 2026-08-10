@@ -174,9 +174,9 @@ async def test_project_owned_rocm_shaped_trace_reaches_accelerator_summary(
     trace = tmp_path / "project-owned-rocm-shaped-perfetto.json"
     shutil.copyfile(_FIXTURE_ROOT / trace.name, trace)
     workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "analysis": workspace.config.analysis.model_copy(
+            "analysis": workspace.config.analysis.validated_copy(
                 update={"trace_processor_path": str(binary)}
             )
         }

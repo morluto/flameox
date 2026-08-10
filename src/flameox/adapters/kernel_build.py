@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Final, Literal, cast
+from typing import Annotated, Final, Literal, assert_never
 
 from pydantic import Field, model_validator
 
@@ -33,26 +33,33 @@ class KernelBuildArtifact(ContractModel):
         return self
 
 
-class KernelBuildStage(ContractModel):
+class _KernelBuildStage(ContractModel):
     name: Annotated[str, Field(min_length=1, max_length=100)]
     ordinal: Annotated[int, Field(ge=0, le=99)]
     predecessor: Annotated[str, Field(min_length=1, max_length=100)] | None = None
-    status: Literal["available", "cached", "skipped", "unavailable", "failed"]
     format: Annotated[str, Field(min_length=1, max_length=100)]
     format_schema: Annotated[str, Field(min_length=1, max_length=100)]
-    artifact: KernelBuildArtifact | None = None
     elapsed_ns: Annotated[int, Field(ge=0)] | None = None
     limitations: Annotated[
         tuple[Annotated[str, Field(min_length=1, max_length=500)], ...],
         Field(max_length=20),
     ] = ()
 
-    @model_validator(mode="after")
-    def artifact_matches_status(self) -> KernelBuildStage:
-        registered = self.status in {"available", "cached"}
-        if registered != (self.artifact is not None):
-            raise ValueError("available and cached stages require exactly one native artifact")
-        return self
+
+class ArtifactKernelBuildStage(_KernelBuildStage):
+    status: Literal["available", "cached"]
+    artifact: KernelBuildArtifact
+
+
+class ArtifactlessKernelBuildStage(_KernelBuildStage):
+    status: Literal["skipped", "unavailable", "failed"]
+    artifact: Literal[None] = None
+
+
+type KernelBuildStage = Annotated[
+    ArtifactKernelBuildStage | ArtifactlessKernelBuildStage,
+    Field(discriminator="status"),
+]
 
 
 class KernelBuildManifestV1(ContractModel):
@@ -118,7 +125,7 @@ class KernelBuildManifestV1(ContractModel):
     ) -> RegisterPipelineRequest:
         declarations: list[PipelineStageDeclaration] = []
         for stage in self.stages:
-            if stage.artifact is not None:
+            if isinstance(stage, ArtifactKernelBuildStage):
                 registration_id = registration_ids_by_path.get(stage.artifact.path)
                 if registration_id is None:
                     raise ValueError(f"missing registration for {stage.artifact.path!r}")
@@ -131,11 +138,11 @@ class KernelBuildManifestV1(ContractModel):
                         format_schema=stage.format_schema,
                         elapsed_ns=stage.elapsed_ns,
                         limitations=stage.limitations,
-                        status=cast(Literal["available", "cached"], stage.status),
+                        status=stage.status,
                         registration_id=registration_id,
                     )
                 )
-            else:
+            elif isinstance(stage, ArtifactlessKernelBuildStage):
                 declarations.append(
                     UnregisteredPipelineStageDeclaration(
                         name=stage.name,
@@ -145,9 +152,11 @@ class KernelBuildManifestV1(ContractModel):
                         format_schema=stage.format_schema,
                         elapsed_ns=stage.elapsed_ns,
                         limitations=stage.limitations,
-                        status=cast(Literal["skipped", "unavailable", "failed"], stage.status),
+                        status=stage.status,
                     )
                 )
+            else:
+                assert_never(stage)
         derived: list[str] = []
         if self.diagnostics:
             derived.append("compiler diagnostics are preserved in the kernel-build manifest")

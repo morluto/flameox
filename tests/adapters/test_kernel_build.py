@@ -121,6 +121,18 @@ def test_failed_build_requires_failed_stage_and_success_rejects_missing_output()
         _manifest(outcome="failed")
 
 
+def test_kernel_build_stage_status_determines_artifact_shape() -> None:
+    stages = _manifest().model_dump(mode="json")["stages"]
+    stages[0]["artifact"] = None
+    with pytest.raises(ValidationError, match="artifact"):
+        _manifest(stages=stages)
+
+    stages = _manifest().model_dump(mode="json")["stages"]
+    stages[0]["status"] = "failed"
+    with pytest.raises(ValidationError, match="artifact"):
+        _manifest(stages=stages)
+
+
 def test_kernel_build_rejects_unknown_fields() -> None:
     with pytest.raises(ValidationError, match="Extra inputs"):
         _manifest(unverified_hint=True)

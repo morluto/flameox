@@ -21,10 +21,12 @@ from flameox.application import (
 from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,
+    CapabilityPermissionStatus,
     CapabilityReport,
     CapabilityStatus,
     DomainError,
     ErrorCode,
+    ProbeKind,
 )
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
@@ -213,9 +215,11 @@ def test_compute_sanitizer_classifies_known_record_kinds(
 
 def test_compute_sanitizer_truncates_records_at_publication_budget(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "storage": workspace.config.storage.model_copy(update={"max_rows_per_generation": 4})
+            "storage": workspace.config.storage.validated_copy(
+                update={"max_rows_per_generation": 4}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())
@@ -375,8 +379,8 @@ async def test_compute_sanitizer_rejects_suppression_changed_after_planning(
         version="fixture",
         supported_modes=("memcheck", "racecheck", "initcheck", "synccheck"),
         supported_formats=("compute-sanitizer-xml",),
-        permission_status="granted",
-        probe_kind="active",
+        permission_status=CapabilityPermissionStatus.GRANTED,
+        probe_kind=ProbeKind.ACTIVE,
     )
     service = CaptureService(workspace)
     monkeypatch.setattr(service.capabilities, "get", lambda _adapter: capability)
@@ -445,8 +449,8 @@ async def test_compute_sanitizer_clean_capture_with_unknown_xml_is_inconclusive(
         version="2026.2.1",
         supported_modes=("memcheck",),
         supported_formats=("compute-sanitizer-xml",),
-        permission_status="granted",
-        probe_kind="active",
+        permission_status=CapabilityPermissionStatus.GRANTED,
+        probe_kind=ProbeKind.ACTIVE,
     )
     service = CaptureService(workspace)
     monkeypatch.setattr(service.capabilities, "get", lambda _adapter: capability)
@@ -484,8 +488,8 @@ async def test_compute_sanitizer_refuses_managed_capture_without_gpu_device_bind
         version="2026.2.1",
         supported_modes=("memcheck",),
         supported_formats=("compute-sanitizer-xml",),
-        permission_status="granted",
-        probe_kind="active",
+        permission_status=CapabilityPermissionStatus.GRANTED,
+        probe_kind=ProbeKind.ACTIVE,
     )
     service = CaptureService(workspace)
     monkeypatch.setattr(service.capabilities, "get", lambda _adapter: capability)

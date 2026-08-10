@@ -6,7 +6,7 @@ from typing import Any
 
 from flameox.domain.errors import DomainError, ErrorCode
 from flameox.domain.identity import digest_model
-from flameox.domain.models import ArtifactKind, RunManifest
+from flameox.domain.models import ArtifactKind, ExecutionStatus, RunManifest
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
@@ -17,7 +17,7 @@ class PytestExtractionResult(ContractModel):
     run_id: str
     artifact_id: str
     complete: bool
-    execution_status: str
+    execution_status: ExecutionStatus
     collected_count: int
     executed_count: int
     passed_count: int
@@ -290,7 +290,7 @@ class PytestExtractor:
             run_id=run_id,
             artifact_id=registration.artifact_id,
             complete=complete,
-            execution_status=run.execution_status.value,
+            execution_status=run.execution_status,
             collected_count=len(collected),
             executed_count=len(executed),
             passed_count=outcome_counts["passed"],

@@ -381,9 +381,11 @@ def test_nvbench_rejects_declared_samples_over_row_budget_before_decoding(
     # the declared allocation against the generation budget.
     sidecar_path.write_bytes(b"not-float32-data")
     run_id = _import_bundle(workspace, json_path, sidecar_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "storage": workspace.config.storage.model_copy(update={"max_rows_per_generation": 3})
+            "storage": workspace.config.storage.validated_copy(
+                update={"max_rows_per_generation": 3}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())
