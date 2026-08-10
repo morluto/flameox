@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from flameox.analysis import (
     InferenceProtocolIdentity,
@@ -10,7 +11,7 @@ from flameox.analysis import (
     TraceIdentity,
     compare_inference_protocols,
 )
-from flameox.domain import ComparisonValidity
+from flameox.domain import ComparisonValidity, OracleStatus
 
 _DIGEST = "sha256:" + "a" * 64
 
@@ -113,7 +114,7 @@ def test_identical_protocols_are_valid() -> None:
 def test_protocols_with_different_oracle_status_are_invalid() -> None:
     baseline = _protocol()
     candidate = _protocol(
-        oracle_result=OracleResult(status="fail", reason="outside_tolerance"),
+        oracle_result=OracleResult(status=OracleStatus.FAIL, reason="outside_tolerance"),
     )
 
     result = compare_inference_protocols(baseline, candidate)
@@ -167,7 +168,6 @@ def test_missing_semantic_oracle_results_are_exploratory() -> None:
         ("hardware.accelerator_model", "A100", "H100"),
         ("hardware.driver_version", "535.0", "540.0"),
         ("profiler.profiler", "none", "torch_profiler"),
-        ("profiler.attached", False, True),
         ("oracle.kind", "execution_check", "contract_check"),
         ("oracle.estimand", "request_throughput", "ttft"),
         ("oracle.tolerance_absolute", 1.0, 2.0),
@@ -188,6 +188,17 @@ def test_declared_facet_mismatch_is_invalid_with_exact_field(
     assert path in fields
     mismatch = next(m for m in result.mismatches if m.field == path)
     assert mismatch.baseline != mismatch.candidate
+
+
+def test_profiler_attachment_mismatch_is_invalid_between_valid_states() -> None:
+    baseline = _protocol()
+    candidate = _apply(_protocol(), "profiler.profiler", "torch_profiler")
+    candidate = _apply(candidate, "profiler.attached", True)
+
+    result = compare_inference_protocols(baseline, candidate)
+
+    assert result.validity is ComparisonValidity.INVALID
+    assert any(mismatch.field == "profiler.attached" for mismatch in result.mismatches)
 
 
 def test_kv_transfer_config_mismatch_is_invalid() -> None:
@@ -313,8 +324,18 @@ def test_attached_profiler_requires_its_version() -> None:
     assert any(r.field == "profiler.profiler_version" for r in result.exploratory_reasons)
 
 
+def test_attached_profiler_cannot_use_the_none_variant() -> None:
+    data = _protocol().model_dump(mode="json")
+    data["profiler"] = {"profiler": "none", "attached": True}
+
+    with pytest.raises(ValidationError):
+        InferenceProtocolIdentity.model_validate(data)
+
+
 def test_nonpassing_semantic_oracles_remain_exploratory() -> None:
-    protocol = _protocol(oracle_result=OracleResult(status="fail", reason="contract_failed"))
+    protocol = _protocol(
+        oracle_result=OracleResult(status=OracleStatus.FAIL, reason="contract_failed"),
+    )
 
     result = compare_inference_protocols(protocol, protocol)
 
@@ -344,4 +365,4 @@ def test_server_rejects_out_of_range_gpu_utilization() -> None:
 
 def test_oracle_result_rejects_empty_reason() -> None:
     with pytest.raises(ValueError):
-        OracleResult(status="pass", reason="")
+        OracleResult(status=OracleStatus.PASS, reason="")

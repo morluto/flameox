@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, StringConstraints
 
-from flameox.domain.models import ComparisonValidity
+from flameox.domain.models import ComparisonValidity, OracleStatus
 from flameox.models import ContractModel
 
 # ---------------------------------------------------------------------------
@@ -93,12 +93,26 @@ class HardwareIdentity(ContractModel):
     topology_digest: _Digest | None = None
 
 
-class ProfilerState(ContractModel):
+class _ProfilerState(ContractModel):
     """Profiler attachment state during the replay."""
 
-    profiler: Literal["none", "nsight_systems", "torch_profiler", "perfetto", "custom"] = "none"
     profiler_version: _NonEmptyStr | None = None
-    attached: bool = False
+
+
+class ProfilerState(_ProfilerState):
+    profiler: Literal["none", "nsight_systems", "torch_profiler", "perfetto", "custom"] = "none"
+    attached: Literal[False] = False
+
+
+class AttachedProfilerState(_ProfilerState):
+    profiler: Literal["nsight_systems", "torch_profiler", "perfetto", "custom"]
+    attached: Literal[True] = True
+
+
+type InferenceProfilerState = Annotated[
+    ProfilerState | AttachedProfilerState,
+    Field(discriminator="attached"),
+]
 
 
 class OracleIdentity(ContractModel):
@@ -114,7 +128,7 @@ class OracleIdentity(ContractModel):
 class OracleResult(ContractModel):
     """The observed oracle outcome for one replay run."""
 
-    status: Literal["pass", "fail", "inconclusive", "unsupported"]
+    status: OracleStatus
     reason: _Identifier
     absolute_error: Annotated[float, Field(ge=0)] | None = None
     relative_error: Annotated[float, Field(ge=0)] | None = None
@@ -132,7 +146,7 @@ class InferenceProtocolIdentity(ContractModel):
     model: ModelIdentity
     server: ServerConfigIdentity
     hardware: HardwareIdentity
-    profiler: ProfilerState
+    profiler: InferenceProfilerState
     oracle: OracleIdentity
     oracle_result: OracleResult | None = None
 
@@ -437,11 +451,8 @@ def _diagnostic_missing_fields(protocol: InferenceProtocolIdentity) -> dict[str,
     missing: dict[str, str] = {}
 
     profiler = protocol.profiler
-    if profiler.attached:
-        if profiler.profiler == "none":
-            missing["profiler.profiler"] = "attached profiler type is unavailable"
-        if profiler.profiler_version is None:
-            missing["profiler.profiler_version"] = "attached profiler version is unavailable"
+    if profiler.attached and profiler.profiler_version is None:
+        missing["profiler.profiler_version"] = "attached profiler version is unavailable"
 
     oracle = protocol.oracle
     if oracle.kind != "contract_check":

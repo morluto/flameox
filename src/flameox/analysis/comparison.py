@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from typing import Literal
 
 import numpy as np
 from scipy.stats import bootstrap
@@ -12,6 +11,7 @@ from flameox.domain.models import (
     Comparison,
     ComparisonDecision,
     ComparisonValidity,
+    MetricPolarity,
 )
 from flameox.domain.scalars import FloatingValue
 
@@ -25,7 +25,7 @@ def _decision(
     low: float | None,
     high: float | None,
     threshold: float,
-    polarity: Literal["lower_is_better", "higher_is_better", "neutral"],
+    polarity: MetricPolarity,
 ) -> ComparisonDecision:
     if low is None or high is None or polarity == "neutral":
         return ComparisonDecision.INCONCLUSIVE
@@ -53,7 +53,7 @@ def compare_paired_samples(
     candidate_by_block: Mapping[str, float],
     metric: str,
     unit: str,
-    polarity: Literal["lower_is_better", "higher_is_better", "neutral"],
+    polarity: MetricPolarity,
     practical_threshold: float,
     confidence_level: float = 0.95,
     random_seed: int = 0,

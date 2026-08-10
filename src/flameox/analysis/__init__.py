@@ -1,5 +1,6 @@
 from flameox.analysis.comparison import compare_paired_samples
 from flameox.analysis.inference_protocol import (
+    AttachedProfilerState,
     ExploratoryReason,
     HardwareIdentity,
     InferenceProtocolComparison,
@@ -45,6 +46,7 @@ __all__ = [
     "AcceleratorLaunchComparison",
     "AcceleratorLaunchRegion",
     "AcceleratorStreamSummary",
+    "AttachedProfilerState",
     "ExecutionAnalysisResult",
     "ExecutionObservationChange",
     "ExploratoryReason",

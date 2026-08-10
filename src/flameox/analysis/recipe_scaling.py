@@ -19,7 +19,13 @@ from flameox.analysis.recipe_models import (
     ScalingTrialSummary,
 )
 from flameox.domain import DomainError, ErrorCode
-from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
+from flameox.evidence_status import (
+    EvidenceAvailability,
+    available_availability,
+    empty_availability,
+    partial_availability,
+    unavailable_availability,
+)
 
 
 class ScalingRecipes(RecipeContext):
@@ -251,10 +257,7 @@ class ScalingRecipes(RecipeContext):
     ) -> tuple[EvidenceAvailability, str | None]:
         if points and succeeded_trials > measured_trials:
             return (
-                EvidenceAvailability(
-                    status="partial",
-                    reason="primary_metric_measurements_partial",
-                ),
+                partial_availability("primary_metric_measurements_partial"),
                 "Some succeeded trials published no measurements matching the experiment's "
                 "primary metric.",
             )
@@ -262,10 +265,7 @@ class ScalingRecipes(RecipeContext):
             return available_availability(), None
         if succeeded_trials:
             return (
-                EvidenceAvailability(
-                    status="unavailable",
-                    reason="primary_metric_measurements_unavailable",
-                ),
+                unavailable_availability("primary_metric_measurements_unavailable"),
                 "Succeeded trials published no measurements matching the experiment's "
                 "primary metric.",
             )
@@ -492,7 +492,7 @@ class ScalingRecipes(RecipeContext):
             )[1]
             tested = len(results)
             results = [
-                item.model_copy(
+                item.validated_copy(
                     update={
                         "adjusted_p_value": float(adjusted[index]),
                         "tested_hypothesis_count": tested,

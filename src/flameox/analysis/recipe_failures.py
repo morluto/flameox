@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
 
 from flameox.analysis.recipe_context import RecipeContext
 from flameox.analysis.recipe_models import (
     FailureAnalysisResult,
     FailureChangePoint,
     FailureCluster,
+    FailurePopulationStatus,
 )
-from flameox.domain import digest_model
+from flameox.domain import CaptureStatus, ExecutionStatus, ValidationStatus, digest_model
 from flameox.evidence_status import available_availability, empty_availability
 
 
@@ -22,8 +22,8 @@ class FailureRecipes(RecipeContext):
         source_state_id: str | None = None,
         environment_id: str | None = None,
         workload_definition_id: str | None = None,
-        execution_status: tuple[str, ...] = (),
-        validation_status: tuple[str, ...] = (),
+        execution_status: tuple[ExecutionStatus, ...] = (),
+        validation_status: tuple[ValidationStatus, ...] = (),
         created_after: datetime | None = None,
         created_before: datetime | None = None,
     ) -> FailureAnalysisResult:
@@ -47,7 +47,7 @@ class FailureRecipes(RecipeContext):
         ):
             if values:
                 filters.append(f"{field} IN ({', '.join('?' for _ in values)})")
-                parameters.extend(values)
+                parameters.extend(value.value for value in values)
                 applied.append(field)
         if created_after is not None:
             filters.append("created_at >= ?")
@@ -148,9 +148,9 @@ class FailureRecipes(RecipeContext):
         failures = tuple(
             FailureCluster(
                 collector=str(row[0]) if row[0] is not None else None,
-                execution_status=str(row[1]),
-                capture_status=str(row[2]),
-                validation_status=str(row[3]),
+                execution_status=ExecutionStatus(str(row[1])),
+                capture_status=CaptureStatus(str(row[2])),
+                validation_status=ValidationStatus(str(row[3])),
                 exit_code=int(row[4]) if row[4] is not None else None,
                 workload_definition_id=str(row[5]) if row[5] is not None else None,
                 environment_id=str(row[6]),
@@ -173,16 +173,16 @@ class FailureRecipes(RecipeContext):
         failed_run_count = int(coverage_row[0])
         workspace_run_count = int(population_row[0])
         eligible_run_count = int(population_row[1])
-        population_status: Literal["observed", "empty", "filtered_empty"]
-        empty_reason: Literal["no_runs", "no_matching_runs", "no_failures"] | None
+        population_status: FailurePopulationStatus
+        empty_reason: str | None
         if workspace_run_count == 0:
-            population_status = "empty"
+            population_status = FailurePopulationStatus.EMPTY
             empty_reason = "no_runs"
         elif eligible_run_count == 0:
-            population_status = "filtered_empty"
+            population_status = FailurePopulationStatus.FILTERED_EMPTY
             empty_reason = "no_matching_runs"
         else:
-            population_status = "observed"
+            population_status = FailurePopulationStatus.OBSERVED
             empty_reason = "no_failures" if failed_run_count == 0 else None
         denominator = failed_run_count or 1
         hypotheses: list[str] = []
@@ -221,7 +221,6 @@ class FailureRecipes(RecipeContext):
             eligible_runs=eligible_run_count,
             failed_runs=failed_run_count,
             population_status=population_status,
-            empty_reason=empty_reason,
             failures=failures,
             total_clusters=total,
             returned=len(failures),

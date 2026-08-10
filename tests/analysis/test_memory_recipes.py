@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from flameox.analysis import RecipeService
+from flameox.analysis.recipe_models import (
+    HotspotResult,
+    MemoryAnalysisResult,
+    WritableRootObservation,
+)
 from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
 from tests.support.analysis import run_row
@@ -61,3 +69,53 @@ def test_memory_reports_phase_correlated_growth(tmp_path: Path) -> None:
         "shutdown",
     ]
     assert [point.delta for point in result.phase_growth] == [None, 140.0, 20.0]
+    assert result.truncated is result.runtime_resources_truncated
+    assert MemoryAnalysisResult.model_validate(result.model_dump()) == result
+
+    contradictory = result.model_dump()
+    contradictory["truncated"] = not result.runtime_resources_truncated
+    with pytest.raises(ValidationError, match="truncation fields must agree"):
+        MemoryAnalysisResult.model_validate(contradictory)
+
+    contradictory = result.model_dump(mode="json")
+    contradictory["unavailable_metrics"] = ["peak_rss"]
+    with pytest.raises(ValidationError, match="derive from runtime resources"):
+        MemoryAnalysisResult.model_validate(contradictory)
+
+    hotspots = RecipeService(workspace).hotspots("memory-run")
+    assert HotspotResult.model_validate(hotspots.model_dump(mode="json")) == hotspots
+    contradictory = hotspots.model_dump(mode="json")
+    contradictory["evidence_status"] = "available"
+    with pytest.raises(ValidationError, match="evidence status fields must agree"):
+        HotspotResult.model_validate(contradictory)
+
+
+def test_writable_root_observation_derives_availability_from_growth() -> None:
+    available = WritableRootObservation.model_validate(
+        {
+            "run_id": "run",
+            "writable_root_identity": "root",
+            "target_path": "build",
+            "growth_bytes": 0,
+            "available": True,
+        }
+    )
+    unavailable = WritableRootObservation.model_validate(
+        {
+            "run_id": "run",
+            "writable_root_identity": "root",
+            "target_path": "build",
+            "growth_bytes": None,
+            "available": False,
+            "unavailable_reason": "resource_summary_unavailable",
+        }
+    )
+
+    assert available.available is True
+    assert unavailable.available is False
+    assert WritableRootObservation.model_validate(unavailable.model_dump()) == unavailable
+
+    contradictory = unavailable.model_dump()
+    contradictory["available"] = True
+    with pytest.raises(ValidationError, match="availability must match"):
+        WritableRootObservation.model_validate(contradictory)

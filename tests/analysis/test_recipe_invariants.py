@@ -4,8 +4,10 @@ from pathlib import Path
 from typing import NoReturn
 
 import pytest
+from pydantic import ValidationError
 
 from flameox.analysis import RecipeService
+from flameox.analysis.recipe_models import FailureAnalysisResult
 from flameox.domain import DomainError, ErrorCode
 from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
@@ -60,6 +62,12 @@ def test_failure_analysis_distinguishes_filtered_and_failure_empty_populations(
     assert (filtered.eligible_runs, filtered.failed_runs) == (0, 0)
     assert filtered.population_status == "filtered_empty"
     assert filtered.empty_reason == "no_matching_runs"
+    assert FailureAnalysisResult.model_validate(observed.model_dump(mode="json")) == observed
+
+    contradictory = observed.model_dump(mode="json")
+    contradictory["empty_reason"] = "no_runs"
+    with pytest.raises(ValidationError, match="empty reason must derive"):
+        FailureAnalysisResult.model_validate(contradictory)
 
 
 def test_analysis_rejects_input_absent_from_pinned_corpus(tmp_path: Path) -> None:

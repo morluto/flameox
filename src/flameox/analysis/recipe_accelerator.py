@@ -15,7 +15,11 @@ from flameox.analysis.recipe_models import (
 from flameox.catalog import Snapshot
 from flameox.domain import DomainError, ErrorCode
 from flameox.evidence_scope import resolve_evidence_scope
-from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
+from flameox.evidence_status import (
+    available_availability,
+    empty_availability,
+    partial_availability,
+)
 
 
 def _trace_integer(value: object) -> int | None:
@@ -156,10 +160,7 @@ class AcceleratorRecipes(RecipeContext):
                 empty_availability("no_matching_accelerator_launch_events")
                 if total == 0
                 else (
-                    EvidenceAvailability(
-                        status="partial",
-                        reason="runtime_or_accelerator_tracks_missing",
-                    )
+                    partial_availability("runtime_or_accelerator_tracks_missing")
                     if not (
                         coverage["runtime_launches"]
                         and coverage["accelerator_kernels"]
