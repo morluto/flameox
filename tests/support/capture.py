@@ -22,9 +22,11 @@ message = ["{message}", "candidate"]
 
 
 def disable_containment(workspace: Workspace) -> None:
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())

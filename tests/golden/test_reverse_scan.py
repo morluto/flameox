@@ -23,8 +23,11 @@ from flameox.domain import (
     ComparisonDecision,
     ComparisonValidity,
     EvidenceLevel,
+    EvidenceReferenceType,
+    EvidenceRelation,
     ExecutionStatus,
     FindingAssessment,
+    FindingConfidence,
     ValidationStatus,
 )
 from flameox.storage import Workspace
@@ -106,9 +109,11 @@ length = [32768, 65536, 131072]
     git(tmp_path, "add", "scan.py", "validate.py", "flameox.toml")
     git(tmp_path, "commit", "-m", "golden fixture")
     workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())
@@ -172,18 +177,18 @@ length = [32768, 65536, 131072]
             title="Native reduction removes reverse-scan interpreter overhead",
             claim="The candidate is materially faster with equivalent output.",
             evidence_level=EvidenceLevel.DERIVED,
-            confidence="high",
+            confidence=FindingConfidence.HIGH,
             assessment=FindingAssessment.SUPPORTED,
             evidence=(
                 EvidenceInput(
-                    ref_type="comparison",
+                    ref_type=EvidenceReferenceType.COMPARISON,
                     ref_id=comparison.comparison.comparison_id,
-                    relation="supports",
+                    relation=EvidenceRelation.SUPPORTS,
                 ),
                 EvidenceInput(
-                    ref_type="analysis",
+                    ref_type=EvidenceReferenceType.ANALYSIS,
                     ref_id=scaling_record.analysis.analysis_id,
-                    relation="context",
+                    relation=EvidenceRelation.CONTEXT,
                 ),
             ),
         )
