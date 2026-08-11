@@ -443,6 +443,7 @@ class ScalingPoint(ConfidenceIntervalFields):
     variant: str
     block_id: str | None
     input_value: float | None
+    input_kind: Literal["integer", "floating"] | None = None
     value: float
     dispersion: float
     unit: str
@@ -456,6 +457,7 @@ class ScalingTrialSummary(ContractModel):
     variant: str
     block_id: str | None
     input_value: float | None
+    input_kind: Literal["integer", "floating"] | None = None
     median: float
     dispersion: float
     unit: str

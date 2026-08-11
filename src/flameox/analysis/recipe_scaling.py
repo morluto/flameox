@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 from scipy.stats import bootstrap, spearmanr
@@ -29,6 +29,17 @@ from flameox.evidence_status import (
 
 
 class ScalingRecipes(RecipeContext):
+    @staticmethod
+    def _input_identity(
+        integer_value: object,
+        floating_value: object,
+    ) -> tuple[float | None, Literal["integer", "floating"] | None]:
+        if integer_value is not None:
+            return float(cast(Any, integer_value)), "integer"
+        if floating_value is not None:
+            return float(cast(Any, floating_value)), "floating"
+        return None, None
+
     def scaling(
         self,
         experiment_id: str,
@@ -106,22 +117,25 @@ class ScalingRecipes(RecipeContext):
             ).fetchone()
             assert complete_row is not None
         trial_groups: dict[
-            tuple[str, str, str | None, float | None, str, str],
+            tuple[
+                str,
+                str,
+                str | None,
+                float | None,
+                Literal["integer", "floating"] | None,
+                str,
+                str,
+            ],
             list[float],
         ] = {}
         for row in rows:
-            input_value = (
-                float(row[3])
-                if row[3] is not None
-                else float(row[4])
-                if row[4] is not None
-                else None
-            )
+            input_value, input_kind = self._input_identity(row[3], row[4])
             key = (
                 str(row[0]),
                 str(row[1]),
                 str(row[2]) if row[2] is not None else None,
                 input_value,
+                input_kind,
                 str(row[7]),
                 str(row[5]),
             )
@@ -133,6 +147,7 @@ class ScalingRecipes(RecipeContext):
             variant,
             block_id,
             input_value,
+            input_kind,
             unit,
             environment_id,
         ), values in sorted(trial_groups.items()):
@@ -143,6 +158,7 @@ class ScalingRecipes(RecipeContext):
                     variant=variant,
                     block_id=block_id,
                     input_value=input_value,
+                    input_kind=input_kind,
                     median=median,
                     dispersion=float(np.median(np.abs(np.asarray(values) - median))),
                     unit=unit,
@@ -151,18 +167,18 @@ class ScalingRecipes(RecipeContext):
                 )
             )
         point_groups: dict[
-            tuple[str, float | None, str],
+            tuple[str, float | None, Literal["integer", "floating"] | None, str],
             list[ScalingTrialSummary],
         ] = {}
         for trial in trials:
             point_groups.setdefault(
-                (trial.variant, trial.input_value, trial.unit),
+                (trial.variant, trial.input_value, trial.input_kind, trial.unit),
                 [],
             ).append(trial)
         points_list: list[ScalingPoint] = []
-        for (variant, input_value, unit), group in sorted(
+        for (variant, input_value, input_kind, unit), group in sorted(
             point_groups.items(),
-            key=lambda item: (item[0][0], item[0][1] or -math.inf),
+            key=lambda item: (item[0][0], item[0][1] or -math.inf, item[0][2] or ""),
         ):
             trial_medians = np.asarray(
                 [trial.median for trial in group],
@@ -180,6 +196,7 @@ class ScalingRecipes(RecipeContext):
                     variant=variant,
                     block_id=next(iter(block_ids)) if len(block_ids) == 1 else None,
                     input_value=input_value,
+                    input_kind=input_kind,
                     value=median,
                     dispersion=dispersion,
                     confidence_interval=(
@@ -403,20 +420,16 @@ class ScalingRecipes(RecipeContext):
                 int | None,
                 str,
                 str,
+                Literal["integer", "floating"],
                 float,
             ],
             float,
         ] = {}
         for row in rows:
-            input_value = (
-                float(cast(Any, row[2]))
-                if row[2] is not None
-                else float(cast(Any, row[3]))
-                if row[3] is not None
-                else None
-            )
+            input_value, input_kind = self._input_identity(row[2], row[3])
             if input_value is None or not math.isfinite(input_value):
                 continue
+            assert input_kind is not None
             key = (
                 str(row[0]),
                 str(row[1]),
@@ -426,6 +439,7 @@ class ScalingRecipes(RecipeContext):
                 int(cast(Any, row[7])) if row[7] is not None else None,
                 str(row[8]),
                 str(row[9]),
+                input_kind,
                 input_value,
             )
             per_trial[key] = per_trial.get(key, 0.0) + float(cast(Any, row[10]))
@@ -442,6 +456,7 @@ class ScalingRecipes(RecipeContext):
             line,
             metric,
             unit,
+            _input_kind,
             input_value,
         ), value in per_trial.items():
             groups.setdefault(

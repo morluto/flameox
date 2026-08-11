@@ -20,7 +20,7 @@ def test_scaling_reports_dispersion_models_and_supported_range(
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     now = FIXTURE_CREATED_AT
-    variants = (32_768, 65_536, 131_072)
+    variants = (32_768, 32_768.0, 65_536, 131_072)
     run_rows = []
     trial_rows = []
     measurement_rows: list[dict[str, object]] = []
@@ -37,6 +37,7 @@ def test_scaling_reports_dispersion_models_and_supported_range(
         }
     ]
     for input_value in variants:
+        is_integer = type(input_value) is int
         variant_id = "variant-baseline"
         for block in range(3):
             run_id = f"run-{input_value}-{block}"
@@ -57,7 +58,7 @@ def test_scaling_reports_dispersion_models_and_supported_range(
                     "collector": "pyperf",
                     "collector_version": "1",
                     "exit_code": 0,
-                    "wall_time_ns": input_value * 2,
+                    "wall_time_ns": int(input_value * 2),
                     "manifest_path": f"runs/{run_id}/manifest.json",
                 }
             )
@@ -74,8 +75,8 @@ def test_scaling_reports_dispersion_models_and_supported_range(
                     "block_id": f"block-{input_value}-{block}",
                     "order_in_block": block,
                     "parameter_name": "length",
-                    "parameter_value_int": input_value,
-                    "parameter_value_float": None,
+                    "parameter_value_int": input_value if is_integer else None,
+                    "parameter_value_float": None if is_integer else input_value,
                     "attempt": 1,
                     "outcome": "succeeded",
                     "exclusion_reason": None,
@@ -89,8 +90,8 @@ def test_scaling_reports_dispersion_models_and_supported_range(
                     "run_id": run_id,
                     "artifact_id": None,
                     "name": "scan.time",
-                    "value_int": input_value * 2 + block,
-                    "value_float": None,
+                    "value_int": int(input_value * 2 + block) if is_integer else None,
+                    "value_float": None if is_integer else input_value * 2 + block,
                     "unit": "ns",
                     "aggregation": "single",
                     "scope": "process",
@@ -179,14 +180,20 @@ def test_scaling_reports_dispersion_models_and_supported_range(
 
     result = RecipeService(workspace).scaling("scaling-experiment")
 
-    assert result.attempted_trials == 9
-    assert result.complete_blocks == 9
+    assert result.attempted_trials == 12
+    assert result.complete_blocks == 12
     assert result.environment_stable
     assert any(fit.model == "linear" for fit in result.fits)
     assert {fit.variant for fit in result.fits} == {"baseline"}
     assert {fit.supported_min for fit in result.fits} == {32_768}
     assert {fit.supported_max for fit in result.fits} == {131_072}
-    assert len(result.trials) == 9
+    assert len(result.trials) == 12
+    assert {(point.input_value, point.input_kind) for point in result.points} == {
+        (32_768.0, "integer"),
+        (32_768.0, "floating"),
+        (65_536.0, "integer"),
+        (131_072.0, "integer"),
+    }
     assert all(point.confidence_low is not None for point in result.points)
     assert result.correlated_hotspots[0].function == "reverse_scan"
     assert result.correlated_hotspots[0].spearman_rho > 0.9
