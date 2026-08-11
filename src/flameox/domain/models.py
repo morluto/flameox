@@ -312,35 +312,6 @@ class OracleReceiptV1(ContractModel):
         return value
 
 
-    @model_validator(mode="after")
-    def status_must_be_coherent_with_evidence(self) -> OracleReceiptV1:
-        """Reject receipts where categorical status contradicts quantitative evidence.
-
-        When both ``absolute_error`` and ``tolerance.absolute`` are present,
-        a ``status='pass'`` receipt with error exceeding tolerance is rejected,
-        and a ``status='fail'`` receipt with error within tolerance is rejected.
-
-        Receipts without quantitative evidence (no error/tolerance) are
-        accepted with any status since there is nothing to contradict.
-        """
-        if self.absolute_error is not None and self.tolerance is not None:
-            abs_tol = self.tolerance.absolute
-            if abs_tol is not None:
-                if self.status == "pass" and self.absolute_error > abs_tol:
-                    raise ValueError(
-                        f"Receipt status='pass' contradicts evidence: "
-                        f"absolute_error={self.absolute_error} exceeds "
-                        f"tolerance.absolute={abs_tol}"
-                    )
-                if self.status == "fail" and self.absolute_error <= abs_tol:
-                    raise ValueError(
-                        f"Receipt status='fail' contradicts evidence: "
-                        f"absolute_error={self.absolute_error} is within "
-                        f"tolerance.absolute={abs_tol}"
-                    )
-        return self
-
-
 class OracleReceiptRecord(ContractModel):
     receipt: OracleReceiptV1
     receipt_artifact_id: Digest

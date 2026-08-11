@@ -1060,7 +1060,7 @@ class VllmResultParser:
             "successful_requests": completed,
             "failed_requests": max(0, total_requests - completed),
             "total_requests": total_requests,
-            "actual_duration": payload["duration"],
+            "actual_duration": payload.get("duration"),
             "time_scale": 1.0,
         }
 

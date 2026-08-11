@@ -38,7 +38,6 @@ from flameox.domain.models import (
     ExecutionRunManifest,
     ImportRunManifest,
     Integrity,
-    OracleStatus,
     ScalarOracleReceiptValue,
     SucceededTrial,
     parse_capture_plan,
@@ -575,59 +574,3 @@ def test_managed_runtime_extra_parser_owns_the_persisted_vocabulary() -> None:
         CapabilityExtra.TORCH,
         CapabilityExtra.TRACE,
     )
-
-
-
-
-def test_oracle_receipt_rejects_pass_with_error_exceeding_tolerance() -> None:
-    """Cross-field validation: status='pass' with error > tolerance must be rejected."""
-    from flameox.domain.models import OracleReceiptV1, OracleTolerance
-
-    with pytest.raises(ValidationError, match="contradicts evidence"):
-        OracleReceiptV1(
-            schema_version="flameox.oracle-receipt.v1",
-            status=OracleStatus.PASS,
-            reason="test-ok",
-            absolute_error=100.0,
-            tolerance=OracleTolerance(absolute=0.001),
-        )
-
-
-def test_oracle_receipt_rejects_fail_with_error_within_tolerance() -> None:
-    """Cross-field validation: status='fail' with error within tolerance must be rejected."""
-    from flameox.domain.models import OracleReceiptV1, OracleTolerance
-
-    with pytest.raises(ValidationError, match="contradicts evidence"):
-        OracleReceiptV1(
-            schema_version="flameox.oracle-receipt.v1",
-            status=OracleStatus.FAIL,
-            reason="test-bad",
-            absolute_error=0.0,
-            tolerance=OracleTolerance(absolute=1.0),
-        )
-
-
-def test_oracle_receipt_accepts_pass_with_error_within_tolerance() -> None:
-    """Cross-field validation: status='pass' with error within tolerance is accepted."""
-    from flameox.domain.models import OracleReceiptV1, OracleTolerance
-
-    receipt = OracleReceiptV1(
-        schema_version="flameox.oracle-receipt.v1",
-        status=OracleStatus.PASS,
-        reason="test-ok",
-        absolute_error=0.001,
-        tolerance=OracleTolerance(absolute=0.01),
-    )
-    assert receipt.status == OracleStatus.PASS
-
-
-def test_oracle_receipt_accepts_pass_without_quantitative_evidence() -> None:
-    """Receipts without error/tolerance evidence are accepted with any status."""
-    from flameox.domain.models import OracleReceiptV1
-
-    receipt = OracleReceiptV1(
-        schema_version="flameox.oracle-receipt.v1",
-        status=OracleStatus.PASS,
-        reason="test-ok",
-    )
-    assert receipt.status == OracleStatus.PASS

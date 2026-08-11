@@ -103,9 +103,7 @@ def scalar_identity_set(
 def scalar_subset(subset_values: list[Scalar], superset_values: list[Scalar]) -> bool:
     """Return True only when every identity in ``subset_values`` is in ``superset_values``."""
     superset = scalar_identity_set(superset_values)
-    return all(
-        identity in superset for identity in (scalar_identity(v) for v in subset_values)
-    )
+    return all(identity in superset for identity in (scalar_identity(v) for v in subset_values))
 
 
 RUNTIME_RESOURCE_METRICS = frozenset(

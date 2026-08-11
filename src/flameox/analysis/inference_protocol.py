@@ -405,8 +405,6 @@ def _facets() -> tuple[_FacetGetter, ...]:
     )
 
 
-
-
 def _normalize(value: object) -> str:
     """Return a display string for a protocol facet value.
 

@@ -1307,6 +1307,16 @@ def test_vllm_parse_rejects_boolean_native_request_counts() -> None:
     assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
 
 
+def test_vllm_parse_rejects_native_result_without_duration() -> None:
+    metrics = _vllm_metrics()
+    metrics["num_prompts"] = 313
+
+    with pytest.raises(DomainError) as error:
+        VllmResultParser().parse_payload(metrics)
+
+    assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
+
+
 def test_mooncake_extractor_publishes_bounded_request_evidence(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     trace = tmp_path / "trace.jsonl"
