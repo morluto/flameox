@@ -35,6 +35,7 @@ def _write_proc_record(root: Path, pid: int, comm: str, starttime: str) -> None:
 def _running_run(run_id: str, pid: int, starttime: str, boot_id: str) -> RunManifest:
     return ExecutionRunManifest(
         run_id=run_id,
+        started_at=OBSERVED_AT,
         execution_status=ExecutionStatus.RUNNING,
         capture_status=CaptureStatus.RUNNING,
         validation_status=ValidationStatus.PENDING,

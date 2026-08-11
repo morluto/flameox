@@ -160,9 +160,9 @@ async def test_real_stdio_discovers_then_plans_and_executes_declared_workload(
         initialized = await client.call_tool("initialize_workspace", {})
         assert initialized.is_error is False
         workspace = Workspace.discover(tmp_path)
-        config = workspace.config.model_copy(
+        config = workspace.config.validated_copy(
             update={
-                "execution": workspace.config.execution.model_copy(
+                "execution": workspace.config.execution.validated_copy(
                     update={"containment": "disabled"}
                 )
             }
@@ -292,9 +292,11 @@ timeout_seconds = 60
 """
     )
     workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())

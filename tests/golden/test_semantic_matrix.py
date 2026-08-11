@@ -21,9 +21,11 @@ async def test_semantic_matrix_preserves_typed_categorical_evidence(tmp_path: Pa
     for name in ("flameox.toml", "semantic_workload.py", "semantic_oracle.py"):
         shutil.copyfile(example / name, tmp_path / name)
     workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())

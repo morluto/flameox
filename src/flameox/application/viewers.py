@@ -4,6 +4,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from typing import Literal
 
 from flameox.application.artifacts import ArtifactService
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, ProcessResult
@@ -12,22 +13,29 @@ from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, Workspace
 
 
-class NativeViewerPlan(ContractModel):
+class _NativeViewerPlan(ContractModel):
     schema_version: int = 1
     artifact_id: str
     artifact_path: str
-    artifact_kinds: tuple[str, ...]
+    artifact_kinds: tuple[ArtifactKind, ...]
     viewer: str
     argv: tuple[str, ...]
-    launches: bool = False
     limitations: tuple[str, ...] = (
         "Viewer behavior and format support are controlled by the installed application.",
     )
 
 
+class NativeViewerPlan(_NativeViewerPlan):
+    launches: Literal[False] = False
+
+
+class _LaunchedNativeViewerPlan(_NativeViewerPlan):
+    launches: Literal[True] = True
+
+
 class NativeViewerLaunchResult(ContractModel):
     schema_version: int = 1
-    plan: NativeViewerPlan
+    plan: _LaunchedNativeViewerPlan
     process: ProcessResult
 
 
@@ -38,7 +46,12 @@ class NativeViewerService:
     def plan(self, artifact_id: str) -> NativeViewerPlan:
         artifact = ArtifactStore(self.workspace).get(artifact_id)
         metadata = ArtifactService(self.workspace).get(artifact_id)
-        kinds = tuple(sorted({item.kind for item in metadata.registrations}))
+        kinds = tuple(
+            sorted(
+                {item.kind for item in metadata.registrations},
+                key=lambda kind: kind.value,
+            )
+        )
         producers = {
             item.producer.lower() for item in metadata.registrations if item.producer is not None
         }
@@ -67,7 +80,9 @@ class NativeViewerService:
             )
         )
         return NativeViewerLaunchResult(
-            plan=plan.model_copy(update={"launches": True}),
+            plan=_LaunchedNativeViewerPlan.model_validate(
+                {**plan.model_dump(mode="python"), "launches": True}
+            ),
             process=outcome.process,
         )
 
@@ -75,25 +90,25 @@ class NativeViewerService:
         self,
         path: Path,
         *,
-        kinds: tuple[str, ...],
+        kinds: tuple[ArtifactKind, ...],
         producers: set[str],
     ) -> tuple[str, tuple[str, ...]]:
         kind_set = set(kinds)
-        if ArtifactKind.MEMORY_PROFILE.value in kind_set or "memray" in producers:
+        if ArtifactKind.MEMORY_PROFILE in kind_set or "memray" in producers:
             executable = self._required_executable(
                 "memray",
                 "Install Memray to inspect memory-profile artifacts.",
             )
             return "memray tree", (executable, "tree", str(path))
-        if ArtifactKind.BENCHMARK_SAMPLES.value in kind_set or "pyperf" in producers:
+        if ArtifactKind.BENCHMARK_SAMPLES in kind_set or "pyperf" in producers:
             executable = self._required_executable(
                 "pyperf",
                 "Install pyperf to inspect benchmark artifacts.",
             )
             return "pyperf show", (executable, "show", str(path))
         if kind_set & {
-            ArtifactKind.EXECUTION_TRACE.value,
-            ArtifactKind.SAMPLE_PROFILE.value,
+            ArtifactKind.EXECUTION_TRACE,
+            ArtifactKind.SAMPLE_PROFILE,
         }:
             configured = self.workspace.config.analysis.trace_processor_path
             trace_executable = (
@@ -120,7 +135,7 @@ class NativeViewerService:
                     ),
                 )
             return "trace_processor_shell", (trace_executable, str(path))
-        if ArtifactKind.CORE_DUMP.value in kind_set:
+        if ArtifactKind.CORE_DUMP in kind_set:
             executable = self._required_executable(
                 "gdb",
                 "Install gdb and supply symbols when inspecting the core.",

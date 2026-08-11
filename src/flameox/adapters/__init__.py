@@ -110,6 +110,7 @@ __all__ = [
     "PerfettoExtractor",
     "PyPerfExtractionResult",
     "PyPerfExtractor",
+    "PytestCompletionState",
     "PytestExtractionResult",
     "PytestExtractor",
     "PythonStartupExtractionResult",

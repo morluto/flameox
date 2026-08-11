@@ -15,7 +15,11 @@ from flameox.analysis.recipe_models import (
 from flameox.catalog import Snapshot
 from flameox.domain import DomainError, ErrorCode
 from flameox.evidence_scope import resolve_evidence_scope
-from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
+from flameox.evidence_status import (
+    available_availability,
+    empty_availability,
+    partial_availability,
+)
 
 
 def _trace_integer(value: object) -> int | None:
@@ -147,8 +151,6 @@ class AcceleratorRecipes(RecipeContext):
             comparison_regions=comparison_regions,
             comparisons=comparisons,
             total=total,
-            returned=len(regions),
-            truncated=total > len(regions),
             coverage=coverage,
             comparison_coverage=comparison_coverage,
             limitations=tuple(dict.fromkeys(limitations)),
@@ -156,10 +158,7 @@ class AcceleratorRecipes(RecipeContext):
                 empty_availability("no_matching_accelerator_launch_events")
                 if total == 0
                 else (
-                    EvidenceAvailability(
-                        status="partial",
-                        reason="runtime_or_accelerator_tracks_missing",
-                    )
+                    partial_availability("runtime_or_accelerator_tracks_missing")
                     if not (
                         coverage["runtime_launches"]
                         and coverage["accelerator_kernels"]
@@ -446,5 +445,4 @@ class AcceleratorRecipes(RecipeContext):
             idle_gap_max_ns=max(gaps, default=0),
             stream_count=len(kernels_by_stream),
             streams=tuple(stream_summaries[:limit]),
-            streams_truncated=len(stream_summaries) > limit,
         )

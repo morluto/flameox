@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from typing import Literal
 
 import numpy as np
 from scipy.stats import bootstrap
@@ -12,6 +11,8 @@ from flameox.domain.models import (
     Comparison,
     ComparisonDecision,
     ComparisonValidity,
+    ConfidenceInterval,
+    MetricPolarity,
 )
 from flameox.domain.scalars import FloatingValue
 
@@ -25,7 +26,7 @@ def _decision(
     low: float | None,
     high: float | None,
     threshold: float,
-    polarity: Literal["lower_is_better", "higher_is_better", "neutral"],
+    polarity: MetricPolarity,
 ) -> ComparisonDecision:
     if low is None or high is None or polarity == "neutral":
         return ComparisonDecision.INCONCLUSIVE
@@ -53,7 +54,7 @@ def compare_paired_samples(
     candidate_by_block: Mapping[str, float],
     metric: str,
     unit: str,
-    polarity: Literal["lower_is_better", "higher_is_better", "neutral"],
+    polarity: MetricPolarity,
     practical_threshold: float,
     confidence_level: float = 0.95,
     random_seed: int = 0,
@@ -130,13 +131,18 @@ def compare_paired_samples(
         ),
         relative_change=relative_change,
         effect_size=relative_change,
-        confidence_low=confidence_low,
-        confidence_high=confidence_high,
-        confidence_level=confidence_level if confidence_low is not None else None,
+        confidence_interval=(
+            ConfidenceInterval(
+                low=confidence_low,
+                high=confidence_high,
+                level=confidence_level,
+            )
+            if confidence_low is not None and confidence_high is not None
+            else None
+        ),
         method="scipy.bootstrap.bca.median_paired_log_ratio.v1",
         random_seed=random_seed,
         independent_unit="block",
-        paired=True,
         baseline_attempted_n=len(baseline_by_block),
         baseline_eligible_n=len(eligible),
         candidate_attempted_n=len(candidate_by_block),

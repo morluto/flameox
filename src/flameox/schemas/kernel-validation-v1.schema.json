@@ -1,5 +1,75 @@
 {
   "$defs": {
+    "EvaluatedKernelValidationMetric": {
+      "additionalProperties": false,
+      "properties": {
+        "comparator": {
+          "enum": [
+            "<=",
+            ">="
+          ],
+          "title": "Comparator",
+          "type": "string"
+        },
+        "limitation": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Limitation"
+        },
+        "name": {
+          "enum": [
+            "max_abs_error",
+            "max_rel_error",
+            "mse",
+            "rmse",
+            "psnr",
+            "cosine_similarity"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "fail"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "threshold": {
+          "title": "Threshold",
+          "type": "number"
+        },
+        "unit": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Unit",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "unit",
+        "value",
+        "comparator",
+        "threshold",
+        "status"
+      ],
+      "title": "EvaluatedKernelValidationMetric",
+      "type": "object"
+    },
     "KernelValidationCase": {
       "additionalProperties": false,
       "properties": {
@@ -90,14 +160,7 @@
           "title": "Seed"
         },
         "status": {
-          "enum": [
-            "pass",
-            "fail",
-            "inconclusive",
-            "unsupported"
-          ],
-          "title": "Status",
-          "type": "string"
+          "$ref": "#/$defs/KernelValidationStatus"
         }
       },
       "required": [
@@ -227,97 +290,23 @@
       "type": "object"
     },
     "KernelValidationMetric": {
-      "additionalProperties": false,
-      "properties": {
-        "comparator": {
-          "anyOf": [
-            {
-              "enum": [
-                "<=",
-                ">="
-              ],
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Comparator"
+      "discriminator": {
+        "mapping": {
+          "fail": "#/$defs/EvaluatedKernelValidationMetric",
+          "inconclusive": "#/$defs/UnavailableKernelValidationMetric",
+          "pass": "#/$defs/EvaluatedKernelValidationMetric",
+          "unsupported": "#/$defs/UnavailableKernelValidationMetric"
         },
-        "limitation": {
-          "anyOf": [
-            {
-              "maxLength": 500,
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Limitation"
-        },
-        "name": {
-          "enum": [
-            "max_abs_error",
-            "max_rel_error",
-            "mse",
-            "rmse",
-            "psnr",
-            "cosine_similarity"
-          ],
-          "title": "Name",
-          "type": "string"
-        },
-        "status": {
-          "enum": [
-            "pass",
-            "fail",
-            "inconclusive",
-            "unsupported"
-          ],
-          "title": "Status",
-          "type": "string"
-        },
-        "threshold": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Threshold"
-        },
-        "unit": {
-          "maxLength": 100,
-          "minLength": 1,
-          "title": "Unit",
-          "type": "string"
-        },
-        "value": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Value"
-        }
+        "propertyName": "status"
       },
-      "required": [
-        "name",
-        "value",
-        "comparator",
-        "threshold",
-        "unit",
-        "status"
-      ],
-      "title": "KernelValidationMetric",
-      "type": "object"
+      "oneOf": [
+        {
+          "$ref": "#/$defs/EvaluatedKernelValidationMetric"
+        },
+        {
+          "$ref": "#/$defs/UnavailableKernelValidationMetric"
+        }
+      ]
     },
     "KernelValidationOutput": {
       "additionalProperties": false,
@@ -373,14 +362,7 @@
           "type": "array"
         },
         "status": {
-          "enum": [
-            "pass",
-            "fail",
-            "inconclusive",
-            "unsupported"
-          ],
-          "title": "Status",
-          "type": "string"
+          "$ref": "#/$defs/KernelValidationStatus"
         }
       },
       "required": [
@@ -427,6 +409,79 @@
         "identity"
       ],
       "title": "KernelValidationReference",
+      "type": "object"
+    },
+    "KernelValidationStatus": {
+      "enum": [
+        "pass",
+        "fail",
+        "inconclusive",
+        "unsupported"
+      ],
+      "title": "KernelValidationStatus",
+      "type": "string"
+    },
+    "UnavailableKernelValidationMetric": {
+      "additionalProperties": false,
+      "properties": {
+        "comparator": {
+          "const": null,
+          "title": "Comparator",
+          "type": "null"
+        },
+        "limitation": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Limitation",
+          "type": "string"
+        },
+        "name": {
+          "enum": [
+            "max_abs_error",
+            "max_rel_error",
+            "mse",
+            "rmse",
+            "psnr",
+            "cosine_similarity"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "inconclusive",
+            "unsupported"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "threshold": {
+          "const": null,
+          "title": "Threshold",
+          "type": "null"
+        },
+        "unit": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Unit",
+          "type": "string"
+        },
+        "value": {
+          "const": null,
+          "title": "Value",
+          "type": "null"
+        }
+      },
+      "required": [
+        "name",
+        "unit",
+        "value",
+        "comparator",
+        "threshold",
+        "status",
+        "limitation"
+      ],
+      "title": "UnavailableKernelValidationMetric",
       "type": "object"
     }
   },
@@ -483,14 +538,7 @@
       "type": "string"
     },
     "status": {
-      "enum": [
-        "pass",
-        "fail",
-        "inconclusive",
-        "unsupported"
-      ],
-      "title": "Status",
-      "type": "string"
+      "$ref": "#/$defs/KernelValidationStatus"
     }
   },
   "required": [

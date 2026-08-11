@@ -2,27 +2,77 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from pydantic import ValidationError
 
 from flameox.application.native_reducer import (
     BinaryChunkPartitioning,
     NativeDdminReducer,
     NativePredicateClassification,
+    NativeReductionAttempt,
+    NativeReductionCacheStatus,
+    NativeReductionDisposition,
     NativeReductionLimits,
+    NativeReductionMinimality,
+    NativeReductionPartitioner,
+    NativeReductionResult,
     StructuredPartitioning,
 )
+
+
+def test_native_reduction_rejects_incoherent_outcome_state() -> None:
+    with pytest.raises(ValidationError):
+        NativeReductionAttempt(
+            attempt_id="attempt",
+            candidate_digest="sha256:" + "0" * 64,
+            candidate_size_bytes=1,
+            classification=NativePredicateClassification.UNRESOLVED,
+            cache_status=NativeReductionCacheStatus.MISS,
+            duration_ms=0,
+            became_best=True,
+        )
+
+    with pytest.raises(ValidationError):
+        NativeReductionResult(
+            disposition=NativeReductionDisposition.SUCCEEDED,
+            original_digest="sha256:" + "0" * 64,
+            final_digest="sha256:" + "0" * 64,
+            original_unit_count=1,
+            final_unit_count=1,
+            minimality=NativeReductionMinimality.ONE_MINIMAL,
+            final_revalidation=NativePredicateClassification.INTERESTING,
+        )
 
 
 def test_binary_partitioning_carries_its_required_chunk_size() -> None:
     reducer = NativeDdminReducer(BinaryChunkPartitioning(chunk_size=2))
 
     result = reducer.reduce(
-        b"KEEPxx", lambda payload: "interesting" if b"KEEP" in payload else "not_interesting"
+        b"KEEPxx",
+        lambda payload: (
+            NativePredicateClassification.INTERESTING
+            if b"KEEP" in payload
+            else NativePredicateClassification.NOT_INTERESTING
+        ),
     )
 
     assert result.final_payload == b"KEEP"
     assert result.minimality == "one_minimal"
+
+
+def test_predicate_results_are_parsed_before_enum_identity_checks() -> None:
+    result = NativeDdminReducer(
+        StructuredPartitioning(partitioner=NativeReductionPartitioner.TEXT_LINES)
+    ).reduce(
+        b"KEEP\ndiscard\n",
+        lambda payload: "interesting" if b"KEEP" in payload else "not_interesting",
+    )
+
+    assert result.final_payload == b"KEEP\n"
+    assert result.final_revalidation is NativePredicateClassification.INTERESTING
+    assert result.accepted_best_payloads == (b"KEEP\n",)
 
 
 @settings(max_examples=20, deadline=None)
@@ -44,10 +94,14 @@ def test_text_reduction_is_deterministic_and_preserves_interesting_candidates(
     original = ("KEEP\n" + "".join(f"{line}\n" for line in extra_lines)).encode()
 
     def predicate(payload: bytes) -> NativePredicateClassification:
-        return "interesting" if b"KEEP\n" in payload else "not_interesting"
+        return (
+            NativePredicateClassification.INTERESTING
+            if b"KEEP\n" in payload
+            else NativePredicateClassification.NOT_INTERESTING
+        )
 
     reducer = NativeDdminReducer(
-        StructuredPartitioning(partitioner="text_lines"),
+        StructuredPartitioning(partitioner=NativeReductionPartitioner.TEXT_LINES),
         limits=NativeReductionLimits(max_attempts=100, wall_time_seconds=5),
     )
     first = reducer.reduce(original, predicate)
@@ -79,8 +133,11 @@ def test_text_reduction_is_deterministic_and_preserves_interesting_candidates(
 
 
 def test_unresolved_candidates_are_never_accepted() -> None:
-    result = NativeDdminReducer(StructuredPartitioning(partitioner="text_lines")).reduce(
-        b"KEEP\nother\n", lambda _payload: "unresolved"
+    result = NativeDdminReducer(
+        StructuredPartitioning(partitioner=NativeReductionPartitioner.TEXT_LINES)
+    ).reduce(
+        b"KEEP\nother\n",
+        lambda _payload: NativePredicateClassification.UNRESOLVED,
     )
 
     assert result.disposition == "inconclusive"
@@ -89,9 +146,11 @@ def test_unresolved_candidates_are_never_accepted() -> None:
 
 
 def test_single_unit_reduction_tests_empty_selection() -> None:
-    result = NativeDdminReducer(StructuredPartitioning(partitioner="text_lines")).reduce(
+    result = NativeDdminReducer(
+        StructuredPartitioning(partitioner=NativeReductionPartitioner.TEXT_LINES)
+    ).reduce(
         b"KEEP\n",
-        lambda _payload: "interesting",
+        lambda _payload: NativePredicateClassification.INTERESTING,
     )
 
     assert result.final_payload == b""
@@ -101,9 +160,15 @@ def test_single_unit_reduction_tests_empty_selection() -> None:
 
 def test_json_normalization_incompatibility_preserves_original() -> None:
     original = b'{ "keep": true, "discard": false }'
-    result = NativeDdminReducer(StructuredPartitioning(partitioner="json_top_level")).reduce(
+    result = NativeDdminReducer(
+        StructuredPartitioning(partitioner=NativeReductionPartitioner.JSON_TOP_LEVEL)
+    ).reduce(
         original,
-        lambda payload: "interesting" if payload == original else "not_interesting",
+        lambda payload: (
+            NativePredicateClassification.INTERESTING
+            if payload == original
+            else NativePredicateClassification.NOT_INTERESTING
+        ),
     )
 
     assert result.disposition == "inconclusive"
@@ -124,9 +189,15 @@ def test_chrome_trace_duration_dependencies_are_kept_together() -> None:
         },
         separators=(",", ":"),
     ).encode()
-    result = NativeDdminReducer(StructuredPartitioning(partitioner="chrome_trace_events")).reduce(
+    result = NativeDdminReducer(
+        StructuredPartitioning(partitioner=NativeReductionPartitioner.CHROME_TRACE_EVENTS)
+    ).reduce(
         original,
-        lambda payload: "interesting" if b'"name":"end"' in payload else "not_interesting",
+        lambda payload: (
+            NativePredicateClassification.INTERESTING
+            if b'"name":"end"' in payload
+            else NativePredicateClassification.NOT_INTERESTING
+        ),
     )
 
     assert result.final_revalidation == "interesting"

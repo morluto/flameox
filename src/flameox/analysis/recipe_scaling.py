@@ -18,8 +18,14 @@ from flameox.analysis.recipe_models import (
     ScalingPoint,
     ScalingTrialSummary,
 )
-from flameox.domain import DomainError, ErrorCode
-from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
+from flameox.domain import ConfidenceInterval, DomainError, ErrorCode
+from flameox.evidence_status import (
+    EvidenceAvailability,
+    available_availability,
+    empty_availability,
+    partial_availability,
+    unavailable_availability,
+)
 
 
 class ScalingRecipes(RecipeContext):
@@ -83,6 +89,7 @@ class ScalingRecipes(RecipeContext):
                 "ON v.variant_id = t.variant_id "
                 "JOIN frame_measurements fm ON fm.run_id = t.run_id "
                 "LEFT JOIN frames f ON f.frame_id = fm.frame_id "
+                "AND f.artifact_id = fm.artifact_id "
                 "WHERE t.experiment_id = ? AND t.outcome = 'succeeded' "
                 "AND coalesce(fm.inclusive_value, fm.self_value) IS NOT NULL",
                 (experiment_id,),
@@ -175,9 +182,11 @@ class ScalingRecipes(RecipeContext):
                     input_value=input_value,
                     value=median,
                     dispersion=dispersion,
-                    confidence_low=low,
-                    confidence_high=high,
-                    confidence_level=confidence_level if low is not None else None,
+                    confidence_interval=(
+                        ConfidenceInterval(low=low, high=high, level=confidence_level)
+                        if low is not None and high is not None
+                        else None
+                    ),
                     unit=unit,
                     sample_count=len(group),
                     raw_sample_count=sum(trial.raw_sample_count for trial in group),
@@ -236,7 +245,6 @@ class ScalingRecipes(RecipeContext):
             fits=fits,
             correlated_hotspots=correlated_hotspots,
             conclusion=conclusion,
-            environment_stable=environment_stable,
             warnings=tuple(warnings),
             evidence=evidence,
         )
@@ -251,10 +259,7 @@ class ScalingRecipes(RecipeContext):
     ) -> tuple[EvidenceAvailability, str | None]:
         if points and succeeded_trials > measured_trials:
             return (
-                EvidenceAvailability(
-                    status="partial",
-                    reason="primary_metric_measurements_partial",
-                ),
+                partial_availability("primary_metric_measurements_partial"),
                 "Some succeeded trials published no measurements matching the experiment's "
                 "primary metric.",
             )
@@ -262,10 +267,7 @@ class ScalingRecipes(RecipeContext):
             return available_availability(), None
         if succeeded_trials:
             return (
-                EvidenceAvailability(
-                    status="unavailable",
-                    reason="primary_metric_measurements_unavailable",
-                ),
+                unavailable_availability("primary_metric_measurements_unavailable"),
                 "Succeeded trials published no measurements matching the experiment's "
                 "primary metric.",
             )
@@ -492,7 +494,7 @@ class ScalingRecipes(RecipeContext):
             )[1]
             tested = len(results)
             results = [
-                item.model_copy(
+                item.validated_copy(
                     update={
                         "adjusted_p_value": float(adjusted[index]),
                         "tested_hypothesis_count": tested,

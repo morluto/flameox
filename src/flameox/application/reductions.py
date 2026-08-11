@@ -4,38 +4,38 @@ import asyncio
 import hashlib
 import shutil
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, TypeAdapter
+from pydantic import Field, TypeAdapter, computed_field
 
-from flameox.application.artifact_workers import ArtifactWorker
+from flameox.adapters.artifact_workers import ArtifactWorker
 from flameox.application.native_reducer import (
     BinaryChunkPartitioning,
     NativePartitioning,
     NativePredicateClassification,
+    NativeReductionDisposition,
     NativeReductionLimits,
+    NativeReductionMinimality,
+    NativeReductionPartitioner,
     NativeReductionResult,
+    StructuredNativePartitioner,
     StructuredPartitioning,
 )
 from flameox.application.reduction_worker import NativeReductionWorkerRequest
 from flameox.application.workloads import WorkloadService
 from flameox.domain import DomainError, ErrorCode, digest_model
-from flameox.domain.models import CommandSpec, utc_now
+from flameox.domain.models import CommandSpec, Digest, utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.execution import SubprocessBroker
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, JsonRecordStore, Workspace
 
-ReductionDisposition = Literal["succeeded", "unchanged", "inconclusive", "original_not_interesting"]
-ReductionPartitioner = Literal[
-    "text_lines",
-    "binary_chunks",
-    "json_top_level",
-    "jsonl_records",
-    "otlp_spans",
-    "chrome_trace_events",
-]
+
+class ReductionDeterminism(StrEnum):
+    DETERMINISTIC = "deterministic"
+    REPEATED = "repeated"
 
 
 class ReductionLimits(ContractModel):
@@ -54,26 +54,20 @@ class _PlanReductionRequest(ContractModel):
         max_length=128,
     )
     limits: ReductionLimits = Field(default_factory=ReductionLimits)
-    expected_determinism: Literal["deterministic", "repeated"] = "deterministic"
+    expected_determinism: ReductionDeterminism = ReductionDeterminism.DETERMINISTIC
 
 
 class BinaryChunkReductionRequest(_PlanReductionRequest):
     """A binary reduction whose chunk size is part of its executable contract."""
 
-    partitioner: Literal["binary_chunks"]
+    partitioner: Literal[NativeReductionPartitioner.BINARY_CHUNKS]
     chunk_size: Annotated[int, Field(ge=1, le=16 * 1024 * 1024)]
 
 
 class StructuredReductionRequest(_PlanReductionRequest):
     """A structured reduction, which never accepts binary chunking configuration."""
 
-    partitioner: Literal[
-        "text_lines",
-        "json_top_level",
-        "jsonl_records",
-        "otlp_spans",
-        "chrome_trace_events",
-    ]
+    partitioner: StructuredNativePartitioner
 
 
 type PlanReductionRequest = Annotated[
@@ -84,8 +78,7 @@ type PlanReductionRequest = Annotated[
 
 class _ReductionPlan(ContractModel):
     schema_version: Literal[2] = 2
-    plan_id: str
-    request_digest: str
+    plan_id: Digest
     workspace_id: str
     original_artifact_id: str
     engine: Literal["native_ddmin"] = "native_ddmin"
@@ -96,23 +89,22 @@ class _ReductionPlan(ContractModel):
     predicate_parameters: dict[str, str | int | float | bool]
     predicate_executable_digest: str
     limits: ReductionLimits
-    expected_determinism: Literal["deterministic", "repeated"]
+    expected_determinism: ReductionDeterminism
     created_at: datetime = Field(default_factory=utc_now)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def request_digest(self) -> Digest:
+        return self.plan_id
 
 
 class BinaryChunkReductionPlan(_ReductionPlan):
-    partitioner: Literal["binary_chunks"]
+    partitioner: Literal[NativeReductionPartitioner.BINARY_CHUNKS]
     chunk_size: Annotated[int, Field(ge=1, le=16 * 1024 * 1024)]
 
 
 class StructuredReductionPlan(_ReductionPlan):
-    partitioner: Literal[
-        "text_lines",
-        "json_top_level",
-        "jsonl_records",
-        "otlp_spans",
-        "chrome_trace_events",
-    ]
+    partitioner: StructuredNativePartitioner
     # Kept in schema 2's durable projection for byte-for-byte compatible records.
     chunk_size: Literal[None] = None
 
@@ -137,7 +129,7 @@ class ReductionResult(ContractModel):
     schema_version: Literal[2] = 2
     reduction_id: str
     plan_id: str
-    disposition: ReductionDisposition
+    disposition: NativeReductionDisposition
     original_artifact_id: str
     final_artifact_id: str | None = None
     predicate_definition_id: str
@@ -148,10 +140,10 @@ class ReductionResult(ContractModel):
     cleanup_complete: bool
     limitations: tuple[str, ...] = ()
     engine: Literal["native_ddmin"] = "native_ddmin"
-    partitioner: ReductionPartitioner
+    partitioner: NativeReductionPartitioner
     original_unit_count: int | None = None
     final_unit_count: int | None = None
-    minimality: Literal["one_minimal", "not_claimed", "partitioner_incompatible"] | None = None
+    minimality: NativeReductionMinimality | None = None
     best_known_artifact_id: str | None = None
     final_revalidation_status: NativePredicateClassification | None = None
     budget_exhausted: bool = False
@@ -171,6 +163,7 @@ class ReductionService:
             kind="reduction_plans",
             model=_REDUCTION_PLAN_ADAPTER,
             id_field="plan_id",
+            output_only_fields={"request_digest"},
         )
         self.results = JsonRecordStore(
             workspace,
@@ -199,7 +192,6 @@ class ReductionService:
             plan: ReductionPlan = BinaryChunkReductionPlan(
                 schema_version=2,
                 plan_id=request_digest,
-                request_digest=request_digest,
                 workspace_id=self.workspace.identity.workspace_id,
                 original_artifact_id=request.original_artifact_id,
                 engine="native_ddmin",
@@ -218,7 +210,6 @@ class ReductionService:
             plan = StructuredReductionPlan(
                 schema_version=2,
                 plan_id=request_digest,
-                request_digest=request_digest,
                 workspace_id=self.workspace.identity.workspace_id,
                 original_artifact_id=request.original_artifact_id,
                 engine="native_ddmin",
@@ -366,16 +357,22 @@ class ReductionService:
             native, accepted_ids, final_id, stdout_id, stderr_id, worker_root = worker_result
             summary = ReductionAttemptSummary(
                 attempted=len(native.attempts),
-                passed=sum(item.classification == "interesting" for item in native.attempts),
-                failed=sum(item.classification == "not_interesting" for item in native.attempts),
+                passed=sum(
+                    item.classification is NativePredicateClassification.INTERESTING
+                    for item in native.attempts
+                ),
+                failed=sum(
+                    item.classification is NativePredicateClassification.NOT_INTERESTING
+                    for item in native.attempts
+                ),
                 contradictory=sum(
-                    item.classification == "unresolved"
+                    item.classification is NativePredicateClassification.UNRESOLVED
                     and len(item.predicate_outcomes) > 1
                     and len(set(item.predicate_outcomes)) > 1
                     for item in native.attempts
                 ),
                 timed_out=sum(
-                    item.classification == "unresolved"
+                    item.classification is NativePredicateClassification.UNRESOLVED
                     and item.failure
                     in {
                         ErrorCode.PROCESS_TIMEOUT.value,
@@ -405,13 +402,13 @@ class ReductionService:
                 plan,
                 reduction_id,
                 NativeReductionResult(
-                    disposition="inconclusive",
+                    disposition=NativeReductionDisposition.INCONCLUSIVE,
                     original_digest=plan.original_artifact_id,
                     final_digest=plan.original_artifact_id,
                     original_unit_count=0,
                     final_unit_count=0,
-                    minimality="not_claimed",
-                    final_revalidation="unresolved",
+                    minimality=NativeReductionMinimality.NOT_CLAIMED,
+                    final_revalidation=NativePredicateClassification.UNRESOLVED,
                     limitations=(error.message,),
                 ),
                 ReductionAttemptSummary(

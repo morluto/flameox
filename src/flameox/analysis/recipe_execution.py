@@ -7,6 +7,7 @@ from flameox.analysis.recipe_models import (
     ExecutionObservationChange,
 )
 from flameox.catalog import Snapshot
+from flameox.domain.models import EvidenceLevel
 from flameox.evidence_scope import resolve_evidence_scope
 from flameox.evidence_status import available_availability, empty_availability
 
@@ -102,8 +103,6 @@ class ExecutionRecipes(RecipeContext):
             removed=removed[:bounded],
             changed=changed[:bounded],
             total=total,
-            returned=len(observations),
-            truncated=total > len(observations),
             limitations=tuple(limitations),
             evidence=(
                 empty_availability("no_execution_observations")
@@ -150,7 +149,7 @@ class ExecutionRecipes(RecipeContext):
                     line_from=int(row[5]) if row[5] is not None else None,
                     line_to=int(row[6]) if row[6] is not None else None,
                     context=str(row[7]) if row[7] is not None else None,
-                    evidence_level=str(row[8]),
+                    evidence_level=EvidenceLevel(str(row[8])),
                 )
                 for row in rows
             ),

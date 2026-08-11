@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TypeVar
 
@@ -10,6 +11,12 @@ from flameox.domain import DomainError, ErrorCode
 from flameox.storage.workspace import Workspace
 
 RecordT = TypeVar("RecordT", bound=BaseModel)
+type ModelFieldSelection = (
+    set[int]
+    | set[str]
+    | Mapping[int, ModelFieldSelection | bool]
+    | Mapping[str, ModelFieldSelection | bool]
+)
 
 
 class JsonRecordStore[RecordT: BaseModel]:
@@ -23,12 +30,14 @@ class JsonRecordStore[RecordT: BaseModel]:
         model: type[RecordT] | TypeAdapter[RecordT],
         id_field: str,
         revision_field: str | None = None,
+        output_only_fields: ModelFieldSelection | None = None,
     ) -> None:
         self.workspace = workspace
         self.kind = kind
         self._adapter = TypeAdapter(model) if isinstance(model, type) else model
         self.id_field = id_field
         self.revision_field = revision_field
+        self.output_only_fields = output_only_fields or set()
 
     def create(self, record: RecordT) -> RecordT:
         with self.workspace.write_locked():
@@ -42,7 +51,8 @@ class JsonRecordStore[RecordT: BaseModel]:
         that must inspect and create records in one cross-process critical
         section. Callers must hold ``workspace.write_locked()``.
         """
-        identifier = self._identifier(record)
+        persisted = self._canonical(record)
+        identifier = self._identifier(persisted)
         root = self._root(identifier)
         try:
             root.mkdir(parents=True)
@@ -53,8 +63,8 @@ class JsonRecordStore[RecordT: BaseModel]:
             ) from None
         if self.revision_field is not None:
             (root / "revisions").mkdir()
-            self._write_revision(record)
-        self._write_projection(record)
+            self._write_revision(persisted)
+        self._write_projection(persisted)
         return record
 
     def _any_ancestor_is_symlink(self, path: Path) -> bool:
@@ -123,10 +133,11 @@ class JsonRecordStore[RecordT: BaseModel]:
                 ErrorCode.REVISION_CONFLICT,
                 f"{self.kind} records do not support revisions.",
             )
-        identifier = self._identifier(record)
+        persisted = self._canonical(record)
+        identifier = self._identifier(persisted)
         current = self.read(identifier)
         actual = self._revision(current)
-        next_revision = self._revision(record)
+        next_revision = self._revision(persisted)
         if next_revision != expected_revision + 1:
             # Caller bug: the supplied next revision does not match the
             # expected sequence. Retrying would loop forever, so this is
@@ -150,9 +161,20 @@ class JsonRecordStore[RecordT: BaseModel]:
                     "actual_revision": actual,
                 },
             )
-        self._write_revision(record)
-        self._write_projection(record)
+        self._write_revision(persisted)
+        self._write_projection(persisted)
         return record
+
+    def _canonical(self, record: RecordT) -> RecordT:
+        try:
+            return self._adapter.validate_python(
+                record.model_dump(mode="python", exclude=self.output_only_fields)
+            )
+        except ValueError as exc:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                f"Invalid {self.kind} record cannot be persisted.",
+            ) from exc
 
     def _root(self, identifier: str) -> Path:
         if (
@@ -194,10 +216,10 @@ class JsonRecordStore[RecordT: BaseModel]:
                     "An immutable record revision already contains different data.",
                 )
             return
-        atomic_write_json(path, record.model_dump(mode="json"))
+        atomic_write_json(path, record.model_dump(mode="json", exclude=self.output_only_fields))
 
     def _write_projection(self, record: RecordT) -> None:
         atomic_write_json(
             self._root(self._identifier(record)) / "record.json",
-            record.model_dump(mode="json"),
+            record.model_dump(mode="json", exclude=self.output_only_fields),
         )

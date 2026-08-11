@@ -156,6 +156,23 @@ def test_kernel_validation_surfaces_nonpassing_metric_limitation(
 
 
 @pytest.mark.parametrize(
+    "updates",
+    (
+        {"status": "inconclusive", "limitation": "Unavailable."},
+        {"value": None},
+    ),
+)
+def test_kernel_validation_metric_status_determines_evidence_shape(
+    updates: dict[str, object],
+) -> None:
+    payload = _document()
+    payload["cases"][0]["outputs"][0]["metrics"][0].update(updates)
+
+    with pytest.raises(ValidationError):
+        KernelValidationV1.model_validate(payload)
+
+
+@pytest.mark.parametrize(
     ("name", "value", "threshold", "match"),
     (
         ("max_abs_error", -0.1, 0.0, "must be nonnegative"),

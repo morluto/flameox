@@ -21,6 +21,8 @@ from flameox.application.inference_profiling import (
 )
 from flameox.application.inference_providers import (
     AvailableInferenceToolDiscovery,
+    InferenceServerProvider,
+    InferenceTool,
     InferenceToolDiscovery,
 )
 from flameox.domain import (
@@ -31,6 +33,7 @@ from flameox.domain import (
     ProcessResult,
     Sensitivity,
     new_id,
+    process_termination_from_returncode,
 )
 from flameox.domain.models import ArtifactKind, ArtifactRegistration, utc_now
 from flameox.execution import (
@@ -38,6 +41,7 @@ from flameox.execution import (
     ExecutionRequest,
     ManagedSidecarLease,
     ManagedSidecarOutcome,
+    ProcessContainment,
     SubprocessBroker,
 )
 from flameox.storage import RunStore, Workspace
@@ -71,10 +75,13 @@ class _FakeLease:
     async def close(self) -> ManagedSidecarOutcome:
         now = datetime.now(UTC)
         return ManagedSidecarOutcome(
-            process=ProcessResult(exit_code=0, cleanup_complete=self.cleanup_complete),
+            process=ProcessResult(
+                termination=process_termination_from_returncode(0),
+                cleanup_complete=self.cleanup_complete,
+            ),
             stdout=b"",
             stderr=b"",
-            containment="process_group",
+            containment=ProcessContainment.PROCESS_GROUP,
             process_observations=(),
             started_at=now,
             finished_at=now,
@@ -120,20 +127,23 @@ class _ProfilingBroker(SubprocessBroker):
         if self.cancel_window:
             raise asyncio.CancelledError
         return ExecutionOutcome(
-            process=ProcessResult(exit_code=0, cleanup_complete=True),
+            process=ProcessResult(
+                termination=process_termination_from_returncode(0),
+                cleanup_complete=True,
+            ),
             stdout=b"",
             stderr=b"",
             resolved_executable=Path(request.argv[0]),
-            containment="process_group",
+            containment=ProcessContainment.PROCESS_GROUP,
         )
 
 
 def _patch_capture_dependencies(monkeypatch: pytest.MonkeyPatch, executable: Path) -> None:
     from flameox.application import inference as inference_module
 
-    def fake_discover(tool: str) -> InferenceToolDiscovery:
+    def fake_discover(tool: InferenceTool) -> InferenceToolDiscovery:
         return AvailableInferenceToolDiscovery(
-            tool=tool,  # type: ignore[arg-type]
+            tool=tool,
             executable=executable,
             version="0.12.0",
             executable_digest="sha256:" + "a" * 64,
@@ -277,10 +287,9 @@ def test_sglang_torch_plan_has_stable_identity_and_derived_profile_id(
     )
 
     discovery = AvailableInferenceToolDiscovery(
-        tool="sglang",
+        tool=InferenceTool.SGLANG,
         executable=launcher,
         available=True,
-        compatible=True,
         version="0.5.16",
         executable_digest="sha256:" + "b" * 64,
     )
@@ -375,7 +384,10 @@ def test_sglang_profiler_control_posts_only_fixed_profile_payload(
         return Response()
 
     monkeypatch.setattr("flameox.application.inference_profiling.urlopen", fake_urlopen)
-    client = InferenceProfilerControlClient("http://127.0.0.1:8000", provider="sglang")
+    client = InferenceProfilerControlClient(
+        "http://127.0.0.1:8000",
+        provider=InferenceServerProvider.SGLANG,
+    )
     client.start(
         output_dir=tmp_path / "traces",
         profile_id="profile-id",

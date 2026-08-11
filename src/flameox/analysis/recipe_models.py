@@ -1,12 +1,27 @@
 from __future__ import annotations
 
-from typing import Literal
+from enum import StrEnum
+from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import Field
+from pydantic import ConfigDict, Field, TypeAdapter, computed_field, model_validator
 
+from flameox.domain import (
+    CaptureStatus,
+    ConfidenceIntervalFields,
+    EvidenceLevel,
+    ExecutionStatus,
+    ProcessCancellationCause,
+    ResourcePolicyCancellationCause,
+    ValidationStatus,
+)
 from flameox.domain.scalars import NumericValue
-from flameox.evidence_status import EvidenceAvailability, available_availability
+from flameox.evidence_status import (
+    EvidenceAvailability,
+    EvidenceStatus,
+    available_availability,
+)
 from flameox.models import ContractModel
+from flameox.pagination import BoundedCollectionContract
 
 
 class Hotspot(ContractModel):
@@ -21,21 +36,27 @@ class Hotspot(ContractModel):
     sample_count: int | None
 
 
-class HotspotResult(ContractModel):
+class HotspotResult(BoundedCollectionContract):
+    page_items_field: ClassVar[str] = "hotspots"
+
     schema_version: int = 1
     corpus_commit_id: str
     input_id: str
     hotspots: tuple[Hotspot, ...]
     total: int
-    returned: int
-    truncated: bool
     coverage: dict[str, int]
     limitations: tuple[str, ...]
-    evidence_status: Literal["available", "empty", "unavailable", "partial", "unknown"] = (
-        "available"
-    )
-    unavailable_reason: str | None = None
     evidence: EvidenceAvailability = Field(default_factory=available_availability)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def evidence_status(self) -> EvidenceStatus:
+        return self.evidence.status
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def unavailable_reason(self) -> str | None:
+        return self.evidence.reason if self.evidence.status == "unavailable" else None
 
 
 class MeasurementSummary(ContractModel):
@@ -47,6 +68,8 @@ class MeasurementSummary(ContractModel):
 
 
 class MemoryAnalysisResult(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: Literal[2] = 2
     corpus_commit_id: str
     input_id: str
@@ -56,12 +79,51 @@ class MemoryAnalysisResult(ContractModel):
     limitations: tuple[str, ...]
     runtime_resources: tuple[RuntimeResourceObservation, ...] = ()
     runtime_resource_totals: RuntimeResourceTotals | None = None
-    runtime_resources_truncated: bool = False
-    truncated: bool = False
     writable_root_observations: tuple[WritableRootObservation, ...] = ()
-    policy_termination: str | None = None
-    unavailable_metrics: tuple[str, ...] = ()
     evidence: EvidenceAvailability = Field(default_factory=available_availability)
+
+    @model_validator(mode="after")
+    def runtime_resource_count_is_coherent(self) -> MemoryAnalysisResult:
+        if (
+            self.runtime_resource_totals is not None
+            and self.runtime_resource_totals.run_count < len(self.runtime_resources)
+        ):
+            raise ValueError("runtime-resource total cannot be smaller than returned resources")
+        return self
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def runtime_resources_truncated(self) -> bool:
+        return (
+            self.runtime_resource_totals is not None
+            and self.runtime_resource_totals.run_count > len(self.runtime_resources)
+        )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def truncated(self) -> bool:
+        return self.runtime_resources_truncated
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def policy_termination(self) -> ProcessCancellationCause | None:
+        return next(
+            (
+                item.policy_termination
+                for item in self.runtime_resources
+                if item.policy_termination is not None
+            ),
+            None,
+        )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def unavailable_metrics(self) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                {metric for item in self.runtime_resources for metric in item.unavailable_metrics}
+            )
+        )
 
 
 class RuntimeResourceObservation(ContractModel):
@@ -70,7 +132,7 @@ class RuntimeResourceObservation(ContractModel):
     minimum_free_bytes: int | None
     staging_growth_bytes: int | None
     peak_rss_bytes: int | None
-    policy_termination: str | None
+    policy_termination: ResourcePolicyCancellationCause | None
     unavailable_metrics: tuple[str, ...] = ()
 
 
@@ -81,13 +143,36 @@ class RuntimeResourceTotals(ContractModel):
     maximum_peak_rss_bytes: int | None = None
 
 
-class WritableRootObservation(ContractModel):
+class _WritableRootObservation(ContractModel):
     run_id: str
     writable_root_identity: str
     target_path: str
-    growth_bytes: int | None
-    available: bool
-    unavailable_reason: str | None = None
+
+
+class AvailableWritableRootObservation(_WritableRootObservation):
+    available: Literal[True] = True
+    growth_bytes: int
+    unavailable_reason: Literal[None] = None
+
+
+class UnavailableWritableRootObservation(_WritableRootObservation):
+    available: Literal[False] = False
+    growth_bytes: Literal[None] = None
+    unavailable_reason: str
+
+
+type WritableRootObservation = Annotated[
+    AvailableWritableRootObservation | UnavailableWritableRootObservation,
+    Field(discriminator="available"),
+]
+
+_WRITABLE_ROOT_OBSERVATION_ADAPTER: TypeAdapter[WritableRootObservation] = TypeAdapter(
+    WritableRootObservation
+)
+
+
+def parse_writable_root_observation(value: object) -> WritableRootObservation:
+    return _WRITABLE_ROOT_OBSERVATION_ADAPTER.validate_python(value)
 
 
 class MemoryPhaseGrowth(ContractModel):
@@ -109,10 +194,12 @@ class ExecutionObservation(ContractModel):
     line_from: int | None
     line_to: int | None
     context: str | None
-    evidence_level: str
+    evidence_level: EvidenceLevel
 
 
-class ExecutionAnalysisResult(ContractModel):
+class ExecutionAnalysisResult(BoundedCollectionContract):
+    page_items_field: ClassVar[str] = "observations"
+
     schema_version: int = 1
     corpus_commit_id: str
     input_id: str
@@ -122,8 +209,6 @@ class ExecutionAnalysisResult(ContractModel):
     removed: tuple[ExecutionObservation, ...] = ()
     changed: tuple[ExecutionObservationChange, ...] = ()
     total: int
-    returned: int
-    truncated: bool
     limitations: tuple[str, ...]
     evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
@@ -154,14 +239,14 @@ class OperatorSummary(ContractModel):
     warmup: bool | None = None
 
 
-class PyTorchAnalysisResult(ContractModel):
+class PyTorchAnalysisResult(BoundedCollectionContract):
+    page_items_field: ClassVar[str] = "operators"
+
     schema_version: int = 1
     corpus_commit_id: str
     input_id: str
     operators: tuple[OperatorSummary, ...]
     total: int
-    returned: int
-    truncated: bool
     coverage: dict[str, bool]
     repeated_small_operations: tuple[OperatorSummary, ...] = ()
     synchronization_time_ns: int = 0
@@ -190,7 +275,19 @@ class AcceleratorStreamSummary(ContractModel):
     idle_gap_max_ns: int
 
 
+def _advertise_stream_truncation(schema: dict[str, Any]) -> None:
+    properties = schema.setdefault("properties", {})
+    assert isinstance(properties, dict)
+    properties["streams_truncated"] = {"type": "boolean", "readOnly": True}
+    required = schema.setdefault("required", [])
+    assert isinstance(required, list)
+    if "streams_truncated" not in required:
+        required.append("streams_truncated")
+
+
 class AcceleratorLaunchRegion(ContractModel):
+    model_config = ConfigDict(json_schema_extra=_advertise_stream_truncation)
+
     region: str
     region_start_ns: int
     region_end_ns: int
@@ -213,7 +310,34 @@ class AcceleratorLaunchRegion(ContractModel):
     idle_gap_max_ns: int
     stream_count: int
     streams: tuple[AcceleratorStreamSummary, ...]
-    streams_truncated: bool
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_stream_truncation_projection(cls, value: object) -> object:
+        if not isinstance(value, dict) or "streams_truncated" not in value:
+            return value
+        parsed = dict(value)
+        supplied = parsed.pop("streams_truncated")
+        stream_count = parsed.get("stream_count")
+        streams = parsed.get("streams")
+        if (
+            isinstance(stream_count, int)
+            and isinstance(streams, (list, tuple))
+            and supplied != (stream_count > len(streams))
+        ):
+            raise ValueError("stream truncation must agree with the stream total")
+        return parsed
+
+    @model_validator(mode="after")
+    def stream_count_is_coherent(self) -> AcceleratorLaunchRegion:
+        if self.stream_count < len(self.streams):
+            raise ValueError("stream total cannot be smaller than returned streams")
+        return self
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def streams_truncated(self) -> bool:
+        return self.stream_count > len(self.streams)
 
 
 class AcceleratorLaunchComparison(ContractModel):
@@ -226,7 +350,9 @@ class AcceleratorLaunchComparison(ContractModel):
     idle_gap_total_delta_ns: int
 
 
-class AcceleratorLaunchAnalysisResult(ContractModel):
+class AcceleratorLaunchAnalysisResult(BoundedCollectionContract):
+    page_items_field: ClassVar[str] = "regions"
+
     schema_version: int = 1
     corpus_commit_id: str
     input_id: str
@@ -236,8 +362,6 @@ class AcceleratorLaunchAnalysisResult(ContractModel):
     comparison_regions: tuple[AcceleratorLaunchRegion, ...] = ()
     comparisons: tuple[AcceleratorLaunchComparison, ...] = ()
     total: int
-    returned: int
-    truncated: bool
     coverage: dict[str, bool]
     comparison_coverage: dict[str, bool] | None = None
     limitations: tuple[str, ...]
@@ -246,9 +370,9 @@ class AcceleratorLaunchAnalysisResult(ContractModel):
 
 class FailureCluster(ContractModel):
     collector: str | None
-    execution_status: str
-    capture_status: str
-    validation_status: str
+    execution_status: ExecutionStatus
+    capture_status: CaptureStatus
+    validation_status: ValidationStatus
     exit_code: int | None
     workload_definition_id: str | None
     environment_id: str
@@ -265,19 +389,27 @@ class FailureChangePoint(ContractModel):
     previous_run_count: int | None
 
 
-class FailureAnalysisResult(ContractModel):
+class FailurePopulationStatus(StrEnum):
+    OBSERVED = "observed"
+    EMPTY = "empty"
+    FILTERED_EMPTY = "filtered_empty"
+
+
+class FailureAnalysisResult(BoundedCollectionContract):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
+    page_items_field: ClassVar[str] = "failures"
+    total_items_field: ClassVar[str] = "total_clusters"
+
     schema_version: int = 1
     corpus_commit_id: str
     cohort_id: str
     filters_applied: tuple[str, ...]
     eligible_runs: int = 0
     failed_runs: int = 0
-    population_status: Literal["observed", "empty", "filtered_empty"] = "empty"
-    empty_reason: Literal["no_runs", "no_matching_runs", "no_failures"] | None = "no_runs"
+    population_status: FailurePopulationStatus = FailurePopulationStatus.EMPTY
     failures: tuple[FailureCluster, ...]
     total_clusters: int
-    returned: int
-    truncated: bool
     change_points: tuple[FailureChangePoint, ...]
     coverage: dict[str, float]
     competing_hypotheses: tuple[str, ...]
@@ -287,20 +419,36 @@ class FailureAnalysisResult(ContractModel):
     )
     evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
+    @model_validator(mode="after")
+    def population_is_coherent(self) -> FailureAnalysisResult:
+        if self.failed_runs > self.eligible_runs:
+            raise ValueError("failed runs cannot exceed eligible runs")
+        if (self.population_status is FailurePopulationStatus.OBSERVED) != (self.eligible_runs > 0):
+            raise ValueError("observed population status must match eligible runs")
+        if self.failed_runs == 0 and (self.failures or self.total_clusters):
+            raise ValueError("an empty failure population cannot contain clusters")
+        return self
 
-class ScalingPoint(ContractModel):
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def empty_reason(self) -> Literal["no_runs", "no_matching_runs", "no_failures"] | None:
+        if self.population_status is FailurePopulationStatus.EMPTY:
+            return "no_runs"
+        if self.population_status is FailurePopulationStatus.FILTERED_EMPTY:
+            return "no_matching_runs"
+        return "no_failures" if self.failed_runs == 0 else None
+
+
+class ScalingPoint(ConfidenceIntervalFields):
     variant: str
     block_id: str | None
     input_value: float | None
     value: float
     dispersion: float
-    confidence_low: float | None = None
-    confidence_high: float | None = None
-    confidence_level: float | None = None
     unit: str
     sample_count: int
     raw_sample_count: int = 0
-    environment_count: int
+    environment_count: int = Field(ge=1)
 
 
 class ScalingTrialSummary(ContractModel):
@@ -351,7 +499,19 @@ class ScalingFit(ContractModel):
     supported_max: float
 
 
+def _advertise_environment_stability(schema: dict[str, Any]) -> None:
+    properties = schema.setdefault("properties", {})
+    assert isinstance(properties, dict)
+    properties["environment_stable"] = {"type": "boolean", "readOnly": True}
+    required = schema.setdefault("required", [])
+    assert isinstance(required, list)
+    if "environment_stable" not in required:
+        required.append("environment_stable")
+
+
 class ScalingAnalysisResult(ContractModel):
+    model_config = ConfigDict(json_schema_extra=_advertise_environment_stability)
+
     schema_version: int = 1
     corpus_commit_id: str
     experiment_id: str
@@ -365,9 +525,34 @@ class ScalingAnalysisResult(ContractModel):
     fits: tuple[ScalingFit, ...]
     correlated_hotspots: tuple[ScalingCorrelatedHotspot, ...]
     conclusion: str
-    environment_stable: bool
     warnings: tuple[str, ...]
     limitations: tuple[str, ...] = (
         "Points are per-trial medians; statistical decisions belong to frozen run-set comparisons.",
     )
     evidence: EvidenceAvailability = Field(default_factory=available_availability)
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_environment_stability_projection(cls, value: object) -> object:
+        if not isinstance(value, dict) or "environment_stable" not in value:
+            return value
+        parsed = dict(value)
+        supplied = parsed.pop("environment_stable")
+        points = parsed.get("points")
+        if isinstance(points, (list, tuple)):
+            counts = tuple(
+                point.get("environment_count")
+                if isinstance(point, dict)
+                else getattr(point, "environment_count", None)
+                for point in points
+            )
+            if all(isinstance(count, int) for count in counts) and supplied != all(
+                count == 1 for count in counts
+            ):
+                raise ValueError("environment stability must derive from scaling points")
+        return parsed
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def environment_stable(self) -> bool:
+        return all(point.environment_count == 1 for point in self.points)

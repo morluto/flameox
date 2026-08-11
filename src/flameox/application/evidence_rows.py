@@ -10,7 +10,7 @@ from flameox.domain import (
     SourceState,
 )
 from flameox.domain.models import utc_now
-from flameox.execution import ProcessObservation
+from flameox.execution import ProcessObservation, ProcessSnapshotPhase
 
 
 def artifact_registration_row(
@@ -57,7 +57,9 @@ def process_observation_rows(
     artifact_id: str,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Project broker observations into the two bounded process evidence tables."""
-    phases = sorted({item.snapshot_phase for item in observations}) or ["post_root_exit"]
+    phases = sorted({item.snapshot_phase for item in observations}) or [
+        ProcessSnapshotPhase.POST_ROOT_EXIT
+    ]
     summaries: list[dict[str, object]] = []
     entries: list[dict[str, object]] = []
     for phase in phases:

@@ -144,6 +144,13 @@ DuckDB for analytical SQL, pyperf for benchmark collection, SciPy for declared
 bootstrap calculations, and collector-supported readers for native artifacts.
 Private APIs and parsing human-readable reports are not product contracts.
 
+### Parse contracts at their boundary
+
+Parse broad boundary data once into narrow immutable contracts. Represent
+distinct states structurally, use named or fully validated transitions, and
+reparse contracts before persistence. Production code must not use Pydantic's
+non-validating `model_copy(update=...)`.
+
 ## System architecture
 
 ### Package boundaries

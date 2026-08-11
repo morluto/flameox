@@ -16,7 +16,10 @@ from flameox.application.workloads import AcceleratorIdentityRequirement
 from flameox.domain import (
     AcceleratorDevice,
     AcceleratorIdentityFacet,
+    AcceleratorIdentityStatus,
     AcceleratorLink,
+    AcceleratorLinkKind,
+    AcceleratorMigMode,
     DomainError,
 )
 from flameox.domain.identity import digest_model
@@ -88,32 +91,44 @@ class AcceleratorIdentityService:
             return None
         executable = shutil.which("nvidia-smi")
         if executable is None:
-            return self._unavailable(required, "missing", "nvidia-smi was not found on PATH.")
+            return self._unavailable(
+                required,
+                AcceleratorIdentityStatus.MISSING,
+                "nvidia-smi was not found on PATH.",
+            )
         try:
             inventory = await self._run(executable, "-q", "-x")
         except PermissionError:
             return self._unavailable(
                 required,
-                "permission_denied",
+                AcceleratorIdentityStatus.PERMISSION_DENIED,
                 "Permission was denied while starting nvidia-smi.",
             )
         except DomainError as error:
-            return self._unavailable(required, "unknown", error.message)
+            return self._unavailable(required, AcceleratorIdentityStatus.UNKNOWN, error.message)
         if inventory.process.exit_code != 0:
             message = inventory.stderr.decode(errors="replace").strip()
             lowered = message.lower()
-            status: Literal["permission_denied", "unsupported", "unknown"] = (
-                "permission_denied"
+            status: Literal[
+                AcceleratorIdentityStatus.PERMISSION_DENIED,
+                AcceleratorIdentityStatus.UNSUPPORTED,
+                AcceleratorIdentityStatus.UNKNOWN,
+            ] = (
+                AcceleratorIdentityStatus.PERMISSION_DENIED
                 if "permission" in lowered
-                else "unsupported"
+                else AcceleratorIdentityStatus.UNSUPPORTED
                 if "not supported" in lowered
-                else "unknown"
+                else AcceleratorIdentityStatus.UNKNOWN
             )
             return self._unavailable(required, status, message or "nvidia-smi failed.")
         try:
             driver, runtime, devices = _parse_nvidia_inventory(inventory.stdout)
         except (ElementTree.ParseError, ValueError) as error:
-            return self._unavailable(required, "unknown", f"Invalid nvidia-smi XML: {error}")
+            return self._unavailable(
+                required,
+                AcceleratorIdentityStatus.UNKNOWN,
+                f"Invalid nvidia-smi XML: {error}",
+            )
 
         links: tuple[AcceleratorLink, ...] = ()
         topology_limitation: tuple[str, ...] = ()
@@ -140,7 +155,7 @@ class AcceleratorIdentityService:
         )
         return AcceleratorIdentityFacet(
             provider="cuda",
-            status="available",
+            status=AcceleratorIdentityStatus.AVAILABLE,
             identity_quality=IdentityQuality.PARTIAL if missing else IdentityQuality.EXACT,
             driver_version=driver,
             runtime_version=runtime,
@@ -165,7 +180,12 @@ class AcceleratorIdentityService:
     @staticmethod
     def _unavailable(
         required: tuple[AcceleratorIdentityRequirement, ...],
-        status: Literal["missing", "permission_denied", "unsupported", "unknown"],
+        status: Literal[
+            AcceleratorIdentityStatus.MISSING,
+            AcceleratorIdentityStatus.PERMISSION_DENIED,
+            AcceleratorIdentityStatus.UNSUPPORTED,
+            AcceleratorIdentityStatus.UNKNOWN,
+        ],
         limitation: str,
     ) -> AcceleratorIdentityFacet:
         return AcceleratorIdentityFacet(
@@ -194,11 +214,11 @@ def _parse_nvidia_inventory(
                 compute_capability=_xml_text(gpu, "compute_cap"),
                 memory_mib=memory,
                 mig_mode=(
-                    "enabled"
+                    AcceleratorMigMode.ENABLED
                     if mig_value == "enabled"
-                    else "disabled"
+                    else AcceleratorMigMode.DISABLED
                     if mig_value == "disabled"
-                    else "unknown"
+                    else AcceleratorMigMode.UNKNOWN
                 ),
             )
         )
@@ -248,17 +268,21 @@ def _topology_link(left: int, right: int, token: str) -> AcceleratorLink:
         return AcceleratorLink(
             left=left,
             right=right,
-            kind="nvlink",
+            kind=AcceleratorLinkKind.NVLINK,
             width=int(nvlink.group(1)),
         )
-    kinds: dict[str, Literal["pcie", "host_bridge", "numa", "system"]] = {
-        "PIX": "pcie",
-        "PXB": "host_bridge",
-        "PHB": "host_bridge",
-        "NODE": "numa",
-        "SYS": "system",
+    kinds: dict[str, AcceleratorLinkKind] = {
+        "PIX": AcceleratorLinkKind.PCIE,
+        "PXB": AcceleratorLinkKind.HOST_BRIDGE,
+        "PHB": AcceleratorLinkKind.HOST_BRIDGE,
+        "NODE": AcceleratorLinkKind.NUMA,
+        "SYS": AcceleratorLinkKind.SYSTEM,
     }
-    return AcceleratorLink(left=left, right=right, kind=kinds.get(token, "unknown"))
+    return AcceleratorLink(
+        left=left,
+        right=right,
+        kind=kinds.get(token, AcceleratorLinkKind.UNKNOWN),
+    )
 
 
 def _missing_accelerator_fields(
@@ -281,7 +305,7 @@ def _missing_accelerator_fields(
             device.model is None
             or device.compute_capability is None
             or device.memory_mib is None
-            or device.mig_mode == "unknown"
+            or device.mig_mode is AcceleratorMigMode.UNKNOWN
             for device in devices
         )
     ):

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pyperf
 import pytest
+from pydantic import ValidationError
 
 from flameox.adapters import PyPerfExtractor
 from flameox.application import (
@@ -14,9 +15,50 @@ from flameox.application import (
     InvestigationService,
 )
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
-from flameox.evidence import GenerationPublisher
+from flameox.evidence import GenerationPublisher, InferenceRequestItem
 from flameox.storage import Workspace
 from tests.support.analysis import run_row
+
+
+def test_inference_request_projection_rejects_contradictory_outcomes() -> None:
+    request = {
+        "request_id": "request",
+        "run_id": "run",
+        "artifact_id": "artifact",
+        "source_request_id": "source",
+        "provider_request_id": None,
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "scheduled_ns": None,
+        "observed_started_ns": None,
+        "ttft_ns": None,
+        "latency_ns": None,
+        "tpot_ns": None,
+        "mean_itl_ns": None,
+        "success": True,
+        "cancelled": False,
+        "error_type": None,
+        "error_code": None,
+        "queue_ns": None,
+        "prefill_ns": None,
+        "decode_ns": None,
+        "cache_hit": None,
+        "prefix_hash_count": None,
+        "evidence_level": "observed",
+    }
+
+    assert InferenceRequestItem.model_validate(request).success is True
+    with pytest.raises(ValidationError, match="do not describe a supported outcome"):
+        InferenceRequestItem.model_validate({**request, "cancelled": True})
+
+    unreported = InferenceRequestItem.model_validate(
+        {**request, "success": None, "cancelled": None}
+    )
+    assert unreported.success is None
+    assert unreported.cancelled is None
+
+    with pytest.raises(ValidationError, match="do not describe a supported outcome"):
+        InferenceRequestItem.model_validate({**request, "success": None})
 
 
 def test_measurement_query_uses_bounded_snapshot_cursors(tmp_path: Path) -> None:

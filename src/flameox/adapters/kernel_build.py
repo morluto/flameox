@@ -1,19 +1,40 @@
 from __future__ import annotations
 
-from pathlib import PurePosixPath
-from typing import Annotated, Final, Literal, cast
+from enum import StrEnum
+from pathlib import Path, PurePosixPath
+from typing import Annotated, Final, Literal
 
 from pydantic import Field, model_validator
 
-from flameox.application.pipelines import (
-    PipelineStageDeclaration,
-    RegisteredPipelineStageDeclaration,
-    RegisterPipelineRequest,
-    UnregisteredPipelineStageDeclaration,
-)
 from flameox.models import ContractModel
 
 KERNEL_BUILD_SCHEMA_VERSION: Final[Literal["flameox.kernel-build.v1"]] = "flameox.kernel-build.v1"
+
+
+class KernelBuildProducer(StrEnum):
+    TRITON = "triton"
+    CUTE = "cute"
+
+
+class KernelBuildOutcome(StrEnum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    INCONCLUSIVE = "inconclusive"
+
+
+class KernelBuildCacheStatus(StrEnum):
+    HIT = "hit"
+    MISS = "miss"
+    MIXED = "mixed"
+    UNKNOWN = "unknown"
+
+
+class KernelBuildStageStatus(StrEnum):
+    AVAILABLE = "available"
+    CACHED = "cached"
+    SKIPPED = "skipped"
+    UNAVAILABLE = "unavailable"
+    FAILED = "failed"
 
 
 class KernelBuildArtifact(ContractModel):
@@ -33,36 +54,47 @@ class KernelBuildArtifact(ContractModel):
         return self
 
 
-class KernelBuildStage(ContractModel):
+class _KernelBuildStage(ContractModel):
     name: Annotated[str, Field(min_length=1, max_length=100)]
     ordinal: Annotated[int, Field(ge=0, le=99)]
     predecessor: Annotated[str, Field(min_length=1, max_length=100)] | None = None
-    status: Literal["available", "cached", "skipped", "unavailable", "failed"]
     format: Annotated[str, Field(min_length=1, max_length=100)]
     format_schema: Annotated[str, Field(min_length=1, max_length=100)]
-    artifact: KernelBuildArtifact | None = None
     elapsed_ns: Annotated[int, Field(ge=0)] | None = None
     limitations: Annotated[
         tuple[Annotated[str, Field(min_length=1, max_length=500)], ...],
         Field(max_length=20),
     ] = ()
 
-    @model_validator(mode="after")
-    def artifact_matches_status(self) -> KernelBuildStage:
-        registered = self.status in {"available", "cached"}
-        if registered != (self.artifact is not None):
-            raise ValueError("available and cached stages require exactly one native artifact")
-        return self
+
+class ArtifactKernelBuildStage(_KernelBuildStage):
+    status: Literal[KernelBuildStageStatus.AVAILABLE, KernelBuildStageStatus.CACHED]
+    artifact: KernelBuildArtifact
+
+
+class ArtifactlessKernelBuildStage(_KernelBuildStage):
+    status: Literal[
+        KernelBuildStageStatus.SKIPPED,
+        KernelBuildStageStatus.UNAVAILABLE,
+        KernelBuildStageStatus.FAILED,
+    ]
+    artifact: Literal[None] = None
+
+
+type KernelBuildStage = Annotated[
+    ArtifactKernelBuildStage | ArtifactlessKernelBuildStage,
+    Field(discriminator="status"),
+]
 
 
 class KernelBuildManifestV1(ContractModel):
     schema_version: Literal["flameox.kernel-build.v1"] = KERNEL_BUILD_SCHEMA_VERSION
-    producer: Literal["triton", "cute"]
+    producer: Literal[KernelBuildProducer.TRITON, KernelBuildProducer.CUTE]
     producer_version: Annotated[str, Field(min_length=1, max_length=100)]
     workload_identity: Annotated[str, Field(min_length=1, max_length=200)]
     device_identity: Annotated[str, Field(min_length=1, max_length=500)] | None = None
-    outcome: Literal["succeeded", "failed", "inconclusive"]
-    cache_status: Literal["hit", "miss", "mixed", "unknown"] = "unknown"
+    outcome: KernelBuildOutcome
+    cache_status: KernelBuildCacheStatus = KernelBuildCacheStatus.UNKNOWN
     stages: Annotated[tuple[KernelBuildStage, ...], Field(min_length=1, max_length=100)]
     source_environment: dict[
         Annotated[str, Field(min_length=1, max_length=100)],
@@ -95,75 +127,22 @@ class KernelBuildManifestV1(ContractModel):
             if stage.predecessor is not None and stage.predecessor not in seen:
                 raise ValueError("stage predecessors must identify an earlier declared stage")
             seen.add(stage.name)
-        if self.outcome == "succeeded" and any(
-            stage.status in {"failed", "unavailable"} for stage in self.stages
+        if self.outcome is KernelBuildOutcome.SUCCEEDED and any(
+            stage.status in {KernelBuildStageStatus.FAILED, KernelBuildStageStatus.UNAVAILABLE}
+            for stage in self.stages
         ):
             raise ValueError("a successful build cannot contain failed or unavailable stages")
-        if self.outcome == "failed" and not any(stage.status == "failed" for stage in self.stages):
+        if self.outcome is KernelBuildOutcome.FAILED and not any(
+            stage.status is KernelBuildStageStatus.FAILED for stage in self.stages
+        ):
             raise ValueError("a failed build requires a failed stage")
         return self
 
-    def pipeline_request(
-        self,
-        *,
-        run_id: str,
-        registration_ids_by_path: dict[str, str],
-    ) -> RegisterPipelineRequest:
-        declarations: list[PipelineStageDeclaration] = []
-        for stage in self.stages:
-            if stage.artifact is not None:
-                registration_id = registration_ids_by_path.get(stage.artifact.path)
-                if registration_id is None:
-                    raise ValueError(f"missing registration for {stage.artifact.path!r}")
-                declarations.append(
-                    RegisteredPipelineStageDeclaration(
-                        name=stage.name,
-                        ordinal=stage.ordinal,
-                        predecessor=stage.predecessor,
-                        format=stage.format,
-                        format_schema=stage.format_schema,
-                        elapsed_ns=stage.elapsed_ns,
-                        limitations=stage.limitations,
-                        status=cast(Literal["available", "cached"], stage.status),
-                        registration_id=registration_id,
-                    )
-                )
-            else:
-                declarations.append(
-                    UnregisteredPipelineStageDeclaration(
-                        name=stage.name,
-                        ordinal=stage.ordinal,
-                        predecessor=stage.predecessor,
-                        format=stage.format,
-                        format_schema=stage.format_schema,
-                        elapsed_ns=stage.elapsed_ns,
-                        limitations=stage.limitations,
-                        status=cast(Literal["skipped", "unavailable", "failed"], stage.status),
-                    )
-                )
-        derived: list[str] = []
-        if self.diagnostics:
-            derived.append("compiler diagnostics are preserved in the kernel-build manifest")
-        if self.device_identity is None:
-            derived.append("device identity was not supplied by the producer")
-        limitations = list(dict.fromkeys((*derived, *self.limitations)))
-        if len(limitations) > 20:
-            retained = 19 - len(derived)
-            limitations = [
-                *derived,
-                *tuple(dict.fromkeys(self.limitations))[:retained],
-                "Additional limitations remain available in the kernel-build manifest.",
-            ]
-        return RegisterPipelineRequest(
-            run_id=run_id,
-            pipeline_name=f"{self.producer}.compiler",
-            pipeline_schema=KERNEL_BUILD_SCHEMA_VERSION,
-            producer=self.producer,
-            producer_version=self.producer_version,
-            workload_identity=self.workload_identity,
-            device_identity=self.device_identity,
-            stages=tuple(declarations),
-            limitations=tuple(dict.fromkeys(limitations)),
+    def bundle_paths(self, manifest_path: Path) -> tuple[Path, ...]:
+        return tuple(
+            manifest_path.parent / stage.artifact.path
+            for stage in self.stages
+            if stage.artifact is not None
         )
 
 

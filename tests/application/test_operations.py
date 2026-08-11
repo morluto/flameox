@@ -1,15 +1,141 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import cast
 
 import pytest
 
-from flameox.application.operations import OperationFailure, OperationRunner
+from flameox.application.operations import (
+    ActiveOperationRecord,
+    OperationFailure,
+    OperationProgress,
+    OperationRunner,
+    OperationStore,
+    operation_digests,
+)
 from flameox.domain import DomainError, ErrorCode
+from flameox.domain.models import utc_now
 from flameox.storage import Workspace
+
+
+@pytest.mark.parametrize(
+    ("completed", "total"),
+    ((1, None), (None, 1), (2, 1)),
+)
+def test_operation_progress_rejects_incoherent_bounds(
+    completed: float | None,
+    total: float | None,
+) -> None:
+    with pytest.raises(ValueError):
+        OperationProgress(
+            phase="running",
+            completed=completed,
+            total=total,
+            message="invalid progress",
+        )
+
+
+def test_operation_store_rejects_terminal_state_without_a_receipt(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    request = {"value": 1}
+    _, idempotency_digest = operation_digests(
+        workspace,
+        "test.operation",
+        request,
+        "terminal-test",
+    )
+    record = ActiveOperationRecord(
+        operation="test.operation",
+        workspace_id=workspace.identity.workspace_id,
+        request=request,
+        idempotency_digest=idempotency_digest,
+        owner_id="test-owner",
+        owner_heartbeat_at=utc_now(),
+    )
+    store = OperationStore(workspace)
+    store.records.create(record)
+    serialized = record.model_dump(mode="json")
+    serialized.update(
+        {
+            "state": "terminal",
+            "phase": "completed",
+            "cleanup_status": "complete",
+            "owner_id": None,
+            "owner_heartbeat_at": None,
+        }
+    )
+    record_path = workspace.paths.records / "operations" / record.operation_id / "record.json"
+    record_path.write_text(json.dumps(serialized))
+
+    with pytest.raises(DomainError) as error:
+        store.read(record.operation_id)
+
+    assert error.value.code is ErrorCode.WORKSPACE_INVALID
+
+
+def test_operation_store_rejects_version_one_records(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    request = {"value": 1}
+    _, idempotency_digest = operation_digests(
+        workspace,
+        "test.operation",
+        request,
+        "version-one-test",
+    )
+    record = ActiveOperationRecord(
+        operation="test.operation",
+        workspace_id=workspace.identity.workspace_id,
+        request=request,
+        idempotency_digest=idempotency_digest,
+        owner_id="test-owner",
+        owner_heartbeat_at=utc_now(),
+    )
+    store = OperationStore(workspace)
+    store.records.create(record)
+    serialized = record.model_dump(mode="json")
+    serialized["schema_version"] = 1
+    record_path = workspace.paths.records / "operations" / record.operation_id / "record.json"
+    record_path.write_text(json.dumps(serialized))
+
+    with pytest.raises(DomainError) as error:
+        store.read(record.operation_id)
+
+    assert error.value.code is ErrorCode.WORKSPACE_INVALID
+
+
+def test_operation_record_rejects_contradictory_identity_projections(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    request = {"value": 1}
+    _, idempotency_digest = operation_digests(
+        workspace,
+        "test.operation",
+        request,
+        "identity-test",
+    )
+    record = ActiveOperationRecord(
+        operation="test.operation",
+        workspace_id=workspace.identity.workspace_id,
+        request=request,
+        idempotency_digest=idempotency_digest,
+        owner_id="test-owner",
+        owner_heartbeat_at=utc_now(),
+    )
+    payload = record.model_dump(mode="python")
+
+    with pytest.raises(ValueError, match="request digest"):
+        ActiveOperationRecord.model_validate({**payload, "request_digest": "sha256:" + "a" * 64})
+    with pytest.raises(ValueError, match="operation identifier"):
+        ActiveOperationRecord.model_validate({**payload, "operation_id": "op-" + "b" * 64})
+
+    cancelling = record.request_cancellation()
+    assert cancelling.cancellation_requested is True
+    with pytest.raises(ValueError, match="cancellation must agree"):
+        ActiveOperationRecord.model_validate(
+            {**cancelling.model_dump(mode="python"), "cancellation_requested": False}
+        )
 
 
 @pytest.mark.anyio

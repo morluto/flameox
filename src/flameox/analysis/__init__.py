@@ -1,5 +1,6 @@
 from flameox.analysis.comparison import compare_paired_samples
 from flameox.analysis.inference_protocol import (
+    AttachedProfilerState,
     ExploratoryReason,
     HardwareIdentity,
     InferenceProtocolComparison,
@@ -7,6 +8,7 @@ from flameox.analysis.inference_protocol import (
     ModelIdentity,
     OracleIdentity,
     OracleResult,
+    ProfilerKind,
     ProfilerState,
     ProtocolMismatch,
     ScheduleIdentity,
@@ -45,6 +47,7 @@ __all__ = [
     "AcceleratorLaunchComparison",
     "AcceleratorLaunchRegion",
     "AcceleratorStreamSummary",
+    "AttachedProfilerState",
     "ExecutionAnalysisResult",
     "ExecutionObservationChange",
     "ExploratoryReason",
@@ -64,6 +67,7 @@ __all__ = [
     "OperatorSummary",
     "OracleIdentity",
     "OracleResult",
+    "ProfilerKind",
     "ProfilerState",
     "ProtocolMismatch",
     "PyTorchAnalysisResult",

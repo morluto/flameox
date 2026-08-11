@@ -22,7 +22,15 @@ from flameox.application import (
     RunSetService,
 )
 from flameox.catalog import Catalog
-from flameox.domain import ArtifactKind, EvidenceLevel, FindingAssessment
+from flameox.domain import (
+    ArtifactKind,
+    EvidenceLevel,
+    EvidenceReferenceType,
+    EvidenceRelation,
+    FindingAssessment,
+    FindingConfidence,
+    MetricPolarity,
+)
 from flameox.storage import Workspace
 
 
@@ -77,7 +85,7 @@ def test_retained_memory_regression_has_native_and_normalized_evidence(
             candidate_run_set_id=candidate.run_set_id,
             metric="memory.retained_end",
             unit="bytes",
-            polarity="lower_is_better",
+            polarity=MetricPolarity.LOWER_IS_BETTER,
             practical_threshold=0.05,
         )
     )
@@ -93,13 +101,13 @@ def test_retained_memory_regression_has_native_and_normalized_evidence(
             title="Candidate retains allocations at capture end",
             claim="The candidate capture has non-zero retained-end allocations.",
             evidence_level=EvidenceLevel.DERIVED,
-            confidence="high",
+            confidence=FindingConfidence.HIGH,
             assessment=FindingAssessment.SUPPORTED,
             evidence=(
                 EvidenceInput(
-                    ref_type="analysis",
+                    ref_type=EvidenceReferenceType.ANALYSIS,
                     ref_id=memory_analysis.analysis.analysis_id,
-                    relation="supports",
+                    relation=EvidenceRelation.SUPPORTS,
                 ),
             ),
         )

@@ -1,26 +1,49 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Annotated, Literal, assert_never
+from enum import StrEnum
+from typing import Annotated, Any, Literal, assert_never
 
-from pydantic import Field, JsonValue, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    JsonValue,
+    ModelWrapValidatorHandler,
+    computed_field,
+    model_validator,
+)
 
-from flameox.domain import DomainError, ErrorCode, canonical_json, digest_model
+from flameox.domain import DomainError, ErrorCode, Sensitivity, canonical_json, digest_model
 from flameox.domain.models import utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, JsonRecordStore, RunStore, Workspace
 
-StageDisposition = Literal[
-    "identical",
-    "changed",
-    "content_changed",
-    "added",
-    "missing",
-    "reordered",
-    "incompatible",
-    "uninspectable",
-]
+
+class PipelineStageStatus(StrEnum):
+    AVAILABLE = "available"
+    CACHED = "cached"
+    SKIPPED = "skipped"
+    UNAVAILABLE = "unavailable"
+    FAILED = "failed"
+
+
+class PipelineStageDisposition(StrEnum):
+    IDENTICAL = "identical"
+    CHANGED = "changed"
+    CONTENT_CHANGED = "content_changed"
+    ADDED = "added"
+    MISSING = "missing"
+    REORDERED = "reordered"
+    INCOMPATIBLE = "incompatible"
+    UNINSPECTABLE = "uninspectable"
+
+
+class PipelineCompatibility(StrEnum):
+    COMPATIBLE = "compatible"
+    INCOMPATIBLE = "incompatible"
+    UNKNOWN = "unknown"
 
 
 class _PipelineStageDeclaration(ContractModel):
@@ -50,12 +73,16 @@ class _PipelineStageDeclaration(ContractModel):
 
 
 class RegisteredPipelineStageDeclaration(_PipelineStageDeclaration):
-    status: Literal["available", "cached"]
+    status: Literal[PipelineStageStatus.AVAILABLE, PipelineStageStatus.CACHED]
     registration_id: str
 
 
 class UnregisteredPipelineStageDeclaration(_PipelineStageDeclaration):
-    status: Literal["skipped", "unavailable", "failed"]
+    status: Literal[
+        PipelineStageStatus.SKIPPED,
+        PipelineStageStatus.UNAVAILABLE,
+        PipelineStageStatus.FAILED,
+    ]
     registration_id: None = None
 
 
@@ -108,15 +135,19 @@ class _PipelineStage(ContractModel):
 
 
 class RegisteredPipelineStage(_PipelineStage):
-    status: Literal["available", "cached"]
+    status: Literal[PipelineStageStatus.AVAILABLE, PipelineStageStatus.CACHED]
     registration_id: str
     artifact_id: str
     artifact_length: int
-    sensitivity: str
+    sensitivity: Sensitivity
 
 
 class UnregisteredPipelineStage(_PipelineStage):
-    status: Literal["skipped", "unavailable", "failed"]
+    status: Literal[
+        PipelineStageStatus.SKIPPED,
+        PipelineStageStatus.UNAVAILABLE,
+        PipelineStageStatus.FAILED,
+    ]
     registration_id: Literal[None] = None
     artifact_id: Literal[None] = None
     artifact_length: Literal[None] = None
@@ -154,7 +185,7 @@ class _PipelineStageComparison(ContractModel):
 class AddedPipelineStageComparison(_PipelineStageComparison):
     baseline_ordinal: Literal[None] = None
     candidate_ordinal: int
-    disposition: Literal["added"] = "added"
+    disposition: Literal[PipelineStageDisposition.ADDED] = PipelineStageDisposition.ADDED
     baseline_artifact_id: Literal[None] = None
     candidate_artifact_id: str | None = None
     artifact_length_change: Literal[None] = None
@@ -166,7 +197,7 @@ class AddedPipelineStageComparison(_PipelineStageComparison):
 class MissingPipelineStageComparison(_PipelineStageComparison):
     baseline_ordinal: int
     candidate_ordinal: Literal[None] = None
-    disposition: Literal["missing"] = "missing"
+    disposition: Literal[PipelineStageDisposition.MISSING] = PipelineStageDisposition.MISSING
     baseline_artifact_id: str | None = None
     candidate_artifact_id: Literal[None] = None
     artifact_length_change: Literal[None] = None
@@ -175,23 +206,45 @@ class MissingPipelineStageComparison(_PipelineStageComparison):
     candidate_summary: Literal[None] = None
 
 
+type _PairedPipelineStageDisposition = Literal[
+    PipelineStageDisposition.IDENTICAL,
+    PipelineStageDisposition.CHANGED,
+    PipelineStageDisposition.CONTENT_CHANGED,
+    PipelineStageDisposition.REORDERED,
+    PipelineStageDisposition.INCOMPATIBLE,
+    PipelineStageDisposition.UNINSPECTABLE,
+]
+
+
+def _advertise_short_circuit_projection(schema: dict[str, Any]) -> None:
+    properties = schema.setdefault("properties", {})
+    assert isinstance(properties, dict)
+    properties["extraction_short_circuited"] = {"type": "boolean", "readOnly": True}
+    required = schema.setdefault("required", [])
+    assert isinstance(required, list)
+    if "extraction_short_circuited" not in required:
+        required.append("extraction_short_circuited")
+
+
 class PairedPipelineStageComparison(_PipelineStageComparison):
+    model_config = ConfigDict(json_schema_extra=_advertise_short_circuit_projection)
+
     baseline_ordinal: int
     candidate_ordinal: int
-    disposition: Literal[
-        "identical",
-        "changed",
-        "content_changed",
-        "reordered",
-        "incompatible",
-        "uninspectable",
-    ]
+    disposition: _PairedPipelineStageDisposition
     baseline_artifact_id: str | None = None
     candidate_artifact_id: str | None = None
     artifact_length_change: int | None = None
-    extraction_short_circuited: bool = False
     baseline_summary: dict[str, JsonValue] | None = None
     candidate_summary: dict[str, JsonValue] | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def extraction_short_circuited(self) -> bool:
+        return (
+            self.baseline_artifact_id is not None
+            and self.baseline_artifact_id == self.candidate_artifact_id
+        )
 
 
 type PipelineStageComparison = Annotated[
@@ -200,25 +253,115 @@ type PipelineStageComparison = Annotated[
 ]
 
 
+def _first_observed_divergent_stage(
+    compatibility: PipelineCompatibility,
+    stages: tuple[PipelineStageComparison, ...],
+) -> str | None:
+    if compatibility is not PipelineCompatibility.COMPATIBLE:
+        return None
+    for stage in stages:
+        if stage.disposition is PipelineStageDisposition.CHANGED:
+            return stage.stage_name
+        if stage.disposition is not PipelineStageDisposition.IDENTICAL:
+            return None
+    return None
+
+
+def _advertise_pipeline_comparison_projections(schema: dict[str, Any]) -> None:
+    properties = schema.setdefault("properties", {})
+    assert isinstance(properties, dict)
+    properties.update(
+        {
+            "comparison_id": {"type": "string", "readOnly": True},
+            "first_observed_divergent_stage": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "readOnly": True,
+            },
+            "result_digest": {"type": "string", "readOnly": True},
+        }
+    )
+    required = schema.setdefault("required", [])
+    assert isinstance(required, list)
+    for name in ("comparison_id", "first_observed_divergent_stage", "result_digest"):
+        if name not in required:
+            required.append(name)
+
+
 class PipelineComparison(ContractModel):
+    model_config = ConfigDict(json_schema_extra=_advertise_pipeline_comparison_projections)
+
     schema_version: Literal[1] = 1
-    comparison_id: str
     baseline_pipeline_id: str
     candidate_pipeline_id: str
-    compatibility: Literal["compatible", "incompatible", "unknown"]
+    compatibility: PipelineCompatibility
     identity_mismatches: tuple[str, ...]
     stages: tuple[PipelineStageComparison, ...]
-    first_observed_divergent_stage: str | None
     input_artifact_ids: tuple[str, ...]
     extractor_identities: tuple[str, ...]
     limitations: tuple[str, ...]
-    result_digest: str
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def parse_projection_fields(
+        cls,
+        value: Any,
+        handler: ModelWrapValidatorHandler[PipelineComparison],
+    ) -> PipelineComparison:
+        if not isinstance(value, Mapping):
+            return handler(value)
+        payload = dict(value)
+        supplied_comparison_id = payload.pop("comparison_id", None)
+        supplied_divergence = payload.pop("first_observed_divergent_stage", None)
+        divergence_was_supplied = "first_observed_divergent_stage" in value
+        supplied_digest = payload.pop("result_digest", None)
+        comparison = handler(payload)
+        if (
+            divergence_was_supplied
+            and supplied_divergence != comparison.first_observed_divergent_stage
+        ):
+            raise ValueError("first divergent stage does not match the stage comparison")
+        if supplied_digest is not None and supplied_digest != comparison.result_digest:
+            raise ValueError("pipeline comparison digest does not match its content")
+        if (
+            supplied_comparison_id is not None
+            and supplied_comparison_id != comparison.comparison_id
+        ):
+            raise ValueError("pipeline comparison identifier does not match its content")
+        return comparison
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def first_observed_divergent_stage(self) -> str | None:
+        return _first_observed_divergent_stage(self.compatibility, self.stages)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def result_digest(self) -> str:
+        return digest_model(self.content_without_identity())
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def comparison_id(self) -> str:
+        return self.result_digest
+
+    def content_without_identity(self) -> dict[str, JsonValue]:
+        return {
+            "baseline_pipeline_id": self.baseline_pipeline_id,
+            "candidate_pipeline_id": self.candidate_pipeline_id,
+            "compatibility": self.compatibility,
+            "identity_mismatches": list(self.identity_mismatches),
+            "stages": [stage.model_dump(mode="json") for stage in self.stages],
+            "first_observed_divergent_stage": self.first_observed_divergent_stage,
+            "input_artifact_ids": list(self.input_artifact_ids),
+            "extractor_identities": list(self.extractor_identities),
+            "limitations": list(self.limitations),
+        }
 
 
 def _pipeline_identity_compatibility(
     baseline: ArtifactPipeline,
     candidate: ArtifactPipeline,
-) -> tuple[Literal["compatible", "incompatible", "unknown"], tuple[str, ...], tuple[str, ...]]:
+) -> tuple[PipelineCompatibility, tuple[str, ...], tuple[str, ...]]:
     mismatches = [
         name
         for name in ("pipeline_name", "pipeline_schema", "producer")
@@ -240,11 +383,11 @@ def _pipeline_identity_compatibility(
         mismatches.append("source_state_id")
     if baseline.environment_id != candidate.environment_id:
         mismatches.append("environment_id")
-    compatibility: Literal["compatible", "incompatible", "unknown"] = "compatible"
+    compatibility = PipelineCompatibility.COMPATIBLE
     if mismatches:
-        compatibility = "incompatible"
+        compatibility = PipelineCompatibility.INCOMPATIBLE
     elif unknown_identities:
-        compatibility = "unknown"
+        compatibility = PipelineCompatibility.UNKNOWN
     return compatibility, tuple(mismatches), tuple(unknown_identities)
 
 
@@ -264,6 +407,9 @@ class ArtifactPipelineService:
             kind="pipeline_comparisons",
             model=PipelineComparison,
             id_field="comparison_id",
+            output_only_fields={
+                "stages": {"__all__": {"extraction_short_circuited"}},
+            },
         )
         self.publisher = GenerationPublisher(workspace)
 
@@ -284,7 +430,7 @@ class ArtifactPipelineService:
                     **declaration.model_dump(),
                     artifact_id=registration.artifact_id,
                     artifact_length=content.byte_length,
-                    sensitivity=registration.sensitivity.value,
+                    sensitivity=registration.sensitivity,
                     producer=request.producer,
                     producer_version=request.producer_version,
                 )
@@ -401,18 +547,16 @@ class ArtifactPipelineService:
                 )
             else:
                 stages.append(self._compare_paired_stage(name, left, right, compatibility))
-        first_divergence = None
-        if compatibility == "compatible":
-            for stage in stages:
-                if stage.disposition == "changed":
-                    first_divergence = stage.stage_name
-                    break
-                if stage.disposition not in {"identical"}:
-                    limitations.append(
-                        "The first divergent stage is unknown because stage ordering or "
-                        "inspection coverage is incomplete."
-                    )
-                    break
+        first_divergence = _first_observed_divergent_stage(compatibility, tuple(stages))
+        if (
+            compatibility is PipelineCompatibility.COMPATIBLE
+            and first_divergence is None
+            and any(stage.disposition is not PipelineStageDisposition.IDENTICAL for stage in stages)
+        ):
+            limitations.append(
+                "The first divergent stage is unknown because stage ordering or "
+                "inspection coverage is incomplete."
+            )
         limitations.append("The first observed divergent stage is not a root-cause attribution.")
         input_artifacts = tuple(
             dict.fromkeys(
@@ -432,30 +576,15 @@ class ArtifactPipelineService:
                 }
             )
         )
-        payload = {
-            "baseline_pipeline_id": baseline.pipeline_id,
-            "candidate_pipeline_id": candidate.pipeline_id,
-            "compatibility": compatibility,
-            "identity_mismatches": mismatches,
-            "stages": [stage.model_dump(mode="json") for stage in stages],
-            "first_observed_divergent_stage": first_divergence,
-            "input_artifact_ids": input_artifacts,
-            "extractor_identities": extractors,
-            "limitations": tuple(dict.fromkeys(limitations)),
-        }
-        result_digest = digest_model(payload)
         comparison = PipelineComparison(
-            comparison_id=result_digest,
             baseline_pipeline_id=baseline.pipeline_id,
             candidate_pipeline_id=candidate.pipeline_id,
             compatibility=compatibility,
             identity_mismatches=mismatches,
             stages=tuple(stages),
-            first_observed_divergent_stage=first_divergence,
             input_artifact_ids=input_artifacts,
             extractor_identities=extractors,
             limitations=tuple(dict.fromkeys(limitations)),
-            result_digest=result_digest,
         )
         try:
             created = self.comparisons.create(comparison)
@@ -498,12 +627,12 @@ class ArtifactPipelineService:
         name: str,
         left: PipelineStage,
         right: PipelineStage,
-        compatibility: str,
+        compatibility: PipelineCompatibility,
     ) -> PairedPipelineStageComparison:
-        disposition: StageDisposition
+        disposition: _PairedPipelineStageDisposition
         stage_limitations = (*left.limitations, *right.limitations)
         incompatible = (
-            compatibility == "incompatible"
+            compatibility is PipelineCompatibility.INCOMPATIBLE
             or left.format != right.format
             or left.format_schema != right.format_schema
             or left.extractor != right.extractor
@@ -511,27 +640,30 @@ class ArtifactPipelineService:
         )
         short_circuit = left.artifact_id is not None and left.artifact_id == right.artifact_id
         if left.ordinal != right.ordinal or left.predecessor != right.predecessor:
-            disposition = "reordered"
-        elif left.status not in {"available", "cached"} or right.status not in {
-            "available",
-            "cached",
+            disposition = PipelineStageDisposition.REORDERED
+        elif left.status not in {
+            PipelineStageStatus.AVAILABLE,
+            PipelineStageStatus.CACHED,
+        } or right.status not in {
+            PipelineStageStatus.AVAILABLE,
+            PipelineStageStatus.CACHED,
         }:
-            disposition = "uninspectable"
+            disposition = PipelineStageDisposition.UNINSPECTABLE
         elif incompatible:
-            disposition = "incompatible"
+            disposition = PipelineStageDisposition.INCOMPATIBLE
         elif short_circuit:
-            disposition = "identical"
+            disposition = PipelineStageDisposition.IDENTICAL
         elif left.structural_summary is None or right.structural_summary is None:
-            disposition = "uninspectable"
+            disposition = PipelineStageDisposition.UNINSPECTABLE
             stage_limitations = (
                 *stage_limitations,
                 "Structural extraction coverage is incomplete.",
             )
         else:
             disposition = (
-                "content_changed"
+                PipelineStageDisposition.CONTENT_CHANGED
                 if left.structural_summary == right.structural_summary
-                else "changed"
+                else PipelineStageDisposition.CHANGED
             )
         return PairedPipelineStageComparison(
             stage_name=name,
@@ -545,7 +677,6 @@ class ArtifactPipelineService:
                 if left.artifact_length is not None and right.artifact_length is not None
                 else None
             ),
-            extraction_short_circuited=short_circuit,
             baseline_summary=left.structural_summary,
             candidate_summary=right.structural_summary,
             limitations=stage_limitations,

@@ -12,7 +12,7 @@ from typing import Literal, Protocol
 import portalocker
 from packaging.version import InvalidVersion, Version
 from platformdirs import user_data_path
-from pydantic import Field
+from pydantic import ConfigDict, Field, computed_field
 
 from flameox.adapters.client_setup import (
     ALL_SETUP_CLIENTS,
@@ -61,13 +61,19 @@ class SetupPlan(ContractModel):
 
 
 class SetupReport(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: Literal[1] = 1
     operation: SetupOperation
     version: str | None
     runtime_installed: bool
     changed_clients: tuple[SetupClient, ...]
     unchanged_clients: tuple[SetupClient, ...]
-    verified: bool
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verified(self) -> bool:
+        return self.operation is SetupOperation.VERIFY or self.version is not None
 
 
 class SetupInspection(ContractModel):
@@ -355,7 +361,6 @@ class SetupService:
                 runtime_installed=False,
                 changed_clients=(),
                 unchanged_clients=tuple(edit.client for edit in plan.edits),
-                verified=True,
             )
 
         installation: RuntimeInstallation | None = None
@@ -412,7 +417,6 @@ class SetupService:
                 runtime_installed=installation.installed if installation else False,
                 changed_clients=(),
                 unchanged_clients=unchanged,
-                verified=installation is not None,
             )
 
         self._write_journal(mutations)
@@ -444,7 +448,6 @@ class SetupService:
             runtime_installed=installation.installed if installation else False,
             changed_clients=tuple(edit.client for edit in changed),
             unchanged_clients=unchanged,
-            verified=installation is not None,
         )
 
     def _updated_install_manifest(

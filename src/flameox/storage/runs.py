@@ -1,18 +1,34 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import overload
 
 from flameox.atomic import atomic_write_json
 from flameox.domain.errors import DomainError, ErrorCode
-from flameox.domain.models import RunManifest, parse_run_manifest_json
+from flameox.domain.models import (
+    ExecutionRunManifest,
+    ImportRunManifest,
+    RunManifest,
+    parse_run_manifest,
+    parse_run_manifest_json,
+)
 from flameox.storage.workspace import Workspace
+
+_OUTPUT_ONLY_FIELDS = {"process": {"timed_out"}}
 
 
 class RunStore:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
 
+    @overload
+    def create(self, manifest: ImportRunManifest) -> ImportRunManifest: ...
+
+    @overload
+    def create(self, manifest: ExecutionRunManifest) -> ExecutionRunManifest: ...
+
     def create(self, manifest: RunManifest) -> RunManifest:
+        manifest = self._canonical(manifest)
         if manifest.revision != 0:
             raise DomainError(
                 ErrorCode.REVISION_CONFLICT,
@@ -46,12 +62,29 @@ class RunStore:
                 f"Run {run_id!r} has an invalid manifest.",
             ) from exc
 
+    @overload
+    def append(
+        self,
+        manifest: ImportRunManifest,
+        *,
+        expected_revision: int,
+    ) -> ImportRunManifest: ...
+
+    @overload
+    def append(
+        self,
+        manifest: ExecutionRunManifest,
+        *,
+        expected_revision: int,
+    ) -> ExecutionRunManifest: ...
+
     def append(
         self,
         manifest: RunManifest,
         *,
         expected_revision: int,
     ) -> RunManifest:
+        manifest = self._canonical(manifest)
         with self.workspace.write_locked():
             current = self.read(manifest.run_id)
             if current.revision != expected_revision:
@@ -72,6 +105,24 @@ class RunStore:
             self._write_revision(manifest)
             self._write_projection(manifest)
         return manifest
+
+    @staticmethod
+    def _canonical(manifest: RunManifest) -> RunManifest:
+        try:
+            canonical = parse_run_manifest(
+                manifest.model_dump(mode="python", exclude=_OUTPUT_ONLY_FIELDS)
+            )
+        except ValueError as exc:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                "Run manifest is invalid and cannot be persisted.",
+            ) from exc
+        if type(canonical) is not type(manifest):
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                "A run revision cannot change its run type.",
+            )
+        return canonical
 
     def _run_root(self, run_id: str) -> Path:
         if (
@@ -95,10 +146,10 @@ class RunStore:
                     "An immutable run revision already contains different data.",
                 )
             return
-        atomic_write_json(path, manifest.model_dump(mode="json"))
+        atomic_write_json(path, manifest.model_dump(mode="json", exclude=_OUTPUT_ONLY_FIELDS))
 
     def _write_projection(self, manifest: RunManifest) -> None:
         atomic_write_json(
             self._run_root(manifest.run_id) / "manifest.json",
-            manifest.model_dump(mode="json"),
+            manifest.model_dump(mode="json", exclude=_OUTPUT_ONLY_FIELDS),
         )

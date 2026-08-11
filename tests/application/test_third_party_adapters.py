@@ -19,6 +19,7 @@ from flameox.domain import (
     AdapterPlanRequest,
     AdapterProbeContext,
     AdapterProbeResult,
+    AdapterProbeStatus,
     AdapterValidationResult,
     ArtifactKind,
     DomainError,
@@ -57,7 +58,10 @@ class FixtureAdapter:
 
     async def probe(self, context: AdapterProbeContext) -> AdapterProbeResult:
         self.phases.append("probe")
-        return AdapterProbeResult(status="available", adapter_version="fixture-1")
+        return AdapterProbeResult(
+            status=AdapterProbeStatus.AVAILABLE,
+            adapter_version="fixture-1",
+        )
 
     async def plan(self, request: AdapterPlanRequest) -> AdapterExecutionPlan:
         self.phases.append("plan")
@@ -122,9 +126,11 @@ argv = [{json.dumps(sys.executable)}, "-c", {json.dumps(command)}]
 timeout_seconds = 30
 """
     )
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())
@@ -335,10 +341,12 @@ async def test_adapter_artifact_quota_uses_normal_capture_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = _workspace(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "capture": workspace.config.capture.model_copy(update={"max_artifact_bytes": 1}),
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"}),
+            "capture": workspace.config.capture.validated_copy(update={"max_artifact_bytes": 1}),
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            ),
         }
     )
     workspace.paths.config.write_text(config.to_toml())

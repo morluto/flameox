@@ -1,17 +1,26 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from enum import StrEnum
+from typing import Annotated, Any, Literal
 
 from pydantic import Field
 
 from flameox.catalog import Catalog
 from flameox.domain import CursorCodec, DomainError, ErrorCode, digest_model
 from flameox.models import ContractModel
+from flameox.pagination import CursorPageContract
 from flameox.storage import Workspace
 
 
-class LifecycleItem(ContractModel):
-    kind: Literal["span", "event", "transition", "gap", "process"]
+class LifecycleItemKind(StrEnum):
+    SPAN = "span"
+    EVENT = "event"
+    TRANSITION = "transition"
+    GAP = "gap"
+    PROCESS = "process"
+
+
+class _LifecycleItem(ContractModel):
     run_id: str | None = None
     artifact_id: str | None = None
     trace_id: str | None = None
@@ -28,7 +37,96 @@ class LifecycleItem(ContractModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
-class LifecycleQueryResult(ContractModel):
+class SpanLifecycleItem(_LifecycleItem):
+    kind: Literal[LifecycleItemKind.SPAN] = LifecycleItemKind.SPAN
+    run_id: str
+    artifact_id: str
+    trace_id: str
+    span_id: str
+    name: str
+    source_ordinal: int
+    start_time_unix_nano: int
+    end_time_unix_nano: int
+    time_unix_nano: Literal[None] = None
+    depth: Literal[None] = None
+    reason: Literal[None] = None
+
+
+class EventLifecycleItem(_LifecycleItem):
+    kind: Literal[LifecycleItemKind.EVENT] = LifecycleItemKind.EVENT
+    run_id: str
+    artifact_id: str
+    trace_id: str
+    span_id: str
+    parent_span_id: Literal[None] = None
+    name: str
+    start_time_unix_nano: Literal[None] = None
+    end_time_unix_nano: Literal[None] = None
+    time_unix_nano: int
+    duration_ns: Literal[None] = None
+    depth: Literal[None] = None
+    reason: Literal[None] = None
+
+
+class TransitionLifecycleItem(_LifecycleItem):
+    kind: Literal[LifecycleItemKind.TRANSITION] = LifecycleItemKind.TRANSITION
+    run_id: str
+    artifact_id: str
+    trace_id: str
+    span_id: str
+    name: str
+    source_ordinal: int
+    start_time_unix_nano: Literal[None] = None
+    end_time_unix_nano: Literal[None] = None
+    time_unix_nano: Literal[None] = None
+    duration_ns: Literal[None] = None
+    depth: int
+    reason: Literal[None] = None
+
+
+class GapLifecycleItem(_LifecycleItem):
+    kind: Literal[LifecycleItemKind.GAP] = LifecycleItemKind.GAP
+    run_id: str
+    artifact_id: str
+    trace_id: str
+    span_id: str
+    name: str
+    source_ordinal: int
+    start_time_unix_nano: int
+    end_time_unix_nano: int
+    time_unix_nano: Literal[None] = None
+    depth: Literal[None] = None
+    reason: str
+
+
+class ProcessLifecycleItem(_LifecycleItem):
+    kind: Literal[LifecycleItemKind.PROCESS] = LifecycleItemKind.PROCESS
+    run_id: str
+    trace_id: Literal[None] = None
+    span_id: Literal[None] = None
+    parent_span_id: Literal[None] = None
+    source_ordinal: Literal[None] = None
+    start_time_unix_nano: Literal[None] = None
+    end_time_unix_nano: Literal[None] = None
+    time_unix_nano: Literal[None] = None
+    duration_ns: Literal[None] = None
+    depth: Literal[None] = None
+    reason: Literal[None] = None
+
+
+type LifecycleItem = Annotated[
+    SpanLifecycleItem
+    | EventLifecycleItem
+    | TransitionLifecycleItem
+    | GapLifecycleItem
+    | ProcessLifecycleItem,
+    Field(discriminator="kind"),
+]
+
+
+class LifecycleQueryResult(CursorPageContract):
+    page_items_field = "items"
+
     schema_version: int = 1
     operation: str
     corpus_commit_id: str
@@ -38,8 +136,6 @@ class LifecycleQueryResult(ContractModel):
     query_bounds: dict[str, Any] = Field(default_factory=dict)
     items: tuple[LifecycleItem, ...]
     total: int
-    returned: int
-    truncated: bool
     next_cursor: str | None = None
     limitations: tuple[str, ...] = ()
 
@@ -79,8 +175,7 @@ class LifecycleEvidenceService:
             values=(artifact_id, end_ns, start_ns),
             select="kind, run_id, artifact_id, trace_id, span_id, parent_span_id, name, "
             "source_ordinal, start_time_unix_nano, end_time_unix_nano, duration_ns",
-            mapper=lambda row: LifecycleItem(
-                kind="span",
+            mapper=lambda row: SpanLifecycleItem(
                 run_id=row[1],
                 artifact_id=row[2],
                 trace_id=row[3],
@@ -163,8 +258,7 @@ class LifecycleEvidenceService:
             orphan_rows = snapshot.execute(orphan_query, tuple(orphan_values)).fetchone()
         selected = rows[:bounded]
         items = tuple(
-            LifecycleItem(
-                kind="transition",
+            TransitionLifecycleItem(
                 run_id=row[1],
                 artifact_id=row[2],
                 trace_id=row[3],
@@ -269,8 +363,7 @@ class LifecycleEvidenceService:
             rows = snapshot.execute(query, tuple(query_values)).fetchall()
         selected = rows[:bounded]
         items = tuple(
-            LifecycleItem(
-                kind="span",
+            SpanLifecycleItem(
                 run_id=row[1],
                 artifact_id=row[2],
                 trace_id=row[3],
@@ -344,8 +437,7 @@ class LifecycleEvidenceService:
                 query, (artifact_id, artifact_id, artifact_id, artifact_id, bounded + 1)
             ).fetchall()
         items = tuple(
-            LifecycleItem(
-                kind="gap",
+            GapLifecycleItem(
                 run_id=row[1],
                 artifact_id=row[2],
                 trace_id=row[3],
@@ -389,8 +481,7 @@ class LifecycleEvidenceService:
         with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
             rows = snapshot.execute(query, (*values, bounded + 1)).fetchall()
         items = tuple(
-            LifecycleItem(
-                kind="process",
+            ProcessLifecycleItem(
                 run_id=run_id,
                 artifact_id=row[8],
                 name=row[4],
@@ -500,8 +591,6 @@ class LifecycleEvidenceService:
             query_bounds=bounds,
             items=items,
             total=total,
-            returned=len(items),
-            truncated=truncated,
             next_cursor=next_cursor,
             limitations=limitations,
         )

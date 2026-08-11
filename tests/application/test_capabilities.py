@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
 import pytest
+from pydantic import ValidationError
 
 from flameox.adapters import AdapterDiscoveryResult, AdapterRegistry
 from flameox.adapters.toxiproxy import ToxiproxyToolReceipt
@@ -19,16 +20,29 @@ from flameox.application.capabilities import (
     SetupVerification,
 )
 from flameox.application.dependencies import WorkloadDependencyService
-from flameox.application.operations import OperationRecord, OperationStatus
+from flameox.application.operations import (
+    ActiveOperationRecord,
+    OperationState,
+    OperationStatus,
+    operation_digests,
+)
 from flameox.domain import (
+    CapabilityExtra,
     CapabilityReport,
     CapabilitySetup,
     CapabilityStatus,
     DomainError,
     ErrorCode,
     ProcessResult,
+    process_termination_from_returncode,
 )
-from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
+from flameox.domain.models import utc_now
+from flameox.execution import (
+    ExecutionOutcome,
+    ExecutionRequest,
+    ProcessContainment,
+    SubprocessBroker,
+)
 from flameox.storage import Workspace
 
 
@@ -45,11 +59,14 @@ class _ProbeBroker(SubprocessBroker):
         self.calls += 1
         self.requests.append(request)
         return ExecutionOutcome(
-            process=ProcessResult(exit_code=0, cleanup_complete=True),
+            process=ProcessResult(
+                termination=process_termination_from_returncode(0),
+                cleanup_complete=True,
+            ),
             stdout=b"trace_processor_shell 99.1\n",
             stderr=b"",
             resolved_executable=Path(request.argv[0]),
-            containment="process_group",
+            containment=ProcessContainment.PROCESS_GROUP,
         )
 
 
@@ -85,12 +102,53 @@ def _probe_outcome(
     stderr: bytes = b"",
 ) -> ExecutionOutcome:
     return ExecutionOutcome(
-        process=ProcessResult(exit_code=exit_code, cleanup_complete=True),
+        process=ProcessResult(
+            termination=process_termination_from_returncode(exit_code),
+            cleanup_complete=True,
+        ),
         stdout=stdout,
         stderr=stderr,
         resolved_executable=Path("/usr/bin/perf"),
-        containment="process_group",
+        containment=ProcessContainment.PROCESS_GROUP,
     )
+
+
+def test_capability_setup_fields_are_derived_from_authoritative_reports() -> None:
+    report = CapabilityReport(
+        adapter="torch.profiler",
+        status=CapabilityStatus.UNAVAILABLE,
+        setup=CapabilitySetup(
+            extra=CapabilityExtra.TORCH,
+            method="start_capability_setup",
+            next_tool="start_capability_setup",
+            requirement="torch>=2.7",
+        ),
+    )
+    capabilities = CapabilityList(
+        capabilities=(report,),
+        recommendation_scope=report.adapter,
+    )
+
+    assert capabilities.setup_adapters == (report.adapter,)
+    assert capabilities.next_tool == "start_capability_setup"
+    assert capabilities.validated_copy() == capabilities
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        CapabilityList.model_validate({**capabilities.model_dump(), "next_tool": "prepare_adapter"})
+
+
+def test_setup_verification_fields_form_one_partition() -> None:
+    verification = SetupVerification(
+        checked_adapters=("available", "missing"),
+        available_adapters=("available",),
+    )
+
+    assert verification.unavailable_adapters == ("missing",)
+    assert verification.status == "partial"
+    assert verification.validated_copy() == verification
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        SetupVerification.model_validate({**verification.model_dump(), "status": "verified"})
 
 
 @pytest.mark.anyio
@@ -374,14 +432,26 @@ def test_capability_setup_installs_only_declared_missing_providers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    broker = _ProbeBroker()
+    receipt_during_install: dict[str, object] | None = None
+
+    class ObservingBroker(_ProbeBroker):
+        async def run(
+            self,
+            request: ExecutionRequest,
+            **kwargs: Any,
+        ) -> ExecutionOutcome:
+            nonlocal receipt_during_install
+            receipt_during_install = json.loads((tmp_path / "capability-setup.json").read_text())
+            return await super().run(request, **kwargs)
+
+    broker = ObservingBroker()
     service = CapabilityService(
         workspace,
         broker=broker,
         capability_manifest=tmp_path / "capabilities.json",
     )
     setup = CapabilitySetup(
-        extra="torch",
+        extra=CapabilityExtra.TORCH,
         method="start_capability_setup",
         next_tool="start_capability_setup",
         requirement="torch>=2.7",
@@ -396,8 +466,7 @@ def test_capability_setup_installs_only_declared_missing_providers(
         (
             CapabilityList(
                 capabilities=(missing,),
-                setup_adapters=("torch.profiler",),
-                next_tool="start_capability_setup",
+                recommendation_scope="torch.profiler",
             ),
             CapabilityList(
                 capabilities=(available,),
@@ -415,6 +484,9 @@ def test_capability_setup_installs_only_declared_missing_providers(
 
     assert result.installed == ("torch.profiler",)
     assert result.already_available == ()
+    assert receipt_during_install is not None
+    assert receipt_during_install["phase"] == "installing_packages"
+    assert receipt_during_install["completed"] == []
     receipt = json.loads((tmp_path / "capability-setup.json").read_text())
     assert receipt | {"updated_at": None} == {
         "completed": ["torch.profiler"],
@@ -473,7 +545,7 @@ def test_capability_setup_cancellation_cleans_up_brokered_install(
         adapter="torch.profiler",
         status=CapabilityStatus.UNAVAILABLE,
         setup=CapabilitySetup(
-            extra="torch",
+            extra=CapabilityExtra.TORCH,
             method="start_capability_setup",
             next_tool="start_capability_setup",
             requirement="torch>=2.7",
@@ -516,7 +588,7 @@ def test_capability_setup_records_failure_when_uv_is_missing(
         adapter="torch.profiler",
         status=CapabilityStatus.UNAVAILABLE,
         setup=CapabilitySetup(
-            extra="torch",
+            extra=CapabilityExtra.TORCH,
             method="start_capability_setup",
             next_tool="start_capability_setup",
             requirement="torch>=2.7",
@@ -549,7 +621,7 @@ def test_trace_processor_staging_preserves_phase_and_bounded_cause(
         adapter="perfetto",
         status=CapabilityStatus.UNAVAILABLE,
         setup=CapabilitySetup(
-            extra="trace",
+            extra=CapabilityExtra.TRACE,
             method="start_capability_setup",
             next_tool="start_capability_setup",
             requirement="perfetto>=0.57,<0.58",
@@ -597,7 +669,7 @@ def test_capability_setup_is_idempotent_when_provider_is_available(
         adapter="torch.profiler",
         status=CapabilityStatus.AVAILABLE,
         setup=CapabilitySetup(
-            extra="torch",
+            extra=CapabilityExtra.TORCH,
             method="start_capability_setup",
             next_tool="start_capability_setup",
             requirement="torch>=2.7",
@@ -635,6 +707,37 @@ def test_list_capabilities_exposes_latest_setup_receipt(tmp_path: Path) -> None:
     assert result.latest_setup.phase == "staging_trace_processor"
 
 
+@pytest.mark.parametrize(
+    ("phase", "completed", "error"),
+    [
+        ("failed", (), None),
+        ("staging_trace_processor", (), "unexpected failure"),
+        ("completed", ("torch.profiler",), None),
+        ("installing_packages", ("unknown",), None),
+    ],
+)
+def test_capability_setup_receipt_rejects_contradictory_durable_states(
+    phase: str,
+    completed: tuple[str, ...],
+    error: str | None,
+) -> None:
+    with pytest.raises(ValidationError):
+        CapabilityList.model_validate(
+            {
+                "capabilities": [],
+                "latest_setup": {
+                    "schema_version": 1,
+                    "requested": ["torch.profiler", "perfetto"],
+                    "completed": list(completed),
+                    "phase": phase,
+                    "error": error,
+                    "updated_at": "2026-08-01T15:30:00Z",
+                    "next_tool": "list_capabilities",
+                },
+            }
+        )
+
+
 def test_capability_recommendations_are_scoped_to_selected_adapter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -660,15 +763,22 @@ def test_capability_recommendations_are_scoped_to_selected_adapter(
 
 def test_running_capability_setup_status_contains_exact_poll_action(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    record = OperationRecord(
-        operation_id="op-1234",
+    request = {"adapters": ["perfetto"]}
+    _, idempotency_digest = operation_digests(
+        workspace,
+        "capability.setup",
+        request,
+        "status-test",
+    )
+    record = ActiveOperationRecord(
         operation="capability.setup",
         workspace_id=workspace.identity.workspace_id,
-        request_digest="sha256:" + "1" * 64,
-        request={"adapters": ["perfetto"]},
-        idempotency_digest="sha256:" + "2" * 64,
-        state="running",
+        request=request,
+        idempotency_digest=idempotency_digest,
+        state=OperationState.RUNNING,
         phase="staging_trace_processor",
+        owner_id="test-owner",
+        owner_heartbeat_at=utc_now(),
     )
 
     status = OperationStatus.from_record(record)
@@ -677,9 +787,9 @@ def test_running_capability_setup_status_contains_exact_poll_action(tmp_path: Pa
     assert status.recovery is not None
     assert status.recovery.action == "poll"
     assert status.recovery.tool == "get_capability_setup"
-    assert status.recovery.arguments == {"operation_id": "op-1234"}
+    assert status.recovery.arguments == {"operation_id": record.operation_id}
 
-    terminal = OperationStatus.from_record(record.model_copy(update={"state": "terminal"}))
+    terminal = OperationStatus.from_record(record.completed(receipt={}, item_outcomes=()))
     assert terminal.poll_after_ms is None
     assert terminal.recovery is None
 
@@ -702,10 +812,8 @@ async def test_capability_setup_manager_persists_progress_and_final_receipt(
             del phase_callback
             return CapabilitySetupResult(
                 requested=adapters,
-                installed=adapters,
                 already_available=(),
                 setup_verification=SetupVerification(
-                    status="verified",
                     checked_adapters=adapters,
                     available_adapters=adapters,
                 ),

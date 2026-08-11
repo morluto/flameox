@@ -26,6 +26,7 @@ def _running_run(*, run_id: str, boot_id: str, start_identity: str) -> RunManife
     observed = utc_now()
     return ExecutionRunManifest(
         run_id=run_id,
+        started_at=observed,
         execution_status=ExecutionStatus.RUNNING,
         capture_status=CaptureStatus.RUNNING,
         validation_status=ValidationStatus.PENDING,
@@ -62,6 +63,7 @@ def test_recovery_closes_only_disappeared_exact_process_lease(tmp_path: Path) ->
     observed = datetime(2025, 1, 2, 3, 4, tzinfo=UTC)
     run = ExecutionRunManifest(
         run_id="abandoned-run",
+        started_at=observed,
         execution_status=ExecutionStatus.RUNNING,
         capture_status=CaptureStatus.RUNNING,
         validation_status=ValidationStatus.PENDING,
@@ -97,7 +99,7 @@ def test_recovery_closes_only_disappeared_exact_process_lease(tmp_path: Path) ->
     assert population.failures[0].run_count == 1
     selected = RecipeService(workspace).failures(
         environment_id=DIGEST,
-        execution_status=("cancelled",),
+        execution_status=(ExecutionStatus.CANCELLED,),
     )
     excluded = RecipeService(workspace).failures(
         environment_id="sha256:" + ("b" * 64),
@@ -225,6 +227,7 @@ def test_recovery_reconciles_planned_capture_from_exact_startup_lease(
         start_identity="118",
     ).model_copy(
         update={
+            "started_at": None,
             "execution_status": ExecutionStatus.PLANNED,
             "capture_status": CaptureStatus.PENDING,
         }

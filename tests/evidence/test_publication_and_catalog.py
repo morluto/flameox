@@ -278,9 +278,11 @@ def test_compaction_replaces_reachable_small_generations(
 
 def test_generation_row_quota_is_enforced_before_staging(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "storage": workspace.config.storage.model_copy(update={"max_rows_per_generation": 1})
+            "storage": workspace.config.storage.validated_copy(
+                update={"max_rows_per_generation": 1}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())

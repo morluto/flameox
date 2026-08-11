@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from flameox.analysis import RecipeService
 from flameox.catalog import Catalog
 from flameox.domain import canonical_json
@@ -190,6 +193,10 @@ def test_scaling_reports_dispersion_models_and_supported_range(
     assert result.correlated_hotspots[0].multiplicity_method == "benjamini-hochberg-fdr"
     assert result.correlated_hotspots[0].tested_hypothesis_count == len(result.correlated_hotspots)
     assert result.correlated_hotspots[0].adjusted_p_value >= result.correlated_hotspots[0].p_value
+    payload = result.model_dump(mode="json")
+    assert type(result).model_validate(payload) == result
+    with pytest.raises(ValidationError, match="environment stability must derive"):
+        type(result).model_validate({**payload, "environment_stable": False})
 
 
 def test_scaling_correlated_hotspots_empty_when_all_filtered(tmp_path: Path) -> None:

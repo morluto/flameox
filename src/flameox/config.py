@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tomllib
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -8,6 +9,17 @@ import tomli_w
 from pydantic import Field
 
 from flameox.models import ContractModel
+
+
+class ContainmentPolicy(StrEnum):
+    REQUIRED_FOR_MCP = "required_for_mcp"
+    PREFERRED = "preferred"
+    DISABLED = "disabled"
+
+
+class NetworkPolicy(StrEnum):
+    DENY_WHEN_CONTAINED = "deny_when_contained"
+    ALLOW = "allow"
 
 
 class CaptureConfig(ContractModel):
@@ -26,8 +38,8 @@ class ExecutionConfig(ContractModel):
     allow_privileged_collectors: bool = False
     allowed_working_roots: tuple[str, ...] = ("..",)
     child_environment_allowlist: tuple[str, ...] = ("PATH", "CUDA_VISIBLE_DEVICES")
-    containment: Literal["required_for_mcp", "preferred", "disabled"] = "required_for_mcp"
-    network: Literal["deny_when_contained", "allow"] = "deny_when_contained"
+    containment: ContainmentPolicy = ContainmentPolicy.REQUIRED_FOR_MCP
+    network: NetworkPolicy = NetworkPolicy.DENY_WHEN_CONTAINED
     max_cpu_percent: Annotated[int, Field(gt=0, le=10_000)] = 100
     max_processes: Annotated[int, Field(gt=0)] = 256
     max_memory_bytes: Annotated[int, Field(gt=0)] = 17_179_869_184

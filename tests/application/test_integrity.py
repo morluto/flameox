@@ -2,7 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from flameox.application import ImportArtifactRequest, ImportService, IntegrityService
+import pytest
+from pydantic import ValidationError
+
+from flameox.application import (
+    ImportArtifactRequest,
+    ImportService,
+    IntegrityIssue,
+    IntegrityLevel,
+    IntegrityResult,
+    IntegrityService,
+    IntegritySeverity,
+)
 from flameox.catalog import Catalog
 from flameox.storage import ArtifactStore, Workspace
 
@@ -16,8 +27,8 @@ def test_full_integrity_detects_altered_artifact_bytes(tmp_path: Path) -> None:
     stored = ArtifactStore(workspace).get(imported.artifact_id)
     stored.payload_path.write_bytes(b"tampered!")
 
-    quick = IntegrityService(workspace).validate(full=False)
-    full = IntegrityService(workspace).validate(full=True)
+    quick = IntegrityService(workspace).validate(IntegrityLevel.QUICK)
+    full = IntegrityService(workspace).validate(IntegrityLevel.FULL)
 
     # With verify-on-retrieval (M1), the quick path now also catches tampered
     # artifact bytes because ArtifactStore.get() re-hashes the payload on
@@ -26,3 +37,27 @@ def test_full_integrity_detects_altered_artifact_bytes(tmp_path: Path) -> None:
     assert full.valid is False
     assert any(issue.code == "INVALID_ARTIFACT" for issue in quick.issues)
     assert any(issue.code == "INVALID_ARTIFACT" for issue in full.issues)
+
+
+def test_integrity_validity_is_derived_from_issue_severity() -> None:
+    result = IntegrityResult(
+        level=IntegrityLevel.QUICK,
+        corpus_commit_id="sha256:commit",
+        checked_artifacts=0,
+        checked_generations=0,
+        checked_parquet_files=0,
+        issues=(
+            IntegrityIssue(
+                severity=IntegritySeverity.WARNING,
+                code="STALE",
+                message="Catalog is stale.",
+            ),
+        ),
+    )
+
+    assert result.valid is True
+    assert result.validated_copy().valid is True
+
+    contradictory = {**result.model_dump(), "valid": False}
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        IntegrityResult.model_validate(contradictory)

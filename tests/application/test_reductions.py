@@ -12,8 +12,10 @@ from flameox.application import (
     BinaryChunkReductionRequest,
     ImportArtifactRequest,
     ImportService,
+    NativeReductionPartitioner,
     PlanReductionRequest,
     ReductionAttemptSummary,
+    ReductionDeterminism,
     ReductionLimits,
     ReductionPlan,
     ReductionResult,
@@ -83,8 +85,7 @@ def test_reduction_plan_parser_preserves_schema_two_wire_variants() -> None:
     adapter: TypeAdapter[ReductionPlan] = TypeAdapter(ReductionPlan)
     common = {
         "schema_version": 2,
-        "plan_id": "plan",
-        "request_digest": "digest",
+        "plan_id": "sha256:" + "2" * 64,
         "workspace_id": "workspace",
         "original_artifact_id": "sha256:" + "0" * 64,
         "predicate_workload": "predicate",
@@ -107,6 +108,18 @@ def test_reduction_plan_parser_preserves_schema_two_wire_variants() -> None:
 
     assert isinstance(binary, BinaryChunkReductionPlan)
     assert isinstance(structured, StructuredReductionPlan)
+    assert structured.expected_determinism is ReductionDeterminism.DETERMINISTIC
+    assert structured.request_digest == structured.plan_id
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        adapter.validate_python(
+            {
+                **common,
+                "request_digest": "sha256:" + "2" * 64,
+                "partitioner": "text_lines",
+                "chunk_size": None,
+            }
+        )
     assert structured.model_dump(mode="json")["chunk_size"] is None
 
     with pytest.raises(ValidationError, match="chunk_size"):
@@ -128,10 +141,10 @@ def _plan(workspace: Workspace, artifact_id: str) -> ReductionPlan:
     return ReductionService(workspace).plan(
         StructuredReductionRequest(
             original_artifact_id=artifact_id,
-            partitioner="text_lines",
+            partitioner=NativeReductionPartitioner.TEXT_LINES,
             predicate_workload="predicate",
             limits=ReductionLimits(predicate_repetitions=2),
-            expected_determinism="repeated",
+            expected_determinism=ReductionDeterminism.REPEATED,
         )
     )
 
@@ -145,7 +158,7 @@ def test_reduction_plan_store_parses_the_persisted_variant(tmp_path: Path) -> No
     planned = service.plan(
         BinaryChunkReductionRequest(
             original_artifact_id=artifact_id,
-            partitioner="binary_chunks",
+            partitioner=NativeReductionPartitioner.BINARY_CHUNKS,
             chunk_size=4,
             predicate_workload="predicate",
         )
@@ -272,7 +285,7 @@ async def test_predicate_timeout_is_reported_without_killing_reduction_worker(
     plan = ReductionService(workspace).plan(
         StructuredReductionRequest(
             original_artifact_id=artifact_id,
-            partitioner="text_lines",
+            partitioner=NativeReductionPartitioner.TEXT_LINES,
             predicate_workload="predicate",
             limits=ReductionLimits(
                 max_attempts=2,

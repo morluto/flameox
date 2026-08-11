@@ -12,10 +12,14 @@ from flameox.application import (
     EvidenceSummaryService,
     ExecutionPolicy,
     SummaryClaim,
+    SummaryExcerptPolicy,
+    SummaryProofShape,
+    SummarySensitiveContextPolicy,
+    SummarySupportStatus,
     render_evidence_summary_markdown,
 )
 from flameox.catalog import Catalog
-from flameox.domain import ExternalExecutionContext, Sensitivity
+from flameox.domain import EvidenceLevel, ExternalExecutionContext, FindingAssessment, Sensitivity
 from flameox.storage import RunStore, Workspace
 from tests.support.capture import disable_containment
 
@@ -47,7 +51,7 @@ async def test_summary_is_stable_and_redacts_sensitive_execution_context(
         lease_id="lease-secret",
         worker_id="worker-secret",
         orchestration_run_id="remote-secret",
-        sensitivity="sensitive",
+        sensitivity=Sensitivity.SENSITIVE,
     )
     service = CaptureService(workspace)
     plan = await service.plan(
@@ -77,7 +81,7 @@ async def test_summary_is_stable_and_redacts_sensitive_execution_context(
     assert any("without a base observation" in item for item in first.summary.limitations)
 
     included = EvidenceSummaryService(workspace).summarize(
-        request.model_copy(update={"sensitive_context": "include"})
+        request.validated_copy(update={"sensitive_context": SummarySensitiveContextPolicy.INCLUDE})
     )
     assert included.summary.runs[0].external_context is not None
     assert included.summary.runs[0].external_context["lease_id"] == "lease-secret"
@@ -103,10 +107,10 @@ async def test_summary_never_excerpts_sensitive_process_output(
     store = RunStore(workspace)
     run = store.read(captured.run.run_id)
     registrations = tuple(
-        item.model_copy(update={"sensitivity": Sensitivity.SENSITIVE}) for item in run.artifacts
+        item.validated_copy(update={"sensitivity": Sensitivity.SENSITIVE}) for item in run.artifacts
     )
     store.append(
-        run.model_copy(update={"revision": run.revision + 1, "artifacts": registrations}),
+        run.validated_copy(update={"revision": run.revision + 1, "artifacts": registrations}),
         expected_revision=run.revision,
     )
     Catalog(workspace).rebuild()
@@ -114,7 +118,7 @@ async def test_summary_never_excerpts_sensitive_process_output(
     result = EvidenceSummaryService(workspace).summarize(
         EvidenceSummaryRequest(
             candidate_run_id=run.run_id,
-            output_excerpts="internal",
+            output_excerpts=SummaryExcerptPolicy.INTERNAL,
         )
     )
 
@@ -126,16 +130,16 @@ def test_markdown_renderer_contains_untrusted_text_without_structure_injection()
         finding_id="finding",
         title="heading\n# injected <img src=x onerror=alert(1)>",
         claim="`````\n# not a heading\n\x1b[31mred",
-        evidence_level="inferred",
-        assessment="inconclusive",
-        support_status="not_supporting",
+        evidence_level=EvidenceLevel.INFERRED,
+        assessment=FindingAssessment.INCONCLUSIVE,
+        support_status=SummarySupportStatus.NOT_SUPPORTING,
         evidence=(),
         limitations=("unsafe `inline`",),
     )
     summary = EvidenceSummary(
         summary_digest="0" * 64,
         corpus_commit_id="1" * 64,
-        proof_shape="selected_evidence",
+        proof_shape=SummaryProofShape.SELECTED_EVIDENCE,
         runs=(),
         references=(),
         claims=(claim,),
@@ -161,3 +165,20 @@ def test_summary_request_has_structural_reference_limits() -> None:
             comparison_ids=tuple(f"comparison-{index}" for index in range(10)),
             analysis_ids=tuple(f"analysis-{index}" for index in range(20)),
         )
+
+
+def test_trial_failure_class_fallback_for_null_column_value() -> None:
+    """A NULL failure_class from externally written rows must degrade to NONE.
+
+    Regression: the strict ``TrialFailureClass(str(row[2]))`` conversion raised
+    ``ValueError`` when ``row[2]`` was ``None`` (``str(None)`` is ``"None"``,
+    which is not a valid enum member). The fix falls back to
+    ``TrialFailureClass.NONE``.
+    """
+    from flameox.domain import TrialFailureClass
+
+    with pytest.raises(ValueError):
+        TrialFailureClass(str(None))
+
+    fallback = TrialFailureClass(str(None) if None is not None else TrialFailureClass.NONE)
+    assert fallback is TrialFailureClass.NONE

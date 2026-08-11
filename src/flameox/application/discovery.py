@@ -1,13 +1,26 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Literal
+from typing import Any
 
-from pydantic import Field
+from pydantic import ConfigDict, Field, computed_field, model_validator
 
 from flameox.catalog import Catalog
-from flameox.domain import CursorCodec, DomainError, ErrorCode, digest_model
+from flameox.domain import (
+    ArtifactKind,
+    CaptureStatus,
+    CursorCodec,
+    DomainError,
+    ErrorCode,
+    ExecutionStatus,
+    ResourceAvailability,
+    RunType,
+    ValidationStatus,
+    digest_model,
+)
 from flameox.models import ContractModel
+from flameox.pagination import CursorPageContract
 from flameox.storage import Workspace
 
 
@@ -20,22 +33,8 @@ class RunFilter(ContractModel):
     lease_id: str | None = None
     worker_id: str | None = None
     orchestration_run_id: str | None = None
-    execution_status: tuple[
-        Literal[
-            "pending",
-            "running",
-            "succeeded",
-            "failed",
-            "timed_out",
-            "cancelled",
-            "not_applicable",
-        ],
-        ...,
-    ] = Field(default=(), max_length=8)
-    validation_status: tuple[
-        Literal["not_requested", "passed", "failed", "inconclusive", "unsupported"],
-        ...,
-    ] = Field(default=(), max_length=5)
+    execution_status: tuple[ExecutionStatus, ...] = Field(default=(), max_length=8)
+    validation_status: tuple[ValidationStatus, ...] = Field(default=(), max_length=9)
     created_after: datetime | None = None
     created_before: datetime | None = None
 
@@ -43,10 +42,10 @@ class RunFilter(ContractModel):
 class RunSummary(ContractModel):
     run_id: str
     created_at: datetime
-    run_type: str
-    execution_status: str
-    capture_status: str
-    validation_status: str
+    run_type: RunType
+    execution_status: ExecutionStatus
+    capture_status: CaptureStatus
+    validation_status: ValidationStatus
     source_state_id: str | None
     environment_id: str
     workload_definition_id: str | None
@@ -55,24 +54,41 @@ class RunSummary(ContractModel):
     lease_id: str | None
     worker_id: str | None
     orchestration_run_id: str | None
-    artifact_kinds: tuple[str, ...]
-    resource_availability: Literal["available", "partial", "unavailable"] = "unavailable"
+    artifact_kinds: tuple[ArtifactKind, ...]
+    resource_availability: ResourceAvailability = ResourceAvailability.UNAVAILABLE
 
 
 class DiscoveryCoverage(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     filters_applied: tuple[str, ...]
-    population_complete: bool = True
     unavailable_facets: tuple[str, ...] = ()
 
+    @model_validator(mode="before")
+    @classmethod
+    def parse_population_projection(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping) or "population_complete" not in value:
+            return value
+        parsed = dict(value)
+        supplied = parsed.pop("population_complete")
+        unavailable = parsed.get("unavailable_facets", ())
+        if isinstance(unavailable, (list, tuple)) and supplied != (not unavailable):
+            raise ValueError("population completeness must agree with unavailable facets")
+        return parsed
 
-class RunListResult(ContractModel):
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def population_complete(self) -> bool:
+        return not self.unavailable_facets
+
+
+class RunListResult(CursorPageContract):
+    page_items_field = "runs"
+
     schema_version: int = 1
     corpus_commit_id: str
     runs: tuple[RunSummary, ...]
     total: int
-    returned: int
-    truncated: bool
-    next_cursor: str | None
     coverage: DiscoveryCoverage
 
 
@@ -133,7 +149,7 @@ class RunDiscoveryService:
             if values:
                 placeholders = ", ".join("?" for _ in values)
                 predicates.append(f"{field} IN ({placeholders})")
-                parameters.extend(values)
+                parameters.extend(value.value for value in values)
                 applied.append(field)
         if filter.created_after is not None:
             predicates.append("created_at >= ?")
@@ -209,8 +225,6 @@ class RunDiscoveryService:
             corpus_commit_id=head.commit_id,
             runs=runs,
             total=int(count_row[0]),
-            returned=len(runs),
-            truncated=has_more,
             next_cursor=next_cursor,
             coverage=DiscoveryCoverage(filters_applied=tuple(applied)),
         )

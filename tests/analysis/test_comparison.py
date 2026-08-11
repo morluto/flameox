@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from flameox.analysis import compare_paired_samples
-from flameox.domain import ComparisonDecision, ComparisonValidity
+from flameox.domain import Comparison, ComparisonDecision, ComparisonValidity, MetricPolarity
 
 BASELINE_SET = "sha256:" + ("a" * 64)
 CANDIDATE_SET = "sha256:" + ("b" * 64)
@@ -37,7 +38,7 @@ def test_paired_comparison_uses_practical_interval(
         candidate_by_block=candidate,
         metric="benchmark.wall_time",
         unit="ns",
-        polarity="lower_is_better",
+        polarity=MetricPolarity.LOWER_IS_BETTER,
         practical_threshold=0.05,
     )
 
@@ -60,7 +61,7 @@ def test_incomplete_experiment_is_not_presented_as_valid() -> None:
         candidate_by_block={"2": 100.0, "3": 90.0},
         metric="benchmark.wall_time",
         unit="ns",
-        polarity="lower_is_better",
+        polarity=MetricPolarity.LOWER_IS_BETTER,
         practical_threshold=0.05,
     )
 
@@ -68,3 +69,13 @@ def test_incomplete_experiment_is_not_presented_as_valid() -> None:
     assert result.validity is ComparisonValidity.EXPLORATORY
     assert result.decision is ComparisonDecision.INCONCLUSIVE
     assert result.confidence_low is None
+
+    with pytest.raises(ValidationError, match="complete pairs"):
+        result.validated_copy(update={"complete_pair_n": 2})
+    with pytest.raises(ValidationError, match="valid number"):
+        result.validated_copy(
+            update={"confidence_interval": {"low": -0.1, "high": None, "level": None}}
+        )
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        Comparison.model_validate({**result.model_dump(mode="python"), "paired": False})

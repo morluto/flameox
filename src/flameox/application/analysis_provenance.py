@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, cast
 
 from pydantic import Field, JsonValue
 
@@ -9,27 +8,18 @@ from flameox.application.analysis_rows import analysis_row
 from flameox.domain import (
     AnalysisRecord,
     EvidenceReference,
+    EvidenceReferenceType,
+    EvidenceRelation,
     digest_model,
     new_id,
 )
 from flameox.models import ContractModel
 
-ReferenceType = Literal[
-    "analysis",
-    "artifact",
-    "comparison",
-    "generation",
-    "observation",
-    "run",
-    "run_set",
-    "trial",
-]
-
 
 class AnalysisReferenceTarget(ContractModel):
-    ref_type: ReferenceType
+    ref_type: EvidenceReferenceType
     ref_id: str
-    relation: Literal["supports", "contradicts", "context", "validates"] = "context"
+    relation: EvidenceRelation = EvidenceRelation.CONTEXT
 
 
 class AnalysisProvenanceInput(ContractModel):
@@ -102,14 +92,14 @@ def context_references(
 ) -> tuple[AnalysisReferenceTarget, ...]:
     return tuple(
         AnalysisReferenceTarget(
-            ref_type=cast(ReferenceType, ref_type),
+            ref_type=ref_type,
             ref_id=ref_id,
         )
         for ref_type, values in (
-            ("run", run_ids),
-            ("artifact", artifact_ids),
-            ("generation", generation_ids),
-            ("run_set", run_set_ids),
+            (EvidenceReferenceType.RUN, run_ids),
+            (EvidenceReferenceType.ARTIFACT, artifact_ids),
+            (EvidenceReferenceType.GENERATION, generation_ids),
+            (EvidenceReferenceType.RUN_SET, run_set_ids),
         )
         for ref_id in values
     )

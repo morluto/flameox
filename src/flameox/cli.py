@@ -44,6 +44,7 @@ from flameox.application import (
     CompactionService,
     CompareRunSetsRequest,
     ComparisonService,
+    ConfigurationOperation,
     ConfigureInferenceScenarioRequest,
     ConfigureInferenceServerRequest,
     CreateInvestigationRequest,
@@ -60,8 +61,13 @@ from flameox.application import (
     GarbageCollector,
     ImportArtifactRequest,
     ImportService,
+    InferenceEndpointType,
     InferenceProfilingService,
     InferenceReplayService,
+    InferenceScenarioProvider,
+    InferenceServerMode,
+    InferenceServerProvider,
+    IntegrityLevel,
     IntegrityService,
     InvestigationService,
     KernelBuildImportService,
@@ -82,13 +88,21 @@ from flameox.application import (
     RunSetService,
     SetupOperation,
     SetupService,
+    SummaryExcerptPolicy,
+    SummarySensitiveContextPolicy,
     WorkloadService,
     parse_inference_scenario_config,
     parse_inference_server_config,
     workspace_status,
 )
 from flameox.catalog import Catalog
-from flameox.domain import ArtifactKind, DomainError, ErrorCode, Sensitivity
+from flameox.domain import (
+    ArtifactKind,
+    DomainError,
+    ErrorCode,
+    EvidenceReferenceType,
+    Sensitivity,
+)
 from flameox.mcp import create_server, run_server
 from flameox.storage import RunStore, Workspace
 
@@ -681,7 +695,9 @@ def validate(
 ) -> None:
     """Validate the immutable corpus without repairing it."""
     try:
-        result = IntegrityService(_workspace(workspace)).validate(full=full)
+        result = IntegrityService(_workspace(workspace)).validate(
+            IntegrityLevel.FULL if full else IntegrityLevel.QUICK
+        )
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -1048,11 +1064,13 @@ def inference_list(
 @inference_app.command("configure-server")
 def inference_configure_server(
     name: str,
-    mode: Literal["managed", "existing_local"],
+    mode: InferenceServerMode,
     model: str,
-    provider: Annotated[Literal["vllm", "sglang"], typer.Option("--provider")] = "vllm",
+    provider: Annotated[InferenceServerProvider, typer.Option("--provider")] = (
+        InferenceServerProvider.VLLM
+    ),
     benchmark_python: Annotated[str | None, typer.Option("--benchmark-python")] = None,
-    operation: Literal["create", "replace"] = "create",
+    operation: ConfigurationOperation = ConfigurationOperation.CREATE,
     workload: Annotated[str | None, typer.Option("--workload")] = None,
     base_url: Annotated[str, typer.Option("--base-url")] = "http://127.0.0.1:8000",
     model_revision: Annotated[str | None, typer.Option("--model-revision")] = None,
@@ -1099,9 +1117,9 @@ def inference_configure_server(
 def inference_configure_scenario(
     name: str,
     server: str,
-    provider: Literal["aiperf", "vllm_bench", "sglang_bench"],
-    operation: Literal["create", "replace"] = "create",
-    endpoint_type: Literal["chat", "completions"] = "chat",
+    provider: InferenceScenarioProvider,
+    operation: ConfigurationOperation = ConfigurationOperation.CREATE,
+    endpoint_type: InferenceEndpointType = InferenceEndpointType.CHAT,
     streaming: bool = True,
     trace_artifact_id: Annotated[str | None, typer.Option("--trace-artifact-id")] = None,
     num_prompts: Annotated[int, typer.Option("--num-prompts", min=1)] = 1,
@@ -1613,7 +1631,7 @@ def catalog_validate(
     """Validate catalog freshness and corpus inventory schemas."""
     try:
         selected = _workspace(workspace)
-        integrity = IntegrityService(selected).validate(full=False)
+        integrity = IntegrityService(selected).validate(IntegrityLevel.QUICK)
         result = {
             "schema_version": 1,
             "catalog": Catalog(selected).status(),
@@ -2233,17 +2251,9 @@ def evidence_get(
     json_output: JsonOption = False,
 ) -> None:
     """Retrieve bounded evidence metadata without binary artifact content."""
-    allowed = {
-        "analysis",
-        "artifact",
-        "comparison",
-        "generation",
-        "observation",
-        "run",
-        "run_set",
-        "trial",
-    }
-    if ref_type not in allowed:
+    try:
+        parsed_ref_type = EvidenceReferenceType(ref_type)
+    except ValueError:
         _fail(
             DomainError(
                 ErrorCode.WORKSPACE_INVALID,
@@ -2252,19 +2262,7 @@ def evidence_get(
         )
     try:
         result = EvidenceLookupService(_workspace(workspace)).get(
-            cast(
-                Literal[
-                    "analysis",
-                    "artifact",
-                    "comparison",
-                    "generation",
-                    "observation",
-                    "run",
-                    "run_set",
-                    "trial",
-                ],
-                ref_type,
-            ),
+            parsed_ref_type,
             ref_id,
         )
     except DomainError as error:
@@ -2281,13 +2279,13 @@ def evidence_summarize(
     analysis_ids: Annotated[list[str] | None, typer.Option("--analysis")] = None,
     finding_ids: Annotated[list[str] | None, typer.Option("--finding")] = None,
     output_excerpts: Annotated[
-        Literal["none", "internal"],
+        SummaryExcerptPolicy,
         typer.Option("--output-excerpts"),
-    ] = "none",
+    ] = SummaryExcerptPolicy.NONE,
     sensitive_context: Annotated[
-        Literal["redact", "include"],
+        SummarySensitiveContextPolicy,
         typer.Option("--sensitive-context"),
-    ] = "redact",
+    ] = SummarySensitiveContextPolicy.REDACT,
     output_format: Annotated[
         Literal["json", "markdown"],
         typer.Option("--format"),
@@ -2433,7 +2431,7 @@ def extract_inference_trace(
 def extract_inference_result(
     run_id: Annotated[str, typer.Argument(help="Import run containing provider result data.")],
     provider: Annotated[
-        Literal["aiperf", "vllm_bench", "sglang_bench"],
+        InferenceScenarioProvider,
         typer.Option("--provider", help="Maintained provider artifact schema."),
     ],
     workspace: WorkspaceOption = None,
@@ -2444,9 +2442,9 @@ def extract_inference_result(
         extractor = InferenceArtifactExtractor(_workspace(workspace))
         result = (
             extractor.extract_aiperf_result(run_id)
-            if provider == "aiperf"
+            if provider is InferenceScenarioProvider.AIPERF
             else extractor.extract_sglang_result(run_id)
-            if provider == "sglang_bench"
+            if provider is InferenceScenarioProvider.SGLANG_BENCH
             else extractor.extract_vllm_result(run_id)
         )
     except DomainError as error:

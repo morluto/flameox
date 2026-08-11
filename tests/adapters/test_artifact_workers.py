@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application.artifact_workers import ArtifactWorker
+from flameox.adapters.artifact_workers import ArtifactWorker
 from flameox.domain import DomainError, ErrorCode
 from flameox.storage import Workspace
 

@@ -14,6 +14,7 @@ import os
 import shutil
 import sys
 import time
+from enum import StrEnum
 from importlib.metadata import PackageNotFoundError, version
 from ipaddress import ip_address
 from pathlib import Path
@@ -23,13 +24,47 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from urllib.response import addinfourl
 
-from pydantic import Field, TypeAdapter, field_validator, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 from flameox.domain import DomainError, ErrorCode
 from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.models import ContractModel
 
 _MAX_PROBE_RESPONSE_BYTES = 1024 * 1024
+
+
+class InferenceServerMode(StrEnum):
+    MANAGED = "managed"
+    EXISTING_LOCAL = "existing_local"
+
+
+class InferenceServerProvider(StrEnum):
+    VLLM = "vllm"
+    SGLANG = "sglang"
+
+
+class InferenceScenarioProvider(StrEnum):
+    AIPERF = "aiperf"
+    VLLM_BENCH = "vllm_bench"
+    SGLANG_BENCH = "sglang_bench"
+
+
+class InferenceEndpointType(StrEnum):
+    CHAT = "chat"
+    COMPLETIONS = "completions"
+
+
+class InferenceTool(StrEnum):
+    AIPERF = "aiperf"
+    VLLM = "vllm"
+    SGLANG = "sglang"
 
 
 class _RejectRedirects(HTTPRedirectHandler):
@@ -61,7 +96,7 @@ class AIPerfProfileRequest(ContractModel):
     base_url: str
     model: Annotated[str, Field(min_length=1, max_length=500)]
     tokenizer: Annotated[str, Field(min_length=1, max_length=500)] | None = None
-    endpoint_type: Literal["chat", "completions"] = "chat"
+    endpoint_type: InferenceEndpointType = InferenceEndpointType.CHAT
     streaming: bool = True
     trace_path: Path | None = None
     output_dir: Path
@@ -133,7 +168,7 @@ class VllmBenchServeRequest(ContractModel):
     base_url: str
     model: Annotated[str, Field(min_length=1, max_length=500)]
     result_path: Path
-    endpoint_type: Literal["chat", "completions"] = "chat"
+    endpoint_type: InferenceEndpointType = InferenceEndpointType.CHAT
     streaming: Literal[True] = True
     num_prompts: Annotated[int, Field(gt=0, le=10_000_000)]
     request_rate: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
@@ -163,9 +198,13 @@ class VllmBenchServeRequest(ContractModel):
             "--model",
             self.model,
             "--backend",
-            "openai-chat" if self.endpoint_type == "chat" else "openai",
+            "openai-chat" if self.endpoint_type is InferenceEndpointType.CHAT else "openai",
             "--endpoint",
-            "/v1/chat/completions" if self.endpoint_type == "chat" else "/v1/completions",
+            (
+                "/v1/chat/completions"
+                if self.endpoint_type is InferenceEndpointType.CHAT
+                else "/v1/completions"
+            ),
             "--num-prompts",
             str(self.num_prompts),
             "--seed",
@@ -194,7 +233,7 @@ class SglangBenchServingRequest(ContractModel):
     model: Annotated[str, Field(min_length=1, max_length=500)]
     tokenizer: Annotated[str, Field(min_length=1, max_length=500)] | None = None
     result_path: Path
-    endpoint_type: Literal["chat", "completions"] = "chat"
+    endpoint_type: InferenceEndpointType = InferenceEndpointType.CHAT
     streaming: Literal[True] = True
     num_prompts: Annotated[int, Field(gt=0, le=10_000_000)]
     random_input_len: Annotated[int, Field(gt=0, le=1_000_000)]
@@ -228,7 +267,11 @@ class SglangBenchServingRequest(ContractModel):
             "-m",
             "sglang.bench_serving",
             "--backend",
-            "sglang-oai-chat" if self.endpoint_type == "chat" else "sglang-oai",
+            (
+                "sglang-oai-chat"
+                if self.endpoint_type is InferenceEndpointType.CHAT
+                else "sglang-oai"
+            ),
             "--host",
             parsed.hostname,
             "--port",
@@ -261,15 +304,22 @@ class SglangBenchServingRequest(ContractModel):
 
 
 class _InferenceToolDiscovery(ContractModel):
-    tool: Literal["aiperf", "vllm", "sglang"]
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
+    tool: InferenceTool
     version: str | None = None
     executable_digest: str | None = None
+    available: bool
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def compatible(self) -> bool:
+        return self.available
 
 
 class AvailableInferenceToolDiscovery(_InferenceToolDiscovery):
     executable: Path
     available: Literal[True] = True
-    compatible: Literal[True] = True
     compatibility_reason: Literal[None] = None
     remediation: tuple[()] = ()
 
@@ -277,7 +327,6 @@ class AvailableInferenceToolDiscovery(_InferenceToolDiscovery):
 class UnavailableInferenceToolDiscovery(_InferenceToolDiscovery):
     executable: Path | None = None
     available: Literal[False] = False
-    compatible: Literal[False] = False
     compatibility_reason: str | None = None
     remediation: tuple[str, ...] = ()
 
@@ -329,13 +378,13 @@ def discover_sglang(
     compatible = tool_version == "0.5.16"
     if executable.is_file() and os.access(executable, os.X_OK) and compatible:
         return AvailableInferenceToolDiscovery(
-            tool="sglang",
+            tool=InferenceTool.SGLANG,
             executable=executable,
             version=tool_version,
             executable_digest=digest,
         )
     return UnavailableInferenceToolDiscovery(
-        tool="sglang",
+        tool=InferenceTool.SGLANG,
         executable=executable if executable.is_file() else None,
         version=tool_version,
         executable_digest=digest,
@@ -358,7 +407,9 @@ def _digest_executable(executable: Path) -> str | None:
     return f"sha256:{digest.hexdigest()}"
 
 
-def discover_inference_tool(tool: Literal["aiperf", "vllm"]) -> InferenceToolDiscovery:
+def discover_inference_tool(
+    tool: Literal[InferenceTool.AIPERF, InferenceTool.VLLM],
+) -> InferenceToolDiscovery:
     located = shutil.which(tool)
     if located is None:
         scripts_dir = Path(sys.executable).resolve().parent
@@ -378,7 +429,7 @@ def discover_inference_tool(tool: Literal["aiperf", "vllm"]) -> InferenceToolDis
             tool_version = None
     compatible = executable is not None
     compatibility_reason: str | None = None
-    if executable is not None and tool == "aiperf":
+    if executable is not None and tool is InferenceTool.AIPERF:
         compatible = tool_version is not None and tool_version.split(".")[:2] == ["0", "12"]
         if not compatible:
             compatibility_reason = (
@@ -399,7 +450,7 @@ def discover_inference_tool(tool: Literal["aiperf", "vllm"]) -> InferenceToolDis
         compatibility_reason=compatibility_reason,
         remediation=(
             ("Install a compatible AIPerf >=0.12,<0.13 in the Flameox runtime, then retry.",)
-            if tool == "aiperf"
+            if tool is InferenceTool.AIPERF
             else ("Install vLLM in the target runtime; Flameox does not install it.",)
         ),
     )

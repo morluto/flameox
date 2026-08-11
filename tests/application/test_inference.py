@@ -15,6 +15,11 @@ from flameox.application.inference import (
     InferenceReplayService,
     parse_inference_replay_plan,
 )
+from flameox.application.inference_providers import (
+    InferenceScenarioProvider,
+    InferenceServerMode,
+    InferenceTool,
+)
 from flameox.domain import (
     CaptureStatus,
     DomainError,
@@ -22,8 +27,14 @@ from flameox.domain import (
     ExecutionStatus,
     ProcessResult,
     ValidationStatus,
+    process_termination_from_returncode,
 )
-from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
+from flameox.execution import (
+    ExecutionOutcome,
+    ExecutionRequest,
+    ProcessContainment,
+    SubprocessBroker,
+)
 from flameox.storage import RunStore, Workspace
 
 DIGEST = "sha256:" + "a" * 64
@@ -85,11 +96,14 @@ class RecordingBroker(SubprocessBroker):
 
     def _outcome(self, request: ExecutionRequest) -> ExecutionOutcome:
         return ExecutionOutcome(
-            process=ProcessResult(exit_code=self._exit_code, cleanup_complete=True),
+            process=ProcessResult(
+                termination=process_termination_from_returncode(self._exit_code),
+                cleanup_complete=True,
+            ),
             stdout=self._stdout,
             stderr=self._stderr,
             resolved_executable=Path(request.argv[0]),
-            containment="process_group",
+            containment=ProcessContainment.PROCESS_GROUP,
         )
 
 
@@ -107,13 +121,12 @@ def _patch_providers(
         parse_inference_tool_discovery,
     )
 
-    def fake_discover(tool: str) -> InferenceToolDiscovery:
+    def fake_discover(tool: InferenceTool) -> InferenceToolDiscovery:
         return parse_inference_tool_discovery(
             {
                 "tool": tool,
                 "executable": executable,
                 "available": executable is not None,
-                "compatible": executable is not None,
                 "remediation": () if executable else ("Install the inference extra.",),
             }
         )
@@ -141,8 +154,8 @@ def test_plan_existing_local_aiperf_builds_typed_argv_and_records_exploratory_re
 
     plan = service.plan("aiperf_replay")
 
-    assert plan.server_mode == "existing_local"
-    assert plan.provider == "aiperf"
+    assert plan.server_mode is InferenceServerMode.EXISTING_LOCAL
+    assert plan.provider is InferenceScenarioProvider.AIPERF
     assert plan.tool_available is True
     assert plan.tool_executable == "/tools/aiperf"
     assert plan.argv[0] == "/tools/aiperf"
@@ -194,10 +207,9 @@ def test_sglang_protocol_identity_binds_random_shape_and_provenance(
     )
 
     discovery = AvailableInferenceToolDiscovery(
-        tool="sglang",
+        tool=InferenceTool.SGLANG,
         executable=launcher,
         available=True,
-        compatible=True,
         version="0.5.16",
         executable_digest="sha256:" + "c" * 64,
     )
@@ -256,6 +268,17 @@ def test_replay_plan_parses_provider_specific_fields_once(
     }
     with pytest.raises(ValueError):
         parse_inference_replay_plan(incompatible)
+
+    contradictory = plan.model_dump(mode="json")
+    contradictory["tool_compatible"] = False
+    with pytest.raises(ValueError, match="availability and compatibility must agree"):
+        parse_inference_replay_plan(contradictory)
+
+    unavailable_with_executable = plan.model_dump(mode="json")
+    del unavailable_with_executable["tool_compatible"]
+    unavailable_with_executable["tool_available"] = False
+    with pytest.raises(ValueError, match="availability must match executable argv"):
+        parse_inference_replay_plan(unavailable_with_executable)
 
 
 def test_plan_accepts_managed_server_without_probing_before_execution(
@@ -322,6 +345,61 @@ def test_plan_unavailable_tool_records_remediation_and_empty_argv(
     assert plan.tool_remediation == ("Install the inference extra.",)
 
 
+def test_plan_incompatible_but_present_tool_returns_remediation_without_argv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool that is installed but incompatible must still produce an actionable plan.
+
+    Regression: previously the plan built argv from the executable path even when
+    the discovery was unavailable, and the coherence validator rejected argv +
+    compatibility_reason, causing a ValidationError instead of a plan.
+    """
+    from flameox.application import inference as inference_module
+    from flameox.application.inference_providers import (
+        ExistingServerProbe,
+        InferenceToolDiscovery,
+    )
+
+    def fake_discover(tool: str) -> InferenceToolDiscovery:
+        from flameox.application.inference_providers import (
+            UnavailableInferenceToolDiscovery,
+        )
+
+        return UnavailableInferenceToolDiscovery(
+            tool=InferenceTool.AIPERF,
+            executable=Path("/tools/aiperf"),
+            version="0.11.0",
+            executable_digest="sha256:" + "a" * 64,
+            compatibility_reason="AIPerf version is outside the supported >=0.12,<0.13 range.",
+            remediation=("Install a compatible AIPerf >=0.12,<0.13 in the Flameox runtime.",),
+        )
+
+    def fake_probe(base_url: str, *, timeout_seconds: float = 2.0) -> ExistingServerProbe:
+        del base_url, timeout_seconds
+        return ExistingServerProbe(
+            base_url="http://127.0.0.1:8000",
+            health_ready=True,
+            model_ids=("test-model",),
+        )
+
+    monkeypatch.setattr(inference_module, "discover_inference_tool", fake_discover)
+    monkeypatch.setattr(inference_module, "probe_existing_vllm_server", fake_probe)
+
+    workspace = Workspace.initialize(tmp_path)
+    _write_project(tmp_path)
+    service = InferenceReplayService(workspace, broker=RecordingBroker())
+
+    plan = service.plan("aiperf_replay")
+
+    assert plan.tool_available is False
+    assert plan.tool_compatible is False
+    assert plan.argv == ()
+    assert plan.tool_executable is not None
+    assert plan.tool_compatibility_reason is not None
+    assert plan.tool_remediation != ()
+
+
 @pytest.mark.anyio
 async def test_run_executes_through_broker_and_preserves_argv_and_output_path(
     tmp_path: Path,
@@ -345,6 +423,9 @@ async def test_run_executes_through_broker_and_preserves_argv_and_output_path(
     assert result.argv == plan.argv
     assert result.exit_code == 0
     assert result.timed_out is False
+    assert result.validated_copy() == result
+    timed_out = result.validated_copy(update={"cancellation_cause": "timeout"})
+    assert timed_out.timed_out is True
     assert result.health_ready is True
     assert result.probed_model_ids == ("test-model",)
     assert result.containment == "process_group"
@@ -523,11 +604,14 @@ receipt_schema = "flameox.oracle-receipt.v1"
                     )
                 )
                 return ExecutionOutcome(
-                    process=ProcessResult(exit_code=0, cleanup_complete=True),
+                    process=ProcessResult(
+                        termination=process_termination_from_returncode(0),
+                        cleanup_complete=True,
+                    ),
                     stdout=b"native oracle diagnostics",
                     stderr=b"",
                     resolved_executable=Path(request.argv[0]),
-                    containment="process_group",
+                    containment=ProcessContainment.PROCESS_GROUP,
                 )
             return self._outcome(request)
 

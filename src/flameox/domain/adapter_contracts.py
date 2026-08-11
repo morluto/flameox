@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Annotated, Final, Literal, Protocol
 
 from pydantic import Field, JsonValue, StringConstraints, model_validator
@@ -10,6 +11,12 @@ from flameox.models import ContractModel
 ADAPTER_API_VERSION: Final[Literal[1]] = 1
 
 
+class AdapterProbeStatus(StrEnum):
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+    DEGRADED = "degraded"
+
+
 class AdapterProbeContext(ContractModel):
     api_version: Literal[1] = ADAPTER_API_VERSION
     project_root: str
@@ -17,7 +24,7 @@ class AdapterProbeContext(ContractModel):
 
 class AdapterProbeResult(ContractModel):
     api_version: Literal[1] = ADAPTER_API_VERSION
-    status: Literal["available", "unavailable", "degraded"]
+    status: AdapterProbeStatus
     adapter_version: Annotated[str, StringConstraints(min_length=1, max_length=100)]
     limitations: Annotated[tuple[str, ...], Field(max_length=32)] = ()
     remediation: Annotated[tuple[str, ...], Field(max_length=32)] = ()

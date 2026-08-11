@@ -234,6 +234,27 @@ def test_gc_restore_and_explicit_expired_purge_are_manifest_specific(
     assert not (workspace.paths.trash / second.trash_manifest_id).exists()
 
 
+def test_gc_rejects_recoverability_that_disagrees_with_manifest_state(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    abandoned = workspace.paths.staging / "abandoned"
+    abandoned.mkdir()
+    (abandoned / "partial.bin").write_bytes(b"recoverable")
+    old = time.time() - 48 * 3600
+    os.utime(abandoned, (old, old))
+    collector = GarbageCollector(workspace)
+    applied = collector.apply(collector.plan(minimum_age_hours=24))
+    manifest = collector.resume(applied.trash_manifest_id)
+    manifest_path = workspace.paths.trash / applied.trash_manifest_id / "manifest.json"
+    manifest_path.write_text(manifest.model_copy(update={"recoverable": False}).model_dump_json())
+
+    with pytest.raises(DomainError) as error:
+        collector.restore(applied.trash_manifest_id)
+
+    assert error.value.code is ErrorCode.WORKSPACE_INVALID
+
+
 def test_gc_resume_completes_restore_interrupted_after_object_move(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

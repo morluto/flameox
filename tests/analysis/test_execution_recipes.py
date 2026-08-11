@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from flameox.analysis import RecipeService
 from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
@@ -111,3 +114,9 @@ def test_execution_comparison_diffs_complete_inputs_before_limiting(
     assert [item.name for item in result.changed] == ["shared"]
     assert result.returned == 1
     assert result.truncated
+    assert result.model_dump(mode="json")["returned"] == 1
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        type(result).model_validate({**result.model_dump(mode="python"), "returned": 0})
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        type(result).model_validate({**result.model_dump(mode="python"), "truncated": False})

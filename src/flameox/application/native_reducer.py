@@ -5,13 +5,54 @@ import json
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from typing import Annotated, Literal, assert_never, cast
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from flameox.models import ContractModel
 
-NativePredicateClassification = Literal["interesting", "not_interesting", "unresolved"]
+
+class NativePredicateClassification(StrEnum):
+    INTERESTING = "interesting"
+    NOT_INTERESTING = "not_interesting"
+    UNRESOLVED = "unresolved"
+
+
+class NativeReductionDisposition(StrEnum):
+    SUCCEEDED = "succeeded"
+    UNCHANGED = "unchanged"
+    INCONCLUSIVE = "inconclusive"
+    ORIGINAL_NOT_INTERESTING = "original_not_interesting"
+
+
+class NativeReductionMinimality(StrEnum):
+    ONE_MINIMAL = "one_minimal"
+    NOT_CLAIMED = "not_claimed"
+    PARTITIONER_INCOMPATIBLE = "partitioner_incompatible"
+
+
+class NativeReductionCacheStatus(StrEnum):
+    MISS = "miss"
+    HIT = "hit"
+
+
+class NativeReductionPartitioner(StrEnum):
+    TEXT_LINES = "text_lines"
+    BINARY_CHUNKS = "binary_chunks"
+    JSON_TOP_LEVEL = "json_top_level"
+    JSONL_RECORDS = "jsonl_records"
+    OTLP_SPANS = "otlp_spans"
+    CHROME_TRACE_EVENTS = "chrome_trace_events"
+
+
+type StructuredNativePartitioner = Literal[
+    NativeReductionPartitioner.TEXT_LINES,
+    NativeReductionPartitioner.JSON_TOP_LEVEL,
+    NativeReductionPartitioner.JSONL_RECORDS,
+    NativeReductionPartitioner.OTLP_SPANS,
+    NativeReductionPartitioner.CHROME_TRACE_EVENTS,
+]
 
 
 class NativeReductionLimits(ContractModel):
@@ -21,18 +62,14 @@ class NativeReductionLimits(ContractModel):
 
 
 class BinaryChunkPartitioning(ContractModel):
-    partitioner: Literal["binary_chunks"] = "binary_chunks"
+    partitioner: Literal[NativeReductionPartitioner.BINARY_CHUNKS] = (
+        NativeReductionPartitioner.BINARY_CHUNKS
+    )
     chunk_size: Annotated[int, Field(ge=1, le=16 * 1024 * 1024)]
 
 
 class StructuredPartitioning(ContractModel):
-    partitioner: Literal[
-        "text_lines",
-        "json_top_level",
-        "jsonl_records",
-        "otlp_spans",
-        "chrome_trace_events",
-    ]
+    partitioner: StructuredNativePartitioner
 
 
 type NativePartitioning = Annotated[
@@ -50,26 +87,63 @@ class NativeReductionAttempt(ContractModel):
     removed_unit_ids: tuple[str, ...] = ()
     predicate_outcomes: tuple[NativePredicateClassification, ...] = ()
     classification: NativePredicateClassification
-    cache_status: Literal["miss", "hit"]
+    cache_status: NativeReductionCacheStatus
     duration_ms: float = Field(ge=0)
     became_best: bool = False
     failure: str | None = None
 
+    @model_validator(mode="after")
+    def accepted_candidates_are_interesting(self) -> NativeReductionAttempt:
+        if (
+            self.became_best
+            and self.classification is not NativePredicateClassification.INTERESTING
+        ):
+            raise ValueError("only an interesting candidate can become the best candidate")
+        return self
+
 
 class NativeReductionResult(ContractModel):
-    disposition: Literal["succeeded", "unchanged", "inconclusive", "original_not_interesting"]
+    disposition: NativeReductionDisposition
     original_digest: str
     final_digest: str
     original_unit_count: int = Field(ge=0)
     final_unit_count: int = Field(ge=0)
     attempts: tuple[NativeReductionAttempt, ...] = ()
-    minimality: Literal["one_minimal", "not_claimed", "partitioner_incompatible"]
+    minimality: NativeReductionMinimality
     budget_exhausted: bool = False
     final_revalidation: NativePredicateClassification
     limitations: tuple[str, ...] = ()
     # These fields are execution handoff data, not part of the persisted result contract.
     final_payload: bytes | None = Field(default=None, exclude=True)
     accepted_best_payloads: tuple[bytes, ...] = Field(default_factory=tuple, exclude=True)
+
+    @model_validator(mode="after")
+    def disposition_is_coherent(self) -> NativeReductionResult:
+        if self.final_unit_count > self.original_unit_count:
+            raise ValueError("reduction cannot add units")
+        if self.disposition is NativeReductionDisposition.SUCCEEDED and (
+            self.final_digest == self.original_digest
+            or self.final_revalidation is not NativePredicateClassification.INTERESTING
+        ):
+            raise ValueError("a successful reduction requires a changed interesting result")
+        if self.disposition is NativeReductionDisposition.UNCHANGED and (
+            self.final_digest != self.original_digest
+            or self.final_revalidation is not NativePredicateClassification.INTERESTING
+        ):
+            raise ValueError("an unchanged reduction must revalidate the original result")
+        if self.disposition is NativeReductionDisposition.ORIGINAL_NOT_INTERESTING and (
+            self.final_digest != self.original_digest
+            or self.final_revalidation is not NativePredicateClassification.NOT_INTERESTING
+        ):
+            raise ValueError("an uninteresting original must remain the final result")
+        if self.minimality is NativeReductionMinimality.ONE_MINIMAL and (
+            self.budget_exhausted
+            or self.final_revalidation is not NativePredicateClassification.INTERESTING
+        ):
+            raise ValueError("one-minimality requires completed interesting revalidation")
+        if self.final_payload is not None and _digest(self.final_payload) != self.final_digest:
+            raise ValueError("the final payload must match the final digest")
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +168,7 @@ class NativeDdminReducer:
     def reduce(  # noqa: C901 - deterministic ddmin control flow is intentionally explicit
         self,
         original: bytes,
-        predicate: Callable[[bytes], NativePredicateClassification],
+        predicate: Callable[[bytes], NativePredicateClassification | str],
         *,
         failure_detail: Callable[[], str | None] | None = None,
         on_best: Callable[[bytes], None] | None = None,
@@ -104,13 +178,13 @@ class NativeDdminReducer:
             units, rebuild = self._partition(original)
         except (ImportError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
             return NativeReductionResult(
-                disposition="inconclusive",
+                disposition=NativeReductionDisposition.INCONCLUSIVE,
                 original_digest=original_digest,
                 final_digest=original_digest,
                 original_unit_count=0,
                 final_unit_count=0,
-                minimality="partitioner_incompatible",
-                final_revalidation="unresolved",
+                minimality=NativeReductionMinimality.PARTITIONER_INCOMPATIBLE,
+                final_revalidation=NativePredicateClassification.UNRESOLVED,
                 limitations=(f"partitioner_incompatible:{error}",),
             )
         cache: dict[str, NativePredicateClassification] = {}
@@ -118,11 +192,18 @@ class NativeDdminReducer:
         accepted_best_payloads: list[bytes] = []
         started = time.monotonic()
 
+        def evaluate(payload: bytes) -> NativePredicateClassification:
+            return NativePredicateClassification(predicate(payload))
+
         def classify(
             payload: bytes, requested: tuple[str, ...], removed: tuple[str, ...]
         ) -> NativePredicateClassification:
             digest = _digest(payload)
-            cache_status: Literal["hit", "miss"] = "hit" if digest in cache else "miss"
+            cache_status = (
+                NativeReductionCacheStatus.HIT
+                if digest in cache
+                else NativeReductionCacheStatus.MISS
+            )
             candidate_started = time.monotonic()
             failure: str | None = None
             if digest in cache:
@@ -132,7 +213,7 @@ class NativeDdminReducer:
                 outcomes_list_values: list[NativePredicateClassification] = []
                 failures: list[str] = []
                 for _ in range(self.limits.repetitions):
-                    outcomes_list_values.append(predicate(payload))
+                    outcomes_list_values.append(evaluate(payload))
                     if failure_detail is not None and (detail := failure_detail()) is not None:
                         failures.append(detail)
                 outcomes_list = tuple(outcomes_list_values)
@@ -157,30 +238,34 @@ class NativeDdminReducer:
             return outcome
 
         initial = classify(original, (), ())
-        if initial != "interesting":
+        if initial is not NativePredicateClassification.INTERESTING:
             return self._result(
-                "inconclusive" if initial == "unresolved" else "original_not_interesting",
+                (
+                    NativeReductionDisposition.INCONCLUSIVE
+                    if initial is NativePredicateClassification.UNRESOLVED
+                    else NativeReductionDisposition.ORIGINAL_NOT_INTERESTING
+                ),
                 original,
                 original,
                 units,
                 len(units),
                 attempts,
-                "not_claimed",
+                NativeReductionMinimality.NOT_CLAIMED,
                 initial,
             )
 
         full_selection = rebuild(units)
         if full_selection != original:
             normalized = classify(full_selection, ("__full_selection__",), ())
-            if normalized != "interesting":
+            if normalized is not NativePredicateClassification.INTERESTING:
                 return self._result(
-                    "inconclusive",
+                    NativeReductionDisposition.INCONCLUSIVE,
                     original,
                     original,
                     units,
                     len(units),
                     attempts,
-                    "partitioner_incompatible",
+                    NativeReductionMinimality.PARTITIONER_INCOMPATIBLE,
                     normalized,
                     limitations=(
                         "The partitioner's normalized full-selection artifact did not preserve "
@@ -232,8 +317,12 @@ class NativeDdminReducer:
                             requested_unit_ids=requested,
                             dependency_added_unit_ids=dependency_added,
                             removed_unit_ids=(),
-                            classification="not_interesting",
-                            cache_status="hit" if candidate_digest in cache else "miss",
+                            classification=NativePredicateClassification.NOT_INTERESTING,
+                            cache_status=(
+                                NativeReductionCacheStatus.HIT
+                                if candidate_digest in cache
+                                else NativeReductionCacheStatus.MISS
+                            ),
                             duration_ms=0,
                             failure="dependency_closure_no_op",
                         )
@@ -242,28 +331,28 @@ class NativeDdminReducer:
                 payload = rebuild(candidate_units)
                 removed = tuple(unit.unit_id for unit in current if unit not in candidate_units)
                 outcome = classify(payload, requested, removed)
-                attempts[-1] = attempts[-1].model_copy(
+                attempts[-1] = attempts[-1].validated_copy(
                     update={"dependency_added_unit_ids": dependency_added}
                 )
-                if outcome == "interesting":
+                if outcome is NativePredicateClassification.INTERESTING:
                     current = candidate_units
                     if on_best is None:
                         accepted_best_payloads.append(payload)
                     else:
                         on_best(payload)
-                    attempts[-1] = attempts[-1].model_copy(update={"became_best": True})
+                    attempts[-1] = attempts[-1].validated_copy(update={"became_best": True})
                     granularity = max(granularity - 1, 2)
                     changed = True
                     break
-                if outcome == "unresolved":
+                if outcome is NativePredicateClassification.UNRESOLVED:
                     return self._result(
-                        "inconclusive",
+                        NativeReductionDisposition.INCONCLUSIVE,
                         original,
                         rebuild(current),
                         units,
                         len(current),
                         attempts,
-                        "not_claimed",
+                        NativeReductionMinimality.NOT_CLAIMED,
                         outcome,
                         budget_exhausted=budget_exhausted,
                         accepted_best_payloads=accepted_best_payloads,
@@ -275,22 +364,24 @@ class NativeDdminReducer:
                     break
                 granularity = min(len(current), granularity * 2)
         final = rebuild(current)
-        final_classification = _collapse(predicate(final) for _ in range(self.limits.repetitions))
-        if final_classification != "interesting":
+        final_classification = _collapse(evaluate(final) for _ in range(self.limits.repetitions))
+        if final_classification is not NativePredicateClassification.INTERESTING:
             return self._result(
-                "inconclusive",
+                NativeReductionDisposition.INCONCLUSIVE,
                 original,
                 final,
                 units,
                 len(current),
                 attempts,
-                "not_claimed",
+                NativeReductionMinimality.NOT_CLAIMED,
                 final_classification,
                 budget_exhausted=budget_exhausted,
                 accepted_best_payloads=accepted_best_payloads,
             )
-        disposition: Literal["succeeded", "unchanged"] = (
-            "unchanged" if _digest(final) == original_digest else "succeeded"
+        disposition = (
+            NativeReductionDisposition.UNCHANGED
+            if _digest(final) == original_digest
+            else NativeReductionDisposition.SUCCEEDED
         )
         return self._result(
             disposition,
@@ -299,7 +390,11 @@ class NativeDdminReducer:
             units,
             len(current),
             attempts,
-            "not_claimed" if budget_exhausted else "one_minimal",
+            (
+                NativeReductionMinimality.NOT_CLAIMED
+                if budget_exhausted
+                else NativeReductionMinimality.ONE_MINIMAL
+            ),
             final_classification,
             budget_exhausted=budget_exhausted,
             accepted_best_payloads=accepted_best_payloads,
@@ -307,13 +402,13 @@ class NativeDdminReducer:
 
     def _result(
         self,
-        disposition: Literal["succeeded", "unchanged", "inconclusive", "original_not_interesting"],
+        disposition: NativeReductionDisposition,
         original: bytes,
         final: bytes,
         original_units: list[_Unit],
         final_unit_count: int,
         attempts: list[NativeReductionAttempt],
-        minimality: Literal["one_minimal", "not_claimed", "partitioner_incompatible"],
+        minimality: NativeReductionMinimality,
         final_revalidation: NativePredicateClassification,
         *,
         budget_exhausted: bool = False,
@@ -344,24 +439,24 @@ class NativeDdminReducer:
             ]
             return units, lambda selected: b"".join(unit.payload for unit in selected)
         partitioner = self.partitioning.partitioner
-        if partitioner == "text_lines":
+        if partitioner is NativeReductionPartitioner.TEXT_LINES:
             units = [
                 _Unit(f"line-{index:08d}", line)
                 for index, line in enumerate(original.splitlines(keepends=True))
             ]
             return units, lambda selected: b"".join(unit.payload for unit in selected)
-        if partitioner == "jsonl_records":
+        if partitioner is NativeReductionPartitioner.JSONL_RECORDS:
             lines = original.splitlines(keepends=True)
             for line in lines:
                 if line.strip():
                     json.loads(line)
             units = [_Unit(f"record-{index:08d}", line) for index, line in enumerate(lines)]
             return units, lambda selected: b"".join(unit.payload for unit in selected)
-        if partitioner == "json_top_level":
+        if partitioner is NativeReductionPartitioner.JSON_TOP_LEVEL:
             return self._partition_json_top_level(original)
-        if partitioner == "chrome_trace_events":
+        if partitioner is NativeReductionPartitioner.CHROME_TRACE_EVENTS:
             return self._partition_chrome_trace(original)
-        if partitioner == "otlp_spans":
+        if partitioner is NativeReductionPartitioner.OTLP_SPANS:
             if original.lstrip().startswith((b"{", b"[")):
                 return self._partition_json_otlp(original)
             return self._partition_binary_otlp(original)
@@ -494,8 +589,8 @@ class NativeDdminReducer:
 
 def _collapse(outcomes: Iterable[NativePredicateClassification]) -> NativePredicateClassification:
     values = tuple(outcomes)
-    if not values or "unresolved" in values or len(set(values)) != 1:
-        return "unresolved"
+    if not values or NativePredicateClassification.UNRESOLVED in values or len(set(values)) != 1:
+        return NativePredicateClassification.UNRESOLVED
     return values[0]
 
 

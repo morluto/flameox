@@ -47,7 +47,7 @@ _WORKER_RESPONSE: TypeAdapter[WorkerResponse] = TypeAdapter(WorkerResponse)
 
 
 class ArtifactWorker:
-    """Run an artifact-facing parser behind the canonical subprocess boundary."""
+    """Run an artifact-facing adapter behind the canonical subprocess boundary."""
 
     def __init__(self, workspace: Workspace, *, broker: SubprocessBroker | None = None) -> None:
         self.workspace = workspace

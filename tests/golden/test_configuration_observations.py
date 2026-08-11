@@ -22,7 +22,14 @@ from flameox.application import (
     RecordHypothesisRequest,
     RunSetService,
 )
-from flameox.domain import EvidenceLevel, FindingAssessment
+from flameox.domain import (
+    EvidenceLevel,
+    EvidenceReferenceType,
+    EvidenceRelation,
+    FindingAssessment,
+    FindingConfidence,
+    MetricPolarity,
+)
 from flameox.storage import Workspace
 
 
@@ -52,9 +59,11 @@ timeout_seconds = 10
 mode = ["bad", "fixed"]
 """
     )
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"})
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
         }
     )
     workspace.paths.config.write_text(config.to_toml())
@@ -112,7 +121,7 @@ mode = ["bad", "fixed"]
             candidate_run_set_id=candidate.run_set_id,
             metric="process.wall_time",
             unit="ns",
-            polarity="neutral",
+            polarity=MetricPolarity.NEUTRAL,
             practical_threshold=0,
         )
     )
@@ -122,13 +131,13 @@ mode = ["bad", "fixed"]
             title="Configuration selects current-policy probabilities",
             claim="The bad mode explicitly reports clipping disabled.",
             evidence_level=EvidenceLevel.OBSERVED,
-            confidence="high",
+            confidence=FindingConfidence.HIGH,
             assessment=FindingAssessment.SUPPORTED,
             evidence=(
                 EvidenceInput(
-                    ref_type="observation",
+                    ref_type=EvidenceReferenceType.OBSERVATION,
                     ref_id=by_name["policy.clipping_enabled"].observation_id,
-                    relation="supports",
+                    relation=EvidenceRelation.SUPPORTS,
                 ),
             ),
         )

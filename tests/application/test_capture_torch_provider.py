@@ -6,10 +6,12 @@ import pytest
 
 from flameox.application import CapabilityService, CaptureService, ExecutionPolicy
 from flameox.domain import (
+    CapabilityPermissionStatus,
     CapabilityReport,
     CapabilityStatus,
     CaptureStatus,
     ExecutionStatus,
+    ProbeKind,
 )
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
@@ -141,8 +143,8 @@ timeout_seconds = 30
         version="fixture",
         supported_modes=("sdk",),
         supported_formats=("chrome-trace",),
-        permission_status="granted",
-        probe_kind="passive",
+        permission_status=CapabilityPermissionStatus.GRANTED,
+        probe_kind=ProbeKind.PASSIVE,
     )
     service = CaptureService(workspace)
     monkeypatch.setattr(service.capabilities, "get", lambda _adapter: report)

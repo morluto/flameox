@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Literal
+from enum import StrEnum
+from typing import Any
 
 from packaging.version import InvalidVersion, Version
 
-from flameox.application.artifact_workers import ArtifactWorker
+from flameox.adapters.artifact_workers import ArtifactWorker
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
@@ -14,12 +15,18 @@ from flameox.storage import ArtifactStore, RunStore, Workspace
 _SUPPORTED_PRODUCER_MAJOR = 2026
 
 
+class ComputeSanitizerStatus(StrEnum):
+    CLEAN = "clean"
+    FINDINGS = "findings"
+    INCONCLUSIVE = "inconclusive"
+
+
 class ComputeSanitizerExtractionResult(ContractModel):
     schema_version: int = 1
     run_id: str
     artifact_id: str
     producer_version: str | None
-    status: Literal["clean", "findings", "inconclusive"]
+    status: ComputeSanitizerStatus
     finding_count: int
     classifications: dict[str, int]
     schema_fingerprint: str
@@ -212,11 +219,20 @@ class ComputeSanitizerExtractor:
             },
         )
         inconclusive = bool(limitations) and not records
+        status = (
+            ComputeSanitizerStatus.FINDINGS
+            if records
+            else (
+                ComputeSanitizerStatus.INCONCLUSIVE
+                if inconclusive
+                else ComputeSanitizerStatus.CLEAN
+            )
+        )
         return ComputeSanitizerExtractionResult(
             run_id=run_id,
             artifact_id=registration.artifact_id,
             producer_version=registration.producer_version,
-            status=("findings" if records else "inconclusive" if inconclusive else "clean"),
+            status=status,
             finding_count=len(records),
             classifications={str(key): int(value) for key, value in classifications.items()},
             schema_fingerprint=schema_fingerprint,

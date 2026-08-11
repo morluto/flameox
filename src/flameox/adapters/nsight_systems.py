@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import JsonValue
 
-from flameox.application.artifact_workers import ArtifactWorker
+from flameox.adapters.artifact_workers import ArtifactWorker
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
 from flameox.evidence import GenerationPublisher
 from flameox.execution import SubprocessBroker

@@ -11,7 +11,15 @@ from flameox.application import (
     RecordFindingRequest,
 )
 from flameox.application.recoverable_move import validate_manifest_id
-from flameox.domain import DomainError, ErrorCode, EvidenceLevel, FindingAssessment
+from flameox.domain import (
+    DomainError,
+    ErrorCode,
+    EvidenceLevel,
+    EvidenceReferenceType,
+    EvidenceRelation,
+    FindingAssessment,
+    FindingConfidence,
+)
 from flameox.storage import Workspace
 
 
@@ -28,7 +36,7 @@ def test_generation_lookup_rejects_non_local_reference(tmp_path: Path, ref_id: s
     workspace = Workspace.initialize(tmp_path)
 
     with pytest.raises(DomainError) as error:
-        EvidenceLookupService(workspace).get("generation", ref_id)
+        EvidenceLookupService(workspace).get(EvidenceReferenceType.GENERATION, ref_id)
 
     assert error.value.code is ErrorCode.EXECUTION_REFUSED
 
@@ -40,13 +48,13 @@ def test_finding_rejects_non_local_generation_reference(tmp_path: Path) -> None:
         title="Candidate is faster",
         claim="The candidate is faster.",
         evidence_level=EvidenceLevel.DERIVED,
-        confidence="high",
+        confidence=FindingConfidence.HIGH,
         assessment=FindingAssessment.SUPPORTED,
         evidence=(
             EvidenceInput(
-                ref_type="generation",
+                ref_type=EvidenceReferenceType.GENERATION,
                 ref_id="../outside",
-                relation="supports",
+                relation=EvidenceRelation.SUPPORTS,
             ),
         ),
     )

@@ -69,7 +69,7 @@ class PyTorchRecipes(RecipeContext):
                 "sum(coalesce(fm.inclusive_value, 0)), "
                 "sum(coalesce(fm.sample_count, 0)) "
                 "FROM frame_measurements fm JOIN frames f "
-                "ON f.frame_id = fm.frame_id WHERE "
+                "ON f.frame_id = fm.frame_id AND f.artifact_id = fm.artifact_id WHERE "
                 + where
                 + " GROUP BY fm.frame_id, f.function, f.module "
                 "ORDER BY sum(coalesce(fm.inclusive_value, 0)) DESC, fm.frame_id "
@@ -229,8 +229,6 @@ class PyTorchRecipes(RecipeContext):
             input_id=input_id,
             operators=operators,
             total=total,
-            returned=len(operators),
-            truncated=total > len(operators),
             coverage={
                 "self_cpu_time": True,
                 "total_cpu_time": True,

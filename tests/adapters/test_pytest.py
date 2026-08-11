@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from flameox.adapters import PytestExtractor
+from flameox.adapters.pytest import PytestCompletionState
 from flameox.application import ImportArtifactRequest, ImportService
 from flameox.catalog import Catalog
 from flameox.domain import (
@@ -118,6 +120,15 @@ def test_pytest_extracts_fixture_cost_outcomes_and_failure_latency(tmp_path: Pat
     result = PytestExtractor(workspace).extract(imported.run.run_id)
 
     assert result.complete is True
+    assert result.interrupted is False
+    payload = result.model_dump(mode="json")
+    assert "completion" not in payload
+    assert result.validated_copy() == result
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        type(result).model_validate({**payload, "interrupted": True})
+    interrupted = result.validated_copy(update={"completion": PytestCompletionState.INTERRUPTED})
+    assert interrupted.complete is False
+    assert interrupted.interrupted is True
     assert result.collected_count == 3
     assert result.executed_count == 2
     assert result.passed_count == 1

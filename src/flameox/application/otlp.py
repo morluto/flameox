@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from flameox.application.artifact_workers import ArtifactWorker
+from pydantic import ConfigDict, computed_field
+
+from flameox.adapters.artifact_workers import ArtifactWorker
 from flameox.application.evidence_rows import _json
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.evidence import GenerationPublisher
@@ -14,6 +16,8 @@ from flameox.storage import ArtifactStore, RunStore, Workspace
 
 
 class OtlpExtractionResult(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: int = 1
     run_id: str
     artifact_id: str
@@ -24,7 +28,11 @@ class OtlpExtractionResult(ContractModel):
     event_count: int = 0
     link_count: int = 0
     limitations: tuple[str, ...] = ()
-    failed: bool = False
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def failed(self) -> bool:
+        return self.evidence_generation_id is None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +110,6 @@ class OtlpTraceService:
                     event_count=int(raw_counts["events"]),
                     link_count=int(raw_counts["links"]),
                     limitations=tuple(str(item) for item in raw_limitations),
-                    failed=True,
                 )
             parsed = _parsed_response(response)
         except _OtlpRowLimitExceeded as error:
@@ -115,7 +122,6 @@ class OtlpTraceService:
                 event_count=error.counts["events"],
                 link_count=error.counts["links"],
                 limitations=error.limitations,
-                failed=True,
             )
         except DomainError:
             raise

@@ -10,9 +10,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
 from itertools import product
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
-from pydantic import Field, JsonValue
+from pydantic import ConfigDict, Field, JsonValue, computed_field, model_validator
 
 from flameox.adapters import PyPerfExtractor, PytestExtractor, PythonStartupExtractor
 from flameox.application.async_work import run_atomic_thread
@@ -42,13 +42,20 @@ from flameox.domain import (
     CursorCodec,
     DomainError,
     ErrorCode,
+    ExecutionStatus,
     Experiment,
+    ExperimentOutcomeDisposition,
+    ExperimentOutcomeGoal,
+    ExperimentOutcomeMethod,
+    ExperimentRole,
     Hypothesis,
     Investigation,
+    MetricSource,
     OracleStrength,
     RunManifest,
     RunSet,
     Trial,
+    TrialFailureClass,
     TrialOutcome,
     ValidationStatus,
     Variant,
@@ -65,6 +72,7 @@ from flameox.evidence import (
     numeric_value_to_columns,
 )
 from flameox.models import ContractModel
+from flameox.pagination import CursorPageContract
 from flameox.storage import JsonRecordStore, RunStore, Workspace
 
 
@@ -127,7 +135,7 @@ class ExperimentPlan(ContractModel):
     experiment_name: str
     experiment: Experiment
     adapter: str
-    metric_source: Literal["measurement", "runtime_resource"] = "measurement"
+    metric_source: MetricSource = MetricSource.MEASUREMENT
     execution_policy: ExecutionPolicy
     variant_parameter: str
     variants: tuple[str, ...]
@@ -151,12 +159,12 @@ class ExperimentRunResult(ContractModel):
     limitations: tuple[str, ...] = ()
 
 
-class ExperimentTrialCollection(ContractModel):
+class ExperimentTrialCollection(CursorPageContract):
+    page_items_field = "trials"
+
     schema_version: Literal[2] = 2
     experiment_id: str
     trials: tuple[Trial, ...]
-    returned: int
-    truncated: bool = False
     next_cursor: str | None = None
 
 
@@ -189,32 +197,100 @@ class OutcomeCount(ContractModel):
     failure_rate: float | None = None
 
 
+class OutcomeFirstFailure(ContractModel):
+    trial_id: str
+    factors: dict[str, JsonValue]
+
+
+def _advertise_first_failure_projections(schema: dict[str, Any]) -> None:
+    properties = schema.setdefault("properties", {})
+    assert isinstance(properties, dict)
+    properties.pop("first_failure", None)
+    properties.update(
+        {
+            "first_failure_trial_id": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "default": None,
+                "title": "First Failure Trial Id",
+            },
+            "first_failure_factors": {
+                "anyOf": [
+                    {
+                        "additionalProperties": {"$ref": "#/$defs/JsonValue"},
+                        "type": "object",
+                    },
+                    {"type": "null"},
+                ],
+                "default": None,
+                "title": "First Failure Factors",
+            },
+        }
+    )
+    required = schema.setdefault("required", [])
+    assert isinstance(required, list)
+    for field_name in (
+        "first_failure",
+        "first_failure_trial_id",
+        "first_failure_factors",
+    ):
+        if field_name in required:
+            required.remove(field_name)
+
+
 class OutcomeExperimentResult(ContractModel):
+    model_config = ConfigDict(json_schema_extra=_advertise_first_failure_projections)
+
     schema_version: Literal[1] = 1
     experiment_id: str
-    method: Literal["fixed_attempts_v1"] = "fixed_attempts_v1"
-    goal: Literal["equivalence", "absence_of_failure", "bounded_rate"]
-    disposition: Literal[
-        "all_clean",
-        "base_only_failure",
-        "candidate_only_failure",
-        "mixed",
-        "unsupported",
-        "insufficient_evidence",
-    ]
+    method: Literal[ExperimentOutcomeMethod.FIXED_ATTEMPTS_V1] = (
+        ExperimentOutcomeMethod.FIXED_ATTEMPTS_V1
+    )
+    goal: ExperimentOutcomeGoal
+    disposition: ExperimentOutcomeDisposition
     counts: tuple[OutcomeCount, ...]
     complete_pairs: int
     unmatched_cells: int
-    first_failure_trial_id: str | None = None
-    first_failure_factors: dict[str, JsonValue] | None = None
+    first_failure: OutcomeFirstFailure | None = Field(default=None, exclude=True)
     limitations: tuple[str, ...] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_first_failure_projections(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        has_trial = "first_failure_trial_id" in value
+        has_factors = "first_failure_factors" in value
+        if not has_trial and not has_factors:
+            return value
+        if "first_failure" in value:
+            raise ValueError("use either first_failure or flattened first-failure fields")
+        if has_trial != has_factors:
+            raise ValueError("first-failure trial and factors must appear together")
+        parsed = dict(value)
+        trial_id = parsed.pop("first_failure_trial_id")
+        factors = parsed.pop("first_failure_factors")
+        if (trial_id is None) != (factors is None):
+            raise ValueError("first-failure trial and factors must appear together")
+        parsed["first_failure"] = (
+            None if trial_id is None else {"trial_id": trial_id, "factors": factors}
+        )
+        return parsed
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def first_failure_trial_id(self) -> str | None:
+        return self.first_failure.trial_id if self.first_failure is not None else None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def first_failure_factors(self) -> dict[str, JsonValue] | None:
+        return self.first_failure.factors if self.first_failure is not None else None
 
 
 @dataclass(slots=True)
 class _ExperimentEntry:
     plan: ExperimentPlan
     expires_monotonic: float
-    consumed: bool = False
 
 
 class ExperimentPlanRegistry:
@@ -242,12 +318,12 @@ class ExperimentPlanRegistry:
         async with self._lock:
             self._evict()
             entry = self._plans.get(plan_id)
-            if entry is None or entry.consumed:
+            if entry is None:
                 raise DomainError(
                     ErrorCode.INVALID_CAPTURE_PLAN,
                     "Experiment plan is missing, expired, or already consumed.",
                 )
-            entry.consumed = True
+            del self._plans[plan_id]
             return entry.plan
 
     def _evict(self) -> None:
@@ -326,8 +402,6 @@ class ExperimentService:
         return ExperimentTrialCollection(
             experiment_id=experiment_id,
             trials=trials,
-            returned=len(trials),
-            truncated=truncated,
             next_cursor=next_cursor,
         )
 
@@ -462,19 +536,19 @@ class ExperimentService:
             )
         definition = self.workloads.definition(config.workload)
         oracle = workload.oracle
-        role: Literal["exploratory", "confirmatory"] = (
-            "confirmatory"
+        role = (
+            ExperimentRole.CONFIRMATORY
             if oracle is not None and oracle.strength is OracleStrength.CROSS_TREATMENT_EQUIVALENCE
-            else "exploratory"
+            else ExperimentRole.EXPLORATORY
         )
         design = {
             "name": experiment_name,
             "config": config.model_dump(mode="json"),
             "parameters": supplied_overrides,
             "metric_source": (
-                "runtime_resource"
+                MetricSource.RUNTIME_RESOURCE
                 if config.primary_metric.startswith("runtime_resource.")
-                else "measurement"
+                else MetricSource.MEASUREMENT
             ),
         }
         experiment = Experiment(
@@ -493,7 +567,7 @@ class ExperimentService:
             practical_threshold=config.practical_threshold,
             confidence_level=config.confidence_level,
             stopping_rule={
-                "method": "fixed_attempts_v1",
+                "method": ExperimentOutcomeMethod.FIXED_ATTEMPTS_V1,
                 "fixed_blocks": config.blocks,
                 "minimum_attempts": config.minimum_attempts or config.blocks,
                 "maximum_attempts": config.maximum_attempts or config.blocks,
@@ -579,9 +653,9 @@ class ExperimentService:
             experiment=experiment,
             adapter=adapter,
             metric_source=(
-                "runtime_resource"
+                MetricSource.RUNTIME_RESOURCE
                 if config.primary_metric.startswith("runtime_resource.")
-                else "measurement"
+                else MetricSource.MEASUREMENT
             ),
             execution_policy=execution_policy,
             variant_parameter=variant_parameter,
@@ -645,20 +719,7 @@ class ExperimentService:
             }
             capture_plan = None
             run: RunManifest | None = None
-            failure_class: Literal[
-                "none",
-                "unattempted",
-                "oracle_failure",
-                "oracle_inconclusive",
-                "oracle_unsupported",
-                "oracle_receipt_error",
-                "process_failure",
-                "timeout",
-                "cancellation",
-                "unsupported_environment",
-                "resource_policy",
-                "infrastructure_failure",
-            ]
+            failure_class: TrialFailureClass
             try:
                 capture_plan = await self.captures.plan(
                     workload_name=config.workload,
@@ -692,7 +753,7 @@ class ExperimentService:
                     block_id=block.block_id,
                     order=order,
                     outcome=TrialOutcome.CANCELLED,
-                    failure_class="cancellation",
+                    failure_class=TrialFailureClass.CANCELLATION,
                 )
                 try:
                     await run_atomic_thread(partial(self._publish_trial, trial))
@@ -712,7 +773,7 @@ class ExperimentService:
                             block_id=block.block_id,
                             order=order,
                             outcome=TrialOutcome.INFRASTRUCTURE_FAILED,
-                            failure_class="infrastructure_failure",
+                            failure_class=TrialFailureClass.INFRASTRUCTURE_FAILURE,
                         )
                         await run_atomic_thread(partial(self._publish_trial, failed))
                         await self._publish_unattempted(
@@ -727,9 +788,9 @@ class ExperimentService:
                         else TrialOutcome.INFRASTRUCTURE_FAILED
                     )
                     failure_class = (
-                        "unsupported_environment"
+                        TrialFailureClass.UNSUPPORTED_ENVIRONMENT
                         if outcome is TrialOutcome.UNSUPPORTED
-                        else "infrastructure_failure"
+                        else TrialFailureClass.INFRASTRUCTURE_FAILURE
                     )
                 else:
                     run = RunStore(self.workspace).read(error.run_id)
@@ -837,7 +898,7 @@ class ExperimentService:
             limitations.append(
                 "Automatic paired comparison currently requires exactly two variants."
             )
-        elif plan.metric_source == "measurement" and plan.adapter != "pyperf":
+        elif plan.metric_source is MetricSource.MEASUREMENT and plan.adapter != "pyperf":
             limitations.append(
                 "Automatic experiment comparison currently requires pyperf measurements."
             )
@@ -850,7 +911,11 @@ class ExperimentService:
                             "candidate_run_set_id": run_sets[1].run_set_id,
                             "experiment_id": plan.experiment.experiment_id,
                             "metric": plan.experiment.primary_metric,
-                            "unit": ("bytes" if plan.metric_source == "runtime_resource" else "ns"),
+                            "unit": (
+                                "bytes"
+                                if plan.metric_source is MetricSource.RUNTIME_RESOURCE
+                                else "ns"
+                            ),
                             "metric_source": plan.metric_source,
                             "polarity": plan.experiment.polarity,
                             "practical_threshold": plan.experiment.practical_threshold,
@@ -889,7 +954,7 @@ class ExperimentService:
                 block_id=block.block_id,
                 order=order,
                 outcome=TrialOutcome.UNATTEMPTED,
-                failure_class="unattempted",
+                failure_class=TrialFailureClass.UNATTEMPTED,
             )
             await run_atomic_thread(partial(self._publish_trial, trial))
 
@@ -1141,37 +1206,33 @@ class ExperimentService:
             item.unsupported + item.oracle_unsupported == item.attempted and item.attempted > 0
             for item in counts
         ):
-            disposition = "unsupported"
+            disposition = ExperimentOutcomeDisposition.UNSUPPORTED
         elif incomplete_receipts or unmatched or any(item.eligible < minimum for item in counts):
-            disposition = "insufficient_evidence"
+            disposition = ExperimentOutcomeDisposition.INSUFFICIENT_EVIDENCE
         elif not failures:
-            disposition = "all_clean"
+            disposition = ExperimentOutcomeDisposition.ALL_CLEAN
         elif len(plan.variants) == 2 and failed_treatments == {plan.variants[0]}:
-            disposition = "base_only_failure"
+            disposition = ExperimentOutcomeDisposition.BASE_ONLY_FAILURE
         elif len(plan.variants) == 2 and failed_treatments == {plan.variants[1]}:
-            disposition = "candidate_only_failure"
+            disposition = ExperimentOutcomeDisposition.CANDIDATE_ONLY_FAILURE
         else:
-            disposition = "mixed"
+            disposition = ExperimentOutcomeDisposition.MIXED
         first_failure = failures[0] if failures else None
         return OutcomeExperimentResult(
             experiment_id=plan.experiment.experiment_id,
             goal=config.outcome_goal,
-            disposition=cast(
-                Literal[
-                    "all_clean",
-                    "base_only_failure",
-                    "candidate_only_failure",
-                    "mixed",
-                    "unsupported",
-                    "insufficient_evidence",
-                ],
-                disposition,
-            ),
+            disposition=disposition,
             counts=tuple(counts),
             complete_pairs=complete_pairs,
             unmatched_cells=unmatched,
-            first_failure_trial_id=(first_failure.trial_id if first_failure is not None else None),
-            first_failure_factors=(first_failure.factors if first_failure is not None else None),
+            first_failure=(
+                OutcomeFirstFailure(
+                    trial_id=first_failure.trial_id,
+                    factors=first_failure.factors,
+                )
+                if first_failure is not None
+                else None
+            ),
             limitations=tuple(limitations),
         )
 
@@ -1211,20 +1272,7 @@ class ExperimentService:
         block_id: str,
         order: int,
         outcome: TrialOutcome,
-        failure_class: Literal[
-            "none",
-            "unattempted",
-            "oracle_failure",
-            "oracle_inconclusive",
-            "oracle_unsupported",
-            "oracle_receipt_error",
-            "process_failure",
-            "timeout",
-            "cancellation",
-            "unsupported_environment",
-            "resource_policy",
-            "infrastructure_failure",
-        ],
+        failure_class: TrialFailureClass,
     ) -> Trial:
         parameter_name, parameter_value = self._trial_parameter_value(plan, cell)
         return parse_trial(
@@ -1289,47 +1337,33 @@ class ExperimentService:
     @staticmethod
     def _classify_run(
         run: RunManifest,
-    ) -> tuple[
-        TrialOutcome,
-        Literal[
-            "none",
-            "oracle_failure",
-            "oracle_inconclusive",
-            "oracle_unsupported",
-            "oracle_receipt_error",
-            "process_failure",
-            "timeout",
-            "cancellation",
-            "resource_policy",
-            "infrastructure_failure",
-        ],
-    ]:
+    ) -> tuple[TrialOutcome, TrialFailureClass]:
         if (
             run.process is not None
             and run.process.resources is not None
             and run.process.resources.policy_termination is not None
         ):
-            return TrialOutcome.RESOURCE_POLICY, "resource_policy"
-        if run.execution_status.value == "timed_out":
-            return TrialOutcome.TIMED_OUT, "timeout"
-        if run.execution_status.value == "cancelled":
-            return TrialOutcome.CANCELLED, "cancellation"
+            return TrialOutcome.RESOURCE_POLICY, TrialFailureClass.RESOURCE_POLICY
+        if run.execution_status is ExecutionStatus.TIMED_OUT:
+            return TrialOutcome.TIMED_OUT, TrialFailureClass.TIMEOUT
+        if run.execution_status is ExecutionStatus.CANCELLED:
+            return TrialOutcome.CANCELLED, TrialFailureClass.CANCELLATION
         if run.validation_status is ValidationStatus.INCONCLUSIVE:
-            return TrialOutcome.INVALID, "oracle_inconclusive"
+            return TrialOutcome.INVALID, TrialFailureClass.ORACLE_INCONCLUSIVE
         if run.validation_status is ValidationStatus.UNSUPPORTED:
-            return TrialOutcome.UNSUPPORTED, "oracle_unsupported"
+            return TrialOutcome.UNSUPPORTED, TrialFailureClass.ORACLE_UNSUPPORTED
         if run.validation_status is ValidationStatus.ERROR:
             if any(
                 limitation.startswith("Oracle receipt validation failed:")
                 for limitation in run.limitations
             ):
-                return TrialOutcome.INVALID, "oracle_receipt_error"
-            return TrialOutcome.INFRASTRUCTURE_FAILED, "infrastructure_failure"
+                return TrialOutcome.INVALID, TrialFailureClass.ORACLE_RECEIPT_ERROR
+            return TrialOutcome.INFRASTRUCTURE_FAILED, TrialFailureClass.INFRASTRUCTURE_FAILURE
         if run.validation_status is ValidationStatus.FAILED:
-            return TrialOutcome.ORACLE_FAILED, "oracle_failure"
-        if run.execution_status.value != "succeeded":
-            return TrialOutcome.FAILED, "process_failure"
-        return TrialOutcome.SUCCEEDED, "none"
+            return TrialOutcome.ORACLE_FAILED, TrialFailureClass.ORACLE_FAILURE
+        if run.execution_status is not ExecutionStatus.SUCCEEDED:
+            return TrialOutcome.FAILED, TrialFailureClass.PROCESS_FAILURE
+        return TrialOutcome.SUCCEEDED, TrialFailureClass.NONE
 
     def _publish_trial(self, trial: Trial) -> PublishedGeneration:
         return self.publisher.publish_rows(

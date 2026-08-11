@@ -4,6 +4,7 @@ import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -15,7 +16,16 @@ from mcp_types import (
     TextContent,
     ToolAnnotations,
 )
-from pydantic import BaseModel, ConfigDict, Field, RootModel, StrictBool, StrictFloat, StrictInt
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    RootModel,
+    SkipValidation,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+)
 
 from flameox import __version__
 from flameox.adapters import (
@@ -78,11 +88,13 @@ from flameox.application import (
     CompareRunSetsRequest,
     ComparisonResult,
     ComparisonService,
+    ConfigurationOperation,
     ConfigureInferenceScenarioRequest,
     ConfigureInferenceServerRequest,
     ConfigureWorkloadRequest,
     CreateInvestigationRequest,
     DeclaredWorkflowDetail,
+    DeclaredWorkflowKind,
     DeclaredWorkflowList,
     DetachedCaptureManager,
     DetachedCaptureStatus,
@@ -109,6 +121,7 @@ from flameox.application import (
     ImportService,
     InferenceConfigurationList,
     InferenceConfigurationResult,
+    InferenceEndpointType,
     InferenceProfilingPlan,
     InferenceProfilingResult,
     InferenceProfilingService,
@@ -116,6 +129,10 @@ from flameox.application import (
     InferenceReplayResult,
     InferenceReplayService,
     InferenceRequestQueryResult,
+    InferenceScenarioProvider,
+    InferenceServerMode,
+    InferenceServerProvider,
+    IntegrityLevel,
     IntegrityResult,
     IntegrityService,
     InvestigationListResult,
@@ -146,6 +163,7 @@ from flameox.application import (
     RunSetService,
     Scalar,
     StackExamplesResult,
+    SupportedInferenceProfiler,
     WorkloadConfig,
     WorkloadConfigurationResult,
     WorkloadConfigurationStatus,
@@ -168,16 +186,22 @@ from flameox.domain import (
     CapturePlan,
     DomainError,
     ErrorCode,
+    EvidenceReferenceType,
+    ExecutionStatus,
     Experiment,
+    ExperimentOutcomeDisposition,
+    ExperimentOutcomeMethod,
     ExternalExecutionContext,
     Finding,
     Hypothesis,
     Investigation,
     LimitationDetail,
+    PreflightMode,
     RunManifest,
     RunSet,
     Sensitivity,
     TrialOutcome,
+    ValidationStatus,
 )
 from flameox.mcp.resources import register_resources
 from flameox.models import ContractModel
@@ -219,6 +243,11 @@ IDEMPOTENT_EXECUTE = ToolAnnotations(
     idempotent_hint=True,
     open_world_hint=True,
 )
+
+
+class WorkspaceValidationMode(StrEnum):
+    STANDARD = "standard"
+    FULL = "full"
 
 
 class ConfigureWorkloadRecoveryContext(ContractModel):
@@ -392,7 +421,7 @@ class ErrorDetail(ContractModel):
 class SuccessPayload[T: BaseModel](ContractModel):
     schema_version: Literal[1]
     ok: Literal[True]
-    result: T
+    result: SkipValidation[T]
     error: None
 
 
@@ -421,8 +450,8 @@ class CaptureReceipt(ContractModel):
 
     schema_version: int = 1
     run_id: str
-    execution_status: str
-    validation_status: str
+    execution_status: ExecutionStatus
+    validation_status: ValidationStatus
     source_state_id: str | None
     environment_id: str
     artifact_ids: tuple[str, ...]
@@ -447,8 +476,8 @@ class ExperimentReceipt(ContractModel):
     attempted_trials: int
     run_set_ids: tuple[str, ...]
     comparison_id: str | None
-    outcome_disposition: str | None = None
-    outcome_method: str | None = None
+    outcome_disposition: ExperimentOutcomeDisposition | None = None
+    outcome_method: ExperimentOutcomeMethod | None = None
     corpus_commit_id: str
     limitations: tuple[str, ...]
     resource_uri: str
@@ -988,7 +1017,7 @@ def create_server(
                 ),
             ),
         ],
-        operation: Literal["create", "replace"],
+        operation: ConfigurationOperation,
         argv: Annotated[
             tuple[str, ...],
             Field(
@@ -1056,14 +1085,14 @@ def create_server(
             str,
             Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
         ],
-        operation: Literal["create", "replace"],
+        operation: ConfigurationOperation,
         mode: Annotated[
-            Literal["managed", "existing_local"],
+            InferenceServerMode,
             Field(description="managed requires workload; existing_local must use loopback."),
         ],
         model: Annotated[str, Field(min_length=1, max_length=500)],
         ctx: Context[AppContext],
-        provider: Literal["vllm", "sglang"] = "vllm",
+        provider: InferenceServerProvider = InferenceServerProvider.VLLM,
         benchmark_python: Annotated[
             str | None,
             Field(description="Absolute SGLang Python launcher; required only for sglang."),
@@ -1119,11 +1148,11 @@ def create_server(
             str,
             Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
         ],
-        operation: Literal["create", "replace"],
+        operation: ConfigurationOperation,
         server_name: Annotated[str, Field(min_length=1, max_length=100)],
-        provider: Literal["aiperf", "vllm_bench", "sglang_bench"],
+        provider: InferenceScenarioProvider,
         ctx: Context[AppContext],
-        endpoint_type: Literal["chat", "completions"] = "chat",
+        endpoint_type: InferenceEndpointType = InferenceEndpointType.CHAT,
         streaming: StrictBool = True,
         trace_artifact_id: Annotated[
             str | None,
@@ -1269,7 +1298,7 @@ def create_server(
     @server.tool(name="plan_inference_profile", annotations=READ_ONLY)
     async def plan_inference_profile_tool(
         server_name: Annotated[str, Field(min_length=1, max_length=100)],
-        profiler: Literal["torch_profiler", "nsight_systems"],
+        profiler: SupportedInferenceProfiler,
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[InferenceProfilingPlan]]:
         """Build a diagnostic-only profile plan for one managed vLLM server."""
@@ -1294,7 +1323,7 @@ def create_server(
     async def run_inference_profile_tool(
         server_name: Annotated[str, Field(min_length=1, max_length=100)],
         scenario_name: Annotated[str, Field(min_length=1, max_length=100)],
-        profiler: Literal["torch_profiler", "nsight_systems"],
+        profiler: SupportedInferenceProfiler,
         measurement_run_id: Annotated[
             str,
             Field(
@@ -1532,7 +1561,7 @@ def create_server(
     @server.tool(name="list_declared_workflows", annotations=READ_ONLY)
     async def list_declared_workflows_tool(
         ctx: Context[AppContext],
-        kind: Literal["workload", "experiment", "fault_experiment"] = "workload",
+        kind: DeclaredWorkflowKind = DeclaredWorkflowKind.WORKLOAD,
         limit: Annotated[StrictInt, Field(ge=1, le=100)] = 50,
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[DeclaredWorkflowList]]:
@@ -1558,7 +1587,7 @@ def create_server(
 
     @server.tool(name="get_declared_workflow", annotations=READ_ONLY)
     async def get_declared_workflow_tool(
-        kind: Literal["workload", "experiment", "fault_experiment"],
+        kind: DeclaredWorkflowKind,
         name: str,
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[DeclaredWorkflowDetail]]:
@@ -1592,7 +1621,7 @@ def create_server(
             ),
         ],
         ctx: Context[AppContext],
-        preflight_mode: Literal["auto", "passive", "active"] = "auto",
+        preflight_mode: PreflightMode = PreflightMode.AUTO,
         capture_mode: Literal["auto", "managed", "trusted_local"] = "auto",
         external_context: ExternalExecutionContext | None = None,
         compute_sanitizer_options: ComputeSanitizerCaptureOptions | None = None,
@@ -1678,8 +1707,8 @@ def create_server(
             resource_uri = f"flameox://runs/{result.run.run_id}"
             receipt = CaptureReceipt(
                 run_id=result.run.run_id,
-                execution_status=result.run.execution_status.value,
-                validation_status=result.run.validation_status.value,
+                execution_status=result.run.execution_status,
+                validation_status=result.run.validation_status,
                 source_state_id=result.run.source_state_id,
                 environment_id=result.run.environment_id,
                 artifact_ids=tuple(item.artifact_id for item in result.run.artifacts),
@@ -3224,16 +3253,7 @@ def create_server(
 
     @server.tool(name="get_evidence", annotations=READ_ONLY)
     async def get_evidence_tool(
-        ref_type: Literal[
-            "analysis",
-            "artifact",
-            "comparison",
-            "generation",
-            "observation",
-            "run",
-            "run_set",
-            "trial",
-        ],
+        ref_type: EvidenceReferenceType,
         ref_id: Annotated[
             str, Field(min_length=1, description="ID of the reference, paired with ref_type.")
         ],
@@ -3251,14 +3271,21 @@ def create_server(
     @server.tool(name="validate_workspace", annotations=READ_ONLY)
     async def validate_workspace_tool(
         ctx: Context[AppContext],
-        mode: Literal["standard", "full"] = "standard",
+        mode: Literal[
+            WorkspaceValidationMode.STANDARD,
+            WorkspaceValidationMode.FULL,
+        ] = WorkspaceValidationMode.STANDARD,
     ) -> Annotated[CallToolResult, ToolPayload[IntegrityResult]]:
         """Validate manifests and schemas; optionally hash every payload."""
         try:
             result = await run_atomic_thread(
                 lambda: IntegrityService(
                     ctx.request_context.lifespan_context.require_workspace()
-                ).validate(full=mode == "full")
+                ).validate(
+                    IntegrityLevel.FULL
+                    if mode is WorkspaceValidationMode.FULL
+                    else IntegrityLevel.QUICK
+                )
             )
             outcome = "passed" if result.valid else "failed"
             issue_suffix = f" with {len(result.issues)} reported issues" if result.issues else ""
@@ -3476,7 +3503,7 @@ def create_server(
     @server.tool(name="extract_inference_result", annotations=ADDITIVE)
     async def extract_inference_result_tool(
         run_id: Annotated[str, Field(min_length=1, max_length=200)],
-        provider: Literal["aiperf", "vllm_bench", "sglang_bench"],
+        provider: InferenceScenarioProvider,
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[InferenceExtractionResult]]:
         """Extract prompt-free AIPerf requests or vLLM aggregate measurements."""
@@ -3486,11 +3513,11 @@ def create_server(
                     InferenceArtifactExtractor(
                         ctx.request_context.lifespan_context.require_workspace()
                     ).extract_aiperf_result(run_id)
-                    if provider == "aiperf"
+                    if provider is InferenceScenarioProvider.AIPERF
                     else InferenceArtifactExtractor(
                         ctx.request_context.lifespan_context.require_workspace()
                     ).extract_sglang_result(run_id)
-                    if provider == "sglang_bench"
+                    if provider is InferenceScenarioProvider.SGLANG_BENCH
                     else InferenceArtifactExtractor(
                         ctx.request_context.lifespan_context.require_workspace()
                     ).extract_vllm_result(run_id)

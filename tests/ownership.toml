@@ -23,6 +23,7 @@ markers = ["integration", "optional", "requires_memray"]
 owner = "adapters"
 lane = "adapters"
 paths = [
+  "tests/adapters/test_artifact_workers.py",
   "tests/adapters/test_benchmark_samples.py",
   "tests/adapters/test_compute_sanitizer.py",
   "tests/adapters/test_kernel_build.py",
@@ -105,13 +106,6 @@ owner = "artifact-service"
 lane = "application"
 paths = ["tests/application/test_artifact_service.py"]
 markers = ["integration"]
-
-
-[[ownership]]
-owner = "artifact-workers"
-lane = "application"
-paths = ["tests/application/test_artifact_workers.py"]
-markers = ["unit"]
 
 
 [[ownership]]
@@ -334,6 +328,13 @@ markers = ["unit"]
 owner = "numeric-value-projection"
 lane = "storage"
 paths = ["tests/evidence/test_numeric_values.py"]
+markers = ["unit"]
+
+
+[[ownership]]
+owner = "evidence-status"
+lane = "analysis"
+paths = ["tests/evidence/test_evidence_status.py"]
 markers = ["unit"]
 
 

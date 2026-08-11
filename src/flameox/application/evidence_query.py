@@ -5,12 +5,44 @@ from typing import Literal
 from pydantic import Field
 
 from flameox.catalog import Catalog
-from flameox.domain import CursorCodec, DomainError, ErrorCode, digest_model
+from flameox.domain import CursorCodec, DomainError, ErrorCode, EvidenceLevel, digest_model
 from flameox.domain.scalars import NumericValue
-from flameox.evidence import numeric_value_from_columns
-from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
+from flameox.evidence import InferenceRequestItem, numeric_value_from_columns
+from flameox.evidence_status import (
+    EvidenceAvailability,
+    available_availability,
+    empty_availability,
+    unavailable_availability,
+)
 from flameox.models import ContractModel
+from flameox.pagination import CursorPageContract
 from flameox.storage import RunStore, Workspace
+
+_INFERENCE_REQUEST_COLUMNS = (
+    "request_id",
+    "run_id",
+    "artifact_id",
+    "source_request_id",
+    "provider_request_id",
+    "input_tokens",
+    "output_tokens",
+    "scheduled_ns",
+    "observed_started_ns",
+    "ttft_ns",
+    "latency_ns",
+    "tpot_ns",
+    "mean_itl_ns",
+    "success",
+    "cancelled",
+    "error_type",
+    "error_code",
+    "queue_ns",
+    "prefill_ns",
+    "decode_ns",
+    "cache_hit",
+    "prefix_hash_count",
+    "evidence_level",
+)
 
 
 class MeasurementItem(ContractModel):
@@ -32,54 +64,26 @@ class MeasurementItem(ContractModel):
     order_in_block: int | None
     phase: str | None
     dimensions: dict[str, str] = Field(default_factory=dict)
-    evidence_level: str
+    evidence_level: EvidenceLevel
 
 
-class MeasurementQueryResult(ContractModel):
+class MeasurementQueryResult(CursorPageContract):
+    page_items_field = "measurements"
+
     schema_version: Literal[2] = 2
     corpus_commit_id: str
     measurements: tuple[MeasurementItem, ...]
     total: int
-    returned: int
-    truncated: bool
-    next_cursor: str | None
     evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
 
-class InferenceRequestItem(ContractModel):
-    request_id: str
-    run_id: str
-    artifact_id: str
-    source_request_id: str
-    provider_request_id: str | None
-    input_tokens: int
-    output_tokens: int
-    scheduled_ns: int | None
-    observed_started_ns: int | None
-    ttft_ns: int | None
-    latency_ns: int | None
-    tpot_ns: int | None
-    mean_itl_ns: int | None
-    success: bool | None
-    cancelled: bool | None
-    error_type: str | None
-    error_code: str | None
-    queue_ns: int | None
-    prefill_ns: int | None
-    decode_ns: int | None
-    cache_hit: bool | None
-    prefix_hash_count: int | None
-    evidence_level: str
+class InferenceRequestQueryResult(CursorPageContract):
+    page_items_field = "requests"
 
-
-class InferenceRequestQueryResult(ContractModel):
     schema_version: int = 1
     corpus_commit_id: str
     requests: tuple[InferenceRequestItem, ...]
     total: int
-    returned: int
-    truncated: bool
-    next_cursor: str | None
     evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
 
@@ -210,19 +214,14 @@ class EvidenceQueryService:
             corpus_commit_id=head.commit_id,
             measurements=measurements,
             total=int(count_row[0]),
-            returned=len(measurements),
-            truncated=has_more,
             next_cursor=next_cursor,
             evidence=(
-                EvidenceAvailability(
-                    status="unavailable",
-                    reason="measurements_not_published",
-                )
+                unavailable_availability("measurements_not_published")
                 if not measurements and int(published_count_row[0]) == 0
                 else (
                     empty_availability("no_matching_measurements")
                     if not measurements
-                    else EvidenceAvailability(status="available", reason="measurements_present")
+                    else available_availability("measurements_present")
                 )
             ),
         )
@@ -266,11 +265,9 @@ class EvidenceQueryService:
             ).fetchone()
             assert count_row is not None
             rows = snapshot.execute(
-                "SELECT request_id, run_id, artifact_id, source_request_id, "
-                "provider_request_id, input_tokens, output_tokens, scheduled_ns, "
-                "observed_started_ns, ttft_ns, latency_ns, tpot_ns, mean_itl_ns, success, "
-                "cancelled, error_type, error_code, queue_ns, prefill_ns, decode_ns, cache_hit, "
-                "prefix_hash_count, evidence_level FROM inference_requests WHERE "
+                "SELECT "
+                + ", ".join(_INFERENCE_REQUEST_COLUMNS)
+                + " FROM inference_requests WHERE "
                 + where
                 + " ORDER BY request_id LIMIT ?",
                 (*parameters, bounded + 1),
@@ -280,7 +277,7 @@ class EvidenceQueryService:
             InferenceRequestItem.model_validate(
                 dict(
                     zip(
-                        InferenceRequestItem.model_fields,
+                        _INFERENCE_REQUEST_COLUMNS,
                         row,
                         strict=True,
                     )
@@ -302,15 +299,10 @@ class EvidenceQueryService:
             corpus_commit_id=head.commit_id,
             requests=requests,
             total=int(count_row[0]),
-            returned=len(requests),
-            truncated=has_more,
             next_cursor=next_cursor,
             evidence=(
-                EvidenceAvailability(status="available", reason="inference_requests_present")
+                available_availability("inference_requests_present")
                 if int(count_row[0]) > 0
-                else EvidenceAvailability(
-                    status="unavailable",
-                    reason="inference_requests_not_published",
-                )
+                else unavailable_availability("inference_requests_not_published")
             ),
         )

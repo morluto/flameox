@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
 
 import pytest
+from pydantic import TypeAdapter, ValidationError
 
 from flameox.application import (
+    ConfigurationOperation,
     ConfigureWorkloadRequest,
+    DeclaredWorkflowKind,
+    InferenceConfigurationResult,
     ProjectConfig,
     WorkloadConfig,
+    WorkloadConfigurationResult,
+    WorkloadConfigurationStatus,
     WorkloadService,
     parse_experiment_config,
 )
@@ -19,7 +24,7 @@ from flameox.storage import Workspace
 def _request(
     name: str,
     *,
-    operation: Literal["create", "replace"] = "create",
+    operation: ConfigurationOperation = ConfigurationOperation.CREATE,
     argv: tuple[str, ...] = ("python", "-c", "print('ok')"),
     parameters: dict[str, tuple[str | int | float | bool, ...]] | None = None,
     expected_configuration_id: str | None = None,
@@ -30,6 +35,61 @@ def _request(
         config=WorkloadConfig(argv=argv, parameters=parameters or {}),
         expected_configuration_id=expected_configuration_id,
     )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "status": "missing",
+            "configuration_id": "sha256:" + "1" * 64,
+            "diagnostics": ["missing"],
+            "next_tool": "configure_workload",
+        },
+        {
+            "status": "invalid",
+            "diagnostics": [],
+            "next_tool": "configure_workload",
+        },
+        {
+            "status": "valid",
+            "configuration_id": "sha256:" + "1" * 64,
+            "workload_names": [],
+            "diagnostics": [],
+            "next_tool": "list_declared_workflows",
+        },
+    ],
+)
+def test_workload_configuration_status_rejects_contradictory_states(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        TypeAdapter(WorkloadConfigurationStatus).validate_python(payload)
+
+
+def test_configuration_receipts_reject_changed_paths_that_contradict_the_action() -> None:
+    digest = "sha256:" + "1" * 64
+    with pytest.raises(ValidationError):
+        WorkloadConfigurationResult.model_validate(
+            {
+                "action": "unchanged",
+                "name": "probe",
+                "configuration_id": digest,
+                "workload_definition_id": digest,
+                "changed_paths": ["flameox.toml"],
+            }
+        )
+    with pytest.raises(ValidationError):
+        InferenceConfigurationResult.model_validate(
+            {
+                "kind": "server",
+                "action": "updated",
+                "name": "local",
+                "configuration_id": digest,
+                "definition_id": digest,
+                "changed_paths": [],
+            }
+        )
 
 
 def test_configure_workload_is_idempotent_and_records_configuration_source(tmp_path: Path) -> None:
@@ -49,7 +109,10 @@ def test_configure_workload_is_idempotent_and_records_configuration_source(tmp_p
     assert second.workload_definition_id == first.workload_definition_id
     assert second.changed_paths == ()
     assert (tmp_path / "flameox.toml").read_text() == config_text
-    assert service.list_declared(kind="workload", limit=10).workflows[0].name == "probe"
+    assert (
+        service.list_declared(kind=DeclaredWorkflowKind.WORKLOAD, limit=10).workflows[0].name
+        == "probe"
+    )
 
 
 def test_literal_braces_round_trip_while_declared_placeholders_render(
@@ -240,7 +303,7 @@ mode = ["baseline", "candidate"]
         service.configure(
             _request(
                 "alpha",
-                operation="replace",
+                operation=ConfigurationOperation.REPLACE,
                 argv=("python", "-c", "print('new alpha')"),
                 expected_configuration_id="sha256:" + "0" * 64,
             )
@@ -252,7 +315,7 @@ mode = ["baseline", "candidate"]
     updated = service.configure(
         _request(
             "alpha",
-            operation="replace",
+            operation=ConfigurationOperation.REPLACE,
             argv=("python", "-c", "print('new alpha')"),
             expected_configuration_id=current.configuration_id,
         )

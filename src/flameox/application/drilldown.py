@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from enum import StrEnum
 
 from pydantic import Field
 
@@ -13,7 +13,13 @@ from flameox.evidence_status import (
     empty_availability,
 )
 from flameox.models import ContractModel
+from flameox.pagination import CursorPageContract
 from flameox.storage import Workspace
+
+
+class CallDirection(StrEnum):
+    CALLERS = "callers"
+    CALLEES = "callees"
 
 
 class FrameDetail(ContractModel):
@@ -26,18 +32,17 @@ class FrameDetail(ContractModel):
     duration_ns: int
 
 
-class CallEdgeResult(ContractModel):
+class CallEdgeResult(CursorPageContract):
+    page_items_field = "frames"
+
     schema_version: int = 1
     corpus_commit_id: str
     input_id: str
     frame_id: str
-    direction: Literal["callers", "callees"]
+    direction: CallDirection
     frames: tuple[FrameDetail, ...]
     total: int
-    returned: int
-    truncated: bool
     coverage: float
-    next_cursor: str | None
     limitations: tuple[str, ...] = (
         "Edges represent syntactic nesting in the captured trace, not causal dependence.",
     )
@@ -52,17 +57,16 @@ class StackExample(ContractModel):
     frames: tuple[FrameDetail, ...]
 
 
-class StackExamplesResult(ContractModel):
+class StackExamplesResult(CursorPageContract):
+    page_items_field = "examples"
+
     schema_version: int = 1
     corpus_commit_id: str
     input_id: str
     frame_id: str
     examples: tuple[StackExample, ...]
     total: int
-    returned: int
-    truncated: bool
     coverage: float
-    next_cursor: str | None
     limitations: tuple[str, ...] = (
         "Examples are representative leaf stacks retained during extraction.",
     )
@@ -84,7 +88,7 @@ class DrilldownService:
         return self._edges(
             input_id,
             frame_id,
-            direction="callers",
+            direction=CallDirection.CALLERS,
             limit=limit,
             cursor=cursor,
         )
@@ -100,7 +104,7 @@ class DrilldownService:
         return self._edges(
             input_id,
             frame_id,
-            direction="callees",
+            direction=CallDirection.CALLEES,
             limit=limit,
             cursor=cursor,
         )
@@ -199,13 +203,11 @@ class DrilldownService:
             frame_id=frame_id,
             examples=examples,
             total=total,
-            returned=len(examples),
-            truncated=has_more,
             coverage=(len(examples) / total if total else 0.0),
             evidence=(
                 empty_availability("no_matching_stacks")
                 if not examples
-                else EvidenceAvailability(status="available", reason="stacks_present")
+                else available_availability("stacks_present")
             ),
             next_cursor=next_cursor,
         )
@@ -215,14 +217,16 @@ class DrilldownService:
         input_id: str,
         frame_id: str,
         *,
-        direction: Literal["callers", "callees"],
+        direction: CallDirection,
         limit: int,
         cursor: str | None,
     ) -> CallEdgeResult:
         limit = self._limit(limit)
         head = self.workspace.corpus.read_head()
-        selected_column = "parent_frame_id" if direction == "callers" else "child_frame_id"
-        match_column = "child_frame_id" if direction == "callers" else "parent_frame_id"
+        selected_column = (
+            "parent_frame_id" if direction is CallDirection.CALLERS else "child_frame_id"
+        )
+        match_column = "child_frame_id" if direction is CallDirection.CALLERS else "parent_frame_id"
         scope_digest = digest_model(
             {
                 "input_id": input_id,
@@ -298,7 +302,7 @@ class DrilldownService:
                 {str(row[0]) for row in selected},
             )
         frames = tuple(
-            metadata[str(row[0])].model_copy(
+            metadata[str(row[0])].validated_copy(
                 update={
                     "sample_count": int(row[1]),
                     "duration_ns": int(row[2]),
@@ -324,13 +328,11 @@ class DrilldownService:
             direction=direction,
             frames=frames,
             total=total,
-            returned=len(frames),
-            truncated=has_more,
             coverage=(len(frames) / total if total else 0.0),
             evidence=(
                 empty_availability("no_matching_edges")
                 if not frames
-                else EvidenceAvailability(status="available", reason="edges_present")
+                else available_availability("edges_present")
             ),
             next_cursor=next_cursor,
         )

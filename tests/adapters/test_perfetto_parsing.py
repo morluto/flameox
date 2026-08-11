@@ -18,7 +18,7 @@ from flameox.application import (
     NativeViewerService,
 )
 from flameox.catalog import Catalog
-from flameox.domain import ArtifactKind, DomainError, ErrorCode
+from flameox.domain import ArtifactKind, DomainError, ErrorCode, EvidenceReferenceType
 from flameox.storage import Workspace
 from tests.support.providers import require_trace_processor
 
@@ -67,9 +67,9 @@ async def test_perfetto_extractor_uses_local_binary_and_curated_query(
         )
     )
     workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "analysis": workspace.config.analysis.model_copy(
+            "analysis": workspace.config.analysis.validated_copy(
                 update={"trace_processor_path": str(binary)}
             )
         }
@@ -121,11 +121,11 @@ async def test_perfetto_extractor_uses_local_binary_and_curated_query(
         cursor=first_callees.next_cursor,
     )
     provenance = EvidenceLookupService(workspace).get(
-        "analysis",
+        EvidenceReferenceType.ANALYSIS,
         materialized.analysis.analysis_id,
     )
     run_evidence = EvidenceLookupService(workspace).get(
-        "run",
+        EvidenceReferenceType.RUN,
         imported.run.run_id,
     )
     artifact = ArtifactService(workspace).get(imported.artifact_id)
@@ -175,9 +175,9 @@ async def test_perfetto_worker_maps_malformed_trace_to_domain_error(
     trace = tmp_path / "malformed.pftrace"
     trace.write_bytes(b"not a trace")
     workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "analysis": workspace.config.analysis.model_copy(
+            "analysis": workspace.config.analysis.validated_copy(
                 update={"trace_processor_path": str(binary)}
             )
         }
@@ -247,9 +247,9 @@ async def test_perfetto_preserves_recursive_multi_process_and_thread_dimensions(
         )
     )
     workspace = Workspace.initialize(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "analysis": workspace.config.analysis.model_copy(
+            "analysis": workspace.config.analysis.validated_copy(
                 update={"trace_processor_path": str(binary)}
             )
         }

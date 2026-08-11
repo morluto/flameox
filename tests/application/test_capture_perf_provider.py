@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from flameox.application import CapabilityService, CaptureService, ExecutionPolicy
-from flameox.domain import DomainError, ErrorCode, ExecutionStatus
+from flameox.domain import DomainError, ErrorCode, ExecutionStatus, PreflightMode
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
 
@@ -38,7 +38,7 @@ timeout_seconds = 30
         plan = await service.plan(
             workload_name="busy",
             adapter="perf",
-            preflight_mode="active",
+            preflight_mode=PreflightMode.ACTIVE,
             execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
         )
     except DomainError as error:

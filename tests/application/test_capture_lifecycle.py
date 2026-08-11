@@ -21,6 +21,7 @@ from flameox.domain import (
     ErrorCode,
     ExecutionStatus,
     ExternalExecutionContext,
+    Sensitivity,
     ValidationStatus,
 )
 from flameox.storage import ArtifactStore, RunStore, Workspace
@@ -282,7 +283,7 @@ timeout_seconds = 30
         lease_id="lease-cancelled",
         worker_id="worker-cancelled",
         orchestration_run_id="orchestration-cancelled",
-        sensitivity="sensitive",
+        sensitivity=Sensitivity.SENSITIVE,
     )
     plan = await service.plan(
         workload_name="wait",
@@ -422,10 +423,12 @@ async def test_artifact_registration_failure_is_terminal_and_cleans_staging(
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     write_workload(tmp_path)
-    config = workspace.config.model_copy(
+    config = workspace.config.validated_copy(
         update={
-            "capture": workspace.config.capture.model_copy(update={"max_artifact_bytes": 1}),
-            "execution": workspace.config.execution.model_copy(update={"containment": "disabled"}),
+            "capture": workspace.config.capture.validated_copy(update={"max_artifact_bytes": 1}),
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            ),
         }
     )
     workspace.paths.config.write_text(config.to_toml())

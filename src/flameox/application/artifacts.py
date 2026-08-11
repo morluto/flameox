@@ -3,8 +3,16 @@ from __future__ import annotations
 from datetime import datetime
 
 from flameox.catalog import Catalog
-from flameox.domain import ArtifactContent, CursorCodec, DomainError, ErrorCode, Sensitivity
+from flameox.domain import (
+    ArtifactContent,
+    ArtifactKind,
+    CursorCodec,
+    DomainError,
+    ErrorCode,
+    Sensitivity,
+)
 from flameox.models import ContractModel
+from flameox.pagination import CursorPageContract
 from flameox.storage import ArtifactStore, Workspace
 
 
@@ -12,7 +20,7 @@ class ArtifactRegistrationSummary(ContractModel):
     registration_id: str
     run_id: str
     display_name: str
-    kind: str
+    kind: ArtifactKind
     media_type: str
     sensitivity: Sensitivity
     role: str
@@ -35,17 +43,16 @@ class ArtifactListItem(ContractModel):
     byte_length: int
     effective_sensitivity: Sensitivity
     registration_count: int
-    kinds: tuple[str, ...]
+    kinds: tuple[ArtifactKind, ...]
 
 
-class ArtifactListResult(ContractModel):
+class ArtifactListResult(CursorPageContract):
+    page_items_field = "artifacts"
+
     schema_version: int = 1
     corpus_commit_id: str
     artifacts: tuple[ArtifactListItem, ...]
     total: int
-    returned: int
-    truncated: bool
-    next_cursor: str | None
 
 
 class ArtifactService:
@@ -149,8 +156,6 @@ class ArtifactService:
             corpus_commit_id=commit_id,
             artifacts=artifacts,
             total=total,
-            returned=len(artifacts),
-            truncated=has_more,
             next_cursor=(
                 CursorCodec.encode(
                     namespace="artifacts",

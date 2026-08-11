@@ -10,11 +10,19 @@ from flameox.analysis.recipe_models import (
     RuntimeResourceObservation,
     RuntimeResourceTotals,
     WritableRootObservation,
+    parse_writable_root_observation,
 )
 from flameox.catalog import Snapshot
+from flameox.domain import ProcessCancellationCause
 from flameox.evidence import numeric_value_from_columns
 from flameox.evidence_scope import EvidenceScope, resolve_evidence_scope
-from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
+from flameox.evidence_status import (
+    available_availability,
+    empty_availability,
+    partial_availability,
+    recoverable_unavailable_evidence,
+    unavailable_availability,
+)
 
 
 class HotspotRecipes(RecipeContext):
@@ -45,19 +53,12 @@ class HotspotRecipes(RecipeContext):
                     input_id=input_id,
                     hotspots=(),
                     total=0,
-                    returned=0,
-                    truncated=False,
                     coverage={"frame_measurements": 0, "completely_symbolized": 0},
                     limitations=(
                         "No registered profile artifact is available for this input; "
                         "profile parsing is extractor-owned.",
                     ),
-                    evidence_status="unavailable",
-                    unavailable_reason="no_profile_artifact",
-                    evidence=EvidenceAvailability(
-                        status="unavailable",
-                        reason="no_profile_artifact",
-                    ),
+                    evidence=unavailable_availability("no_profile_artifact"),
                 )
             count_row = snapshot.execute(
                 "SELECT count(*) FROM frame_measurements fm WHERE " + where,
@@ -69,7 +70,7 @@ class HotspotRecipes(RecipeContext):
                 "SELECT fm.frame_id, f.function, f.file, f.line, fm.metric, "
                 "fm.self_value, fm.inclusive_value, fm.unit, fm.sample_count "
                 "FROM frame_measurements fm LEFT JOIN frames f "
-                "ON f.frame_id = fm.frame_id WHERE "
+                "ON f.frame_id = fm.frame_id AND f.artifact_id = fm.artifact_id WHERE "
                 + where
                 + " ORDER BY coalesce(fm.inclusive_value, fm.self_value, 0) DESC, "
                 "fm.frame_id LIMIT ?",
@@ -77,7 +78,9 @@ class HotspotRecipes(RecipeContext):
             ).fetchall()
             symbolized_row = snapshot.execute(
                 "SELECT count(*) FROM frame_measurements fm JOIN frames f "
-                "ON f.frame_id = fm.frame_id WHERE " + where + " AND f.symbolization = 'complete'",
+                "ON f.frame_id = fm.frame_id AND f.artifact_id = fm.artifact_id WHERE "
+                + where
+                + " AND f.symbolization = 'complete'",
                 parameters,
             ).fetchone()
             assert symbolized_row is not None
@@ -100,8 +103,6 @@ class HotspotRecipes(RecipeContext):
             input_id=input_id,
             hotspots=hotspots,
             total=total,
-            returned=len(hotspots),
-            truncated=total > len(hotspots),
             coverage={
                 "frame_measurements": total,
                 "completely_symbolized": int(symbolized_row[0]),
@@ -110,7 +111,6 @@ class HotspotRecipes(RecipeContext):
                 "Complete stacks remain in native artifacts; this result is a bounded "
                 "frame aggregate.",
             ),
-            evidence_status="available" if hotspots else "empty",
             evidence=(
                 empty_availability("no_matching_hotspots")
                 if not hotspots
@@ -190,15 +190,12 @@ class HotspotRecipes(RecipeContext):
                 limit=bounded,
                 corpus_commit_id=corpus_commit_id,
             )
-            resource_rows, resource_total, resource_truncated = self._runtime_resources(
+            resource_rows, resource_total = self._runtime_resources(
                 snapshot,
                 scope,
                 bounded,
             )
             writable_rows = self._writable_root_observations(snapshot, scope, bounded)
-            unavailable_metrics = tuple(
-                sorted({metric for item in resource_rows for metric in item.unavailable_metrics})
-            )
             policy_termination = next(
                 (
                     item.policy_termination
@@ -242,49 +239,26 @@ class HotspotRecipes(RecipeContext):
             or policy_termination is not None
             or (resource_total is not None and resource_total.run_count > 0)
         )
-        evidence = (
-            EvidenceAvailability(
-                status="unavailable",
-                reason=(
-                    "memory_profile_not_extracted"
-                    if has_memory_profile
-                    else "no_memory_profile_artifact"
-                ),
-                next_tool="extract_memray" if has_memory_profile and memory_run_id else None,
-                next_arguments=(
-                    {"run_id": memory_run_id} if has_memory_profile and memory_run_id else None
-                ),
+        if rows or memory_hotspots or phase_growth:
+            evidence = available_availability()
+        elif has_runtime_evidence:
+            evidence = partial_availability(
+                "memory_profile_not_extracted_runtime_evidence_present"
+                if has_memory_profile
+                else "no_memory_profile_artifact_runtime_evidence_present"
             )
-            if (
-                not rows
-                and not memory_hotspots
-                and not phase_growth
-                and has_memory_profile
-                and not has_runtime_evidence
+        elif has_memory_profile and memory_run_id is not None:
+            evidence = recoverable_unavailable_evidence(
+                "memory_profile_not_extracted",
+                next_tool="extract_memray",
+                next_arguments={"run_id": memory_run_id},
             )
-            else (
-                EvidenceAvailability(
-                    status="partial" if has_runtime_evidence else "unavailable",
-                    reason=(
-                        (
-                            "memory_profile_not_extracted_runtime_evidence_present"
-                            if has_memory_profile
-                            else "no_memory_profile_artifact_runtime_evidence_present"
-                        )
-                        if has_runtime_evidence
-                        else "no_memory_profile_artifact"
-                    ),
-                )
-                if not rows and not memory_hotspots and not phase_growth
-                else (
-                    available_availability()
-                    if memory_hotspots or phase_growth
-                    else empty_availability("no_memory_measurements")
-                )
-                if not rows
-                else available_availability()
+        else:
+            evidence = unavailable_availability(
+                "memory_profile_not_extracted"
+                if has_memory_profile
+                else "no_memory_profile_artifact"
             )
-        )
         return MemoryAnalysisResult(
             corpus_commit_id=snapshot.commit.commit_id,
             input_id=input_id,
@@ -307,11 +281,7 @@ class HotspotRecipes(RecipeContext):
             limitations=tuple(limitations),
             runtime_resources=resource_rows,
             runtime_resource_totals=resource_total,
-            runtime_resources_truncated=resource_truncated,
-            truncated=resource_truncated,
             writable_root_observations=writable_rows,
-            policy_termination=policy_termination,
-            unavailable_metrics=unavailable_metrics,
             evidence=evidence,
         )
 
@@ -336,7 +306,7 @@ class HotspotRecipes(RecipeContext):
         snapshot: Snapshot,
         scope: EvidenceScope,
         limit: int,
-    ) -> tuple[tuple[RuntimeResourceObservation, ...], RuntimeResourceTotals, bool]:
+    ) -> tuple[tuple[RuntimeResourceObservation, ...], RuntimeResourceTotals]:
         where, parameters = self._run_scope_predicate(scope, "rr.run_id")
         rows = snapshot.execute(
             "SELECT run_id, sampling_interval_ms, minimum_free_bytes, staging_growth_bytes, "
@@ -353,28 +323,26 @@ class HotspotRecipes(RecipeContext):
         ).fetchone()
         assert total_row is not None
         observations = tuple(
-            RuntimeResourceObservation(
-                run_id=str(row[0]),
-                sampling_interval_ms=int(row[1]),
-                minimum_free_bytes=int(row[2]) if row[2] is not None else None,
-                staging_growth_bytes=int(row[3]) if row[3] is not None else None,
-                peak_rss_bytes=int(row[4]) if row[4] is not None else None,
-                policy_termination=str(row[5]) if row[5] is not None else None,
-                unavailable_metrics=tuple(str(item) for item in (row[6] or ())),
+            RuntimeResourceObservation.model_validate(
+                {
+                    "run_id": str(row[0]),
+                    "sampling_interval_ms": int(row[1]),
+                    "minimum_free_bytes": int(row[2]) if row[2] is not None else None,
+                    "staging_growth_bytes": int(row[3]) if row[3] is not None else None,
+                    "peak_rss_bytes": int(row[4]) if row[4] is not None else None,
+                    "policy_termination": (
+                        ProcessCancellationCause(str(row[5])) if row[5] is not None else None
+                    ),
+                    "unavailable_metrics": tuple(str(item) for item in (row[6] or ())),
+                }
             )
             for row in rows[:limit]
         )
-        return (
-            observations,
-            RuntimeResourceTotals(
-                run_count=int(total_row[0]),
-                minimum_free_bytes=(int(total_row[1]) if total_row[1] is not None else None),
-                total_staging_growth_bytes=(
-                    int(total_row[2]) if total_row[2] is not None else None
-                ),
-                maximum_peak_rss_bytes=(int(total_row[3]) if total_row[3] is not None else None),
-            ),
-            len(rows) > limit,
+        return observations, RuntimeResourceTotals(
+            run_count=int(total_row[0]),
+            minimum_free_bytes=(int(total_row[1]) if total_row[1] is not None else None),
+            total_staging_growth_bytes=(int(total_row[2]) if total_row[2] is not None else None),
+            maximum_peak_rss_bytes=(int(total_row[3]) if total_row[3] is not None else None),
         )
 
     def _writable_root_observations(
@@ -392,13 +360,15 @@ class HotspotRecipes(RecipeContext):
             (*parameters, limit),
         ).fetchall()
         return tuple(
-            WritableRootObservation(
-                run_id=str(row[0]),
-                writable_root_identity=str(row[1]),
-                target_path=str(row[2]),
-                growth_bytes=int(row[3]) if row[3] is not None else None,
-                available=bool(row[4]),
-                unavailable_reason=str(row[5]) if row[5] is not None else None,
+            parse_writable_root_observation(
+                {
+                    "run_id": str(row[0]),
+                    "writable_root_identity": str(row[1]),
+                    "target_path": str(row[2]),
+                    "growth_bytes": int(row[3]) if row[3] is not None else None,
+                    "available": bool(row[4]),
+                    "unavailable_reason": str(row[5]) if row[5] is not None else None,
+                }
             )
             for row in rows
         )

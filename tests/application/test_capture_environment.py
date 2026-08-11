@@ -18,6 +18,7 @@ from flameox.domain import (
     ErrorCode,
     ExecutionStatus,
     ExternalExecutionContext,
+    Sensitivity,
 )
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
@@ -42,7 +43,7 @@ argv = ["python", "-c", "raise SystemExit(3)"]
         lease_id="lease-123",
         worker_id="worker-7",
         orchestration_run_id="validation-9",
-        sensitivity="sensitive",
+        sensitivity=Sensitivity.SENSITIVE,
     )
     service = CaptureService(workspace)
     plan = await service.plan(
@@ -81,6 +82,10 @@ argv = ["python", "-c", "raise SystemExit(3)"]
             lease_id="contains secret whitespace",
             worker_id="worker",
             orchestration_run_id="run",
+        )
+    with pytest.raises(ValueError):
+        ExternalExecutionContext.model_validate(
+            {**context.model_dump(mode="json"), "sensitivity": Sensitivity.NORMAL}
         )
 
 

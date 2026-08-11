@@ -8,8 +8,13 @@ from typing import Any
 import pytest
 
 from flameox.application import CapabilityService
-from flameox.domain import CapabilityStatus, ProcessResult
-from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
+from flameox.domain import CapabilityStatus, ProcessResult, process_termination_from_returncode
+from flameox.execution import (
+    ExecutionOutcome,
+    ExecutionRequest,
+    ProcessContainment,
+    SubprocessBroker,
+)
 from flameox.storage import Workspace
 
 
@@ -35,11 +40,14 @@ class _NcuProbeBroker(SubprocessBroker):
             stderr = self.probe_stderr
             exit_code = 1
         return ExecutionOutcome(
-            process=ProcessResult(exit_code=exit_code, cleanup_complete=True),
+            process=ProcessResult(
+                termination=process_termination_from_returncode(exit_code),
+                cleanup_complete=True,
+            ),
             stdout=stdout,
             stderr=stderr,
             resolved_executable=Path(request.argv[0]),
-            containment="process_group",
+            containment=ProcessContainment.PROCESS_GROUP,
         )
 
 

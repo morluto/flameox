@@ -18,7 +18,12 @@ from mcp.client.stdio import stdio_client
 from packaging.version import InvalidVersion, Version
 
 from flameox.atomic import atomic_write_json, atomic_write_text
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import (
+    CapabilityExtra,
+    DomainError,
+    ErrorCode,
+    parse_managed_runtime_extras,
+)
 from flameox.execution import (
     INSTALLER_ENVIRONMENT_ALLOWLIST,
     ExecutionOutcome,
@@ -149,7 +154,7 @@ class ManagedRuntime:
         )
         return RuntimeInstallation(version, executable, True)
 
-    def _managed_extras(self) -> tuple[str, ...]:
+    def _managed_extras(self) -> tuple[CapabilityExtra, ...]:
         """Carry agent-prepared providers into the next versioned runtime."""
         path = self.root / "capabilities.json"
         try:
@@ -158,13 +163,7 @@ class ManagedRuntime:
             return ()
         if not isinstance(payload, dict) or payload.get("schema_version") != 1:
             return ()
-        extras = payload.get("extras")
-        if not isinstance(extras, list):
-            return ()
-        allowed = {"cpu", "execution", "memory", "test", "trace", "torch"}
-        return tuple(
-            sorted(value for value in extras if isinstance(value, str) and value in allowed)
-        )
+        return parse_managed_runtime_extras(payload.get("extras"))
 
     async def verify(self, executable: Path, version: str) -> None:
         try:
@@ -327,9 +326,9 @@ def install_trace_processor(
             _check_staging_cancelled(cancel_event)
             os.replace(temporary, target)
             config = workspace.config
-            updated = config.model_copy(
+            updated = config.validated_copy(
                 update={
-                    "analysis": config.analysis.model_copy(
+                    "analysis": config.analysis.validated_copy(
                         update={"trace_processor_path": str(target)}
                     )
                 }

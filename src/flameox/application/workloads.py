@@ -5,6 +5,7 @@ import re
 import shutil
 import tomllib
 from collections.abc import Mapping
+from enum import StrEnum
 from ipaddress import ip_address
 from pathlib import Path, PurePath
 from string import Formatter
@@ -13,11 +14,13 @@ from urllib.parse import urlsplit
 
 import tomlkit
 from pydantic import (
+    ConfigDict,
     Discriminator,
     Field,
     JsonValue,
     Tag,
     TypeAdapter,
+    computed_field,
     field_validator,
     model_validator,
 )
@@ -27,22 +30,34 @@ from tomlkit.items import Table
 from flameox.adapters.builtins import BUILTIN_ADAPTERS
 from flameox.adapters.registry import AdapterRegistry
 from flameox.application.capabilities import CapabilityService
-from flameox.application.inference_providers import _loopback_http_url
+from flameox.application.inference_providers import (
+    InferenceEndpointType,
+    InferenceScenarioProvider,
+    InferenceServerMode,
+    InferenceServerProvider,
+    _loopback_http_url,
+)
 from flameox.atomic import atomic_write_text
 from flameox.domain import (
+    CapabilityPermissionStatus,
     CapabilityReport,
     CapabilityStatus,
     CommandSpec,
     CursorCodec,
     DomainError,
     ErrorCode,
+    ExperimentOutcomeGoal,
+    MetricPolarity,
     OracleStrength,
+    ProbeKind,
+    RequirementKind,
     WorkloadDefinition,
     WorkloadInstance,
     digest_model,
 )
 from flameox.domain.models import Digest
 from flameox.models import ContractModel
+from flameox.pagination import CursorPageContract
 from flameox.storage import Workspace
 
 Scalar = str | int | float | bool
@@ -54,6 +69,36 @@ RUNTIME_RESOURCE_METRICS = frozenset(
         "runtime_resource.staging_growth_bytes",
     }
 )
+
+
+class ConfigurationOperation(StrEnum):
+    CREATE = "create"
+    REPLACE = "replace"
+
+
+class ConfigurationAction(StrEnum):
+    CREATED = "created"
+    UPDATED = "updated"
+    UNCHANGED = "unchanged"
+
+
+class DeclaredWorkflowKind(StrEnum):
+    WORKLOAD = "workload"
+    EXPERIMENT = "experiment"
+    FAULT_EXPERIMENT = "fault_experiment"
+
+
+class InferenceConfigurationKind(StrEnum):
+    SERVER = "server"
+    SCENARIO = "scenario"
+
+
+class AdapterPlanningDisposition(StrEnum):
+    READY = "ready"
+    ACTIVE_PROBE_REQUIRED = "active_probe_required"
+    UNAVAILABLE = "unavailable"
+    UNSUPPORTED = "unsupported"
+    DEGRADED = "degraded"
 
 
 class WorkloadOracleConfig(ContractModel):
@@ -148,7 +193,7 @@ class _CommonExperimentConfig(ContractModel):
     blocks: Annotated[int, Field(gt=0, le=1_000)] = 1
     max_trials: Annotated[int, Field(gt=0, le=100_000)] = 10_000
     primary_metric: str = "categorical_outcome"
-    polarity: Literal["lower_is_better", "higher_is_better", "neutral"] = "neutral"
+    polarity: MetricPolarity = MetricPolarity.NEUTRAL
     estimand: str = "median_paired_log_ratio"
     practical_threshold: Annotated[float, Field(ge=0)] = 0
     confidence_level: Annotated[float, Field(gt=0, lt=1)] = 0.95
@@ -245,7 +290,7 @@ class _PerformanceExperimentConfig(_CommonExperimentConfig):
 
 class _OutcomeExperimentConfig(_CommonExperimentConfig):
     analysis: Literal["outcome"]
-    outcome_goal: Literal["equivalence", "absence_of_failure", "bounded_rate"]
+    outcome_goal: ExperimentOutcomeGoal
     minimum_attempts: Annotated[int, Field(gt=0, le=1_000)] | None = None
     maximum_attempts: Annotated[int, Field(gt=0, le=1_000)] | None = None
 
@@ -358,60 +403,51 @@ def parse_experiment_config(value: object) -> ExperimentConfig:
     return _EXPERIMENT_CONFIG_ADAPTER.validate_python(value)
 
 
-class LatencyFault(ContractModel):
+class _ToxicFault(ContractModel):
+    stream: Literal["upstream", "downstream"] = "downstream"
+    toxicity: float = Field(default=1.0, ge=0, le=1)
+
+
+class LatencyFault(_ToxicFault):
     type: Literal["latency"]
     latency_ms: int = Field(gt=0, le=3_600_000)
     jitter_ms: int = Field(default=0, ge=0, le=3_600_000)
-    stream: Literal["upstream", "downstream"] = "downstream"
-    toxicity: float = Field(default=1.0, ge=0, le=1)
 
 
-class TimeoutFault(ContractModel):
+class TimeoutFault(_ToxicFault):
     type: Literal["timeout"]
     timeout_ms: int = Field(gt=0, le=3_600_000)
-    stream: Literal["upstream", "downstream"] = "downstream"
-    toxicity: float = Field(default=1.0, ge=0, le=1)
 
 
-class ResetPeerFault(ContractModel):
+class ResetPeerFault(_ToxicFault):
     type: Literal["reset_peer"]
-    stream: Literal["upstream", "downstream"] = "downstream"
-    toxicity: float = Field(default=1.0, ge=0, le=1)
 
 
-class BandwidthFault(ContractModel):
+class BandwidthFault(_ToxicFault):
     type: Literal["bandwidth"]
     bandwidth_limit: int = Field(gt=0, le=10_000_000_000)
-    stream: Literal["upstream", "downstream"] = "downstream"
-    toxicity: float = Field(default=1.0, ge=0, le=1)
 
 
-class SlicerFault(ContractModel):
+class SlicerFault(_ToxicFault):
     type: Literal["slicer"]
     average_size: int = Field(gt=0, le=10_000_000)
     size_variation: int = Field(default=0, ge=0, le=10_000_000)
     delay_ms: int = Field(default=0, ge=0, le=3_600_000)
-    stream: Literal["upstream", "downstream"] = "downstream"
-    toxicity: float = Field(default=1.0, ge=0, le=1)
 
 
-class LimitDataFault(ContractModel):
+class LimitDataFault(_ToxicFault):
     type: Literal["limit_data"]
     bytes: int = Field(gt=0, le=10_000_000_000)
-    stream: Literal["upstream", "downstream"] = "downstream"
-    toxicity: float = Field(default=1.0, ge=0, le=1)
 
 
-class SlowCloseFault(ContractModel):
+class SlowCloseFault(_ToxicFault):
     type: Literal["slow_close"]
     delay_ms: int = Field(gt=0, le=3_600_000)
-    stream: Literal["upstream", "downstream"] = "downstream"
-    toxicity: float = Field(default=1.0, ge=0, le=1)
 
 
 class ProxyFault(ContractModel):
     type: Literal["proxy"]
-    enabled: bool = True
+    enabled: Literal[False]
 
 
 FaultScenario = Annotated[
@@ -437,7 +473,7 @@ class FaultExperimentConfig(ContractModel):
     blocks: int = Field(default=1, gt=0, le=1_000)
     repetitions: int = Field(default=1, gt=0, le=1_000)
     primary_metric: str = "categorical_outcome"
-    polarity: Literal["lower_is_better", "higher_is_better", "neutral"] = "neutral"
+    polarity: MetricPolarity = MetricPolarity.NEUTRAL
     estimand: str = "median_paired_log_ratio"
     practical_threshold: float = Field(default=0, ge=0)
     confidence_level: float = Field(default=0.95, gt=0, lt=1)
@@ -463,15 +499,15 @@ class FaultExperimentConfig(ContractModel):
         if self.blocks * self.repetitions * (len(self.scenarios) + 1) > 100_000:
             raise ValueError("fault experiment schedule exceeds the 100000-trial bound")
         for scenario in self.scenarios.values():
-            if isinstance(scenario, ProxyFault) and scenario.enabled:
-                raise ValueError("proxy treatment is non-discriminating when enabled")
+            if isinstance(scenario, ProxyFault):
+                continue
             if (
-                hasattr(scenario, "jitter_ms")
-                and getattr(scenario, "toxicity", 1.0) == 1
-                and getattr(scenario, "jitter_ms", 0) != 0
+                isinstance(scenario, LatencyFault)
+                and scenario.toxicity == 1
+                and scenario.jitter_ms != 0
             ):
                 raise ValueError("deterministic latency faults require zero jitter")
-            if getattr(scenario, "toxicity", 1.0) < 1 and self.repetitions < 2:
+            if scenario.toxicity < 1 and self.repetitions < 2:
                 raise ValueError("stochastic fault scenarios require repeated trials")
         return self
 
@@ -492,12 +528,12 @@ class _CommonInferenceServerConfig(ContractModel):
 
 
 class _VllmInferenceServerConfig(_CommonInferenceServerConfig):
-    provider: Literal["vllm"] = "vllm"
+    provider: Literal[InferenceServerProvider.VLLM] = InferenceServerProvider.VLLM
     benchmark_python: Literal[None] = None
 
 
 class _SglangInferenceServerConfig(_CommonInferenceServerConfig):
-    provider: Literal["sglang"]
+    provider: Literal[InferenceServerProvider.SGLANG]
     benchmark_python: str
 
     @field_validator("benchmark_python")
@@ -518,7 +554,7 @@ class _SglangInferenceServerConfig(_CommonInferenceServerConfig):
 
 
 class _ManagedInferenceServerConfig(_CommonInferenceServerConfig):
-    mode: Literal["managed"]
+    mode: Literal[InferenceServerMode.MANAGED]
     workload: str
 
     @field_validator("base_url")
@@ -533,7 +569,7 @@ class _ManagedInferenceServerConfig(_CommonInferenceServerConfig):
 
 
 class _ExistingLocalInferenceServerConfig(_CommonInferenceServerConfig):
-    mode: Literal["existing_local"]
+    mode: Literal[InferenceServerMode.EXISTING_LOCAL]
     workload: Literal[None] = None
 
 
@@ -600,7 +636,7 @@ class _CommonInferenceScenarioConfig(ContractModel):
     """
 
     server: str
-    endpoint_type: Literal["chat", "completions"] = "chat"
+    endpoint_type: InferenceEndpointType = InferenceEndpointType.CHAT
     num_prompts: Annotated[int, Field(gt=0, le=10_000_000)] = 1
     concurrency: Annotated[int, Field(gt=0, le=100_000)] | None = None
     request_rate: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
@@ -610,7 +646,7 @@ class _CommonInferenceScenarioConfig(ContractModel):
 
 
 class _AIPerfInferenceScenarioConfig(_CommonInferenceScenarioConfig):
-    provider: Literal["aiperf"]
+    provider: Literal[InferenceScenarioProvider.AIPERF]
     streaming: bool = True
     trace_artifact_id: Digest | None = None
     burstiness: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
@@ -629,7 +665,7 @@ class _AIPerfInferenceScenarioConfig(_CommonInferenceScenarioConfig):
 
 
 class _VllmBenchInferenceScenarioConfig(_CommonInferenceScenarioConfig):
-    provider: Literal["vllm_bench"]
+    provider: Literal[InferenceScenarioProvider.VLLM_BENCH]
     streaming: Literal[True] = True
     trace_artifact_id: Literal[None] = None
     burstiness: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
@@ -646,7 +682,7 @@ class _VllmBenchInferenceScenarioConfig(_CommonInferenceScenarioConfig):
 
 
 class _SglangBenchInferenceScenarioConfig(_CommonInferenceScenarioConfig):
-    provider: Literal["sglang_bench"]
+    provider: Literal[InferenceScenarioProvider.SGLANG_BENCH]
     streaming: Literal[True] = True
     trace_artifact_id: Literal[None] = None
     burstiness: Literal[None] = None
@@ -760,9 +796,15 @@ class ProjectConfig(ContractModel):
             )
         for scenario in self.inference_scenarios.values():
             server = self.inference_servers[scenario.server]
-            if scenario.provider == "sglang_bench" and server.provider != "sglang":
+            if (
+                scenario.provider is InferenceScenarioProvider.SGLANG_BENCH
+                and server.provider is not InferenceServerProvider.SGLANG
+            ):
                 raise ValueError("sglang_bench scenarios require an sglang inference server")
-            if scenario.provider != "sglang_bench" and server.provider == "sglang":
+            if (
+                scenario.provider is not InferenceScenarioProvider.SGLANG_BENCH
+                and server.provider is InferenceServerProvider.SGLANG
+            ):
                 raise ValueError("sglang inference servers require an sglang_bench scenario")
         missing_oracles = sorted(
             {
@@ -807,16 +849,37 @@ class ConfigureWorkloadRequest(ContractModel):
             pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
         ),
     ]
-    operation: Literal["create", "replace"]
+    operation: ConfigurationOperation
     config: WorkloadConfig
     expected_configuration_id: str | None = None
 
 
-class WorkloadConfigurationStatus(ContractModel):
+class _WorkloadConfigurationStatus(ContractModel):
     schema_version: Literal[1] = 1
-    status: Literal["missing", "valid", "invalid"]
     config_path: Literal["flameox.toml"] = "flameox.toml"
-    configuration_id: str | None = None
+
+
+class _UnavailableWorkloadConfigurationStatus(_WorkloadConfigurationStatus):
+    configuration_id: Literal[None] = None
+    workload_names: tuple[()] = ()
+    diagnostics: Annotated[
+        tuple[Annotated[str, Field(max_length=512)], ...],
+        Field(min_length=1, max_length=8),
+    ]
+    next_tool: Literal["configure_workload"] = "configure_workload"
+
+
+class MissingWorkloadConfigurationStatus(_UnavailableWorkloadConfigurationStatus):
+    status: Literal["missing"] = "missing"
+
+
+class InvalidWorkloadConfigurationStatus(_UnavailableWorkloadConfigurationStatus):
+    status: Literal["invalid"] = "invalid"
+
+
+class ValidWorkloadConfigurationStatus(_WorkloadConfigurationStatus):
+    status: Literal["valid"] = "valid"
+    configuration_id: Digest
     workload_names: Annotated[
         tuple[Annotated[str, Field(max_length=100)], ...],
         Field(max_length=1_000),
@@ -825,21 +888,44 @@ class WorkloadConfigurationStatus(ContractModel):
         tuple[Annotated[str, Field(max_length=512)], ...],
         Field(max_length=8),
     ] = ()
-    next_tool: Literal["configure_workload", "list_declared_workflows"] | None = None
+    next_tool: Literal["configure_workload", "list_declared_workflows"]
+
+    @model_validator(mode="after")
+    def recovery_matches_declared_workloads(self) -> ValidWorkloadConfigurationStatus:
+        expected_diagnostics = (
+            () if self.workload_names else ("No named workloads are declared yet.",)
+        )
+        expected_next_tool = (
+            "list_declared_workflows" if self.workload_names else "configure_workload"
+        )
+        if self.diagnostics != expected_diagnostics or self.next_tool != expected_next_tool:
+            raise ValueError("valid configuration recovery must match declared workloads")
+        return self
+
+
+type WorkloadConfigurationStatus = Annotated[
+    MissingWorkloadConfigurationStatus
+    | InvalidWorkloadConfigurationStatus
+    | ValidWorkloadConfigurationStatus,
+    Field(discriminator="status"),
+]
 
 
 class WorkloadConfigurationResult(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: Literal[1] = 1
-    action: Literal["created", "updated", "unchanged"]
+    action: ConfigurationAction
     name: str
     configuration_id: str
     workload_definition_id: str
     configuration_source: Literal["agent"] = "agent"
-    changed_paths: Annotated[
-        tuple[Annotated[str, Field(max_length=200)], ...],
-        Field(max_length=8),
-    ]
     next_tool: Literal["list_declared_workflows"] = "list_declared_workflows"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def changed_paths(self) -> tuple[Literal["flameox.toml"], ...]:
+        return () if self.action is ConfigurationAction.UNCHANGED else ("flameox.toml",)
 
 
 class ConfigureInferenceServerRequest(ContractModel):
@@ -847,7 +933,7 @@ class ConfigureInferenceServerRequest(ContractModel):
         str,
         Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
     ]
-    operation: Literal["create", "replace"]
+    operation: ConfigurationOperation
     config: InferenceServerConfig
     expected_configuration_id: Digest | None = None
 
@@ -857,19 +943,25 @@ class ConfigureInferenceScenarioRequest(ContractModel):
         str,
         Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
     ]
-    operation: Literal["create", "replace"]
+    operation: ConfigurationOperation
     config: InferenceScenarioConfig
     expected_configuration_id: Digest | None = None
 
 
 class InferenceConfigurationResult(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: Literal[1] = 1
-    kind: Literal["server", "scenario"]
-    action: Literal["created", "updated", "unchanged"]
+    kind: InferenceConfigurationKind
+    action: ConfigurationAction
     name: str
     configuration_id: Digest
     definition_id: Digest
-    changed_paths: tuple[Literal["flameox.toml"], ...]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def changed_paths(self) -> tuple[Literal["flameox.toml"], ...]:
+        return () if self.action is ConfigurationAction.UNCHANGED else ("flameox.toml",)
 
 
 class InferenceConfigurationList(ContractModel):
@@ -886,7 +978,7 @@ class ResolvedOracle(ContractModel):
 
 
 class DeclaredWorkflowSummary(ContractModel):
-    kind: Literal["workload", "experiment", "fault_experiment"]
+    kind: DeclaredWorkflowKind
     name: str
     definition_id: str
     parameter_names: tuple[str, ...] = ()
@@ -894,16 +986,22 @@ class DeclaredWorkflowSummary(ContractModel):
     timeout_seconds: float | None = None
 
 
-class DeclaredWorkflowList(ContractModel):
+class DeclaredWorkflowList(CursorPageContract):
+    page_items_field = "workflows"
+
     schema_version: int = 1
     configuration_id: str
     workflows: tuple[DeclaredWorkflowSummary, ...]
-    returned: int
-    truncated: bool
-    next_cursor: str | None
+
+
+def _require_complete_adapter_option_count(options: tuple[AdapterOption, ...], total: int) -> None:
+    if total < len(options):
+        raise ValueError("adapter option total cannot be smaller than the returned options")
 
 
 class DeclaredWorkflowDetail(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: int = 1
     configuration_id: str
     summary: DeclaredWorkflowSummary
@@ -913,51 +1011,85 @@ class DeclaredWorkflowDetail(ContractModel):
     design: str | None = None
     blocks: int | None = None
     primary_metric: str | None = None
-    polarity: str | None = None
+    polarity: MetricPolarity | None = None
     estimand: str | None = None
     validation_spec_id: str | None = None
     requirements: tuple[DeclaredWorkflowRequirement, ...] = ()
     adapter_options: tuple[AdapterOption, ...] = ()
-    adapter_option_total: int = 0
-    adapter_options_total: int = 0
-    adapter_options_truncated: bool = False
+    adapter_option_total: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def adapter_option_count_is_coherent(self) -> DeclaredWorkflowDetail:
+        _require_complete_adapter_option_count(self.adapter_options, self.adapter_option_total)
+        return self
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def adapter_options_total(self) -> int:
+        return self.adapter_option_total
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def adapter_options_truncated(self) -> bool:
+        return self.adapter_option_total > len(self.adapter_options)
 
 
 class DeclaredWorkflowRequirement(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     name: str
-    kind: Literal["executable", "python_distribution", "capability"]
+    kind: RequirementKind
+    probe_kind: ProbeKind
     required: bool
-    optional: bool
-    probe_kind: Literal["passive", "active"]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def optional(self) -> bool:
+        return not self.required
 
 
 class AdapterOption(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     adapter: str
     status: CapabilityStatus
-    capability_status: CapabilityStatus
-    planning_disposition: Literal[
-        "ready",
-        "active_probe_required",
-        "unavailable",
-        "unsupported",
-        "degraded",
-    ]
-    required_preflight_mode: Literal["passive", "active"]
-    permission_status: str | None = None
+    planning_disposition: AdapterPlanningDisposition
+    required_preflight_mode: ProbeKind
+    permission_status: CapabilityPermissionStatus | None = None
     supported_modes: tuple[str, ...] = ()
     supported_formats: tuple[str, ...] = ()
     features: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     remediation: tuple[str, ...] = ()
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def capability_status(self) -> CapabilityStatus:
+        return self.status
+
 
 class WorkloadInspection(WorkloadDefinition):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     configuration_id: str
     requirements: tuple[DeclaredWorkflowRequirement, ...] = ()
     adapter_options: tuple[AdapterOption, ...] = ()
-    adapter_option_total: int = 0
-    adapter_options_total: int = 0
-    adapter_options_truncated: bool = False
+    adapter_option_total: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def adapter_option_count_is_coherent(self) -> WorkloadInspection:
+        _require_complete_adapter_option_count(self.adapter_options, self.adapter_option_total)
+        return self
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def adapter_options_total(self) -> int:
+        return self.adapter_option_total
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def adapter_options_truncated(self) -> bool:
+        return self.adapter_option_total > len(self.adapter_options)
 
 
 _TEMPLATE_FIELD = re.compile(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -1039,22 +1171,17 @@ class WorkloadService:
 
     def configuration_status(self) -> WorkloadConfigurationStatus:
         if not self.project_config_path.exists():
-            return WorkloadConfigurationStatus(
-                status="missing",
+            return MissingWorkloadConfigurationStatus(
                 diagnostics=("No named workload configuration exists yet.",),
-                next_tool="configure_workload",
             )
         try:
             project = self.load()
         except DomainError as error:
-            return WorkloadConfigurationStatus(
-                status="invalid",
+            return InvalidWorkloadConfigurationStatus(
                 diagnostics=(error.message[:512],),
-                next_tool="configure_workload",
             )
         has_workloads = bool(project.workloads)
-        return WorkloadConfigurationStatus(
-            status="valid",
+        return ValidWorkloadConfigurationStatus(
             configuration_id=digest_model(project),
             workload_names=tuple(sorted(project.workloads)),
             diagnostics=(("No named workloads are declared yet.",) if not has_workloads else ()),
@@ -1075,7 +1202,7 @@ class WorkloadService:
     def list_declared(
         self,
         *,
-        kind: Literal["workload", "experiment", "fault_experiment"],
+        kind: DeclaredWorkflowKind,
         limit: int,
         cursor: str | None = None,
     ) -> DeclaredWorkflowList:
@@ -1097,8 +1224,12 @@ class WorkloadService:
 
         names = sorted(
             project.workloads
-            if kind == "workload"
-            else (project.experiments if kind == "experiment" else project.fault_experiments)
+            if kind is DeclaredWorkflowKind.WORKLOAD
+            else (
+                project.experiments
+                if kind is DeclaredWorkflowKind.EXPERIMENT
+                else project.fault_experiments
+            )
         )
         summaries = tuple(self._workflow_summary(project, kind, name) for name in names)
         selected = summaries[offset : offset + limit]
@@ -1116,15 +1247,13 @@ class WorkloadService:
         return DeclaredWorkflowList(
             configuration_id=configuration_id,
             workflows=selected,
-            returned=len(selected),
-            truncated=next_cursor is not None,
             next_cursor=next_cursor,
         )
 
     def get_declared(
         self,
         *,
-        kind: Literal["workload", "experiment", "fault_experiment"],
+        kind: DeclaredWorkflowKind,
         name: str,
     ) -> DeclaredWorkflowDetail:
         project = self.load()
@@ -1132,18 +1261,16 @@ class WorkloadService:
         summary = self._workflow_summary(project, kind, name)
         workload_name = (
             name
-            if kind == "workload"
+            if kind is DeclaredWorkflowKind.WORKLOAD
             else (
                 project.experiments[name].workload
-                if kind == "experiment"
+                if kind is DeclaredWorkflowKind.EXPERIMENT
                 else project.fault_experiments[name].workload
             )
         )
         workload_config = project.workloads[workload_name]
-        requirements, adapter_options, option_total, options_truncated = self._inspection_fields(
-            workload_config
-        )
-        if kind == "workload":
+        requirements, adapter_options, option_total = self._inspection_fields(workload_config)
+        if kind is DeclaredWorkflowKind.WORKLOAD:
             config = project.workloads[name]
             definition = self.definition(name)
             return DeclaredWorkflowDetail(
@@ -1154,10 +1281,8 @@ class WorkloadService:
                 requirements=requirements,
                 adapter_options=adapter_options,
                 adapter_option_total=option_total,
-                adapter_options_total=option_total,
-                adapter_options_truncated=options_truncated,
             )
-        if kind == "fault_experiment":
+        if kind is DeclaredWorkflowKind.FAULT_EXPERIMENT:
             fault = project.fault_experiments[name]
             return DeclaredWorkflowDetail(
                 configuration_id=configuration_id,
@@ -1172,8 +1297,6 @@ class WorkloadService:
                 requirements=requirements,
                 adapter_options=adapter_options,
                 adapter_option_total=option_total,
-                adapter_options_total=option_total,
-                adapter_options_truncated=options_truncated,
             )
         experiment = project.experiments[name]
         workload = project.workloads[experiment.workload]
@@ -1192,23 +1315,19 @@ class WorkloadService:
             requirements=requirements,
             adapter_options=adapter_options,
             adapter_option_total=option_total,
-            adapter_options_total=option_total,
-            adapter_options_truncated=options_truncated,
         )
 
     def inspect(self, name: str) -> WorkloadInspection:
         project = self.load()
         definition = self.definition(name)
         config = project.workloads[name]
-        requirements, options, total, truncated = self._inspection_fields(config)
+        requirements, options, total = self._inspection_fields(config)
         return WorkloadInspection(
             **definition.model_dump(mode="python"),
             configuration_id=digest_model(project),
             requirements=requirements,
             adapter_options=options,
             adapter_option_total=total,
-            adapter_options_total=total,
-            adapter_options_truncated=truncated,
         )
 
     def _inspection_fields(
@@ -1218,23 +1337,23 @@ class WorkloadService:
         tuple[DeclaredWorkflowRequirement, ...],
         tuple[AdapterOption, ...],
         int,
-        bool,
     ]:
         requirement_groups: tuple[
-            tuple[Literal["executable", "python_distribution", "capability"], tuple[str, ...]],
+            tuple[RequirementKind, tuple[str, ...]],
             ...,
         ] = (
-            ("executable", config.requirements.executables),
-            ("python_distribution", config.requirements.python_distributions),
-            ("capability", config.requirements.capabilities),
+            (RequirementKind.EXECUTABLE, config.requirements.executables),
+            (RequirementKind.PYTHON_DISTRIBUTION, config.requirements.python_distributions),
+            (RequirementKind.CAPABILITY, config.requirements.capabilities),
         )
         requirements = tuple(
             DeclaredWorkflowRequirement(
                 name=name,
                 kind=kind,
                 required=name not in config.requirements.optional,
-                optional=name in config.requirements.optional,
-                probe_kind=("active" if name in config.requirements.active else "passive"),
+                probe_kind=(
+                    ProbeKind.ACTIVE if name in config.requirements.active else ProbeKind.PASSIVE
+                ),
             )
             for kind, values in requirement_groups
             for name in values
@@ -1255,37 +1374,28 @@ class WorkloadService:
         ]
         reports.sort(key=lambda item: item.adapter)
         options = tuple(self._adapter_option(item) for item in reports[:64])
-        return requirements, options, len(reports), len(reports) > len(options)
+        return requirements, options, len(reports)
 
     @staticmethod
     def _adapter_option(capability: CapabilityReport) -> AdapterOption:
         permission_sensitive = capability.permission_status in {
-            "unknown_until_active_probe",
-            "not_exercised",
+            CapabilityPermissionStatus.UNKNOWN_UNTIL_ACTIVE_PROBE,
+            CapabilityPermissionStatus.NOT_EXERCISED,
         }
-        required_mode: Literal["passive", "active"] = (
-            "active" if permission_sensitive else "passive"
-        )
+        required_mode = ProbeKind.ACTIVE if permission_sensitive else ProbeKind.PASSIVE
         if permission_sensitive and capability.status is CapabilityStatus.AVAILABLE:
-            disposition: Literal[
-                "ready",
-                "active_probe_required",
-                "unavailable",
-                "unsupported",
-                "degraded",
-            ] = "active_probe_required"
+            disposition = AdapterPlanningDisposition.ACTIVE_PROBE_REQUIRED
         elif capability.status is CapabilityStatus.UNAVAILABLE:
-            disposition = "unavailable"
+            disposition = AdapterPlanningDisposition.UNAVAILABLE
         elif capability.status is CapabilityStatus.UNSUPPORTED_PLATFORM:
-            disposition = "unsupported"
+            disposition = AdapterPlanningDisposition.UNSUPPORTED
         elif capability.status is CapabilityStatus.DEGRADED:
-            disposition = "degraded"
+            disposition = AdapterPlanningDisposition.DEGRADED
         else:
-            disposition = "ready"
+            disposition = AdapterPlanningDisposition.READY
         return AdapterOption(
             adapter=capability.adapter,
             status=capability.status,
-            capability_status=capability.status,
             planning_disposition=disposition,
             required_preflight_mode=required_mode,
             permission_status=capability.permission_status,
@@ -1299,11 +1409,11 @@ class WorkloadService:
     def _workflow_summary(
         self,
         project: ProjectConfig,
-        kind: Literal["workload", "experiment", "fault_experiment"],
+        kind: DeclaredWorkflowKind,
         name: str,
     ) -> DeclaredWorkflowSummary:
         try:
-            if kind == "workload":
+            if kind is DeclaredWorkflowKind.WORKLOAD:
                 workload_config = project.workloads[name]
                 definition = self.definition(name)
                 return DeclaredWorkflowSummary(
@@ -1318,7 +1428,7 @@ class WorkloadService:
                     ),
                     timeout_seconds=workload_config.timeout_seconds,
                 )
-            if kind == "fault_experiment":
+            if kind is DeclaredWorkflowKind.FAULT_EXPERIMENT:
                 fault_config = project.fault_experiments[name]
                 workload_config = project.workloads[fault_config.workload]
                 return DeclaredWorkflowSummary(
@@ -1380,7 +1490,7 @@ class WorkloadService:
                     project = self.load()
                     current_id = digest_model(project)
                 except DomainError as error:
-                    if request.operation != "create":
+                    if request.operation is not ConfigurationOperation.CREATE:
                         raise
                     try:
                         recovered_text = self._render_project_config(existing_text, name, config)
@@ -1406,7 +1516,7 @@ class WorkloadService:
                 project = ProjectConfig()
 
             existing = project.workloads.get(name)
-            if request.operation == "create":
+            if request.operation is ConfigurationOperation.CREATE:
                 if existing is not None and existing != config:
                     raise DomainError(
                         ErrorCode.EXECUTION_REFUSED,
@@ -1419,10 +1529,14 @@ class WorkloadService:
                             "next_tool": "workload_configuration_status",
                         },
                     )
-                action: Literal["created", "updated", "unchanged"] = (
-                    "created"
+                action = (
+                    ConfigurationAction.CREATED
                     if recovered_invalid
-                    else ("unchanged" if existing is not None else "created")
+                    else (
+                        ConfigurationAction.UNCHANGED
+                        if existing is not None
+                        else ConfigurationAction.CREATED
+                    )
                 )
             else:
                 if current_id is None or existing is None:
@@ -1445,7 +1559,7 @@ class WorkloadService:
                             "next_tool": "workload_configuration_status",
                         },
                     )
-                action = "updated"
+                action = ConfigurationAction.UPDATED
 
             updated = ProjectConfig.model_validate(
                 {
@@ -1454,8 +1568,7 @@ class WorkloadService:
                 }
             )
             definition_id = digest_model(self._definition_content(name, config))
-            changed_paths: list[str] = []
-            if action != "unchanged":
+            if action is not ConfigurationAction.UNCHANGED:
                 rendered = (
                     recovered_text
                     if recovered_invalid
@@ -1468,7 +1581,6 @@ class WorkloadService:
                     else 0o644
                 )
                 atomic_write_text(self.project_config_path, rendered, mode=mode)
-                changed_paths.append("flameox.toml")
 
         return WorkloadConfigurationResult(
             action=action,
@@ -1476,14 +1588,13 @@ class WorkloadService:
             configuration_id=digest_model(updated),
             workload_definition_id=definition_id,
             configuration_source="agent",
-            changed_paths=tuple(changed_paths),
         )
 
     def configure_inference_server(
         self, request: ConfigureInferenceServerRequest
     ) -> InferenceConfigurationResult:
         return self._configure_inference_entry(
-            kind="server",
+            kind=InferenceConfigurationKind.SERVER,
             name=request.name,
             operation=request.operation,
             config=request.config,
@@ -1494,7 +1605,7 @@ class WorkloadService:
         self, request: ConfigureInferenceScenarioRequest
     ) -> InferenceConfigurationResult:
         return self._configure_inference_entry(
-            kind="scenario",
+            kind=InferenceConfigurationKind.SCENARIO,
             name=request.name,
             operation=request.operation,
             config=request.config,
@@ -1504,14 +1615,16 @@ class WorkloadService:
     def _configure_inference_entry(
         self,
         *,
-        kind: Literal["server", "scenario"],
+        kind: InferenceConfigurationKind,
         name: str,
-        operation: Literal["create", "replace"],
+        operation: ConfigurationOperation,
         config: InferenceServerConfig | InferenceScenarioConfig,
         expected_configuration_id: Digest | None,
     ) -> InferenceConfigurationResult:
         section: Literal["inference_servers", "inference_scenarios"] = (
-            "inference_servers" if kind == "server" else "inference_scenarios"
+            "inference_servers"
+            if kind is InferenceConfigurationKind.SERVER
+            else "inference_scenarios"
         )
         with self.workspace.write_locked():
             text = (
@@ -1521,15 +1634,23 @@ class WorkloadService:
             )
             project = self.load() if text else ProjectConfig()
             current_id = digest_model(project)
-            entries = project.inference_servers if kind == "server" else project.inference_scenarios
+            entries = (
+                project.inference_servers
+                if kind is InferenceConfigurationKind.SERVER
+                else project.inference_scenarios
+            )
             existing = entries.get(name)
-            if operation == "create" and existing is not None and existing != config:
+            if (
+                operation is ConfigurationOperation.CREATE
+                and existing is not None
+                and existing != config
+            ):
                 raise DomainError(
                     ErrorCode.EXECUTION_REFUSED,
                     f"Inference {kind} {name!r} already exists; use operation='replace'.",
                     details={"configuration_id": current_id},
                 )
-            if operation == "replace":
+            if operation is ConfigurationOperation.REPLACE:
                 if existing is None:
                     raise DomainError(
                         ErrorCode.REVISION_CONFLICT,
@@ -1541,10 +1662,12 @@ class WorkloadService:
                         "Inference configuration changed before replacement.",
                         details={"configuration_id": current_id},
                     )
-            action: Literal["created", "updated", "unchanged"] = (
-                "unchanged"
+            action = (
+                ConfigurationAction.UNCHANGED
                 if existing == config
-                else ("created" if existing is None else "updated")
+                else (
+                    ConfigurationAction.CREATED if existing is None else ConfigurationAction.UPDATED
+                )
             )
             updated_values = {**entries, name: config}
             updated = ProjectConfig.model_validate(
@@ -1553,8 +1676,7 @@ class WorkloadService:
                     section: updated_values,
                 }
             )
-            changed_paths: tuple[Literal["flameox.toml"], ...] = ()
-            if action != "unchanged":
+            if action is not ConfigurationAction.UNCHANGED:
                 rendered = self._render_named_config(text, section, name, config)
                 mode = (
                     self.project_config_path.stat().st_mode & 0o777
@@ -1562,14 +1684,12 @@ class WorkloadService:
                     else 0o644
                 )
                 atomic_write_text(self.project_config_path, rendered, mode=mode)
-                changed_paths = ("flameox.toml",)
         return InferenceConfigurationResult(
             kind=kind,
             action=action,
             name=name,
             configuration_id=digest_model(updated),
             definition_id=digest_model(config),
-            changed_paths=changed_paths,
         )
 
     def resolve(

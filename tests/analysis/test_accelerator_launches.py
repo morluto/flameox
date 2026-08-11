@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from flameox.analysis import RecipeService
 from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
@@ -159,6 +162,10 @@ def test_accelerator_launches_counts_graphs_kernels_and_per_stream_gaps(
     assert region.streams[0].idle_gap_total_ns == 5
     assert not region.streams_truncated
     assert [(item.name, item.count) for item in region.kernel_names] == [("projection_kernel", 2)]
+    region_payload = region.model_dump(mode="json")
+    assert type(region).model_validate(region_payload) == region
+    with pytest.raises(ValidationError, match="stream truncation must agree"):
+        type(region).model_validate({**region_payload, "streams_truncated": True})
 
     missing_phase = RecipeService(workspace).accelerator_launches(
         "decode-run",

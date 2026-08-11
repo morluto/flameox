@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
-from typing import Literal
 
 from flameox.adapters.options import (
     adapter_accepts_options,
@@ -17,15 +17,19 @@ from flameox.adapters.options import (
     triton_compiler_options,
 )
 from flameox.adapters.torch_profiler import SdkTorchProfilerOptions, torch_profiler_options
-from flameox.domain import ArtifactKind, DomainError, ErrorCode
+from flameox.domain import ArtifactKind, CapabilityExtra, DomainError, ErrorCode
 
-DependencyKind = Literal["internal", "executable", "package"]
+
+class AdapterDependencyKind(StrEnum):
+    INTERNAL = "internal"
+    EXECUTABLE = "executable"
+    PACKAGE = "package"
 
 
 @dataclass(frozen=True, slots=True)
 class BuiltinAdapter:
     name: str
-    dependency_kind: DependencyKind
+    dependency_kind: AdapterDependencyKind
     dependency: str | None
     supported_modes: tuple[str, ...]
     supported_formats: tuple[str, ...]
@@ -40,9 +44,7 @@ class BuiltinAdapter:
     expected_overhead: str | None = None
     capture_limitations: tuple[str, ...] = ()
     preserve_artifact_on_nonzero: bool = False
-    managed_extra: (
-        Literal["cpu", "execution", "memory", "test", "trace", "torch", "toxiproxy"] | None
-    ) = None
+    managed_extra: CapabilityExtra | None = None
     managed_requirement: str | None = None
 
 
@@ -60,7 +62,7 @@ BUILTIN_ADAPTERS = {
     for adapter in (
         BuiltinAdapter(
             name="command",
-            dependency_kind="internal",
+            dependency_kind=AdapterDependencyKind.INTERNAL,
             dependency=None,
             supported_modes=("named_workload",),
             supported_formats=("process-output",),
@@ -71,7 +73,7 @@ BUILTIN_ADAPTERS = {
         ),
         BuiltinAdapter(
             name="py-spy",
-            dependency_kind="executable",
+            dependency_kind=AdapterDependencyKind.EXECUTABLE,
             dependency="py-spy",
             supported_modes=("record", "attach", "chrome"),
             supported_formats=("speedscope", "chrome-trace", "raw"),
@@ -88,12 +90,12 @@ BUILTIN_ADAPTERS = {
             capture_limitations=(
                 "GIL, native-frame, idle-thread, and subprocess modes are disabled.",
             ),
-            managed_extra="cpu",
+            managed_extra=CapabilityExtra.CPU,
             managed_requirement="py-spy>=0.4.2,<0.5",
         ),
         BuiltinAdapter(
             name="perf",
-            dependency_kind="executable",
+            dependency_kind=AdapterDependencyKind.EXECUTABLE,
             dependency="perf",
             supported_modes=("record", "stat", "sched"),
             supported_formats=("perf.data",),
@@ -110,7 +112,7 @@ BUILTIN_ADAPTERS = {
         ),
         BuiltinAdapter(
             name="perfetto",
-            dependency_kind="executable",
+            dependency_kind=AdapterDependencyKind.EXECUTABLE,
             dependency="trace_processor_shell",
             supported_modes=("import", "query"),
             supported_formats=("perfetto", "chrome-trace", "pprof", "perf.data"),
@@ -120,12 +122,12 @@ BUILTIN_ADAPTERS = {
                 "Trace Processor, or configure analysis.trace_processor_path explicitly.",
             ),
             version_args=("--version",),
-            managed_extra="trace",
+            managed_extra=CapabilityExtra.TRACE,
             managed_requirement="perfetto>=0.57,<0.58",
         ),
         BuiltinAdapter(
             name="pyperf",
-            dependency_kind="package",
+            dependency_kind=AdapterDependencyKind.PACKAGE,
             dependency="pyperf",
             supported_modes=("import", "benchmark"),
             supported_formats=("pyperf-json",),
@@ -143,7 +145,7 @@ BUILTIN_ADAPTERS = {
         ),
         BuiltinAdapter(
             name="python-startup",
-            dependency_kind="internal",
+            dependency_kind=AdapterDependencyKind.INTERNAL,
             dependency=None,
             supported_modes=("repeated_process",),
             supported_formats=("flameox-python-startup-json", "python-importtime"),
@@ -162,7 +164,7 @@ BUILTIN_ADAPTERS = {
         ),
         BuiltinAdapter(
             name="pytest",
-            dependency_kind="package",
+            dependency_kind=AdapterDependencyKind.PACKAGE,
             dependency="pytest",
             supported_modes=("serial", "xdist"),
             supported_formats=("flameox-pytest-events-jsonl",),
@@ -185,12 +187,12 @@ BUILTIN_ADAPTERS = {
                 "recovered into the primary artifact may be unavailable.",
             ),
             preserve_artifact_on_nonzero=True,
-            managed_extra="test",
+            managed_extra=CapabilityExtra.TEST,
             managed_requirement="pytest>=8.3",
         ),
         BuiltinAdapter(
             name="torch.profiler",
-            dependency_kind="package",
+            dependency_kind=AdapterDependencyKind.PACKAGE,
             dependency="torch",
             supported_modes=("trace_import", "whole_entrypoint", "sdk"),
             supported_formats=("chrome-trace",),
@@ -212,18 +214,18 @@ BUILTIN_ADAPTERS = {
                 "capture plan.",
                 "Scheduled SDK mode requires explicit workload step boundaries.",
             ),
-            managed_extra="torch",
+            managed_extra=CapabilityExtra.TORCH,
             managed_requirement="torch>=2.7",
         ),
         BuiltinAdapter(
             name="memray",
-            dependency_kind="package",
+            dependency_kind=AdapterDependencyKind.PACKAGE,
             dependency="memray",
             supported_modes=("import", "run"),
             supported_formats=("memray",),
             features=("allocations", "retained_memory", "stacks"),
             output_filename="memory.bin",
-            managed_extra="memory",
+            managed_extra=CapabilityExtra.MEMORY,
             managed_requirement="memray>=1.17",
             artifact_kinds=(ArtifactKind.MEMORY_PROFILE,),
             expected_overhead=(
@@ -236,7 +238,7 @@ BUILTIN_ADAPTERS = {
         ),
         BuiltinAdapter(
             name="compute-sanitizer",
-            dependency_kind="executable",
+            dependency_kind=AdapterDependencyKind.EXECUTABLE,
             dependency="compute-sanitizer",
             supported_modes=("memcheck", "racecheck", "initcheck", "synccheck"),
             supported_formats=("compute-sanitizer-xml",),
@@ -257,7 +259,7 @@ BUILTIN_ADAPTERS = {
         ),
         BuiltinAdapter(
             name="nvbench",
-            dependency_kind="internal",
+            dependency_kind=AdapterDependencyKind.INTERNAL,
             dependency=None,
             supported_modes=("benchmark",),
             supported_formats=("nvbench-json", "nvbench-jsonbin"),
@@ -286,7 +288,7 @@ BUILTIN_ADAPTERS = {
         ),
         BuiltinAdapter(
             name="rocprofv3",
-            dependency_kind="executable",
+            dependency_kind=AdapterDependencyKind.EXECUTABLE,
             dependency="rocprofv3",
             supported_modes=("pftrace",),
             supported_formats=("pftrace",),
@@ -317,7 +319,7 @@ BUILTIN_ADAPTERS = {
         ),
         BuiltinAdapter(
             name="nsight.compute",
-            dependency_kind="executable",
+            dependency_kind=AdapterDependencyKind.EXECUTABLE,
             dependency="ncu",
             supported_modes=("profile",),
             supported_formats=("ncu-rep", "ncu-repz"),
@@ -343,7 +345,7 @@ BUILTIN_ADAPTERS = {
         ),
         BuiltinAdapter(
             name="triton.compiler",
-            dependency_kind="internal",
+            dependency_kind=AdapterDependencyKind.INTERNAL,
             dependency=None,
             supported_modes=("env_dump",),
             supported_formats=("ttir", "ttgir", "llir", "ptx", "cubin"),
@@ -368,7 +370,7 @@ BUILTIN_ADAPTERS = {
         ),
         BuiltinAdapter(
             name="cute.compiler",
-            dependency_kind="internal",
+            dependency_kind=AdapterDependencyKind.INTERNAL,
             dependency=None,
             supported_modes=("env_dump",),
             supported_formats=("cute_dsl_ir", "ptx", "cubin"),
@@ -392,13 +394,13 @@ BUILTIN_ADAPTERS = {
         ),
         BuiltinAdapter(
             name="coverage",
-            dependency_kind="package",
+            dependency_kind=AdapterDependencyKind.PACKAGE,
             dependency="coverage",
             supported_modes=("import", "run"),
             supported_formats=("coverage-data",),
             features=("lines", "branches"),
             output_filename=".coverage",
-            managed_extra="execution",
+            managed_extra=CapabilityExtra.EXECUTION,
             managed_requirement="coverage>=7.14,<8",
             artifact_kinds=(ArtifactKind.EXECUTION_COVERAGE,),
             expected_overhead="Tracing overhead; branch collection is enabled.",

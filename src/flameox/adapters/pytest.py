@@ -2,22 +2,33 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from enum import StrEnum
 from typing import Any
+
+from pydantic import ConfigDict, Field, computed_field
 
 from flameox.domain.errors import DomainError, ErrorCode
 from flameox.domain.identity import digest_model
-from flameox.domain.models import ArtifactKind, RunManifest
+from flameox.domain.models import ArtifactKind, ExecutionStatus, RunManifest
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
 
+class PytestCompletionState(StrEnum):
+    COMPLETE = "complete"
+    INTERRUPTED = "interrupted"
+    INCOMPLETE = "incomplete"
+
+
 class PytestExtractionResult(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: int = 2
     run_id: str
     artifact_id: str
-    complete: bool
-    execution_status: str
+    completion: PytestCompletionState = Field(exclude=True)
+    execution_status: ExecutionStatus
     collected_count: int
     executed_count: int
     passed_count: int
@@ -30,7 +41,6 @@ class PytestExtractionResult(ContractModel):
     fixture_setup_ns: int
     collection_duration_ns: int | None
     workers: tuple[str, ...]
-    interrupted: bool
     recovered_sidecar_events: int
     sidecar_recovery_failures: int
     first_failure_observed_ns: int | None
@@ -38,6 +48,16 @@ class PytestExtractionResult(ContractModel):
     measurement_count: int
     corpus_commit_id: str
     limitations: tuple[str, ...] = ()
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def complete(self) -> bool:
+        return self.completion is PytestCompletionState.COMPLETE
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def interrupted(self) -> bool:
+        return self.completion is PytestCompletionState.INTERRUPTED
 
 
 class PytestExtractor:
@@ -265,7 +285,7 @@ class PytestExtractor:
                     aggregation="single",
                 )
             )
-        complete, completion_limitations = _completion(
+        completion, completion_limitations = _completion_state(
             events,
             interrupted=interrupted,
             crashed=crashed,
@@ -289,8 +309,8 @@ class PytestExtractor:
         return PytestExtractionResult(
             run_id=run_id,
             artifact_id=registration.artifact_id,
-            complete=complete,
-            execution_status=run.execution_status.value,
+            completion=completion,
+            execution_status=run.execution_status,
             collected_count=len(collected),
             executed_count=len(executed),
             passed_count=outcome_counts["passed"],
@@ -303,7 +323,6 @@ class PytestExtractor:
             fixture_setup_ns=fixture_setup_ns,
             collection_duration_ns=collection_duration,
             workers=tuple(sorted(workers)),
-            interrupted=interrupted,
             recovered_sidecar_events=recovered_sidecar_events,
             sidecar_recovery_failures=len(failed_sidecars),
             first_failure_observed_ns=first_observed,
@@ -548,14 +567,14 @@ def _test_outcome(reports: dict[str, str]) -> str:
     return "errored"
 
 
-def _completion(
+def _completion_state(
     events: list[dict[str, Any]],
     *,
     interrupted: bool,
     crashed: bool,
     failed_sidecars: set[str],
     truncated_stream: bool,
-) -> tuple[bool, list[str]]:
+) -> tuple[PytestCompletionState, list[str]]:
     limitations: list[str] = []
     has_terminal_event = any(event.get("event") == "session_finished" for event in events)
     if not has_terminal_event:
@@ -577,7 +596,14 @@ def _completion(
         and not failed_sidecars
         and not truncated_stream
     )
-    return complete, limitations
+    state = (
+        PytestCompletionState.COMPLETE
+        if complete
+        else (
+            PytestCompletionState.INTERRUPTED if interrupted else PytestCompletionState.INCOMPLETE
+        )
+    )
+    return state, limitations
 
 
 def _crash_limitation(

@@ -3,10 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from flameox.application import (
     ImportArtifactRequest,
     ImportService,
+    NativeViewerPlan,
     NativeViewerService,
 )
 from flameox.catalog import Catalog
@@ -94,5 +96,20 @@ async def test_explicit_viewer_launch_uses_bounded_subprocess_broker(
 
     result = await NativeViewerService(workspace).launch(imported.artifact_id)
 
-    assert result.plan.launches
+    assert result.plan.launches is True
+    assert result.validated_copy().plan.launches is True
     assert result.process.exit_code == 0
+
+
+def test_unlaunched_viewer_plan_cannot_claim_launch_side_effect() -> None:
+    with pytest.raises(ValidationError):
+        NativeViewerPlan.model_validate(
+            {
+                "artifact_id": "sha256:artifact",
+                "artifact_path": "/artifact",
+                "artifact_kinds": [ArtifactKind.COLLECTOR_METADATA],
+                "viewer": "xdg-open",
+                "argv": ["xdg-open", "/artifact"],
+                "launches": True,
+            }
+        )

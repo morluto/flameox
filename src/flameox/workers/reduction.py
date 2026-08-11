@@ -43,7 +43,7 @@ def _reduce(request: NativeReductionWorkerRequest, job_root: Path) -> dict[str, 
         remaining = wall_deadline - time.monotonic()
         if remaining <= 0:
             failure = "reduction_wall_time"
-            return "unresolved"
+            return NativePredicateClassification.UNRESOLVED
         try:
             outcome = broker.run_sync(
                 ExecutionRequest(
@@ -70,10 +70,14 @@ def _reduce(request: NativeReductionWorkerRequest, job_root: Path) -> dict[str, 
             )
         except DomainError as exc:
             failure = exc.code.value
-            return "unresolved"
+            return NativePredicateClassification.UNRESOLVED
         failure = None
         latest_output = (outcome.stdout, outcome.stderr)
-        return "interesting" if outcome.process.exit_code == 0 else "not_interesting"
+        return (
+            NativePredicateClassification.INTERESTING
+            if outcome.process.exit_code == 0
+            else NativePredicateClassification.NOT_INTERESTING
+        )
 
     def preserve_best(payload: bytes) -> None:
         path = job_root / f"best-{len(accepted_paths):08d}"

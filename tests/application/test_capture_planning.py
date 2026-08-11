@@ -6,21 +6,31 @@ from typing import Any
 import pytest
 
 from flameox.application import (
+    AdapterOption,
     CapabilityList,
     CapabilityService,
     CaptureService,
+    DeclaredWorkflowKind,
     ExecutionPolicy,
     PreflightService,
     WorkloadService,
 )
 from flameox.domain import (
+    CapabilityPermissionStatus,
     CapabilityReport,
     CapabilityStatus,
     DomainError,
     ErrorCode,
+    ProbeKind,
     ProcessResult,
+    process_termination_from_returncode,
 )
-from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
+from flameox.execution import (
+    ExecutionOutcome,
+    ExecutionRequest,
+    ProcessContainment,
+    SubprocessBroker,
+)
 from flameox.storage import Workspace
 from tests.support.capture import write_workload
 
@@ -28,11 +38,14 @@ from tests.support.capture import write_workload
 class _NvccProbeBroker(SubprocessBroker):
     async def run(self, request: ExecutionRequest, **_: Any) -> ExecutionOutcome:
         return ExecutionOutcome(
-            process=ProcessResult(exit_code=1, cleanup_complete=True),
+            process=ProcessResult(
+                termination=process_termination_from_returncode(1),
+                cleanup_complete=True,
+            ),
             stdout=b"",
             stderr=b"fatal error: cuda_runtime.h: No such file or directory\n",
             resolved_executable=Path(request.argv[0]),
-            containment="process_group",
+            containment=ProcessContainment.PROCESS_GROUP,
         )
 
 
@@ -53,13 +66,16 @@ class _NvccProbeFailureBroker(SubprocessBroker):
 class _PathReportingNvccProbeBroker(SubprocessBroker):
     async def run(self, request: ExecutionRequest, **_: Any) -> ExecutionOutcome:
         return ExecutionOutcome(
-            process=ProcessResult(exit_code=1, cleanup_complete=True),
+            process=ProcessResult(
+                termination=process_termination_from_returncode(1),
+                cleanup_complete=True,
+            ),
             stdout=b"",
             stderr=(
                 f"{request.argv[4]}: fatal error: cuda_runtime.h: No such file or directory\n"
             ).encode(),
             resolved_executable=Path(request.argv[0]),
-            containment="process_group",
+            containment=ProcessContainment.PROCESS_GROUP,
         )
 
 
@@ -103,15 +119,15 @@ size = [1, 2]
     )
     service = WorkloadService(workspace)
 
-    first = service.list_declared(kind="workload", limit=1)
+    first = service.list_declared(kind=DeclaredWorkflowKind.WORKLOAD, limit=1)
     assert [item.name for item in first.workflows] == ["alpha"]
     assert first.next_cursor is not None
     second = service.list_declared(
-        kind="workload",
+        kind=DeclaredWorkflowKind.WORKLOAD,
         limit=1,
         cursor=first.next_cursor,
     )
-    detail = service.get_declared(kind="experiment", name="scaling")
+    detail = service.get_declared(kind=DeclaredWorkflowKind.EXPERIMENT, name="scaling")
 
     assert [item.name for item in second.workflows] == ["beta"]
     assert second.next_cursor is None
@@ -123,7 +139,7 @@ size = [1, 2]
     )
     with pytest.raises(DomainError) as stale:
         service.list_declared(
-            kind="workload",
+            kind=DeclaredWorkflowKind.WORKLOAD,
             limit=1,
             cursor=first.next_cursor,
         )
@@ -148,21 +164,45 @@ active = ["perf"]
     )
 
     service = WorkloadService(workspace)
-    detail = service.get_declared(kind="workload", name="probe")
+    detail = service.get_declared(kind=DeclaredWorkflowKind.WORKLOAD, name="probe")
     inspection = service.inspect("probe")
 
     requirements = {item.name: item for item in detail.requirements}
     assert requirements["python"].kind == "executable"
     assert requirements["python"].required is True
+    assert requirements["python"].optional is False
+    assert requirements["perf"].required is False
     assert requirements["perf"].optional is True
     assert requirements["perf"].probe_kind == "active"
+    requirement_payload = requirements["perf"].model_dump(mode="python")
+    assert requirements["perf"].validated_copy() == requirements["perf"]
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        type(requirements["perf"]).model_validate({**requirement_payload, "optional": False})
     assert detail.adapter_option_total >= len(detail.adapter_options)
-    assert detail.adapter_option_total <= 64 or detail.adapter_options_truncated is True
+    assert detail.adapter_options_truncated is (
+        detail.adapter_option_total > len(detail.adapter_options)
+    )
+    assert detail.adapter_options_total == detail.adapter_option_total
+    assert detail.validated_copy() == detail
+    contradictory_counts = detail.model_dump()
+    contradictory_counts["adapter_options_total"] = detail.adapter_option_total + 1
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        type(detail).model_validate(contradictory_counts)
+    contradictory_truncation = detail.model_dump()
+    contradictory_truncation["adapter_options_truncated"] = not detail.adapter_options_truncated
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        type(detail).model_validate(contradictory_truncation)
     assert tuple(item.adapter for item in detail.adapter_options) == tuple(
         sorted(item.adapter for item in detail.adapter_options)
     )
     command = next(item for item in detail.adapter_options if item.adapter == "command")
     assert command.planning_disposition == "ready"
+    assert command.capability_status is command.status
+    assert command.validated_copy() == command
+    contradictory = command.model_dump()
+    contradictory["capability_status"] = CapabilityStatus.UNAVAILABLE
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        AdapterOption.model_validate(contradictory)
     assert inspection.command_template == ("python", "-c", "print('ok')")
     assert inspection.configuration_id == detail.configuration_id
 
@@ -187,8 +227,8 @@ allow_exploratory = true
 """
     )
 
-    passive = await PreflightService(workspace).inspect("probe", mode="passive")
-    active = await PreflightService(workspace).inspect("probe", mode="active")
+    passive = await PreflightService(workspace).inspect("probe", mode=ProbeKind.PASSIVE)
+    active = await PreflightService(workspace).inspect("probe", mode=ProbeKind.ACTIVE)
     by_name = {item.requirement: item for item in passive.requirements}
 
     assert by_name["python"].status == "available"
@@ -233,15 +273,15 @@ active = ["permission.probe"]
             return CapabilityReport(
                 adapter=adapter,
                 status=CapabilityStatus.PERMISSION_REQUIRED,
-                permission_status="denied",
+                permission_status=CapabilityPermissionStatus.DENIED,
                 remediation=("Grant the documented local permission.",),
-                probe_kind="active",
+                probe_kind=ProbeKind.ACTIVE,
             )
 
     result = await PreflightService(
         workspace,
         capabilities=PermissionCapabilities(workspace),
-    ).inspect("probe", mode="active")
+    ).inspect("probe", mode=ProbeKind.ACTIVE)
 
     assert result.disposition == "blocked"
     assert result.requirements[0].status == "permission_denied"
@@ -268,7 +308,7 @@ executables = ["nvcc"]
     result = await PreflightService(
         workspace,
         broker=_NvccProbeBroker(),
-    ).inspect("gpu", mode="active")
+    ).inspect("gpu", mode=ProbeKind.ACTIVE)
 
     requirement = result.requirements[0]
     assert result.disposition == "blocked"
@@ -298,7 +338,7 @@ executables = ["nvcc"]
     result = await PreflightService(
         workspace,
         broker=_NvccProbeFailureBroker(),
-    ).inspect("gpu", mode="active")
+    ).inspect("gpu", mode=ProbeKind.ACTIVE)
 
     requirement = result.requirements[0]
     assert requirement.status == "probe_failed"
@@ -323,8 +363,8 @@ executables = ["nvcc"]
     monkeypatch.setattr("flameox.application.preflight.shutil.which", lambda _: "/usr/bin/nvcc")
     service = PreflightService(workspace, broker=_PathReportingNvccProbeBroker())
 
-    first = await service.inspect("gpu", mode="active")
-    second = await service.inspect("gpu", mode="active")
+    first = await service.inspect("gpu", mode=ProbeKind.ACTIVE)
+    second = await service.inspect("gpu", mode=ProbeKind.ACTIVE)
 
     assert first.preflight_id == second.preflight_id
     assert first.requirements[0].evidence[1] == (
