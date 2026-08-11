@@ -45,6 +45,7 @@ def _protocol(**overrides: object) -> InferenceProtocolIdentity:
             "tokenizer_revision": "main",
             "trust_remote_code": False,
             "dtype": "auto",
+            "quantization": "none",
         },
         "server": {
             "backend": "vllm",
@@ -131,6 +132,16 @@ def test_missing_semantic_oracle_results_are_exploratory() -> None:
 
     assert result.validity is ComparisonValidity.EXPLORATORY
     assert any(reason.field == "oracle_result.status" for reason in result.exploratory_reasons)
+
+
+def test_missing_effective_quantization_is_exploratory() -> None:
+    baseline = _apply(_protocol(), "model.quantization", None)
+    candidate = _apply(_protocol(), "model.quantization", None)
+
+    result = compare_inference_protocols(baseline, candidate)
+
+    assert result.validity is ComparisonValidity.EXPLORATORY
+    assert any(reason.field == "model.quantization" for reason in result.exploratory_reasons)
 
 
 # ---------------------------------------------------------------------------

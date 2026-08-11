@@ -435,6 +435,8 @@ def _identity_missing_fields(protocol: InferenceProtocolIdentity) -> dict[str, s
         missing["model.tokenizer_id"] = "tokenizer identity is unavailable"
     if protocol.model.tokenizer_revision is None:
         missing["model.tokenizer_revision"] = "tokenizer revision is unavailable"
+    if protocol.model.quantization is None:
+        missing["model.quantization"] = "effective model quantization is unavailable"
     if protocol.server.managed_server_command_digest is None:
         missing["server.managed_server_command_digest"] = (
             "managed server and cache configuration provenance is unavailable"
