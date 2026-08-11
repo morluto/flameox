@@ -35,6 +35,10 @@ from flameox.application.workloads import (
     _FactorExperimentConfig,
     _OutcomeExperimentConfig,
     _ScaledLegacyExperimentConfig,
+    scalar_contains,
+    scalar_equal,
+    scalar_identity_set,
+    scalar_subset,
 )
 from flameox.catalog import Catalog
 from flameox.domain import (
@@ -988,7 +992,7 @@ class ExperimentService:
             matches = [
                 name
                 for name, choices in workload_parameters.items()
-                if set(config.variants).issubset(set(choices))
+                if scalar_subset(list(config.variants), list(choices))
             ]
             if not matches:
                 raise DomainError(
@@ -1018,7 +1022,9 @@ class ExperimentService:
                     ErrorCode.WORKSPACE_INVALID,
                     f"Experiment factor {name!r} is not a workload parameter.",
                 )
-            if len(set(values)) != len(values) or not set(values).issubset(set(allowed)):
+            if len(scalar_identity_set(list(values))) != len(values) or not scalar_subset(
+                list(values), list(allowed)
+            ):
                 raise DomainError(
                     ErrorCode.WORKSPACE_INVALID,
                     f"Experiment factor {name!r} contains duplicate or undeclared values.",
@@ -1040,7 +1046,7 @@ class ExperimentService:
                     ErrorCode.WORKSPACE_INVALID,
                     "Explicit combinations must contain every declared factor exactly once.",
                 )
-            if any(combination[name] not in factors[name] for name in factor_names):
+            if any(not scalar_contains(combination[name], factors[name]) for name in factor_names):
                 raise DomainError(
                     ErrorCode.WORKSPACE_INVALID,
                     "Explicit combination contains an undeclared factor value.",
@@ -1060,7 +1066,7 @@ class ExperimentService:
                     ErrorCode.WORKSPACE_INVALID,
                     "Every exclusion must name at least one declared factor.",
                 )
-            if any(value not in factors[name] for name, value in rule.items()):
+            if any(not scalar_contains(value, factors[name]) for name, value in rule.items()):
                 raise DomainError(
                     ErrorCode.WORKSPACE_INVALID,
                     "Exclusion contains an undeclared factor value.",
@@ -1069,7 +1075,7 @@ class ExperimentService:
             combination
             for combination in combinations
             if not any(
-                all(combination[name] == value for name, value in rule.items())
+                all(scalar_equal(combination[name], value) for name, value in rule.items())
                 for rule in config.exclude
             )
         )
@@ -1102,7 +1108,10 @@ class ExperimentService:
             selected = [
                 trial
                 for trial in trials
-                if trial.factors.get(plan.variant_parameter) == treatment_value
+                if scalar_equal(
+                    cast(Scalar, trial.factors.get(plan.variant_parameter)),
+                    cast(Scalar, treatment_value),
+                )
             ]
             attempted = sum(trial.outcome is not TrialOutcome.UNATTEMPTED for trial in selected)
             eligible = sum(

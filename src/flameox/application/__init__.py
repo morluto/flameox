@@ -363,6 +363,11 @@ __all__ = [
     "parse_inference_tool_discovery",
     "probe_existing_vllm_server",
     "render_evidence_summary_markdown",
+    "scalar_contains",
+    "scalar_equal",
+    "scalar_identity",
+    "scalar_identity_set",
+    "scalar_subset",
     "workspace_status",
 ]
 
