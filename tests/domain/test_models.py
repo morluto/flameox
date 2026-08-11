@@ -28,6 +28,7 @@ from flameox.domain import (
     Trial,
     TrialOutcome,
     ValidationStatus,
+    Variant,
     digest_model,
     effective_sensitivity,
     parse_managed_runtime_extras,
@@ -102,6 +103,25 @@ def test_sensitivity_is_monotonic_across_registrations() -> None:
         effective_sensitivity([Sensitivity.NORMAL, Sensitivity.SENSITIVE, Sensitivity.INTERNAL])
         is Sensitivity.SENSITIVE
     )
+
+
+@pytest.mark.parametrize("name", ["", "x" * 200])
+def test_variant_name_allows_empty_labels_with_a_bounded_length(name: str) -> None:
+    assert (
+        Variant(
+            variant_id="variant",
+            experiment_id="experiment",
+            name=name,
+        ).name
+        == name
+    )
+
+    with pytest.raises(ValidationError, match="at most 200 characters"):
+        Variant(
+            variant_id="variant",
+            experiment_id="experiment",
+            name="x" * 201,
+        )
 
 
 def test_core_dump_has_mandatory_sensitivity_floor() -> None:
