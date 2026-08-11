@@ -1556,7 +1556,7 @@ class InferenceReplayService:
                 model_revision=plan.model_revision,
                 tokenizer_id=plan.tokenizer or plan.model,
                 tokenizer_revision=plan.tokenizer_revision or plan.model_revision,
-                quantization=plan.quantization or "none",
+                quantization=plan.quantization,
             ),
             server=ServerConfigIdentity(
                 backend=plan.server_provider.value,
