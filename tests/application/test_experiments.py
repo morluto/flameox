@@ -98,7 +98,7 @@ async def test_randomized_experiment_records_trials_and_compares_run_sets(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "bench.py").write_text(
         "import sys\n"
-        "count = 6000 if sys.argv[1] == 'baseline' else 1500\n"
+        "count = 6000 if sys.argv[1] == 'implementation=' else 1500\n"
         "assert sum(range(count)) >= 0\n"
     )
     (tmp_path / "flameox.toml").write_text(
@@ -106,12 +106,12 @@ async def test_randomized_experiment_records_trials_and_compares_run_sets(
 schema_version = 1
 
 [workloads.scan]
-argv = ["python", "bench.py", "{implementation}"]
+argv = ["python", "bench.py", "implementation={implementation}"]
 cwd = "."
 timeout_seconds = 30
 
 [workloads.scan.parameters]
-implementation = ["baseline", "candidate"]
+implementation = ["", "candidate"]
 
 [workloads.scan.oracle]
 strength = "cross_treatment_equivalence"
@@ -120,7 +120,7 @@ argv = ["python", "-c", "print('same-output')"]
 [experiments.scan_comparison]
 workload = "scan"
 treatment_factor = "implementation"
-baseline_value = "baseline"
+baseline_value = ""
 design = "randomized_complete_blocks"
 blocks = 1
 primary_metric = "pyperf.workload"
@@ -130,7 +130,7 @@ practical_threshold = 0.01
 confidence_level = 0.95
 random_seed = 1984
 [experiments.scan_comparison.factors]
-implementation = ["candidate", "baseline"]
+implementation = ["candidate", ""]
 """
     )
     config = workspace.config.validated_copy(
@@ -177,8 +177,8 @@ implementation = ["candidate", "baseline"]
     result = await service.run(plan.plan_id, progress=record_progress)
 
     assert len(plan.blocks) == 1
-    assert set(plan.blocks[0].order) == {"baseline", "candidate"}
-    assert plan.baseline_variant == "baseline"
+    assert set(plan.blocks[0].order) == {"", "candidate"}
+    assert plan.baseline_variant == ""
     assert len(result.trials) == 2
     assert all(trial.outcome is TrialOutcome.SUCCEEDED for trial in result.trials)
     assert len(result.run_sets) == 2
@@ -186,7 +186,7 @@ implementation = ["candidate", "baseline"]
     assert result.comparison.comparison.experiment_id == result.experiment.experiment_id
     assert result.comparison.comparison.validity is ComparisonValidity.EXPLORATORY
     assert result.comparison.comparison.complete_pair_n == 1
-    assert result.comparison.baseline_run_set.selection["variant"] == "baseline"
+    assert result.comparison.baseline_run_set.selection["variant"] == ""
     assert result.comparison.candidate_run_set.selection["variant"] == "candidate"
     assert result.limitations == ()
     assert service.experiments.read(result.experiment.experiment_id) == result.experiment
@@ -194,7 +194,7 @@ implementation = ["candidate", "baseline"]
     assert scaling.attempted_trials == 2
     assert scaling.complete_blocks == 1
     assert {point.variant for point in scaling.points} == {
-        "baseline",
+        "",
         "candidate",
     }
     assert [item[0] for item in progress] == list(range(7))
@@ -254,6 +254,66 @@ implementation = ["baseline", "candidate"]
 
     assert result.comparison is not None
     assert result.comparison.comparison.metric == "runtime_resource.peak_rss_bytes"
+
+
+@pytest.mark.anyio
+async def test_explicit_factor_comparison_requires_the_declared_baseline(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "bench.py").write_text("assert sum(range(1000)) >= 0\n")
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.scan]
+argv = ["python", "bench.py"]
+cwd = "."
+[workloads.scan.parameters]
+implementation = ["baseline", "candidate", "other"]
+[workloads.scan.oracle]
+strength = "cross_treatment_equivalence"
+argv = ["python", "-c", "print('same-output')"]
+[experiments.partial]
+workload = "scan"
+treatment_factor = "implementation"
+baseline_value = "baseline"
+combination_policy = "explicit"
+combinations = [{implementation = "candidate"}, {implementation = "other"}]
+blocks = 1
+primary_metric = "runtime_resource.peak_rss_bytes"
+polarity = "lower_is_better"
+[experiments.partial.factors]
+implementation = ["baseline", "candidate", "other"]
+"""
+    )
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "add", "bench.py", "flameox.toml")
+    _git(
+        tmp_path,
+        "-c",
+        "user.name=flameox Test",
+        "-c",
+        "user.email=flameox@example.invalid",
+        "commit",
+        "-qm",
+        "fixture",
+    )
+    investigation = InvestigationService(workspace).create(
+        CreateInvestigationRequest(question="Does the partial matrix affect resource use?")
+    )
+    service = ExperimentService(workspace)
+    plan = await service.plan(
+        experiment_name="partial",
+        investigation_id=investigation.investigation_id,
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    result = await service.run(plan.plan_id)
+
+    assert result.comparison is None
+    assert (
+        "Automatic paired comparison requires the declared baseline and exactly one candidate "
+        "treatment." in (result.limitations)
+    )
 
 
 @pytest.mark.anyio
@@ -614,14 +674,14 @@ schema_version = 1
 [workloads.semantic]
 argv = ["python", "-c", "print('{mode}', '{case}')"]
 [workloads.semantic.parameters]
-mode = ["base", "candidate"]
+mode = ["", "candidate"]
 case = ["bad", "clean"]
 [workloads.semantic.oracle]
 strength = "contract_check"
 argv = [
   "python", "-c",
-  "import sys; raise SystemExit(1 if sys.argv[1:] == ['base', 'bad'] else 0)",
-  "{mode}", "{case}",
+  "import sys; raise SystemExit(1 if sys.argv[1:] == ['mode=', 'bad'] else 0)",
+  "mode={mode}", "{case}",
 ]
 
 [experiments.semantic]
@@ -629,13 +689,13 @@ workload = "semantic"
 design = "fixed_order"
 blocks = 1
 treatment_factor = "mode"
-baseline_value = "base"
+baseline_value = ""
 analysis = "outcome"
 outcome_goal = "equivalence"
 minimum_attempts = 1
 maximum_attempts = 1
 [experiments.semantic.factors]
-mode = ["candidate", "base"]
+mode = ["candidate", ""]
 case = ["bad", "clean"]
 """
     )
@@ -665,10 +725,11 @@ case = ["bad", "clean"]
     assert result.outcome.disposition == "base_only_failure"
     assert result.outcome.complete_pairs == 2
     assert result.outcome.unmatched_cells == 0
-    assert result.outcome.first_failure_factors == {"mode": "base", "case": "bad"}
+    assert plan.baseline_variant == ""
+    assert result.outcome.first_failure_factors == {"mode": "", "case": "bad"}
     counts = {item.treatment: item for item in result.outcome.counts}
-    assert counts["base"].oracle_failed == 1
-    assert counts["base"].failure_rate == 0.5
+    assert counts[""].oracle_failed == 1
+    assert counts[""].failure_rate == 0.5
     assert counts["candidate"].pass_rate == 1
     with Catalog(workspace).open_snapshot() as snapshot:
         row = snapshot.execute(

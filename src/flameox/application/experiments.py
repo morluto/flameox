@@ -913,42 +913,55 @@ class ExperimentService:
                 "Automatic experiment comparison currently requires pyperf measurements."
             )
         else:
-            comparison_run_sets: tuple[RunSet, ...] = run_sets
-            if not plan.baseline_variant:
+            comparison_run_sets: tuple[RunSet, RunSet] | None = run_sets
+            if plan.baseline_variant is None:
                 limitations.append(
                     "Baseline was determined by list position, not an explicit "
                     "baseline_value. Reordering the treatment list reverses the "
                     "comparison direction."
                 )
             else:
-                comparison_run_sets = tuple(
-                    sorted(
-                        run_sets,
-                        key=lambda run_set: run_set.selection["variant"] != plan.baseline_variant,
+                baseline_run_sets = tuple(
+                    run_set
+                    for run_set in run_sets
+                    if run_set.selection["variant"] == plan.baseline_variant
+                )
+                candidate_run_sets = tuple(
+                    run_set
+                    for run_set in run_sets
+                    if run_set.selection["variant"] != plan.baseline_variant
+                )
+                if len(baseline_run_sets) != 1 or len(candidate_run_sets) != 1:
+                    limitations.append(
+                        "Automatic paired comparison requires the declared baseline and exactly "
+                        "one candidate treatment."
+                    )
+                    comparison_run_sets = None
+                else:
+                    comparison_run_sets = (baseline_run_sets[0], candidate_run_sets[0])
+            if comparison_run_sets is not None:
+                comparison = await run_atomic_thread(
+                    lambda: ComparisonService(self.workspace).record(
+                        parse_compare_run_sets_request(
+                            {
+                                "baseline_run_set_id": comparison_run_sets[0].run_set_id,
+                                "candidate_run_set_id": comparison_run_sets[1].run_set_id,
+                                "experiment_id": plan.experiment.experiment_id,
+                                "metric": plan.experiment.primary_metric,
+                                "unit": (
+                                    "bytes"
+                                    if plan.metric_source is MetricSource.RUNTIME_RESOURCE
+                                    else "ns"
+                                ),
+                                "metric_source": plan.metric_source,
+                                "polarity": plan.experiment.polarity,
+                                "practical_threshold": plan.experiment.practical_threshold,
+                                "confidence_level": plan.experiment.confidence_level,
+                                "random_seed": plan.experiment.random_seed,
+                            }
+                        )
                     )
                 )
-            comparison = await run_atomic_thread(
-                lambda: ComparisonService(self.workspace).record(
-                    parse_compare_run_sets_request(
-                        {
-                            "baseline_run_set_id": comparison_run_sets[0].run_set_id,
-                            "candidate_run_set_id": comparison_run_sets[1].run_set_id,
-                            "experiment_id": plan.experiment.experiment_id,
-                            "metric": plan.experiment.primary_metric,
-                            "unit": (
-                                "bytes"
-                                if plan.metric_source is MetricSource.RUNTIME_RESOURCE
-                                else "ns"
-                            ),
-                            "metric_source": plan.metric_source,
-                            "polarity": plan.experiment.polarity,
-                            "practical_threshold": plan.experiment.practical_threshold,
-                            "confidence_level": plan.experiment.confidence_level,
-                            "random_seed": plan.experiment.random_seed,
-                        }
-                    )
-                )
-            )
         result_commit_id = published.commit.commit_id
         if comparison is not None:
             result_commit_id = comparison.materialized_commit_id or comparison.corpus_commit_id
@@ -1231,6 +1244,9 @@ class ExperimentService:
             trial.failure_class in {"oracle_inconclusive", "oracle_receipt_error", "unattempted"}
             for trial in trials
         )
+        baseline_variant = plan.baseline_variant
+        if baseline_variant is None and plan.variants:
+            baseline_variant = plan.variants[0]
         if counts and all(
             item.unsupported + item.oracle_unsupported == item.attempted and item.attempted > 0
             for item in counts
@@ -1240,13 +1256,17 @@ class ExperimentService:
             disposition = ExperimentOutcomeDisposition.INSUFFICIENT_EVIDENCE
         elif not failures:
             disposition = ExperimentOutcomeDisposition.ALL_CLEAN
-        elif len(plan.variants) == 2 and failed_treatments == {
-            plan.baseline_variant or plan.variants[0]
-        }:
+        elif (
+            len(plan.variants) == 2
+            and baseline_variant is not None
+            and failed_treatments == {baseline_variant}
+        ):
             disposition = ExperimentOutcomeDisposition.BASE_ONLY_FAILURE
-        elif len(plan.variants) == 2 and failed_treatments == {
-            v for v in plan.variants if v != (plan.baseline_variant or plan.variants[0])
-        }:
+        elif (
+            len(plan.variants) == 2
+            and baseline_variant is not None
+            and failed_treatments == {v for v in plan.variants if v != baseline_variant}
+        ):
             disposition = ExperimentOutcomeDisposition.CANDIDATE_ONLY_FAILURE
         else:
             disposition = ExperimentOutcomeDisposition.MIXED

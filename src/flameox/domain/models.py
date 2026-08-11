@@ -1341,7 +1341,7 @@ class Variant(ContractModel):
     schema_version: Literal[1] = 1
     variant_id: Identifier
     experiment_id: Identifier
-    name: Identifier
+    name: str
     source_state_id: Digest | None = None
     workload_instance_id: Digest | None = None
     environment_requirements: dict[str, JsonValue] = Field(default_factory=dict)
