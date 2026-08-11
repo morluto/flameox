@@ -22,7 +22,7 @@ from flameox.storage import Workspace
 
 
 class _QuarantineManifest(ContractModel):
-    schema_version: int = 1
+    schema_version: Literal[2] = 2
     quarantine_id: str
     operation: str
     detected_at: datetime
