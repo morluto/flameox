@@ -175,9 +175,7 @@ def test_hotspots_join_frames_within_the_measurement_artifact(tmp_path: Path) ->
 
     assert result.total == 1
     assert result.coverage["completely_symbolized"] == 1
-    assert [(item.function, item.line) for item in result.hotspots] == [
-        ("candidate_function", 20)
-    ]
+    assert [(item.function, item.line) for item in result.hotspots] == [("candidate_function", 20)]
 
 
 def test_writable_root_observation_derives_availability_from_growth() -> None:
