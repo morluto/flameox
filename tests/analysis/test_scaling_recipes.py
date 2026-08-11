@@ -183,10 +183,11 @@ def test_scaling_reports_dispersion_models_and_supported_range(
     assert result.attempted_trials == 12
     assert result.complete_blocks == 12
     assert result.environment_stable
-    assert any(fit.model == "linear" for fit in result.fits)
-    assert {fit.variant for fit in result.fits} == {"baseline"}
-    assert {fit.supported_min for fit in result.fits} == {32_768}
-    assert {fit.supported_max for fit in result.fits} == {131_072}
+    assert result.fits == ()
+    assert (
+        "Fits were excluded for variants with mixed integer and floating scaling inputs: baseline."
+        in result.warnings
+    )
     assert len(result.trials) == 12
     assert {(point.input_value, point.input_kind) for point in result.points} == {
         (32_768.0, "integer"),

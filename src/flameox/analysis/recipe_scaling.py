@@ -235,6 +235,27 @@ class ScalingRecipes(RecipeContext):
             warnings.append(
                 "Some variants have no numeric input value and were excluded from fits."
             )
+        input_kinds_by_variant: dict[str, set[Literal["integer", "floating"]]] = {}
+        for point in points:
+            if (
+                point.input_value is not None
+                and point.input_value > 0
+                and math.isfinite(point.input_value)
+                and math.isfinite(point.value)
+                and point.input_kind is not None
+            ):
+                input_kinds_by_variant.setdefault(point.variant, set()).add(point.input_kind)
+        mixed_input_kind_variants = {
+            variant
+            for variant, input_kinds in input_kinds_by_variant.items()
+            if input_kinds == {"integer", "floating"}
+        }
+        if mixed_input_kind_variants:
+            warnings.append(
+                "Fits were excluded for variants with mixed integer and floating scaling inputs: "
+                + ", ".join(sorted(mixed_input_kind_variants))
+                + "."
+            )
         environment_stable = all(point.environment_count == 1 for point in points)
         if not environment_stable:
             warnings.append("Environment identity varies within at least one scaling point.")
@@ -310,6 +331,8 @@ class ScalingRecipes(RecipeContext):
                 and math.isfinite(point.value)
             ]
             if len(numeric) < 3 or len({point.input_value for point in numeric}) < 2:
+                continue
+            if {point.input_kind for point in numeric} == {"integer", "floating"}:
                 continue
             x = np.asarray([point.input_value for point in numeric], dtype=float)
             y = np.asarray([point.value for point in numeric], dtype=float)
