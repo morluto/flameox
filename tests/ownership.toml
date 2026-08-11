@@ -27,18 +27,21 @@ paths = [
   "tests/adapters/test_benchmark_samples.py",
   "tests/adapters/test_compute_sanitizer.py",
   "tests/adapters/test_kernel_build.py",
+  "tests/adapters/test_kernel_build_collector.py",
   "tests/adapters/test_kernel_validation.py",
+  "tests/adapters/test_nsight_compute_options.py",
   "tests/adapters/test_nvbench.py",
   "tests/adapters/test_pyperf.py",
   "tests/adapters/test_python_startup.py",
+  "tests/adapters/test_rocprofv3.py",
 ]
 markers = ["unit"]
 
 
 [[ownership]]
-owner = "rocprofv3-adapter"
+owner = "rocprofv3-integration"
 lane = "adapters"
-paths = ["tests/adapters/test_rocprofv3.py"]
+paths = ["tests/adapters/test_rocprofv3_integration.py"]
 markers = ["integration", "process"]
 
 
@@ -542,6 +545,12 @@ paths = ["tests/application/test_capture_torch_provider.py"]
 markers = ["integration", "optional", "process", "serial", "requires_torch"]
 
 [[ownership]]
+owner = "capture-compute-sanitizer"
+lane = "process"
+paths = ["tests/application/test_capture_compute_sanitizer.py"]
+markers = ["integration", "process", "serial"]
+
+[[ownership]]
 owner = "capture-nvbench-provider"
 lane = "process"
 paths = ["tests/application/test_capture_nvbench_provider.py"]
@@ -668,9 +677,9 @@ paths = ["tests/adapters/test_nsight_compute_live.py"]
 markers = ["integration", "optional", "process", "serial", "requires_ncu"]
 
 [[ownership]]
-owner = "kernel-build-capture"
-lane = "adapters"
-paths = ["tests/adapters/test_kernel_build_capture.py"]
+owner = "capture-kernel-build"
+lane = "process"
+paths = ["tests/application/test_capture_kernel_build.py"]
 markers = ["integration", "process"]
 
 [[ownership]]

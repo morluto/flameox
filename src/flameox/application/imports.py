@@ -125,7 +125,7 @@ class ImportBundleRequest(ContractModel):
     """
 
     primary: BundleMember
-    sidecars: Annotated[tuple[BundleMember, ...], Field(max_length=99)] = ()
+    sidecars: tuple[BundleMember, ...] = ()
     kind: ArtifactKind = ArtifactKind.BENCHMARK_SAMPLES
     sensitivity: Sensitivity = Sensitivity.INTERNAL
     producer: str | None = None

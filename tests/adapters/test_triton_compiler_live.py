@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -28,39 +29,14 @@ TRITON_CACHE_DIR = "{project / "triton-cache"}"
     )
 
 
-def _triton_kernel_script(path: Path) -> None:
-    path.write_text(
-        """
-import os
-import triton
-import triton.language as tl
-
-@triton.jit
-def add_kernel(x_ptr, y_ptr, out_ptr, n, BLOCK: tl.constexpr):
-    pid = tl.program_id(0)
-    offsets = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offsets < n
-    x = tl.load(x_ptr + offsets, mask=mask)
-    y = tl.load(y_ptr + offsets, mask=mask)
-    tl.store(out_ptr + offsets, x + y, mask=mask)
-
-import torch
-x = torch.randn(128, device="cuda")
-y = torch.randn(128, device="cuda")
-out = torch.empty_like(x)
-add_kernel[(1,)](x, y, out, 128, BLOCK=128)
-print(out.sum().item())
-"""
-    )
-
-
 @pytest.mark.requires_triton
 @pytest.mark.anyio
 async def test_triton_compiler_live_capture_emits_manifest_with_ir(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     python = os.environ.get("FLAMEOX_TRITON_PYTHON", sys.executable)
     script = tmp_path / "triton_kernel.py"
-    _triton_kernel_script(script)
+    fixture = Path(__file__).parent.parent / "fixtures" / "triton" / "vector_add.py.txt"
+    shutil.copyfile(fixture, script)
     _write_triton_workload(tmp_path, python=python, script=str(script))
     disable_containment(workspace)
     service = CaptureService(workspace)

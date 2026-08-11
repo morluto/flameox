@@ -99,6 +99,15 @@ def provider_available(marker: str) -> bool:
     if marker == "requires_cute":
         configured = os.environ.get("FLAMEOX_CUTE_WORKLOAD")
         return bool(configured and Path(configured).expanduser().is_file())
+    if marker == "requires_compute_sanitizer":
+        return shutil.which("compute-sanitizer") is not None and shutil.which("nvcc") is not None
+    if marker == "requires_ncu":
+        executable = shutil.which("ncu")
+        if executable is None:
+            return False
+        from flameox.adapters.nsight_compute import find_ncu_report_interface
+
+        return find_ncu_report_interface(executable=Path(executable)) is not None
     configured_variable = CONFIGURED_EXECUTABLE_PROVIDERS.get(marker)
     if configured_variable is not None:
         configured = os.environ.get(configured_variable)

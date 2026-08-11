@@ -1,0 +1,46 @@
+class Action:
+    def __init__(self, index):
+        self.index = index
+
+    def name(self):
+        return "mapping" if self.index == 0 else "sequence"
+
+    def workload_type(self):
+        return None
+
+    def metric_names(self):
+        return ()
+
+    def rule_results_as_dicts(self):
+        return ()
+
+    def source_files(self):
+        if self.index == 0:
+            return {str(index): f"kernel-{index}.cu" for index in range(9)}
+        return ["first.cu", "second.cu"]
+
+    def source_markers(self):
+        return ()
+
+
+class Range:
+    def num_actions(self):
+        return 2
+
+    def action_by_idx(self, index):
+        return Action(index)
+
+
+class Report:
+    def get_version(self):
+        return "2099.1"
+
+    def num_ranges(self):
+        return 1
+
+    def range_by_idx(self, index):
+        return Range()
+
+
+def load_report(path):
+    return Report()

@@ -11,8 +11,6 @@ from flameox.adapters import KernelBuildManifestV1, kernel_build_json_schema
 from flameox.application import (
     ArtifactPipelineService,
     KernelBuildImportService,
-    RegisteredPipelineStageDeclaration,
-    kernel_build_pipeline_request,
 )
 from flameox.domain import DomainError, ErrorCode
 from flameox.storage import Workspace
@@ -64,36 +62,6 @@ def _manifest(**updates: object) -> KernelBuildManifestV1:
     return KernelBuildManifestV1.model_validate(payload)
 
 
-def test_kernel_build_translates_to_existing_pipeline_contract() -> None:
-    manifest = _manifest(diagnostics=["diagnostic text remains native manifest data"])
-
-    request = kernel_build_pipeline_request(
-        manifest,
-        run_id="run-1",
-        registration_ids_by_path={
-            "kernel/vector_add.ttir": "registration-ttir",
-            "kernel/vector_add.ptx": "registration-ptx",
-        },
-    )
-
-    assert request.pipeline_name == "triton.compiler"
-    assert request.pipeline_schema == "flameox.kernel-build.v1"
-    assert request.workload_identity == "vector-add"
-    assert request.device_identity == "NVIDIA sm_86"
-    assert all(isinstance(stage, RegisteredPipelineStageDeclaration) for stage in request.stages)
-    assert request.stages[1].status == "cached"
-    assert "diagnostics are preserved" in request.limitations[0]
-
-
-def test_kernel_build_returns_only_declared_bundle_paths(tmp_path: Path) -> None:
-    manifest_path = tmp_path / "manifest.json"
-
-    assert _manifest().bundle_paths(manifest_path) == (
-        tmp_path / "kernel/vector_add.ttir",
-        tmp_path / "kernel/vector_add.ptx",
-    )
-
-
 @pytest.mark.parametrize("path", ["../secret", "/absolute", "kernel/../secret", "."])
 def test_kernel_build_rejects_uncontained_artifact_paths(path: str) -> None:
     stages = _manifest().model_dump(mode="json")["stages"]
@@ -104,12 +72,15 @@ def test_kernel_build_rejects_uncontained_artifact_paths(path: str) -> None:
 
 
 def test_kernel_build_rejects_duplicate_artifacts_and_out_of_order_stages() -> None:
-    stages = _manifest().model_dump(mode="json")["stages"]
-    stages[1]["artifact"]["path"] = stages[0]["artifact"]["path"]
-    stages[1]["ordinal"] = 0
+    duplicate = _manifest().model_dump(mode="json")["stages"]
+    duplicate[1]["artifact"]["path"] = duplicate[0]["artifact"]["path"]
+    with pytest.raises(ValidationError, match="artifact paths must be unique"):
+        _manifest(stages=duplicate)
 
-    with pytest.raises(ValidationError, match="unique"):
-        _manifest(stages=stages)
+    out_of_order = _manifest().model_dump(mode="json")["stages"]
+    out_of_order[0]["ordinal"], out_of_order[1]["ordinal"] = 1, 0
+    with pytest.raises(ValidationError, match="declared in ordinal order"):
+        _manifest(stages=out_of_order)
 
 
 def test_failed_build_requires_failed_stage_and_success_rejects_missing_output() -> None:
@@ -121,18 +92,6 @@ def test_failed_build_requires_failed_stage_and_success_rejects_missing_output()
         _manifest(stages=stages)
     with pytest.raises(ValidationError, match="requires a failed stage"):
         _manifest(outcome="failed")
-
-
-def test_kernel_build_stage_status_determines_artifact_shape() -> None:
-    stages = _manifest().model_dump(mode="json")["stages"]
-    stages[0]["artifact"] = None
-    with pytest.raises(ValidationError, match="artifact"):
-        _manifest(stages=stages)
-
-    stages = _manifest().model_dump(mode="json")["stages"]
-    stages[0]["status"] = "failed"
-    with pytest.raises(ValidationError, match="artifact"):
-        _manifest(stages=stages)
 
 
 def test_kernel_build_rejects_unknown_fields() -> None:
@@ -152,7 +111,10 @@ def test_kernel_build_bundle_import_registers_existing_pipeline(tmp_path: Path) 
     workspace = Workspace.initialize(tmp_path)
     artifact_path = tmp_path / "kernel.ttir"
     artifact_path.write_text("ttir", encoding="utf-8")
+    (tmp_path / "unrelated.ptx").write_text("must not be imported")
     manifest = _manifest(
+        diagnostics=["diagnostic text remains native manifest data"],
+        limitations=[f"limitation-{index}" for index in range(20)],
         stages=[
             {
                 "name": "ttir",
@@ -167,29 +129,34 @@ def test_kernel_build_bundle_import_registers_existing_pipeline(tmp_path: Path) 
                     "media_type": "text/plain",
                 },
             }
-        ]
+        ],
     )
     manifest_path = tmp_path / "kernel-build.json"
     manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
 
     result = KernelBuildImportService(workspace).import_manifest(manifest_path)
 
+    assert len(result.run.artifacts) == 2
     assert result.run.artifacts[0].role == "kernel_build_manifest"
     assert result.run.artifacts[1].role == "compiler_stage"
     assert result.pipeline.workload_identity == "vector-add"
     assert result.pipeline.device_identity == "NVIDIA sm_86"
     assert result.pipeline.run_id == result.run.run_id
     assert result.pipeline.stages[0].artifact_id == result.run.artifacts[1].artifact_id
+    assert len(result.pipeline.limitations) == 20
+    assert "diagnostics are preserved" in result.pipeline.limitations[0]
+    assert result.pipeline.limitations[-1].startswith("Additional limitations")
 
 
-def test_kernel_build_pipeline_comparison_binds_workload_device_and_unknown_version(
+def test_imported_pipeline_comparison_distinguishes_mismatch_from_missing_version(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    pipeline_ids: list[str] = []
+    pipeline_ids: dict[str, str] = {}
     for directory, workload, device in (
-        ("left", "vector-add", "sm_86"),
-        ("right", "matrix-multiply", "sm_90"),
+        ("baseline", "vector-add", "sm_86"),
+        ("same-identity", "vector-add", "sm_86"),
+        ("different-identity", "matrix-multiply", "sm_90"),
     ):
         root = tmp_path / directory
         root.mkdir()
@@ -216,71 +183,21 @@ def test_kernel_build_pipeline_comparison_binds_workload_device_and_unknown_vers
         )
         manifest_path = root / "kernel-build.json"
         manifest_path.write_text(manifest.model_dump_json())
-        pipeline_ids.append(
+        pipeline_ids[directory] = (
             KernelBuildImportService(workspace).import_manifest(manifest_path).pipeline.pipeline_id
         )
 
-    comparison = ArtifactPipelineService(workspace).compare(*pipeline_ids)
-
-    assert comparison.compatibility == "incompatible"
-    assert comparison.identity_mismatches == ("workload_identity", "device_identity")
-
-
-def test_kernel_build_unknown_compiler_version_is_not_compatible(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    pipeline_ids: list[str] = []
-    for directory in ("left", "right"):
-        root = tmp_path / directory
-        root.mkdir()
-        artifact = root / "kernel.ttir"
-        artifact.write_text("ttir")
-        manifest = _manifest(
-            producer_version="unknown",
-            stages=[
-                {
-                    "name": "ttir",
-                    "ordinal": 0,
-                    "status": "available",
-                    "format": "mlir",
-                    "format_schema": "triton-ttir",
-                    "artifact": {
-                        "path": artifact.name,
-                        "byte_length": 4,
-                        "sha256": hashlib.sha256(b"ttir").hexdigest(),
-                    },
-                }
-            ],
-        )
-        manifest_path = root / "kernel-build.json"
-        manifest_path.write_text(manifest.model_dump_json())
-        pipeline_ids.append(
-            KernelBuildImportService(workspace).import_manifest(manifest_path).pipeline.pipeline_id
-        )
-
-    comparison = ArtifactPipelineService(workspace).compare(*pipeline_ids)
-
-    assert comparison.compatibility == "unknown"
-    assert any("producer_version" in item for item in comparison.limitations)
-
-
-def test_kernel_build_pipeline_limits_derived_limitations() -> None:
-    manifest = _manifest(
-        device_identity=None,
-        diagnostics=["diagnostic"],
-        limitations=[f"limitation-{index}" for index in range(20)],
+    unknown = ArtifactPipelineService(workspace).compare(
+        pipeline_ids["baseline"], pipeline_ids["same-identity"]
+    )
+    incompatible = ArtifactPipelineService(workspace).compare(
+        pipeline_ids["baseline"], pipeline_ids["different-identity"]
     )
 
-    request = kernel_build_pipeline_request(
-        manifest,
-        run_id="run-1",
-        registration_ids_by_path={
-            "kernel/vector_add.ttir": "registration-ttir",
-            "kernel/vector_add.ptx": "registration-ptx",
-        },
-    )
-
-    assert len(request.limitations) == 20
-    assert request.limitations[-1].startswith("Additional limitations")
+    assert unknown.compatibility == "unknown"
+    assert any("producer_version" in item for item in unknown.limitations)
+    assert incompatible.compatibility == "incompatible"
+    assert incompatible.identity_mismatches == ("workload_identity", "device_identity")
 
 
 def test_kernel_build_import_uses_bounded_declared_role(tmp_path: Path) -> None:
@@ -333,15 +250,12 @@ def test_malformed_kernel_build_manifest_leaves_no_anonymous_state(tmp_path: Pat
 
 def test_kernel_build_import_applies_manifest_document_limit(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     manifest_path = tmp_path / "kernel-build.json"
     manifest_path.write_text(_manifest().model_dump_json())
-    monkeypatch.setattr(
-        "flameox.application.kernel_builds._MAX_KERNEL_BUILD_MANIFEST_BYTES",
-        8,
-    )
+    with manifest_path.open("ab") as manifest_file:
+        manifest_file.truncate(1024 * 1024 + 1)
 
     with pytest.raises(DomainError) as error:
         KernelBuildImportService(workspace).import_manifest(manifest_path)
@@ -350,7 +264,7 @@ def test_kernel_build_import_applies_manifest_document_limit(
 
 def test_kernel_build_bundle_rejects_digest_mismatch_before_registration(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    (tmp_path / "kernel.ttir").write_text("changed", encoding="utf-8")
+    (tmp_path / "kernel.ttir").write_text("fail", encoding="utf-8")
     manifest = _manifest(
         stages=[
             {
@@ -370,7 +284,7 @@ def test_kernel_build_bundle_rejects_digest_mismatch_before_registration(tmp_pat
     manifest_path = tmp_path / "kernel-build.json"
     manifest_path.write_text(manifest.model_dump_json(), encoding="utf-8")
 
-    with pytest.raises(DomainError, match="byte length mismatch"):
+    with pytest.raises(DomainError, match="sha256 mismatch"):
         KernelBuildImportService(workspace).import_manifest(manifest_path)
 
 
