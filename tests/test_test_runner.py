@@ -13,6 +13,7 @@ from typing import Any, cast
 import pytest
 
 from tests.support.ownership import load_ownership
+from tests.support.providers import provider_available
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "tools" / "test.py"
@@ -49,6 +50,30 @@ def test_list_reports_lanes_and_metadata_commands() -> None:
         assert any(marker in record.markers for record in RECORDS), lane
     assert "Metadata commands:" in result.stdout
     assert "  capabilities validate managed setup metadata against extras" in result.stdout
+
+
+def test_gpu_provider_readiness_requires_every_live_lane_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "tests.support.providers.shutil.which",
+        lambda name: None if name == "nvcc" else f"/usr/bin/{name}",
+    )
+    assert provider_available("requires_compute_sanitizer") is False
+
+    monkeypatch.setattr("tests.support.providers.shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        "flameox.adapters.nsight_compute.find_ncu_report_interface",
+        lambda **_: None,
+    )
+    assert provider_available("requires_compute_sanitizer") is True
+    assert provider_available("requires_ncu") is False
+
+    monkeypatch.setattr(
+        "flameox.adapters.nsight_compute.find_ncu_report_interface",
+        lambda **_: Path("/opt/nvidia/extras/python/ncu_report.py"),
+    )
+    assert provider_available("requires_ncu") is True
 
 
 def test_affected_plan_no_changes_is_valid_and_explicitly_empty(

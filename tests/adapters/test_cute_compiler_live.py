@@ -7,13 +7,7 @@ from pathlib import Path
 import pytest
 
 from flameox.application import CaptureService, ExecutionPolicy
-from flameox.domain import (
-    ArtifactKind,
-    CapabilityReport,
-    CapabilityStatus,
-    CaptureStatus,
-    ExecutionStatus,
-)
+from flameox.domain import ArtifactKind, CaptureStatus, ExecutionStatus
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
 
@@ -22,7 +16,6 @@ from tests.support.capture import disable_containment
 @pytest.mark.anyio
 async def test_configured_cute_workload_emits_kernel_build(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workload = os.environ.get("FLAMEOX_CUTE_WORKLOAD")
     assert workload is not None
@@ -36,24 +29,7 @@ argv = [{json.dumps(workload)}]
 timeout_seconds = 120
 """
     )
-    report = CapabilityReport(
-        adapter="cute.compiler",
-        status=CapabilityStatus.AVAILABLE,
-        version="configured-workload",
-        supported_modes=("compile",),
-        supported_formats=("kernel-build-manifest",),
-        permission_status="granted",
-        probe_kind="passive",
-    )
     service = CaptureService(workspace)
-    monkeypatch.setattr(service.capabilities, "get", lambda _adapter: report)
-
-    async def probe(_adapter: str, *, refresh: bool = False) -> CapabilityReport:
-        assert refresh
-        return report
-
-    monkeypatch.setattr(service.capabilities, "probe", probe)
-
     plan = await service.plan(
         workload_name="compile",
         adapter="cute.compiler",

@@ -1,0 +1,121 @@
+class Metric:
+    ValueKind_UINT32 = 1
+    ValueKind_UINT64 = 2
+    ValueKind_FLOAT = 3
+    ValueKind_DOUBLE = 4
+    ValueKind_STRING = 5
+
+    def __init__(self, name, kind, value, unit):
+        self._name = name
+        self._kind = kind
+        self._value = value
+        self._unit = unit
+
+    def has_value(self):
+        return True
+
+    def kind(self):
+        return self._kind
+
+    def as_uint64(self):
+        return int(self._value)
+
+    def as_double(self):
+        return float(self._value)
+
+    def as_string(self):
+        return str(self._value)
+
+    def value(self):
+        return self._value
+
+    def unit(self):
+        return self._unit
+
+    def description(self):
+        return "official metric description"
+
+    def metric_type(self):
+        return 2
+
+    def metric_subtype(self):
+        if self._name == "unknown":
+            raise RuntimeError("optional subtype unavailable")
+        return None
+
+    def rollup_operation(self):
+        return 1
+
+
+class Action:
+    def __init__(self):
+        self.metrics = {
+            "sm__cycles_elapsed.avg": Metric("cycles", 2, 42, "cycle"),
+            "device__attribute_display_name": Metric("device", 5, "Fake GPU", ""),
+            "unsupported.metric": Metric("unknown", 99, object(), ""),
+        }
+
+    def name(self):
+        return "vector_add"
+
+    def workload_type(self):
+        def values():
+            for index in range(100):
+                yield index
+            raise AssertionError("provider iterable was consumed past its bound")
+
+        return values()
+
+    def metric_names(self):
+        return tuple(self.metrics)
+
+    def metric_by_name(self, name):
+        return self.metrics[name]
+
+    def rule_results_as_dicts(self):
+        return [
+            {
+                "rule_identifier": "ExplicitRoofline",
+                "section_identifier": "SpeedOfLight_RooflineChart",
+                "k" * 250: "v" * 300,
+            },
+            {"deep": {"a": {"b": {"c": {"d": {"e": "end"}}}}}},
+        ]
+
+    def source_files(self):
+        return {"0": "kernel.cu"}
+
+    def source_markers(self):
+        return [{"source_address": 1234, "message": "source marker"}]
+
+    def source_info(self, address):
+        return {"file": "kernel.cu", "line": 7, "address": address}
+
+    def sass_by_pc(self, address):
+        return {"address": address, "instruction": "LDG.E"}
+
+    def ptx_by_pc(self, address):
+        return {"address": address, "instruction": "ld.global"}
+
+
+class Range:
+    def num_actions(self):
+        return 1
+
+    def action_by_idx(self, index):
+        return Action()
+
+
+class Report:
+    def get_version(self):
+        return "2099.1"
+
+    def num_ranges(self):
+        return 1
+
+    def range_by_idx(self, index):
+        return Range()
+
+
+def load_report(path):
+    return Report()

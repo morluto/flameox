@@ -20,17 +20,32 @@ from tests.support.capture import disable_containment
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_live_compute_sanitizer_clean_and_out_of_bounds_reports(tmp_path: Path) -> None:
+@pytest.fixture(scope="module")
+def compute_sanitizer_probe(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[str, str, Path]:
     sanitizer = shutil.which("compute-sanitizer")
     nvcc = shutil.which("nvcc")
-    if sanitizer is None or nvcc is None:
-        pytest.skip("Compute Sanitizer live proof requires compute-sanitizer and nvcc")
-    executable = tmp_path / "kernel-probe"
+    assert sanitizer is not None
+    assert nvcc is not None
+    version_probe = subprocess.run(
+        (sanitizer, "--version"),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    producer_version = next(
+        line.strip()
+        for line in (version_probe.stdout + version_probe.stderr).splitlines()
+        if line.strip().casefold().startswith("version ")
+    )
+    executable = tmp_path_factory.mktemp("compute-sanitizer-probe") / "kernel-probe"
     subprocess.run(
         (
             nvcc,
             "-lineinfo",
-            "-arch=sm_86",
+            "-arch=native",
             str(PROJECT_ROOT / "tests" / "fixtures" / "compute_sanitizer" / "kernel_probe.cu"),
             "-o",
             str(executable),
@@ -38,67 +53,56 @@ def test_live_compute_sanitizer_clean_and_out_of_bounds_reports(tmp_path: Path) 
         check=True,
         timeout=60,
     )
+    return sanitizer, producer_version, executable
+
+
+def test_live_compute_sanitizer_clean_report_extracts_without_findings(
+    tmp_path: Path,
+    compute_sanitizer_probe: tuple[str, str, Path],
+) -> None:
+    sanitizer, producer_version, executable = compute_sanitizer_probe
     workspace = Workspace.initialize(tmp_path)
-
-    def collect(name: str, *arguments: str) -> tuple[int, int]:
-        report = tmp_path / f"{name}.xml"
-        process = subprocess.run(
-            (
-                sanitizer,
-                "--tool",
-                "memcheck",
-                "--xml",
-                "--save",
-                str(report),
-                "--error-exitcode",
-                "86",
-                "--target-processes",
-                "application-only",
-                str(executable),
-                *arguments,
-            ),
-            check=False,
-            capture_output=True,
-            timeout=60,
+    report = tmp_path / "clean.xml"
+    process = subprocess.run(
+        (
+            sanitizer,
+            "--tool",
+            "memcheck",
+            "--xml",
+            "--save",
+            str(report),
+            "--error-exitcode",
+            "86",
+            "--target-processes",
+            "application-only",
+            str(executable),
+        ),
+        check=False,
+        capture_output=True,
+        timeout=60,
+    )
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(
+            path=report,
+            kind=ArtifactKind.SANITIZER_REPORT,
+            producer="compute-sanitizer",
+            producer_version=producer_version,
         )
-        imported = ImportService(workspace).import_artifact(
-            ImportArtifactRequest(
-                path=report,
-                kind=ArtifactKind.SANITIZER_REPORT,
-                producer="compute-sanitizer",
-                producer_version="live",
-            )
-        )
-        extracted = ComputeSanitizerExtractor(workspace).extract(imported.run.run_id)
-        return process.returncode, extracted.finding_count
+    )
 
-    assert collect("clean") == (0, 0)
-    finding_exit, finding_count = collect("out-of-bounds", "oob")
-    assert finding_exit == 86
-    assert finding_count > 0
+    extracted = ComputeSanitizerExtractor(workspace).extract(imported.run.run_id)
+
+    assert process.returncode == 0
+    assert extracted.finding_count == 0
+    assert extracted.status == "clean"
 
 
 @pytest.mark.anyio
 async def test_live_compute_sanitizer_wrapper_preserves_finding_as_validation(
     tmp_path: Path,
+    compute_sanitizer_probe: tuple[str, str, Path],
 ) -> None:
-    sanitizer = shutil.which("compute-sanitizer")
-    nvcc = shutil.which("nvcc")
-    if sanitizer is None or nvcc is None:
-        pytest.skip("Compute Sanitizer live proof requires compute-sanitizer and nvcc")
-    executable = tmp_path / "kernel-probe"
-    subprocess.run(
-        (
-            nvcc,
-            "-lineinfo",
-            "-arch=sm_86",
-            str(PROJECT_ROOT / "tests" / "fixtures" / "compute_sanitizer" / "kernel_probe.cu"),
-            "-o",
-            str(executable),
-        ),
-        check=True,
-        timeout=60,
-    )
+    _, _, executable = compute_sanitizer_probe
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         "schema_version = 1\n"
