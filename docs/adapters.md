@@ -662,10 +662,11 @@ overhead depends on the enabled domains and workload event rate. The normal
 execution policy owns containment, quotas, timeout, cancellation, and the
 bounded output directory; rocprofv3 owns the native PFTrace bytes.
 
-Fixture provenance and proof gap: `tests/adapters/test_rocprofv3.py` creates a
-Flameox-authored fake CLI under the project MIT license. It verifies exact argv,
-output naming, strict option rejection, and partial-artifact preservation, but
-its sentinel output is not presented as a valid PFTrace. The project-owned
+Fixture provenance and proof gap: `tests/adapters/test_rocprofv3.py` verifies
+strict options and exact argv construction. `tests/adapters/test_rocprofv3_integration.py`
+creates a Flameox-authored fake CLI under the project MIT license and verifies output
+naming and partial-artifact preservation, but its sentinel output is not presented as
+a valid PFTrace. The project-owned
 `project-owned-rocm-shaped-perfetto.json` fixture is a valid Perfetto-compatible
 Chrome trace containing HIP-runtime-shaped and kernel events. It covers import,
 bounded Perfetto extraction, and accelerator summarization, but it was not
