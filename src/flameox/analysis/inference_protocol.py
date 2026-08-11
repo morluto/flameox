@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -404,10 +405,17 @@ def _facets() -> tuple[_FacetGetter, ...]:
     )
 
 
+
+
 def _normalize(value: object) -> str:
+    """Return a display string for a protocol facet value.
+
+    For dict values, use canonical JSON serialization (sorted keys) so that
+    keys/values containing commas or equals signs cannot produce colliding
+    normal forms. Plain scalar values use ``str()`` as before.
+    """
     if isinstance(value, dict):
-        items = sorted(value.items(), key=lambda item: item[0])
-        return ",".join(f"{k}={v}" for k, v in items)
+        return json.dumps(value, sort_keys=True, ensure_ascii=False)
     if isinstance(value, bool):
         return "true" if value else "false"
     if value is None:

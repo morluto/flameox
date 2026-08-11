@@ -366,3 +366,23 @@ def test_server_rejects_out_of_range_gpu_utilization() -> None:
 def test_oracle_result_rejects_empty_reason() -> None:
     with pytest.raises(ValueError):
         OracleResult(status=OracleStatus.PASS, reason="")
+
+
+def test_kv_transfer_config_with_delimiter_chars_does_not_collide() -> None:
+    """Distinct KV-transfer configs with commas/equals in keys/values must not collide.
+
+    Regression for #288: the old ``_normalize()`` used unescaped
+    ``",".join(f"{k}={v}")`` which could make distinct dicts produce the
+    same normalized string. The fix uses canonical JSON serialization.
+    """
+    from flameox.analysis.inference_protocol import _normalize
+
+    config_a = {"a=b,c": "d"}
+    config_b = {"a": "b=c,d"}
+
+    norm_a = _normalize(config_a)
+    norm_b = _normalize(config_b)
+    assert norm_a != norm_b, (
+        f"Distinct configs must not collide: {config_a!r} vs {config_b!r} "
+        f"both normalized to {norm_a!r}"
+    )
