@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Literal
+from typing import Any
 
-from pydantic import Field
+from pydantic import ConfigDict, Field, computed_field, model_validator
 
 from flameox.catalog import Catalog
 from flameox.domain import (
@@ -13,11 +14,13 @@ from flameox.domain import (
     DomainError,
     ErrorCode,
     ExecutionStatus,
+    ResourceAvailability,
     RunType,
     ValidationStatus,
     digest_model,
 )
 from flameox.models import ContractModel
+from flameox.pagination import CursorPageContract
 from flameox.storage import Workspace
 
 
@@ -52,23 +55,40 @@ class RunSummary(ContractModel):
     worker_id: str | None
     orchestration_run_id: str | None
     artifact_kinds: tuple[ArtifactKind, ...]
-    resource_availability: Literal["available", "partial", "unavailable"] = "unavailable"
+    resource_availability: ResourceAvailability = ResourceAvailability.UNAVAILABLE
 
 
 class DiscoveryCoverage(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     filters_applied: tuple[str, ...]
-    population_complete: bool = True
     unavailable_facets: tuple[str, ...] = ()
 
+    @model_validator(mode="before")
+    @classmethod
+    def parse_population_projection(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping) or "population_complete" not in value:
+            return value
+        parsed = dict(value)
+        supplied = parsed.pop("population_complete")
+        unavailable = parsed.get("unavailable_facets", ())
+        if isinstance(unavailable, (list, tuple)) and supplied != (not unavailable):
+            raise ValueError("population completeness must agree with unavailable facets")
+        return parsed
 
-class RunListResult(ContractModel):
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def population_complete(self) -> bool:
+        return not self.unavailable_facets
+
+
+class RunListResult(CursorPageContract):
+    page_items_field = "runs"
+
     schema_version: int = 1
     corpus_commit_id: str
     runs: tuple[RunSummary, ...]
     total: int
-    returned: int
-    truncated: bool
-    next_cursor: str | None
     coverage: DiscoveryCoverage
 
 
@@ -205,8 +225,6 @@ class RunDiscoveryService:
             corpus_commit_id=head.commit_id,
             runs=runs,
             total=int(count_row[0]),
-            returned=len(runs),
-            truncated=has_more,
             next_cursor=next_cursor,
             coverage=DiscoveryCoverage(filters_applied=tuple(applied)),
         )

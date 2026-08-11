@@ -19,8 +19,23 @@ from pydantic import (
     model_validator,
 )
 
-from flameox.domain import ArtifactKind, DomainError, ErrorCode, RunType, digest_model
-from flameox.evidence import GenerationPublisher
+from flameox.domain import (
+    ArtifactKind,
+    DomainError,
+    ErrorCode,
+    EvidenceLevel,
+    RunType,
+    digest_model,
+)
+from flameox.evidence import (
+    CancelledInferenceRequestOutcome,
+    FailedInferenceRequestOutcome,
+    GenerationPublisher,
+    InferenceRequestItem,
+    ReportedInferenceRequestOutcome,
+    SucceededInferenceRequestOutcome,
+    inference_request_outcome_columns,
+)
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
@@ -104,7 +119,7 @@ class MooncakeRequestRow(ContractModel):
     input_length: Annotated[int, Field(ge=0)]
     output_length: Annotated[int, Field(ge=0)]
     prefix_hash_count: Annotated[int, Field(ge=0)]
-    evidence_level: Literal["observed"] = "observed"
+    evidence_level: EvidenceLevel = EvidenceLevel.OBSERVED
 
 
 class MooncakeTraceSummary(ContractModel):
@@ -251,6 +266,61 @@ class MooncakeTraceParser:
         return timestamp, input_length, output_length, hash_ids
 
 
+class AIPerfRequestRow(ContractModel):
+    """One AIPerf request whose export always reports a concrete outcome."""
+
+    source_request_id: str
+    provider_request_id: str | None
+    input_tokens: Annotated[int, Field(ge=0)]
+    output_tokens: Annotated[int, Field(ge=0)]
+    scheduled_ns: Annotated[int, Field(ge=0)] | None
+    observed_started_ns: Annotated[int, Field(ge=0)]
+    ttft_ns: Annotated[int, Field(ge=0)] | None
+    latency_ns: Annotated[int, Field(ge=0)] | None
+    tpot_ns: Annotated[int, Field(ge=0)] | None
+    mean_itl_ns: Annotated[int, Field(ge=0)] | None
+    outcome: ReportedInferenceRequestOutcome = Field(exclude=True)
+    queue_ns: None = None
+    prefill_ns: None = None
+    decode_ns: None = None
+    cache_hit: None = None
+    prefix_hash_count: None = None
+    evidence_level: EvidenceLevel = EvidenceLevel.OBSERVED
+    line_index: Annotated[int, Field(ge=0)]
+
+    @property
+    def success(self) -> bool:
+        success = inference_request_outcome_columns(self.outcome).success
+        assert success is not None
+        return success
+
+    @property
+    def cancelled(self) -> bool:
+        cancelled = inference_request_outcome_columns(self.outcome).cancelled
+        assert cancelled is not None
+        return cancelled
+
+    @property
+    def error_type(self) -> str | None:
+        return inference_request_outcome_columns(self.outcome).error_type
+
+    @property
+    def error_code(self) -> str | None:
+        return inference_request_outcome_columns(self.outcome).error_code
+
+    def evidence_columns(self) -> dict[str, Any]:
+        columns = self.model_dump(mode="python", exclude={"line_index"})
+        columns.update(
+            {
+                "success": self.success,
+                "cancelled": self.cancelled,
+                "error_type": self.error_type,
+                "error_code": self.error_code,
+            }
+        )
+        return columns
+
+
 class AIPerfRecordParser:
     """Stream AIPerf 0.12 record exports without retaining provider payloads."""
 
@@ -263,7 +333,7 @@ class AIPerfRecordParser:
 
     def iter_rows(
         self, path: Path, *, inputs_index: AIPerfInputsIndex | None = None
-    ) -> Iterator[dict[str, Any]]:
+    ) -> Iterator[AIPerfRequestRow]:
         self.truncated = False
         self._inputs_index = inputs_index
         self._corr_matched = 0
@@ -378,7 +448,7 @@ class AIPerfRecordParser:
         return round(value * factor) if factor is not None and value >= 0 else None
 
     @classmethod
-    def _normalize(cls, payload: dict[str, Any], line_index: int) -> dict[str, Any]:
+    def _normalize(cls, payload: dict[str, Any], line_index: int) -> AIPerfRequestRow:
         metadata, metrics = payload.get("metadata"), payload.get("metrics")
         if not isinstance(metadata, dict) or not isinstance(metrics, dict):
             raise ValueError("metadata and metrics must be objects")
@@ -393,6 +463,8 @@ class AIPerfRecordParser:
 
         session_num = integer("session_num", required=True)
         request_start_ns = integer("request_start_ns", required=True)
+        assert session_num is not None
+        assert request_start_ns is not None
         input_metric = cls._metric(metrics, "input_sequence_length")
         output_metric = cls._metric(metrics, "output_sequence_length")
         if input_metric is None or output_metric is None:
@@ -423,33 +495,39 @@ class AIPerfRecordParser:
             and output_tokens > 1
             else None
         )
-        return {
-            "source_request_id": source_request_id,
-            "provider_request_id": metadata.get("x_request_id")
-            if isinstance(metadata.get("x_request_id"), str)
-            else None,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "scheduled_ns": integer("credit_issued_ns"),
-            "observed_started_ns": request_start_ns,
-            "ttft_ns": ttft_ns,
-            "latency_ns": latency_ns,
-            "tpot_ns": tpot_ns,
-            "mean_itl_ns": cls._duration_ns(cls._metric(metrics, "inter_token_latency")),
-            "success": error is None and not cancelled,
-            "cancelled": cancelled,
-            "error_type": _safe_error_category(error.get("type"))
-            if isinstance(error, dict)
-            else None,
-            "error_code": _safe_error_code(error.get("code")) if isinstance(error, dict) else None,
-            "queue_ns": None,
-            "prefill_ns": None,
-            "decode_ns": None,
-            "cache_hit": None,
-            "prefix_hash_count": None,
-            "evidence_level": "observed",
-            "line_index": line_index,
-        }
+        error_type = _safe_error_category(error.get("type")) if isinstance(error, dict) else None
+        error_code = _safe_error_code(error.get("code")) if isinstance(error, dict) else None
+        outcome: ReportedInferenceRequestOutcome
+        if cancelled:
+            outcome = CancelledInferenceRequestOutcome(
+                error_type=error_type,
+                error_code=error_code,
+            )
+        elif error is not None:
+            outcome = FailedInferenceRequestOutcome(
+                error_type=error_type,
+                error_code=error_code,
+            )
+        else:
+            outcome = SucceededInferenceRequestOutcome()
+        return AIPerfRequestRow(
+            source_request_id=source_request_id,
+            provider_request_id=(
+                metadata.get("x_request_id")
+                if isinstance(metadata.get("x_request_id"), str)
+                else None
+            ),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            scheduled_ns=integer("credit_issued_ns"),
+            observed_started_ns=request_start_ns,
+            ttft_ns=ttft_ns,
+            latency_ns=latency_ns,
+            tpot_ns=tpot_ns,
+            mean_itl_ns=cls._duration_ns(cls._metric(metrics, "inter_token_latency")),
+            outcome=outcome,
+            line_index=line_index,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -886,7 +964,7 @@ class VllmMeasurementRow(ContractModel):
     unit: str
     aggregation: str
     dimensions: dict[str, str]
-    evidence_level: Literal["derived"] = "derived"
+    evidence_level: EvidenceLevel = EvidenceLevel.DERIVED
 
 
 class VllmResultParser:
@@ -1287,31 +1365,33 @@ class InferenceArtifactExtractor:
         parser = MooncakeTraceParser(max_rows=self._request_row_limit())
         summary, requests = parser.parse(stored.payload_path)
         rows = [
-            {
-                "request_id": row.request_id,
-                "run_id": target_run,
-                "artifact_id": registration.artifact_id,
-                "source_request_id": str(row.line_index),
-                "provider_request_id": None,
-                "input_tokens": row.input_length,
-                "output_tokens": row.output_length,
-                "scheduled_ns": row.timestamp_ms * 1_000_000,
-                "observed_started_ns": None,
-                "ttft_ns": None,
-                "latency_ns": None,
-                "tpot_ns": None,
-                "mean_itl_ns": None,
-                "success": None,
-                "cancelled": None,
-                "error_type": None,
-                "error_code": None,
-                "queue_ns": None,
-                "prefill_ns": None,
-                "decode_ns": None,
-                "cache_hit": None,
-                "prefix_hash_count": row.prefix_hash_count,
-                "evidence_level": "observed",
-            }
+            InferenceRequestItem.model_validate(
+                {
+                    "request_id": row.request_id,
+                    "run_id": target_run,
+                    "artifact_id": registration.artifact_id,
+                    "source_request_id": str(row.line_index),
+                    "provider_request_id": None,
+                    "input_tokens": row.input_length,
+                    "output_tokens": row.output_length,
+                    "scheduled_ns": row.timestamp_ms * 1_000_000,
+                    "observed_started_ns": None,
+                    "ttft_ns": None,
+                    "latency_ns": None,
+                    "tpot_ns": None,
+                    "mean_itl_ns": None,
+                    "success": None,
+                    "cancelled": None,
+                    "error_type": None,
+                    "error_code": None,
+                    "queue_ns": None,
+                    "prefill_ns": None,
+                    "decode_ns": None,
+                    "cache_hit": None,
+                    "prefix_hash_count": row.prefix_hash_count,
+                    "evidence_level": "observed",
+                }
+            ).model_dump(mode="python")
             for row in requests
         ]
         published = self.publisher.publish_rows_idempotent(
@@ -1486,21 +1566,23 @@ class InferenceArtifactExtractor:
         parser = AIPerfRecordParser(max_rows=self._request_row_limit())
         rows: list[dict[str, Any]] = []
         for record in parser.iter_rows(stored.payload_path, inputs_index=inputs_index):
-            line_index = record.pop("line_index")
+            line_index = record.line_index
             rows.append(
-                {
-                    "request_id": digest_model(
-                        {
-                            "run_id": target_run,
-                            "artifact_id": registration.artifact_id,
-                            "line_index": line_index,
-                            "source_request_id": record["source_request_id"],
-                        }
-                    ),
-                    "run_id": target_run,
-                    "artifact_id": registration.artifact_id,
-                    **record,
-                }
+                InferenceRequestItem.model_validate(
+                    {
+                        "request_id": digest_model(
+                            {
+                                "run_id": target_run,
+                                "artifact_id": registration.artifact_id,
+                                "line_index": line_index,
+                                "source_request_id": record.source_request_id,
+                            }
+                        ),
+                        "run_id": target_run,
+                        "artifact_id": registration.artifact_id,
+                        **record.evidence_columns(),
+                    }
+                ).model_dump(mode="python")
             )
         if not rows:
             raise DomainError(

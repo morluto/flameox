@@ -10,9 +10,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
 from itertools import product
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
-from pydantic import Field, JsonValue, model_validator
+from pydantic import ConfigDict, Field, JsonValue, computed_field, model_validator
 
 from flameox.adapters import PyPerfExtractor, PytestExtractor, PythonStartupExtractor
 from flameox.application.async_work import run_atomic_thread
@@ -47,8 +47,10 @@ from flameox.domain import (
     ExperimentOutcomeDisposition,
     ExperimentOutcomeGoal,
     ExperimentOutcomeMethod,
+    ExperimentRole,
     Hypothesis,
     Investigation,
+    MetricSource,
     OracleStrength,
     RunManifest,
     RunSet,
@@ -70,6 +72,7 @@ from flameox.evidence import (
     numeric_value_to_columns,
 )
 from flameox.models import ContractModel
+from flameox.pagination import CursorPageContract
 from flameox.storage import JsonRecordStore, RunStore, Workspace
 
 
@@ -132,7 +135,7 @@ class ExperimentPlan(ContractModel):
     experiment_name: str
     experiment: Experiment
     adapter: str
-    metric_source: Literal["measurement", "runtime_resource"] = "measurement"
+    metric_source: MetricSource = MetricSource.MEASUREMENT
     execution_policy: ExecutionPolicy
     variant_parameter: str
     variants: tuple[str, ...]
@@ -156,12 +159,12 @@ class ExperimentRunResult(ContractModel):
     limitations: tuple[str, ...] = ()
 
 
-class ExperimentTrialCollection(ContractModel):
+class ExperimentTrialCollection(CursorPageContract):
+    page_items_field = "trials"
+
     schema_version: Literal[2] = 2
     experiment_id: str
     trials: tuple[Trial, ...]
-    returned: int
-    truncated: bool = False
     next_cursor: str | None = None
 
 
@@ -194,7 +197,49 @@ class OutcomeCount(ContractModel):
     failure_rate: float | None = None
 
 
+class OutcomeFirstFailure(ContractModel):
+    trial_id: str
+    factors: dict[str, JsonValue]
+
+
+def _advertise_first_failure_projections(schema: dict[str, Any]) -> None:
+    properties = schema.setdefault("properties", {})
+    assert isinstance(properties, dict)
+    properties.pop("first_failure", None)
+    properties.update(
+        {
+            "first_failure_trial_id": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "default": None,
+                "title": "First Failure Trial Id",
+            },
+            "first_failure_factors": {
+                "anyOf": [
+                    {
+                        "additionalProperties": {"$ref": "#/$defs/JsonValue"},
+                        "type": "object",
+                    },
+                    {"type": "null"},
+                ],
+                "default": None,
+                "title": "First Failure Factors",
+            },
+        }
+    )
+    required = schema.setdefault("required", [])
+    assert isinstance(required, list)
+    for field_name in (
+        "first_failure",
+        "first_failure_trial_id",
+        "first_failure_factors",
+    ):
+        if field_name in required:
+            required.remove(field_name)
+
+
 class OutcomeExperimentResult(ContractModel):
+    model_config = ConfigDict(json_schema_extra=_advertise_first_failure_projections)
+
     schema_version: Literal[1] = 1
     experiment_id: str
     method: Literal[ExperimentOutcomeMethod.FIXED_ATTEMPTS_V1] = (
@@ -205,15 +250,41 @@ class OutcomeExperimentResult(ContractModel):
     counts: tuple[OutcomeCount, ...]
     complete_pairs: int
     unmatched_cells: int
-    first_failure_trial_id: str | None = None
-    first_failure_factors: dict[str, JsonValue] | None = None
+    first_failure: OutcomeFirstFailure | None = Field(default=None, exclude=True)
     limitations: tuple[str, ...] = ()
 
-    @model_validator(mode="after")
-    def first_failure_is_atomic(self) -> OutcomeExperimentResult:
-        if (self.first_failure_trial_id is None) != (self.first_failure_factors is None):
+    @model_validator(mode="before")
+    @classmethod
+    def parse_first_failure_projections(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        has_trial = "first_failure_trial_id" in value
+        has_factors = "first_failure_factors" in value
+        if not has_trial and not has_factors:
+            return value
+        if "first_failure" in value:
+            raise ValueError("use either first_failure or flattened first-failure fields")
+        if has_trial != has_factors:
             raise ValueError("first-failure trial and factors must appear together")
-        return self
+        parsed = dict(value)
+        trial_id = parsed.pop("first_failure_trial_id")
+        factors = parsed.pop("first_failure_factors")
+        if (trial_id is None) != (factors is None):
+            raise ValueError("first-failure trial and factors must appear together")
+        parsed["first_failure"] = (
+            None if trial_id is None else {"trial_id": trial_id, "factors": factors}
+        )
+        return parsed
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def first_failure_trial_id(self) -> str | None:
+        return self.first_failure.trial_id if self.first_failure is not None else None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def first_failure_factors(self) -> dict[str, JsonValue] | None:
+        return self.first_failure.factors if self.first_failure is not None else None
 
 
 @dataclass(slots=True)
@@ -331,8 +402,6 @@ class ExperimentService:
         return ExperimentTrialCollection(
             experiment_id=experiment_id,
             trials=trials,
-            returned=len(trials),
-            truncated=truncated,
             next_cursor=next_cursor,
         )
 
@@ -467,19 +536,19 @@ class ExperimentService:
             )
         definition = self.workloads.definition(config.workload)
         oracle = workload.oracle
-        role: Literal["exploratory", "confirmatory"] = (
-            "confirmatory"
+        role = (
+            ExperimentRole.CONFIRMATORY
             if oracle is not None and oracle.strength is OracleStrength.CROSS_TREATMENT_EQUIVALENCE
-            else "exploratory"
+            else ExperimentRole.EXPLORATORY
         )
         design = {
             "name": experiment_name,
             "config": config.model_dump(mode="json"),
             "parameters": supplied_overrides,
             "metric_source": (
-                "runtime_resource"
+                MetricSource.RUNTIME_RESOURCE
                 if config.primary_metric.startswith("runtime_resource.")
-                else "measurement"
+                else MetricSource.MEASUREMENT
             ),
         }
         experiment = Experiment(
@@ -584,9 +653,9 @@ class ExperimentService:
             experiment=experiment,
             adapter=adapter,
             metric_source=(
-                "runtime_resource"
+                MetricSource.RUNTIME_RESOURCE
                 if config.primary_metric.startswith("runtime_resource.")
-                else "measurement"
+                else MetricSource.MEASUREMENT
             ),
             execution_policy=execution_policy,
             variant_parameter=variant_parameter,
@@ -829,7 +898,7 @@ class ExperimentService:
             limitations.append(
                 "Automatic paired comparison currently requires exactly two variants."
             )
-        elif plan.metric_source == "measurement" and plan.adapter != "pyperf":
+        elif plan.metric_source is MetricSource.MEASUREMENT and plan.adapter != "pyperf":
             limitations.append(
                 "Automatic experiment comparison currently requires pyperf measurements."
             )
@@ -842,7 +911,11 @@ class ExperimentService:
                             "candidate_run_set_id": run_sets[1].run_set_id,
                             "experiment_id": plan.experiment.experiment_id,
                             "metric": plan.experiment.primary_metric,
-                            "unit": ("bytes" if plan.metric_source == "runtime_resource" else "ns"),
+                            "unit": (
+                                "bytes"
+                                if plan.metric_source is MetricSource.RUNTIME_RESOURCE
+                                else "ns"
+                            ),
                             "metric_source": plan.metric_source,
                             "polarity": plan.experiment.polarity,
                             "practical_threshold": plan.experiment.practical_threshold,
@@ -1152,8 +1225,14 @@ class ExperimentService:
             counts=tuple(counts),
             complete_pairs=complete_pairs,
             unmatched_cells=unmatched,
-            first_failure_trial_id=(first_failure.trial_id if first_failure is not None else None),
-            first_failure_factors=(first_failure.factors if first_failure is not None else None),
+            first_failure=(
+                OutcomeFirstFailure(
+                    trial_id=first_failure.trial_id,
+                    factors=first_failure.factors,
+                )
+                if first_failure is not None
+                else None
+            ),
             limitations=tuple(limitations),
         )
 

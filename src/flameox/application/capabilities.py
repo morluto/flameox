@@ -21,7 +21,12 @@ import portalocker
 from platformdirs import user_data_path
 from pydantic import ConfigDict, Field, TypeAdapter, computed_field, model_validator
 
-from flameox.adapters.builtins import BUILTIN_ADAPTERS, BuiltinAdapter, builtin_adapter
+from flameox.adapters.builtins import (
+    BUILTIN_ADAPTERS,
+    AdapterDependencyKind,
+    BuiltinAdapter,
+    builtin_adapter,
+)
 from flameox.adapters.nsight_compute import find_ncu_report_interface
 from flameox.adapters.registry import AdapterRegistry
 from flameox.adapters.setup_runtime import install_trace_processor
@@ -30,6 +35,7 @@ from flameox.application.operations import OperationFailure, OperationRunner, Op
 from flameox.atomic import atomic_write_json
 from flameox.domain import (
     AdapterSetup,
+    CapabilityExtra,
     CapabilityPermissionStatus,
     CapabilityProvisioning,
     CapabilityReport,
@@ -39,6 +45,7 @@ from flameox.domain import (
     DomainError,
     ErrorCode,
     ProbeKind,
+    parse_managed_runtime_extras,
 )
 from flameox.domain.models import utc_now
 from flameox.execution import (
@@ -404,7 +411,7 @@ class CapabilityService:
         architecture = platform.machine().lower()
         reports: list[CapabilityReport] = []
         for adapter in BUILTIN_ADAPTERS.values():
-            if adapter.dependency_kind != "internal":
+            if adapter.dependency_kind is not AdapterDependencyKind.INTERNAL:
                 continue
             supported_platform = (
                 adapter.supported_platforms is None or system in adapter.supported_platforms
@@ -434,7 +441,7 @@ class CapabilityService:
         executable_adapters = (
             adapter
             for adapter in BUILTIN_ADAPTERS.values()
-            if adapter.dependency_kind == "executable"
+            if adapter.dependency_kind is AdapterDependencyKind.EXECUTABLE
         )
         for adapter in executable_adapters:
             if adapter.dependency is None:
@@ -511,7 +518,9 @@ class CapabilityService:
             )
         reports.extend(self._containment_reports(system, architecture))
         package_adapters = (
-            adapter for adapter in BUILTIN_ADAPTERS.values() if adapter.dependency_kind == "package"
+            adapter
+            for adapter in BUILTIN_ADAPTERS.values()
+            if adapter.dependency_kind is AdapterDependencyKind.PACKAGE
         )
         for adapter in package_adapters:
             if adapter.dependency is None:
@@ -1157,9 +1166,7 @@ class CapabilityService:
                 else ("staging_toxiproxy" if pending_toxiproxy else None)
             )
         )
-        if initial_phase is None:
-            self._record_setup_completed(requested)
-        else:
+        if initial_phase is not None:
             self._record_setup_progress(
                 requested,
                 completed=already_available,
@@ -1228,9 +1235,7 @@ class CapabilityService:
                     if pending_trace
                     else ("staging_toxiproxy" if pending_toxiproxy else None)
                 )
-                if next_phase is None:
-                    self._record_setup_completed(requested)
-                else:
+                if next_phase is not None:
                     self._record_setup_progress(
                         requested,
                         completed=self._available_requested(requested),
@@ -1543,7 +1548,7 @@ class CapabilityService:
             else ("Call start_capability_setup with adapter='toxiproxy'.",),
             setup=CapabilitySetup(
                 method="start_capability_setup",
-                extra="toxiproxy",
+                extra=CapabilityExtra.TOXIPROXY,
                 requirement=None,
                 next_tool="start_capability_setup",
             ),
@@ -1587,24 +1592,15 @@ class CapabilityService:
                 details={"error": str(error)[:500]},
             ) from error
 
-    def _record_managed_extras(self, extras: tuple[str, ...]) -> None:
-        values = {
-            value
-            for value in extras
-            if value in {"cpu", "execution", "memory", "test", "trace", "torch"}
-        }
+    def _record_managed_extras(self, extras: tuple[CapabilityExtra, ...]) -> None:
+        values = set(parse_managed_runtime_extras(extras))
         if not values:
             return
-        existing: set[str] = set()
+        existing: set[CapabilityExtra] = set()
         try:
             payload = json.loads(self.capability_manifest.read_text())
             if isinstance(payload, dict) and isinstance(payload.get("extras"), list):
-                existing = {
-                    value
-                    for value in payload["extras"]
-                    if isinstance(value, str)
-                    and value in {"cpu", "execution", "memory", "test", "trace", "torch"}
-                }
+                existing = set(parse_managed_runtime_extras(payload["extras"]))
         except (OSError, ValueError):
             pass
         payload = {"schema_version": 1, "extras": sorted(existing | values)}
@@ -1614,18 +1610,15 @@ class CapabilityService:
                 Path(user_data_path("flameox", appauthor=False)) / "capabilities.json"
             )
             if runtime_manifest != self.capability_manifest:
-                runtime_existing: set[str] = set()
+                runtime_existing: set[CapabilityExtra] = set()
                 try:
                     runtime_payload = json.loads(runtime_manifest.read_text())
                     if isinstance(runtime_payload, dict) and isinstance(
                         runtime_payload.get("extras"), list
                     ):
-                        runtime_existing = {
-                            value
-                            for value in runtime_payload["extras"]
-                            if isinstance(value, str)
-                            and value in {"cpu", "execution", "memory", "test", "trace", "torch"}
-                        }
+                        runtime_existing = set(
+                            parse_managed_runtime_extras(runtime_payload["extras"])
+                        )
                 except (OSError, ValueError):
                     pass
                 atomic_write_json(

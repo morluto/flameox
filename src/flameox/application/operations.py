@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
 from uuid import uuid4
 
-from pydantic import Field, TypeAdapter, model_validator
+from pydantic import Field, TypeAdapter, computed_field, model_validator
 
 from flameox.domain import DomainError, ErrorCode, digest_model
-from flameox.domain.models import utc_now
+from flameox.domain.models import Digest, utc_now
 from flameox.models import ContractModel
 from flameox.storage import JsonRecordStore, Workspace
 
@@ -91,13 +91,11 @@ class OperationFailure(Exception):
 
 
 class _OperationRecord(ContractModel):
-    schema_version: Literal[1] = 1
-    operation_id: str
+    schema_version: Literal[2] = 2
     operation: str
     workspace_id: str
-    request_digest: str
     request: dict[str, Any]
-    idempotency_digest: str
+    idempotency_digest: Digest
     phase: str = "starting"
     revision: int = Field(default=0, ge=0)
     progress: tuple[OperationProgress, ...] = Field(default=(), max_length=32)
@@ -105,11 +103,59 @@ class _OperationRecord(ContractModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
+    @model_validator(mode="before")
+    @classmethod
+    def parse_identity_projections(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        payload = dict(value)
+        supplied_request_digest = payload.pop("request_digest", None)
+        if (
+            supplied_request_digest is not None
+            and "request" in payload
+            and supplied_request_digest != digest_model(payload["request"])
+        ):
+            raise ValueError("operation request digest does not match its request")
+        supplied_operation_id = payload.pop("operation_id", None)
+        idempotency_digest = payload.get("idempotency_digest")
+        if supplied_operation_id is not None and isinstance(idempotency_digest, str):
+            expected_operation_id = f"op-{idempotency_digest.removeprefix('sha256:')}"
+            if supplied_operation_id != expected_operation_id:
+                raise ValueError("operation identifier does not match its idempotency digest")
+        return payload
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def request_digest(self) -> Digest:
+        return digest_model(self.request)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def operation_id(self) -> str:
+        return f"op-{self.idempotency_digest.removeprefix('sha256:')}"
+
     def _next_revision(self) -> dict[str, Any]:
-        payload = self.model_dump(mode="python")
+        payload = {name: getattr(self, name) for name in type(self).model_fields}
         payload["revision"] = self.revision + 1
         payload["updated_at"] = utc_now()
         return payload
+
+
+def _parse_active_cancellation_projection(value: Any) -> Any:
+    if not isinstance(value, Mapping) or "cancellation_requested" not in value:
+        return value
+    payload = dict(value)
+    supplied = payload.pop("cancellation_requested")
+    cleanup_status = payload.get(
+        "cleanup_status",
+        OperationCleanupStatus.NOT_REQUIRED,
+    )
+    if cleanup_status in {
+        OperationCleanupStatus.NOT_REQUIRED,
+        OperationCleanupStatus.PENDING,
+    } and supplied != (cleanup_status == OperationCleanupStatus.PENDING):
+        raise ValueError("operation cancellation must agree with pending cleanup")
+    return payload
 
 
 class ActiveOperationRecord(_OperationRecord):
@@ -119,7 +165,6 @@ class ActiveOperationRecord(_OperationRecord):
     failure_code: Literal[None] = None
     failure_message: Literal[None] = None
     failure_details: Literal[None] = None
-    cancellation_requested: bool = False
     cleanup_status: Literal[
         OperationCleanupStatus.NOT_REQUIRED,
         OperationCleanupStatus.PENDING,
@@ -129,16 +174,15 @@ class ActiveOperationRecord(_OperationRecord):
     owner_id: str
     owner_heartbeat_at: datetime
 
-    @model_validator(mode="after")
-    def cancellation_owns_cleanup_state(self) -> Self:
-        expected = (
-            OperationCleanupStatus.PENDING
-            if self.cancellation_requested
-            else OperationCleanupStatus.NOT_REQUIRED
-        )
-        if self.cleanup_status is not expected:
-            raise ValueError("active operation cleanup must match cancellation state")
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def parse_cancellation_projection(cls, value: Any) -> Any:
+        return _parse_active_cancellation_projection(value)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def cancellation_requested(self) -> bool:
+        return self.cleanup_status is OperationCleanupStatus.PENDING
 
     def running(self) -> Self:
         payload = self._next_revision()
@@ -155,7 +199,6 @@ class ActiveOperationRecord(_OperationRecord):
         payload = self._next_revision()
         payload.update(
             {
-                "cancellation_requested": True,
                 "phase": "cancelling",
                 "cleanup_status": OperationCleanupStatus.PENDING,
                 "owner_heartbeat_at": payload["updated_at"],
@@ -216,6 +259,7 @@ class ActiveOperationRecord(_OperationRecord):
                 **self._next_revision(),
                 "state": OperationState.CANCELLED,
                 "phase": "cancelled",
+                "cancellation_requested": self.cancellation_requested,
                 "cleanup_status": OperationCleanupStatus.COMPLETE,
                 "terminal_receipt": receipt,
                 "item_outcomes": item_outcomes,
@@ -243,6 +287,7 @@ class ActiveOperationRecord(_OperationRecord):
                 **self._next_revision(),
                 "state": OperationState.FAILED,
                 "phase": phase,
+                "cancellation_requested": self.cancellation_requested,
                 "cleanup_status": OperationCleanupStatus.COMPLETE,
                 "failure_code": failure_code,
                 "failure_message": failure_message,
@@ -320,7 +365,6 @@ class UnmanagedOperationRecord(_OperationRecord):
     failure_code: Literal[None] = None
     failure_message: Literal[None] = None
     failure_details: Literal[None] = None
-    cancellation_requested: bool
     cleanup_status: Literal[
         OperationCleanupStatus.NOT_REQUIRED,
         OperationCleanupStatus.PENDING,
@@ -330,16 +374,15 @@ class UnmanagedOperationRecord(_OperationRecord):
     owner_id: Literal[None] = None
     owner_heartbeat_at: Literal[None] = None
 
-    @model_validator(mode="after")
-    def cancellation_owns_cleanup_state(self) -> Self:
-        expected = (
-            OperationCleanupStatus.PENDING
-            if self.cancellation_requested
-            else OperationCleanupStatus.NOT_REQUIRED
-        )
-        if self.cleanup_status is not expected:
-            raise ValueError("unmanaged operation cleanup must match cancellation state")
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def parse_cancellation_projection(cls, value: Any) -> Any:
+        return _parse_active_cancellation_projection(value)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def cancellation_requested(self) -> bool:
+        return self.cleanup_status is OperationCleanupStatus.PENDING
 
 
 type OperationRecord = Annotated[
@@ -381,6 +424,7 @@ class OperationStatus(ContractModel):
     @classmethod
     def from_record(cls, record: OperationRecord) -> OperationStatus:
         payload = record.model_dump(exclude={"owner_id", "owner_heartbeat_at"})
+        payload["schema_version"] = 1
         if record.operation == "capability.setup" and isinstance(record, ActiveOperationRecord):
             payload["poll_after_ms"] = _capability_setup_poll_after_ms(record.phase)
             payload["recovery"] = OperationRecovery(
@@ -498,12 +542,9 @@ class OperationRunner:
             # The digest-derived identity makes the create itself the cross-process
             # idempotency gate. A process-local asyncio lock cannot protect two MCP
             # server instances sharing one workspace.
-            operation_id = f"op-{idempotency_digest.removeprefix('sha256:')}"
             record = ActiveOperationRecord(
-                operation_id=operation_id,
                 operation=self.operation,
                 workspace_id=self.workspace.identity.workspace_id,
-                request_digest=request_digest,
                 request=request,
                 idempotency_digest=idempotency_digest,
                 owner_id=self.owner_id,
@@ -513,6 +554,7 @@ class OperationRunner:
                     for item in items
                 ),
             )
+            operation_id = record.operation_id
             try:
                 self.store.records.create(record)
             except DomainError as error:

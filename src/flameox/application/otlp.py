@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import ConfigDict, computed_field, model_validator
 
-from flameox.application.artifact_workers import ArtifactWorker
+from flameox.adapters.artifact_workers import ArtifactWorker
 from flameox.application.evidence_rows import _json
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.evidence import GenerationPublisher

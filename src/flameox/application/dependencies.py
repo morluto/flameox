@@ -19,6 +19,8 @@ from flameox.domain import (
     PreflightDisposition,
     PreflightReport,
     ProbeKind,
+    RequirementKind,
+    RequirementStatus,
 )
 from flameox.execution import (
     INSTALLER_ENVIRONMENT_ALLOWLIST,
@@ -102,7 +104,8 @@ def _dependency_next_tool(
     preflight: PreflightReport,
 ) -> Literal["plan_capture", "list_capabilities", "prepare_workload_dependencies"]:
     if any(
-        item.kind == "python_distribution" and item.status != "available"
+        item.kind is RequirementKind.PYTHON_DISTRIBUTION
+        and item.status is not RequirementStatus.AVAILABLE
         for item in preflight.requirements
     ):
         return "prepare_workload_dependencies"

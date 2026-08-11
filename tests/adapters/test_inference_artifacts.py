@@ -19,6 +19,7 @@ from flameox.application import EvidenceQueryService, ImportArtifactRequest, Imp
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, Sensitivity
 from flameox.domain.identity import new_id
 from flameox.domain.models import ArtifactRegistration
+from flameox.evidence import InferenceRequestOutcomeKind
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
 
@@ -353,32 +354,32 @@ def test_aiperf_record_parser_normalizes_safe_request_evidence(tmp_path: Path) -
 
     rows = list(AIPerfRecordParser().iter_rows(result))
 
-    assert rows == [
-        {
-            "source_request_id": "conversation-a:2",
-            "provider_request_id": "request-7",
-            "input_tokens": 20,
-            "output_tokens": 3,
-            "scheduled_ns": 100,
-            "observed_started_ns": 125,
-            "ttft_ns": 2_000_000,
-            "latency_ns": 10_000_000,
-            "tpot_ns": 4_000_000,
-            "mean_itl_ns": 4_000_000,
-            "success": True,
-            "cancelled": False,
-            "error_type": None,
-            "error_code": None,
-            "queue_ns": None,
-            "prefill_ns": None,
-            "decode_ns": None,
-            "cache_hit": None,
-            "prefix_hash_count": None,
-            "evidence_level": "observed",
-            "line_index": 0,
-        }
-    ]
-    assert "must never be normalized" not in json.dumps(rows)
+    assert len(rows) == 1
+    assert rows[0].outcome.kind is InferenceRequestOutcomeKind.SUCCEEDED
+    assert {**rows[0].evidence_columns(), "line_index": rows[0].line_index} == {
+        "source_request_id": "conversation-a:2",
+        "provider_request_id": "request-7",
+        "input_tokens": 20,
+        "output_tokens": 3,
+        "scheduled_ns": 100,
+        "observed_started_ns": 125,
+        "ttft_ns": 2_000_000,
+        "latency_ns": 10_000_000,
+        "tpot_ns": 4_000_000,
+        "mean_itl_ns": 4_000_000,
+        "success": True,
+        "cancelled": False,
+        "error_type": None,
+        "error_code": None,
+        "queue_ns": None,
+        "prefill_ns": None,
+        "decode_ns": None,
+        "cache_hit": None,
+        "prefix_hash_count": None,
+        "evidence_level": "observed",
+        "line_index": 0,
+    }
+    assert "must never be normalized" not in json.dumps(rows[0].evidence_columns())
 
 
 def test_aiperf_record_parser_keeps_only_safe_error_classification(tmp_path: Path) -> None:
@@ -400,11 +401,12 @@ def test_aiperf_record_parser_keeps_only_safe_error_classification(tmp_path: Pat
 
     row = next(AIPerfRecordParser().iter_rows(result))
 
-    assert row["success"] is False
-    assert row["cancelled"] is True
-    assert row["error_type"] == "timeout"
-    assert row["error_code"] == "408"
-    assert "secret body" not in json.dumps(row)
+    assert row.outcome.kind is InferenceRequestOutcomeKind.CANCELLED
+    assert row.success is False
+    assert row.cancelled is True
+    assert row.error_type == "timeout"
+    assert row.error_code == "408"
+    assert "secret body" not in json.dumps(row.evidence_columns())
 
 
 def test_aiperf_record_parser_collapses_untrusted_error_identifiers(tmp_path: Path) -> None:
@@ -419,9 +421,10 @@ def test_aiperf_record_parser_collapses_untrusted_error_identifiers(tmp_path: Pa
 
     row = next(AIPerfRecordParser().iter_rows(result))
 
-    assert row["error_type"] == "provider_error"
-    assert row["error_code"] == "provider_error"
-    serialized = json.dumps(row)
+    assert row.outcome.kind is InferenceRequestOutcomeKind.FAILED
+    assert row.error_type == "provider_error"
+    assert row.error_code == "provider_error"
+    serialized = json.dumps(row.evidence_columns())
     assert "super-secret" not in serialized
     assert "tenant-secret" not in serialized
     assert "another secret" not in serialized

@@ -8,7 +8,7 @@ import pytest
 
 from flameox.config import WorkspaceConfig
 from flameox.domain import DomainError, ErrorCode
-from flameox.storage import Workspace
+from flameox.storage import CorpusCommit, Workspace
 
 
 def test_initialize_creates_static_identity_and_empty_corpus(tmp_path: Path) -> None:
@@ -142,6 +142,22 @@ def test_commit_digest_detects_tampering(tmp_path: Path) -> None:
         workspace.corpus.read_head()
 
     assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+
+
+def test_corpus_commit_rejects_contradictory_persisted_digest_projections(
+    tmp_path: Path,
+) -> None:
+    commit = Workspace.initialize(tmp_path).corpus.read_head()
+    payload = commit.model_dump(mode="json")
+
+    payload["inventory_digest"] = "sha256:" + ("a" * 64)
+    with pytest.raises(ValueError, match="inventory digest"):
+        CorpusCommit.model_validate(payload)
+
+    payload = commit.model_dump(mode="json")
+    payload["commit_id"] = "sha256:" + ("b" * 64)
+    with pytest.raises(ValueError, match="commit digest"):
+        CorpusCommit.model_validate(payload)
 
 
 def test_lock_timeout_maps_to_structured_retryable_error(tmp_path: Path) -> None:

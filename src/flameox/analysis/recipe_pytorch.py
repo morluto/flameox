@@ -229,8 +229,6 @@ class PyTorchRecipes(RecipeContext):
             input_id=input_id,
             operators=operators,
             total=total,
-            returned=len(operators),
-            truncated=total > len(operators),
             coverage={
                 "self_cpu_time": True,
                 "total_cpu_time": True,

@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import Field, JsonValue
 
-from flameox.application.artifact_workers import ArtifactWorker
+from flameox.adapters.artifact_workers import ArtifactWorker
 from flameox.domain import (
     ArtifactKind,
     ArtifactRegistration,
@@ -22,6 +22,7 @@ from flameox.evidence import GenerationPublisher
 from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
 from flameox.execution import SubprocessBroker
 from flameox.models import ContractModel
+from flameox.pagination import CursorPageContract
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
 type _AggregateKey = tuple[str, str | None, str | None]
@@ -54,17 +55,16 @@ class TraceEvent(ContractModel):
     track_id: int
 
 
-class TraceWindowResult(ContractModel):
+class TraceWindowResult(CursorPageContract):
+    page_items_field = "events"
+
     schema_version: int = 1
     artifact_id: str
     start_ns: int
     end_ns: int
     events: tuple[TraceEvent, ...]
     total: int
-    returned: int
-    truncated: bool
     coverage: float
-    next_cursor: str | None
     trace_processor_path: str
     limitations: tuple[str, ...] = (
         "The window includes slices that overlap the requested interval.",
@@ -647,8 +647,6 @@ class PerfettoExtractor:
             end_ns=end_ns,
             events=events,
             total=total,
-            returned=len(events),
-            truncated=has_more,
             coverage=(len(events) / total if total else 0.0),
             next_cursor=next_cursor,
             trace_processor_path=str(binary),

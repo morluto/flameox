@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import Field, StringConstraints
@@ -99,13 +100,26 @@ class _ProfilerState(ContractModel):
     profiler_version: _NonEmptyStr | None = None
 
 
+class ProfilerKind(StrEnum):
+    NONE = "none"
+    NSIGHT_SYSTEMS = "nsight_systems"
+    TORCH_PROFILER = "torch_profiler"
+    PERFETTO = "perfetto"
+    CUSTOM = "custom"
+
+
 class ProfilerState(_ProfilerState):
-    profiler: Literal["none", "nsight_systems", "torch_profiler", "perfetto", "custom"] = "none"
+    profiler: ProfilerKind = ProfilerKind.NONE
     attached: Literal[False] = False
 
 
 class AttachedProfilerState(_ProfilerState):
-    profiler: Literal["nsight_systems", "torch_profiler", "perfetto", "custom"]
+    profiler: Literal[
+        ProfilerKind.NSIGHT_SYSTEMS,
+        ProfilerKind.TORCH_PROFILER,
+        ProfilerKind.PERFETTO,
+        ProfilerKind.CUSTOM,
+    ]
     attached: Literal[True] = True
 
 

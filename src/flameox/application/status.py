@@ -8,7 +8,7 @@ from flameox.adapters import (
     PyPerfExtractor,
 )
 from flameox.application.capabilities import CapabilityService
-from flameox.application.integrity import IntegrityService
+from flameox.application.integrity import IntegrityLevel, IntegrityService
 from flameox.application.quarantine import QuarantineService
 from flameox.application.recovery import RecoveryService
 from flameox.catalog import Catalog
@@ -76,7 +76,7 @@ def workspace_status(workspace: Workspace) -> WorkspaceStatus:
     storage_bytes = tree_bytes(workspace.paths.root)
     if catalog_fresh is False:
         warnings.append("The rebuildable catalog is stale.")
-    integrity = IntegrityService(workspace).validate(full=False)
+    integrity = IntegrityService(workspace).validate(IntegrityLevel.QUICK)
     warnings.extend(issue.message for issue in integrity.issues)
     recovery = RecoveryService(workspace).inspect()
     quarantined_run_ids = tuple(

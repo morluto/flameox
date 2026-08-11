@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from flameox.adapters import RuntimeInstallation, SetupClient
 from flameox.application import SetupOperation, SetupService
@@ -150,7 +151,20 @@ async def test_verify_checks_the_runtime_and_every_configured_launcher(tmp_path:
     assert all(client.action.value == "already_current" for client in plan.public.clients)
     assert report.verified
     assert report.unchanged_clients == (SetupClient.CLAUDE, SetupClient.GEMINI)
+    assert report.model_dump(mode="json")["verified"] is True
+    with pytest.raises(ValidationError, match="verification must agree"):
+        type(report).model_validate({**report.model_dump(mode="python"), "verified": False})
     assert runtime.verified[-1] == runtime.executable("0.1.0")
+
+    unbound = type(report)(
+        operation=SetupOperation.CONFIGURE,
+        version=None,
+        runtime_installed=False,
+        changed_clients=(),
+        unchanged_clients=(),
+    )
+    assert unbound.verified is False
+    assert type(report).model_validate(unbound.model_dump(mode="json")) == unbound
 
 
 @pytest.mark.anyio

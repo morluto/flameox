@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -10,8 +9,10 @@ from flameox.application import (
     ArtifactPipelineService,
     ImportArtifactRequest,
     ImportService,
+    PipelineComparison,
     PipelineStageComparison,
     PipelineStageDeclaration,
+    PipelineStageStatus,
     RegisteredPipelineStage,
     RegisteredPipelineStageDeclaration,
     RegisterPipelineRequest,
@@ -25,12 +26,12 @@ _STAGE_ADAPTER: TypeAdapter[PipelineStageDeclaration] = TypeAdapter(PipelineStag
 _STAGE_COMPARISON_ADAPTER: TypeAdapter[PipelineStageComparison] = TypeAdapter(
     PipelineStageComparison
 )
-type StageStatus = Literal["available", "cached", "skipped", "unavailable", "failed"]
+type StageStatus = PipelineStageStatus
 
 
 @pytest.mark.parametrize(
     "status",
-    ["available", "cached", "skipped", "unavailable", "failed"],
+    list(PipelineStageStatus),
 )
 def test_pipeline_stage_status_routes_to_registration_variant(status: StageStatus) -> None:
     payload: dict[str, object] = {
@@ -44,7 +45,7 @@ def test_pipeline_stage_status_routes_to_registration_variant(status: StageStatu
 
     stage = _STAGE_ADAPTER.validate_python(payload)
 
-    if status in {"available", "cached"}:
+    if status in {PipelineStageStatus.AVAILABLE, PipelineStageStatus.CACHED}:
         assert isinstance(stage, RegisteredPipelineStageDeclaration)
     else:
         assert isinstance(stage, UnregisteredPipelineStageDeclaration)
@@ -87,6 +88,51 @@ def test_pipeline_stage_comparison_requires_the_side_named_by_its_disposition() 
                 "candidate_ordinal": 1,
             }
         )
+
+
+def test_pipeline_stage_comparison_rejects_a_stale_short_circuit_projection() -> None:
+    with pytest.raises(ValidationError, match="short-circuit status"):
+        _STAGE_COMPARISON_ADAPTER.validate_python(
+            {
+                "stage_name": "generated",
+                "disposition": "identical",
+                "baseline_ordinal": 1,
+                "candidate_ordinal": 1,
+                "baseline_artifact_id": "sha256:same",
+                "candidate_artifact_id": "sha256:same",
+                "extraction_short_circuited": False,
+            }
+        )
+
+
+def test_pipeline_comparison_rejects_stale_derived_projections() -> None:
+    payload = {
+        "baseline_pipeline_id": "baseline",
+        "candidate_pipeline_id": "candidate",
+        "compatibility": "compatible",
+        "identity_mismatches": [],
+        "stages": [
+            {
+                "stage_name": "generated",
+                "disposition": "changed",
+                "baseline_ordinal": 1,
+                "candidate_ordinal": 1,
+            }
+        ],
+        "input_artifact_ids": [],
+        "extractor_identities": [],
+        "limitations": [],
+    }
+    comparison = PipelineComparison.model_validate(payload)
+
+    assert comparison.first_observed_divergent_stage == "generated"
+    assert comparison.comparison_id == comparison.result_digest
+    with pytest.raises(ValidationError, match="first divergent stage"):
+        PipelineComparison.model_validate(
+            {**payload, "first_observed_divergent_stage": "different"}
+        )
+    with pytest.raises(ValidationError, match="digest does not match"):
+        PipelineComparison.model_validate({**payload, "result_digest": "sha256:stale"})
 
 
 def _import(workspace: Workspace, path: Path, content: str, *, sensitive: bool = False) -> str:
@@ -133,7 +179,7 @@ def _pipeline(
     workspace: Workspace,
     run_id: str,
     *,
-    second_status: StageStatus = "available",
+    second_status: StageStatus = PipelineStageStatus.AVAILABLE,
     second_ordinal: int = 1,
     schema: str = "ir-v1",
     generated_lines: int = 1,
@@ -142,7 +188,7 @@ def _pipeline(
     device_identity: str | None = "device",
 ) -> str:
     registrations = RunStore(workspace).read(run_id).artifacts
-    if second_status == "available" or second_status == "cached":
+    if second_status in {PipelineStageStatus.AVAILABLE, PipelineStageStatus.CACHED}:
         second_stage: PipelineStageDeclaration = RegisteredPipelineStageDeclaration(
             name="generated",
             ordinal=second_ordinal,
@@ -176,7 +222,7 @@ def _pipeline(
             RegisteredPipelineStageDeclaration(
                 name="input",
                 ordinal=0,
-                status="available",
+                status=PipelineStageStatus.AVAILABLE,
                 registration_id=registrations[0].registration_id,
                 format="text",
                 format_schema="source-v1",
@@ -268,7 +314,12 @@ def test_pipeline_marks_skipped_and_incompatible_stages_explicitly(tmp_path: Pat
 
     skipped = service.compare(
         baseline,
-        _pipeline(service, workspace, right_run, second_status="skipped"),
+        _pipeline(
+            service,
+            workspace,
+            right_run,
+            second_status=PipelineStageStatus.SKIPPED,
+        ),
     )
     incompatible = service.compare(
         baseline,

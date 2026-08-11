@@ -16,6 +16,7 @@ from flameox.catalog import Catalog
 from flameox.domain import (
     DomainError,
     ErrorCode,
+    ProcessCancellationCause,
 )
 from flameox.storage import RunStore, Workspace
 from tests.support.capture import disable_containment, write_workload
@@ -119,7 +120,10 @@ timeout_seconds = 20
     assert run.process.cancellation_cause == "storage_reserve_exceeded"
     assert run.process.cleanup_complete is True
     assert run.process.resources is not None
-    assert run.process.resources.policy_termination == "storage_reserve_exceeded"
+    assert (
+        run.process.resources.policy_termination
+        is ProcessCancellationCause.STORAGE_RESERVE_EXCEEDED
+    )
     with Catalog(workspace).open_snapshot() as snapshot:
         resource_row = snapshot.execute(
             "SELECT policy_termination FROM runtime_resource_summaries WHERE run_id = ?",

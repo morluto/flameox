@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from enum import StrEnum
 from typing import Annotated, Literal, cast
 
 from pydantic import Field, JsonValue, model_validator
@@ -17,6 +18,7 @@ from flameox.domain import (
     Finding,
     FindingAssessment,
     LimitationDetail,
+    LimitationSource,
     Sensitivity,
     TrialFailureClass,
     TrialOutcome,
@@ -28,6 +30,40 @@ from flameox.storage import ArtifactStore, JsonRecordStore, RunStore, Workspace
 
 _ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+class SummaryExcerptPolicy(StrEnum):
+    NONE = "none"
+    INTERNAL = "internal"
+
+
+class SummarySensitiveContextPolicy(StrEnum):
+    REDACT = "redact"
+    INCLUDE = "include"
+
+
+class SummaryRunRole(StrEnum):
+    BASELINE = "baseline"
+    CANDIDATE = "candidate"
+    CONTEXT = "context"
+
+
+class SummaryReferenceKind(StrEnum):
+    COMPARISON = "comparison"
+    ANALYSIS = "analysis"
+
+
+class SummarySupportStatus(StrEnum):
+    AS_RECORDED = "as_recorded"
+    NOT_SUPPORTING = "not_supporting"
+    CANDIDATE_ONLY = "candidate_only"
+
+
+class SummaryProofShape(StrEnum):
+    PAIRED_VALIDATION = "paired_validation"
+    CANDIDATE_ONLY_VALIDATION = "candidate_only_validation"
+    BASELINE_ONLY_OBSERVATION = "baseline_only_observation"
+    SELECTED_EVIDENCE = "selected_evidence"
 
 
 def _unique_limitation_details(
@@ -56,8 +92,8 @@ class EvidenceSummaryRequest(ContractModel):
     comparison_ids: Annotated[tuple[str, ...], Field(max_length=10)] = ()
     analysis_ids: Annotated[tuple[str, ...], Field(max_length=20)] = ()
     finding_ids: Annotated[tuple[str, ...], Field(max_length=20)] = ()
-    output_excerpts: Literal["none", "internal"] = "none"
-    sensitive_context: Literal["redact", "include"] = "redact"
+    output_excerpts: SummaryExcerptPolicy = SummaryExcerptPolicy.NONE
+    sensitive_context: SummarySensitiveContextPolicy = SummarySensitiveContextPolicy.REDACT
 
     @model_validator(mode="after")
     def bounded_unique_selection(self) -> EvidenceSummaryRequest:
@@ -98,7 +134,7 @@ class SummaryAttempt(ContractModel):
 
 class SummaryRun(ContractModel):
     run_id: str
-    proof_role: Literal["baseline", "candidate", "context"]
+    proof_role: SummaryRunRole
     execution_status: ExecutionStatus
     validation_status: ValidationStatus
     workload_definition_id: str | None
@@ -115,7 +151,7 @@ class SummaryRun(ContractModel):
 
 
 class SummaryReference(ContractModel):
-    ref_type: Literal["comparison", "analysis"]
+    ref_type: SummaryReferenceKind
     ref_id: str
     data: dict[str, JsonValue]
 
@@ -126,7 +162,7 @@ class SummaryClaim(ContractModel):
     claim: str
     evidence_level: EvidenceLevel
     assessment: FindingAssessment
-    support_status: Literal["as_recorded", "not_supporting", "candidate_only"]
+    support_status: SummarySupportStatus
     evidence: tuple[dict[str, JsonValue], ...]
     limitations: tuple[str, ...] = ()
 
@@ -135,12 +171,7 @@ class EvidenceSummary(ContractModel):
     schema_version: Literal[1] = 1
     summary_digest: str
     corpus_commit_id: str
-    proof_shape: Literal[
-        "paired_validation",
-        "candidate_only_validation",
-        "baseline_only_observation",
-        "selected_evidence",
-    ]
+    proof_shape: SummaryProofShape
     runs: tuple[SummaryRun, ...]
     references: tuple[SummaryReference, ...]
     claims: tuple[SummaryClaim, ...]
@@ -187,10 +218,10 @@ class EvidenceSummaryService:
             references = tuple(
                 [
                     SummaryReference(
-                        ref_type="comparison",
+                        ref_type=SummaryReferenceKind.COMPARISON,
                         ref_id=ref_id,
                         data=self._compact_reference(
-                            "comparison",
+                            SummaryReferenceKind.COMPARISON,
                             self.lookup.get(EvidenceReferenceType.COMPARISON, ref_id).data,
                         ),
                     )
@@ -198,10 +229,10 @@ class EvidenceSummaryService:
                 ]
                 + [
                     SummaryReference(
-                        ref_type="analysis",
+                        ref_type=SummaryReferenceKind.ANALYSIS,
                         ref_id=ref_id,
                         data=self._compact_reference(
-                            "analysis",
+                            SummaryReferenceKind.ANALYSIS,
                             self.lookup.get(EvidenceReferenceType.ANALYSIS, ref_id).data,
                         ),
                     )
@@ -242,20 +273,20 @@ class EvidenceSummaryService:
     @staticmethod
     def _selected_runs(
         request: EvidenceSummaryRequest,
-    ) -> tuple[tuple[str, Literal["baseline", "candidate", "context"]], ...]:
-        values: list[tuple[str, Literal["baseline", "candidate", "context"]]] = []
+    ) -> tuple[tuple[str, SummaryRunRole], ...]:
+        values: list[tuple[str, SummaryRunRole]] = []
         if request.baseline_run_id is not None:
-            values.append((request.baseline_run_id, "baseline"))
+            values.append((request.baseline_run_id, SummaryRunRole.BASELINE))
         if request.candidate_run_id is not None:
-            values.append((request.candidate_run_id, "candidate"))
-        values.extend((run_id, "context") for run_id in request.run_ids)
+            values.append((request.candidate_run_id, SummaryRunRole.CANDIDATE))
+        values.extend((run_id, SummaryRunRole.CONTEXT) for run_id in request.run_ids)
         return tuple(values)
 
     def _run_summary(
         self,
         snapshot: Snapshot,
         run_id: str,
-        role: Literal["baseline", "candidate", "context"],
+        role: SummaryRunRole,
         *,
         request: EvidenceSummaryRequest,
         truncation: list[str],
@@ -279,7 +310,7 @@ class EvidenceSummaryService:
             excerpt: tuple[str, ...] = ()
             excerpt_truncated = False
             if (
-                request.output_excerpts == "internal"
+                request.output_excerpts is SummaryExcerptPolicy.INTERNAL
                 and registration.kind
                 in {ArtifactKind.PROCESS_OUTPUT, ArtifactKind.VALIDATION_OUTPUT}
                 and registration.sensitivity is not Sensitivity.SENSITIVE
@@ -314,15 +345,15 @@ class EvidenceSummaryService:
         if (
             external_context is not None
             and run.external_context is not None
-            and run.external_context.sensitivity == "sensitive"
-            and request.sensitive_context == "redact"
+            and run.external_context.sensitivity is Sensitivity.SENSITIVE
+            and request.sensitive_context is SummarySensitiveContextPolicy.REDACT
         ):
             for field in ("lease_id", "worker_id", "orchestration_run_id"):
                 external_context[field] = "[redacted]"
         argv = run.command.argv if run.command is not None else ()
         run_limitations = list(run.limitations)
         run_limitation_details = list(run.limitation_details)
-        if len(argv) > 1 and request.sensitive_context == "redact":
+        if len(argv) > 1 and request.sensitive_context is SummarySensitiveContextPolicy.REDACT:
             argv = (
                 argv[0],
                 f"[{len(argv) - 1} arguments redacted; digest={digest_model(argv[1:])}]",
@@ -333,7 +364,7 @@ class EvidenceSummaryService:
             )
             run_limitation_details.append(
                 LimitationDetail(
-                    source="validation",
+                    source=LimitationSource.VALIDATION,
                     code="sensitive_context_redacted",
                     message=run_limitations[-1],
                 )
@@ -451,20 +482,20 @@ class EvidenceSummaryService:
                 ).data
                 invalid_comparison = invalid_comparison or comparison.get("validity") != "valid"
         candidate_only = request.candidate_run_id is not None and request.baseline_run_id is None
-        status: Literal["as_recorded", "not_supporting", "candidate_only"]
+        status: SummarySupportStatus
         limitations = list(finding.limitations)
         if len(rows) > 50:
             limitations.append("Finding evidence references were truncated at 50 items.")
         if invalid_comparison or finding.assessment is not FindingAssessment.SUPPORTED:
-            status = "not_supporting"
+            status = SummarySupportStatus.NOT_SUPPORTING
         elif candidate_only:
-            status = "candidate_only"
+            status = SummarySupportStatus.CANDIDATE_ONLY
             limitations.append(
                 "Candidate-only validation does not establish that the behavior regressed "
                 "on the base revision."
             )
         else:
-            status = "as_recorded"
+            status = SummarySupportStatus.AS_RECORDED
         return SummaryClaim(
             finding_id=finding.finding_id,
             title=finding.title,
@@ -479,19 +510,14 @@ class EvidenceSummaryService:
     @staticmethod
     def _proof_shape(
         request: EvidenceSummaryRequest,
-    ) -> Literal[
-        "paired_validation",
-        "candidate_only_validation",
-        "baseline_only_observation",
-        "selected_evidence",
-    ]:
+    ) -> SummaryProofShape:
         if request.baseline_run_id is not None and request.candidate_run_id is not None:
-            return "paired_validation"
+            return SummaryProofShape.PAIRED_VALIDATION
         if request.candidate_run_id is not None:
-            return "candidate_only_validation"
+            return SummaryProofShape.CANDIDATE_ONLY_VALIDATION
         if request.baseline_run_id is not None:
-            return "baseline_only_observation"
-        return "selected_evidence"
+            return SummaryProofShape.BASELINE_ONLY_OBSERVATION
+        return SummaryProofShape.SELECTED_EVIDENCE
 
     @staticmethod
     def _limitations(
@@ -519,7 +545,10 @@ class EvidenceSummaryService:
         ):
             limitations.append("Baseline and candidate environment identities differ.")
         for reference in references:
-            if reference.ref_type == "comparison" and reference.data.get("validity") != "valid":
+            if (
+                reference.ref_type is SummaryReferenceKind.COMPARISON
+                and reference.data.get("validity") != "valid"
+            ):
                 limitations.append(
                     f"Comparison {reference.ref_id} is "
                     f"{reference.data.get('validity', 'unknown')} and is not supporting proof."
@@ -545,7 +574,7 @@ class EvidenceSummaryService:
 
     @staticmethod
     def _compact_reference(
-        ref_type: Literal["comparison", "analysis"],
+        ref_type: SummaryReferenceKind,
         data: dict[str, JsonValue],
     ) -> dict[str, JsonValue]:
         fields = (
@@ -562,7 +591,7 @@ class EvidenceSummaryService:
                 "complete_pair_n",
                 "corpus_commit_id",
             )
-            if ref_type == "comparison"
+            if ref_type is SummaryReferenceKind.COMPARISON
             else (
                 "analysis_id",
                 "recipe",

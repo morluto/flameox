@@ -10,6 +10,7 @@ from flameox.analysis.recipe_models import (
     RuntimeResourceObservation,
     RuntimeResourceTotals,
     WritableRootObservation,
+    parse_writable_root_observation,
 )
 from flameox.catalog import Snapshot
 from flameox.domain import ProcessCancellationCause
@@ -52,8 +53,6 @@ class HotspotRecipes(RecipeContext):
                     input_id=input_id,
                     hotspots=(),
                     total=0,
-                    returned=0,
-                    truncated=False,
                     coverage={"frame_measurements": 0, "completely_symbolized": 0},
                     limitations=(
                         "No registered profile artifact is available for this input; "
@@ -102,8 +101,6 @@ class HotspotRecipes(RecipeContext):
             input_id=input_id,
             hotspots=hotspots,
             total=total,
-            returned=len(hotspots),
-            truncated=total > len(hotspots),
             coverage={
                 "frame_measurements": total,
                 "completely_symbolized": int(symbolized_row[0]),
@@ -191,7 +188,7 @@ class HotspotRecipes(RecipeContext):
                 limit=bounded,
                 corpus_commit_id=corpus_commit_id,
             )
-            resource_rows, resource_total, resource_truncated = self._runtime_resources(
+            resource_rows, resource_total = self._runtime_resources(
                 snapshot,
                 scope,
                 bounded,
@@ -282,7 +279,6 @@ class HotspotRecipes(RecipeContext):
             limitations=tuple(limitations),
             runtime_resources=resource_rows,
             runtime_resource_totals=resource_total,
-            runtime_resources_truncated=resource_truncated,
             writable_root_observations=writable_rows,
             evidence=evidence,
         )
@@ -308,7 +304,7 @@ class HotspotRecipes(RecipeContext):
         snapshot: Snapshot,
         scope: EvidenceScope,
         limit: int,
-    ) -> tuple[tuple[RuntimeResourceObservation, ...], RuntimeResourceTotals, bool]:
+    ) -> tuple[tuple[RuntimeResourceObservation, ...], RuntimeResourceTotals]:
         where, parameters = self._run_scope_predicate(scope, "rr.run_id")
         rows = snapshot.execute(
             "SELECT run_id, sampling_interval_ms, minimum_free_bytes, staging_growth_bytes, "
@@ -340,17 +336,11 @@ class HotspotRecipes(RecipeContext):
             )
             for row in rows[:limit]
         )
-        return (
-            observations,
-            RuntimeResourceTotals(
-                run_count=int(total_row[0]),
-                minimum_free_bytes=(int(total_row[1]) if total_row[1] is not None else None),
-                total_staging_growth_bytes=(
-                    int(total_row[2]) if total_row[2] is not None else None
-                ),
-                maximum_peak_rss_bytes=(int(total_row[3]) if total_row[3] is not None else None),
-            ),
-            len(rows) > limit,
+        return observations, RuntimeResourceTotals(
+            run_count=int(total_row[0]),
+            minimum_free_bytes=(int(total_row[1]) if total_row[1] is not None else None),
+            total_staging_growth_bytes=(int(total_row[2]) if total_row[2] is not None else None),
+            maximum_peak_rss_bytes=(int(total_row[3]) if total_row[3] is not None else None),
         )
 
     def _writable_root_observations(
@@ -368,7 +358,7 @@ class HotspotRecipes(RecipeContext):
             (*parameters, limit),
         ).fetchall()
         return tuple(
-            WritableRootObservation.model_validate(
+            parse_writable_root_observation(
                 {
                     "run_id": str(row[0]),
                     "writable_root_identity": str(row[1]),

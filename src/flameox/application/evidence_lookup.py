@@ -40,11 +40,11 @@ class EvidenceLookupService:
         ref_id: str,
     ) -> EvidenceLookupResult:
         head = self.workspace.corpus.read_head()
-        if ref_type == "run":
+        if ref_type is EvidenceReferenceType.RUN:
             data = RunStore(self.workspace).read(ref_id).model_dump(mode="json")
-        elif ref_type == "artifact":
+        elif ref_type is EvidenceReferenceType.ARTIFACT:
             data = ArtifactService(self.workspace).get(ref_id).model_dump(mode="json")
-        elif ref_type == "generation":
+        elif ref_type is EvidenceReferenceType.GENERATION:
             validate_manifest_id(ref_id, kind="generation")
             path = self.workspace.paths.generations / ref_id / "manifest.json"
             try:

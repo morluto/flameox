@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from flameox.domain import RunManifest
+from flameox.domain import ResourceAvailability, RunManifest
 
 
 def run_row(manifest: RunManifest) -> dict[str, object]:
@@ -58,15 +58,15 @@ def run_row(manifest: RunManifest) -> dict[str, object]:
             sort_keys=True,
         ),
         "resource_availability": (
-            "unavailable"
+            ResourceAvailability.UNAVAILABLE
             if manifest.process is None or manifest.process.resources is None
             else (
-                "available"
+                ResourceAvailability.AVAILABLE
                 if (
                     not manifest.process.resources.unavailable_metrics
                     and manifest.process.resources.policy_termination is None
                 )
-                else "partial"
+                else ResourceAvailability.PARTIAL
             )
         ),
         "manifest_path": f"runs/{manifest.run_id}/manifest.json",

@@ -8,6 +8,8 @@ from pydantic import ValidationError
 
 from flameox.application.inference_providers import (
     AIPerfProfileRequest,
+    InferenceEndpointType,
+    InferenceTool,
     SglangBenchServingRequest,
     VllmBenchServeRequest,
     discover_inference_tool,
@@ -181,7 +183,7 @@ def test_aiperf_discovery_rejects_unsupported_version(
     )
     monkeypatch.setattr("flameox.application.inference_providers.version", lambda _tool: "0.13.0")
 
-    result = discover_inference_tool("aiperf")
+    result = discover_inference_tool(InferenceTool.AIPERF)
 
     assert result.available is False
     assert result.compatible is False
@@ -200,7 +202,7 @@ def test_sglang_bench_uses_fixed_module_random_workload_and_safe_output(tmp_path
         random_input_len=16,
         random_output_len=8,
         random_range_ratio=0.5,
-        endpoint_type="chat",
+        endpoint_type=InferenceEndpointType.CHAT,
     )
 
     argv = request.argv()
@@ -226,8 +228,13 @@ def test_sglang_bench_rejects_base_url_paths(tmp_path: Path) -> None:
 
 
 def test_sglang_discovery_uses_the_bounded_broker(tmp_path: Path) -> None:
-    from flameox.domain import ProcessResult
-    from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
+    from flameox.domain import ProcessResult, process_termination_from_returncode
+    from flameox.execution import (
+        ExecutionOutcome,
+        ExecutionRequest,
+        ProcessContainment,
+        SubprocessBroker,
+    )
 
     executable = tmp_path / "python"
     executable.write_text("launcher")
@@ -240,11 +247,11 @@ def test_sglang_discovery_uses_the_bounded_broker(tmp_path: Path) -> None:
         def run_sync(self, request: ExecutionRequest, **_kwargs: object) -> ExecutionOutcome:
             self.request = request
             return ExecutionOutcome(
-                process=ProcessResult(exit_code=0),
+                process=ProcessResult(termination=process_termination_from_returncode(0)),
                 stdout=b"0.5.16\n",
                 stderr=b"",
                 resolved_executable=executable,
-                containment="process_group",
+                containment=ProcessContainment.PROCESS_GROUP,
             )
 
     broker = Broker()

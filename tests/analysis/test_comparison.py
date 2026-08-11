@@ -74,3 +74,6 @@ def test_incomplete_experiment_is_not_presented_as_valid() -> None:
         Comparison.model_validate({**result.model_dump(mode="python"), "complete_pair_n": 2})
     with pytest.raises(ValidationError, match="confidence bounds and level"):
         Comparison.model_validate({**result.model_dump(mode="python"), "confidence_low": -0.1})
+
+    with pytest.raises(ValidationError, match="paired projection contradicts"):
+        Comparison.model_validate({**result.model_dump(mode="python"), "paired": False})

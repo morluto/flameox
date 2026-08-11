@@ -103,8 +103,6 @@ class ExecutionRecipes(RecipeContext):
             removed=removed[:bounded],
             changed=changed[:bounded],
             total=total,
-            returned=len(observations),
-            truncated=total > len(observations),
             limitations=tuple(limitations),
             evidence=(
                 empty_availability("no_execution_observations")

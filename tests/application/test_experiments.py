@@ -43,14 +43,16 @@ def _git(project: Path, *args: str) -> None:
 
 def test_outcome_result_rejects_half_a_first_failure() -> None:
     with pytest.raises(ValidationError):
-        OutcomeExperimentResult(
-            experiment_id="experiment",
-            goal=ExperimentOutcomeGoal.EQUIVALENCE,
-            disposition=ExperimentOutcomeDisposition.INSUFFICIENT_EVIDENCE,
-            counts=(),
-            complete_pairs=0,
-            unmatched_cells=0,
-            first_failure_trial_id="trial",
+        OutcomeExperimentResult.model_validate(
+            {
+                "experiment_id": "experiment",
+                "goal": ExperimentOutcomeGoal.EQUIVALENCE,
+                "disposition": ExperimentOutcomeDisposition.INSUFFICIENT_EVIDENCE,
+                "counts": (),
+                "complete_pairs": 0,
+                "unmatched_cells": 0,
+                "first_failure_trial_id": "trial",
+            }
         )
 
 

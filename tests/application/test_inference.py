@@ -15,6 +15,11 @@ from flameox.application.inference import (
     InferenceReplayService,
     parse_inference_replay_plan,
 )
+from flameox.application.inference_providers import (
+    InferenceScenarioProvider,
+    InferenceServerMode,
+    InferenceTool,
+)
 from flameox.domain import (
     CaptureStatus,
     DomainError,
@@ -22,8 +27,14 @@ from flameox.domain import (
     ExecutionStatus,
     ProcessResult,
     ValidationStatus,
+    process_termination_from_returncode,
 )
-from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
+from flameox.execution import (
+    ExecutionOutcome,
+    ExecutionRequest,
+    ProcessContainment,
+    SubprocessBroker,
+)
 from flameox.storage import RunStore, Workspace
 
 DIGEST = "sha256:" + "a" * 64
@@ -85,11 +96,14 @@ class RecordingBroker(SubprocessBroker):
 
     def _outcome(self, request: ExecutionRequest) -> ExecutionOutcome:
         return ExecutionOutcome(
-            process=ProcessResult(exit_code=self._exit_code, cleanup_complete=True),
+            process=ProcessResult(
+                termination=process_termination_from_returncode(self._exit_code),
+                cleanup_complete=True,
+            ),
             stdout=self._stdout,
             stderr=self._stderr,
             resolved_executable=Path(request.argv[0]),
-            containment="process_group",
+            containment=ProcessContainment.PROCESS_GROUP,
         )
 
 
@@ -107,7 +121,7 @@ def _patch_providers(
         parse_inference_tool_discovery,
     )
 
-    def fake_discover(tool: str) -> InferenceToolDiscovery:
+    def fake_discover(tool: InferenceTool) -> InferenceToolDiscovery:
         return parse_inference_tool_discovery(
             {
                 "tool": tool,
@@ -141,8 +155,8 @@ def test_plan_existing_local_aiperf_builds_typed_argv_and_records_exploratory_re
 
     plan = service.plan("aiperf_replay")
 
-    assert plan.server_mode == "existing_local"
-    assert plan.provider == "aiperf"
+    assert plan.server_mode is InferenceServerMode.EXISTING_LOCAL
+    assert plan.provider is InferenceScenarioProvider.AIPERF
     assert plan.tool_available is True
     assert plan.tool_executable == "/tools/aiperf"
     assert plan.argv[0] == "/tools/aiperf"
@@ -194,7 +208,7 @@ def test_sglang_protocol_identity_binds_random_shape_and_provenance(
     )
 
     discovery = AvailableInferenceToolDiscovery(
-        tool="sglang",
+        tool=InferenceTool.SGLANG,
         executable=launcher,
         available=True,
         version="0.5.16",
@@ -354,7 +368,7 @@ def test_plan_incompatible_but_present_tool_returns_remediation_without_argv(
         )
 
         return UnavailableInferenceToolDiscovery(
-            tool="aiperf",
+            tool=InferenceTool.AIPERF,
             executable=Path("/tools/aiperf"),
             version="0.11.0",
             executable_digest="sha256:" + "a" * 64,
@@ -593,11 +607,14 @@ receipt_schema = "flameox.oracle-receipt.v1"
                     )
                 )
                 return ExecutionOutcome(
-                    process=ProcessResult(exit_code=0, cleanup_complete=True),
+                    process=ProcessResult(
+                        termination=process_termination_from_returncode(0),
+                        cleanup_complete=True,
+                    ),
                     stdout=b"native oracle diagnostics",
                     stderr=b"",
                     resolved_executable=Path(request.argv[0]),
-                    containment="process_group",
+                    containment=ProcessContainment.PROCESS_GROUP,
                 )
             return self._outcome(request)
 

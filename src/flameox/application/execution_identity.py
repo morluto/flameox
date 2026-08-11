@@ -3,13 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path, PurePath
-from typing import Literal
 
 from flameox.application.workloads import WorkloadService
 from flameox.domain import (
     DomainError,
     ErrorCode,
     ExecutionIdentityInput,
+    ExecutionIdentityInputKind,
+    ExecutionIdentityInputStatus,
+    ExecutionIdentityQuality,
     WorkloadExecutionIdentity,
     digest_model,
 )
@@ -70,9 +72,9 @@ class ExecutionIdentityService:
         config = self.workloads.load().workloads[workload_name]
         inputs = [
             ExecutionIdentityInput(
-                kind="python_module",
+                kind=ExecutionIdentityInputKind.PYTHON_MODULE,
                 requested=name,
-                status="not_observed",
+                status=ExecutionIdentityInputStatus.NOT_OBSERVED,
                 limitations=("Resolved and loaded path is observed immediately before execution.",),
             )
             for name in config.identity.python_modules
@@ -117,9 +119,9 @@ class ExecutionIdentityService:
         if "python" not in Path(executable).name.lower():
             return tuple(
                 ExecutionIdentityInput(
-                    kind="python_module",
+                    kind=ExecutionIdentityInputKind.PYTHON_MODULE,
                     requested=name,
-                    status="resolution_failed",
+                    status=ExecutionIdentityInputStatus.RESOLUTION_FAILED,
                     limitations=("Declared Python modules require a Python workload executable.",),
                 )
                 for name in names
@@ -150,9 +152,9 @@ class ExecutionIdentityService:
         except (DomainError, json.JSONDecodeError, ValueError) as error:
             return tuple(
                 ExecutionIdentityInput(
-                    kind="python_module",
+                    kind=ExecutionIdentityInputKind.PYTHON_MODULE,
                     requested=name,
-                    status="resolution_failed",
+                    status=ExecutionIdentityInputStatus.RESOLUTION_FAILED,
                     limitations=(f"Module identity probe failed: {error}",),
                 )
                 for name in names
@@ -165,7 +167,7 @@ class ExecutionIdentityService:
             distribution_version = value.get("version")
             results.append(
                 ExecutionIdentityInput(
-                    kind="python_module",
+                    kind=ExecutionIdentityInputKind.PYTHON_MODULE,
                     requested=name,
                     resolved_path=str(resolved) if resolved is not None else None,
                     loaded_path=str(resolved) if resolved is not None else None,
@@ -175,9 +177,9 @@ class ExecutionIdentityService:
                     ),
                     content_digest=self._digest(resolved) if resolved is not None else None,
                     status=(
-                        "exact"
+                        ExecutionIdentityInputStatus.EXACT
                         if value.get("status") == "exact" and resolved is not None
-                        else "resolution_failed"
+                        else ExecutionIdentityInputStatus.RESOLUTION_FAILED
                     ),
                     limitations=(
                         (str(value.get("error")),) if value.get("error") is not None else ()
@@ -199,36 +201,36 @@ class ExecutionIdentityService:
             resolved.relative_to(self.workspace.project_root.resolve())
         except FileNotFoundError:
             return ExecutionIdentityInput(
-                kind="native_file",
+                kind=ExecutionIdentityInputKind.NATIVE_FILE,
                 requested=value,
                 configured_path=str(candidate),
-                status="missing",
+                status=ExecutionIdentityInputStatus.MISSING,
             )
         except ValueError:
             return ExecutionIdentityInput(
-                kind="native_file",
+                kind=ExecutionIdentityInputKind.NATIVE_FILE,
                 requested=value,
                 configured_path=str(candidate),
-                status="resolution_failed",
+                status=ExecutionIdentityInputStatus.RESOLUTION_FAILED,
                 limitations=("Resolved native file escapes the project root.",),
             )
         if not resolved.is_file():
             return ExecutionIdentityInput(
-                kind="native_file",
+                kind=ExecutionIdentityInputKind.NATIVE_FILE,
                 requested=value,
                 configured_path=str(candidate),
                 resolved_path=str(resolved),
-                status="resolution_failed",
+                status=ExecutionIdentityInputStatus.RESOLUTION_FAILED,
                 limitations=("Resolved native identity input is not a regular file.",),
             )
         return ExecutionIdentityInput(
-            kind="native_file",
+            kind=ExecutionIdentityInputKind.NATIVE_FILE,
             requested=value,
             configured_path=str(candidate),
             resolved_path=str(resolved),
             loaded_path=None,
             content_digest=self._digest(resolved),
-            status="exact",
+            status=ExecutionIdentityInputStatus.EXACT,
             limitations=(
                 "Configured native identity is bound; actual loader use is not observed.",
             ),
@@ -242,15 +244,20 @@ class ExecutionIdentityService:
         missing = tuple(
             item.requested
             for item in values
-            if item.status in {"missing", "ambiguous", "resolution_failed", "not_observed"}
+            if item.status
+            in {
+                ExecutionIdentityInputStatus.MISSING,
+                ExecutionIdentityInputStatus.AMBIGUOUS,
+                ExecutionIdentityInputStatus.RESOLUTION_FAILED,
+                ExecutionIdentityInputStatus.NOT_OBSERVED,
+            }
         )
-        quality: Literal["exact", "partial", "unknown", "not_applicable"]
         if not values:
-            quality = "not_applicable"
+            quality = ExecutionIdentityQuality.NOT_APPLICABLE
         elif not missing:
-            quality = "exact"
+            quality = ExecutionIdentityQuality.EXACT
         else:
-            quality = "partial"
+            quality = ExecutionIdentityQuality.PARTIAL
         content = {
             "quality": quality,
             "inputs": [item.model_dump(mode="json") for item in values],

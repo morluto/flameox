@@ -151,8 +151,6 @@ class AcceleratorRecipes(RecipeContext):
             comparison_regions=comparison_regions,
             comparisons=comparisons,
             total=total,
-            returned=len(regions),
-            truncated=total > len(regions),
             coverage=coverage,
             comparison_coverage=comparison_coverage,
             limitations=tuple(dict.fromkeys(limitations)),
@@ -447,5 +445,4 @@ class AcceleratorRecipes(RecipeContext):
             idle_gap_max_ns=max(gaps, default=0),
             stream_count=len(kernels_by_stream),
             streams=tuple(stream_summaries[:limit]),
-            streams_truncated=len(stream_summaries) > limit,
         )

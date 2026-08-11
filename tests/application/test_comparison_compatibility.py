@@ -21,6 +21,7 @@ from flameox.application.run_rows import run_row
 from flameox.catalog import Catalog
 from flameox.domain import (
     AcceleratorIdentityFacet,
+    AcceleratorIdentityStatus,
     ComparisonValidity,
     DomainError,
     ErrorCode,
@@ -28,6 +29,9 @@ from flameox.domain import (
     EvidenceReferenceType,
     EvidenceRelation,
     ExecutionIdentityInput,
+    ExecutionIdentityInputKind,
+    ExecutionIdentityInputStatus,
+    ExecutionIdentityQuality,
     ExternalExecutionContext,
     FindingAssessment,
     FindingConfidence,
@@ -288,7 +292,7 @@ def test_comparison_rejects_different_or_partial_accelerator_identity(
     candidate_environment = collect_environment(
         AcceleratorIdentityFacet(
             provider="cuda",
-            status="available",
+            status=AcceleratorIdentityStatus.AVAILABLE,
             identity_quality=IdentityQuality.EXACT,
             driver_version="575.57.08",
             runtime_version="12.9",
@@ -325,7 +329,7 @@ def test_comparison_rejects_different_or_partial_accelerator_identity(
     partial_environment = collect_environment(
         AcceleratorIdentityFacet(
             provider="cuda",
-            status="missing",
+            status=AcceleratorIdentityStatus.MISSING,
             identity_quality=IdentityQuality.PARTIAL,
             missing_fields=("cuda.devices",),
         )
@@ -369,13 +373,13 @@ def test_comparison_reports_differing_declared_artifact_paths_and_digests(
 
     def identity(digest_character: str) -> WorkloadExecutionIdentity:
         item = ExecutionIdentityInput(
-            kind="native_file",
+            kind=ExecutionIdentityInputKind.NATIVE_FILE,
             requested="build/libtilelang.so",
             configured_path="/project/build/libtilelang.so",
             resolved_path="/project/build/libtilelang.so",
             loaded_path="/project/build/libtilelang.so",
             content_digest="sha256:" + digest_character * 64,
-            status="exact",
+            status=ExecutionIdentityInputStatus.EXACT,
         )
         values = {
             "quality": "exact",
@@ -384,7 +388,7 @@ def test_comparison_reports_differing_declared_artifact_paths_and_digests(
         }
         return WorkloadExecutionIdentity(
             identity_id=digest_model(values),
-            quality="exact",
+            quality=ExecutionIdentityQuality.EXACT,
             inputs=(item,),
         )
 

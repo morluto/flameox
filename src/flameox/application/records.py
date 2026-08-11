@@ -26,6 +26,7 @@ from flameox.domain import (
 )
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
+from flameox.pagination import CursorPageContract
 from flameox.storage import ArtifactStore, JsonRecordStore, RunStore, Workspace
 
 
@@ -73,24 +74,22 @@ class FindingResult(ContractModel):
     corpus_commit_id: str
 
 
-class InvestigationListResult(ContractModel):
+class InvestigationListResult(CursorPageContract):
+    page_items_field = "investigations"
+
     schema_version: int = 1
     corpus_commit_id: str
     investigations: tuple[Investigation, ...]
     total: int
-    returned: int
-    truncated: bool
-    next_cursor: str | None
 
 
-class FindingListResult(ContractModel):
+class FindingListResult(CursorPageContract):
+    page_items_field = "findings"
+
     schema_version: int = 1
     corpus_commit_id: str
     findings: tuple[Finding, ...]
     total: int
-    returned: int
-    truncated: bool
-    next_cursor: str | None
 
 
 class InvestigationService:
@@ -150,8 +149,6 @@ class InvestigationService:
             corpus_commit_id=head.commit_id,
             investigations=selected,
             total=len(values),
-            returned=len(selected),
-            truncated=next_offset < len(values),
             next_cursor=_encode_offset(
                 namespace="investigations",
                 snapshot_id=head.commit_id,
@@ -252,7 +249,12 @@ class FindingService:
                 "A supported finding requires at least one evidence reference.",
             )
         if request.evidence_level is EvidenceLevel.OBSERVED and any(
-            item.ref_type in {"analysis", "comparison"} for item in request.evidence
+            item.ref_type
+            in {
+                EvidenceReferenceType.ANALYSIS,
+                EvidenceReferenceType.COMPARISON,
+            }
+            for item in request.evidence
         ):
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
@@ -262,8 +264,8 @@ class FindingService:
             self._require_reference(item)
             if (
                 request.assessment is FindingAssessment.SUPPORTED
-                and item.relation == "supports"
-                and item.ref_type == "comparison"
+                and item.relation is EvidenceRelation.SUPPORTS
+                and item.ref_type is EvidenceReferenceType.COMPARISON
                 and not self._comparison_can_support(item.ref_id)
             ):
                 raise DomainError(
@@ -353,8 +355,6 @@ class FindingService:
             corpus_commit_id=head.commit_id,
             findings=selected,
             total=len(values),
-            returned=len(selected),
-            truncated=next_offset < len(values),
             next_cursor=_encode_offset(
                 namespace="findings",
                 snapshot_id=head.commit_id,
@@ -364,13 +364,13 @@ class FindingService:
         )
 
     def _require_reference(self, item: EvidenceInput) -> None:
-        if item.ref_type == "run":
+        if item.ref_type is EvidenceReferenceType.RUN:
             RunStore(self.workspace).read(item.ref_id)
             return
-        if item.ref_type == "artifact":
+        if item.ref_type is EvidenceReferenceType.ARTIFACT:
             ArtifactStore(self.workspace).get(item.ref_id)
             return
-        if item.ref_type == "generation":
+        if item.ref_type is EvidenceReferenceType.GENERATION:
             validate_manifest_id(item.ref_id, kind="generation")
             path = self.workspace.paths.generations / item.ref_id / "manifest.json"
             if path.is_file():

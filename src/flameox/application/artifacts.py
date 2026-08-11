@@ -12,6 +12,7 @@ from flameox.domain import (
     Sensitivity,
 )
 from flameox.models import ContractModel
+from flameox.pagination import CursorPageContract
 from flameox.storage import ArtifactStore, Workspace
 
 
@@ -45,14 +46,13 @@ class ArtifactListItem(ContractModel):
     kinds: tuple[ArtifactKind, ...]
 
 
-class ArtifactListResult(ContractModel):
+class ArtifactListResult(CursorPageContract):
+    page_items_field = "artifacts"
+
     schema_version: int = 1
     corpus_commit_id: str
     artifacts: tuple[ArtifactListItem, ...]
     total: int
-    returned: int
-    truncated: bool
-    next_cursor: str | None
 
 
 class ArtifactService:
@@ -156,8 +156,6 @@ class ArtifactService:
             corpus_commit_id=commit_id,
             artifacts=artifacts,
             total=total,
-            returned=len(artifacts),
-            truncated=has_more,
             next_cursor=(
                 CursorCodec.encode(
                     namespace="artifacts",

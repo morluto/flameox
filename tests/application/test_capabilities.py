@@ -20,17 +20,29 @@ from flameox.application.capabilities import (
     SetupVerification,
 )
 from flameox.application.dependencies import WorkloadDependencyService
-from flameox.application.operations import ActiveOperationRecord, OperationState, OperationStatus
+from flameox.application.operations import (
+    ActiveOperationRecord,
+    OperationState,
+    OperationStatus,
+    operation_digests,
+)
 from flameox.domain import (
+    CapabilityExtra,
     CapabilityReport,
     CapabilitySetup,
     CapabilityStatus,
     DomainError,
     ErrorCode,
     ProcessResult,
+    process_termination_from_returncode,
 )
 from flameox.domain.models import utc_now
-from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
+from flameox.execution import (
+    ExecutionOutcome,
+    ExecutionRequest,
+    ProcessContainment,
+    SubprocessBroker,
+)
 from flameox.storage import Workspace
 
 
@@ -47,11 +59,14 @@ class _ProbeBroker(SubprocessBroker):
         self.calls += 1
         self.requests.append(request)
         return ExecutionOutcome(
-            process=ProcessResult(exit_code=0, cleanup_complete=True),
+            process=ProcessResult(
+                termination=process_termination_from_returncode(0),
+                cleanup_complete=True,
+            ),
             stdout=b"trace_processor_shell 99.1\n",
             stderr=b"",
             resolved_executable=Path(request.argv[0]),
-            containment="process_group",
+            containment=ProcessContainment.PROCESS_GROUP,
         )
 
 
@@ -87,11 +102,14 @@ def _probe_outcome(
     stderr: bytes = b"",
 ) -> ExecutionOutcome:
     return ExecutionOutcome(
-        process=ProcessResult(exit_code=exit_code, cleanup_complete=True),
+        process=ProcessResult(
+            termination=process_termination_from_returncode(exit_code),
+            cleanup_complete=True,
+        ),
         stdout=stdout,
         stderr=stderr,
         resolved_executable=Path("/usr/bin/perf"),
-        containment="process_group",
+        containment=ProcessContainment.PROCESS_GROUP,
     )
 
 
@@ -100,7 +118,7 @@ def test_capability_setup_fields_are_derived_from_authoritative_reports() -> Non
         adapter="torch.profiler",
         status=CapabilityStatus.UNAVAILABLE,
         setup=CapabilitySetup(
-            extra="torch",
+            extra=CapabilityExtra.TORCH,
             method="start_capability_setup",
             next_tool="start_capability_setup",
             requirement="torch>=2.7",
@@ -131,7 +149,7 @@ def test_legacy_capability_list_with_list_capabilities_next_tool_round_trips() -
         adapter="torch.profiler",
         status=CapabilityStatus.AVAILABLE,
         setup=CapabilitySetup(
-            extra="torch",
+            extra=CapabilityExtra.TORCH,
             method="start_capability_setup",
             next_tool="start_capability_setup",
             requirement="torch>=2.7",
@@ -440,14 +458,26 @@ def test_capability_setup_installs_only_declared_missing_providers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    broker = _ProbeBroker()
+    receipt_during_install: dict[str, object] | None = None
+
+    class ObservingBroker(_ProbeBroker):
+        async def run(
+            self,
+            request: ExecutionRequest,
+            **kwargs: Any,
+        ) -> ExecutionOutcome:
+            nonlocal receipt_during_install
+            receipt_during_install = json.loads((tmp_path / "capability-setup.json").read_text())
+            return await super().run(request, **kwargs)
+
+    broker = ObservingBroker()
     service = CapabilityService(
         workspace,
         broker=broker,
         capability_manifest=tmp_path / "capabilities.json",
     )
     setup = CapabilitySetup(
-        extra="torch",
+        extra=CapabilityExtra.TORCH,
         method="start_capability_setup",
         next_tool="start_capability_setup",
         requirement="torch>=2.7",
@@ -480,6 +510,9 @@ def test_capability_setup_installs_only_declared_missing_providers(
 
     assert result.installed == ("torch.profiler",)
     assert result.already_available == ()
+    assert receipt_during_install is not None
+    assert receipt_during_install["phase"] == "installing_packages"
+    assert receipt_during_install["completed"] == []
     receipt = json.loads((tmp_path / "capability-setup.json").read_text())
     assert receipt | {"updated_at": None} == {
         "completed": ["torch.profiler"],
@@ -538,7 +571,7 @@ def test_capability_setup_cancellation_cleans_up_brokered_install(
         adapter="torch.profiler",
         status=CapabilityStatus.UNAVAILABLE,
         setup=CapabilitySetup(
-            extra="torch",
+            extra=CapabilityExtra.TORCH,
             method="start_capability_setup",
             next_tool="start_capability_setup",
             requirement="torch>=2.7",
@@ -581,7 +614,7 @@ def test_capability_setup_records_failure_when_uv_is_missing(
         adapter="torch.profiler",
         status=CapabilityStatus.UNAVAILABLE,
         setup=CapabilitySetup(
-            extra="torch",
+            extra=CapabilityExtra.TORCH,
             method="start_capability_setup",
             next_tool="start_capability_setup",
             requirement="torch>=2.7",
@@ -614,7 +647,7 @@ def test_trace_processor_staging_preserves_phase_and_bounded_cause(
         adapter="perfetto",
         status=CapabilityStatus.UNAVAILABLE,
         setup=CapabilitySetup(
-            extra="trace",
+            extra=CapabilityExtra.TRACE,
             method="start_capability_setup",
             next_tool="start_capability_setup",
             requirement="perfetto>=0.57,<0.58",
@@ -662,7 +695,7 @@ def test_capability_setup_is_idempotent_when_provider_is_available(
         adapter="torch.profiler",
         status=CapabilityStatus.AVAILABLE,
         setup=CapabilitySetup(
-            extra="torch",
+            extra=CapabilityExtra.TORCH,
             method="start_capability_setup",
             next_tool="start_capability_setup",
             requirement="torch>=2.7",
@@ -756,13 +789,18 @@ def test_capability_recommendations_are_scoped_to_selected_adapter(
 
 def test_running_capability_setup_status_contains_exact_poll_action(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
+    request = {"adapters": ["perfetto"]}
+    _, idempotency_digest = operation_digests(
+        workspace,
+        "capability.setup",
+        request,
+        "status-test",
+    )
     record = ActiveOperationRecord(
-        operation_id="op-1234",
         operation="capability.setup",
         workspace_id=workspace.identity.workspace_id,
-        request_digest="sha256:" + "1" * 64,
-        request={"adapters": ["perfetto"]},
-        idempotency_digest="sha256:" + "2" * 64,
+        request=request,
+        idempotency_digest=idempotency_digest,
         state=OperationState.RUNNING,
         phase="staging_trace_processor",
         owner_id="test-owner",
@@ -775,7 +813,7 @@ def test_running_capability_setup_status_contains_exact_poll_action(tmp_path: Pa
     assert status.recovery is not None
     assert status.recovery.action == "poll"
     assert status.recovery.tool == "get_capability_setup"
-    assert status.recovery.arguments == {"operation_id": "op-1234"}
+    assert status.recovery.arguments == {"operation_id": record.operation_id}
 
     terminal = OperationStatus.from_record(record.completed(receipt={}, item_outcomes=()))
     assert terminal.poll_after_ms is None

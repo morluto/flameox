@@ -18,7 +18,7 @@ from flameox.analysis.recipe_models import (
     ScalingPoint,
     ScalingTrialSummary,
 )
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import ConfidenceInterval, DomainError, ErrorCode
 from flameox.evidence_status import (
     EvidenceAvailability,
     available_availability,
@@ -181,9 +181,11 @@ class ScalingRecipes(RecipeContext):
                     input_value=input_value,
                     value=median,
                     dispersion=dispersion,
-                    confidence_low=low,
-                    confidence_high=high,
-                    confidence_level=confidence_level if low is not None else None,
+                    confidence_interval=(
+                        ConfidenceInterval(low=low, high=high, level=confidence_level)
+                        if low is not None and high is not None
+                        else None
+                    ),
                     unit=unit,
                     sample_count=len(group),
                     raw_sample_count=sum(trial.raw_sample_count for trial in group),
@@ -242,7 +244,6 @@ class ScalingRecipes(RecipeContext):
             fits=fits,
             correlated_hotspots=correlated_hotspots,
             conclusion=conclusion,
-            environment_stable=environment_stable,
             warnings=tuple(warnings),
             evidence=evidence,
         )

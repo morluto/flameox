@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import IO, Any, Literal, TypeVar, cast
 
@@ -25,7 +26,9 @@ from flameox.domain.errors import DomainError, ErrorCode
 from flameox.domain.models import (
     ProcessCancellationCause,
     ProcessResult,
+    ResourcePolicyCancellationCause,
     RuntimeResourceSummary,
+    process_termination_from_returncode,
 )
 from flameox.models import ContractModel
 
@@ -85,7 +88,27 @@ INSTALLER_ENVIRONMENT_ALLOWLIST = (
 )
 
 _T = TypeVar("_T")
-type ProcessContainment = Literal["broker", "process", "process_group", "systemd_scope"]
+
+
+class ProcessContainment(StrEnum):
+    BROKER = "broker"
+    PROCESS = "process"
+    PROCESS_GROUP = "process_group"
+    SYSTEMD_SCOPE = "systemd_scope"
+
+
+class ProcessDiscoverySource(StrEnum):
+    ROOT = "root"
+    ANCESTRY = "ancestry"
+    PREVIOUSLY_OBSERVED = "previously_observed"
+    CONTAINMENT = "containment"
+
+
+class ProcessSnapshotPhase(StrEnum):
+    RUNNING = "running"
+    PRE_CLEANUP = "pre_cleanup"
+    POST_CLEANUP = "post_cleanup"
+    POST_ROOT_EXIT = "post_root_exit"
 
 
 def _is_dangerous_environment_name(name: str) -> bool:
@@ -174,7 +197,7 @@ class ProcessObservation(ContractModel):
     create_time: float | None = None
     parent_pid: int | None = None
     parent_create_time: float | None = None
-    discovery_source: Literal["root", "ancestry", "previously_observed", "containment"]
+    discovery_source: ProcessDiscoverySource
     name: str | None = None
     status: str | None = None
     rss_bytes: int | None = None
@@ -183,7 +206,7 @@ class ProcessObservation(ContractModel):
     thread_count: int | None = None
     fd_count: int | None = None
     observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    snapshot_phase: Literal["running", "pre_cleanup", "post_cleanup", "post_root_exit"]
+    snapshot_phase: ProcessSnapshotPhase
     alive_before_cleanup: bool | None = None
     cleanup_action: str | None = None
     cleanup_outcome: str | None = None
@@ -198,7 +221,7 @@ class _ResourcePolicyExceeded(Exception):
     def __init__(
         self,
         summary: RuntimeResourceSummary,
-        cause: Literal["storage_reserve_exceeded", "memory_limit_exceeded"],
+        cause: ResourcePolicyCancellationCause,
     ) -> None:
         self.summary = summary
         self.cause = cause
@@ -512,7 +535,7 @@ class SubprocessBroker:
                 process_observations.extend(
                     self._snapshot_processes(
                         process.pid,
-                        "running",
+                        ProcessSnapshotPhase.RUNNING,
                         True,
                         None,
                         None,
@@ -550,12 +573,7 @@ class SubprocessBroker:
             resources = await self._collect_resource(resource_task)
             await self._settle_task(stdin_task)
             timeout_process = ProcessResult(
-                exit_code=None,
-                terminating_signal=(
-                    -process.returncode
-                    if process.returncode is not None and process.returncode < 0
-                    else None
-                ),
+                termination=process_termination_from_returncode(process.returncode),
                 wall_time_ns=time.monotonic_ns() - started,
                 cancellation_cause=ProcessCancellationCause.TIMEOUT,
                 cleanup_complete=cleanup_complete,
@@ -587,16 +605,7 @@ class SubprocessBroker:
             await self._settle_resource(resource_task)
             await self._settle_task(stdin_task)
             output_process = ProcessResult(
-                exit_code=(
-                    process.returncode
-                    if process.returncode is not None and process.returncode >= 0
-                    else None
-                ),
-                terminating_signal=(
-                    -process.returncode
-                    if process.returncode is not None and process.returncode < 0
-                    else None
-                ),
+                termination=process_termination_from_returncode(process.returncode),
                 wall_time_ns=time.monotonic_ns() - started,
                 cancellation_cause=ProcessCancellationCause.OUTPUT_LIMIT,
                 cleanup_complete=cleanup_complete,
@@ -626,12 +635,12 @@ class SubprocessBroker:
             await self._settle_task(stdin_task)
             code = (
                 ErrorCode.STORAGE_QUOTA_EXCEEDED
-                if exc.cause == "storage_reserve_exceeded"
+                if exc.cause is ProcessCancellationCause.STORAGE_RESERVE_EXCEEDED
                 else ErrorCode.QUERY_BUDGET_EXCEEDED
             )
             message = (
                 "Runtime storage reserve was exceeded."
-                if exc.cause == "storage_reserve_exceeded"
+                if exc.cause is ProcessCancellationCause.STORAGE_RESERVE_EXCEEDED
                 else "Process tree exceeded the configured memory budget."
             )
             raise DomainError(
@@ -639,7 +648,7 @@ class SubprocessBroker:
                 message,
                 details={
                     "process": ProcessResult(
-                        cancellation_cause=ProcessCancellationCause(exc.cause),
+                        cancellation_cause=exc.cause,
                         cleanup_complete=cleanup_complete,
                         peak_rss_bytes=exc.summary.peak_rss_bytes,
                         resources=exc.summary,
@@ -680,23 +689,14 @@ class SubprocessBroker:
         process_observations.extend(
             self._snapshot_known_processes(
                 observed_identities,
-                "post_root_exit",
+                ProcessSnapshotPhase.POST_ROOT_EXIT,
                 False,
                 None,
                 None,
             )
         )
         result = ProcessResult(
-            exit_code=(
-                process.returncode
-                if process.returncode is not None and process.returncode >= 0
-                else None
-            ),
-            terminating_signal=(
-                -process.returncode
-                if process.returncode is not None and process.returncode < 0
-                else None
-            ),
+            termination=process_termination_from_returncode(process.returncode),
             wall_time_ns=finished - started,
             cleanup_complete=True,
             peak_rss_bytes=resources.peak_rss_bytes if resources is not None else None,
@@ -708,9 +708,13 @@ class SubprocessBroker:
             stderr=stderr,
             resolved_executable=executable,
             containment=(
-                "systemd_scope"
+                ProcessContainment.SYSTEMD_SCOPE
                 if request.systemd_scope_unit is not None
-                else ("process_group" if os.name == "posix" else "process")
+                else (
+                    ProcessContainment.PROCESS_GROUP
+                    if os.name == "posix"
+                    else ProcessContainment.PROCESS
+                )
             ),
             process_observations=tuple(process_observations),
         )
@@ -724,7 +728,13 @@ class SubprocessBroker:
         tracked_descendants: dict[int, float | None],
     ) -> bool:
         observations.extend(
-            self._snapshot_processes(process.pid, "pre_cleanup", True, "terminate", None)
+            self._snapshot_processes(
+                process.pid,
+                ProcessSnapshotPhase.PRE_CLEANUP,
+                True,
+                "terminate",
+                None,
+            )
         )
         identities = self._observation_identities(observations)
         cleanup_complete = await asyncio.shield(
@@ -733,7 +743,7 @@ class SubprocessBroker:
         observations.extend(
             self._snapshot_known_processes(
                 identities,
-                "post_cleanup",
+                ProcessSnapshotPhase.POST_CLEANUP,
                 False,
                 "terminate",
                 str(cleanup_complete),
@@ -770,7 +780,7 @@ class SubprocessBroker:
     def _snapshot_processes(
         self,
         root_pid: int,
-        phase: Literal["running", "pre_cleanup", "post_cleanup", "post_root_exit"],
+        phase: ProcessSnapshotPhase,
         alive_before_cleanup: bool | None,
         cleanup_action: str | None,
         cleanup_outcome: str | None,
@@ -812,12 +822,12 @@ class SubprocessBroker:
 
     def _enumerate_processes(
         self, root_pid: int, deadline: float
-    ) -> tuple[list[tuple[psutil.Process, str]], bool]:
-        processes: list[tuple[psutil.Process, str]] = []
-        pending: deque[tuple[psutil.Process, str]] = deque()
+    ) -> tuple[list[tuple[psutil.Process, ProcessDiscoverySource]], bool]:
+        processes: list[tuple[psutil.Process, ProcessDiscoverySource]] = []
+        pending: deque[tuple[psutil.Process, ProcessDiscoverySource]] = deque()
         truncated = False
         try:
-            pending.append((psutil.Process(root_pid), "root"))
+            pending.append((psutil.Process(root_pid), ProcessDiscoverySource.ROOT))
             while pending and len(processes) < self._MAX_OBSERVED_PROCESSES:
                 if time.monotonic() > deadline:
                     truncated = True
@@ -835,7 +845,7 @@ class SubprocessBroker:
                     if len(processes) + len(pending) >= self._MAX_OBSERVED_PROCESSES:
                         truncated = True
                         break
-                    pending.append((child, "ancestry"))
+                    pending.append((child, ProcessDiscoverySource.ANCESTRY))
             truncated = truncated or bool(pending)
         except psutil.Error:
             return [], False
@@ -843,8 +853,8 @@ class SubprocessBroker:
 
     def _snapshot_known_processes(
         self,
-        identities: tuple[tuple[int, float | None, str], ...],
-        phase: Literal["running", "pre_cleanup", "post_cleanup", "post_root_exit"],
+        identities: tuple[tuple[int, float | None, ProcessDiscoverySource], ...],
+        phase: ProcessSnapshotPhase,
         alive_before_cleanup: bool | None,
         cleanup_action: str | None,
         cleanup_outcome: str | None,
@@ -861,7 +871,7 @@ class SubprocessBroker:
                     ProcessObservation(
                         pid=pid,
                         create_time=create_time,
-                        discovery_source="previously_observed",
+                        discovery_source=ProcessDiscoverySource.PREVIOUSLY_OBSERVED,
                         snapshot_phase=phase,
                         alive_before_cleanup=alive_before_cleanup,
                         cleanup_action=cleanup_action,
@@ -884,7 +894,7 @@ class SubprocessBroker:
                     ProcessObservation(
                         pid=pid,
                         create_time=current_create_time,
-                        discovery_source="previously_observed",
+                        discovery_source=ProcessDiscoverySource.PREVIOUSLY_OBSERVED,
                         snapshot_phase=phase,
                         alive_before_cleanup=alive_before_cleanup,
                         cleanup_action=cleanup_action,
@@ -896,7 +906,7 @@ class SubprocessBroker:
             observations.append(
                 self._observe_process(
                     process,
-                    "previously_observed",
+                    ProcessDiscoverySource.PREVIOUSLY_OBSERVED,
                     phase,
                     alive_before_cleanup,
                     cleanup_action,
@@ -909,7 +919,7 @@ class SubprocessBroker:
     @staticmethod
     def _observation_identities(
         observations: list[ProcessObservation],
-    ) -> tuple[tuple[int, float | None, str], ...]:
+    ) -> tuple[tuple[int, float | None, ProcessDiscoverySource], ...]:
         return tuple(
             dict.fromkeys(
                 (item.pid, item.create_time, item.discovery_source) for item in observations
@@ -919,8 +929,8 @@ class SubprocessBroker:
     @staticmethod
     def _observe_process(
         process: psutil.Process,
-        source: str,
-        phase: Literal["running", "pre_cleanup", "post_cleanup", "post_root_exit"],
+        source: ProcessDiscoverySource,
+        phase: ProcessSnapshotPhase,
         alive_before_cleanup: bool | None,
         cleanup_action: str | None,
         cleanup_outcome: str | None,
@@ -960,7 +970,7 @@ class SubprocessBroker:
             create_time=create_time,
             parent_pid=parent_pid,
             parent_create_time=parent_create_time,
-            discovery_source=source,  # type: ignore[arg-type]
+            discovery_source=source,
             name=read("name"),
             status=read("status"),
             rss_bytes=getattr(memory, "rss", None),
@@ -1040,7 +1050,7 @@ class SubprocessBroker:
             process_observations.extend(
                 self._snapshot_processes(
                     process.pid,
-                    "running",
+                    ProcessSnapshotPhase.RUNNING,
                     True,
                     None,
                     None,
@@ -1068,7 +1078,7 @@ class SubprocessBroker:
         process_observations.extend(
             self._snapshot_known_processes(
                 self._observation_identities(process_observations),
-                "post_root_exit",
+                ProcessSnapshotPhase.POST_ROOT_EXIT,
                 False,
                 None,
                 None,
@@ -1076,8 +1086,7 @@ class SubprocessBroker:
         )
         if observed.cancellation_cause is ProcessCancellationCause.IO_FAILURE or output.io_failed:
             io_process = ProcessResult(
-                exit_code=observed.returncode if observed.returncode >= 0 else None,
-                terminating_signal=(-observed.returncode if observed.returncode < 0 else None),
+                termination=process_termination_from_returncode(observed.returncode),
                 wall_time_ns=finished - started,
                 cancellation_cause=ProcessCancellationCause.IO_FAILURE,
                 cleanup_complete=cleanup_complete,
@@ -1097,8 +1106,7 @@ class SubprocessBroker:
             or output.limit_exceeded
         ):
             output_process = ProcessResult(
-                exit_code=observed.returncode if observed.returncode >= 0 else None,
-                terminating_signal=(-observed.returncode if observed.returncode < 0 else None),
+                termination=process_termination_from_returncode(observed.returncode),
                 wall_time_ns=finished - started,
                 cancellation_cause=ProcessCancellationCause.OUTPUT_LIMIT,
                 cleanup_complete=cleanup_complete,
@@ -1115,8 +1123,7 @@ class SubprocessBroker:
             )
         if observed.cancellation_cause is ProcessCancellationCause.TIMEOUT:
             timeout_process = ProcessResult(
-                exit_code=None,
-                terminating_signal=(-observed.returncode if observed.returncode < 0 else None),
+                termination=process_termination_from_returncode(observed.returncode),
                 wall_time_ns=finished - started,
                 cancellation_cause=ProcessCancellationCause.TIMEOUT,
                 cleanup_complete=cleanup_complete,
@@ -1137,8 +1144,7 @@ class SubprocessBroker:
             )
 
         process_result = ProcessResult(
-            exit_code=observed.returncode if observed.returncode >= 0 else None,
-            terminating_signal=(-observed.returncode if observed.returncode < 0 else None),
+            termination=process_termination_from_returncode(observed.returncode),
             wall_time_ns=finished - started,
             cancellation_cause=observed.cancellation_cause,
             cleanup_complete=cleanup_complete,
@@ -1149,7 +1155,11 @@ class SubprocessBroker:
             stdout=stdout,
             stderr=stderr,
             resolved_executable=executable,
-            containment=("process_group" if os.name == "posix" else "process"),
+            containment=(
+                ProcessContainment.PROCESS_GROUP
+                if os.name == "posix"
+                else ProcessContainment.PROCESS
+            ),
             peak_rss_backend=observed.peak_rss_backend,
             process_observations=tuple(process_observations),
         )
@@ -1227,14 +1237,20 @@ class SubprocessBroker:
         force: bool,
     ) -> bool:
         observations.extend(
-            self._snapshot_processes(process.pid, "pre_cleanup", True, "terminate", None)
+            self._snapshot_processes(
+                process.pid,
+                ProcessSnapshotPhase.PRE_CLEANUP,
+                True,
+                "terminate",
+                None,
+            )
         )
         identities = self._observation_identities(observations)
         cleanup_complete = self._terminate_observed_group(process, force=force)
         observations.extend(
             self._snapshot_known_processes(
                 identities,
-                "post_cleanup",
+                ProcessSnapshotPhase.POST_CLEANUP,
                 False,
                 "terminate",
                 str(cleanup_complete),
@@ -1385,9 +1401,12 @@ class SubprocessBroker:
                     minimum_free=minimum_free,
                     peak_rss=peak_rss,
                     unavailable=unavailable,
-                    termination="storage_reserve_exceeded",
+                    termination=ProcessCancellationCause.STORAGE_RESERVE_EXCEEDED,
                 )
-                raise _ResourcePolicyExceeded(summary, "storage_reserve_exceeded")
+                raise _ResourcePolicyExceeded(
+                    summary,
+                    ProcessCancellationCause.STORAGE_RESERVE_EXCEEDED,
+                )
             if policy.maximum_rss_bytes is not None and rss > policy.maximum_rss_bytes:
                 summary = self._resource_summary(
                     policy,
@@ -1396,9 +1415,12 @@ class SubprocessBroker:
                     minimum_free=minimum_free,
                     peak_rss=peak_rss,
                     unavailable=unavailable,
-                    termination="memory_limit_exceeded",
+                    termination=ProcessCancellationCause.MEMORY_LIMIT_EXCEEDED,
                 )
-                raise _ResourcePolicyExceeded(summary, "memory_limit_exceeded")
+                raise _ResourcePolicyExceeded(
+                    summary,
+                    ProcessCancellationCause.MEMORY_LIMIT_EXCEEDED,
+                )
             await asyncio.sleep(interval)
         if not free_sampled:
             unavailable.add("minimum_free_bytes")
@@ -1423,7 +1445,7 @@ class SubprocessBroker:
         minimum_free: int | None,
         peak_rss: int,
         unavailable: set[str],
-        termination: Literal["storage_reserve_exceeded", "memory_limit_exceeded"] | None,
+        termination: ResourcePolicyCancellationCause | None,
     ) -> RuntimeResourceSummary:
         growth: dict[str, int] = {}
         for root in policy.writable_roots:
@@ -1876,7 +1898,13 @@ class ManagedSidecarLease:
                     )
                 if await readiness():
                     observations.extend(
-                        broker._snapshot_processes(process.pid, "running", True, None, None)
+                        broker._snapshot_processes(
+                            process.pid,
+                            ProcessSnapshotPhase.RUNNING,
+                            True,
+                            None,
+                            None,
+                        )
                     )
                     return lease
                 await asyncio.sleep(0.05)
@@ -1981,7 +2009,7 @@ class ManagedSidecarLease:
                         asyncio.to_thread(
                             broker._snapshot_processes,
                             process.pid,
-                            "running",
+                            ProcessSnapshotPhase.RUNNING,
                             True,
                             None,
                             None,
@@ -2105,7 +2133,11 @@ class ManagedSidecarLease:
         )
         self._observations.extend(
             self._broker._snapshot_processes(
-                self._process.pid, "pre_cleanup", True, "terminate", None
+                self._process.pid,
+                ProcessSnapshotPhase.PRE_CLEANUP,
+                True,
+                "terminate",
+                None,
             )
         )
         identities = self._broker._observation_identities(self._observations)
@@ -2120,7 +2152,11 @@ class ManagedSidecarLease:
         )
         self._observations.extend(
             self._broker._snapshot_known_processes(
-                identities, "post_cleanup", False, "terminate", str(cleanup_complete)
+                identities,
+                ProcessSnapshotPhase.POST_CLEANUP,
+                False,
+                "terminate",
+                str(cleanup_complete),
             )
         )
         stdout = await self._broker._collect_readers(self._stdout_task, self._stderr_task)
@@ -2130,9 +2166,7 @@ class ManagedSidecarLease:
         finished = datetime.now(UTC)
         self._outcome = ManagedSidecarOutcome(
             process=ProcessResult(
-                exit_code=(
-                    self._process.returncode if self._process.returncode is not None else None
-                ),
+                termination=process_termination_from_returncode(self._process.returncode),
                 cleanup_complete=cleanup_complete,
                 wall_time_ns=max(0, int((finished - self._started_at).total_seconds() * 1e9)),
                 stdout=stdout_bytes.decode(errors="replace"),
@@ -2140,7 +2174,11 @@ class ManagedSidecarLease:
             ),
             stdout=stdout_bytes,
             stderr=stderr_bytes,
-            containment="process_group" if os.name == "posix" else "process",
+            containment=(
+                ProcessContainment.PROCESS_GROUP
+                if os.name == "posix"
+                else ProcessContainment.PROCESS
+            ),
             process_observations=tuple(self._observations),
             started_at=self._started_at,
             finished_at=finished,

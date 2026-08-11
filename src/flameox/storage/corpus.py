@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, StringConstraints
+from pydantic import (
+    Field,
+    ModelWrapValidatorHandler,
+    StringConstraints,
+    ValidationError,
+    computed_field,
+    model_validator,
+)
 
 from flameox.atomic import atomic_write_json, atomic_write_text
 from flameox.domain.errors import DomainError, ErrorCode
@@ -40,18 +48,49 @@ class GenerationManifest(ContractModel):
     supersedes: tuple[str, ...] = ()
 
 
+class _CorpusCommitIntegrityError(ValueError):
+    """A persisted commit projection contradicts its canonical content."""
+
+
 class CorpusCommit(ContractModel):
     schema_version: Literal[1] = 1
-    commit_id: Digest
     parent_commit_id: Digest | None
     created_at: datetime
     generation_manifests: tuple[str, ...]
-    inventory_digest: Digest
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def parse_digest_projections(
+        cls,
+        value: Any,
+        handler: ModelWrapValidatorHandler[CorpusCommit],
+    ) -> CorpusCommit:
+        if not isinstance(value, Mapping):
+            return handler(value)
+        payload = dict(value)
+        supplied_inventory = payload.pop("inventory_digest", None)
+        supplied_commit = payload.pop("commit_id", None)
+        commit = handler(payload)
+        if supplied_inventory is not None and supplied_inventory != commit.inventory_digest:
+            raise _CorpusCommitIntegrityError(
+                "corpus inventory digest does not match its generation manifests"
+            )
+        if supplied_commit is not None and supplied_commit != commit.commit_id:
+            raise _CorpusCommitIntegrityError("corpus commit digest does not match its content")
+        return commit
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def inventory_digest(self) -> Digest:
+        return digest_model({"generation_manifests": self.generation_manifests})
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def commit_id(self) -> Digest:
+        return digest_model(self.content_without_id())
 
     def content_without_id(self) -> dict[str, object]:
-        content = self.model_dump(mode="json")
-        del content["commit_id"]
-        return content
+        return self.model_dump(mode="json", exclude={"commit_id"})
 
 
 def build_commit(
@@ -62,15 +101,11 @@ def build_commit(
 ) -> CorpusCommit:
     generation_manifests = tuple(sorted(set(generation_manifests)))
     timestamp = created_at or utc_now()
-    inventory_digest = digest_model({"generation_manifests": generation_manifests})
-    commit = CorpusCommit(
-        commit_id="sha256:" + ("0" * 64),
+    return CorpusCommit(
         parent_commit_id=parent_commit_id,
         created_at=timestamp,
         generation_manifests=generation_manifests,
-        inventory_digest=inventory_digest,
     )
-    return commit.validated_copy(update={"commit_id": digest_model(commit.content_without_id())})
 
 
 class CorpusStore:
@@ -96,8 +131,6 @@ class CorpusStore:
         return self.commits_root / f"{digest}.json"
 
     def write_commit(self, commit: CorpusCommit) -> None:
-        if digest_model(commit.content_without_id()) != commit.commit_id:
-            raise DomainError(ErrorCode.WORKSPACE_INVALID, "Corpus commit digest is invalid.")
         path = self.commit_path(commit.commit_id)
         if path.exists():
             existing = self.read_commit(commit.commit_id)
@@ -129,14 +162,22 @@ class CorpusStore:
         try:
             payload = json.loads(path.read_text())
             commit = CorpusCommit.model_validate(payload)
+        except ValidationError as exc:
+            integrity_failure = any(
+                isinstance(error.get("ctx", {}).get("error"), _CorpusCommitIntegrityError)
+                for error in exc.errors(include_url=False)
+            )
+            raise DomainError(
+                (
+                    ErrorCode.ARTIFACT_INTEGRITY_FAILED
+                    if integrity_failure
+                    else ErrorCode.WORKSPACE_INVALID
+                ),
+                f"Corpus commit {commit_id!r} is missing or invalid.",
+            ) from exc
         except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
                 f"Corpus commit {commit_id!r} is missing or invalid.",
             ) from exc
-        if digest_model(commit.content_without_id()) != commit.commit_id:
-            raise DomainError(
-                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                f"Corpus commit {commit_id!r} failed its content digest.",
-            )
         return commit

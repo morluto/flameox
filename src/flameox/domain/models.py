@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     ConfigDict,
@@ -25,18 +26,20 @@ Digest = Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
 ShortText = Annotated[str, StringConstraints(min_length=1, max_length=500)]
 
 
+class LimitationSource(StrEnum):
+    ADAPTER = "adapter"
+    CONTAINMENT = "containment"
+    PREFLIGHT = "preflight"
+    COLLECTOR = "collector"
+    ARTIFACT = "artifact"
+    RESOURCE = "resource"
+    VALIDATION = "validation"
+
+
 class LimitationDetail(ContractModel):
     """A bounded, machine-readable explanation of an evidence limitation."""
 
-    source: Literal[
-        "adapter",
-        "containment",
-        "preflight",
-        "collector",
-        "artifact",
-        "resource",
-        "validation",
-    ]
+    source: LimitationSource
     code: Annotated[
         str,
         StringConstraints(
@@ -56,6 +59,12 @@ class EvidenceLevel(StrEnum):
     OBSERVED = "observed"
     DERIVED = "derived"
     INFERRED = "inferred"
+
+
+class ResourceAvailability(StrEnum):
+    AVAILABLE = "available"
+    PARTIAL = "partial"
+    UNAVAILABLE = "unavailable"
 
 
 class IdentityQuality(StrEnum):
@@ -199,6 +208,11 @@ class TrialFailureClass(StrEnum):
     INFRASTRUCTURE_FAILURE = "infrastructure_failure"
     ORACLE_INCONCLUSIVE = "oracle_inconclusive"
     ORACLE_RECEIPT_ERROR = "oracle_receipt_error"
+
+
+class ExperimentRole(StrEnum):
+    EXPLORATORY = "exploratory"
+    CONFIRMATORY = "confirmatory"
 
 
 class OracleStrength(StrEnum):
@@ -374,6 +388,87 @@ class MetricPolarity(StrEnum):
     NEUTRAL = "neutral"
 
 
+class MetricSource(StrEnum):
+    MEASUREMENT = "measurement"
+    RUNTIME_RESOURCE = "runtime_resource"
+
+
+class ConfidenceInterval(ContractModel):
+    low: float
+    high: float
+    level: Annotated[float, Field(gt=0, lt=1)]
+
+    @model_validator(mode="after")
+    def lower_bound_does_not_exceed_upper_bound(self) -> ConfidenceInterval:
+        if self.low > self.high:
+            raise ValueError("confidence interval lower bound exceeds its upper bound")
+        return self
+
+
+_CONFIDENCE_PROJECTION_FIELDS = ("confidence_low", "confidence_high", "confidence_level")
+
+
+def _advertise_confidence_interval_projections(schema: dict[str, Any]) -> None:
+    properties = schema.setdefault("properties", {})
+    assert isinstance(properties, dict)
+    properties.pop("confidence_interval", None)
+    for field_name in _CONFIDENCE_PROJECTION_FIELDS:
+        properties[field_name] = {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "default": None,
+            "readOnly": True,
+            "title": field_name.replace("_", " ").title(),
+        }
+
+
+class ConfidenceIntervalFields(ContractModel):
+    """Optional confidence interval with flattened compatibility projections."""
+
+    model_config = ConfigDict(json_schema_extra=_advertise_confidence_interval_projections)
+
+    confidence_interval: ConfidenceInterval | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_flat_confidence_interval(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+        supplied = tuple(name for name in _CONFIDENCE_PROJECTION_FIELDS if name in value)
+        if not supplied:
+            return value
+        if "confidence_interval" in value:
+            raise ValueError(
+                "use either confidence_interval or flattened confidence fields, not both"
+            )
+        parsed = dict(value)
+        low = parsed.pop("confidence_low", None)
+        high = parsed.pop("confidence_high", None)
+        level = parsed.pop("confidence_level", None)
+        observed = (low, high, level)
+        if all(item is None for item in observed):
+            parsed["confidence_interval"] = None
+        elif any(item is None for item in observed):
+            raise ValueError("confidence bounds and level must appear together")
+        else:
+            parsed["confidence_interval"] = {"low": low, "high": high, "level": level}
+        return parsed
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def confidence_low(self) -> float | None:
+        return self.confidence_interval.low if self.confidence_interval is not None else None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def confidence_high(self) -> float | None:
+        return self.confidence_interval.high if self.confidence_interval is not None else None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def confidence_level(self) -> float | None:
+        return self.confidence_interval.level if self.confidence_interval is not None else None
+
+
 class Integrity(ContractModel):
     sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
     hashed_at: datetime = Field(default_factory=utc_now)
@@ -453,24 +548,47 @@ class EnvironmentRecord(ContractModel):
         return self
 
 
+class AcceleratorMigMode(StrEnum):
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    UNKNOWN = "unknown"
+
+
+class AcceleratorLinkKind(StrEnum):
+    NVLINK = "nvlink"
+    PCIE = "pcie"
+    HOST_BRIDGE = "host_bridge"
+    NUMA = "numa"
+    SYSTEM = "system"
+    UNKNOWN = "unknown"
+
+
+class AcceleratorIdentityStatus(StrEnum):
+    AVAILABLE = "available"
+    MISSING = "missing"
+    PERMISSION_DENIED = "permission_denied"
+    UNSUPPORTED = "unsupported"
+    UNKNOWN = "unknown"
+
+
 class AcceleratorDevice(ContractModel):
     index: Annotated[int, Field(ge=0)]
     model: str | None = None
     compute_capability: str | None = None
     memory_mib: Annotated[int, Field(ge=0)] | None = None
-    mig_mode: Literal["enabled", "disabled", "unknown"] = "unknown"
+    mig_mode: AcceleratorMigMode = AcceleratorMigMode.UNKNOWN
 
 
 class AcceleratorLink(ContractModel):
     left: Annotated[int, Field(ge=0)]
     right: Annotated[int, Field(ge=0)]
-    kind: Literal["nvlink", "pcie", "host_bridge", "numa", "system", "unknown"]
+    kind: AcceleratorLinkKind
     width: Annotated[int, Field(gt=0)] | None = None
 
 
 class AcceleratorIdentityFacet(ContractModel):
     provider: Literal["cuda"]
-    status: Literal["available", "missing", "permission_denied", "unsupported", "unknown"]
+    status: AcceleratorIdentityStatus
     identity_quality: IdentityQuality
     driver_version: str | None = None
     runtime_version: str | None = None
@@ -577,6 +695,22 @@ class PreflightDisposition(StrEnum):
     EXPLORATORY = "exploratory"
 
 
+class RequirementKind(StrEnum):
+    EXECUTABLE = "executable"
+    PYTHON_DISTRIBUTION = "python_distribution"
+    CAPABILITY = "capability"
+
+
+class RequirementStatus(StrEnum):
+    AVAILABLE = "available"
+    ABSENT = "absent"
+    PERMISSION_DENIED = "permission_denied"
+    ENVIRONMENT_BLOCKED = "environment_blocked"
+    UNSUPPORTED = "unsupported"
+    UNKNOWN = "unknown"
+    PROBE_FAILED = "probe_failed"
+
+
 class CapabilitySetupVerification(StrEnum):
     NOT_REQUIRED = "not_required"
     PENDING = "pending"
@@ -594,11 +728,42 @@ class CapabilityProvisioning(StrEnum):
     UNSUPPORTED = "unsupported"
 
 
+class CapabilityExtra(StrEnum):
+    CPU = "cpu"
+    EXECUTION = "execution"
+    MEMORY = "memory"
+    TEST = "test"
+    TRACE = "trace"
+    TORCH = "torch"
+    TOXIPROXY = "toxiproxy"
+
+
+_MANAGED_RUNTIME_EXTRAS = frozenset(CapabilityExtra) - {CapabilityExtra.TOXIPROXY}
+
+
+def parse_managed_runtime_extras(value: object) -> tuple[CapabilityExtra, ...]:
+    """Parse the package extras that may be carried into a versioned runtime."""
+
+    if not isinstance(value, (list, tuple)):
+        return ()
+    extras: set[CapabilityExtra] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        try:
+            extra = CapabilityExtra(item)
+        except ValueError:
+            continue
+        if extra in _MANAGED_RUNTIME_EXTRAS:
+            extras.add(extra)
+    return tuple(sorted(extras, key=str))
+
+
 class CapabilitySetup(ContractModel):
     """The bounded setup action FlameOx can take for one capability."""
 
     method: Literal["start_capability_setup"]
-    extra: Literal["cpu", "execution", "memory", "test", "trace", "torch", "toxiproxy"]
+    extra: CapabilityExtra
     requirement: str | None = None
     next_tool: Literal["start_capability_setup", "list_capabilities"]
     verification_tool: Literal["list_capabilities"] = "list_capabilities"
@@ -641,18 +806,10 @@ class CapabilityReport(ContractModel):
 
 class RequirementResult(ContractModel):
     requirement: str
-    kind: Literal["executable", "python_distribution", "capability"]
+    kind: RequirementKind
     required: bool
     probe_kind: ProbeKind
-    status: Literal[
-        "available",
-        "absent",
-        "permission_denied",
-        "environment_blocked",
-        "unsupported",
-        "unknown",
-        "probe_failed",
-    ]
+    status: RequirementStatus
     identity: str | None = None
     evidence: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
@@ -705,11 +862,31 @@ class ExternalExecutionContext(ContractModel):
         str,
         StringConstraints(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$"),
     ]
-    sensitivity: Literal["internal", "sensitive"] = "internal"
+    sensitivity: Literal[Sensitivity.INTERNAL, Sensitivity.SENSITIVE] = Sensitivity.INTERNAL
+
+
+class ExecutionIdentityInputKind(StrEnum):
+    PYTHON_MODULE = "python_module"
+    NATIVE_FILE = "native_file"
+
+
+class ExecutionIdentityInputStatus(StrEnum):
+    EXACT = "exact"
+    MISSING = "missing"
+    AMBIGUOUS = "ambiguous"
+    RESOLUTION_FAILED = "resolution_failed"
+    NOT_OBSERVED = "not_observed"
+
+
+class ExecutionIdentityQuality(StrEnum):
+    EXACT = "exact"
+    PARTIAL = "partial"
+    UNKNOWN = "unknown"
+    NOT_APPLICABLE = "not_applicable"
 
 
 class ExecutionIdentityInput(ContractModel):
-    kind: Literal["python_module", "native_file"]
+    kind: ExecutionIdentityInputKind
     requested: str
     configured_path: str | None = None
     resolved_path: str | None = None
@@ -718,14 +895,14 @@ class ExecutionIdentityInput(ContractModel):
     version: str | None = None
     content_digest: Digest | None = None
     build_id: str | None = None
-    status: Literal["exact", "missing", "ambiguous", "resolution_failed", "not_observed"]
+    status: ExecutionIdentityInputStatus
     limitations: tuple[str, ...] = ()
 
 
 class WorkloadExecutionIdentity(ContractModel):
     schema_version: Literal[1] = 1
     identity_id: Digest
-    quality: Literal["exact", "partial", "unknown", "not_applicable"]
+    quality: ExecutionIdentityQuality
     inputs: tuple[ExecutionIdentityInput, ...]
     missing_inputs: tuple[str, ...] = ()
 
@@ -832,11 +1009,125 @@ class ProcessCancellationCause(StrEnum):
     CRASH_RECOVERY = "crash_recovery"
 
 
-class ProcessResult(ContractModel):
+class ProcessTerminationKind(StrEnum):
+    UNREPORTED = "unreported"
+    EXITED = "exited"
+    SIGNALLED = "signalled"
+
+
+class UnreportedProcessTermination(ContractModel):
+    kind: Literal[ProcessTerminationKind.UNREPORTED] = ProcessTerminationKind.UNREPORTED
+
+
+class ExitedProcessTermination(ContractModel):
+    kind: Literal[ProcessTerminationKind.EXITED] = ProcessTerminationKind.EXITED
+    exit_code: Annotated[int, Field(ge=0)]
+
+
+class SignalledProcessTermination(ContractModel):
+    kind: Literal[ProcessTerminationKind.SIGNALLED] = ProcessTerminationKind.SIGNALLED
+    signal: Annotated[int, Field(gt=0)]
+
+
+type ProcessTermination = Annotated[
+    UnreportedProcessTermination | ExitedProcessTermination | SignalledProcessTermination,
+    Field(discriminator="kind"),
+]
+
+
+def process_termination_from_returncode(returncode: int | None) -> ProcessTermination:
+    if returncode is None:
+        return UnreportedProcessTermination()
+    if returncode >= 0:
+        return ExitedProcessTermination(exit_code=returncode)
+    return SignalledProcessTermination(signal=-returncode)
+
+
+def _advertise_process_termination_projections(schema: dict[str, Any]) -> None:
+    properties = schema.setdefault("properties", {})
+    assert isinstance(properties, dict)
+    properties.pop("termination", None)
+    properties.update(
+        {
+            "exit_code": {
+                "anyOf": [{"minimum": 0, "type": "integer"}, {"type": "null"}],
+                "default": None,
+                "title": "Exit Code",
+            },
+            "terminating_signal": {
+                "anyOf": [{"exclusiveMinimum": 0, "type": "integer"}, {"type": "null"}],
+                "default": None,
+                "title": "Terminating Signal",
+            },
+        }
+    )
+
+
+class ProcessTerminationFields(ContractModel):
+    """Canonical process termination with flattened compatibility projections."""
+
+    model_config = ConfigDict(json_schema_extra=_advertise_process_termination_projections)
+
+    termination: ProcessTermination = Field(
+        default_factory=UnreportedProcessTermination,
+        exclude=True,
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_flat_termination(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+        has_exit_code = "exit_code" in value
+        has_signal = "terminating_signal" in value
+        if not has_exit_code and not has_signal:
+            return value
+        if "termination" in value:
+            raise ValueError("use either termination or flattened termination fields, not both")
+        parsed = dict(value)
+        exit_code = parsed.pop("exit_code", None)
+        signal = parsed.pop("terminating_signal", None)
+        if exit_code is not None and signal is not None:
+            raise ValueError("a process cannot have both an exit code and a terminating signal")
+        if exit_code is not None:
+            termination: dict[str, object] = {
+                "kind": ProcessTerminationKind.EXITED,
+                "exit_code": exit_code,
+            }
+        elif signal is not None:
+            termination = {
+                "kind": ProcessTerminationKind.SIGNALLED,
+                "signal": signal,
+            }
+        else:
+            termination = {"kind": ProcessTerminationKind.UNREPORTED}
+        parsed["termination"] = termination
+        return parsed
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def exit_code(self) -> int | None:
+        if isinstance(self.termination, ExitedProcessTermination):
+            return self.termination.exit_code
+        return None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def terminating_signal(self) -> int | None:
+        if isinstance(self.termination, SignalledProcessTermination):
+            return self.termination.signal
+        return None
+
+
+type ResourcePolicyCancellationCause = Literal[
+    ProcessCancellationCause.STORAGE_RESERVE_EXCEEDED,
+    ProcessCancellationCause.MEMORY_LIMIT_EXCEEDED,
+]
+
+
+class ProcessResult(ProcessTerminationFields):
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
-    exit_code: int | None = None
-    terminating_signal: int | None = None
     wall_time_ns: Annotated[int, Field(ge=0)] | None = None
     peak_rss_bytes: Annotated[int, Field(ge=0)] | None = None
     cancellation_cause: ProcessCancellationCause | None = None
@@ -866,9 +1157,7 @@ class ProcessResult(ContractModel):
         return self.cancellation_cause is ProcessCancellationCause.TIMEOUT
 
     @model_validator(mode="after")
-    def termination_is_coherent(self) -> ProcessResult:
-        if self.exit_code is not None and self.terminating_signal is not None:
-            raise ValueError("process cannot have both an exit code and a terminating signal")
+    def resource_summary_is_coherent(self) -> ProcessResult:
         if self.resources is not None and self.peak_rss_bytes != self.resources.peak_rss_bytes:
             raise ValueError("process and resource-summary peak RSS must agree")
         return self
@@ -884,7 +1173,7 @@ class RuntimeResourceSummary(ContractModel):
     # tree's lifetime maximum.
     peak_rss_backend: str | None = None
     unavailable_metrics: tuple[str, ...] = ()
-    policy_termination: Literal["storage_reserve_exceeded", "memory_limit_exceeded"] | None = None
+    policy_termination: ResourcePolicyCancellationCause | None = None
 
 
 class CaptureLease(ContractModel):
@@ -1059,7 +1348,7 @@ class Experiment(ContractModel):
     confidence_level: Annotated[float, Field(gt=0, lt=1)]
     stopping_rule: dict[str, JsonValue]
     random_seed: Annotated[int, Field(ge=0)]
-    role: Literal["exploratory", "confirmatory"]
+    role: ExperimentRole
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -1269,7 +1558,7 @@ class EvidenceReference(ContractModel):
     relation: EvidenceRelation
 
 
-class Comparison(ContractModel):
+class Comparison(ConfidenceIntervalFields):
     # This is the public result envelope, not the durable comparison format. Persisted
     # comparisons retain the separate schema-v1 Parquet projection in evidence/schemas.py.
     schema_version: Literal[2] = 2
@@ -1291,13 +1580,9 @@ class Comparison(ContractModel):
     # mean difference such as Cohen's d. See ``estimand`` for the exact
     # quantity this value estimates.
     effect_size: float | None = None
-    confidence_low: float | None = None
-    confidence_high: float | None = None
-    confidence_level: float | None = None
     method: Identifier
     random_seed: Annotated[int, Field(ge=0)] | None = None
     independent_unit: Identifier
-    paired: bool
     baseline_attempted_n: Annotated[int, Field(ge=0)]
     baseline_eligible_n: Annotated[int, Field(ge=0)]
     baseline_failed_n: Annotated[int, Field(ge=0)] = 0
@@ -1312,21 +1597,26 @@ class Comparison(ContractModel):
     validity: ComparisonValidity
     mismatches: tuple[str, ...] = ()
 
+    @model_validator(mode="before")
+    @classmethod
+    def parse_legacy_paired_projection(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping) or "paired" not in value:
+            return value
+        payload = dict(value)
+        paired = payload.pop("paired")
+        if not isinstance(paired, bool):
+            raise ValueError("comparison paired projection must be a boolean")
+        if paired != (payload.get("complete_pair_n") is not None):
+            raise ValueError("comparison paired projection contradicts its complete-pair count")
+        return payload
+
+    @computed_field(return_type=bool)  # type: ignore[prop-decorator]
+    @property
+    def paired(self) -> bool:
+        return self.complete_pair_n is not None
+
     @model_validator(mode="after")
     def statistical_state_is_coherent(self) -> Comparison:
-        confidence = (self.confidence_low, self.confidence_high, self.confidence_level)
-        if any(value is not None for value in confidence) and any(
-            value is None for value in confidence
-        ):
-            raise ValueError("comparison confidence bounds and level must appear together")
-        if (
-            self.confidence_low is not None
-            and self.confidence_high is not None
-            and self.confidence_low > self.confidence_high
-        ):
-            raise ValueError("comparison confidence lower bound exceeds its upper bound")
-        if self.paired != (self.complete_pair_n is not None):
-            raise ValueError("paired comparisons require a complete-pair count")
         if self.complete_pair_n is not None and self.complete_pair_n > min(
             self.baseline_eligible_n,
             self.candidate_eligible_n,

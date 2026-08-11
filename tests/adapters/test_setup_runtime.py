@@ -12,14 +12,21 @@ from flameox.adapters import ManagedRuntime, install_trace_processor
 from flameox.application import CapabilityList
 from flameox.application.capabilities import CapabilityService
 from flameox.domain import (
+    CapabilityExtra,
     CapabilityReport,
     CapabilitySetup,
     CapabilityStatus,
     DomainError,
     ErrorCode,
     ProcessResult,
+    process_termination_from_returncode,
 )
-from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
+from flameox.execution import (
+    ExecutionOutcome,
+    ExecutionRequest,
+    ProcessContainment,
+    SubprocessBroker,
+)
 from flameox.storage import Workspace
 
 
@@ -46,11 +53,14 @@ class RecordingBroker(SubprocessBroker):
             path.mkdir(parents=True, exist_ok=True)
             (path / ("flameox.exe" if os.name == "nt" else "flameox")).write_text("")
         return ExecutionOutcome(
-            process=ProcessResult(exit_code=0, cleanup_complete=True),
+            process=ProcessResult(
+                termination=process_termination_from_returncode(0),
+                cleanup_complete=True,
+            ),
             stdout=self.stdout,
             stderr=b"",
             resolved_executable=Path(request.argv[0]),
-            containment="process_group",
+            containment=ProcessContainment.PROCESS_GROUP,
         )
 
 
@@ -113,7 +123,7 @@ async def test_prepared_workspace_capability_is_carried_into_runtime_upgrade(
     )
 
     setup = CapabilitySetup(
-        extra="torch",
+        extra=CapabilityExtra.TORCH,
         method="start_capability_setup",
         next_tool="start_capability_setup",
         requirement="torch>=2.7",

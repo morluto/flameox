@@ -223,8 +223,6 @@ class FailureRecipes(RecipeContext):
             population_status=population_status,
             failures=failures,
             total_clusters=total,
-            returned=len(failures),
-            truncated=total > len(failures),
             change_points=change_points,
             coverage={
                 "source_identity": int(coverage_row[1]) / denominator,

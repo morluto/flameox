@@ -12,6 +12,7 @@ from flameox.application import (
     ArtifactPipelineService,
     KernelBuildImportService,
     RegisteredPipelineStageDeclaration,
+    kernel_build_pipeline_request,
 )
 from flameox.domain import DomainError, ErrorCode
 from flameox.storage import Workspace
@@ -66,7 +67,8 @@ def _manifest(**updates: object) -> KernelBuildManifestV1:
 def test_kernel_build_translates_to_existing_pipeline_contract() -> None:
     manifest = _manifest(diagnostics=["diagnostic text remains native manifest data"])
 
-    request = manifest.pipeline_request(
+    request = kernel_build_pipeline_request(
+        manifest,
         run_id="run-1",
         registration_ids_by_path={
             "kernel/vector_add.ttir": "registration-ttir",
@@ -268,7 +270,8 @@ def test_kernel_build_pipeline_limits_derived_limitations() -> None:
         limitations=[f"limitation-{index}" for index in range(20)],
     )
 
-    request = manifest.pipeline_request(
+    request = kernel_build_pipeline_request(
+        manifest,
         run_id="run-1",
         registration_ids_by_path={
             "kernel/vector_add.ttir": "registration-ttir",

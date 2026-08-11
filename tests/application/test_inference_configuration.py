@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from flameox.application.workloads import (
+    ConfigurationOperation,
     ConfigureInferenceScenarioRequest,
     ConfigureInferenceServerRequest,
     InferenceScenarioConfig,
@@ -233,7 +234,7 @@ def test_structured_inference_configuration_preserves_existing_sections(tmp_path
     server = service.configure_inference_server(
         ConfigureInferenceServerRequest(
             name="local",
-            operation="create",
+            operation=ConfigurationOperation.CREATE,
             config=_server(
                 mode="managed",
                 workload="serve",
@@ -248,7 +249,7 @@ def test_structured_inference_configuration_preserves_existing_sections(tmp_path
     scenario = service.configure_inference_scenario(
         ConfigureInferenceScenarioRequest(
             name="replay",
-            operation="create",
+            operation=ConfigurationOperation.CREATE,
             config=_scenario(
                 server="local",
                 provider="aiperf",
@@ -306,7 +307,7 @@ def test_structured_inference_replace_requires_current_digest(tmp_path: Path) ->
     created = service.configure_inference_server(
         ConfigureInferenceServerRequest(
             name="local",
-            operation="create",
+            operation=ConfigurationOperation.CREATE,
             config=_server(mode="existing_local", model="model", base_url="http://127.0.0.1:8000"),
         )
     )
@@ -314,7 +315,7 @@ def test_structured_inference_replace_requires_current_digest(tmp_path: Path) ->
     replaced = service.configure_inference_server(
         ConfigureInferenceServerRequest(
             name="local",
-            operation="replace",
+            operation=ConfigurationOperation.REPLACE,
             expected_configuration_id=created.configuration_id,
             config=_server(
                 mode="existing_local", model="model-2", base_url="http://127.0.0.1:8000"

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import math
+from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, assert_never
 
 from pydantic import (
     Field,
@@ -19,7 +20,14 @@ from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
-ValidationStatus = Literal["pass", "fail", "inconclusive", "unsupported"]
+
+class KernelValidationStatus(StrEnum):
+    PASS = "pass"
+    FAIL = "fail"
+    INCONCLUSIVE = "inconclusive"
+    UNSUPPORTED = "unsupported"
+
+
 MetricName = Literal[
     "max_abs_error",
     "max_rel_error",
@@ -76,7 +84,7 @@ class EvaluatedKernelValidationMetric(_KernelValidationMetric):
     value: float
     comparator: Comparator
     threshold: float
-    status: Literal["pass", "fail"]
+    status: Literal[KernelValidationStatus.PASS, KernelValidationStatus.FAIL]
     limitation: Annotated[str, StringConstraints(max_length=500)] | None = None
 
     @model_validator(mode="after")
@@ -97,8 +105,8 @@ class EvaluatedKernelValidationMetric(_KernelValidationMetric):
             if self.comparator == "<="
             else self.value >= self.threshold
         )
-        expected_status: ValidationStatus = "pass" if passed else "fail"
-        if self.status != expected_status:
+        expected_status = KernelValidationStatus.PASS if passed else KernelValidationStatus.FAIL
+        if self.status is not expected_status:
             raise ValueError("metric status contradicts its value and threshold")
         return self
 
@@ -107,7 +115,10 @@ class UnavailableKernelValidationMetric(_KernelValidationMetric):
     value: Literal[None]
     comparator: Literal[None]
     threshold: Literal[None]
-    status: Literal["inconclusive", "unsupported"]
+    status: Literal[
+        KernelValidationStatus.INCONCLUSIVE,
+        KernelValidationStatus.UNSUPPORTED,
+    ]
     limitation: Annotated[str, StringConstraints(min_length=1, max_length=500)]
 
 
@@ -145,7 +156,7 @@ class KernelValidationOutput(ContractModel):
     name: BoundedName
     dtype: Annotated[str, StringConstraints(min_length=1, max_length=100)]
     shape: Annotated[tuple[Int64, ...], Field(max_length=16)]
-    status: ValidationStatus
+    status: KernelValidationStatus
     metrics: Annotated[tuple[KernelValidationMetric, ...], Field(max_length=16)] = ()
     representative_failures: Annotated[
         tuple[KernelValidationFailure, ...], Field(max_length=8)
@@ -165,17 +176,24 @@ class KernelValidationOutput(ContractModel):
         if len(names) != len(set(names)):
             raise ValueError("output metric names must be unique")
         if not self.metrics:
-            if self.status not in {"inconclusive", "unsupported"} or not self.limitations:
+            if (
+                self.status
+                not in {
+                    KernelValidationStatus.INCONCLUSIVE,
+                    KernelValidationStatus.UNSUPPORTED,
+                }
+                or not self.limitations
+            ):
                 raise ValueError(
                     "outputs without metrics must be inconclusive or unsupported with a limitation"
                 )
         else:
             expected = _aggregate_status(tuple(item.status for item in self.metrics))
-            if self.status != expected:
+            if self.status is not expected:
                 raise ValueError("output status contradicts its metrics")
-        if self.status == "fail" and not self.representative_failures:
+        if self.status is KernelValidationStatus.FAIL and not self.representative_failures:
             raise ValueError("failed outputs require at least one representative failure")
-        if self.status != "fail" and self.representative_failures:
+        if self.status is not KernelValidationStatus.FAIL and self.representative_failures:
             raise ValueError("representative failures require failed output status")
         return self
 
@@ -190,7 +208,7 @@ class KernelValidationCase(ContractModel):
     )
     seed: Int64 | None = None
     device: Annotated[str, StringConstraints(min_length=1, max_length=200)]
-    status: ValidationStatus
+    status: KernelValidationStatus
     outputs: Annotated[tuple[KernelValidationOutput, ...], Field(min_length=1, max_length=32)]
     limitations: Annotated[tuple[str, ...], Field(max_length=20)] = ()
 
@@ -207,7 +225,7 @@ class KernelValidationCase(ContractModel):
         if len(names) != len(set(names)):
             raise ValueError("case output names must be unique")
         expected = _aggregate_status(tuple(item.status for item in self.outputs))
-        if self.status != expected:
+        if self.status is not expected:
             raise ValueError("case status contradicts its outputs")
         return self
 
@@ -217,7 +235,7 @@ class KernelValidationV1(ContractModel):
     producer: BoundedName
     producer_version: Annotated[str, StringConstraints(max_length=200)] | None = None
     reference: KernelValidationReference
-    status: ValidationStatus
+    status: KernelValidationStatus
     coverage_complete: bool
     cases: Annotated[tuple[KernelValidationCase, ...], Field(min_length=1, max_length=1_000)]
     limitations: Annotated[tuple[str, ...], Field(max_length=20)] = ()
@@ -228,30 +246,37 @@ class KernelValidationV1(ContractModel):
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("case IDs must be unique")
         child_status = _aggregate_status(tuple(item.status for item in self.cases))
-        expected: ValidationStatus
-        if child_status == "fail":
-            expected = "fail"
-        elif child_status == "pass" and self.coverage_complete:
-            expected = "pass"
-        elif child_status == "unsupported":
-            expected = "unsupported"
+        if child_status is KernelValidationStatus.FAIL:
+            expected = KernelValidationStatus.FAIL
+        elif child_status is KernelValidationStatus.PASS:
+            expected = (
+                KernelValidationStatus.PASS
+                if self.coverage_complete
+                else KernelValidationStatus.INCONCLUSIVE
+            )
+        elif child_status is KernelValidationStatus.UNSUPPORTED:
+            expected = KernelValidationStatus.UNSUPPORTED
+        elif child_status is KernelValidationStatus.INCONCLUSIVE:
+            expected = KernelValidationStatus.INCONCLUSIVE
         else:
-            expected = "inconclusive"
-        if self.status != expected:
+            assert_never(child_status)
+        if self.status is not expected:
             raise ValueError("document status contradicts case outcomes or coverage")
         if not self.coverage_complete and not self.limitations:
             raise ValueError("incomplete coverage requires a limitation")
         return self
 
 
-def _aggregate_status(statuses: tuple[ValidationStatus, ...]) -> ValidationStatus:
-    if "fail" in statuses:
-        return "fail"
-    if statuses and all(item == "pass" for item in statuses):
-        return "pass"
-    if statuses and all(item == "unsupported" for item in statuses):
-        return "unsupported"
-    return "inconclusive"
+def _aggregate_status(
+    statuses: tuple[KernelValidationStatus, ...],
+) -> KernelValidationStatus:
+    if KernelValidationStatus.FAIL in statuses:
+        return KernelValidationStatus.FAIL
+    if statuses and all(item is KernelValidationStatus.PASS for item in statuses):
+        return KernelValidationStatus.PASS
+    if statuses and all(item is KernelValidationStatus.UNSUPPORTED for item in statuses):
+        return KernelValidationStatus.UNSUPPORTED
+    return KernelValidationStatus.INCONCLUSIVE
 
 
 class KernelValidationExtractionResult(ContractModel):
@@ -260,7 +285,7 @@ class KernelValidationExtractionResult(ContractModel):
     artifact_id: str
     producer: str
     producer_version: str | None
-    status: ValidationStatus
+    status: KernelValidationStatus
     coverage_complete: bool
     case_count: int
     output_count: int

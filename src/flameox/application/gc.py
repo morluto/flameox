@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal, Self
 from uuid import uuid4
@@ -21,9 +22,16 @@ from flameox.models import ContractModel
 from flameox.storage import GenerationManifest, Workspace, tree_bytes
 
 
+class GarbageEntryKind(StrEnum):
+    STAGING = "staging"
+    GENERATION = "generation"
+    EVIDENCE = "evidence"
+    ARTIFACT = "artifact"
+
+
 class GarbageEntry(ContractModel):
     path: str
-    kind: Literal["staging", "generation", "evidence", "artifact"]
+    kind: GarbageEntryKind
     byte_length: int
     reason: str
 
@@ -210,7 +218,7 @@ class GarbageCollector:
                     self._candidate(
                         entries,
                         capture_path,
-                        kind="staging",
+                        kind=GarbageEntryKind.STAGING,
                         reason=("Capture staging data is older than the recovery window."),
                         cutoff=cutoff,
                     )
@@ -218,7 +226,7 @@ class GarbageCollector:
             self._candidate(
                 entries,
                 path,
-                kind="staging",
+                kind=GarbageEntryKind.STAGING,
                 reason="Unpublished staging data older than the recovery window.",
                 cutoff=cutoff,
             )
@@ -227,7 +235,7 @@ class GarbageCollector:
                 self._candidate(
                     entries,
                     path,
-                    kind="generation",
+                    kind=GarbageEntryKind.GENERATION,
                     reason="Generation is not reachable from a retained corpus commit.",
                     cutoff=cutoff,
                 )
@@ -237,7 +245,7 @@ class GarbageCollector:
                 self._candidate(
                     entries,
                     path,
-                    kind="evidence",
+                    kind=GarbageEntryKind.EVIDENCE,
                     reason="Evidence is not reachable from a retained corpus commit.",
                     cutoff=cutoff,
                 )
@@ -247,7 +255,7 @@ class GarbageCollector:
                 self._candidate(
                     entries,
                     metadata.parent,
-                    kind="artifact",
+                    kind=GarbageEntryKind.ARTIFACT,
                     reason="Artifact is not reachable from retained evidence.",
                     cutoff=cutoff,
                 )
@@ -496,7 +504,7 @@ class GarbageCollector:
         entries: list[GarbageEntry],
         path: Path,
         *,
-        kind: Literal["staging", "generation", "evidence", "artifact"],
+        kind: GarbageEntryKind,
         reason: str,
         cutoff: datetime,
     ) -> None:

@@ -4,7 +4,6 @@ import shutil
 import tempfile
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
-from typing import Literal
 
 from packaging.requirements import InvalidRequirement, Requirement
 
@@ -17,7 +16,9 @@ from flameox.domain import (
     PreflightDisposition,
     PreflightReport,
     ProbeKind,
+    RequirementKind,
     RequirementResult,
+    RequirementStatus,
     digest_model,
 )
 from flameox.execution import ExecutionRequest, SubprocessBroker
@@ -65,10 +66,10 @@ class PreflightService:
                     results.append(
                         RequirementResult(
                             requirement=name,
-                            kind="capability",
+                            kind=RequirementKind.CAPABILITY,
                             required=name not in requirements.optional,
                             probe_kind=ProbeKind.ACTIVE,
-                            status="probe_failed",
+                            status=RequirementStatus.PROBE_FAILED,
                             limitations=(error.message,),
                             remediation=error.remediation,
                         )
@@ -78,10 +79,10 @@ class PreflightService:
                 results.append(
                     RequirementResult(
                         requirement=name,
-                        kind="capability",
+                        kind=RequirementKind.CAPABILITY,
                         required=name not in requirements.optional,
                         probe_kind=ProbeKind.ACTIVE,
-                        status="unknown",
+                        status=RequirementStatus.UNKNOWN,
                         limitations=("Active probe was not requested for this planning call.",),
                         remediation=("Re-plan with preflight_mode='active' to request the probe.",),
                     )
@@ -95,7 +96,9 @@ class PreflightService:
                     report=report,
                 )
             )
-        blocked = any(item.required and item.status != "available" for item in results)
+        blocked = any(
+            item.required and item.status is not RequirementStatus.AVAILABLE for item in results
+        )
         if blocked and requirements.allow_exploratory:
             disposition = PreflightDisposition.EXPLORATORY
         elif blocked:
@@ -103,7 +106,9 @@ class PreflightService:
         else:
             disposition = PreflightDisposition.READY
         limitations = tuple(
-            f"{item.requirement}: {item.status}" for item in results if item.status != "available"
+            f"{item.requirement}: {item.status}"
+            for item in results
+            if item.status is not RequirementStatus.AVAILABLE
         )
         content = {
             "mode": mode,
@@ -123,10 +128,10 @@ class PreflightService:
         if resolved is None:
             return RequirementResult(
                 requirement=name,
-                kind="executable",
+                kind=RequirementKind.EXECUTABLE,
                 required=required,
                 probe_kind=ProbeKind.PASSIVE,
-                status="absent",
+                status=RequirementStatus.ABSENT,
                 remediation=(
                     f"FlameOx cannot install host executable {name!r}; install it in the local "
                     "environment or configure a workload that uses an available executable.",
@@ -140,19 +145,19 @@ class PreflightService:
         else:
             return RequirementResult(
                 requirement=name,
-                kind="executable",
+                kind=RequirementKind.EXECUTABLE,
                 required=required,
                 probe_kind=ProbeKind.PASSIVE,
-                status="unsupported",
+                status=RequirementStatus.UNSUPPORTED,
                 evidence=(str(path),),
                 limitations=("Repository-controlled executables are not probed during preflight.",),
             )
         return RequirementResult(
             requirement=name,
-            kind="executable",
+            kind=RequirementKind.EXECUTABLE,
             required=required,
             probe_kind=ProbeKind.PASSIVE,
-            status="available",
+            status=RequirementStatus.AVAILABLE,
             identity=str(path),
             evidence=(str(path),),
         )
@@ -174,10 +179,10 @@ class PreflightService:
         else:
             return RequirementResult(
                 requirement="nvcc",
-                kind="executable",
+                kind=RequirementKind.EXECUTABLE,
                 required=required,
                 probe_kind=(ProbeKind.ACTIVE if mode is ProbeKind.ACTIVE else ProbeKind.PASSIVE),
-                status="unsupported",
+                status=RequirementStatus.UNSUPPORTED,
                 evidence=(str(path),),
                 limitations=(
                     "Repository-controlled nvcc is not used for CUDA toolkit readiness checks.",
@@ -186,10 +191,10 @@ class PreflightService:
         if mode is ProbeKind.PASSIVE:
             return RequirementResult(
                 requirement="nvcc",
-                kind="executable",
+                kind=RequirementKind.EXECUTABLE,
                 required=required,
                 probe_kind=ProbeKind.ACTIVE,
-                status="unknown",
+                status=RequirementStatus.UNKNOWN,
                 identity=str(path),
                 evidence=(str(path),),
                 limitations=(
@@ -245,10 +250,10 @@ class PreflightService:
                 if outcome.process.exit_code == 0 and output.is_file() and output.stat().st_size:
                     return RequirementResult(
                         requirement="nvcc",
-                        kind="executable",
+                        kind=RequirementKind.EXECUTABLE,
                         required=required,
                         probe_kind=ProbeKind.ACTIVE,
-                        status="available",
+                        status=RequirementStatus.AVAILABLE,
                         identity=str(path),
                         evidence=(str(path), "bounded_cuda_header_compile"),
                     )
@@ -297,10 +302,10 @@ class PreflightService:
     ) -> RequirementResult:
         return RequirementResult(
             requirement="nvcc",
-            kind="executable",
+            kind=RequirementKind.EXECUTABLE,
             required=required,
             probe_kind=ProbeKind.ACTIVE,
-            status="probe_failed",
+            status=RequirementStatus.PROBE_FAILED,
             identity=str(path),
             evidence=(str(path), diagnostic),
             limitations=(
@@ -330,14 +335,14 @@ class PreflightService:
             marker in lowered for marker in ("no such file", "not found", "cannot open")
         )
         if permission_denied:
-            status: Literal["permission_denied", "environment_blocked"] = "permission_denied"
+            status = RequirementStatus.PERMISSION_DENIED
             limitation = "The bounded CUDA toolkit compile was denied by the host environment."
             remediation = (
                 "Grant the configured process permission to invoke nvcc and access the CUDA "
                 "toolkit, then refresh preflight.",
             )
         else:
-            status = "environment_blocked"
+            status = RequirementStatus.ENVIRONMENT_BLOCKED
             limitation = (
                 "The CUDA toolkit is environment-blocked: the bounded nvcc compile did not "
                 "produce an object file."
@@ -353,7 +358,7 @@ class PreflightService:
                 )
         return RequirementResult(
             requirement="nvcc",
-            kind="executable",
+            kind=RequirementKind.EXECUTABLE,
             required=required,
             probe_kind=ProbeKind.ACTIVE,
             status=status,
@@ -375,10 +380,10 @@ class PreflightService:
         except InvalidRequirement:
             return RequirementResult(
                 requirement=name,
-                kind="python_distribution",
+                kind=RequirementKind.PYTHON_DISTRIBUTION,
                 required=required,
                 probe_kind=ProbeKind.PASSIVE,
-                status="unsupported",
+                status=RequirementStatus.UNSUPPORTED,
                 remediation=(
                     "Use a package name with an optional version specifier in the workload "
                     "requirements.",
@@ -389,10 +394,10 @@ class PreflightService:
         except PackageNotFoundError:
             return RequirementResult(
                 requirement=name,
-                kind="python_distribution",
+                kind=RequirementKind.PYTHON_DISTRIBUTION,
                 required=required,
                 probe_kind=ProbeKind.PASSIVE,
-                status="absent",
+                status=RequirementStatus.ABSENT,
                 remediation=(
                     f"Call prepare_workload_dependencies for workload dependencies including "
                     f"{name!r}.",
@@ -403,10 +408,10 @@ class PreflightService:
         if not requirement.specifier.contains(value.version, prereleases=True):
             return RequirementResult(
                 requirement=name,
-                kind="python_distribution",
+                kind=RequirementKind.PYTHON_DISTRIBUTION,
                 required=required,
                 probe_kind=ProbeKind.PASSIVE,
-                status="absent",
+                status=RequirementStatus.ABSENT,
                 identity=identity,
                 evidence=(identity,),
                 remediation=(
@@ -416,10 +421,10 @@ class PreflightService:
             )
         return RequirementResult(
             requirement=name,
-            kind="python_distribution",
+            kind=RequirementKind.PYTHON_DISTRIBUTION,
             required=required,
             probe_kind=ProbeKind.PASSIVE,
-            status="available",
+            status=RequirementStatus.AVAILABLE,
             identity=identity,
             evidence=(identity,),
             limitations=("Distribution metadata does not prove which module will load.",),
@@ -436,34 +441,24 @@ class PreflightService:
         if not isinstance(report, CapabilityReport):
             return RequirementResult(
                 requirement=name,
-                kind="capability",
+                kind=RequirementKind.CAPABILITY,
                 required=required,
                 probe_kind=ProbeKind.ACTIVE if active else ProbeKind.PASSIVE,
-                status="unknown",
+                status=RequirementStatus.UNKNOWN,
                 limitations=("Flameox does not own a probe for this capability.",),
                 next_tool="list_capabilities",
             )
-        statuses: dict[
-            CapabilityStatus,
-            Literal[
-                "available",
-                "absent",
-                "permission_denied",
-                "unsupported",
-                "unknown",
-                "probe_failed",
-            ],
-        ] = {
-            CapabilityStatus.AVAILABLE: "available",
-            CapabilityStatus.UNAVAILABLE: "absent",
-            CapabilityStatus.PERMISSION_REQUIRED: "permission_denied",
-            CapabilityStatus.UNSUPPORTED_PLATFORM: "unsupported",
-            CapabilityStatus.UNKNOWN: "unknown",
-            CapabilityStatus.DEGRADED: "unknown",
+        statuses = {
+            CapabilityStatus.AVAILABLE: RequirementStatus.AVAILABLE,
+            CapabilityStatus.UNAVAILABLE: RequirementStatus.ABSENT,
+            CapabilityStatus.PERMISSION_REQUIRED: RequirementStatus.PERMISSION_DENIED,
+            CapabilityStatus.UNSUPPORTED_PLATFORM: RequirementStatus.UNSUPPORTED,
+            CapabilityStatus.UNKNOWN: RequirementStatus.UNKNOWN,
+            CapabilityStatus.DEGRADED: RequirementStatus.UNKNOWN,
         }
         return RequirementResult(
             requirement=name,
-            kind="capability",
+            kind=RequirementKind.CAPABILITY,
             required=required,
             probe_kind=ProbeKind.ACTIVE if active else ProbeKind.PASSIVE,
             status=statuses[report.status],

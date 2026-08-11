@@ -6,6 +6,7 @@ import statistics
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Annotated, Any, Literal
 
 from pydantic import Discriminator, Field, JsonValue, Tag, TypeAdapter
@@ -32,6 +33,7 @@ from flameox.domain import (
     Experiment,
     IdentityQuality,
     MetricPolarity,
+    MetricSource,
     RunSet,
     RunSetMember,
     ValidationStatus,
@@ -47,6 +49,15 @@ _RUNTIME_RESOURCE_COLUMNS = {
     "runtime_resource.minimum_free_bytes": "minimum_free_bytes",
     "runtime_resource.staging_growth_bytes": "staging_growth_bytes",
 }
+
+
+class ProfileChangeDirection(StrEnum):
+    REGRESSED = "regressed"
+    IMPROVED = "improved"
+    CHANGED = "changed"
+    UNCHANGED = "unchanged"
+
+
 RuntimeResourceMetric = Literal[
     "runtime_resource.peak_rss_bytes",
     "runtime_resource.minimum_free_bytes",
@@ -126,21 +137,23 @@ class _CompareRunSetsRequest(ContractModel):
 class MeasurementCompareRunSetsRequest(_CompareRunSetsRequest):
     metric: str
     unit: str
-    metric_source: Literal["measurement"] = "measurement"
+    metric_source: Literal[MetricSource.MEASUREMENT] = MetricSource.MEASUREMENT
 
 
 class RuntimeResourceCompareRunSetsRequest(_CompareRunSetsRequest):
     metric: RuntimeResourceMetric
     unit: Literal["bytes"]
-    metric_source: Literal["runtime_resource"] = "runtime_resource"
+    metric_source: Literal[MetricSource.RUNTIME_RESOURCE] = MetricSource.RUNTIME_RESOURCE
 
 
-def _comparison_metric_source(value: Any) -> Literal["measurement", "runtime_resource"]:
+def _comparison_metric_source(
+    value: Any,
+) -> Literal[MetricSource.MEASUREMENT, MetricSource.RUNTIME_RESOURCE]:
     if isinstance(value, RuntimeResourceCompareRunSetsRequest):
-        return "runtime_resource"
-    if isinstance(value, Mapping) and value.get("metric_source") == "runtime_resource":
-        return "runtime_resource"
-    return "measurement"
+        return MetricSource.RUNTIME_RESOURCE
+    if isinstance(value, Mapping) and value.get("metric_source") == MetricSource.RUNTIME_RESOURCE:
+        return MetricSource.RUNTIME_RESOURCE
+    return MetricSource.MEASUREMENT
 
 
 type CompareRunSetsRequest = Annotated[
@@ -179,7 +192,7 @@ class ProfileChange(ContractModel):
     candidate_value: float
     absolute_change: float
     relative_change: float | None
-    direction: Literal["regressed", "improved", "changed", "unchanged"]
+    direction: ProfileChangeDirection
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,7 +364,7 @@ class ComparisonService:
         )
         baseline = self._samples(snapshot, baseline_set, request)
         candidate = self._samples(snapshot, candidate_set, request)
-        if request.metric_source == "runtime_resource":
+        if request.metric_source is MetricSource.RUNTIME_RESOURCE:
             invalidating.extend(
                 self._runtime_resource_compatibility_mismatches(
                     snapshot, baseline_set, candidate_set, request.metric
@@ -552,7 +565,7 @@ class ComparisonService:
         run_set: RunSet,
         request: CompareRunSetsRequest,
     ) -> _SampleSet:
-        if request.metric_source == "runtime_resource":
+        if request.metric_source is MetricSource.RUNTIME_RESOURCE:
             return self._runtime_resource_samples(snapshot, run_set, request.metric)
         return self._measurement_samples(snapshot, run_set, request.metric, request.unit)
 
@@ -1209,13 +1222,13 @@ class ComparisonService:
             absolute = candidate_value - baseline_value
             relative = absolute / baseline_value if baseline_value != 0 else None
             if math.isclose(absolute, 0.0):
-                direction: Literal["regressed", "improved", "changed", "unchanged"] = "unchanged"
+                direction = ProfileChangeDirection.UNCHANGED
             elif polarity == "neutral":
-                direction = "changed"
+                direction = ProfileChangeDirection.CHANGED
             elif (absolute > 0) == (polarity == "lower_is_better"):
-                direction = "regressed"
+                direction = ProfileChangeDirection.REGRESSED
             else:
-                direction = "improved"
+                direction = ProfileChangeDirection.IMPROVED
             changes.append(
                 ProfileChange(
                     frame_id=key[0],

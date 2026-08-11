@@ -10,6 +10,7 @@ from flameox.application import (
     CapabilityList,
     CapabilityService,
     CaptureService,
+    DeclaredWorkflowKind,
     ExecutionPolicy,
     PreflightService,
     WorkloadService,
@@ -22,8 +23,14 @@ from flameox.domain import (
     ErrorCode,
     ProbeKind,
     ProcessResult,
+    process_termination_from_returncode,
 )
-from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
+from flameox.execution import (
+    ExecutionOutcome,
+    ExecutionRequest,
+    ProcessContainment,
+    SubprocessBroker,
+)
 from flameox.storage import Workspace
 from tests.support.capture import write_workload
 
@@ -31,11 +38,14 @@ from tests.support.capture import write_workload
 class _NvccProbeBroker(SubprocessBroker):
     async def run(self, request: ExecutionRequest, **_: Any) -> ExecutionOutcome:
         return ExecutionOutcome(
-            process=ProcessResult(exit_code=1, cleanup_complete=True),
+            process=ProcessResult(
+                termination=process_termination_from_returncode(1),
+                cleanup_complete=True,
+            ),
             stdout=b"",
             stderr=b"fatal error: cuda_runtime.h: No such file or directory\n",
             resolved_executable=Path(request.argv[0]),
-            containment="process_group",
+            containment=ProcessContainment.PROCESS_GROUP,
         )
 
 
@@ -56,13 +66,16 @@ class _NvccProbeFailureBroker(SubprocessBroker):
 class _PathReportingNvccProbeBroker(SubprocessBroker):
     async def run(self, request: ExecutionRequest, **_: Any) -> ExecutionOutcome:
         return ExecutionOutcome(
-            process=ProcessResult(exit_code=1, cleanup_complete=True),
+            process=ProcessResult(
+                termination=process_termination_from_returncode(1),
+                cleanup_complete=True,
+            ),
             stdout=b"",
             stderr=(
                 f"{request.argv[4]}: fatal error: cuda_runtime.h: No such file or directory\n"
             ).encode(),
             resolved_executable=Path(request.argv[0]),
-            containment="process_group",
+            containment=ProcessContainment.PROCESS_GROUP,
         )
 
 
@@ -106,15 +119,15 @@ size = [1, 2]
     )
     service = WorkloadService(workspace)
 
-    first = service.list_declared(kind="workload", limit=1)
+    first = service.list_declared(kind=DeclaredWorkflowKind.WORKLOAD, limit=1)
     assert [item.name for item in first.workflows] == ["alpha"]
     assert first.next_cursor is not None
     second = service.list_declared(
-        kind="workload",
+        kind=DeclaredWorkflowKind.WORKLOAD,
         limit=1,
         cursor=first.next_cursor,
     )
-    detail = service.get_declared(kind="experiment", name="scaling")
+    detail = service.get_declared(kind=DeclaredWorkflowKind.EXPERIMENT, name="scaling")
 
     assert [item.name for item in second.workflows] == ["beta"]
     assert second.next_cursor is None
@@ -126,7 +139,7 @@ size = [1, 2]
     )
     with pytest.raises(DomainError) as stale:
         service.list_declared(
-            kind="workload",
+            kind=DeclaredWorkflowKind.WORKLOAD,
             limit=1,
             cursor=first.next_cursor,
         )
@@ -151,7 +164,7 @@ active = ["perf"]
     )
 
     service = WorkloadService(workspace)
-    detail = service.get_declared(kind="workload", name="probe")
+    detail = service.get_declared(kind=DeclaredWorkflowKind.WORKLOAD, name="probe")
     inspection = service.inspect("probe")
 
     requirements = {item.name: item for item in detail.requirements}
@@ -161,14 +174,24 @@ active = ["perf"]
     assert requirements["perf"].required is False
     assert requirements["perf"].optional is True
     assert requirements["perf"].probe_kind == "active"
+    requirement_payload = requirements["perf"].model_dump(mode="python")
+    assert type(requirements["perf"]).model_validate(requirement_payload) == requirements["perf"]
+    with pytest.raises(ValueError, match="optionality must be the inverse"):
+        type(requirements["perf"]).model_validate({**requirement_payload, "optional": False})
     assert detail.adapter_option_total >= len(detail.adapter_options)
-    assert detail.adapter_option_total <= 64 or detail.adapter_options_truncated is True
+    assert detail.adapter_options_truncated is (
+        detail.adapter_option_total > len(detail.adapter_options)
+    )
     assert detail.adapter_options_total == detail.adapter_option_total
     assert type(detail).model_validate(detail.model_dump()) == detail
     contradictory_counts = detail.model_dump()
     contradictory_counts["adapter_options_total"] = detail.adapter_option_total + 1
     with pytest.raises(ValueError, match="adapter option totals must agree"):
         type(detail).model_validate(contradictory_counts)
+    contradictory_truncation = detail.model_dump()
+    contradictory_truncation["adapter_options_truncated"] = not detail.adapter_options_truncated
+    with pytest.raises(ValueError, match="adapter option truncation must agree"):
+        type(detail).model_validate(contradictory_truncation)
     assert tuple(item.adapter for item in detail.adapter_options) == tuple(
         sorted(item.adapter for item in detail.adapter_options)
     )

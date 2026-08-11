@@ -12,11 +12,15 @@ from flameox.application.workloads import AcceleratorIdentityRequirement
 from flameox.domain import (
     AcceleratorDevice,
     AcceleratorIdentityFacet,
+    AcceleratorIdentityStatus,
     AcceleratorLink,
+    AcceleratorLinkKind,
+    AcceleratorMigMode,
     IdentityQuality,
     ProcessResult,
+    process_termination_from_returncode,
 )
-from flameox.execution import ExecutionOutcome, ExecutionRequest
+from flameox.execution import ExecutionOutcome, ExecutionRequest, ProcessContainment
 
 _INVENTORY = b"""\
 <?xml version="1.0"?>
@@ -55,11 +59,11 @@ class _Broker:
         self.requests.append(request)
         stdout = self.topology.encode() if request.argv[-2:] == ("topo", "-m") else self.inventory
         return ExecutionOutcome(
-            process=ProcessResult(exit_code=0),
+            process=ProcessResult(termination=process_termination_from_returncode(0)),
             stdout=stdout,
             stderr=b"",
             resolved_executable=Path(request.argv[0]),
-            containment="process_group",
+            containment=ProcessContainment.PROCESS_GROUP,
         )
 
 
@@ -72,11 +76,11 @@ class _FailedBroker:
         if self.permission_denied:
             raise PermissionError(request.argv[0])
         return ExecutionOutcome(
-            process=ProcessResult(exit_code=1),
+            process=ProcessResult(termination=process_termination_from_returncode(1)),
             stdout=b"",
             stderr=self.stderr,
             resolved_executable=Path(request.argv[0]),
-            containment="process_group",
+            containment=ProcessContainment.PROCESS_GROUP,
         )
 
 
@@ -197,7 +201,7 @@ async def test_unknown_inventory_fields_remain_distinct_and_partial(
                     model="NVIDIA H100 PCIe",
                     compute_capability="9.0",
                     memory_mib=81559,
-                    mig_mode="disabled",
+                    mig_mode=AcceleratorMigMode.DISABLED,
                 ),
             )
         },
@@ -208,11 +212,11 @@ async def test_unknown_inventory_fields_remain_distinct_and_partial(
                     model="NVIDIA H100 SXM",
                     compute_capability="9.0",
                     memory_mib=81559,
-                    mig_mode="enabled",
+                    mig_mode=AcceleratorMigMode.ENABLED,
                 ),
             )
         },
-        {"links": (AcceleratorLink(left=0, right=1, kind="host_bridge"),)},
+        {"links": (AcceleratorLink(left=0, right=1, kind=AcceleratorLinkKind.HOST_BRIDGE),)},
     ],
 )
 def test_driver_model_mig_and_topology_each_change_environment_identity(
@@ -220,7 +224,7 @@ def test_driver_model_mig_and_topology_each_change_environment_identity(
 ) -> None:
     baseline = AcceleratorIdentityFacet(
         provider="cuda",
-        status="available",
+        status=AcceleratorIdentityStatus.AVAILABLE,
         identity_quality=IdentityQuality.EXACT,
         driver_version="575.57.08",
         runtime_version="12.9",
@@ -230,10 +234,10 @@ def test_driver_model_mig_and_topology_each_change_environment_identity(
                 model="NVIDIA H100 SXM",
                 compute_capability="9.0",
                 memory_mib=81559,
-                mig_mode="disabled",
+                mig_mode=AcceleratorMigMode.DISABLED,
             ),
         ),
-        links=(AcceleratorLink(left=0, right=1, kind="nvlink", width=18),),
+        links=(AcceleratorLink(left=0, right=1, kind=AcceleratorLinkKind.NVLINK, width=18),),
     )
     changed = baseline.model_copy(update=change)
 

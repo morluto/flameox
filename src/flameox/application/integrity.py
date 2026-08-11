@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+from enum import StrEnum
 from pathlib import Path
-from typing import Literal
 
 import pyarrow.parquet as pq
 from pydantic import ConfigDict, computed_field, model_validator
@@ -14,8 +14,18 @@ from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, CorpusCommit, GenerationManifest, RunStore, Workspace
 
 
+class IntegritySeverity(StrEnum):
+    ERROR = "error"
+    WARNING = "warning"
+
+
+class IntegrityLevel(StrEnum):
+    QUICK = "quick"
+    FULL = "full"
+
+
 class IntegrityIssue(ContractModel):
-    severity: Literal["error", "warning"]
+    severity: IntegritySeverity
     code: str
     path: str | None = None
     message: str
@@ -25,7 +35,7 @@ class IntegrityResult(ContractModel):
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
     schema_version: int = 1
-    level: Literal["quick", "full"]
+    level: IntegrityLevel
     corpus_commit_id: str
     checked_artifacts: int
     checked_generations: int
@@ -42,7 +52,7 @@ class IntegrityResult(ContractModel):
         raw_issues = parsed.get("issues")
         if isinstance(raw_issues, (list, tuple)):
             issues = tuple(IntegrityIssue.model_validate(issue) for issue in raw_issues)
-            if valid != (not any(issue.severity == "error" for issue in issues)):
+            if valid != (not any(issue.severity is IntegritySeverity.ERROR for issue in issues)):
                 raise ValueError("validity must agree with integrity issue severity")
             parsed["issues"] = issues
         return parsed
@@ -50,7 +60,7 @@ class IntegrityResult(ContractModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def valid(self) -> bool:
-        return not any(issue.severity == "error" for issue in self.issues)
+        return not any(issue.severity is IntegritySeverity.ERROR for issue in self.issues)
 
 
 class IntegrityService:
@@ -60,7 +70,7 @@ class IntegrityService:
     def _check_manifests(
         self,
         head: CorpusCommit,
-        full: bool,
+        level: IntegrityLevel,
     ) -> tuple[int, int, list[IntegrityIssue]]:
         issues: list[IntegrityIssue] = []
         checked_generations = 0
@@ -74,7 +84,7 @@ class IntegrityService:
             except FileNotFoundError:
                 issues.append(
                     IntegrityIssue(
-                        severity="error",
+                        severity=IntegritySeverity.ERROR,
                         code="MISSING_GENERATION_MANIFEST",
                         path=str(path),
                         message="Generation manifest is missing from the corpus.",
@@ -84,7 +94,7 @@ class IntegrityService:
             except OSError as exc:
                 issues.append(
                     IntegrityIssue(
-                        severity="error",
+                        severity=IntegritySeverity.ERROR,
                         code="UNREADABLE_GENERATION_MANIFEST",
                         path=str(path),
                         message=str(exc),
@@ -97,7 +107,7 @@ class IntegrityService:
                 # otherwise be misreported as a corrupt manifest.
                 issues.append(
                     IntegrityIssue(
-                        severity="error",
+                        severity=IntegritySeverity.ERROR,
                         code="INVALID_GENERATION_MANIFEST",
                         path=str(path),
                         message=str(exc),
@@ -123,13 +133,16 @@ class IntegrityService:
                         or arrow_schema.metadata != expected_schema.metadata
                     ):
                         raise ValueError("Parquet schema differs from the schema registry")
-                    if full and _sha256(evidence_path) != evidence_file.sha256:
+                    if (
+                        level is IntegrityLevel.FULL
+                        and _sha256(evidence_path) != evidence_file.sha256
+                    ):
                         raise ValueError("Parquet bytes differ from their manifest digest")
                     checked_parquet += 1
                 except (OSError, ValueError) as exc:
                     issues.append(
                         IntegrityIssue(
-                            severity="error",
+                            severity=IntegritySeverity.ERROR,
                             code="INVALID_PARQUET",
                             path=str(evidence_path),
                             message=str(exc),
@@ -138,10 +151,10 @@ class IntegrityService:
 
         return checked_generations, checked_parquet, issues
 
-    def validate(self, *, full: bool = False) -> IntegrityResult:
+    def validate(self, level: IntegrityLevel = IntegrityLevel.QUICK) -> IntegrityResult:
         issues: list[IntegrityIssue] = []
         head = self.workspace.corpus.read_head()
-        checked_generations, checked_parquet, manifest_issues = self._check_manifests(head, full)
+        checked_generations, checked_parquet, manifest_issues = self._check_manifests(head, level)
         issues.extend(manifest_issues)
 
         checked_artifacts = 0
@@ -151,13 +164,16 @@ class IntegrityService:
                 stored = ArtifactStore(self.workspace).get(artifact_id)
                 if not stored.payload_path.is_file():
                     raise FileNotFoundError(stored.payload_path)
-                if full and _sha256(stored.payload_path) != stored.content.integrity.sha256:
+                if (
+                    level is IntegrityLevel.FULL
+                    and _sha256(stored.payload_path) != stored.content.integrity.sha256
+                ):
                     raise ValueError("Artifact bytes differ from their content identity")
                 checked_artifacts += 1
             except (DomainError, OSError, ValueError) as exc:
                 issues.append(
                     IntegrityIssue(
-                        severity="error",
+                        severity=IntegritySeverity.ERROR,
                         code="INVALID_ARTIFACT",
                         path=str(metadata_path),
                         message=str(exc),
@@ -169,7 +185,7 @@ class IntegrityService:
             except DomainError as exc:
                 issues.append(
                     IntegrityIssue(
-                        severity="error",
+                        severity=IntegritySeverity.ERROR,
                         code="INVALID_RUN",
                         path=str(projection),
                         message=exc.message,
@@ -180,7 +196,7 @@ class IntegrityService:
             if not catalog["fresh"]:
                 issues.append(
                     IntegrityIssue(
-                        severity="warning",
+                        severity=IntegritySeverity.WARNING,
                         code="STALE_CATALOG",
                         message="The rebuildable catalog does not match corpus HEAD.",
                     )
@@ -188,13 +204,13 @@ class IntegrityService:
         except DomainError as exc:
             issues.append(
                 IntegrityIssue(
-                    severity="warning",
+                    severity=IntegritySeverity.WARNING,
                     code="CATALOG_UNAVAILABLE",
                     message=exc.message,
                 )
             )
         return IntegrityResult(
-            level="full" if full else "quick",
+            level=level,
             corpus_commit_id=head.commit_id,
             checked_artifacts=checked_artifacts,
             checked_generations=checked_generations,

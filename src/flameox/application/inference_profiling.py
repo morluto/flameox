@@ -7,6 +7,7 @@ import shutil
 import time
 from collections.abc import Mapping
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.error import HTTPError, URLError
@@ -15,7 +16,11 @@ from urllib.request import Request, urlopen
 
 from pydantic import Discriminator, Field, Tag, TypeAdapter
 
-from flameox.analysis.inference_protocol import AttachedProfilerState, InferenceProtocolIdentity
+from flameox.analysis.inference_protocol import (
+    AttachedProfilerState,
+    InferenceProtocolIdentity,
+    ProfilerKind,
+)
 from flameox.application.evidence_query import EvidenceQueryService
 from flameox.application.evidence_rows import (
     artifact_registration_row,
@@ -24,7 +29,12 @@ from flameox.application.evidence_rows import (
 )
 from flameox.application.imports import ImportArtifactRequest, ImportService
 from flameox.application.inference import InferenceReplayService
-from flameox.application.inference_providers import _loopback_http_url, discover_sglang
+from flameox.application.inference_providers import (
+    InferenceServerMode,
+    InferenceServerProvider,
+    _loopback_http_url,
+    discover_sglang,
+)
 from flameox.application.run_rows import run_row
 from flameox.application.source import collect_partial_source_state
 from flameox.application.workloads import WorkloadService, _ManagedInferenceServerConfig
@@ -51,6 +61,20 @@ from flameox.evidence import GenerationPublisher
 from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
+
+type SupportedInferenceProfiler = Literal[
+    ProfilerKind.TORCH_PROFILER,
+    ProfilerKind.NSIGHT_SYSTEMS,
+]
+_SUPPORTED_INFERENCE_PROFILER: TypeAdapter[SupportedInferenceProfiler] = TypeAdapter(
+    SupportedInferenceProfiler
+)
+
+
+class InferenceProfileCoverage(StrEnum):
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    UNAVAILABLE = "unavailable"
 
 
 class SglangProfileOptions(ContractModel):
@@ -83,24 +107,24 @@ class _InferenceProfilingPlan(ContractModel):
 
 
 class VllmTorchProfilingPlan(_InferenceProfilingPlan):
-    server_provider: Literal["vllm"] = "vllm"
-    profiler: Literal["torch_profiler"] = "torch_profiler"
+    server_provider: Literal[InferenceServerProvider.VLLM] = InferenceServerProvider.VLLM
+    profiler: Literal[ProfilerKind.TORCH_PROFILER] = ProfilerKind.TORCH_PROFILER
     nsys_executable: Literal[None] = None
     sglang_profile_id: Literal[None] = None
     sglang_profile_options: Literal[None] = None
 
 
 class SglangTorchProfilingPlan(_InferenceProfilingPlan):
-    server_provider: Literal["sglang"] = "sglang"
-    profiler: Literal["torch_profiler"] = "torch_profiler"
+    server_provider: Literal[InferenceServerProvider.SGLANG] = InferenceServerProvider.SGLANG
+    profiler: Literal[ProfilerKind.TORCH_PROFILER] = ProfilerKind.TORCH_PROFILER
     nsys_executable: Literal[None] = None
     sglang_profile_id: Annotated[str, Field(min_length=1, max_length=100)]
     sglang_profile_options: SglangProfileOptions
 
 
 class NsightSystemsProfilingPlan(_InferenceProfilingPlan):
-    server_provider: Literal["vllm", "sglang"]
-    profiler: Literal["nsight_systems"] = "nsight_systems"
+    server_provider: InferenceServerProvider
+    profiler: Literal[ProfilerKind.NSIGHT_SYSTEMS] = ProfilerKind.NSIGHT_SYSTEMS
     nsys_executable: Path
     sglang_profile_id: Literal[None] = None
     sglang_profile_options: Literal[None] = None
@@ -140,13 +164,13 @@ class InferenceProfilingResult(ContractModel):
     measurement_protocol_id: str
     measurement_run_id: str
     scenario_name: str
-    profiler: Literal["torch_profiler", "nsight_systems"]
+    profiler: SupportedInferenceProfiler
     benchmark_exit_code: int | None
     server_cleanup_complete: bool
     artifact_ids: tuple[str, ...]
     artifact_run_ids: tuple[str, ...]
     extracted_run_ids: tuple[str, ...] = ()
-    coverage: Literal["complete", "partial", "unavailable"]
+    coverage: InferenceProfileCoverage
     limitations: tuple[str, ...]
 
 
@@ -165,10 +189,11 @@ class InferenceProfilingService:
         self,
         server_name: str,
         *,
-        profiler: Literal["torch_profiler", "nsight_systems"],
+        profiler: SupportedInferenceProfiler | str,
         nsys_executable: Path | None = None,
         expected_plan_id: str | None = None,
     ) -> InferenceProfilingPlan:
+        selected_profiler = _SUPPORTED_INFERENCE_PROFILER.validate_python(profiler)
         project = self.workloads.load()
         try:
             server = project.inference_servers[server_name]
@@ -179,12 +204,15 @@ class InferenceProfilingService:
                 remediation=("List or configure a managed inference server, then retry.",),
                 details={"server": server_name, "next_tool": "list_inference_configurations"},
             ) from exc
-        if server.mode != "managed" or server.workload is None:
+        if server.mode is not InferenceServerMode.MANAGED or server.workload is None:
             raise DomainError(
                 ErrorCode.EXECUTION_REFUSED,
                 "Inference profiling requires a Flameox-managed server workload.",
             )
-        if server.provider == "sglang" and profiler != "torch_profiler":
+        if (
+            server.provider is InferenceServerProvider.SGLANG
+            and selected_profiler is not ProfilerKind.TORCH_PROFILER
+        ):
             raise DomainError(
                 ErrorCode.EXECUTION_REFUSED,
                 "SGLang profiling supports only its stage-separated Torch profiler in v1.",
@@ -195,7 +223,8 @@ class InferenceProfilingService:
         server_executable_digest, server_version = replay._server_tool_identity(server)
         sglang_discovery = (
             discover_sglang(Path(server.benchmark_python), broker=self.broker)
-            if server.provider == "sglang" and server.benchmark_python is not None
+            if server.provider is InferenceServerProvider.SGLANG
+            and server.benchmark_python is not None
             else None
         )
         if sglang_discovery is not None:
@@ -204,14 +233,17 @@ class InferenceProfilingService:
         output_root = self.workspace.paths.staging / f"inference-profile-{server_name}" / new_id()
         environment = dict(workload.command.env_overrides)
         limitations: tuple[str, ...]
-        if profiler == "torch_profiler" and server.provider == "vllm":
+        if (
+            selected_profiler is ProfilerKind.TORCH_PROFILER
+            and server.provider is InferenceServerProvider.VLLM
+        ):
             output_path = output_root / "torch"
             environment["VLLM_TORCH_PROFILER_DIR"] = str(output_path)
             argv = native_argv
             limitations = (
                 "Diagnostic profile; measurements must come from a separate unprofiled run.",
             )
-        elif profiler == "torch_profiler":
+        elif selected_profiler is ProfilerKind.TORCH_PROFILER:
             output_path = output_root / "torch"
             argv = native_argv
             limitations = (
@@ -253,16 +285,22 @@ class InferenceProfilingService:
             )
         sglang_profile_options = (
             SglangProfileOptions()
-            if server.provider == "sglang" and profiler == "torch_profiler"
+            if (
+                server.provider is InferenceServerProvider.SGLANG
+                and selected_profiler is ProfilerKind.TORCH_PROFILER
+            )
             else None
         )
         environment_names = set(environment)
-        if profiler == "torch_profiler" and server.provider == "vllm":
+        if (
+            selected_profiler is ProfilerKind.TORCH_PROFILER
+            and server.provider is InferenceServerProvider.VLLM
+        ):
             environment_names.add("VLLM_TORCH_PROFILER_DIR")
         environment_digest = digest_model(workload.command.env_overrides)
         identity = {
             "server": server.model_dump(mode="json"),
-            "profiler": profiler,
+            "profiler": selected_profiler,
             "native_argv": native_argv,
             "cwd": workload.command.cwd,
             "environment_digest": environment_digest,
@@ -296,7 +334,7 @@ class InferenceProfilingService:
                 "plan_id": plan_id,
                 "server_name": server_name,
                 "server_provider": server.provider,
-                "profiler": profiler,
+                "profiler": selected_profiler,
                 "base_url": server.base_url,
                 "server_argv": argv,
                 "server_cwd": Path(workload.command.cwd),
@@ -352,10 +390,16 @@ class InferenceProfilingService:
                 "Managed server environment identity changed after profiling was planned.",
                 remediation=("Plan the inference profile again, then retry capture.",),
             )
-        if plan.profiler == "torch_profiler" and plan.server_provider == "vllm":
+        if (
+            plan.profiler is ProfilerKind.TORCH_PROFILER
+            and plan.server_provider is InferenceServerProvider.VLLM
+        ):
             server_environment["VLLM_TORCH_PROFILER_DIR"] = str(plan.output_path)
         server_digest, server_version = replay._server_tool_identity(server)
-        if server.provider == "sglang" and server.benchmark_python is not None:
+        if (
+            server.provider is InferenceServerProvider.SGLANG
+            and server.benchmark_python is not None
+        ):
             sglang_discovery = discover_sglang(Path(server.benchmark_python), broker=self.broker)
             server_version = sglang_discovery.version
             benchmark_digest = sglang_discovery.executable_digest
@@ -452,7 +496,7 @@ class InferenceProfilingService:
                         control.timeout_seconds,
                         max(0.01, (deadline_at - utc_now()).total_seconds()),
                     )
-                    if plan.server_provider == "sglang":
+                    if plan.server_provider is InferenceServerProvider.SGLANG:
                         await asyncio.to_thread(
                             control.start,
                             output_dir=plan.output_path,
@@ -509,7 +553,7 @@ class InferenceProfilingService:
             if server_outcome.process.cleanup_complete is not True:
                 limitations.append("Managed server process cleanup was incomplete.")
 
-            if plan.profiler == "nsight_systems" and plan.output_path.is_file():
+            if plan.profiler is ProfilerKind.NSIGHT_SYSTEMS and plan.output_path.is_file():
                 await self._export_nsight(plan, deadline_at, limitations)
             artifacts, runs, preservation_limitations = self._preserve(plan)
             limitations.extend(preservation_limitations)
@@ -519,10 +563,14 @@ class InferenceProfilingService:
                     "No recognized profiler trace was extracted from preserved artifacts."
                 )
             operational_limitations = limitations[len(run.limitations) :]
-            coverage: Literal["complete", "partial", "unavailable"] = (
-                "complete"
+            coverage = (
+                InferenceProfileCoverage.COMPLETE
                 if extracted_runs and not operational_limitations
-                else ("partial" if artifacts else "unavailable")
+                else (
+                    InferenceProfileCoverage.PARTIAL
+                    if artifacts
+                    else InferenceProfileCoverage.UNAVAILABLE
+                )
             )
             finished = self._finish_run(
                 run,
@@ -718,14 +766,18 @@ class InferenceProfilingService:
         artifact_ids: tuple[str, ...],
         artifact_run_ids: tuple[str, ...],
         process: ProcessResult | None,
-        coverage: Literal["complete", "partial", "unavailable"],
+        coverage: InferenceProfileCoverage,
         limitations: tuple[str, ...],
     ) -> RunManifest:
         status = (
             ExecutionStatus.TIMED_OUT
             if process is not None and process.timed_out
             else ExecutionStatus.SUCCEEDED
-            if process is not None and process.exit_code == 0 and coverage == "complete"
+            if (
+                process is not None
+                and process.exit_code == 0
+                and coverage is InferenceProfileCoverage.COMPLETE
+            )
             else ExecutionStatus.FAILED
         )
         registrations = self._canonical_registrations(run.run_id, artifact_run_ids)
@@ -952,9 +1004,9 @@ class InferenceProfilingService:
                         role=("inference_server_output" if server_output else "inference_profile"),
                         producer=(
                             "nsys"
-                            if plan.profiler == "nsight_systems"
+                            if plan.profiler is ProfilerKind.NSIGHT_SYSTEMS
                             else "sglang.torch_profiler"
-                            if plan.server_provider == "sglang"
+                            if plan.server_provider is InferenceServerProvider.SGLANG
                             else "torch_profiler"
                         ),
                         allow_external_path=True,
@@ -990,14 +1042,14 @@ class InferenceProfilingService:
                 limitations.append("No deadline remained for profile evidence extraction.")
                 break
             try:
-                if plan.profiler == "nsight_systems" and name.endswith(".sqlite"):
+                if plan.profiler is ProfilerKind.NSIGHT_SYSTEMS and name.endswith(".sqlite"):
                     from flameox.adapters.nsight_systems import NsightSystemsExtractor
 
                     await asyncio.wait_for(
                         NsightSystemsExtractor(self.workspace, broker=self.broker).extract(run_id),
                         timeout=remaining,
                     )
-                elif plan.profiler == "torch_profiler" and name.endswith(
+                elif plan.profiler is ProfilerKind.TORCH_PROFILER and name.endswith(
                     (".json", ".json.gz", ".pftrace")
                 ):
                     from flameox.adapters.perfetto import PerfettoExtractor
@@ -1049,7 +1101,7 @@ class InferenceProfilerControlClient:
         self,
         base_url: str,
         *,
-        provider: Literal["vllm", "sglang"] = "vllm",
+        provider: InferenceServerProvider = InferenceServerProvider.VLLM,
         timeout_seconds: float = 5.0,
     ) -> None:
         self.base_url = _loopback_http_url(base_url)
@@ -1066,7 +1118,7 @@ class InferenceProfilerControlClient:
         options: SglangProfileOptions | None = None,
     ) -> None:
         payload: bytes = b""
-        if self.provider == "sglang":
+        if self.provider is InferenceServerProvider.SGLANG:
             if output_dir is None or profile_id is None or options is None:
                 raise ValueError("SGLang profiling requires generated profile options")
             payload = json.dumps(

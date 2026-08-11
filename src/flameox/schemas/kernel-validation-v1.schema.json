@@ -160,14 +160,7 @@
           "title": "Seed"
         },
         "status": {
-          "enum": [
-            "pass",
-            "fail",
-            "inconclusive",
-            "unsupported"
-          ],
-          "title": "Status",
-          "type": "string"
+          "$ref": "#/$defs/KernelValidationStatus"
         }
       },
       "required": [
@@ -369,14 +362,7 @@
           "type": "array"
         },
         "status": {
-          "enum": [
-            "pass",
-            "fail",
-            "inconclusive",
-            "unsupported"
-          ],
-          "title": "Status",
-          "type": "string"
+          "$ref": "#/$defs/KernelValidationStatus"
         }
       },
       "required": [
@@ -424,6 +410,16 @@
       ],
       "title": "KernelValidationReference",
       "type": "object"
+    },
+    "KernelValidationStatus": {
+      "enum": [
+        "pass",
+        "fail",
+        "inconclusive",
+        "unsupported"
+      ],
+      "title": "KernelValidationStatus",
+      "type": "string"
     },
     "UnavailableKernelValidationMetric": {
       "additionalProperties": false,
@@ -542,14 +538,7 @@
       "type": "string"
     },
     "status": {
-      "enum": [
-        "pass",
-        "fail",
-        "inconclusive",
-        "unsupported"
-      ],
-      "title": "Status",
-      "type": "string"
+      "$ref": "#/$defs/KernelValidationStatus"
     }
   },
   "required": [

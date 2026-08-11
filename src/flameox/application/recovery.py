@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from enum import StrEnum
 
 from flameox.application.gc import GarbageCollector
 from flameox.application.proc import read_boot_id, read_proc_stat_start_identity
@@ -20,7 +20,11 @@ from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import RunStore, Workspace
 
-type LeaseState = Literal["active", "recoverable", "indeterminate"]
+
+class LeaseState(StrEnum):
+    ACTIVE = "active"
+    RECOVERABLE = "recoverable"
+    INDETERMINATE = "indeterminate"
 
 
 class RecoveryInspection(ContractModel):
@@ -64,9 +68,9 @@ class RecoveryService:
             if not recoverable_lifecycle:
                 continue
             lease_state = self._lease_state(run)
-            if lease_state == "active":
+            if lease_state is LeaseState.ACTIVE:
                 active.append(run.run_id)
-            elif lease_state == "recoverable":
+            elif lease_state is LeaseState.RECOVERABLE:
                 recoverable.append(run.run_id)
             else:
                 indeterminate.append(run.run_id)
@@ -130,19 +134,19 @@ class RecoveryService:
 
     def _lease_state(self, run: RunManifest) -> LeaseState:
         if run.lease is None:
-            return "indeterminate"
+            return LeaseState.INDETERMINATE
         try:
             boot_id = read_boot_id()
         except (OSError, ValueError):
-            return "indeterminate"
+            return LeaseState.INDETERMINATE
         if boot_id != run.lease.boot_id:
-            return "recoverable"
+            return LeaseState.RECOVERABLE
         try:
             start_identity = read_proc_stat_start_identity(run.lease.process_id)
         except FileNotFoundError:
-            return "recoverable"
+            return LeaseState.RECOVERABLE
         except (OSError, ValueError):
-            return "indeterminate"
+            return LeaseState.INDETERMINATE
         if start_identity == run.lease.process_start_identity:
-            return "active"
-        return "recoverable"
+            return LeaseState.ACTIVE
+        return LeaseState.RECOVERABLE

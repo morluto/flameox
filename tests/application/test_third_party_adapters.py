@@ -19,6 +19,7 @@ from flameox.domain import (
     AdapterPlanRequest,
     AdapterProbeContext,
     AdapterProbeResult,
+    AdapterProbeStatus,
     AdapterValidationResult,
     ArtifactKind,
     DomainError,
@@ -57,7 +58,10 @@ class FixtureAdapter:
 
     async def probe(self, context: AdapterProbeContext) -> AdapterProbeResult:
         self.phases.append("probe")
-        return AdapterProbeResult(status="available", adapter_version="fixture-1")
+        return AdapterProbeResult(
+            status=AdapterProbeStatus.AVAILABLE,
+            adapter_version="fixture-1",
+        )
 
     async def plan(self, request: AdapterPlanRequest) -> AdapterExecutionPlan:
         self.phases.append("plan")

@@ -9,7 +9,7 @@ from flameox.analysis import RecipeService
 from flameox.analysis.recipe_models import (
     HotspotResult,
     MemoryAnalysisResult,
-    WritableRootObservation,
+    parse_writable_root_observation,
 )
 from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
@@ -77,6 +77,12 @@ def test_memory_reports_phase_correlated_growth(tmp_path: Path) -> None:
     with pytest.raises(ValidationError, match="truncation fields must agree"):
         MemoryAnalysisResult.model_validate(contradictory)
 
+    contradictory = result.model_dump()
+    contradictory["truncated"] = True
+    contradictory["runtime_resources_truncated"] = True
+    with pytest.raises(ValidationError, match="runtime-resource total"):
+        MemoryAnalysisResult.model_validate(contradictory)
+
     contradictory = result.model_dump(mode="json")
     contradictory["unavailable_metrics"] = ["peak_rss"]
     with pytest.raises(ValidationError, match="derive from runtime resources"):
@@ -91,7 +97,7 @@ def test_memory_reports_phase_correlated_growth(tmp_path: Path) -> None:
 
 
 def test_writable_root_observation_derives_availability_from_growth() -> None:
-    available = WritableRootObservation.model_validate(
+    available = parse_writable_root_observation(
         {
             "run_id": "run",
             "writable_root_identity": "root",
@@ -100,7 +106,7 @@ def test_writable_root_observation_derives_availability_from_growth() -> None:
             "available": True,
         }
     )
-    unavailable = WritableRootObservation.model_validate(
+    unavailable = parse_writable_root_observation(
         {
             "run_id": "run",
             "writable_root_identity": "root",
@@ -113,9 +119,9 @@ def test_writable_root_observation_derives_availability_from_growth() -> None:
 
     assert available.available is True
     assert unavailable.available is False
-    assert WritableRootObservation.model_validate(unavailable.model_dump()) == unavailable
+    assert parse_writable_root_observation(unavailable.model_dump()) == unavailable
 
     contradictory = unavailable.model_dump()
     contradictory["available"] = True
-    with pytest.raises(ValidationError, match="availability must match"):
-        WritableRootObservation.model_validate(contradictory)
+    with pytest.raises(ValidationError):
+        parse_writable_root_observation(contradictory)

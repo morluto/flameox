@@ -5,23 +5,35 @@ import json
 import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Literal, assert_never
 
 from pydantic import ValidationError
 
 from flameox.adapters.kernel_build import (
+    KERNEL_BUILD_SCHEMA_VERSION,
     ArtifactKernelBuildStage,
     ArtifactlessKernelBuildStage,
     KernelBuildArtifact,
+    KernelBuildCacheStatus,
     KernelBuildManifestV1,
+    KernelBuildOutcome,
+    KernelBuildProducer,
     KernelBuildStage,
+    KernelBuildStageStatus,
 )
 from flameox.application.imports import (
     BundleMember,
     ImportBundleRequest,
     ImportService,
 )
-from flameox.application.pipelines import ArtifactPipeline, ArtifactPipelineService
+from flameox.application.pipelines import (
+    ArtifactPipeline,
+    ArtifactPipelineService,
+    PipelineStageDeclaration,
+    RegisteredPipelineStageDeclaration,
+    RegisterPipelineRequest,
+    UnregisteredPipelineStageDeclaration,
+)
 from flameox.atomic import atomic_write_json
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, RunManifest, Sensitivity
 from flameox.models import ContractModel
@@ -102,6 +114,62 @@ class KernelBuildInventory:
     dump_dir: Path | None
 
 
+def kernel_build_pipeline_request(
+    manifest: KernelBuildManifestV1,
+    *,
+    run_id: str,
+    registration_ids_by_path: dict[str, str],
+) -> RegisterPipelineRequest:
+    """Translate a parsed provider manifest into the application pipeline contract."""
+
+    declarations: list[PipelineStageDeclaration] = []
+    for stage in manifest.stages:
+        if isinstance(stage, ArtifactKernelBuildStage):
+            registration_id = registration_ids_by_path.get(stage.artifact.path)
+            if registration_id is None:
+                raise ValueError(f"missing registration for {stage.artifact.path!r}")
+            declarations.append(
+                RegisteredPipelineStageDeclaration.model_validate(
+                    {
+                        **stage.model_dump(exclude={"artifact"}),
+                        "registration_id": registration_id,
+                    }
+                )
+            )
+        elif isinstance(stage, ArtifactlessKernelBuildStage):
+            declarations.append(
+                UnregisteredPipelineStageDeclaration.model_validate(
+                    stage.model_dump(exclude={"artifact"})
+                )
+            )
+        else:
+            assert_never(stage)
+    derived: list[str] = []
+    if manifest.diagnostics:
+        derived.append("compiler diagnostics are preserved in the kernel-build manifest")
+    if manifest.device_identity is None:
+        derived.append("device identity was not supplied by the producer")
+    limitations = list(dict.fromkeys((*derived, *manifest.limitations)))
+    if len(limitations) > 20:
+        retained = 19 - len(derived)
+        limitations = [
+            *derived,
+            *tuple(dict.fromkeys(manifest.limitations))[:retained],
+            "Additional limitations remain available in the kernel-build manifest.",
+        ]
+    return RegisterPipelineRequest(
+        run_id=run_id,
+        pipeline_name=f"{manifest.producer.value}.compiler",
+        pipeline_schema=KERNEL_BUILD_SCHEMA_VERSION,
+        producer=manifest.producer,
+        producer_version=manifest.producer_version,
+        workload_identity=manifest.workload_identity,
+        device_identity=manifest.device_identity,
+        stages=tuple(declarations),
+        limitations=tuple(dict.fromkeys(limitations)),
+    )
+
+
 class KernelBuildCaptureCollector:
     """Inventory allowlisted staged native extensions and emit a kernel-build manifest.
 
@@ -174,26 +242,30 @@ class KernelBuildCaptureCollector:
             limitations.append(
                 "Compiler artifact predecessor lineage is not declared by the provider output."
             )
-        outcome: Literal["succeeded", "failed", "inconclusive"]
+        outcome: KernelBuildOutcome
         if exit_code == 0 and entries_tuple:
-            outcome = "succeeded"
+            outcome = KernelBuildOutcome.SUCCEEDED
         elif exit_code != 0:
-            outcome = "failed"
+            outcome = KernelBuildOutcome.FAILED
         else:
-            outcome = "inconclusive"
+            outcome = KernelBuildOutcome.INCONCLUSIVE
         stages = self._build_stages(entries_tuple, outcome=outcome)
         if not entries_tuple and exit_code != 0:
             limitations.append("No allowlisted native artifacts were found after compiler failure.")
-        if outcome == "inconclusive":
+        if outcome is KernelBuildOutcome.INCONCLUSIVE:
             limitations.append(
                 "Compiler exited successfully but produced no allowlisted native artifacts."
             )
         manifest = KernelBuildManifestV1(
-            producer="triton" if adapter == "triton.compiler" else "cute",
+            producer=(
+                KernelBuildProducer.TRITON
+                if adapter == "triton.compiler"
+                else KernelBuildProducer.CUTE
+            ),
             producer_version=producer_version or "unknown",
             workload_identity=workload_name,
             outcome=outcome,
-            cache_status="unknown",
+            cache_status=KernelBuildCacheStatus.UNKNOWN,
             stages=stages,
             source_environment=self._normalized_environment(source_environment, output_root),
             limitations=tuple(dict.fromkeys(limitations)),
@@ -373,7 +445,7 @@ class KernelBuildCaptureCollector:
     def _build_stages(
         entries: tuple[KernelBuildInventoryEntry, ...],
         *,
-        outcome: Literal["succeeded", "failed", "inconclusive"],
+        outcome: KernelBuildOutcome,
     ) -> tuple[KernelBuildStage, ...]:
         priority = {
             ".ttir": 0,
@@ -409,7 +481,7 @@ class KernelBuildCaptureCollector:
                     name=stage_name,
                     ordinal=ordinal,
                     predecessor=None,
-                    status="available",
+                    status=KernelBuildStageStatus.AVAILABLE,
                     format=entry.format,
                     format_schema=entry.format_schema,
                     artifact=KernelBuildArtifact(
@@ -421,8 +493,13 @@ class KernelBuildCaptureCollector:
                 )
             )
         if not stages:
-            empty_status: Literal["failed", "unavailable"] = (
-                "failed" if outcome == "failed" else "unavailable"
+            empty_status: Literal[
+                KernelBuildStageStatus.FAILED,
+                KernelBuildStageStatus.UNAVAILABLE,
+            ] = (
+                KernelBuildStageStatus.FAILED
+                if outcome is KernelBuildOutcome.FAILED
+                else KernelBuildStageStatus.UNAVAILABLE
             )
             stages.append(
                 ArtifactlessKernelBuildStage(
@@ -433,13 +510,13 @@ class KernelBuildCaptureCollector:
                     format_schema="unknown",
                 )
             )
-        elif outcome == "failed":
+        elif outcome is KernelBuildOutcome.FAILED:
             stages.append(
                 ArtifactlessKernelBuildStage(
                     name="build_failed",
                     ordinal=len(stages),
                     predecessor=None,
-                    status="failed",
+                    status=KernelBuildStageStatus.FAILED,
                     format="unknown",
                     format_schema="unknown",
                 )
@@ -520,7 +597,8 @@ class KernelBuildImportService:
             for path, registration in zip(artifact_paths, registrations, strict=True)
         }
         pipeline = ArtifactPipelineService(self.workspace).register(
-            manifest.pipeline_request(
+            kernel_build_pipeline_request(
+                manifest,
                 run_id=imported.run.run_id,
                 registration_ids_by_path=registration_ids_by_path,
             )

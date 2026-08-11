@@ -221,6 +221,25 @@
       "title": "KernelBuildArtifact",
       "type": "object"
     },
+    "KernelBuildCacheStatus": {
+      "enum": [
+        "hit",
+        "miss",
+        "mixed",
+        "unknown"
+      ],
+      "title": "KernelBuildCacheStatus",
+      "type": "string"
+    },
+    "KernelBuildOutcome": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "inconclusive"
+      ],
+      "title": "KernelBuildOutcome",
+      "type": "string"
+    },
     "KernelBuildStage": {
       "discriminator": {
         "mapping": {
@@ -245,15 +264,8 @@
   "additionalProperties": false,
   "properties": {
     "cache_status": {
-      "default": "unknown",
-      "enum": [
-        "hit",
-        "miss",
-        "mixed",
-        "unknown"
-      ],
-      "title": "Cache Status",
-      "type": "string"
+      "$ref": "#/$defs/KernelBuildCacheStatus",
+      "default": "unknown"
     },
     "device_identity": {
       "anyOf": [
@@ -292,13 +304,7 @@
       "type": "array"
     },
     "outcome": {
-      "enum": [
-        "succeeded",
-        "failed",
-        "inconclusive"
-      ],
-      "title": "Outcome",
-      "type": "string"
+      "$ref": "#/$defs/KernelBuildOutcome"
     },
     "producer": {
       "enum": [

@@ -12,11 +12,10 @@ from flameox.application import (
     EvidenceQueryService,
     ImportArtifactRequest,
     ImportService,
-    InferenceRequestItem,
     InvestigationService,
 )
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
-from flameox.evidence import GenerationPublisher
+from flameox.evidence import GenerationPublisher, InferenceRequestItem
 from flameox.storage import Workspace
 from tests.support.analysis import run_row
 
@@ -49,8 +48,17 @@ def test_inference_request_projection_rejects_contradictory_outcomes() -> None:
     }
 
     assert InferenceRequestItem.model_validate(request).success is True
-    with pytest.raises(ValidationError, match="successful request cannot be cancelled"):
+    with pytest.raises(ValidationError, match="do not describe a supported outcome"):
         InferenceRequestItem.model_validate({**request, "cancelled": True})
+
+    unreported = InferenceRequestItem.model_validate(
+        {**request, "success": None, "cancelled": None}
+    )
+    assert unreported.success is None
+    assert unreported.cancelled is None
+
+    with pytest.raises(ValidationError, match="do not describe a supported outcome"):
+        InferenceRequestItem.model_validate({**request, "success": None})
 
 
 def test_measurement_query_uses_bounded_snapshot_cursors(tmp_path: Path) -> None:

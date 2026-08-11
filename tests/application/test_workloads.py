@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from flameox.application import (
+    ConfigurationOperation,
     ConfigureWorkloadRequest,
+    DeclaredWorkflowKind,
     InferenceConfigurationResult,
     ProjectConfig,
     WorkloadConfig,
@@ -23,7 +24,7 @@ from flameox.storage import Workspace
 def _request(
     name: str,
     *,
-    operation: Literal["create", "replace"] = "create",
+    operation: ConfigurationOperation = ConfigurationOperation.CREATE,
     argv: tuple[str, ...] = ("python", "-c", "print('ok')"),
     parameters: dict[str, tuple[str | int | float | bool, ...]] | None = None,
     expected_configuration_id: str | None = None,
@@ -108,7 +109,10 @@ def test_configure_workload_is_idempotent_and_records_configuration_source(tmp_p
     assert second.workload_definition_id == first.workload_definition_id
     assert second.changed_paths == ()
     assert (tmp_path / "flameox.toml").read_text() == config_text
-    assert service.list_declared(kind="workload", limit=10).workflows[0].name == "probe"
+    assert (
+        service.list_declared(kind=DeclaredWorkflowKind.WORKLOAD, limit=10).workflows[0].name
+        == "probe"
+    )
 
 
 def test_literal_braces_round_trip_while_declared_placeholders_render(
@@ -299,7 +303,7 @@ mode = ["baseline", "candidate"]
         service.configure(
             _request(
                 "alpha",
-                operation="replace",
+                operation=ConfigurationOperation.REPLACE,
                 argv=("python", "-c", "print('new alpha')"),
                 expected_configuration_id="sha256:" + "0" * 64,
             )
@@ -311,7 +315,7 @@ mode = ["baseline", "candidate"]
     updated = service.configure(
         _request(
             "alpha",
-            operation="replace",
+            operation=ConfigurationOperation.REPLACE,
             argv=("python", "-c", "print('new alpha')"),
             expected_configuration_id=current.configuration_id,
         )

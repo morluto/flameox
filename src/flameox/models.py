@@ -22,7 +22,7 @@ class ContractModel(BaseModel):
     def validated_copy(self, *, update: Mapping[str, Any] | None = None) -> Self:
         """Copy an immutable contract while re-parsing all updated fields."""
 
-        values = self.model_dump(mode="python", exclude_computed_fields=True)
+        values = {name: getattr(self, name) for name in type(self).model_fields}
         if update is not None:
             values.update(update)
         return self.__class__.model_validate(values)

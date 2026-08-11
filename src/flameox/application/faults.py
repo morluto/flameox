@@ -4,12 +4,12 @@ import asyncio
 import json
 import shutil
 import socket
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, computed_field, model_validator
 
 from flameox.adapters.toxiproxy import ToxiproxyApiError, ToxiproxyClient, ToxiproxyToolManager
 from flameox.application.async_work import run_atomic_thread
@@ -53,8 +53,10 @@ from flameox.domain import (
     ExecutionStatus,
     Experiment,
     ExperimentOutcomeMethod,
+    ExperimentRole,
     Hypothesis,
     Investigation,
+    MetricSource,
     RunManifest,
     Sensitivity,
     Trial,
@@ -65,7 +67,7 @@ from flameox.domain import (
     digest_model,
     new_id,
 )
-from flameox.domain.models import ExecutionRunManifest
+from flameox.domain.models import Digest, ExecutionRunManifest
 from flameox.evidence import GenerationPublisher
 from flameox.execution import ManagedSidecarLease, ManagedSidecarOutcome, SubprocessBroker
 from flameox.models import ContractModel
@@ -76,8 +78,7 @@ _BASELINE = "baseline"
 
 class FaultExperimentPlan(ContractModel):
     schema_version: Literal[1] = 1
-    plan_id: str
-    request_digest: str
+    plan_id: Digest
     workspace_id: str
     experiment_name: str
     experiment_plan: ExperimentPlan
@@ -96,6 +97,22 @@ class FaultExperimentPlan(ContractModel):
     limitations: tuple[str, ...] = ()
     revision: int = 0
     consumed_at: datetime | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_legacy_request_digest(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping) or "request_digest" not in value:
+            return value
+        payload = dict(value)
+        request_digest = payload.pop("request_digest")
+        if request_digest != payload.get("plan_id"):
+            raise ValueError("fault plan request digest must match its plan identity")
+        return payload
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def request_digest(self) -> Digest:
+        return self.plan_id
 
 
 class FaultExperimentResult(ContractModel):
@@ -239,7 +256,7 @@ class FaultExperimentService:
                 "repetitions": config.repetitions,
             },
             random_seed=config.random_seed,
-            role="exploratory",
+            role=ExperimentRole.EXPLORATORY,
         )
         blocks: list[ExperimentBlock] = []
         for block_number in range(1, config.blocks * config.repetitions + 1):
@@ -276,9 +293,9 @@ class FaultExperimentService:
             experiment=experiment,
             adapter="command",
             metric_source=(
-                "runtime_resource"
+                MetricSource.RUNTIME_RESOURCE
                 if config.primary_metric.startswith("runtime_resource.")
-                else "measurement"
+                else MetricSource.MEASUREMENT
             ),
             execution_policy=execution_policy,
             variant_parameter="scenario",
@@ -305,7 +322,6 @@ class FaultExperimentService:
         }
         plan = FaultExperimentPlan(
             plan_id=digest_model(bound),
-            request_digest=digest_model(bound),
             workspace_id=self.workspace.identity.workspace_id,
             experiment_name=experiment_name,
             experiment_plan=embedded,

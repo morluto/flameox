@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, computed_field, model_validator
 
 from flameox.application.capture import CaptureService
 from flameox.domain import (
@@ -32,7 +32,74 @@ class DetachedProgress(ContractModel):
         return self
 
 
-class DetachedCaptureRecord(ContractModel):
+class DetachedFailure(ContractModel):
+    code: str
+    message: str
+
+
+def _advertise_detached_failure_projections(schema: dict[str, Any]) -> None:
+    properties = schema.setdefault("properties", {})
+    assert isinstance(properties, dict)
+    properties.pop("failure", None)
+    properties.update(
+        {
+            "failure_code": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "default": None,
+                "title": "Failure Code",
+            },
+            "failure_message": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "default": None,
+                "title": "Failure Message",
+            },
+        }
+    )
+    required = schema.setdefault("required", [])
+    assert isinstance(required, list)
+    for field_name in ("failure", "failure_code", "failure_message"):
+        if field_name in required:
+            required.remove(field_name)
+
+
+class _DetachedFailureFields(ContractModel):
+    model_config = ConfigDict(json_schema_extra=_advertise_detached_failure_projections)
+
+    failure: DetachedFailure | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_failure_projections(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        has_code = "failure_code" in value
+        has_message = "failure_message" in value
+        if not has_code and not has_message:
+            return value
+        if "failure" in value:
+            raise ValueError("use either failure or flattened detached-failure fields")
+        if has_code != has_message:
+            raise ValueError("detached capture failure code and message must appear together")
+        parsed = dict(value)
+        code = parsed.pop("failure_code")
+        message = parsed.pop("failure_message")
+        if (code is None) != (message is None):
+            raise ValueError("detached capture failure code and message must appear together")
+        parsed["failure"] = None if code is None else {"code": code, "message": message}
+        return parsed
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def failure_code(self) -> str | None:
+        return self.failure.code if self.failure is not None else None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def failure_message(self) -> str | None:
+        return self.failure.message if self.failure is not None else None
+
+
+class DetachedCaptureRecord(_DetachedFailureFields):
     schema_version: Literal[1] = 1
     run_id: str
     revision: Annotated[int, Field(ge=0)] = 0
@@ -40,8 +107,6 @@ class DetachedCaptureRecord(ContractModel):
     plan_digest: str
     plan_request: dict[str, object] = Field(default_factory=dict)
     progress: Annotated[tuple[DetachedProgress, ...], Field(max_length=16)] = ()
-    failure_code: str | None = None
-    failure_message: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -55,12 +120,6 @@ class DetachedCaptureRecord(ContractModel):
             raise ValueError("legacy detached capture state is invalid")
         return {key: item for key, item in value.items() if key != "state"}
 
-    @model_validator(mode="after")
-    def failure_fields_are_atomic(self) -> Self:
-        if (self.failure_code is None) != (self.failure_message is None):
-            raise ValueError("detached capture failure code and message must appear together")
-        return self
-
     def with_progress(self, progress: DetachedProgress) -> Self:
         return self.__class__.model_validate(
             {
@@ -72,12 +131,14 @@ class DetachedCaptureRecord(ContractModel):
         )
 
     def with_failure(self, *, code: str, message: str) -> Self:
+        payload = self.model_dump(mode="python")
+        payload.pop("failure_code", None)
+        payload.pop("failure_message", None)
         return self.__class__.model_validate(
             {
-                **self.model_dump(mode="python"),
+                **payload,
                 "revision": self.revision + 1,
-                "failure_code": code,
-                "failure_message": message,
+                "failure": DetachedFailure(code=code, message=message),
                 "updated_at": utc_now(),
             }
         )
@@ -89,7 +150,7 @@ class DetachedRecovery(ContractModel):
     arguments: dict[str, object]
 
 
-class DetachedCaptureStatus(ContractModel):
+class DetachedCaptureStatus(_DetachedFailureFields):
     schema_version: Literal[1] = 1
     run_id: str
     state: Literal[
@@ -103,15 +164,11 @@ class DetachedCaptureStatus(ContractModel):
     capture_status: CaptureStatus | None = None
     artifact_count: Annotated[int, Field(ge=0)] = 0
     progress: tuple[DetachedProgress, ...] = ()
-    failure_code: str | None = None
-    failure_message: str | None = None
     limitations: tuple[str, ...] = ()
     recovery: DetachedRecovery | None = None
 
     @model_validator(mode="after")
     def projected_state_is_coherent(self) -> Self:
-        if (self.failure_code is None) != (self.failure_message is None):
-            raise ValueError("detached capture failure code and message must appear together")
         if (self.execution_status is None) != (self.capture_status is None):
             raise ValueError("detached execution and capture status must appear together")
         if self.recovery is not None and self.state != "failed_to_start":
@@ -238,8 +295,7 @@ class DetachedCaptureManager:
                 run_id=run_id,
                 state="starting" if managed else "failed_to_start",
                 progress=record.progress,
-                failure_code=record.failure_code,
-                failure_message=record.failure_message,
+                failure=record.failure,
                 limitations=(
                     (
                         "The server stopped before publishing a run manifest. Re-plan the "
@@ -292,8 +348,7 @@ class DetachedCaptureManager:
             capture_status=run.capture_status,
             artifact_count=len(run.artifacts),
             progress=record.progress,
-            failure_code=record.failure_code,
-            failure_message=record.failure_message,
+            failure=record.failure,
             limitations=limitations,
             recovery=(
                 DetachedRecovery(arguments=record.plan_request)

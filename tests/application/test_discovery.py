@@ -73,8 +73,21 @@ def test_run_and_artifact_pagination_are_snapshot_bound_and_filtered(tmp_path: P
         limit=1,
     )
     assert first.returned == 1
+    assert first.truncated is True
     assert first.next_cursor is not None
+    assert first.model_dump(mode="json")["returned"] == 1
+    with pytest.raises(ValidationError, match="returned projection"):
+        type(first).model_validate({**first.model_dump(mode="python"), "returned": 0})
+    with pytest.raises(ValidationError, match="truncated projection"):
+        type(first).model_validate({**first.model_dump(mode="python"), "truncated": False})
     assert first.coverage.filters_applied == ("execution_status",)
+    coverage_payload = first.coverage.model_dump(mode="python")
+    assert coverage_payload["population_complete"] is True
+    assert type(first.coverage).model_validate(coverage_payload) == first.coverage
+    with pytest.raises(ValidationError, match="population completeness"):
+        type(first.coverage).model_validate(
+            {**coverage_payload, "unavailable_facets": ["artifact_kinds"]}
+        )
     matching_identity = first.runs[0].environment_id
     assert first.runs[0].artifact_kinds == ("collector_metadata",)
     second = runs.list(
@@ -83,6 +96,7 @@ def test_run_and_artifact_pagination_are_snapshot_bound_and_filtered(tmp_path: P
         cursor=first.next_cursor,
     )
     assert second.returned == 1
+    assert second.truncated is False
     assert second.runs[0].run_id != first.runs[0].run_id
     assert second.next_cursor is None
     assert (

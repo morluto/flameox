@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from flameox.adapters import PytestExtractor
 from flameox.application import ImportArtifactRequest, ImportService
@@ -118,6 +119,13 @@ def test_pytest_extracts_fixture_cost_outcomes_and_failure_latency(tmp_path: Pat
     result = PytestExtractor(workspace).extract(imported.run.run_id)
 
     assert result.complete is True
+    assert result.interrupted is False
+    payload = result.model_dump(mode="json")
+    assert "completion" not in payload
+    assert type(result).model_validate(payload) == result
+    assert result.validated_copy() == result
+    with pytest.raises(ValidationError, match="cannot be complete and interrupted"):
+        type(result).model_validate({**payload, "interrupted": True})
     assert result.collected_count == 3
     assert result.executed_count == 2
     assert result.passed_count == 1

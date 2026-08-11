@@ -17,8 +17,19 @@ from flameox.application import (
     InvestigationService,
 )
 from flameox.application.workloads import FaultExperimentConfig, ProjectConfig
-from flameox.domain import DomainError, ErrorCode, ProcessResult
-from flameox.execution import ManagedSidecarOutcome, ProcessObservation
+from flameox.domain import (
+    DomainError,
+    ErrorCode,
+    ProcessResult,
+    process_termination_from_returncode,
+)
+from flameox.execution import (
+    ManagedSidecarOutcome,
+    ProcessContainment,
+    ProcessDiscoverySource,
+    ProcessObservation,
+    ProcessSnapshotPhase,
+)
 from flameox.storage import ArtifactStore, Workspace
 
 
@@ -142,25 +153,29 @@ class _FakeLease:
         observation = ProcessObservation(
             pid=12345,
             create_time=1.0,
-            discovery_source="root",
+            discovery_source=ProcessDiscoverySource.ROOT,
             name="toxiproxy-server",
             status="running",
-            snapshot_phase="pre_cleanup",
+            snapshot_phase=ProcessSnapshotPhase.PRE_CLEANUP,
             alive_before_cleanup=True,
             cleanup_action="terminate",
             cleanup_outcome="True",
         )
-        post = observation.model_copy(
-            update={
-                "snapshot_phase": "post_cleanup",
+        post = ProcessObservation.model_validate(
+            {
+                **observation.model_dump(mode="python"),
+                "snapshot_phase": ProcessSnapshotPhase.POST_CLEANUP,
                 "alive_before_cleanup": False,
             }
         )
         self.outcome = ManagedSidecarOutcome(
-            process=ProcessResult(exit_code=0, cleanup_complete=True),
+            process=ProcessResult(
+                termination=process_termination_from_returncode(0),
+                cleanup_complete=True,
+            ),
             stdout=b"proxy-log",
             stderr=b"",
-            containment="process_group",
+            containment=ProcessContainment.PROCESS_GROUP,
             process_observations=(observation, post),
             started_at=now,
             finished_at=now,

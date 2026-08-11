@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from collections.abc import Mapping
+from enum import StrEnum
 from typing import Any
+
+from pydantic import ConfigDict, Field, computed_field, model_validator
 
 from flameox.domain.errors import DomainError, ErrorCode
 from flameox.domain.identity import digest_model
@@ -12,11 +16,19 @@ from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
 
+class PytestCompletionState(StrEnum):
+    COMPLETE = "complete"
+    INTERRUPTED = "interrupted"
+    INCOMPLETE = "incomplete"
+
+
 class PytestExtractionResult(ContractModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     schema_version: int = 2
     run_id: str
     artifact_id: str
-    complete: bool
+    completion: PytestCompletionState = Field(exclude=True)
     execution_status: ExecutionStatus
     collected_count: int
     executed_count: int
@@ -30,7 +42,6 @@ class PytestExtractionResult(ContractModel):
     fixture_setup_ns: int
     collection_duration_ns: int | None
     workers: tuple[str, ...]
-    interrupted: bool
     recovered_sidecar_events: int
     sidecar_recovery_failures: int
     first_failure_observed_ns: int | None
@@ -38,6 +49,48 @@ class PytestExtractionResult(ContractModel):
     measurement_count: int
     corpus_commit_id: str
     limitations: tuple[str, ...] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_legacy_completion_projections(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        parsed = dict(value)
+        has_complete = "complete" in parsed
+        has_interrupted = "interrupted" in parsed
+        if has_complete != has_interrupted:
+            raise ValueError("pytest completion projections must be supplied together")
+        if not has_complete:
+            return parsed
+        complete = parsed.pop("complete")
+        interrupted = parsed.pop("interrupted")
+        if not isinstance(complete, bool) or not isinstance(interrupted, bool):
+            raise ValueError("pytest completion projections must be booleans")
+        if complete and interrupted:
+            raise ValueError("a pytest extraction cannot be complete and interrupted")
+        completion = (
+            PytestCompletionState.COMPLETE
+            if complete
+            else (
+                PytestCompletionState.INTERRUPTED
+                if interrupted
+                else PytestCompletionState.INCOMPLETE
+            )
+        )
+        if "completion" in parsed and parsed["completion"] != completion:
+            raise ValueError("pytest completion projections must match their state")
+        parsed["completion"] = completion
+        return parsed
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def complete(self) -> bool:
+        return self.completion is PytestCompletionState.COMPLETE
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def interrupted(self) -> bool:
+        return self.completion is PytestCompletionState.INTERRUPTED
 
 
 class PytestExtractor:
@@ -265,7 +318,7 @@ class PytestExtractor:
                     aggregation="single",
                 )
             )
-        complete, completion_limitations = _completion(
+        completion, completion_limitations = _completion_state(
             events,
             interrupted=interrupted,
             crashed=crashed,
@@ -289,7 +342,7 @@ class PytestExtractor:
         return PytestExtractionResult(
             run_id=run_id,
             artifact_id=registration.artifact_id,
-            complete=complete,
+            completion=completion,
             execution_status=run.execution_status,
             collected_count=len(collected),
             executed_count=len(executed),
@@ -303,7 +356,6 @@ class PytestExtractor:
             fixture_setup_ns=fixture_setup_ns,
             collection_duration_ns=collection_duration,
             workers=tuple(sorted(workers)),
-            interrupted=interrupted,
             recovered_sidecar_events=recovered_sidecar_events,
             sidecar_recovery_failures=len(failed_sidecars),
             first_failure_observed_ns=first_observed,
@@ -548,14 +600,14 @@ def _test_outcome(reports: dict[str, str]) -> str:
     return "errored"
 
 
-def _completion(
+def _completion_state(
     events: list[dict[str, Any]],
     *,
     interrupted: bool,
     crashed: bool,
     failed_sidecars: set[str],
     truncated_stream: bool,
-) -> tuple[bool, list[str]]:
+) -> tuple[PytestCompletionState, list[str]]:
     limitations: list[str] = []
     has_terminal_event = any(event.get("event") == "session_finished" for event in events)
     if not has_terminal_event:
@@ -577,7 +629,14 @@ def _completion(
         and not failed_sidecars
         and not truncated_stream
     )
-    return complete, limitations
+    state = (
+        PytestCompletionState.COMPLETE
+        if complete
+        else (
+            PytestCompletionState.INTERRUPTED if interrupted else PytestCompletionState.INCOMPLETE
+        )
+    )
+    return state, limitations
 
 
 def _crash_limitation(

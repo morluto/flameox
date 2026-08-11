@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 from pydantic import JsonValue
 
@@ -50,7 +50,10 @@ from flameox.application.evidence_rows import (
 )
 from flameox.application.execution_identity import ExecutionIdentityService
 from flameox.application.execution_policy import ExecutionPolicy
-from flameox.application.kernel_builds import KernelBuildCaptureCollector
+from flameox.application.kernel_builds import (
+    KernelBuildCaptureCollector,
+    kernel_build_pipeline_request,
+)
 from flameox.application.nvbench_imports import (
     collect_nvbench_sidecar_specs,
     load_nvbench_document_with_integrity,
@@ -70,11 +73,13 @@ from flameox.atomic import atomic_write_bytes
 from flameox.config import ContainmentPolicy, NetworkPolicy
 from flameox.domain import (
     AcceleratorIdentityFacet,
+    AcceleratorIdentityStatus,
     AdapterExecutionPlan,
     AdapterExtractionResult,
     AdapterPlanRequest,
     AdapterProbeContext,
     AdapterProbeResult,
+    AdapterProbeStatus,
     AdapterValidationResult,
     ArtifactKind,
     ArtifactRegistration,
@@ -92,6 +97,7 @@ from flameox.domain import (
     ExternalExecutionContext,
     IdentityQuality,
     LimitationDetail,
+    LimitationSource,
     OracleReceiptRecord,
     OracleStatus,
     OracleStrength,
@@ -101,6 +107,8 @@ from flameox.domain import (
     ProbeKind,
     ProcessCancellationCause,
     ProcessResult,
+    RequirementKind,
+    RequirementStatus,
     RunManifest,
     Sensitivity,
     ValidationStatus,
@@ -113,6 +121,7 @@ from flameox.evidence import GenerationPublisher
 from flameox.execution import (
     ExecutionOutcome,
     ExecutionRequest,
+    ProcessContainment,
     ProcessObservation,
     ResourcePolicy,
     SubprocessBroker,
@@ -124,19 +133,7 @@ from flameox.storage import ArtifactStore, RunStore, StorageQuota, Workspace
 _MAX_PYTEST_SIDECAR_BYTES = 16 * 1024 * 1024
 
 
-def _limitation(
-    source: Literal[
-        "adapter",
-        "containment",
-        "preflight",
-        "collector",
-        "artifact",
-        "resource",
-        "validation",
-    ],
-    code: str,
-    message: str,
-) -> LimitationDetail:
+def _limitation(source: LimitationSource, code: str, message: str) -> LimitationDetail:
     return LimitationDetail(source=source, code=code, message=message)
 
 
@@ -172,15 +169,19 @@ def _preflight_limitation_details(preflight: PreflightReport) -> tuple[Limitatio
     for item in preflight.requirements:
         details.extend(
             _limitation(
-                "preflight",
+                LimitationSource.PREFLIGHT,
                 f"requirement.{item.status}",
                 f"{item.requirement}: {message}",
             )
             for message in item.limitations
-            or ((f"Requirement status is {item.status}.",) if item.status != "available" else ())
+            or (
+                (f"Requirement status is {item.status}.",)
+                if item.status is not RequirementStatus.AVAILABLE
+                else ()
+            )
         )
     details.extend(
-        _limitation("preflight", "preflight.limitation", message)
+        _limitation(LimitationSource.PREFLIGHT, "preflight.limitation", message)
         for message in preflight.limitations
     )
     return _merge_limitation_details(tuple(details))
@@ -366,7 +367,7 @@ class _CaptureExecution:
             limitation_details = (
                 *limitation_details,
                 _limitation(
-                    "collector",
+                    LimitationSource.COLLECTOR,
                     "snapshot_artifact_unavailable",
                     f"Process snapshot artifact could not be retained: {snapshot_error}",
                 ),
@@ -549,7 +550,8 @@ class CaptureService:
             missing_distributions = tuple(
                 item.requirement
                 for item in preflight.requirements
-                if item.kind == "python_distribution" and item.status == "absent"
+                if item.kind is RequirementKind.PYTHON_DISTRIBUTION
+                and item.status is RequirementStatus.ABSENT
             )
             next_tool = "get_declared_workflow"
             if missing_distributions:
@@ -558,7 +560,7 @@ class CaptureService:
                 next_tool = "prepare_adapter"
             elif any(item.next_tool == "start_capability_setup" for item in preflight.requirements):
                 next_tool = "start_capability_setup"
-            elif any(item.kind == "capability" for item in preflight.requirements):
+            elif any(item.kind is RequirementKind.CAPABILITY for item in preflight.requirements):
                 next_tool = "list_capabilities"
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
@@ -650,7 +652,7 @@ class CaptureService:
             limitation_details = (
                 *limitation_details,
                 _limitation(
-                    "containment",
+                    LimitationSource.CONTAINMENT,
                     "trusted_local_execution",
                     "The workload runs directly; descendant cleanup and resource isolation are "
                     "not enforced by a containment backend.",
@@ -805,7 +807,7 @@ class CaptureService:
         planned_accelerator = (
             AcceleratorIdentityFacet(
                 provider="cuda",
-                status="unknown",
+                status=AcceleratorIdentityStatus.UNKNOWN,
                 identity_quality=IdentityQuality.PARTIAL,
                 missing_fields=identity_requirements,
                 limitations=("Declared accelerator identity has not been observed yet.",),
@@ -1032,15 +1034,19 @@ class CaptureService:
                     stderr=(partial_process.stderr or "").encode(),
                     resolved_executable=Path(plan.collector_argv[0]).resolve(),
                     containment=(
-                        "systemd_scope"
+                        ProcessContainment.SYSTEMD_SCOPE
                         if plan.systemd_scope_unit is not None
-                        else ("process_group" if os.name == "posix" else "process")
+                        else (
+                            ProcessContainment.PROCESS_GROUP
+                            if os.name == "posix"
+                            else ProcessContainment.PROCESS
+                        )
                     ),
                     process_observations=process_observations,
                 )
                 collector_limitation_details.append(
                     _limitation(
-                        "collector",
+                        LimitationSource.COLLECTOR,
                         "timeout_partial_artifact",
                         "Collector timed out; the non-empty native output is partial evidence.",
                     )
@@ -1069,7 +1075,7 @@ class CaptureService:
                         if torch_diagnostics.stat().st_size > max_diagnostics_bytes:
                             collector_limitation_details.append(
                                 _limitation(
-                                    "collector",
+                                    LimitationSource.COLLECTOR,
                                     "diagnostics_oversized",
                                     "Torch profiler diagnostics exceed 1 MiB; skipping parse.",
                                 )
@@ -1085,7 +1091,7 @@ class CaptureService:
                         if diagnostic_status == "failed" and isinstance(diagnostic_phase, str):
                             collector_limitation_details.append(
                                 _limitation(
-                                    "collector",
+                                    LimitationSource.COLLECTOR,
                                     "failure_phase",
                                     f"Torch profiler collector failed during {diagnostic_phase}.",
                                 )
@@ -1108,7 +1114,7 @@ class CaptureService:
                     ) as diagnostic_error:
                         collector_limitation_details.append(
                             _limitation(
-                                "collector",
+                                LimitationSource.COLLECTOR,
                                 "diagnostics_registration_failed",
                                 "Torch profiler diagnostics could not be registered: "
                                 f"{diagnostic_error}",
@@ -1123,7 +1129,11 @@ class CaptureService:
                     process_observations=process_observations,
                     limitation_details=tuple(
                         [
-                            _limitation("collector", error.code.value.lower(), error.message),
+                            _limitation(
+                                LimitationSource.COLLECTOR,
+                                error.code.value.lower(),
+                                error.message,
+                            ),
                             *collector_limitation_details,
                         ]
                     ),
@@ -1162,7 +1172,7 @@ class CaptureService:
         if not collector_succeeded and not outcome.process.timed_out:
             collector_limitation_details.append(
                 _limitation(
-                    "collector",
+                    LimitationSource.COLLECTOR,
                     "nonzero_exit",
                     f"Collector exited with status {outcome.process.exit_code}.",
                 )
@@ -1203,7 +1213,7 @@ class CaptureService:
             if quarantined is not None:
                 collector_limitation_details.append(quarantined)
             collector_limitation_details.append(
-                _limitation("artifact", "expected_output_invalid", reason)
+                _limitation(LimitationSource.ARTIFACT, "expected_output_invalid", reason)
             )
             valid_native_paths = ()
         elif (
@@ -1221,13 +1231,13 @@ class CaptureService:
                 else "Collector emitted an incomplete, extra, empty, or non-regular output set."
             )
             collector_limitation_details.append(
-                _limitation("artifact", "expected_output_invalid", reason)
+                _limitation(LimitationSource.ARTIFACT, "expected_output_invalid", reason)
             )
             collector_succeeded = False
         if native_paths and outcome.process.timed_out and valid_native_paths:
             collector_limitation_details.append(
                 _limitation(
-                    "collector",
+                    LimitationSource.COLLECTOR,
                     "timeout_partial_artifact",
                     "Collector timed out; the non-empty native output is partial evidence.",
                 )
@@ -1457,7 +1467,7 @@ class CaptureService:
                     if torch_diagnostics.stat().st_size > max_diagnostics_bytes:
                         collector_limitation_details.append(
                             _limitation(
-                                "collector",
+                                LimitationSource.COLLECTOR,
                                 "diagnostics_oversized",
                                 "Torch profiler diagnostics exceed 1 MiB; skipping parse.",
                             )
@@ -1476,7 +1486,7 @@ class CaptureService:
                 if diagnostic_status == "failed" and isinstance(diagnostic_phase, str):
                     collector_limitation_details.append(
                         _limitation(
-                            "collector",
+                            LimitationSource.COLLECTOR,
                             "failure_phase",
                             f"Torch profiler collector failed during {diagnostic_phase}.",
                         )
@@ -1562,7 +1572,7 @@ class CaptureService:
                         except DomainError as error:
                             collector_limitation_details.append(
                                 _limitation(
-                                    "artifact",
+                                    LimitationSource.ARTIFACT,
                                     "adapter_output_quarantine_failed",
                                     error.message,
                                 )
@@ -1570,7 +1580,7 @@ class CaptureService:
                         else:
                             collector_limitation_details.append(
                                 _limitation(
-                                    "artifact",
+                                    LimitationSource.ARTIFACT,
                                     "adapter_output_quarantined",
                                     f"Declared adapter output was quarantined ({quarantine_id}).",
                                 )
@@ -1753,7 +1763,7 @@ class CaptureService:
                 )
             )
             details = [
-                _limitation("artifact", error.code.value.lower(), error.message),
+                _limitation(LimitationSource.ARTIFACT, error.code.value.lower(), error.message),
             ]
             if quarantined is not None:
                 details.append(quarantined)
@@ -1771,12 +1781,12 @@ class CaptureService:
         detail_groups = [
             tuple(collector_limitation_details),
             tuple(
-                _limitation("validation", "validation.limitation", message)
+                _limitation(LimitationSource.VALIDATION, "validation.limitation", message)
                 for message in validation_limitations
             ),
             tuple(
                 _limitation(
-                    "resource",
+                    LimitationSource.RESOURCE,
                     "resource_metric_unavailable",
                     f"Runtime resource metric {metric!r} was unavailable.",
                 )
@@ -1789,7 +1799,7 @@ class CaptureService:
             (
                 (
                     _limitation(
-                        "resource",
+                        LimitationSource.RESOURCE,
                         "storage_reserve_exceeded",
                         "Runtime storage reserve terminated the collector.",
                     ),
@@ -1862,7 +1872,8 @@ class CaptureService:
             try:
                 await run_atomic_thread(
                     lambda: ArtifactPipelineService(self.workspace).register(
-                        kernel_build_manifest.pipeline_request(
+                        kernel_build_pipeline_request(
+                            kernel_build_manifest,
                             run_id=terminal.run_id,
                             registration_ids_by_path=registration_ids_by_path,
                         )
@@ -2450,12 +2461,12 @@ class CaptureService:
                 quarantine_ids.append(manifest.quarantine_id)
         except DomainError as error:
             return _limitation(
-                "artifact",
+                LimitationSource.ARTIFACT,
                 "native_output_quarantine_failed",
                 f"Invalid {plan.adapter} output could not be quarantined: {error.message}",
             )
         return _limitation(
-            "artifact",
+            LimitationSource.ARTIFACT,
             "native_output_quarantined",
             f"Invalid {plan.adapter} output was quarantined "
             f"({', '.join(quarantine_ids)}): {reason}",
@@ -2535,7 +2546,7 @@ class CaptureService:
                 limitations=invocation.limitations,
                 environment=invocation.environment,
                 limitation_details=tuple(
-                    _limitation("adapter", "capture.limitation", message)
+                    _limitation(LimitationSource.ADAPTER, "capture.limitation", message)
                     for message in invocation.limitations
                 ),
                 permissions=adapter_definition.permissions,
@@ -2550,7 +2561,7 @@ class CaptureService:
                     AdapterProbeContext(project_root=str(self.workspace.project_root))
                 )
             )
-            if probe.status == "unavailable":
+            if probe.status is AdapterProbeStatus.UNAVAILABLE:
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                     f"Approved adapter {adapter!r} is unavailable.",
@@ -2585,7 +2596,7 @@ class CaptureService:
             limitations=(*probe.limitations, *execution_plan.limitations),
             environment={},
             limitation_details=tuple(
-                _limitation("adapter", "probe.limitation", message)
+                _limitation(LimitationSource.ADAPTER, "probe.limitation", message)
                 for message in (*probe.limitations, *execution_plan.limitations)
             ),
             permissions=execution_plan.permissions,
@@ -2964,7 +2975,7 @@ class CaptureService:
         if process.resources is None:
             process_details.append(
                 _limitation(
-                    "resource",
+                    LimitationSource.RESOURCE,
                     "resource_summary_unavailable",
                     "Runtime resource sampling did not produce a summary.",
                 )
@@ -2972,7 +2983,7 @@ class CaptureService:
         else:
             process_details.extend(
                 _limitation(
-                    "resource",
+                    LimitationSource.RESOURCE,
                     "resource_metric_unavailable",
                     f"Runtime resource metric {metric!r} was unavailable.",
                 )
@@ -2981,7 +2992,7 @@ class CaptureService:
             if process.resources.policy_termination is not None:
                 process_details.append(
                     _limitation(
-                        "resource",
+                        LimitationSource.RESOURCE,
                         "storage_reserve_exceeded",
                         "Runtime storage reserve terminated the collector.",
                     )

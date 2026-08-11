@@ -11,6 +11,7 @@ from flameox.domain.models import (
     Comparison,
     ComparisonDecision,
     ComparisonValidity,
+    ConfidenceInterval,
     MetricPolarity,
 )
 from flameox.domain.scalars import FloatingValue
@@ -130,13 +131,18 @@ def compare_paired_samples(
         ),
         relative_change=relative_change,
         effect_size=relative_change,
-        confidence_low=confidence_low,
-        confidence_high=confidence_high,
-        confidence_level=confidence_level if confidence_low is not None else None,
+        confidence_interval=(
+            ConfidenceInterval(
+                low=confidence_low,
+                high=confidence_high,
+                level=confidence_level,
+            )
+            if confidence_low is not None and confidence_high is not None
+            else None
+        ),
         method="scipy.bootstrap.bca.median_paired_log_ratio.v1",
         random_seed=random_seed,
         independent_unit="block",
-        paired=True,
         baseline_attempted_n=len(baseline_by_block),
         baseline_eligible_n=len(eligible),
         candidate_attempted_n=len(candidate_by_block),

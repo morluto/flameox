@@ -21,6 +21,7 @@ from flameox.domain import (
     ErrorCode,
     ExecutionStatus,
     ExternalExecutionContext,
+    Sensitivity,
     ValidationStatus,
 )
 from flameox.storage import ArtifactStore, RunStore, Workspace
@@ -282,7 +283,7 @@ timeout_seconds = 30
         lease_id="lease-cancelled",
         worker_id="worker-cancelled",
         orchestration_run_id="orchestration-cancelled",
-        sensitivity="sensitive",
+        sensitivity=Sensitivity.SENSITIVE,
     )
     plan = await service.plan(
         workload_name="wait",

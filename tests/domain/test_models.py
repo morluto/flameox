@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -11,6 +13,7 @@ from flameox.domain import (
     ArtifactContent,
     ArtifactKind,
     ArtifactRegistration,
+    CapabilityExtra,
     CaptureStatus,
     CommandSpec,
     DomainError,
@@ -18,6 +21,7 @@ from flameox.domain import (
     OracleReceiptValue,
     ProcessCancellationCause,
     ProcessResult,
+    ProcessTerminationKind,
     RunManifest,
     RuntimeResourceSummary,
     Sensitivity,
@@ -26,6 +30,7 @@ from flameox.domain import (
     ValidationStatus,
     digest_model,
     effective_sensitivity,
+    parse_managed_runtime_extras,
 )
 from flameox.domain.models import (
     ActiveCapturePlan,
@@ -40,6 +45,7 @@ from flameox.domain.models import (
 from flameox.domain.scalars import FloatingValue, IntegerValue, NumericValue, parse_numeric_value
 
 DIGEST = "sha256:" + ("a" * 64)
+SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src" / "flameox"
 
 
 def _capture_plan_payload(**overrides: object) -> dict[str, object]:
@@ -215,6 +221,57 @@ def test_run_manifest_parser_routes_schema_one_json_to_legal_variants() -> None:
         )
 
 
+def test_validated_copy_reparses_updates_into_a_valid_contract() -> None:
+    imported = ImportRunManifest(
+        run_id="run",
+        capture_status=CaptureStatus.PENDING,
+        validation_status=ValidationStatus.NOT_REQUESTED,
+        environment_id=DIGEST,
+    )
+
+    updated = imported.validated_copy(
+        update={"revision": 1, "capture_status": CaptureStatus.REGISTERED.value}
+    )
+
+    assert updated.revision == 1
+    assert updated.capture_status is CaptureStatus.REGISTERED
+
+
+def test_validated_copy_rejects_invalid_timestamp_and_lifecycle_updates() -> None:
+    planned = ExecutionRunManifest(
+        run_id="run",
+        execution_status=ExecutionStatus.PLANNED,
+        capture_status=CaptureStatus.PENDING,
+        validation_status=ValidationStatus.NOT_REQUESTED,
+        environment_id=DIGEST,
+    )
+
+    with pytest.raises(ValidationError, match="timezone"):
+        planned.validated_copy(update={"created_at": datetime(2026, 1, 1)})
+
+    with pytest.raises(ValidationError, match="running execution"):
+        planned.validated_copy(update={"execution_status": ExecutionStatus.RUNNING})
+
+
+def test_production_contract_updates_cannot_bypass_validation() -> None:
+    violations: list[str] = []
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "model_copy"
+                and any(keyword.arg == "update" for keyword in node.keywords)
+            ):
+                violations.append(f"{path.relative_to(SOURCE_ROOT)}:{node.lineno}")
+
+    assert violations == [], (
+        "production contract updates must use validated_copy() or a named validated transition: "
+        + ", ".join(violations)
+    )
+
+
 @pytest.mark.parametrize(
     "updates",
     (
@@ -310,6 +367,20 @@ def test_process_result_parses_legacy_timeout_flag_into_authoritative_cause() ->
     assert result.cancellation_cause is ProcessCancellationCause.TIMEOUT
     assert result.timed_out is True
     assert ProcessResult.model_validate(result.model_dump(mode="json")) == result
+
+
+def test_process_result_parses_flat_termination_into_one_domain_variant() -> None:
+    exited = ProcessResult.model_validate({"exit_code": 0})
+    signalled = ProcessResult.model_validate({"terminating_signal": 15})
+
+    assert exited.termination.kind is ProcessTerminationKind.EXITED
+    assert exited.exit_code == 0
+    assert exited.terminating_signal is None
+    assert signalled.termination.kind is ProcessTerminationKind.SIGNALLED
+    assert signalled.exit_code is None
+    assert signalled.terminating_signal == 15
+    assert ProcessResult.model_validate(exited.model_dump(mode="json")) == exited
+    assert ProcessResult.model_validate(signalled.model_dump(mode="json")) == signalled
 
 
 @pytest.mark.parametrize("argv", [(), ("python", "bad\x00arg"), ("",)])
@@ -494,3 +565,10 @@ def test_oracle_receipt_value_rejects_kind_value_mismatches(
 def test_oracle_receipt_parser_rejects_ambiguous_or_unsupported_json(payload: bytes) -> None:
     with pytest.raises(DomainError):
         parse_oracle_receipt(payload)
+
+
+def test_managed_runtime_extra_parser_owns_the_persisted_vocabulary() -> None:
+    assert parse_managed_runtime_extras(["torch", "unknown", "trace", "torch", "toxiproxy", 1]) == (
+        CapabilityExtra.TORCH,
+        CapabilityExtra.TRACE,
+    )

@@ -22,9 +22,10 @@ import json
 import os
 import shutil
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Literal, assert_never
+from typing import Annotated, Any, Literal, assert_never
 from urllib.parse import urlsplit
 
 from pydantic import ConfigDict, Field, TypeAdapter, computed_field, model_validator
@@ -49,8 +50,15 @@ from flameox.application.evidence_rows import (
 from flameox.application.imports import ImportArtifactRequest, ImportService
 from flameox.application.inference_providers import (
     AIPerfProfileRequest,
+    AvailableInferenceToolDiscovery,
     ExistingServerProbe,
+    InferenceEndpointType,
+    InferenceScenarioProvider,
+    InferenceServerMode,
+    InferenceServerProvider,
+    InferenceTool,
     SglangBenchServingRequest,
+    UnavailableInferenceToolDiscovery,
     VllmBenchServeRequest,
     discover_inference_tool,
     discover_sglang,
@@ -83,6 +91,7 @@ from flameox.domain import (
     OracleStatus,
     OracleStrength,
     ProcessCancellationCause,
+    ProcessTerminationFields,
     RunManifest,
     Sensitivity,
     SourceState,
@@ -102,16 +111,179 @@ from flameox.execution import (
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
-_PROVIDER_TOOL: dict[str, Literal["aiperf", "vllm"]] = {
-    "aiperf": "aiperf",
-    "vllm_bench": "vllm",
-    "sglang_bench": "vllm",
+_PROVIDER_TOOL: dict[
+    InferenceScenarioProvider,
+    Literal[InferenceTool.AIPERF, InferenceTool.VLLM],
+] = {
+    InferenceScenarioProvider.AIPERF: InferenceTool.AIPERF,
+    InferenceScenarioProvider.VLLM_BENCH: InferenceTool.VLLM,
+    InferenceScenarioProvider.SGLANG_BENCH: InferenceTool.VLLM,
 }
 _MAX_RESULT_LIMITATIONS = 16
 
 
+class _ReadyReplayTool(ContractModel):
+    state: Literal["ready"] = "ready"
+    executable: str
+    version: str | None = None
+    executable_digest: str | None = None
+    argv: Annotated[tuple[str, ...], Field(min_length=1, max_length=1_024)]
+
+
+class _UnavailableReplayTool(ContractModel):
+    state: Literal["unavailable"] = "unavailable"
+    executable: str | None = None
+    version: str | None = None
+    executable_digest: str | None = None
+    compatibility_reason: str | None = None
+    remediation: Annotated[tuple[str, ...], Field(max_length=8)] = ()
+    argv: tuple[()] = ()
+
+
+type _ReplayTool = Annotated[
+    _ReadyReplayTool | _UnavailableReplayTool,
+    Field(discriminator="state"),
+]
+
+_FLAT_REPLAY_TOOL_FIELDS = frozenset(
+    {
+        "tool_executable",
+        "tool_version",
+        "tool_executable_digest",
+        "tool_compatibility_reason",
+        "tool_remediation",
+        "argv",
+        "tool_available",
+        "tool_compatible",
+    }
+)
+
+
+def _advertise_replay_tool_projections(schema: dict[str, Any]) -> None:
+    properties = schema.setdefault("properties", {})
+    assert isinstance(properties, dict)
+    properties.pop("replay_tool", None)
+    nullable_string = {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None}
+    properties.update(
+        {
+            "tool_executable": {**nullable_string, "title": "Tool Executable"},
+            "tool_version": {**nullable_string, "title": "Tool Version"},
+            "tool_executable_digest": {
+                **nullable_string,
+                "title": "Tool Executable Digest",
+            },
+            "tool_compatibility_reason": {
+                **nullable_string,
+                "title": "Tool Compatibility Reason",
+            },
+            "tool_remediation": {
+                "default": [],
+                "items": {"type": "string"},
+                "maxItems": 8,
+                "title": "Tool Remediation",
+                "type": "array",
+            },
+            "argv": {
+                "default": [],
+                "items": {"type": "string"},
+                "maxItems": 1_024,
+                "title": "Argv",
+                "type": "array",
+            },
+            "tool_available": {
+                "readOnly": True,
+                "title": "Tool Available",
+                "type": "boolean",
+            },
+            "tool_compatible": {
+                "readOnly": True,
+                "title": "Tool Compatible",
+                "type": "boolean",
+            },
+        }
+    )
+    required = schema.setdefault("required", [])
+    assert isinstance(required, list)
+    for field_name in (
+        "replay_tool",
+        "tool_executable",
+        "tool_version",
+        "tool_executable_digest",
+        "tool_compatibility_reason",
+        "tool_remediation",
+        "argv",
+    ):
+        if field_name in required:
+            required.remove(field_name)
+    for field_name in ("tool_available", "tool_compatible"):
+        if field_name not in required:
+            required.append(field_name)
+
+
+def _parse_flat_replay_tool(value: Mapping[str, object]) -> dict[str, object]:
+    parsed = dict(value)
+    supplied = _FLAT_REPLAY_TOOL_FIELDS.intersection(parsed)
+    if "replay_tool" in parsed:
+        if supplied:
+            raise ValueError("use either replay_tool or flattened tool fields, not both")
+        return parsed
+
+    available = parsed.pop("tool_available", None)
+    compatible = parsed.pop("tool_compatible", None)
+    if available is not None and compatible is not None and available != compatible:
+        raise ValueError("tool availability and compatibility must agree")
+    argv = parsed.pop("argv", ())
+    planned = bool(argv)
+    if available is not None and available != planned:
+        raise ValueError("tool availability must match executable argv")
+    if compatible is not None and compatible != planned:
+        raise ValueError("tool compatibility must match executable argv")
+
+    snapshot: dict[str, object] = {
+        "state": "ready" if planned else "unavailable",
+        "executable": parsed.pop("tool_executable", None),
+        "version": parsed.pop("tool_version", None),
+        "executable_digest": parsed.pop("tool_executable_digest", None),
+        "argv": argv,
+    }
+    reason = parsed.pop("tool_compatibility_reason", None)
+    remediation = parsed.pop("tool_remediation", ())
+    if planned and (reason is not None or remediation):
+        raise ValueError("an available tool cannot carry incompatibility recovery")
+    if not planned:
+        snapshot["compatibility_reason"] = reason
+        snapshot["remediation"] = remediation
+    parsed["replay_tool"] = snapshot
+    return parsed
+
+
+def _replay_tool_snapshot(
+    discovery: AvailableInferenceToolDiscovery | UnavailableInferenceToolDiscovery,
+    argv: tuple[str, ...],
+) -> _ReplayTool:
+    if isinstance(discovery, AvailableInferenceToolDiscovery):
+        return _ReadyReplayTool(
+            executable=str(discovery.executable),
+            version=discovery.version,
+            executable_digest=discovery.executable_digest,
+            argv=argv,
+        )
+    if argv:
+        raise ValueError("an unavailable tool cannot carry executable argv")
+    return _UnavailableReplayTool(
+        executable=str(discovery.executable) if discovery.executable is not None else None,
+        version=discovery.version,
+        executable_digest=discovery.executable_digest,
+        compatibility_reason=discovery.compatibility_reason,
+        remediation=discovery.remediation,
+    )
+
+
 class _InferenceReplayPlan(ContractModel):
-    model_config = ConfigDict(json_schema_mode_override="serialization")
+    model_config = ConfigDict(
+        json_schema_extra=_advertise_replay_tool_projections,
+        json_schema_mode_override="serialization",
+    )
 
     """A validated, side-effect-free plan for one inference replay run."""
 
@@ -119,24 +291,19 @@ class _InferenceReplayPlan(ContractModel):
     plan_id: str
     scenario_name: str
     server_name: str
-    server_mode: Literal["managed", "existing_local"]
+    server_mode: InferenceServerMode
     base_url: str
     model: Annotated[str, Field(min_length=1, max_length=500)]
     model_revision: str | None = None
     tokenizer: Annotated[str, Field(min_length=1, max_length=500)] | None = None
     tokenizer_revision: str | None = None
     quantization: str | None = None
-    endpoint_type: Literal["chat", "completions"] = "chat"
-    tool_executable: str | None = None
-    tool_version: str | None = None
-    tool_executable_digest: str | None = None
+    endpoint_type: InferenceEndpointType = InferenceEndpointType.CHAT
+    replay_tool: _ReplayTool = Field(exclude=True)
     server_executable_digest: str | None = None
     server_version: str | None = None
-    tool_compatibility_reason: str | None = None
-    tool_remediation: Annotated[tuple[str, ...], Field(max_length=8)] = ()
     health_ready: bool | None = None
     probed_model_ids: Annotated[tuple[str, ...], Field(max_length=64)] = ()
-    argv: Annotated[tuple[str, ...], Field(max_length=1_024)] = ()
     output_path: str | None = None
     num_prompts: Annotated[int, Field(gt=0, le=10_000_000)] = 1
     concurrency: Annotated[int, Field(gt=0, le=100_000)] | None = None
@@ -153,34 +320,48 @@ class _InferenceReplayPlan(ContractModel):
     @model_validator(mode="before")
     @classmethod
     def parse_tool_readiness_projections(cls, value: object) -> object:
-        if not isinstance(value, dict):
+        if not isinstance(value, Mapping):
             return value
-        available = value.get("tool_available")
-        compatible = value.get("tool_compatible")
-        if available is not None and compatible is not None and available != compatible:
-            raise ValueError("tool availability and compatibility must agree")
-        parsed = dict(value)
-        parsed.pop("tool_available", None)
-        parsed.pop("tool_compatible", None)
-        planned = bool(parsed.get("argv", ()))
-        if available is not None and available != planned:
-            raise ValueError("tool availability must match executable argv")
-        if compatible is not None and compatible != planned:
-            raise ValueError("tool compatibility must match executable argv")
-        return parsed
+        return _parse_flat_replay_tool(value)
 
-    @model_validator(mode="after")
-    def tool_readiness_is_coherent(self) -> _InferenceReplayPlan:
-        if self.argv and self.tool_executable is None:
-            raise ValueError("an available tool requires an executable")
-        if self.argv and (self.tool_compatibility_reason is not None or self.tool_remediation):
-            raise ValueError("an available tool cannot carry incompatibility recovery")
-        return self
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def tool_executable(self) -> str | None:
+        return self.replay_tool.executable
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def tool_version(self) -> str | None:
+        return self.replay_tool.version
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def tool_executable_digest(self) -> str | None:
+        return self.replay_tool.executable_digest
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def tool_compatibility_reason(self) -> str | None:
+        if isinstance(self.replay_tool, _UnavailableReplayTool):
+            return self.replay_tool.compatibility_reason
+        return None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def tool_remediation(self) -> tuple[str, ...]:
+        if isinstance(self.replay_tool, _UnavailableReplayTool):
+            return self.replay_tool.remediation
+        return ()
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def argv(self) -> tuple[str, ...]:
+        return self.replay_tool.argv
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def tool_available(self) -> bool:
-        return bool(self.argv)
+        return isinstance(self.replay_tool, _ReadyReplayTool)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -189,8 +370,8 @@ class _InferenceReplayPlan(ContractModel):
 
 
 class AIPerfReplayPlan(_InferenceReplayPlan):
-    provider: Literal["aiperf"]
-    server_provider: Literal["vllm"] = "vllm"
+    provider: Literal[InferenceScenarioProvider.AIPERF]
+    server_provider: Literal[InferenceServerProvider.VLLM] = InferenceServerProvider.VLLM
     streaming: bool = True
     trace_artifact_id: str | None = None
     burstiness: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
@@ -201,8 +382,8 @@ class AIPerfReplayPlan(_InferenceReplayPlan):
 
 
 class VllmBenchReplayPlan(_InferenceReplayPlan):
-    provider: Literal["vllm_bench"]
-    server_provider: Literal["vllm"] = "vllm"
+    provider: Literal[InferenceScenarioProvider.VLLM_BENCH]
+    server_provider: Literal[InferenceServerProvider.VLLM] = InferenceServerProvider.VLLM
     streaming: Literal[True] = True
     trace_artifact_id: Literal[None] = None
     burstiness: Annotated[float, Field(gt=0, le=1_000_000)] | None = None
@@ -213,8 +394,8 @@ class VllmBenchReplayPlan(_InferenceReplayPlan):
 
 
 class SglangBenchReplayPlan(_InferenceReplayPlan):
-    provider: Literal["sglang_bench"]
-    server_provider: Literal["sglang"] = "sglang"
+    provider: Literal[InferenceScenarioProvider.SGLANG_BENCH]
+    server_provider: Literal[InferenceServerProvider.SGLANG] = InferenceServerProvider.SGLANG
     streaming: Literal[True] = True
     trace_artifact_id: Literal[None] = None
     burstiness: Literal[None] = None
@@ -238,7 +419,7 @@ def parse_inference_replay_plan(value: object) -> InferenceReplayPlan:
     return _INFERENCE_REPLAY_PLAN_ADAPTER.validate_python(value)
 
 
-class InferenceReplayResult(ContractModel):
+class InferenceReplayResult(ProcessTerminationFields):
     """The bounded outcome of one executed inference replay plan."""
 
     model_config = ConfigDict(json_schema_mode_override="serialization")
@@ -249,17 +430,15 @@ class InferenceReplayResult(ContractModel):
     plan_id: str
     scenario_name: str
     server_name: str
-    provider: Literal["aiperf", "vllm_bench", "sglang_bench"]
+    provider: InferenceScenarioProvider
     argv: Annotated[tuple[str, ...], Field(max_length=1_024)]
     output_path: str | None = None
     output_path_retained: bool = False
-    exit_code: int | None = None
-    terminating_signal: int | None = None
     wall_time_ns: Annotated[int, Field(ge=0)] | None = None
     cancellation_cause: ProcessCancellationCause | None = None
     stdout_bytes: Annotated[int, Field(ge=0)] = 0
     stderr_bytes: Annotated[int, Field(ge=0)] = 0
-    containment: ProcessContainment = "broker"
+    containment: ProcessContainment = ProcessContainment.BROKER
     peak_rss_backend: str | None = None
     health_ready: bool
     probed_model_ids: Annotated[tuple[str, ...], Field(max_length=64)] = ()
@@ -290,12 +469,6 @@ class InferenceReplayResult(ContractModel):
     @property
     def timed_out(self) -> bool:
         return self.cancellation_cause is ProcessCancellationCause.TIMEOUT
-
-    @model_validator(mode="after")
-    def termination_is_coherent(self) -> InferenceReplayResult:
-        if self.exit_code is not None and self.terminating_signal is not None:
-            raise ValueError("replay cannot have both an exit code and a terminating signal")
-        return self
 
 
 class _OracleObservation(ContractModel):
@@ -343,11 +516,12 @@ class InferenceReplayService:
         tool = _PROVIDER_TOOL[scenario.provider]
         discovery = (
             discover_sglang(Path(server.benchmark_python), broker=self.broker)
-            if scenario.provider == "sglang_bench" and server.benchmark_python is not None
+            if scenario.provider is InferenceScenarioProvider.SGLANG_BENCH
+            and server.benchmark_python is not None
             else discover_inference_tool(tool)
         )
         probe: ExistingServerProbe | None = None
-        if server.mode == "existing_local" and discovery.available:
+        if server.mode is InferenceServerMode.EXISTING_LOCAL and discovery.available:
             probe = probe_existing_vllm_server(
                 server.base_url, timeout_seconds=self.probe_timeout_seconds
             )
@@ -367,7 +541,7 @@ class InferenceReplayService:
                 )
         server_executable_digest, server_version = self._server_tool_identity(server)
         output_path = self._output_path(scenario_name, new_id())
-        if scenario.provider == "sglang_bench":
+        if scenario.provider is InferenceScenarioProvider.SGLANG_BENCH:
             output_path = output_path.with_suffix(".jsonl")
         if discovery.available:
             assert discovery.executable is not None
@@ -379,6 +553,10 @@ class InferenceReplayService:
             )
         else:
             request = None
+        replay_tool = _replay_tool_snapshot(
+            discovery,
+            request.argv() if request is not None else (),
+        )
         configuration_id = digest_model(project.model_dump(mode="json"))
         plan_id = digest_model(
             {
@@ -416,16 +594,11 @@ class InferenceReplayService:
                 quantization=server.quantization,
                 endpoint_type=scenario.endpoint_type,
                 streaming=scenario.streaming,
-                tool_executable=str(discovery.executable) if discovery.executable else None,
-                tool_version=discovery.version,
-                tool_executable_digest=discovery.executable_digest,
+                replay_tool=replay_tool,
                 server_executable_digest=server_executable_digest,
                 server_version=server_version,
-                tool_compatibility_reason=discovery.compatibility_reason,
-                tool_remediation=discovery.remediation,
                 health_ready=probe.health_ready if probe is not None else None,
                 probed_model_ids=probe.model_ids if probe is not None else (),
-                argv=request.argv() if request is not None else (),
                 output_path=str(output_path),
                 trace_artifact_id=scenario.trace_artifact_id,
                 num_prompts=scenario.num_prompts,
@@ -440,7 +613,7 @@ class InferenceReplayService:
                 random_output_len=scenario.random_output_len,
                 random_range_ratio=(
                     scenario.random_range_ratio or 1.0
-                    if scenario.provider == "sglang_bench"
+                    if scenario.provider is InferenceScenarioProvider.SGLANG_BENCH
                     else scenario.random_range_ratio
                 ),
                 timeout_seconds=deadline,
@@ -789,7 +962,7 @@ class InferenceReplayService:
             )
         project = self.workloads.load()
         _scenario, server = self._resolve(plan.scenario_name, project)
-        if server.mode != "existing_local":
+        if server.mode is not InferenceServerMode.EXISTING_LOCAL:
             raise DomainError(
                 ErrorCode.EXECUTION_REFUSED,
                 "Synchronous replay is limited to existing_local servers; use async run for "
@@ -991,7 +1164,11 @@ class InferenceReplayService:
         command = self.workloads.resolve(server.workload).command
         executable = self._resolve_server_executable(command)
         executable_digest = self._executable_digest(executable)
-        discovery = discover_inference_tool("vllm") if server.provider == "vllm" else None
+        discovery = (
+            discover_inference_tool(InferenceTool.VLLM)
+            if server.provider is InferenceServerProvider.VLLM
+            else None
+        )
         version = (
             discovery.version
             if discovery is not None
@@ -1036,7 +1213,8 @@ class InferenceReplayService:
             )
         provider = (
             discover_sglang(Path(plan.tool_executable), broker=self.broker)
-            if plan.provider == "sglang_bench" and plan.tool_executable is not None
+            if plan.provider is InferenceScenarioProvider.SGLANG_BENCH
+            and plan.tool_executable is not None
             else discover_inference_tool(_PROVIDER_TOOL[plan.provider])
         )
         if not plan.tool_available:
@@ -1086,7 +1264,7 @@ class InferenceReplayService:
         # One absolute deadline for the whole replay. AIPerf trace replay can be
         # long, so default to a generous bounded value rather than the workload
         # default.
-        return 1800.0 if scenario.provider == "aiperf" else 600.0
+        return 1800.0 if scenario.provider is InferenceScenarioProvider.AIPERF else 600.0
 
     def _output_path(self, scenario_name: str, run_token: str | None = None) -> Path:
         root = self.workspace.paths.staging / f"inference-replay-{scenario_name}"
@@ -1208,8 +1386,7 @@ class InferenceReplayService:
             argv=plan.argv,
             output_path=str(output_path),
             output_path_retained=output_path.parent.exists(),
-            exit_code=process.exit_code,
-            terminating_signal=process.terminating_signal,
+            termination=process.termination,
             wall_time_ns=process.wall_time_ns,
             cancellation_cause=process.cancellation_cause,
             stdout_bytes=len(outcome.stdout),
@@ -1360,18 +1537,18 @@ class InferenceReplayService:
                     "mooncake"
                     if plan.trace_artifact_id is not None
                     else "aiperf"
-                    if plan.provider == "aiperf"
+                    if plan.provider is InferenceScenarioProvider.AIPERF
                     else "sglang.bench_serving"
-                    if plan.provider == "sglang_bench"
+                    if plan.provider is InferenceScenarioProvider.SGLANG_BENCH
                     else "vllm"
                 ),
                 producer=(
                     "mooncake"
                     if plan.trace_artifact_id is not None
                     else "aiperf"
-                    if plan.provider == "aiperf"
+                    if plan.provider is InferenceScenarioProvider.AIPERF
                     else "sglang.bench_serving"
-                    if plan.provider == "sglang_bench"
+                    if plan.provider is InferenceScenarioProvider.SGLANG_BENCH
                     else "vllm"
                 ),
                 producer_version=(
@@ -1397,10 +1574,16 @@ class InferenceReplayService:
                 quantization=plan.quantization or "none",
             ),
             server=ServerConfigIdentity(
-                backend=plan.server_provider,
-                cache_backend="custom" if plan.server_provider == "sglang" else "vllm_paged",
+                backend=plan.server_provider.value,
+                cache_backend=(
+                    "custom"
+                    if plan.server_provider is InferenceServerProvider.SGLANG
+                    else "vllm_paged"
+                ),
                 endpoint=(
-                    "/v1/chat/completions" if plan.endpoint_type == "chat" else "/v1/completions"
+                    "/v1/chat/completions"
+                    if plan.endpoint_type is InferenceEndpointType.CHAT
+                    else "/v1/completions"
                 ),
                 managed_server_command_digest=managed_command_digest,
                 server_executable_digest=plan.server_executable_digest,
@@ -1640,11 +1823,14 @@ class InferenceReplayService:
         extractor = InferenceArtifactExtractor(self.workspace)
         limitations: list[str] = []
         try:
-            if plan.provider in {"vllm_bench", "sglang_bench"}:
+            if plan.provider in {
+                InferenceScenarioProvider.VLLM_BENCH,
+                InferenceScenarioProvider.SGLANG_BENCH,
+            }:
                 if preserved:
                     result = (
                         extractor.extract_sglang_result
-                        if plan.provider == "sglang_bench"
+                        if plan.provider is InferenceScenarioProvider.SGLANG_BENCH
                         else extractor.extract_vllm_result
                     )(preserved[0][1], evidence_run_id=evidence_run_id)
                     return result.limitations
@@ -1672,7 +1858,7 @@ class InferenceReplayService:
         tuple[str, ...],
     ]:
         discovery_limitations: tuple[str, ...] = ()
-        if plan.provider == "aiperf" and output_path.parent.is_dir():
+        if plan.provider is InferenceScenarioProvider.AIPERF and output_path.parent.is_dir():
             candidates, discovery_limitations = self._bounded_output_candidates(output_path.parent)
         else:
             candidates = tuple(
@@ -1693,7 +1879,9 @@ class InferenceReplayService:
         limitations = list(discovery_limitations)
         importer = ImportService(self.workspace)
         for path in candidates:
-            is_inputs = plan.provider == "aiperf" and path.name == "inputs.json"
+            is_inputs = (
+                plan.provider is InferenceScenarioProvider.AIPERF and path.name == "inputs.json"
+            )
             is_oracle = path.name.startswith("oracle")
             is_server_output = path.name.startswith("server.")
             try:
@@ -1712,7 +1900,11 @@ class InferenceReplayService:
                         media_type=self._provider_media_type(path),
                         sensitivity=(
                             Sensitivity.SENSITIVE
-                            if plan.provider in {"aiperf", "sglang_bench"}
+                            if plan.provider
+                            in {
+                                InferenceScenarioProvider.AIPERF,
+                                InferenceScenarioProvider.SGLANG_BENCH,
+                            }
                             or is_oracle
                             or is_server_output
                             else Sensitivity.INTERNAL
