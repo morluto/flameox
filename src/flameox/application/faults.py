@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import shutil
 import socket
 from collections.abc import Awaitable, Callable
@@ -250,6 +251,9 @@ class FaultExperimentService:
         )
         blocks: list[ExperimentBlock] = []
         for block_number in range(1, config.blocks * config.repetitions + 1):
+            cell_treatments = list(treatments)
+            generator = random.Random(f"{config.random_seed}:{block_number}")
+            generator.shuffle(cell_treatments)
             cells = tuple(
                 ExperimentCell(
                     trial_id=digest_model(
@@ -260,12 +264,12 @@ class FaultExperimentService:
                     factors={"scenario": treatment},
                     parameters={},
                 )
-                for treatment in treatments
+                for treatment in cell_treatments
             )
             blocks.append(
                 ExperimentBlock(
                     block_id=f"fault-block-{block_number:04d}",
-                    order=treatments,
+                    order=tuple(cell_treatments),
                     cells=cells,
                 )
             )
