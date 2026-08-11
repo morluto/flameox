@@ -265,6 +265,7 @@ class _FactorExperimentConfig(_CommonExperimentConfig):
     )
     exclude: Annotated[tuple[dict[str, Scalar], ...], Field(max_length=1_000)] = ()
     treatment_factor: str
+    baseline_value: Scalar | None = None
     scaling_parameter: Literal[None] = None
     scaling_values: Annotated[tuple[Scalar, ...], Field(max_length=0)] = ()
 
@@ -272,6 +273,12 @@ class _FactorExperimentConfig(_CommonExperimentConfig):
     def treatment_is_declared(self) -> _FactorExperimentConfig:
         if self.treatment_factor not in self.factors:
             raise ValueError("factor experiments require a declared treatment_factor")
+        if self.baseline_value is not None:
+            allowed = self.factors[self.treatment_factor]
+            if not scalar_contains(self.baseline_value, allowed):
+                raise ValueError(
+                    "baseline_value must be one of the declared treatment_factor values"
+                )
         return self
 
 

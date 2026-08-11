@@ -1,4 +1,4 @@
-expected_test_count = 1124
+expected_test_count = 1125
 
 # New files are normalized to their pre-split path so this receipt proves
 # test identity and parametrized case preservation across the decomposition.
@@ -111,7 +111,7 @@ expected_test_count = 1124
 'tests/application/test_third_party_adapters.py' = { count = 7, digest = '8e3cdabaab74c522b762fc616415f1dab272fa95afb12c152f1668a5b03089ce' }
 'tests/application/test_viewers.py' = { count = 9, digest = 'cb76ef25a45e1af1ec07f4c8a1f30a78a1bd6de0842073d11aa0b5a508a4458d' }
 'tests/application/test_run_set_variants.py' = { count = 2, digest = '8bdf8d791bd9734c165c5f94265522240f9af03e35b058d3654363462042c4f4' }
-'tests/application/test_workloads.py' = { count = 33, digest = '6355aa95f35c00e52fb08811eb149e82abb869126651c513d9fa3ffacc8bf964' }
+'tests/application/test_workloads.py' = { count = 34, digest = '82c36cf0cf413d8b357928f55d648bcc93740b34895d78c4c467039e3b1dd7db' }
 'tests/application/test_workloads_and_capture.py' = { count = 61, digest = '4a3b82b3bf031b5178476cc42daeec7159bb26b887160cb11132af2218af387d' }
 'tests/application/test_operations.py' = { count = 12, digest = 'bf0944d7a9c98f44155ff2fe60c0be1fa2abf72f561237fb1cdf503d1c289e37' }
 'tests/application/test_otlp_lifecycle.py' = { count = 6, digest = 'b86df016da038f8d1d112e57c0f7a94ddd57ffc4d6e47a8785b048c20903eb34' }

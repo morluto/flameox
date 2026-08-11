@@ -425,6 +425,28 @@ def test_experiment_requires_explicit_treatment_factor_and_factors() -> None:
     assert config.factors["length"] == (128, 256)
 
 
+def test_factor_experiment_baseline_value_uses_exact_scalar_identity() -> None:
+    config = parse_experiment_config(
+        {
+            "workload": "probe",
+            "treatment_factor": "mode",
+            "baseline_value": 1.0,
+            "factors": {"mode": (1, 1.0)},
+        }
+    )
+
+    assert config.model_dump(mode="python")["baseline_value"] == 1.0
+    with pytest.raises(ValueError, match="baseline_value must be one of"):
+        parse_experiment_config(
+            {
+                "workload": "probe",
+                "treatment_factor": "mode",
+                "baseline_value": True,
+                "factors": {"mode": (1, 1.0)},
+            }
+        )
+
+
 def test_scalar_identity_distinguishes_exact_json_types() -> None:
     """Scalar identity distinguishes bool/int/float even when Python equality treats them equal."""
     from flameox.application import (

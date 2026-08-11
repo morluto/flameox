@@ -120,6 +120,7 @@ argv = ["python", "-c", "print('same-output')"]
 [experiments.scan_comparison]
 workload = "scan"
 treatment_factor = "implementation"
+baseline_value = "baseline"
 design = "randomized_complete_blocks"
 blocks = 1
 primary_metric = "pyperf.workload"
@@ -129,7 +130,7 @@ practical_threshold = 0.01
 confidence_level = 0.95
 random_seed = 1984
 [experiments.scan_comparison.factors]
-implementation = ["baseline", "candidate"]
+implementation = ["candidate", "baseline"]
 """
     )
     config = workspace.config.validated_copy(
@@ -177,6 +178,7 @@ implementation = ["baseline", "candidate"]
 
     assert len(plan.blocks) == 1
     assert set(plan.blocks[0].order) == {"baseline", "candidate"}
+    assert plan.baseline_variant == "baseline"
     assert len(result.trials) == 2
     assert all(trial.outcome is TrialOutcome.SUCCEEDED for trial in result.trials)
     assert len(result.run_sets) == 2
@@ -184,6 +186,8 @@ implementation = ["baseline", "candidate"]
     assert result.comparison.comparison.experiment_id == result.experiment.experiment_id
     assert result.comparison.comparison.validity is ComparisonValidity.EXPLORATORY
     assert result.comparison.comparison.complete_pair_n == 1
+    assert result.comparison.baseline_run_set.selection["variant"] == "baseline"
+    assert result.comparison.candidate_run_set.selection["variant"] == "candidate"
     assert result.limitations == ()
     assert service.experiments.read(result.experiment.experiment_id) == result.experiment
     scaling = RecipeService(workspace).scaling(result.experiment.experiment_id)
@@ -625,12 +629,13 @@ workload = "semantic"
 design = "fixed_order"
 blocks = 1
 treatment_factor = "mode"
+baseline_value = "base"
 analysis = "outcome"
 outcome_goal = "equivalence"
 minimum_attempts = 1
 maximum_attempts = 1
 [experiments.semantic.factors]
-mode = ["base", "candidate"]
+mode = ["candidate", "base"]
 case = ["bad", "clean"]
 """
     )

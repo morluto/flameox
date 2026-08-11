@@ -143,6 +143,7 @@ class ExperimentPlan(ContractModel):
     execution_policy: ExecutionPolicy
     variant_parameter: str
     variants: tuple[str, ...]
+    baseline_variant: str | None = None
     factors: dict[str, tuple[JsonValue, ...]] = Field(default_factory=dict)
     parameter_overrides: dict[str, JsonValue]
     blocks: tuple[ExperimentBlock, ...]
@@ -664,6 +665,11 @@ class ExperimentService:
             execution_policy=execution_policy,
             variant_parameter=variant_parameter,
             variants=variants,
+            baseline_variant=(
+                self._factor_label(config.baseline_value)
+                if isinstance(config, _FactorExperimentConfig) and config.baseline_value is not None
+                else None
+            ),
             factors={
                 name: tuple(cast(JsonValue, value) for value in values)
                 for name, values in factors.items()
@@ -907,12 +913,26 @@ class ExperimentService:
                 "Automatic experiment comparison currently requires pyperf measurements."
             )
         else:
+            comparison_run_sets: tuple[RunSet, ...] = run_sets
+            if not plan.baseline_variant:
+                limitations.append(
+                    "Baseline was determined by list position, not an explicit "
+                    "baseline_value. Reordering the treatment list reverses the "
+                    "comparison direction."
+                )
+            else:
+                comparison_run_sets = tuple(
+                    sorted(
+                        run_sets,
+                        key=lambda run_set: run_set.selection["variant"] != plan.baseline_variant,
+                    )
+                )
             comparison = await run_atomic_thread(
                 lambda: ComparisonService(self.workspace).record(
                     parse_compare_run_sets_request(
                         {
-                            "baseline_run_set_id": run_sets[0].run_set_id,
-                            "candidate_run_set_id": run_sets[1].run_set_id,
+                            "baseline_run_set_id": comparison_run_sets[0].run_set_id,
+                            "candidate_run_set_id": comparison_run_sets[1].run_set_id,
                             "experiment_id": plan.experiment.experiment_id,
                             "metric": plan.experiment.primary_metric,
                             "unit": (
@@ -1220,9 +1240,13 @@ class ExperimentService:
             disposition = ExperimentOutcomeDisposition.INSUFFICIENT_EVIDENCE
         elif not failures:
             disposition = ExperimentOutcomeDisposition.ALL_CLEAN
-        elif len(plan.variants) == 2 and failed_treatments == {plan.variants[0]}:
+        elif len(plan.variants) == 2 and failed_treatments == {
+            plan.baseline_variant or plan.variants[0]
+        }:
             disposition = ExperimentOutcomeDisposition.BASE_ONLY_FAILURE
-        elif len(plan.variants) == 2 and failed_treatments == {plan.variants[1]}:
+        elif len(plan.variants) == 2 and failed_treatments == {
+            v for v in plan.variants if v != (plan.baseline_variant or plan.variants[0])
+        }:
             disposition = ExperimentOutcomeDisposition.CANDIDATE_ONLY_FAILURE
         else:
             disposition = ExperimentOutcomeDisposition.MIXED
