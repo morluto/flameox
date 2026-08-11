@@ -85,6 +85,7 @@ def _complete_protocol_identity() -> InferenceProtocolIdentity:
             model_revision="revision-1",
             tokenizer_id="test-tokenizer",
             tokenizer_revision="revision-1",
+            quantization="none",
         ),
         server=ServerConfigIdentity(
             backend="vllm",
