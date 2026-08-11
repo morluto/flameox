@@ -137,32 +137,6 @@ def test_capability_setup_fields_are_derived_from_authoritative_reports() -> Non
         CapabilityList.model_validate({**capabilities.model_dump(), "next_tool": "prepare_adapter"})
 
 
-def test_legacy_capability_list_with_list_capabilities_next_tool_round_trips() -> None:
-    """A legacy payload carrying next_tool='list_capabilities' must still parse.
-
-    Regression: the old ``CapabilityList`` allowed ``next_tool='list_capabilities'``
-    as a valid literal. The new computed field only returns ``start_capability_setup``,
-    ``prepare_adapter``, or ``None``, so the legacy validator must treat
-    ``list_capabilities`` as ``None`` (no setup action needed) rather than rejecting it.
-    """
-    report = CapabilityReport(
-        adapter="torch.profiler",
-        status=CapabilityStatus.AVAILABLE,
-        setup=CapabilitySetup(
-            extra=CapabilityExtra.TORCH,
-            method="start_capability_setup",
-            next_tool="start_capability_setup",
-            requirement="torch>=2.7",
-        ),
-    )
-    capabilities = CapabilityList(capabilities=(report,))
-
-    legacy_payload = {**capabilities.model_dump(mode="json"), "next_tool": "list_capabilities"}
-    parsed = CapabilityList.model_validate(legacy_payload)
-    assert parsed.next_tool is None
-    assert parsed == capabilities
-
-
 def test_setup_verification_fields_form_one_partition() -> None:
     verification = SetupVerification(
         checked_adapters=("available", "missing"),

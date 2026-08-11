@@ -49,19 +49,6 @@ def _manager(workspace: Workspace) -> tuple[CaptureService, DetachedCaptureManag
     return captures, DetachedCaptureManager(workspace, captures)
 
 
-def test_detached_record_parses_and_discards_legacy_duplicate_state() -> None:
-    record = DetachedCaptureRecord.model_validate(
-        {
-            "run_id": "legacy-run",
-            "idempotency_digest": "sha256:legacy-idempotency",
-            "plan_digest": "sha256:legacy-plan",
-            "state": "running",
-        }
-    )
-
-    assert "state" not in record.model_dump()
-
-
 def test_detached_progress_rejects_completed_work_beyond_total() -> None:
     with pytest.raises(ValidationError):
         DetachedProgress(completed=2, total=1, message="invalid")

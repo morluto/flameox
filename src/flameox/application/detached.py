@@ -110,16 +110,6 @@ class DetachedCaptureRecord(_DetachedFailureFields):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
-    @model_validator(mode="before")
-    @classmethod
-    def discard_legacy_duplicate_state(cls, value: Any) -> Any:
-        if not isinstance(value, dict) or "state" not in value:
-            return value
-        state = value["state"]
-        if state not in {"starting", "running", "terminal", "failed_to_start"}:
-            raise ValueError("legacy detached capture state is invalid")
-        return {key: item for key, item in value.items() if key != "state"}
-
     def with_progress(self, progress: DetachedProgress) -> Self:
         return self.__class__.model_validate(
             {

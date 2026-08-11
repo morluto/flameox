@@ -1,4 +1,4 @@
-expected_test_count = 1112
+expected_test_count = 1110
 
 # New files are normalized to their pre-split path so this receipt proves
 # test identity and parametrized case preservation across the decomposition.
@@ -74,13 +74,13 @@ expected_test_count = 1112
 'tests/application/test_artifact_workers.py' = { count = 6, digest = 'dd06d1ce7d46627d8cdfb5c8a3b0198e3e8e978d4cbdf0c1bed268a230102124' }
 'tests/application/test_artifact_service.py' = { count = 5, digest = '478916ee602095b39b51258e5156a2a1f072e608d8c515b18ed41c85a017beb2' }
 'tests/application/test_async_work.py' = { count = 1, digest = '5c21ab9d048e8676c0b086ff6859e87b28da82ab793c2b70de975f592355067e' }
-'tests/application/test_capabilities.py' = { count = 28, digest = 'cfda0200fa7d6dadfbf0099fa7e0bc4b4faeddead9f3ff5805133f2de0dd962b' }
+'tests/application/test_capabilities.py' = { count = 27, digest = 'd60b78843206b1fb663166fe3bbd9be0d4a58ee56d591d6d32ee557837578ad0' }
 'tests/application/test_capture_native_outputs.py' = { count = 5, digest = '73ffb01416e94a3044feeecb6f11f1fb452f0b1595ecc8b3ac3ef4f749918f77' }
 'tests/application/test_capture_compute_sanitizer.py' = { count = 4, digest = 'da1d91a6d908d221d6ad4c1d3dc9a68fdb1983df2d2d9a38297680d903760b96' }
 'tests/application/test_capture_kernel_build.py' = { count = 5, digest = '1d8c38c38cf297a0251c34e543d3864190c6ad7914fa702c0fdd3bb03b438dec' }
 'tests/application/test_capture_nvbench_provider.py' = { count = 5, digest = 'b37b04a4465d5481a99eb8ed2fb26421bfe60bf667507b0c7b9c180ad8d992d8' }
 'tests/application/test_comparison_samples.py' = { count = 5, digest = 'e8f94545da22cc09a8868477a4ad48b9c7a88dcecd03de4d00a0d9199ca293dc' }
-'tests/application/test_detached.py' = { count = 14, digest = '051aa69cadb926764fac141ef0511616da70a91746a9bfbabc3108736304d734' }
+'tests/application/test_detached.py' = { count = 13, digest = '356a41f469574fd98a9b6a571d9976d49db0f566d8a41b85ca7f8f1d55ce8825' }
 'tests/application/test_discovery.py' = { count = 3, digest = '71f828e982610d80c40180d9a1b3b93bd52dc6aa85d9cccfc0eeefac81a269d8' }
 'tests/application/test_environment_identity.py' = { count = 10, digest = '22a3e3a5af0f747fcf9a680ba01e2d05dab7362ed5ac558d774e788826fb62c6' }
 'tests/application/test_evidence_query.py' = { count = 3, digest = '619797e86687938c280892af2964aa021f45f32cef09b7ac265666a947753756' }
