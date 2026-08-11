@@ -89,6 +89,7 @@ class ScalingRecipes(RecipeContext):
                 "ON v.variant_id = t.variant_id "
                 "JOIN frame_measurements fm ON fm.run_id = t.run_id "
                 "LEFT JOIN frames f ON f.frame_id = fm.frame_id "
+                "AND f.artifact_id = fm.artifact_id "
                 "WHERE t.experiment_id = ? AND t.outcome = 'succeeded' "
                 "AND coalesce(fm.inclusive_value, fm.self_value) IS NOT NULL",
                 (experiment_id,),

@@ -116,7 +116,7 @@ def test_execution_comparison_diffs_complete_inputs_before_limiting(
     assert result.truncated
     assert result.model_dump(mode="json")["returned"] == 1
 
-    with pytest.raises(ValidationError, match="returned projection"):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         type(result).model_validate({**result.model_dump(mode="python"), "returned": 0})
-    with pytest.raises(ValidationError, match="truncated projection"):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         type(result).model_validate({**result.model_dump(mode="python"), "truncated": False})

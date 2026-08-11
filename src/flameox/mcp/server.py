@@ -16,7 +16,16 @@ from mcp_types import (
     TextContent,
     ToolAnnotations,
 )
-from pydantic import BaseModel, ConfigDict, Field, RootModel, StrictBool, StrictFloat, StrictInt
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    RootModel,
+    SkipValidation,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+)
 
 from flameox import __version__
 from flameox.adapters import (
@@ -412,7 +421,7 @@ class ErrorDetail(ContractModel):
 class SuccessPayload[T: BaseModel](ContractModel):
     schema_version: Literal[1]
     ok: Literal[True]
-    result: T
+    result: SkipValidation[T]
     error: None
 
 

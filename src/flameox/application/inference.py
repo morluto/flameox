@@ -450,21 +450,6 @@ class InferenceReplayResult(ProcessTerminationFields):
     oracle_status: OracleStatus | None = None
     completed_at: datetime = Field(default_factory=utc_now)
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_timed_out(cls, value: object) -> object:
-        if not isinstance(value, dict) or "timed_out" not in value:
-            return value
-        timed_out = value["timed_out"]
-        cause = value.get("cancellation_cause")
-        if cause is not None and (cause == ProcessCancellationCause.TIMEOUT) != timed_out:
-            raise ValueError("timed_out must match a timeout cancellation cause")
-        parsed = dict(value)
-        del parsed["timed_out"]
-        if timed_out:
-            parsed["cancellation_cause"] = ProcessCancellationCause.TIMEOUT
-        return parsed
-
     @computed_field  # type: ignore[prop-decorator]
     @property
     def timed_out(self) -> bool:

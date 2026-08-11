@@ -213,6 +213,33 @@ class ProcessObservation(ContractModel):
     failures: tuple[str, ...] = ()
 
 
+class ProcessExecutionError(DomainError):
+    """A process failure with typed internal state and a public wire projection."""
+
+    def __init__(
+        self,
+        code: ErrorCode,
+        message: str,
+        *,
+        process: ProcessResult,
+        process_observations: tuple[ProcessObservation, ...],
+        retryable: bool = False,
+    ) -> None:
+        self.process = process
+        self.process_observations = process_observations
+        super().__init__(
+            code,
+            message,
+            details={
+                "process": process.model_dump(mode="json"),
+                "process_observations": [
+                    item.model_dump(mode="json") for item in process_observations
+                ],
+            },
+            retryable=retryable,
+        )
+
+
 class _OutputLimitExceeded(Exception):
     pass
 
@@ -499,15 +526,11 @@ class SubprocessBroker:
                 cancellation_cause=ProcessCancellationCause.TIMEOUT,
                 cleanup_complete=cleanup_complete,
             )
-            raise DomainError(
+            raise ProcessExecutionError(
                 ErrorCode.PROCESS_TIMEOUT,
                 f"Process exceeded {request.timeout_seconds} seconds.",
-                details={
-                    "process": timeout_process.model_dump(mode="json"),
-                    "process_observations": [
-                        item.model_dump(mode="json") for item in process_observations
-                    ],
-                },
+                process=timeout_process,
+                process_observations=tuple(process_observations),
                 retryable=True,
             ) from exc
         except asyncio.CancelledError:
@@ -582,15 +605,11 @@ class SubprocessBroker:
                 stdout=partial_stdout.decode(errors="replace"),
                 stderr=partial_stderr.decode(errors="replace"),
             )
-            raise DomainError(
+            raise ProcessExecutionError(
                 ErrorCode.PROCESS_TIMEOUT,
                 f"Process exceeded {request.timeout_seconds} seconds.",
-                details={
-                    "process": timeout_process.model_dump(mode="json"),
-                    "process_observations": [
-                        item.model_dump(mode="json") for item in process_observations
-                    ],
-                },
+                process=timeout_process,
+                process_observations=tuple(process_observations),
                 retryable=True,
             ) from exc
         except _OutputLimitExceeded as exc:
@@ -610,15 +629,11 @@ class SubprocessBroker:
                 cancellation_cause=ProcessCancellationCause.OUTPUT_LIMIT,
                 cleanup_complete=cleanup_complete,
             )
-            raise DomainError(
+            raise ProcessExecutionError(
                 ErrorCode.QUERY_BUDGET_EXCEEDED,
                 f"Process output exceeded {request.max_output_bytes} bytes.",
-                details={
-                    "process": output_process.model_dump(mode="json"),
-                    "process_observations": [
-                        item.model_dump(mode="json") for item in process_observations
-                    ],
-                },
+                process=output_process,
+                process_observations=tuple(process_observations),
             ) from exc
         except _ResourcePolicyExceeded as exc:
             cleanup_complete = await self._terminate_with_observation(
@@ -643,22 +658,19 @@ class SubprocessBroker:
                 if exc.cause is ProcessCancellationCause.STORAGE_RESERVE_EXCEEDED
                 else "Process tree exceeded the configured memory budget."
             )
-            raise DomainError(
+            policy_process = ProcessResult(
+                cancellation_cause=exc.cause,
+                cleanup_complete=cleanup_complete,
+                peak_rss_bytes=exc.summary.peak_rss_bytes,
+                resources=exc.summary,
+                stdout=partial_stdout.decode(errors="replace"),
+                stderr=partial_stderr.decode(errors="replace"),
+            )
+            raise ProcessExecutionError(
                 code,
                 message,
-                details={
-                    "process": ProcessResult(
-                        cancellation_cause=exc.cause,
-                        cleanup_complete=cleanup_complete,
-                        peak_rss_bytes=exc.summary.peak_rss_bytes,
-                        resources=exc.summary,
-                        stdout=partial_stdout.decode(errors="replace"),
-                        stderr=partial_stderr.decode(errors="replace"),
-                    ).model_dump(mode="json"),
-                    "process_observations": [
-                        item.model_dump(mode="json") for item in process_observations
-                    ],
-                },
+                process=policy_process,
+                process_observations=tuple(process_observations),
             ) from exc
         except asyncio.CancelledError:
             cleanup_complete = await self._terminate_with_observation(
@@ -1091,15 +1103,11 @@ class SubprocessBroker:
                 cancellation_cause=ProcessCancellationCause.IO_FAILURE,
                 cleanup_complete=cleanup_complete,
             )
-            raise DomainError(
+            raise ProcessExecutionError(
                 ErrorCode.PROCESS_FAILED,
                 "Process output could not be drained safely.",
-                details={
-                    "process": io_process.model_dump(mode="json"),
-                    "process_observations": [
-                        item.model_dump(mode="json") for item in process_observations
-                    ],
-                },
+                process=io_process,
+                process_observations=tuple(process_observations),
             )
         if (
             observed.cancellation_cause is ProcessCancellationCause.OUTPUT_LIMIT
@@ -1111,15 +1119,11 @@ class SubprocessBroker:
                 cancellation_cause=ProcessCancellationCause.OUTPUT_LIMIT,
                 cleanup_complete=cleanup_complete,
             )
-            raise DomainError(
+            raise ProcessExecutionError(
                 ErrorCode.QUERY_BUDGET_EXCEEDED,
                 f"Process output exceeded {request.max_output_bytes} bytes.",
-                details={
-                    "process": output_process.model_dump(mode="json"),
-                    "process_observations": [
-                        item.model_dump(mode="json") for item in process_observations
-                    ],
-                },
+                process=output_process,
+                process_observations=tuple(process_observations),
             )
         if observed.cancellation_cause is ProcessCancellationCause.TIMEOUT:
             timeout_process = ProcessResult(
@@ -1131,15 +1135,11 @@ class SubprocessBroker:
                 stdout=stdout.decode(errors="replace"),
                 stderr=stderr.decode(errors="replace"),
             )
-            raise DomainError(
+            raise ProcessExecutionError(
                 ErrorCode.PROCESS_TIMEOUT,
                 f"Process exceeded {request.timeout_seconds} seconds.",
-                details={
-                    "process": timeout_process.model_dump(mode="json"),
-                    "process_observations": [
-                        item.model_dump(mode="json") for item in process_observations
-                    ],
-                },
+                process=timeout_process,
+                process_observations=tuple(process_observations),
                 retryable=True,
             )
 

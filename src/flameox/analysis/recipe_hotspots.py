@@ -70,7 +70,7 @@ class HotspotRecipes(RecipeContext):
                 "SELECT fm.frame_id, f.function, f.file, f.line, fm.metric, "
                 "fm.self_value, fm.inclusive_value, fm.unit, fm.sample_count "
                 "FROM frame_measurements fm LEFT JOIN frames f "
-                "ON f.frame_id = fm.frame_id WHERE "
+                "ON f.frame_id = fm.frame_id AND f.artifact_id = fm.artifact_id WHERE "
                 + where
                 + " ORDER BY coalesce(fm.inclusive_value, fm.self_value, 0) DESC, "
                 "fm.frame_id LIMIT ?",
@@ -78,7 +78,9 @@ class HotspotRecipes(RecipeContext):
             ).fetchall()
             symbolized_row = snapshot.execute(
                 "SELECT count(*) FROM frame_measurements fm JOIN frames f "
-                "ON f.frame_id = fm.frame_id WHERE " + where + " AND f.symbolization = 'complete'",
+                "ON f.frame_id = fm.frame_id AND f.artifact_id = fm.artifact_id WHERE "
+                + where
+                + " AND f.symbolization = 'complete'",
                 parameters,
             ).fetchone()
             assert symbolized_row is not None

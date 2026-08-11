@@ -131,9 +131,9 @@ def test_capability_setup_fields_are_derived_from_authoritative_reports() -> Non
 
     assert capabilities.setup_adapters == (report.adapter,)
     assert capabilities.next_tool == "start_capability_setup"
-    assert CapabilityList.model_validate(capabilities.model_dump()) == capabilities
+    assert capabilities.validated_copy() == capabilities
 
-    with pytest.raises(ValidationError, match="next_tool must agree"):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         CapabilityList.model_validate({**capabilities.model_dump(), "next_tool": "prepare_adapter"})
 
 
@@ -145,9 +145,9 @@ def test_setup_verification_fields_form_one_partition() -> None:
 
     assert verification.unavailable_adapters == ("missing",)
     assert verification.status == "partial"
-    assert SetupVerification.model_validate(verification.model_dump()) == verification
+    assert verification.validated_copy() == verification
 
-    with pytest.raises(ValidationError, match="verification status must agree"):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         SetupVerification.model_validate({**verification.model_dump(), "status": "verified"})
 
 

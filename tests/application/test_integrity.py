@@ -56,8 +56,8 @@ def test_integrity_validity_is_derived_from_issue_severity() -> None:
     )
 
     assert result.valid is True
-    assert IntegrityResult.model_validate(result.model_dump()).valid is True
+    assert result.validated_copy().valid is True
 
     contradictory = {**result.model_dump(), "valid": False}
-    with pytest.raises(ValidationError, match="validity must agree"):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         IntegrityResult.model_validate(contradictory)

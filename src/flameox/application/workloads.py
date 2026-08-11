@@ -911,22 +911,6 @@ type WorkloadConfigurationStatus = Annotated[
 ]
 
 
-def _parse_configuration_changed_paths(value: object) -> object:
-    if not isinstance(value, dict):
-        return value
-    parsed = dict(value)
-    action = parsed.get("action")
-    if action in {"created", "updated", "unchanged"}:
-        expected = () if action == "unchanged" else ("flameox.toml",)
-        supplied = parsed.get("changed_paths", expected)
-        if isinstance(supplied, list):
-            supplied = tuple(supplied)
-        if supplied != expected:
-            raise ValueError("changed paths must agree with the configuration action")
-    parsed.pop("changed_paths", None)
-    return parsed
-
-
 class WorkloadConfigurationResult(ContractModel):
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
@@ -937,11 +921,6 @@ class WorkloadConfigurationResult(ContractModel):
     workload_definition_id: str
     configuration_source: Literal["agent"] = "agent"
     next_tool: Literal["list_declared_workflows"] = "list_declared_workflows"
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_changed_paths(cls, value: object) -> object:
-        return _parse_configuration_changed_paths(value)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -979,11 +958,6 @@ class InferenceConfigurationResult(ContractModel):
     configuration_id: Digest
     definition_id: Digest
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_changed_paths(cls, value: object) -> object:
-        return _parse_configuration_changed_paths(value)
-
     @computed_field  # type: ignore[prop-decorator]
     @property
     def changed_paths(self) -> tuple[Literal["flameox.toml"], ...]:
@@ -1020,26 +994,6 @@ class DeclaredWorkflowList(CursorPageContract):
     workflows: tuple[DeclaredWorkflowSummary, ...]
 
 
-def _parse_adapter_option_projections(value: object) -> object:
-    if not isinstance(value, dict):
-        return value
-    parsed = dict(value)
-    if "adapter_options_total" in parsed:
-        legacy_total = parsed.pop("adapter_options_total")
-        if "adapter_option_total" in parsed and parsed["adapter_option_total"] != legacy_total:
-            raise ValueError("adapter option totals must agree")
-        parsed["adapter_option_total"] = legacy_total
-    if "adapter_options_truncated" in parsed:
-        legacy_truncated = parsed.pop("adapter_options_truncated")
-        total = parsed.get("adapter_option_total")
-        options = parsed.get("adapter_options")
-        if isinstance(total, int) and isinstance(options, (list, tuple)):
-            expected = total > len(options)
-            if legacy_truncated != expected:
-                raise ValueError("adapter option truncation must agree with the bounded options")
-    return parsed
-
-
 def _require_complete_adapter_option_count(options: tuple[AdapterOption, ...], total: int) -> None:
     if total < len(options):
         raise ValueError("adapter option total cannot be smaller than the returned options")
@@ -1063,11 +1017,6 @@ class DeclaredWorkflowDetail(ContractModel):
     requirements: tuple[DeclaredWorkflowRequirement, ...] = ()
     adapter_options: tuple[AdapterOption, ...] = ()
     adapter_option_total: int = Field(default=0, ge=0)
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_adapter_option_projections(cls, value: object) -> object:
-        return _parse_adapter_option_projections(value)
 
     @model_validator(mode="after")
     def adapter_option_count_is_coherent(self) -> DeclaredWorkflowDetail:
@@ -1093,18 +1042,6 @@ class DeclaredWorkflowRequirement(ContractModel):
     probe_kind: ProbeKind
     required: bool
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_optional_projection(cls, value: object) -> object:
-        if not isinstance(value, Mapping) or "optional" not in value:
-            return value
-        parsed = dict(value)
-        optional = parsed.pop("optional")
-        required = parsed.get("required")
-        if isinstance(required, bool) and optional != (not required):
-            raise ValueError("requirement optionality must be the inverse of required")
-        return parsed
-
     @computed_field  # type: ignore[prop-decorator]
     @property
     def optional(self) -> bool:
@@ -1125,19 +1062,6 @@ class AdapterOption(ContractModel):
     limitations: tuple[str, ...] = ()
     remediation: tuple[str, ...] = ()
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_capability_status(cls, value: object) -> object:
-        if not isinstance(value, dict) or "capability_status" not in value:
-            return value
-        capability_status = value["capability_status"]
-        if "status" in value and value["status"] != capability_status:
-            raise ValueError("status and capability_status must agree")
-        parsed = dict(value)
-        del parsed["capability_status"]
-        parsed["status"] = capability_status
-        return parsed
-
     @computed_field  # type: ignore[prop-decorator]
     @property
     def capability_status(self) -> CapabilityStatus:
@@ -1151,11 +1075,6 @@ class WorkloadInspection(WorkloadDefinition):
     requirements: tuple[DeclaredWorkflowRequirement, ...] = ()
     adapter_options: tuple[AdapterOption, ...] = ()
     adapter_option_total: int = Field(default=0, ge=0)
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_adapter_option_projections(cls, value: object) -> object:
-        return _parse_adapter_option_projections(value)
 
     @model_validator(mode="after")
     def adapter_option_count_is_coherent(self) -> WorkloadInspection:

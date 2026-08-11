@@ -127,7 +127,6 @@ def _patch_providers(
                 "tool": tool,
                 "executable": executable,
                 "available": executable is not None,
-                "compatible": executable is not None,
                 "remediation": () if executable else ("Install the inference extra.",),
             }
         )
@@ -424,11 +423,9 @@ async def test_run_executes_through_broker_and_preserves_argv_and_output_path(
     assert result.argv == plan.argv
     assert result.exit_code == 0
     assert result.timed_out is False
-    assert InferenceReplayResult.model_validate(result.model_dump(mode="json")) == result
-    contradictory = result.model_dump(mode="json")
-    contradictory["cancellation_cause"] = "timeout"
-    with pytest.raises(ValueError, match="timed_out must match"):
-        InferenceReplayResult.model_validate(contradictory)
+    assert result.validated_copy() == result
+    timed_out = result.validated_copy(update={"cancellation_cause": "timeout"})
+    assert timed_out.timed_out is True
     assert result.health_ready is True
     assert result.probed_model_ids == ("test-model",)
     assert result.containment == "process_group"

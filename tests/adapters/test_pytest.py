@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from flameox.adapters import PytestExtractor
+from flameox.adapters.pytest import PytestCompletionState
 from flameox.application import ImportArtifactRequest, ImportService
 from flameox.catalog import Catalog
 from flameox.domain import (
@@ -122,10 +123,12 @@ def test_pytest_extracts_fixture_cost_outcomes_and_failure_latency(tmp_path: Pat
     assert result.interrupted is False
     payload = result.model_dump(mode="json")
     assert "completion" not in payload
-    assert type(result).model_validate(payload) == result
     assert result.validated_copy() == result
-    with pytest.raises(ValidationError, match="cannot be complete and interrupted"):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         type(result).model_validate({**payload, "interrupted": True})
+    interrupted = result.validated_copy(update={"completion": PytestCompletionState.INTERRUPTED})
+    assert interrupted.complete is False
+    assert interrupted.interrupted is True
     assert result.collected_count == 3
     assert result.executed_count == 2
     assert result.passed_count == 1

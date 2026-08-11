@@ -41,37 +41,6 @@ class WorkloadDependencySetupResult(ContractModel):
     preflight: PreflightReport
     workload_executed: Literal[False] = False
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_projections(cls, value: object) -> object:
-        if not isinstance(value, dict):
-            return value
-        parsed = dict(value)
-        requested = parsed.get("requested")
-        available = parsed.get("already_available")
-        raw_preflight = parsed.get("preflight")
-        if (
-            isinstance(requested, (list, tuple))
-            and isinstance(available, (list, tuple))
-            and raw_preflight is not None
-        ):
-            preflight = PreflightReport.model_validate(raw_preflight)
-            expected_installed = tuple(item for item in requested if item not in set(available))
-            expected_next = _dependency_next_tool(preflight)
-            supplied_installed = parsed.get("installed", expected_installed)
-            if isinstance(supplied_installed, list):
-                supplied_installed = tuple(supplied_installed)
-            if supplied_installed != expected_installed:
-                raise ValueError("installed requirements must complete the requested partition")
-            if parsed.get("status", preflight.disposition) != preflight.disposition:
-                raise ValueError("setup status must agree with preflight disposition")
-            if parsed.get("next_tool", expected_next) != expected_next:
-                raise ValueError("next tool must agree with preflight evidence")
-            parsed["preflight"] = preflight
-        for name in ("installed", "status", "next_tool"):
-            parsed.pop(name, None)
-        return parsed
-
     @model_validator(mode="after")
     def availability_is_a_partition(self) -> WorkloadDependencySetupResult:
         if len(set(self.requested)) != len(self.requested):

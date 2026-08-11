@@ -238,20 +238,6 @@ class PairedPipelineStageComparison(_PipelineStageComparison):
     baseline_summary: dict[str, JsonValue] | None = None
     candidate_summary: dict[str, JsonValue] | None = None
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_short_circuit_projection(cls, value: object) -> object:
-        if not isinstance(value, dict) or "extraction_short_circuited" not in value:
-            return value
-        parsed = dict(value)
-        supplied = parsed.pop("extraction_short_circuited")
-        expected = parsed.get("baseline_artifact_id") is not None and parsed.get(
-            "baseline_artifact_id"
-        ) == parsed.get("candidate_artifact_id")
-        if supplied != expected:
-            raise ValueError("short-circuit status must agree with artifact identity")
-        return parsed
-
     @computed_field  # type: ignore[prop-decorator]
     @property
     def extraction_short_circuited(self) -> bool:
@@ -421,6 +407,9 @@ class ArtifactPipelineService:
             kind="pipeline_comparisons",
             model=PipelineComparison,
             id_field="comparison_id",
+            output_only_fields={
+                "stages": {"__all__": {"extraction_short_circuited"}},
+            },
         )
         self.publisher = GenerationPublisher(workspace)
 

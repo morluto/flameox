@@ -122,6 +122,7 @@ from flameox.execution import (
     ExecutionOutcome,
     ExecutionRequest,
     ProcessContainment,
+    ProcessExecutionError,
     ProcessObservation,
     ResourcePolicy,
     SubprocessBroker,
@@ -1003,11 +1004,7 @@ class CaptureService:
                 if error.code is ErrorCode.PROCESS_TIMEOUT
                 else ExecutionStatus.FAILED
             )
-            partial_process = (
-                ProcessResult.model_validate(error.details["process"])
-                if "process" in error.details
-                else None
-            )
+            partial_process = error.process if isinstance(error, ProcessExecutionError) else None
             process_observations = tuple(
                 ProcessObservation.model_validate(item)
                 for item in error.details.get("process_observations", ())

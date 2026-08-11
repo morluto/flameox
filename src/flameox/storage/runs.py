@@ -14,6 +14,8 @@ from flameox.domain.models import (
 )
 from flameox.storage.workspace import Workspace
 
+_OUTPUT_ONLY_FIELDS = {"process": {"timed_out"}}
+
 
 class RunStore:
     def __init__(self, workspace: Workspace) -> None:
@@ -107,7 +109,9 @@ class RunStore:
     @staticmethod
     def _canonical(manifest: RunManifest) -> RunManifest:
         try:
-            canonical = parse_run_manifest(manifest.model_dump(mode="python"))
+            canonical = parse_run_manifest(
+                manifest.model_dump(mode="python", exclude=_OUTPUT_ONLY_FIELDS)
+            )
         except ValueError as exc:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
@@ -142,10 +146,10 @@ class RunStore:
                     "An immutable run revision already contains different data.",
                 )
             return
-        atomic_write_json(path, manifest.model_dump(mode="json"))
+        atomic_write_json(path, manifest.model_dump(mode="json", exclude=_OUTPUT_ONLY_FIELDS))
 
     def _write_projection(self, manifest: RunManifest) -> None:
         atomic_write_json(
             self._run_root(manifest.run_id) / "manifest.json",
-            manifest.model_dump(mode="json"),
+            manifest.model_dump(mode="json", exclude=_OUTPUT_ONLY_FIELDS),
         )

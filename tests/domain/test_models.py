@@ -361,12 +361,14 @@ def test_process_result_rejects_incoherent_termination(payload: dict[str, object
         ProcessResult.model_validate(payload)
 
 
-def test_process_result_parses_legacy_timeout_flag_into_authoritative_cause() -> None:
-    result = ProcessResult.model_validate({"timed_out": True})
+def test_process_result_rejects_the_derived_timeout_projection_as_input() -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        ProcessResult.model_validate({"timed_out": True})
 
+    result = ProcessResult(cancellation_cause=ProcessCancellationCause.TIMEOUT)
     assert result.cancellation_cause is ProcessCancellationCause.TIMEOUT
     assert result.timed_out is True
-    assert ProcessResult.model_validate(result.model_dump(mode="json")) == result
+    assert result.validated_copy() == result
 
 
 def test_process_result_parses_flat_termination_into_one_domain_variant() -> None:
@@ -379,8 +381,8 @@ def test_process_result_parses_flat_termination_into_one_domain_variant() -> Non
     assert signalled.termination.kind is ProcessTerminationKind.SIGNALLED
     assert signalled.exit_code is None
     assert signalled.terminating_signal == 15
-    assert ProcessResult.model_validate(exited.model_dump(mode="json")) == exited
-    assert ProcessResult.model_validate(signalled.model_dump(mode="json")) == signalled
+    assert exited.validated_copy() == exited
+    assert signalled.validated_copy() == signalled
 
 
 @pytest.mark.parametrize("argv", [(), ("python", "bad\x00arg"), ("",)])

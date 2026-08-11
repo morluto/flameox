@@ -76,9 +76,9 @@ def test_run_and_artifact_pagination_are_snapshot_bound_and_filtered(tmp_path: P
     assert first.truncated is True
     assert first.next_cursor is not None
     assert first.model_dump(mode="json")["returned"] == 1
-    with pytest.raises(ValidationError, match="returned projection"):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         type(first).model_validate({**first.model_dump(mode="python"), "returned": 0})
-    with pytest.raises(ValidationError, match="truncated projection"):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         type(first).model_validate({**first.model_dump(mode="python"), "truncated": False})
     assert first.coverage.filters_applied == ("execution_status",)
     coverage_payload = first.coverage.model_dump(mode="python")

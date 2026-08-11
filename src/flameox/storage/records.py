@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TypeVar
 
@@ -10,6 +11,12 @@ from flameox.domain import DomainError, ErrorCode
 from flameox.storage.workspace import Workspace
 
 RecordT = TypeVar("RecordT", bound=BaseModel)
+type ModelFieldSelection = (
+    set[int]
+    | set[str]
+    | Mapping[int, ModelFieldSelection | bool]
+    | Mapping[str, ModelFieldSelection | bool]
+)
 
 
 class JsonRecordStore[RecordT: BaseModel]:
@@ -23,12 +30,14 @@ class JsonRecordStore[RecordT: BaseModel]:
         model: type[RecordT] | TypeAdapter[RecordT],
         id_field: str,
         revision_field: str | None = None,
+        output_only_fields: ModelFieldSelection | None = None,
     ) -> None:
         self.workspace = workspace
         self.kind = kind
         self._adapter = TypeAdapter(model) if isinstance(model, type) else model
         self.id_field = id_field
         self.revision_field = revision_field
+        self.output_only_fields = output_only_fields or set()
 
     def create(self, record: RecordT) -> RecordT:
         with self.workspace.write_locked():
@@ -158,7 +167,9 @@ class JsonRecordStore[RecordT: BaseModel]:
 
     def _canonical(self, record: RecordT) -> RecordT:
         try:
-            return self._adapter.validate_python(record.model_dump(mode="python"))
+            return self._adapter.validate_python(
+                record.model_dump(mode="python", exclude=self.output_only_fields)
+            )
         except ValueError as exc:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
@@ -205,10 +216,10 @@ class JsonRecordStore[RecordT: BaseModel]:
                     "An immutable record revision already contains different data.",
                 )
             return
-        atomic_write_json(path, record.model_dump(mode="json"))
+        atomic_write_json(path, record.model_dump(mode="json", exclude=self.output_only_fields))
 
     def _write_projection(self, record: RecordT) -> None:
         atomic_write_json(
             self._root(self._identifier(record)) / "record.json",
-            record.model_dump(mode="json"),
+            record.model_dump(mode="json", exclude=self.output_only_fields),
         )

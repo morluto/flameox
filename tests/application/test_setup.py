@@ -152,7 +152,7 @@ async def test_verify_checks_the_runtime_and_every_configured_launcher(tmp_path:
     assert report.verified
     assert report.unchanged_clients == (SetupClient.CLAUDE, SetupClient.GEMINI)
     assert report.model_dump(mode="json")["verified"] is True
-    with pytest.raises(ValidationError, match="verification must agree"):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         type(report).model_validate({**report.model_dump(mode="python"), "verified": False})
     assert runtime.verified[-1] == runtime.executable("0.1.0")
 
@@ -164,7 +164,7 @@ async def test_verify_checks_the_runtime_and_every_configured_launcher(tmp_path:
         unchanged_clients=(),
     )
     assert unbound.verified is False
-    assert type(report).model_validate(unbound.model_dump(mode="json")) == unbound
+    assert unbound.validated_copy() == unbound
 
 
 @pytest.mark.anyio

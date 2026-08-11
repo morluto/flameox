@@ -71,9 +71,11 @@ def test_incomplete_experiment_is_not_presented_as_valid() -> None:
     assert result.confidence_low is None
 
     with pytest.raises(ValidationError, match="complete pairs"):
-        Comparison.model_validate({**result.model_dump(mode="python"), "complete_pair_n": 2})
-    with pytest.raises(ValidationError, match="confidence bounds and level"):
-        Comparison.model_validate({**result.model_dump(mode="python"), "confidence_low": -0.1})
+        result.validated_copy(update={"complete_pair_n": 2})
+    with pytest.raises(ValidationError, match="valid number"):
+        result.validated_copy(
+            update={"confidence_interval": {"low": -0.1, "high": None, "level": None}}
+        )
 
-    with pytest.raises(ValidationError, match="paired projection contradicts"):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         Comparison.model_validate({**result.model_dump(mode="python"), "paired": False})

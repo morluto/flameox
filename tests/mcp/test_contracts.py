@@ -152,7 +152,9 @@ async def test_every_mcp_tool_uses_sdk_generated_schemas_and_annotations(
     assert "ref_type and its ID separately" in by_name["get_evidence"].description
     execution_output = by_name["analyze_execution"].output_schema
     assert execution_output is not None
-    execution_result = execution_output["$defs"]["ExecutionAnalysisResult"]
+    definitions = execution_output["$defs"]
+    success = definitions["SuccessPayload_ExecutionAnalysisResult_"]
+    execution_result = success["properties"]["result"]
     assert execution_result["properties"]["returned"]["readOnly"] is True
     assert execution_result["properties"]["truncated"]["readOnly"] is True
     assert {"returned", "truncated"} <= set(execution_result["required"])

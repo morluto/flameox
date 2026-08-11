@@ -91,7 +91,7 @@ def test_pipeline_stage_comparison_requires_the_side_named_by_its_disposition() 
 
 
 def test_pipeline_stage_comparison_rejects_a_stale_short_circuit_projection() -> None:
-    with pytest.raises(ValidationError, match="short-circuit status"):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         _STAGE_COMPARISON_ADAPTER.validate_python(
             {
                 "stage_name": "generated",

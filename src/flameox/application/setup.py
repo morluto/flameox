@@ -12,7 +12,7 @@ from typing import Literal, Protocol
 import portalocker
 from packaging.version import InvalidVersion, Version
 from platformdirs import user_data_path
-from pydantic import ConfigDict, Field, computed_field, model_validator
+from pydantic import ConfigDict, Field, computed_field
 
 from flameox.adapters.client_setup import (
     ALL_SETUP_CLIENTS,
@@ -69,21 +69,6 @@ class SetupReport(ContractModel):
     runtime_installed: bool
     changed_clients: tuple[SetupClient, ...]
     unchanged_clients: tuple[SetupClient, ...]
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_verified_projection(cls, value: object) -> object:
-        if not isinstance(value, dict) or "verified" not in value:
-            return value
-        parsed = dict(value)
-        raw_operation = parsed.get("operation")
-        if not isinstance(raw_operation, str):
-            return value
-        operation = SetupOperation(raw_operation)
-        verified = operation is SetupOperation.VERIFY or parsed.get("version") is not None
-        if parsed.pop("verified") != verified:
-            raise ValueError("setup verification must agree with the operation")
-        return parsed
 
     @computed_field  # type: ignore[prop-decorator]
     @property

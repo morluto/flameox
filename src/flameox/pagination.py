@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any, ClassVar
 
 from pydantic import ConfigDict, computed_field, model_validator
@@ -39,22 +38,6 @@ class CollectionResultContract(ContractModel):
 
     page_items_field: ClassVar[str]
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_returned_projection(cls, value: Any) -> Any:
-        if not isinstance(value, Mapping):
-            return value
-        parsed = dict(value)
-        items = parsed.get(cls.page_items_field)
-        if isinstance(items, (list, tuple)) and "returned" in parsed:
-            returned = parsed["returned"]
-            if isinstance(returned, bool) or not isinstance(returned, int):
-                raise ValueError("page returned projection must be an integer")
-            if returned != len(items):
-                raise ValueError("page returned projection must match its items")
-        parsed.pop("returned", None)
-        return parsed
-
     @computed_field  # type: ignore[prop-decorator]
     @property
     def returned(self) -> int:
@@ -68,21 +51,6 @@ class CursorPageContract(CollectionResultContract):
     """A cursor page whose continuation state is derived from its cursor."""
 
     next_cursor: str | None
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_truncated_projection(cls, value: Any) -> Any:
-        if not isinstance(value, Mapping):
-            return value
-        parsed = dict(value)
-        if "truncated" in parsed:
-            truncated = parsed["truncated"]
-            if not isinstance(truncated, bool):
-                raise ValueError("page truncated projection must be a boolean")
-            if truncated != (parsed.get("next_cursor") is not None):
-                raise ValueError("page truncated projection must match its continuation cursor")
-        parsed.pop("truncated", None)
-        return parsed
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -107,28 +75,6 @@ class BoundedCollectionContract(CollectionResultContract):
     """A head-bounded collection whose truncation is derived from its total."""
 
     total_items_field: ClassVar[str] = "total"
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_truncated_projection(cls, value: Any) -> Any:
-        if not isinstance(value, Mapping):
-            return value
-        parsed = dict(value)
-        items = parsed.get(cls.page_items_field)
-        total = parsed.get(cls.total_items_field)
-        if "truncated" in parsed:
-            truncated = parsed["truncated"]
-            if not isinstance(truncated, bool):
-                raise ValueError("page truncated projection must be a boolean")
-            if (
-                isinstance(items, (list, tuple))
-                and isinstance(total, int)
-                and not isinstance(total, bool)
-                and truncated != (total > len(items))
-            ):
-                raise ValueError("page truncated projection must match its total and items")
-        parsed.pop("truncated", None)
-        return parsed
 
     @computed_field  # type: ignore[prop-decorator]
     @property

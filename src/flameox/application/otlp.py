@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pydantic import ConfigDict, computed_field, model_validator
+from pydantic import ConfigDict, computed_field
 
 from flameox.adapters.artifact_workers import ArtifactWorker
 from flameox.application.evidence_rows import _json
@@ -28,17 +28,6 @@ class OtlpExtractionResult(ContractModel):
     event_count: int = 0
     link_count: int = 0
     limitations: tuple[str, ...] = ()
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_failed_projection(cls, value: object) -> object:
-        if not isinstance(value, dict) or "failed" not in value:
-            return value
-        parsed = dict(value)
-        failed = parsed.pop("failed")
-        if failed != (parsed.get("evidence_generation_id") is None):
-            raise ValueError("failure status must agree with evidence publication")
-        return parsed
 
     @computed_field  # type: ignore[prop-decorator]
     @property

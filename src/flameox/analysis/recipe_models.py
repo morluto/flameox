@@ -19,7 +19,6 @@ from flameox.evidence_status import (
     EvidenceAvailability,
     EvidenceStatus,
     available_availability,
-    parse_evidence_availability,
 )
 from flameox.models import ContractModel
 from flameox.pagination import BoundedCollectionContract
@@ -48,38 +47,6 @@ class HotspotResult(BoundedCollectionContract):
     coverage: dict[str, int]
     limitations: tuple[str, ...]
     evidence: EvidenceAvailability = Field(default_factory=available_availability)
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_evidence_projection(cls, value: object) -> object:
-        if not isinstance(value, dict):
-            return value
-        parsed = dict(value)
-        status_present = "evidence_status" in parsed
-        reason_present = "unavailable_reason" in parsed
-        legacy_status = parsed.pop("evidence_status", "available")
-        legacy_reason = parsed.pop("unavailable_reason", None)
-        raw_evidence = parsed.get("evidence")
-        if raw_evidence is None:
-            parsed["evidence"] = parse_evidence_availability(
-                {
-                    "status": legacy_status,
-                    "reason": (
-                        legacy_reason
-                        if legacy_status == "unavailable" and legacy_reason is not None
-                        else f"legacy_{legacy_status}"
-                    ),
-                }
-            )
-            return parsed
-        evidence = parse_evidence_availability(raw_evidence)
-        if status_present and legacy_status != evidence.status:
-            raise ValueError("evidence status fields must agree")
-        expected_reason = evidence.reason if evidence.status == "unavailable" else None
-        if reason_present and legacy_reason != expected_reason:
-            raise ValueError("unavailable reason must agree with structured evidence")
-        parsed["evidence"] = evidence
-        return parsed
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -115,36 +82,6 @@ class MemoryAnalysisResult(ContractModel):
     writable_root_observations: tuple[WritableRootObservation, ...] = ()
     evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_truncated(cls, value: object) -> object:
-        if not isinstance(value, dict):
-            return value
-        parsed = dict(value)
-        supplied = tuple(
-            parsed.pop(name)
-            for name in ("truncated", "runtime_resources_truncated")
-            if name in parsed
-        )
-        if not supplied:
-            return parsed
-        if len(supplied) == 2 and supplied[0] != supplied[1]:
-            raise ValueError("truncation fields must agree")
-        totals = parsed.get("runtime_resource_totals")
-        run_count = (
-            totals.get("run_count")
-            if isinstance(totals, dict)
-            else getattr(totals, "run_count", None)
-        )
-        resources = parsed.get("runtime_resources", ())
-        if (
-            isinstance(run_count, int)
-            and isinstance(resources, (list, tuple))
-            and supplied[0] != (run_count > len(resources))
-        ):
-            raise ValueError("truncation fields must agree with the runtime-resource total")
-        return parsed
-
     @model_validator(mode="after")
     def runtime_resource_count_is_coherent(self) -> MemoryAnalysisResult:
         if (
@@ -161,39 +98,6 @@ class MemoryAnalysisResult(ContractModel):
             self.runtime_resource_totals is not None
             and self.runtime_resource_totals.run_count > len(self.runtime_resources)
         )
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_resource_projection(cls, value: object) -> object:
-        if not isinstance(value, dict) or not {
-            "policy_termination",
-            "unavailable_metrics",
-        }.intersection(value):
-            return value
-        parsed = dict(value)
-        resources = tuple(
-            item
-            if isinstance(item, RuntimeResourceObservation)
-            else RuntimeResourceObservation.model_validate(item)
-            for item in parsed.get("runtime_resources", ())
-        )
-        expected_policy = next(
-            (item.policy_termination for item in resources if item.policy_termination is not None),
-            None,
-        )
-        expected_metrics = tuple(
-            sorted({metric for item in resources for metric in item.unavailable_metrics})
-        )
-        if "policy_termination" in parsed and parsed["policy_termination"] != expected_policy:
-            raise ValueError("policy termination must derive from runtime resources")
-        if "unavailable_metrics" in parsed:
-            raw_metrics = parsed["unavailable_metrics"]
-            if not isinstance(raw_metrics, list | tuple) or tuple(raw_metrics) != expected_metrics:
-                raise ValueError("unavailable metrics must derive from runtime resources")
-        parsed.pop("policy_termination", None)
-        parsed.pop("unavailable_metrics", None)
-        parsed["runtime_resources"] = resources
-        return parsed
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -514,30 +418,6 @@ class FailureAnalysisResult(BoundedCollectionContract):
         "require a specialized extractor.",
     )
     evidence: EvidenceAvailability = Field(default_factory=available_availability)
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_empty_reason(cls, value: object) -> object:
-        if not isinstance(value, dict) or "empty_reason" not in value:
-            return value
-        status = FailurePopulationStatus(value.get("population_status", "empty"))
-        failed_runs = value.get("failed_runs", 0)
-        expected = (
-            "no_runs"
-            if status is FailurePopulationStatus.EMPTY
-            else (
-                "no_matching_runs"
-                if status is FailurePopulationStatus.FILTERED_EMPTY
-                else "no_failures"
-                if failed_runs == 0
-                else None
-            )
-        )
-        if value["empty_reason"] != expected:
-            raise ValueError("empty reason must derive from the failure population")
-        parsed = dict(value)
-        del parsed["empty_reason"]
-        return parsed
 
     @model_validator(mode="after")
     def population_is_coherent(self) -> FailureAnalysisResult:

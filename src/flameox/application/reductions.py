@@ -3,13 +3,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import shutil
-from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, TypeAdapter, computed_field, model_validator
+from pydantic import Field, TypeAdapter, computed_field
 
 from flameox.adapters.artifact_workers import ArtifactWorker
 from flameox.application.native_reducer import (
@@ -93,17 +92,6 @@ class _ReductionPlan(ContractModel):
     expected_determinism: ReductionDeterminism
     created_at: datetime = Field(default_factory=utc_now)
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_request_digest(cls, value: Any) -> Any:
-        if not isinstance(value, Mapping) or "request_digest" not in value:
-            return value
-        payload = dict(value)
-        request_digest = payload.pop("request_digest")
-        if request_digest != payload.get("plan_id"):
-            raise ValueError("reduction request digest must match its plan identity")
-        return payload
-
     @computed_field  # type: ignore[prop-decorator]
     @property
     def request_digest(self) -> Digest:
@@ -175,6 +163,7 @@ class ReductionService:
             kind="reduction_plans",
             model=_REDUCTION_PLAN_ADAPTER,
             id_field="plan_id",
+            output_only_fields={"request_digest"},
         )
         self.results = JsonRecordStore(
             workspace,

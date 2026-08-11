@@ -311,19 +311,6 @@ class _InferenceToolDiscovery(ContractModel):
     executable_digest: str | None = None
     available: bool
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_compatible(cls, value: object) -> object:
-        if not isinstance(value, dict) or "compatible" not in value:
-            return value
-        compatible = value["compatible"]
-        if "available" in value and value["available"] != compatible:
-            raise ValueError("availability and compatibility must agree")
-        parsed = dict(value)
-        del parsed["compatible"]
-        parsed["available"] = compatible
-        return parsed
-
     @computed_field  # type: ignore[prop-decorator]
     @property
     def compatible(self) -> bool:

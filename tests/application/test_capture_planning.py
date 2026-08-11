@@ -175,22 +175,22 @@ active = ["perf"]
     assert requirements["perf"].optional is True
     assert requirements["perf"].probe_kind == "active"
     requirement_payload = requirements["perf"].model_dump(mode="python")
-    assert type(requirements["perf"]).model_validate(requirement_payload) == requirements["perf"]
-    with pytest.raises(ValueError, match="optionality must be the inverse"):
+    assert requirements["perf"].validated_copy() == requirements["perf"]
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         type(requirements["perf"]).model_validate({**requirement_payload, "optional": False})
     assert detail.adapter_option_total >= len(detail.adapter_options)
     assert detail.adapter_options_truncated is (
         detail.adapter_option_total > len(detail.adapter_options)
     )
     assert detail.adapter_options_total == detail.adapter_option_total
-    assert type(detail).model_validate(detail.model_dump()) == detail
+    assert detail.validated_copy() == detail
     contradictory_counts = detail.model_dump()
     contradictory_counts["adapter_options_total"] = detail.adapter_option_total + 1
-    with pytest.raises(ValueError, match="adapter option totals must agree"):
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         type(detail).model_validate(contradictory_counts)
     contradictory_truncation = detail.model_dump()
     contradictory_truncation["adapter_options_truncated"] = not detail.adapter_options_truncated
-    with pytest.raises(ValueError, match="adapter option truncation must agree"):
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         type(detail).model_validate(contradictory_truncation)
     assert tuple(item.adapter for item in detail.adapter_options) == tuple(
         sorted(item.adapter for item in detail.adapter_options)
@@ -198,10 +198,10 @@ active = ["perf"]
     command = next(item for item in detail.adapter_options if item.adapter == "command")
     assert command.planning_disposition == "ready"
     assert command.capability_status is command.status
-    assert AdapterOption.model_validate(command.model_dump()) == command
+    assert command.validated_copy() == command
     contradictory = command.model_dump()
     contradictory["capability_status"] = CapabilityStatus.UNAVAILABLE
-    with pytest.raises(ValueError, match="status and capability_status must agree"):
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         AdapterOption.model_validate(contradictory)
     assert inspection.command_template == ("python", "-c", "print('ok')")
     assert inspection.configuration_id == detail.configuration_id

@@ -354,10 +354,10 @@ def test_otlp_failure_is_derived_from_evidence_publication() -> None:
     failed = OtlpExtractionResult(run_id="run", artifact_id="artifact")
 
     assert failed.failed is True
-    assert OtlpExtractionResult.model_validate(failed.model_dump()).failed is True
+    assert failed.validated_copy().failed is True
 
     contradictory = {**failed.model_dump(), "failed": False}
-    with pytest.raises(ValidationError, match="failure status must agree"):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         OtlpExtractionResult.model_validate(contradictory)
 
 

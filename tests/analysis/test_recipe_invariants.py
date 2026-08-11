@@ -62,11 +62,11 @@ def test_failure_analysis_distinguishes_filtered_and_failure_empty_populations(
     assert (filtered.eligible_runs, filtered.failed_runs) == (0, 0)
     assert filtered.population_status == "filtered_empty"
     assert filtered.empty_reason == "no_matching_runs"
-    assert FailureAnalysisResult.model_validate(observed.model_dump(mode="json")) == observed
+    assert observed.validated_copy() == observed
 
     contradictory = observed.model_dump(mode="json")
     contradictory["empty_reason"] = "no_runs"
-    with pytest.raises(ValidationError, match="empty reason must derive"):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         FailureAnalysisResult.model_validate(contradictory)
 
 

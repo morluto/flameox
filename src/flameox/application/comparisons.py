@@ -416,9 +416,8 @@ class ComparisonService:
             random_seed=request.random_seed,
             experiment_id=request.experiment_id,
         )
-        comparison = Comparison.model_validate(
-            {
-                **comparison.model_dump(mode="python"),
+        comparison = comparison.validated_copy(
+            update={
                 "baseline_attempted_n": baseline.attempted,
                 "baseline_eligible_n": baseline.eligible,
                 "baseline_failed_n": baseline.failed,
@@ -427,24 +426,22 @@ class ComparisonService:
                 "candidate_eligible_n": candidate.eligible,
                 "candidate_failed_n": candidate.failed,
                 "candidate_excluded_n": candidate.excluded,
-            }
+            },
         )
         all_reasons = (*invalidating, *exploratory)
         if invalidating:
-            comparison = Comparison.model_validate(
-                {
-                    **comparison.model_dump(mode="python"),
+            comparison = comparison.validated_copy(
+                update={
                     "validity": ComparisonValidity.INVALID,
                     "mismatches": tuple(all_reasons),
-                }
+                },
             )
         elif exploratory:
-            comparison = Comparison.model_validate(
-                {
-                    **comparison.model_dump(mode="python"),
+            comparison = comparison.validated_copy(
+                update={
                     "validity": ComparisonValidity.EXPLORATORY,
                     "mismatches": tuple(all_reasons),
-                }
+                },
             )
         return ComparisonResult(
             comparison=comparison,

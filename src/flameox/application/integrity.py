@@ -5,7 +5,7 @@ from enum import StrEnum
 from pathlib import Path
 
 import pyarrow.parquet as pq
-from pydantic import ConfigDict, computed_field, model_validator
+from pydantic import ConfigDict, computed_field
 
 from flameox.catalog import Catalog
 from flameox.domain import DomainError
@@ -41,21 +41,6 @@ class IntegrityResult(ContractModel):
     checked_generations: int
     checked_parquet_files: int
     issues: tuple[IntegrityIssue, ...]
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_valid_projection(cls, value: object) -> object:
-        if not isinstance(value, dict) or "valid" not in value:
-            return value
-        parsed = dict(value)
-        valid = parsed.pop("valid")
-        raw_issues = parsed.get("issues")
-        if isinstance(raw_issues, (list, tuple)):
-            issues = tuple(IntegrityIssue.model_validate(issue) for issue in raw_issues)
-            if valid != (not any(issue.severity is IntegritySeverity.ERROR for issue in issues)):
-                raise ValueError("validity must agree with integrity issue severity")
-            parsed["issues"] = issues
-        return parsed
 
     @computed_field  # type: ignore[prop-decorator]
     @property

@@ -4,12 +4,12 @@ import asyncio
 import json
 import shutil
 import socket
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
-from pydantic import Field, JsonValue, computed_field, model_validator
+from pydantic import Field, JsonValue, computed_field
 
 from flameox.adapters.toxiproxy import ToxiproxyApiError, ToxiproxyClient, ToxiproxyToolManager
 from flameox.application.async_work import run_atomic_thread
@@ -98,17 +98,6 @@ class FaultExperimentPlan(ContractModel):
     revision: int = 0
     consumed_at: datetime | None = None
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_request_digest(cls, value: Any) -> Any:
-        if not isinstance(value, Mapping) or "request_digest" not in value:
-            return value
-        payload = dict(value)
-        request_digest = payload.pop("request_digest")
-        if request_digest != payload.get("plan_id"):
-            raise ValueError("fault plan request digest must match its plan identity")
-        return payload
-
     @computed_field  # type: ignore[prop-decorator]
     @property
     def request_digest(self) -> Digest:
@@ -187,6 +176,7 @@ class FaultExperimentService:
             model=FaultExperimentPlan,
             id_field="plan_id",
             revision_field="revision",
+            output_only_fields={"request_digest"},
         )
         self.results = JsonRecordStore(
             workspace,

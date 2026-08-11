@@ -73,7 +73,6 @@ def test_tool_discovery_requires_an_executable_when_available() -> None:
             {
                 "tool": "aiperf",
                 "available": True,
-                "compatible": True,
                 "executable": None,
             }
         )

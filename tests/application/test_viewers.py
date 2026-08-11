@@ -8,7 +8,6 @@ from pydantic import ValidationError
 from flameox.application import (
     ImportArtifactRequest,
     ImportService,
-    NativeViewerLaunchResult,
     NativeViewerPlan,
     NativeViewerService,
 )
@@ -98,7 +97,7 @@ async def test_explicit_viewer_launch_uses_bounded_subprocess_broker(
     result = await NativeViewerService(workspace).launch(imported.artifact_id)
 
     assert result.plan.launches is True
-    assert NativeViewerLaunchResult.model_validate(result.model_dump()).plan.launches is True
+    assert result.validated_copy().plan.launches is True
     assert result.process.exit_code == 0
 
 

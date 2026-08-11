@@ -127,45 +127,6 @@ class CapabilityList(ContractModel):
     recommendation_scope: str | None = None
     latest_setup: CapabilitySetupReceipt | None = None
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_setup_projections(cls, value: object) -> object:
-        projection_names = (
-            "setup_adapters",
-            "setup_third_party_adapters",
-            "available_setup_adapters",
-            "available_setup_third_party_adapters",
-            "next_tool",
-        )
-        if not isinstance(value, dict):
-            return value
-        parsed = dict(value)
-        raw_capabilities = parsed.get("capabilities")
-        scope = parsed.get("recommendation_scope")
-        if isinstance(raw_capabilities, (list, tuple)) and (
-            scope is None or isinstance(scope, str)
-        ):
-            capabilities = tuple(
-                CapabilityReport.model_validate(report) for report in raw_capabilities
-            )
-            projections = dict(
-                zip(
-                    projection_names,
-                    _capability_setup_projections(capabilities, scope),
-                    strict=True,
-                )
-            )
-            for name, expected in projections.items():
-                supplied = parsed.get(name, expected)
-                if isinstance(expected, tuple) and isinstance(supplied, list):
-                    supplied = tuple(supplied)
-                if supplied != expected:
-                    raise ValueError(f"{name} must agree with capability reports")
-            parsed["capabilities"] = capabilities
-        for name in projection_names:
-            parsed.pop(name, None)
-        return parsed
-
     @computed_field  # type: ignore[prop-decorator]
     @property
     def setup_adapters(self) -> tuple[str, ...]:
@@ -203,32 +164,6 @@ class SetupVerification(ContractModel):
     available_adapters: tuple[str, ...]
     method: Literal["capability_scan"] = "capability_scan"
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_projections(cls, value: object) -> object:
-        if not isinstance(value, dict):
-            return value
-        parsed = dict(value)
-        checked = parsed.get("checked_adapters")
-        available = parsed.get("available_adapters")
-        if isinstance(checked, (list, tuple)) and isinstance(available, (list, tuple)):
-            checked_values = tuple(checked)
-            available_values = tuple(available)
-            unavailable = tuple(
-                item for item in checked_values if item not in set(available_values)
-            )
-            expected_status = "verified" if not unavailable else "partial"
-            supplied_unavailable = parsed.get("unavailable_adapters", unavailable)
-            if isinstance(supplied_unavailable, list):
-                supplied_unavailable = tuple(supplied_unavailable)
-            if supplied_unavailable != unavailable:
-                raise ValueError("unavailable adapters must agree with checked availability")
-            if parsed.get("status", expected_status) != expected_status:
-                raise ValueError("verification status must agree with adapter availability")
-        parsed.pop("unavailable_adapters", None)
-        parsed.pop("status", None)
-        return parsed
-
     @model_validator(mode="after")
     def availability_is_a_partition(self) -> SetupVerification:
         if len(set(self.checked_adapters)) != len(self.checked_adapters):
@@ -264,24 +199,6 @@ class CapabilitySetupResult(ContractModel):
     next_tool: Literal["list_capabilities"] = "list_capabilities"
     setup_verification: SetupVerification
     workload_executed: Literal[False] = False
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_legacy_installed_projection(cls, value: object) -> object:
-        if not isinstance(value, dict):
-            return value
-        parsed = dict(value)
-        requested = parsed.get("requested")
-        available = parsed.get("already_available")
-        if isinstance(requested, (list, tuple)) and isinstance(available, (list, tuple)):
-            expected = tuple(item for item in requested if item not in set(available))
-            supplied = parsed.get("installed", expected)
-            if isinstance(supplied, list):
-                supplied = tuple(supplied)
-            if supplied != expected:
-                raise ValueError("installed adapters must complete the requested partition")
-        parsed.pop("installed", None)
-        return parsed
 
     @model_validator(mode="after")
     def availability_is_a_partition(self) -> CapabilitySetupResult:
