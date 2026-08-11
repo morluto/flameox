@@ -187,6 +187,30 @@ def test_schema_one_legacy_experiment_fields_remain_loadable() -> None:
     assert experiment.scaling_values == (1, 2)
 
 
+def test_legacy_scaled_experiment_accepts_distinct_typed_scaling_values() -> None:
+    project = ProjectConfig.model_validate(
+        {
+            "schema_version": 1,
+            "workloads": {
+                "scan": {
+                    "argv": ["python", "-c", "print('{length}')"],
+                    "parameters": {"length": [1, 1.0]},
+                }
+            },
+            "experiments": {
+                "scan": {
+                    "workload": "scan",
+                    "variants": ["baseline", "candidate"],
+                    "scaling_parameter": "length",
+                    "scaling_values": [1, 1.0],
+                }
+            },
+        }
+    )
+
+    assert project.experiments["scan"].scaling_values == (1, 1.0)
+
+
 @pytest.mark.parametrize(
     "shape",
     (
@@ -399,3 +423,156 @@ def test_experiment_requires_explicit_treatment_factor_and_factors() -> None:
     )
     assert config.treatment_factor == "mode"
     assert config.factors["length"] == (128, 256)
+
+
+def test_factor_experiment_baseline_value_uses_exact_scalar_identity() -> None:
+    config = parse_experiment_config(
+        {
+            "workload": "probe",
+            "treatment_factor": "mode",
+            "baseline_value": 1.0,
+            "factors": {"mode": (1, 1.0)},
+        }
+    )
+
+    assert config.model_dump(mode="python")["baseline_value"] == 1.0
+    with pytest.raises(ValueError, match="baseline_value must be one of"):
+        parse_experiment_config(
+            {
+                "workload": "probe",
+                "treatment_factor": "mode",
+                "baseline_value": True,
+                "factors": {"mode": (1, 1.0)},
+            }
+        )
+
+
+def test_scalar_identity_distinguishes_exact_json_types() -> None:
+    """Scalar identity distinguishes bool/int/float even when Python equality treats them equal."""
+    from flameox.application import (
+        scalar_contains,
+        scalar_equal,
+        scalar_identity,
+        scalar_identity_set,
+        scalar_subset,
+    )
+
+    # True is not 1, 1 is not 1.0
+    assert scalar_identity(True) != scalar_identity(1)
+    assert scalar_identity(False) != scalar_identity(0)
+    assert scalar_identity(1) != scalar_identity(1.0)
+    assert scalar_identity(0) != scalar_identity(0.0)
+    assert scalar_identity(1) != scalar_identity("1")
+
+    assert not scalar_equal(True, 1)
+    assert not scalar_equal(False, 0)
+    assert not scalar_equal(1, 1.0)
+    assert not scalar_equal(1, "1")
+    assert scalar_equal(1, 1)
+    assert scalar_equal(True, True)
+    assert scalar_equal("a", "a")
+
+    # scalar_contains uses exact type
+    assert scalar_contains(1, (1,))
+    assert not scalar_contains(True, (1,))
+    assert not scalar_contains(1, (1.0,))
+    assert not scalar_contains(1.0, (1,))
+    assert not scalar_contains(1, (True,))
+    assert not scalar_contains(0, (False,))
+    assert scalar_contains(True, (True,))
+    assert scalar_contains(False, (False,))
+
+    # scalar_identity_set treats distinct-typed values as distinct
+    ids = scalar_identity_set([True, 1, 1.0, "1", True])
+    assert len(ids) == 4
+    ids2 = scalar_identity_set([1, 1, 1])
+    assert len(ids2) == 1
+
+    assert scalar_subset([1, 2], [1, 2, 3])
+    assert not scalar_subset([True], [1])
+    assert not scalar_subset([1.0], [1])
+    assert not scalar_subset([1], [1.0])
+    assert scalar_subset([True], [True])
+
+
+def test_resolve_rejects_int_for_bool_choice(tmp_path: Path) -> None:
+    """Regression for #258: integer 1 must not authorize a boolean True choice."""
+    workspace = Workspace.initialize(tmp_path)
+    service = WorkloadService(workspace)
+    service.configure(
+        ConfigureWorkloadRequest(
+            name="probe",
+            operation=ConfigurationOperation.CREATE,
+            config=WorkloadConfig(
+                argv=("python", "-c", "print({mode})"),
+                parameters={"mode": (True,)},
+            ),
+        )
+    )
+
+    with pytest.raises(DomainError) as exc:
+        service.resolve("probe", {"mode": 1})
+    assert exc.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+
+    with pytest.raises(DomainError) as exc2:
+        service.resolve("probe", {"mode": 1.0})
+    assert exc2.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+
+
+def test_resolve_rejects_float_for_int_choice(tmp_path: Path) -> None:
+    """Regression for #258: float 1.0 must not authorize an integer 1 choice."""
+    workspace = Workspace.initialize(tmp_path)
+    service = WorkloadService(workspace)
+    service.configure(
+        ConfigureWorkloadRequest(
+            name="probe",
+            operation=ConfigurationOperation.CREATE,
+            config=WorkloadConfig(
+                argv=("python", "-c", "print({mode})"),
+                parameters={"mode": (1,)},
+            ),
+        )
+    )
+
+    with pytest.raises(DomainError) as exc:
+        service.resolve("probe", {"mode": 1.0})
+    assert exc.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+
+
+def test_resolve_rejects_bool_for_int_choice(tmp_path: Path) -> None:
+    """Regression for #258: bool True must not authorize an integer 1 choice."""
+    workspace = Workspace.initialize(tmp_path)
+    service = WorkloadService(workspace)
+    service.configure(
+        ConfigureWorkloadRequest(
+            name="probe",
+            operation=ConfigurationOperation.CREATE,
+            config=WorkloadConfig(
+                argv=("python", "-c", "print({mode})"),
+                parameters={"mode": (1,)},
+            ),
+        )
+    )
+
+    with pytest.raises(DomainError) as exc:
+        service.resolve("probe", {"mode": True})
+    assert exc.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+
+
+def test_resolve_accepts_same_type_choices(tmp_path: Path) -> None:
+    """Regression for #258: same-typed values must still authorize normally."""
+    workspace = Workspace.initialize(tmp_path)
+    service = WorkloadService(workspace)
+    service.configure(
+        ConfigureWorkloadRequest(
+            name="probe",
+            operation=ConfigurationOperation.CREATE,
+            config=WorkloadConfig(
+                argv=("python", "-c", "print({mode})"),
+                parameters={"mode": (1, 2, 3)},
+            ),
+        )
+    )
+
+    instance = service.resolve("probe", {"mode": 2})
+    assert instance.parameters["mode"] == 2

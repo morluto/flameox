@@ -62,6 +62,50 @@ from flameox.storage import Workspace
 
 Scalar = str | int | float | bool
 
+
+def scalar_identity(value: Scalar) -> tuple[str, object]:
+    """Return a typed identity key distinguishing bool/int/float/str by exact JSON type.
+
+    Python's numeric tower treats ``True == 1`` and ``1 == 1.0`` as equal, and
+    ``hash(True) == hash(1)``. Configuration and evidence protocols must not
+    treat those as the same scalar. This helper returns a ``(type_tag, value)``
+    tuple where the type tag distinguishes the four scalar JSON kinds so that
+    ``scalar_identity(True) != scalar_identity(1)`` and
+    ``scalar_identity(1) != scalar_identity(1.0)``.
+    """
+    if type(value) is bool:
+        return ("bool", value)
+    if type(value) is int:
+        return ("int", value)
+    if type(value) is float:
+        return ("float", value)
+    return ("string", value)
+
+
+def scalar_equal(left: Scalar, right: Scalar) -> bool:
+    """Return True only when both scalars share the exact JSON type and value."""
+    return scalar_identity(left) == scalar_identity(right)
+
+
+def scalar_contains(value: Scalar, choices: tuple[Scalar, ...] | list[Scalar]) -> bool:
+    """Return True only when ``value`` is present in ``choices`` by exact scalar identity."""
+    identity = scalar_identity(value)
+    return any(scalar_identity(choice) == identity for choice in choices)
+
+
+def scalar_identity_set(
+    values: tuple[Scalar, ...] | list[Scalar],
+) -> set[tuple[str, object]]:
+    """Return the set of scalar identities for ``values`` without Python-equality collisions."""
+    return {scalar_identity(value) for value in values}
+
+
+def scalar_subset(subset_values: list[Scalar], superset_values: list[Scalar]) -> bool:
+    """Return True only when every identity in ``subset_values`` is in ``superset_values``."""
+    superset = scalar_identity_set(superset_values)
+    return all(identity in superset for identity in (scalar_identity(v) for v in subset_values))
+
+
 RUNTIME_RESOURCE_METRICS = frozenset(
     {
         "runtime_resource.peak_rss_bytes",
@@ -221,6 +265,7 @@ class _FactorExperimentConfig(_CommonExperimentConfig):
     )
     exclude: Annotated[tuple[dict[str, Scalar], ...], Field(max_length=1_000)] = ()
     treatment_factor: str
+    baseline_value: Scalar | None = None
     scaling_parameter: Literal[None] = None
     scaling_values: Annotated[tuple[Scalar, ...], Field(max_length=0)] = ()
 
@@ -228,6 +273,12 @@ class _FactorExperimentConfig(_CommonExperimentConfig):
     def treatment_is_declared(self) -> _FactorExperimentConfig:
         if self.treatment_factor not in self.factors:
             raise ValueError("factor experiments require a declared treatment_factor")
+        if self.baseline_value is not None:
+            allowed = self.factors[self.treatment_factor]
+            if not scalar_contains(self.baseline_value, allowed):
+                raise ValueError(
+                    "baseline_value must be one of the declared treatment_factor values"
+                )
         return self
 
 
@@ -276,7 +327,7 @@ class _ScaledLegacyExperimentConfig(_LegacyExperimentConfig):
     @field_validator("scaling_values")
     @classmethod
     def scaling_values_are_unique(cls, value: tuple[Scalar, ...]) -> tuple[Scalar, ...]:
-        if len(set(value)) != len(value):
+        if len(scalar_identity_set(list(value))) != len(value):
             raise ValueError("experiment scaling values must be unique")
         return value
 
@@ -1887,7 +1938,7 @@ class WorkloadService:
                     f"Dynamic workload parameter {name!r} must be supplied.",
                 )
             value = overrides.get(name, choices[0])
-            if name not in dynamic_parameters and value not in choices:
+            if name not in dynamic_parameters and not scalar_contains(value, choices):
                 raise DomainError(
                     ErrorCode.INVALID_CAPTURE_PLAN,
                     f"Value for {name!r} is outside the declared choices.",

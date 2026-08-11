@@ -22,6 +22,7 @@ from flameox.domain.scalars import NumericValue
 from flameox.models import ContractModel
 
 Identifier = Annotated[str, StringConstraints(min_length=1, max_length=200)]
+VariantName = Annotated[str, StringConstraints(max_length=200)]
 Digest = Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
 ShortText = Annotated[str, StringConstraints(min_length=1, max_length=500)]
 
@@ -1341,7 +1342,7 @@ class Variant(ContractModel):
     schema_version: Literal[1] = 1
     variant_id: Identifier
     experiment_id: Identifier
-    name: Identifier
+    name: VariantName
     source_state_id: Digest | None = None
     workload_instance_id: Digest | None = None
     environment_requirements: dict[str, JsonValue] = Field(default_factory=dict)

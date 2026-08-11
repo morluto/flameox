@@ -821,6 +821,17 @@ class AIPerfCorrelationSummary(ContractModel):
 # vLLM aggregate benchmark-result JSON normalization
 # ---------------------------------------------------------------------------
 #
+def _percentile_label(percentile: int | float) -> str:
+    """Return a canonical label for a percentile rank, preserving fractional precision.
+
+    ``int()`` truncation made p99.1 and p99.9 both produce ``p99``, losing
+    the exact percentile identity in the metric name.
+    """
+    if float(percentile).is_integer():
+        return str(int(percentile))
+    return str(float(percentile))
+
+
 # vLLM's ``benchmark_serving.BenchmarkMetrics`` dataclass is serialized by the
 # Mooncake replayer (and other vLLM benchmark scripts) as a JSON object whose
 # percentile fields are lists of ``[percentile, value_ms]`` pairs. The parser
@@ -907,6 +918,10 @@ class VllmAggregateMetrics(ContractModel):
             "median_itl_ms",
             "mean_e2el_ms",
             "median_e2el_ms",
+            "std_ttft_ms",
+            "std_tpot_ms",
+            "std_itl_ms",
+            "std_e2el_ms",
         ):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be non-negative")
@@ -944,6 +959,13 @@ class VllmResultDocument(ContractModel):
     total_requests: Annotated[int, Field(ge=0)]
     actual_duration: Annotated[float, Field(ge=0)]
     time_scale: Annotated[float, Field(gt=0)] = 1.0
+
+    @field_validator("actual_duration", "time_scale")
+    @classmethod
+    def finite_duration_and_scale(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("duration and time_scale must be finite")
+        return value
 
     @model_validator(mode="after")
     def totals_match(self) -> VllmResultDocument:
@@ -1038,7 +1060,7 @@ class VllmResultParser:
             "successful_requests": completed,
             "failed_requests": max(0, total_requests - completed),
             "total_requests": total_requests,
-            "actual_duration": payload.get("duration", 0.0),
+            "actual_duration": payload.get("duration"),
             "time_scale": 1.0,
         }
 
@@ -1163,7 +1185,7 @@ class VllmResultParser:
             add(f"vllm.{label}.std_ms", std, unit="ms", aggregation="std", extra={"stat": "std"})
             for percentile, value in getattr(metrics, f"percentiles_{metric}_ms"):
                 add(
-                    f"vllm.{label}.p{int(percentile)}_ms",
+                    f"vllm.{label}.p{_percentile_label(percentile)}_ms",
                     float(value),
                     unit="ms",
                     aggregation="percentile",

@@ -35,6 +35,10 @@ from flameox.application.workloads import (
     _FactorExperimentConfig,
     _OutcomeExperimentConfig,
     _ScaledLegacyExperimentConfig,
+    scalar_contains,
+    scalar_equal,
+    scalar_identity_set,
+    scalar_subset,
 )
 from flameox.catalog import Catalog
 from flameox.domain import (
@@ -139,6 +143,7 @@ class ExperimentPlan(ContractModel):
     execution_policy: ExecutionPolicy
     variant_parameter: str
     variants: tuple[str, ...]
+    baseline_variant: str | None = None
     factors: dict[str, tuple[JsonValue, ...]] = Field(default_factory=dict)
     parameter_overrides: dict[str, JsonValue]
     blocks: tuple[ExperimentBlock, ...]
@@ -660,6 +665,11 @@ class ExperimentService:
             execution_policy=execution_policy,
             variant_parameter=variant_parameter,
             variants=variants,
+            baseline_variant=(
+                self._factor_label(config.baseline_value)
+                if isinstance(config, _FactorExperimentConfig) and config.baseline_value is not None
+                else None
+            ),
             factors={
                 name: tuple(cast(JsonValue, value) for value in values)
                 for name, values in factors.items()
@@ -903,28 +913,55 @@ class ExperimentService:
                 "Automatic experiment comparison currently requires pyperf measurements."
             )
         else:
-            comparison = await run_atomic_thread(
-                lambda: ComparisonService(self.workspace).record(
-                    parse_compare_run_sets_request(
-                        {
-                            "baseline_run_set_id": run_sets[0].run_set_id,
-                            "candidate_run_set_id": run_sets[1].run_set_id,
-                            "experiment_id": plan.experiment.experiment_id,
-                            "metric": plan.experiment.primary_metric,
-                            "unit": (
-                                "bytes"
-                                if plan.metric_source is MetricSource.RUNTIME_RESOURCE
-                                else "ns"
-                            ),
-                            "metric_source": plan.metric_source,
-                            "polarity": plan.experiment.polarity,
-                            "practical_threshold": plan.experiment.practical_threshold,
-                            "confidence_level": plan.experiment.confidence_level,
-                            "random_seed": plan.experiment.random_seed,
-                        }
+            comparison_run_sets: tuple[RunSet, RunSet] | None = run_sets
+            if plan.baseline_variant is None:
+                limitations.append(
+                    "Baseline was determined by list position, not an explicit "
+                    "baseline_value. Reordering the treatment list reverses the "
+                    "comparison direction."
+                )
+            else:
+                baseline_run_sets = tuple(
+                    run_set
+                    for run_set in run_sets
+                    if run_set.selection["variant"] == plan.baseline_variant
+                )
+                candidate_run_sets = tuple(
+                    run_set
+                    for run_set in run_sets
+                    if run_set.selection["variant"] != plan.baseline_variant
+                )
+                if len(baseline_run_sets) != 1 or len(candidate_run_sets) != 1:
+                    limitations.append(
+                        "Automatic paired comparison requires the declared baseline and exactly "
+                        "one candidate treatment."
+                    )
+                    comparison_run_sets = None
+                else:
+                    comparison_run_sets = (baseline_run_sets[0], candidate_run_sets[0])
+            if comparison_run_sets is not None:
+                comparison = await run_atomic_thread(
+                    lambda: ComparisonService(self.workspace).record(
+                        parse_compare_run_sets_request(
+                            {
+                                "baseline_run_set_id": comparison_run_sets[0].run_set_id,
+                                "candidate_run_set_id": comparison_run_sets[1].run_set_id,
+                                "experiment_id": plan.experiment.experiment_id,
+                                "metric": plan.experiment.primary_metric,
+                                "unit": (
+                                    "bytes"
+                                    if plan.metric_source is MetricSource.RUNTIME_RESOURCE
+                                    else "ns"
+                                ),
+                                "metric_source": plan.metric_source,
+                                "polarity": plan.experiment.polarity,
+                                "practical_threshold": plan.experiment.practical_threshold,
+                                "confidence_level": plan.experiment.confidence_level,
+                                "random_seed": plan.experiment.random_seed,
+                            }
+                        )
                     )
                 )
-            )
         result_commit_id = published.commit.commit_id
         if comparison is not None:
             result_commit_id = comparison.materialized_commit_id or comparison.corpus_commit_id
@@ -988,7 +1025,7 @@ class ExperimentService:
             matches = [
                 name
                 for name, choices in workload_parameters.items()
-                if set(config.variants).issubset(set(choices))
+                if scalar_subset(list(config.variants), list(choices))
             ]
             if not matches:
                 raise DomainError(
@@ -1018,7 +1055,9 @@ class ExperimentService:
                     ErrorCode.WORKSPACE_INVALID,
                     f"Experiment factor {name!r} is not a workload parameter.",
                 )
-            if len(set(values)) != len(values) or not set(values).issubset(set(allowed)):
+            if len(scalar_identity_set(list(values))) != len(values) or not scalar_subset(
+                list(values), list(allowed)
+            ):
                 raise DomainError(
                     ErrorCode.WORKSPACE_INVALID,
                     f"Experiment factor {name!r} contains duplicate or undeclared values.",
@@ -1040,7 +1079,7 @@ class ExperimentService:
                     ErrorCode.WORKSPACE_INVALID,
                     "Explicit combinations must contain every declared factor exactly once.",
                 )
-            if any(combination[name] not in factors[name] for name in factor_names):
+            if any(not scalar_contains(combination[name], factors[name]) for name in factor_names):
                 raise DomainError(
                     ErrorCode.WORKSPACE_INVALID,
                     "Explicit combination contains an undeclared factor value.",
@@ -1060,7 +1099,7 @@ class ExperimentService:
                     ErrorCode.WORKSPACE_INVALID,
                     "Every exclusion must name at least one declared factor.",
                 )
-            if any(value not in factors[name] for name, value in rule.items()):
+            if any(not scalar_contains(value, factors[name]) for name, value in rule.items()):
                 raise DomainError(
                     ErrorCode.WORKSPACE_INVALID,
                     "Exclusion contains an undeclared factor value.",
@@ -1069,7 +1108,7 @@ class ExperimentService:
             combination
             for combination in combinations
             if not any(
-                all(combination[name] == value for name, value in rule.items())
+                all(scalar_equal(combination[name], value) for name, value in rule.items())
                 for rule in config.exclude
             )
         )
@@ -1102,7 +1141,10 @@ class ExperimentService:
             selected = [
                 trial
                 for trial in trials
-                if trial.factors.get(plan.variant_parameter) == treatment_value
+                if scalar_equal(
+                    cast(Scalar, trial.factors.get(plan.variant_parameter)),
+                    cast(Scalar, treatment_value),
+                )
             ]
             attempted = sum(trial.outcome is not TrialOutcome.UNATTEMPTED for trial in selected)
             eligible = sum(
@@ -1202,6 +1244,9 @@ class ExperimentService:
             trial.failure_class in {"oracle_inconclusive", "oracle_receipt_error", "unattempted"}
             for trial in trials
         )
+        baseline_variant = plan.baseline_variant
+        if baseline_variant is None and plan.variants:
+            baseline_variant = plan.variants[0]
         if counts and all(
             item.unsupported + item.oracle_unsupported == item.attempted and item.attempted > 0
             for item in counts
@@ -1211,9 +1256,17 @@ class ExperimentService:
             disposition = ExperimentOutcomeDisposition.INSUFFICIENT_EVIDENCE
         elif not failures:
             disposition = ExperimentOutcomeDisposition.ALL_CLEAN
-        elif len(plan.variants) == 2 and failed_treatments == {plan.variants[0]}:
+        elif (
+            len(plan.variants) == 2
+            and baseline_variant is not None
+            and failed_treatments == {baseline_variant}
+        ):
             disposition = ExperimentOutcomeDisposition.BASE_ONLY_FAILURE
-        elif len(plan.variants) == 2 and failed_treatments == {plan.variants[1]}:
+        elif (
+            len(plan.variants) == 2
+            and baseline_variant is not None
+            and failed_treatments == {v for v in plan.variants if v != baseline_variant}
+        ):
             disposition = ExperimentOutcomeDisposition.CANDIDATE_ONLY_FAILURE
         else:
             disposition = ExperimentOutcomeDisposition.MIXED

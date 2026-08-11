@@ -322,8 +322,16 @@ latency_ms = 10
     assert len(result.trials) == 2
     assert all(trial.run_id is not None for trial in result.trials)
     assert len(leases) == 2
-    assert leases[0].treatments == []
-    assert leases[1].treatments[0]["toxic_type"] == "latency"
+    assert result.treatment_order is None
+    assert result.block_treatment_orders == tuple(
+        block.order for block in plan.experiment_plan.blocks
+    )
+    # Baseline must have no toxics; the latency treatment must have one.
+    baseline_lease = next(lease for lease in leases if lease.treatments == [])
+    treatment_lease = next(
+        lease for lease in leases if lease.treatments and lease is not baseline_lease
+    )
+    assert treatment_lease.treatments[0]["toxic_type"] == "latency"
     assert all(trial.trial_id in result.trial_artifacts for trial in result.trials)
 
     treatment_run = next(
@@ -342,7 +350,7 @@ latency_ms = 10
     )
     assert config_payload["tool"]["version"] == "2.12.0"
     assert config_payload["tool"]["sha256"] == "a" * 64
-    assert config_payload["observed"]["admin_port"] == 48002
+    assert config_payload["observed"]["admin_port"] in (48001, 48002)
     assert config_payload["observed"]["proxy_upstream"] == f"127.0.0.1:{upstream.server_port}"
     assert config_payload["observed"]["oracle"]["validation_status"] == "not_requested"
     endpoint = f"http://127.0.0.1:{upstream.server_port}"
@@ -363,3 +371,92 @@ latency_ms = 10
         not set(item).intersection({"cmdline", "environment", "cwd", "exe", "connections"})
         for item in snapshot_payload
     )
+
+
+@pytest.mark.anyio
+async def test_fault_plan_randomizes_treatment_order_across_blocks(
+    tmp_path: Path,
+) -> None:
+    """Regression: random_seed must permute the schedule so baseline is not always first.
+
+    Issue #286: Fault experiments always ran baseline first, confounding
+    treatment with execution order. The seed must now produce a different
+    schedule than the fixed declaration order.
+    """
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+
+[workloads.client]
+argv = ["python", "-c", "print(1)", "{endpoint}"]
+cwd = "."
+
+[workloads.client.parameters]
+endpoint = ["unused"]
+
+[fault_experiments.transport]
+workload = "client"
+endpoint_parameter = "endpoint"
+upstream_host = "127.0.0.1"
+upstream_port = 8080
+endpoint_template = "http://{host}:{port}"
+blocks = 2
+repetitions = 1
+random_seed = 42
+
+[fault_experiments.transport.scenarios.delay]
+type = "latency"
+latency_ms = 10
+
+[fault_experiments.transport.scenarios.timeout]
+type = "timeout"
+timeout_ms = 50
+"""
+    )
+    investigation = InvestigationService(workspace).create(
+        CreateInvestigationRequest(question="does transport latency change the outcome?")
+    )
+    tool_manager = _ToolManager(Path("/bin/true"))
+    plan = await FaultExperimentService(workspace, tool_manager=tool_manager).plan(
+        experiment_name="transport",
+        investigation_id=investigation.investigation_id,
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    # Baseline must not be first in every block (the old confounding bug).
+    first_treatments = [block.order[0] for block in plan.experiment_plan.blocks]
+    assert not all(t == "baseline" for t in first_treatments), (
+        "Baseline is always first — treatment is confounded with execution order."
+    )
+
+    # All declared treatments appear in each block (no drop).
+    for block in plan.experiment_plan.blocks:
+        assert set(block.order) == {"baseline", "delay", "timeout"}
+
+    # Reproducibility: same seed + same block gives the same order.
+    plan2 = await FaultExperimentService(
+        workspace, tool_manager=_ToolManager(Path("/bin/true"))
+    ).plan(
+        experiment_name="transport",
+        investigation_id=investigation.investigation_id,
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    assert [b.order for b in plan.experiment_plan.blocks] == [
+        b.order for b in plan2.experiment_plan.blocks
+    ]
+
+    # Different seed gives a different schedule.
+    (tmp_path / "flameox.toml").write_text(
+        (tmp_path / "flameox.toml").read_text().replace("random_seed = 42", "random_seed = 999")
+    )
+    plan_diff = await FaultExperimentService(
+        workspace, tool_manager=_ToolManager(Path("/bin/true"))
+    ).plan(
+        experiment_name="transport",
+        investigation_id=investigation.investigation_id,
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    assert [b.order for b in plan_diff.experiment_plan.blocks] != [
+        b.order for b in plan.experiment_plan.blocks
+    ]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import shutil
 import socket
 from collections.abc import Awaitable, Callable
@@ -105,12 +106,13 @@ class FaultExperimentPlan(ContractModel):
 
 
 class FaultExperimentResult(ContractModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 2
     result_id: str
     plan_id: str
     experiment: Experiment
     trials: tuple[Trial, ...]
-    treatment_order: tuple[str, ...]
+    treatment_order: tuple[str, ...] | None = None
+    block_treatment_orders: tuple[tuple[str, ...], ...] = ()
     trial_artifacts: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     corpus_commit_id: str
     limitations: tuple[str, ...] = ()
@@ -250,6 +252,9 @@ class FaultExperimentService:
         )
         blocks: list[ExperimentBlock] = []
         for block_number in range(1, config.blocks * config.repetitions + 1):
+            cell_treatments = list(treatments)
+            generator = random.Random(f"{config.random_seed}:{block_number}")
+            generator.shuffle(cell_treatments)
             cells = tuple(
                 ExperimentCell(
                     trial_id=digest_model(
@@ -260,12 +265,12 @@ class FaultExperimentService:
                     factors={"scenario": treatment},
                     parameters={},
                 )
-                for treatment in treatments
+                for treatment in cell_treatments
             )
             blocks.append(
                 ExperimentBlock(
                     block_id=f"fault-block-{block_number:04d}",
-                    order=treatments,
+                    order=tuple(cell_treatments),
                     cells=cells,
                 )
             )
@@ -511,7 +516,7 @@ class FaultExperimentService:
             plan_id=plan.plan_id,
             experiment=plan.experiment_plan.experiment,
             trials=tuple(trials),
-            treatment_order=plan.experiment_plan.variants,
+            block_treatment_orders=tuple(block.order for block in plan.experiment_plan.blocks),
             trial_artifacts={name: tuple(values) for name, values in artifact_ids.items()},
             corpus_commit_id=self.workspace.corpus.read_head().commit_id,
             limitations=(

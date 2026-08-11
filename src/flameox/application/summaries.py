@@ -4,7 +4,7 @@ import html
 import json
 import re
 from enum import StrEnum
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, TextIO, cast
 
 from pydantic import Field, JsonValue, model_validator
 
@@ -27,6 +27,23 @@ from flameox.domain import (
 )
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, JsonRecordStore, RunStore, Workspace
+
+_DISCARD_CHUNK_SIZE = 4096
+
+
+def _discard_rest_of_line(stream: TextIO) -> None:
+    """Discard the remainder of an overlong line without materializing it.
+
+    Instead of calling unbounded ``stream.readline()`` which loads the
+    entire remaining line into memory, read fixed-size chunks until a
+    newline or EOF is encountered.  Peak memory is bounded by
+    ``_DISCARD_CHUNK_SIZE``, not by the physical line length.
+    """
+    while True:
+        chunk = stream.readline(_DISCARD_CHUNK_SIZE)
+        if not chunk or chunk.endswith("\n"):
+            break
+
 
 _ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -566,7 +583,7 @@ class EvidenceSummaryService:
                     break
                 if len(line) == 201 and not line.endswith("\n"):
                     truncated = True
-                    stream.readline()
+                    _discard_rest_of_line(stream)
                 selected.append(_CONTROL.sub("", _ANSI_ESCAPE.sub("", line.rstrip("\r\n"))))
             if stream.readline(1):
                 truncated = True

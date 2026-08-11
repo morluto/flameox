@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -405,9 +406,14 @@ def _facets() -> tuple[_FacetGetter, ...]:
 
 
 def _normalize(value: object) -> str:
+    """Return a display string for a protocol facet value.
+
+    For dict values, use canonical JSON serialization (sorted keys) so that
+    keys/values containing commas or equals signs cannot produce colliding
+    normal forms. Plain scalar values use ``str()`` as before.
+    """
     if isinstance(value, dict):
-        items = sorted(value.items(), key=lambda item: item[0])
-        return ",".join(f"{k}={v}" for k, v in items)
+        return json.dumps(value, sort_keys=True, ensure_ascii=False)
     if isinstance(value, bool):
         return "true" if value else "false"
     if value is None:
@@ -429,6 +435,8 @@ def _identity_missing_fields(protocol: InferenceProtocolIdentity) -> dict[str, s
         missing["model.tokenizer_id"] = "tokenizer identity is unavailable"
     if protocol.model.tokenizer_revision is None:
         missing["model.tokenizer_revision"] = "tokenizer revision is unavailable"
+    if protocol.model.quantization is None:
+        missing["model.quantization"] = "effective model quantization is unavailable"
     if protocol.server.managed_server_command_digest is None:
         missing["server.managed_server_command_digest"] = (
             "managed server and cache configuration provenance is unavailable"
