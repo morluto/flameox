@@ -106,12 +106,13 @@ class FaultExperimentPlan(ContractModel):
 
 
 class FaultExperimentResult(ContractModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 2
     result_id: str
     plan_id: str
     experiment: Experiment
     trials: tuple[Trial, ...]
-    treatment_order: tuple[str, ...]
+    treatment_order: tuple[str, ...] | None = None
+    block_treatment_orders: tuple[tuple[str, ...], ...] = ()
     trial_artifacts: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     corpus_commit_id: str
     limitations: tuple[str, ...] = ()
@@ -515,7 +516,7 @@ class FaultExperimentService:
             plan_id=plan.plan_id,
             experiment=plan.experiment_plan.experiment,
             trials=tuple(trials),
-            treatment_order=plan.experiment_plan.variants,
+            block_treatment_orders=tuple(block.order for block in plan.experiment_plan.blocks),
             trial_artifacts={name: tuple(values) for name, values in artifact_ids.items()},
             corpus_commit_id=self.workspace.corpus.read_head().commit_id,
             limitations=(

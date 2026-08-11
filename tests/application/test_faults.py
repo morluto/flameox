@@ -322,6 +322,10 @@ latency_ms = 10
     assert len(result.trials) == 2
     assert all(trial.run_id is not None for trial in result.trials)
     assert len(leases) == 2
+    assert result.treatment_order is None
+    assert result.block_treatment_orders == tuple(
+        block.order for block in plan.experiment_plan.blocks
+    )
     # Baseline must have no toxics; the latency treatment must have one.
     baseline_lease = next(lease for lease in leases if lease.treatments == [])
     treatment_lease = next(
