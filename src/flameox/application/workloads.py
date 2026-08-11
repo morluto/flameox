@@ -320,7 +320,7 @@ class _ScaledLegacyExperimentConfig(_LegacyExperimentConfig):
     @field_validator("scaling_values")
     @classmethod
     def scaling_values_are_unique(cls, value: tuple[Scalar, ...]) -> tuple[Scalar, ...]:
-        if len(set(value)) != len(value):
+        if len(scalar_identity_set(list(value))) != len(value):
             raise ValueError("experiment scaling values must be unique")
         return value
 

@@ -187,6 +187,30 @@ def test_schema_one_legacy_experiment_fields_remain_loadable() -> None:
     assert experiment.scaling_values == (1, 2)
 
 
+def test_legacy_scaled_experiment_accepts_distinct_typed_scaling_values() -> None:
+    project = ProjectConfig.model_validate(
+        {
+            "schema_version": 1,
+            "workloads": {
+                "scan": {
+                    "argv": ["python", "-c", "print('{length}')"],
+                    "parameters": {"length": [1, 1.0]},
+                }
+            },
+            "experiments": {
+                "scan": {
+                    "workload": "scan",
+                    "variants": ["baseline", "candidate"],
+                    "scaling_parameter": "length",
+                    "scaling_values": [1, 1.0],
+                }
+            },
+        }
+    )
+
+    assert project.experiments["scan"].scaling_values == (1, 1.0)
+
+
 @pytest.mark.parametrize(
     "shape",
     (
