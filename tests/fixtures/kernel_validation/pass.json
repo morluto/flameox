@@ -1,0 +1,57 @@
+{
+  "schema_version": "flameox.kernel-validation.v1",
+  "producer": "kernel-tests",
+  "producer_version": "1.2.3",
+  "reference": {
+    "name": "torch.reference",
+    "version": "2.9",
+    "identity": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "status": "pass",
+  "coverage_complete": true,
+  "cases": [
+    {
+      "case_id": "square-fp32-128",
+      "dimensions": {
+        "size": 128,
+        "transposed": false
+      },
+      "inputs": {
+        "left": {
+          "dtype": "float32",
+          "shape": [128, 128],
+          "role": "input"
+        }
+      },
+      "seed": 42,
+      "device": "cuda:0-sm86",
+      "status": "pass",
+      "outputs": [
+        {
+          "name": "result",
+          "dtype": "float32",
+          "shape": [128, 128],
+          "status": "pass",
+          "metrics": [
+            {
+              "name": "max_abs_error",
+              "value": 0.0001,
+              "comparator": "<=",
+              "threshold": 0.001,
+              "unit": "absolute",
+              "status": "pass"
+            },
+            {
+              "name": "cosine_similarity",
+              "value": 0.9999,
+              "comparator": ">=",
+              "threshold": 0.999,
+              "unit": "ratio",
+              "status": "pass"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

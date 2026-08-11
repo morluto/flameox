@@ -1,0 +1,47 @@
+class Action:
+    def name(self):
+        return "bounded_action"
+
+    def workload_type(self):
+        return None
+
+    def metric_names(self):
+        return ()
+
+    def rule_results_as_dicts(self):
+        return ()
+
+    def source_files(self):
+        return {}
+
+    def source_markers(self):
+        return ()
+
+
+class Range:
+    def __init__(self, count):
+        self.count = count
+
+    def name(self):
+        return "range"
+
+    def num_actions(self):
+        return self.count
+
+    def action_by_idx(self, index):
+        return Action()
+
+
+class Report:
+    def get_version(self):
+        return "2099.1"
+
+    def num_ranges(self):
+        return 2
+
+    def range_by_idx(self, index):
+        return Range(2 if index == 0 else 1)
+
+
+def load_report(path):
+    return Report()

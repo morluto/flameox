@@ -1,10 +1,11 @@
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
 
-from flameox.adapters.nsight_compute import NsightComputeExtractor
+from flameox.adapters.nsight_compute import NsightComputeExtractor, find_ncu_report_interface
 from flameox.application import (
     CapabilityService,
     CaptureService,
@@ -62,11 +63,13 @@ timeout_seconds = 120
 @pytest.mark.optional
 @pytest.mark.requires_ncu
 def test_installed_official_interface_extracts_bundled_sample(tmp_path: Path) -> None:
-    sample = Path(
-        "/opt/nvidia/nsight-compute/2026.2.1/extras/samples/instructionMix/sobelFloat.ncu-rep"
-    )
+    executable = shutil.which("ncu")
+    assert executable is not None
+    interface = find_ncu_report_interface(executable=Path(executable))
+    assert interface is not None
+    sample = interface.parent.parent / "samples" / "instructionMix" / "sobelFloat.ncu-rep"
     if not sample.is_file():
-        pytest.skip("installed Nsight Compute sample report is unavailable")
+        pytest.skip(f"selected Nsight Compute installation has no bundled sample at {sample}")
     workspace = Workspace.initialize(tmp_path)
     run_id = (
         ImportService(workspace)
@@ -75,7 +78,6 @@ def test_installed_official_interface_extracts_bundled_sample(tmp_path: Path) ->
                 path=sample,
                 kind=ArtifactKind.KERNEL_PROFILE,
                 producer="nsight.compute",
-                producer_version="2026.2.1",
                 allow_external_path=True,
             )
         )
@@ -84,7 +86,7 @@ def test_installed_official_interface_extracts_bundled_sample(tmp_path: Path) ->
 
     result = NsightComputeExtractor(workspace).extract(run_id)
 
-    assert result.report_version == "2026.2.1"
+    assert result.report_version
     assert result.action_count >= 1
     assert result.metric_count >= 1
 

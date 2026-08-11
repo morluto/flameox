@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -280,42 +281,10 @@ async def test_mcp_import_list_get_and_resource_workflow(tmp_path: Path) -> None
 async def test_mcp_kernel_validation_extraction_reports_progress_and_resources(
     tmp_path: Path,
 ) -> None:
-    validation = {
-        "schema_version": "flameox.kernel-validation.v1",
-        "producer": "kernel-tests",
-        "producer_version": "1.0",
-        "reference": {"name": "cpu-reference", "identity": "reference-v1"},
-        "status": "pass",
-        "coverage_complete": True,
-        "cases": [
-            {
-                "case_id": "vector-add-fp32",
-                "dimensions": {"elements": 32},
-                "inputs": {"left": {"dtype": "float32", "shape": [32], "role": "input"}},
-                "device": "cuda:0-sm86",
-                "status": "pass",
-                "outputs": [
-                    {
-                        "name": "result",
-                        "dtype": "float32",
-                        "shape": [32],
-                        "status": "pass",
-                        "metrics": [
-                            {
-                                "name": "max_abs_error",
-                                "value": 0.0,
-                                "comparator": "<=",
-                                "threshold": 1e-6,
-                                "unit": "absolute",
-                                "status": "pass",
-                            }
-                        ],
-                    }
-                ],
-            }
-        ],
-    }
-    (tmp_path / "validation.json").write_text(json.dumps(validation))
+    shutil.copyfile(
+        Path(__file__).parents[1] / "fixtures" / "kernel_validation" / "pass.json",
+        tmp_path / "validation.json",
+    )
     Workspace.initialize(tmp_path)
     recorded_progress: list[tuple[float, float | None, str | None]] = []
 

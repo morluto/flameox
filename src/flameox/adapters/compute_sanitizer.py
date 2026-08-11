@@ -89,7 +89,7 @@ def compute_sanitizer_compatibility_limitations(
         )
     normalized = producer_version.strip()
     if normalized.casefold().startswith("version "):
-        normalized = normalized.split(maxsplit=1)[1]
+        normalized = normalized.split(maxsplit=2)[1]
     try:
         observed_major = Version(normalized).major
     except InvalidVersion:

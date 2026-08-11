@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Annotated, Final, Literal, cast
 
 from pydantic import Field, model_validator
@@ -102,13 +102,6 @@ class KernelBuildManifestV1(ContractModel):
         if self.outcome == "failed" and not any(stage.status == "failed" for stage in self.stages):
             raise ValueError("a failed build requires a failed stage")
         return self
-
-    def bundle_paths(self, manifest_path: Path) -> tuple[Path, ...]:
-        return tuple(
-            manifest_path.parent / stage.artifact.path
-            for stage in self.stages
-            if stage.artifact is not None
-        )
 
     def pipeline_request(
         self,

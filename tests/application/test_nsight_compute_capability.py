@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +43,22 @@ class _NcuProbeBroker(SubprocessBroker):
         )
 
 
+def _install_ncu_with_report_interface(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installation = project / "nsight-compute"
+    executable = installation / "bin" / "ncu"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    interface = installation / "extras" / "python" / "ncu_report.py"
+    interface.parent.mkdir(parents=True)
+    interface.write_text("# official interface location fixture\n")
+    monkeypatch.setenv("PATH", f"{executable.parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr("flameox.application.capabilities.os.geteuid", lambda: 0)
+
+
 @pytest.mark.anyio
 async def test_ncu_probe_maps_counter_denial_to_permission_required(
     tmp_path: Path,
@@ -49,16 +67,7 @@ async def test_ncu_probe_maps_counter_denial_to_permission_required(
     workspace = Workspace.initialize(tmp_path)
     broker = _NcuProbeBroker()
     service = CapabilityService(workspace, broker=broker)
-    monkeypatch.setattr(
-        service,
-        "_resolved_executable",
-        lambda adapter, executable: "/usr/bin/ncu" if adapter == "nsight.compute" else None,
-    )
-    monkeypatch.setattr(
-        "flameox.application.capabilities.find_ncu_report_interface",
-        lambda **_: Path("/opt/nvidia/nsight-compute/extras/python/ncu_report.py"),
-    )
-    monkeypatch.setattr(service, "_nvidia_counter_access_restriction", lambda: None)
+    _install_ncu_with_report_interface(tmp_path, monkeypatch)
 
     report = await service.probe("nsight.compute")
 
@@ -89,16 +98,7 @@ async def test_ncu_probe_reports_non_permission_failure_as_degraded(
         workspace,
         broker=_NcuProbeBroker(probe_stderr=b"==ERROR== CUDA driver initialization failed\n"),
     )
-    monkeypatch.setattr(
-        service,
-        "_resolved_executable",
-        lambda adapter, executable: "/usr/bin/ncu" if adapter == "nsight.compute" else None,
-    )
-    monkeypatch.setattr(
-        "flameox.application.capabilities.find_ncu_report_interface",
-        lambda **_: Path("/opt/nvidia/nsight-compute/extras/python/ncu_report.py"),
-    )
-    monkeypatch.setattr(service, "_nvidia_counter_access_restriction", lambda: None)
+    _install_ncu_with_report_interface(tmp_path, monkeypatch)
 
     report = await service.probe("nsight.compute")
 

@@ -4,7 +4,7 @@ import json
 from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -20,57 +20,11 @@ from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import Workspace
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+VALIDATION_FIXTURE = PROJECT_ROOT / "tests" / "fixtures" / "kernel_validation" / "pass.json"
 
 
 def _document() -> dict[str, Any]:
-    return {
-        "schema_version": "flameox.kernel-validation.v1",
-        "producer": "kernel-tests",
-        "producer_version": "1.2.3",
-        "reference": {
-            "name": "torch.reference",
-            "version": "2.9",
-            "identity": "sha256:" + "a" * 64,
-        },
-        "status": "pass",
-        "coverage_complete": True,
-        "cases": [
-            {
-                "case_id": "square-fp32-128",
-                "dimensions": {"size": 128, "transposed": False},
-                "inputs": {"left": {"dtype": "float32", "shape": [128, 128], "role": "input"}},
-                "seed": 42,
-                "device": "cuda:0-sm86",
-                "status": "pass",
-                "outputs": [
-                    {
-                        "name": "result",
-                        "dtype": "float32",
-                        "shape": [128, 128],
-                        "status": "pass",
-                        "metrics": [
-                            {
-                                "name": "max_abs_error",
-                                "value": 0.0001,
-                                "comparator": "<=",
-                                "threshold": 0.001,
-                                "unit": "absolute",
-                                "status": "pass",
-                            },
-                            {
-                                "name": "cosine_similarity",
-                                "value": 0.9999,
-                                "comparator": ">=",
-                                "threshold": 0.999,
-                                "unit": "ratio",
-                                "status": "pass",
-                            },
-                        ],
-                    }
-                ],
-            }
-        ],
-    }
+    return cast(dict[str, Any], json.loads(VALIDATION_FIXTURE.read_text(encoding="utf-8")))
 
 
 def _import(workspace: Workspace, path: Path) -> str:
@@ -174,23 +128,31 @@ def test_kernel_validation_failed_output_requires_bounded_examples() -> None:
     assert KernelValidationV1.model_validate(payload).status == "fail"
 
 
-def test_kernel_validation_represents_inconclusive_metric_with_limitation() -> None:
+@pytest.mark.parametrize("metric_status", ("inconclusive", "unsupported"))
+def test_kernel_validation_surfaces_nonpassing_metric_limitation(
+    tmp_path: Path,
+    metric_status: str,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
     payload = _document()
     metric = payload["cases"][0]["outputs"][0]["metrics"][0]
     metric.update(
         value=None,
         comparator=None,
         threshold=None,
-        status="inconclusive",
-        limitation="Reference result was unavailable.",
+        status=metric_status,
+        limitation=f"Metric was {metric_status} for this device.",
     )
     payload["cases"][0]["outputs"][0].update(status="inconclusive")
     payload["cases"][0].update(status="inconclusive")
     payload.update(status="inconclusive")
+    source = tmp_path / "inconclusive.json"
+    source.write_text(json.dumps(payload))
 
-    document = KernelValidationV1.model_validate(payload)
+    result = KernelValidationExtractor(workspace).extract(_import(workspace, source))
 
-    assert document.cases[0].outputs[0].metrics[0].status == "inconclusive"
+    assert result.status == "inconclusive"
+    assert f"Metric was {metric_status} for this device." in result.limitations
 
 
 @pytest.mark.parametrize(
@@ -248,28 +210,6 @@ def test_kernel_validation_extractor_rejects_json_type_coercion(
     assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
 
 
-def test_kernel_validation_result_surfaces_nested_limitations(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    payload = _document()
-    metric = payload["cases"][0]["outputs"][0]["metrics"][0]
-    metric.update(
-        value=None,
-        comparator=None,
-        threshold=None,
-        status="unsupported",
-        limitation="Metric unavailable on the selected device.",
-    )
-    payload["cases"][0]["outputs"][0].update(status="inconclusive")
-    payload["cases"][0].update(status="inconclusive")
-    payload.update(status="inconclusive")
-    source = tmp_path / "limited.json"
-    source.write_text(json.dumps(payload))
-
-    result = KernelValidationExtractor(workspace).extract(_import(workspace, source))
-
-    assert result.limitations == ("Metric unavailable on the selected device.",)
-
-
 def test_kernel_validation_result_bounds_nested_limitation_summary(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     payload = _document()
@@ -287,6 +227,7 @@ def test_kernel_validation_result_bounds_nested_limitation_summary(tmp_path: Pat
     result = KernelValidationExtractor(workspace).extract(_import(workspace, source))
 
     assert len(result.limitations) == 100
+    assert result.limitations[0] == "limitation-0"
     assert result.limitations[-1] == (
         "Additional nested limitations were omitted from this bounded summary."
     )
