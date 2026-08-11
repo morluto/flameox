@@ -62,6 +62,19 @@ def test_binary_partitioning_carries_its_required_chunk_size() -> None:
     assert result.minimality == "one_minimal"
 
 
+def test_predicate_results_are_parsed_before_enum_identity_checks() -> None:
+    result = NativeDdminReducer(
+        StructuredPartitioning(partitioner=NativeReductionPartitioner.TEXT_LINES)
+    ).reduce(
+        b"KEEP\ndiscard\n",
+        lambda payload: "interesting" if b"KEEP" in payload else "not_interesting",
+    )
+
+    assert result.final_payload == b"KEEP\n"
+    assert result.final_revalidation is NativePredicateClassification.INTERESTING
+    assert result.accepted_best_payloads == (b"KEEP\n",)
+
+
 @settings(max_examples=20, deadline=None)
 @given(
     st.lists(

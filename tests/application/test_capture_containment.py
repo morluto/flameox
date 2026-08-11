@@ -13,6 +13,7 @@ from flameox.application import (
     WorkloadService,
 )
 from flameox.catalog import Catalog
+from flameox.config import ContainmentPolicy
 from flameox.domain import (
     DomainError,
     ErrorCode,
@@ -20,6 +21,12 @@ from flameox.domain import (
 )
 from flameox.storage import RunStore, Workspace
 from tests.support.capture import disable_containment, write_workload
+
+
+def test_approved_agent_parses_containment_mode_before_policy_decision() -> None:
+    configured_mode = ContainmentPolicy.REQUIRED_FOR_MCP.value
+
+    assert ExecutionPolicy.APPROVED_AGENT.requires_containment(configured_mode) is True
 
 
 @pytest.mark.parametrize(

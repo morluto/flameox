@@ -168,7 +168,7 @@ class NativeDdminReducer:
     def reduce(  # noqa: C901 - deterministic ddmin control flow is intentionally explicit
         self,
         original: bytes,
-        predicate: Callable[[bytes], NativePredicateClassification],
+        predicate: Callable[[bytes], NativePredicateClassification | str],
         *,
         failure_detail: Callable[[], str | None] | None = None,
         on_best: Callable[[bytes], None] | None = None,
@@ -192,6 +192,9 @@ class NativeDdminReducer:
         accepted_best_payloads: list[bytes] = []
         started = time.monotonic()
 
+        def evaluate(payload: bytes) -> NativePredicateClassification:
+            return NativePredicateClassification(predicate(payload))
+
         def classify(
             payload: bytes, requested: tuple[str, ...], removed: tuple[str, ...]
         ) -> NativePredicateClassification:
@@ -210,7 +213,7 @@ class NativeDdminReducer:
                 outcomes_list_values: list[NativePredicateClassification] = []
                 failures: list[str] = []
                 for _ in range(self.limits.repetitions):
-                    outcomes_list_values.append(predicate(payload))
+                    outcomes_list_values.append(evaluate(payload))
                     if failure_detail is not None and (detail := failure_detail()) is not None:
                         failures.append(detail)
                 outcomes_list = tuple(outcomes_list_values)
@@ -361,7 +364,7 @@ class NativeDdminReducer:
                     break
                 granularity = min(len(current), granularity * 2)
         final = rebuild(current)
-        final_classification = _collapse(predicate(final) for _ in range(self.limits.repetitions))
+        final_classification = _collapse(evaluate(final) for _ in range(self.limits.repetitions))
         if final_classification is not NativePredicateClassification.INTERESTING:
             return self._result(
                 NativeReductionDisposition.INCONCLUSIVE,
