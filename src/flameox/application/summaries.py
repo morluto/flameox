@@ -4,7 +4,7 @@ import html
 import json
 import re
 from enum import StrEnum
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, TextIO, cast
 
 from pydantic import Field, JsonValue, model_validator
 
@@ -31,7 +31,7 @@ from flameox.storage import ArtifactStore, JsonRecordStore, RunStore, Workspace
 _DISCARD_CHUNK_SIZE = 4096
 
 
-def _discard_rest_of_line(stream) -> None:
+def _discard_rest_of_line(stream: TextIO) -> None:
     """Discard the remainder of an overlong line without materializing it.
 
     Instead of calling unbounded ``stream.readline()`` which loads the

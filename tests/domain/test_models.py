@@ -38,6 +38,7 @@ from flameox.domain.models import (
     ExecutionRunManifest,
     ImportRunManifest,
     Integrity,
+    OracleStatus,
     ScalarOracleReceiptValue,
     SucceededTrial,
     parse_capture_plan,
@@ -585,7 +586,7 @@ def test_oracle_receipt_rejects_pass_with_error_exceeding_tolerance() -> None:
     with pytest.raises(ValidationError, match="contradicts evidence"):
         OracleReceiptV1(
             schema_version="flameox.oracle-receipt.v1",
-            status="pass",
+            status=OracleStatus.PASS,
             reason="test-ok",
             absolute_error=100.0,
             tolerance=OracleTolerance(absolute=0.001),
@@ -599,7 +600,7 @@ def test_oracle_receipt_rejects_fail_with_error_within_tolerance() -> None:
     with pytest.raises(ValidationError, match="contradicts evidence"):
         OracleReceiptV1(
             schema_version="flameox.oracle-receipt.v1",
-            status="fail",
+            status=OracleStatus.FAIL,
             reason="test-bad",
             absolute_error=0.0,
             tolerance=OracleTolerance(absolute=1.0),
@@ -612,12 +613,12 @@ def test_oracle_receipt_accepts_pass_with_error_within_tolerance() -> None:
 
     receipt = OracleReceiptV1(
         schema_version="flameox.oracle-receipt.v1",
-        status="pass",
+        status=OracleStatus.PASS,
         reason="test-ok",
         absolute_error=0.001,
         tolerance=OracleTolerance(absolute=0.01),
     )
-    assert receipt.status == "pass"
+    assert receipt.status == OracleStatus.PASS
 
 
 def test_oracle_receipt_accepts_pass_without_quantitative_evidence() -> None:
@@ -626,7 +627,7 @@ def test_oracle_receipt_accepts_pass_without_quantitative_evidence() -> None:
 
     receipt = OracleReceiptV1(
         schema_version="flameox.oracle-receipt.v1",
-        status="pass",
+        status=OracleStatus.PASS,
         reason="test-ok",
     )
-    assert receipt.status == "pass"
+    assert receipt.status == OracleStatus.PASS

@@ -74,6 +74,7 @@ dev = [
     "pyarrow-stubs>=20.0.0.20260625",
     "ruff>=0.11",
     "scipy-stubs>=1.18.0.1,<1.19",
+    "twine>=6.1",
     "vulture>=2.14",
 ]
 
