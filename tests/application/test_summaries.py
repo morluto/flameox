@@ -182,3 +182,26 @@ def test_trial_failure_class_fallback_for_null_column_value() -> None:
 
     fallback = TrialFailureClass(str(None) if None is not None else TrialFailureClass.NONE)
     assert fallback is TrialFailureClass.NONE
+
+
+def test_excerpt_discards_overlong_line_in_bounded_chunks() -> None:
+    """Overlong lines must not be materialized during excerpt extraction.
+
+    Regression for #291: ``_excerpt()`` called unbounded ``stream.readline()``
+    to discard the remainder of a line longer than 200 characters, materializing
+    a multi-gigabyte string in memory. The fix uses bounded ``_DISCARD_CHUNK_SIZE``
+    chunks instead.
+    """
+    import io
+
+    from flameox.application.summaries import _discard_rest_of_line
+
+    long_line = "X" * 10_000
+    content = f"{long_line}\nshort line\n"
+    stream = io.StringIO(content)
+    line = stream.readline(201)
+    assert len(line) == 201
+    assert not line.endswith("\n")
+    _discard_rest_of_line(stream)
+    next_line = stream.readline()
+    assert next_line == "short line\n"
