@@ -40,7 +40,7 @@ async def test_semantic_matrix_preserves_typed_categorical_evidence(tmp_path: Pa
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    result = await service.run(plan.plan_id)
+    result = await service.run(plan.plan_token)
 
     assert len(result.trials) == 8
     assert {trial.factors["treatment"] for trial in result.trials} == {

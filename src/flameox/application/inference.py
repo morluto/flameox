@@ -17,9 +17,9 @@ inputs.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
+import secrets
 import shutil
 import time
 from collections.abc import Mapping
@@ -109,7 +109,7 @@ from flameox.execution import (
     SubprocessBroker,
 )
 from flameox.models import ContractModel
-from flameox.storage import ArtifactStore, RunStore, Workspace
+from flameox.storage import ArtifactStore, AuthorizedPlanStore, RunStore, Workspace
 
 _PROVIDER_TOOL: dict[
     InferenceScenarioProvider,
@@ -289,6 +289,7 @@ class _InferenceReplayPlan(ContractModel):
 
     schema_version: Literal[1] = 1
     plan_id: str
+    plan_token: str = ""
     scenario_name: str
     server_name: str
     server_mode: InferenceServerMode
@@ -480,6 +481,11 @@ class InferenceReplayService:
         self.publisher = GenerationPublisher(workspace)
         self.broker = broker or SubprocessBroker()
         self.probe_timeout_seconds = probe_timeout_seconds
+        self.plans = AuthorizedPlanStore(
+            workspace,
+            family="inference_replay",
+            model=_INFERENCE_REPLAY_PLAN_ADAPTER,
+        )
 
     def plan(
         self,
@@ -563,9 +569,10 @@ class InferenceReplayService:
                 remediation=("Plan the scenario again and review the replacement plan.",),
                 details={"expected_plan_id": expected_plan_id, "actual_plan_id": plan_id},
             )
-        return parse_inference_replay_plan(
+        plan = parse_inference_replay_plan(
             dict(
                 plan_id=plan_id,
+                plan_token=secrets.token_hex(32),
                 scenario_name=scenario_name,
                 server_name=scenario.server,
                 provider=scenario.provider,
@@ -610,9 +617,22 @@ class InferenceReplayService:
                 configuration_id=configuration_id,
             )
         )
+        self.plans.issue(
+            plan.plan_token,
+            plan.plan_id,
+            plan,
+            expires_at=plan.deadline_at,
+        )
+        return plan
 
-    async def run(self, plan: InferenceReplayPlan) -> InferenceReplayResult:
-        """Execute a validated plan through the canonical subprocess broker."""
+    async def run(
+        self,
+        plan_token: str,
+        *,
+        expected_plan_id: str | None = None,
+    ) -> InferenceReplayResult:
+        """Consume and execute one server-owned replay intent."""
+        plan = self.plans.consume(plan_token, expected_digest=expected_plan_id)
         self._validate_plan(plan)
         output_path = Path(plan.output_path or self._output_path(plan.scenario_name))
         environment = await self._managed_environment(plan)
@@ -731,8 +751,14 @@ class InferenceReplayService:
             oracle,
         )
 
-    def run_sync(self, plan: InferenceReplayPlan) -> InferenceReplayResult:
+    def run_sync(
+        self,
+        plan_token: str,
+        *,
+        expected_plan_id: str | None = None,
+    ) -> InferenceReplayResult:
         """Synchronous wrapper around :meth:`run` for non-async callers."""
+        plan = self.plans.consume(plan_token, expected_digest=expected_plan_id)
         self._validate_plan(plan)
         output_path = Path(plan.output_path or self._output_path(plan.scenario_name))
         run, environment, source_state = self._start_run(plan)
@@ -1146,9 +1172,15 @@ class InferenceReplayService:
     def _server_tool_identity(self, server: InferenceServerConfig) -> tuple[str | None, str | None]:
         if not isinstance(server, _ManagedInferenceServerConfig):
             return None, None
-        command = self.workloads.resolve(server.workload).command
-        executable = self._resolve_server_executable(command)
-        executable_digest = self._executable_digest(executable)
+        workload = self.workloads.resolve(server.workload)
+        binding = workload.executable_binding
+        if binding is None:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                "A managed inference workload is missing its executable binding.",
+            )
+        executable = binding.canonical_target
+        executable_digest = binding.identity.sha256
         discovery = (
             discover_inference_tool(InferenceTool.VLLM)
             if server.provider is InferenceServerProvider.VLLM
@@ -1162,30 +1194,6 @@ class InferenceReplayService:
             else None
         )
         return executable_digest, version
-
-    @staticmethod
-    def _resolve_server_executable(command: CommandSpec) -> Path:
-        candidate = Path(command.argv[0])
-        if candidate.is_absolute() or candidate.parent != Path("."):
-            return (
-                candidate if candidate.is_absolute() else (Path(command.cwd) / candidate).resolve()
-            )
-        environment = {**os.environ, **command.env_overrides}
-        located = shutil.which(command.argv[0], path=environment.get("PATH"))
-        return Path(located).resolve() if located is not None else candidate
-
-    @staticmethod
-    def _executable_digest(path: Path) -> str | None:
-        if not path.is_file():
-            return None
-        digest = hashlib.sha256()
-        try:
-            with path.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-        except OSError:
-            return None
-        return f"sha256:{digest.hexdigest()}"
 
     def _validate_plan(self, plan: InferenceReplayPlan) -> None:
         project = self.workloads.load()

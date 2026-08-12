@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -16,6 +17,7 @@ from pydantic import BaseModel
 
 from flameox.atomic import fsync_directory
 from flameox.domain.errors import DomainError, ErrorCode
+from flameox.domain.models import RunManifest, parse_run_manifest_json
 from flameox.evidence.schemas import SCHEMA_MAJOR, SCHEMA_MINOR, schema_for, table_names
 from flameox.observability import OperationLogger, elapsed_ms
 from flameox.storage.corpus import CorpusCommit, GenerationManifest
@@ -54,14 +56,26 @@ def _duckdb_type(data_type: pa.DataType) -> str:
     raise TypeError(f"Unsupported Arrow type for an empty DuckDB view: {data_type}")
 
 
+@dataclass(frozen=True, slots=True)
+class SnapshotHandle:
+    """An immutable corpus identity acquired once at an analysis boundary."""
+
+    commit: CorpusCommit
+
+    @property
+    def commit_id(self) -> str:
+        return self.commit.commit_id
+
+
 class Snapshot:
     def __init__(
         self,
         *,
-        commit: CorpusCommit,
+        handle: SnapshotHandle,
         connection: duckdb.DuckDBPyConnection,
     ) -> None:
-        self.commit = commit
+        self.handle = handle
+        self.commit = handle.commit
         self.connection = connection
 
     def execute(
@@ -73,6 +87,33 @@ class Snapshot:
 
     def interrupt(self) -> None:
         self.connection.interrupt()
+
+    def run(self, run_id: str) -> RunManifest:
+        row = self.execute(
+            "SELECT manifest_json FROM runs WHERE run_id = ? ORDER BY published_at DESC LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise DomainError(
+                ErrorCode.RUN_NOT_FOUND,
+                f"Run {run_id!r} is absent from snapshot {self.handle.commit_id!r}.",
+                details={"missing_entity": "run", "corpus_commit_id": self.handle.commit_id},
+            )
+        if not isinstance(row[0], str):
+            raise DomainError(
+                ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
+                "The pinned run row predates snapshot-contained run manifests.",
+                run_id=run_id,
+                remediation=("Republish or re-import the run before analyzing it.",),
+            )
+        try:
+            return parse_run_manifest_json(row[0])
+        except ValueError as exc:
+            raise DomainError(
+                ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
+                "The pinned snapshot contains an invalid run manifest.",
+                run_id=run_id,
+            ) from exc
 
 
 class _CancelledBeforeQuery(Exception):
@@ -161,13 +202,22 @@ class Catalog:
             lock_wait_ms=lock_wait_ms,
         )
 
-    @contextmanager
-    def open_snapshot(self, commit_id: str | None = None) -> Iterator[Snapshot]:
+    def pin(self, commit_id: str | None = None) -> SnapshotHandle:
         commit = (
             self.workspace.corpus.read_head()
             if commit_id is None
             else self.workspace.corpus.read_commit(commit_id)
         )
+        return SnapshotHandle(commit=commit)
+
+    @contextmanager
+    def open_snapshot(
+        self,
+        handle: SnapshotHandle | str | None = None,
+    ) -> Iterator[Snapshot]:
+        if not isinstance(handle, SnapshotHandle):
+            handle = self.pin(handle)
+        commit = handle.commit
         with (
             self.workspace.retention_locked(shared=True),
             self.workspace.catalog_locked(shared=True),
@@ -186,7 +236,7 @@ class Catalog:
                 inventory = self._inventory(commit)
                 self._configure_connection(connection)
                 self._create_snapshot_views(connection, inventory)
-                yield Snapshot(commit=commit, connection=connection)
+                yield Snapshot(handle=handle, connection=connection)
             finally:
                 connection.close()
 
@@ -194,19 +244,17 @@ class Catalog:
         self,
         operation: Callable[[Snapshot], T],
         *,
-        commit_id: str | None = None,
+        handle: SnapshotHandle | None = None,
         cleanup_timeout_seconds: float = 5,
         query_name: str | None = None,
     ) -> T:
-        pinned_commit_id = (
-            self.workspace.corpus.read_head().commit_id if commit_id is None else commit_id
-        )
+        pinned = handle or self.pin()
         cancellation_requested = threading.Event()
         holder_lock = threading.Lock()
         active_snapshot: list[Snapshot] = []
 
         def run() -> T:
-            with self.open_snapshot(pinned_commit_id) as snapshot:
+            with self.open_snapshot(pinned) as snapshot:
                 with holder_lock:
                     active_snapshot.append(snapshot)
                 try:

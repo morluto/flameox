@@ -115,7 +115,7 @@ async def test_triton_compiler_capture_emits_manifest_with_native_artifacts(
         adapter="triton.compiler",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
     assert result.run.execution_status is ExecutionStatus.SUCCEEDED
     assert result.run.capture_status is CaptureStatus.REGISTERED
     manifest_reg = next(reg for reg in result.run.artifacts if reg.role == "kernel_build_manifest")
@@ -174,7 +174,7 @@ async def test_triton_compiler_capture_preserves_manifest_on_nonzero_exit(
         adapter="triton.compiler",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
     assert result.run.execution_status is ExecutionStatus.FAILED
     assert result.run.capture_status is CaptureStatus.REGISTERED
     manifest_regs = [reg for reg in result.run.artifacts if reg.role == "kernel_build_manifest"]
@@ -206,7 +206,7 @@ sys.exit(0)
         adapter_options={"keep_allowlist": ["ir", "ptx"]},
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
     assert result.run.execution_status is ExecutionStatus.SUCCEEDED
     assert result.run.capture_status is CaptureStatus.REGISTERED
     native_regs = [reg for reg in result.run.artifacts if reg.role.startswith("compiler_stage")]

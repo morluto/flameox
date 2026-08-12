@@ -170,7 +170,8 @@ class GarbageCollector:
         root_commit_ids = {head.commit_id}
         referenced_generations: set[str] = set()
         referenced_artifacts: set[str] = set()
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             root_commit_ids.update(
                 str(row[0])
                 for row in snapshot.execute(
@@ -204,7 +205,8 @@ class GarbageCollector:
                 )
                 referenced_generations.add(manifest.generation_id)
                 referenced_artifacts.update(manifest.input_artifact_ids)
-            with Catalog(self.workspace).open_snapshot(commit_id) as snapshot:
+            catalog = Catalog(self.workspace)
+            with catalog.open_snapshot(catalog.pin(commit_id)) as snapshot:
                 referenced_artifacts.update(
                     str(row[0])
                     for row in snapshot.execute(

@@ -10,8 +10,14 @@ from typing import Annotated, Any, Literal, TypeVar, cast
 from pydantic import ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
 from flameox.atomic import atomic_write_json
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import DomainError, ErrorCode
+from flameox.domain.executables import (
+    ExecutableResolutionRequest,
+    ExecutableTrustPolicy,
+)
 from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
+from flameox.filesystem import BoundedFileSystem
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
@@ -46,12 +52,20 @@ type WorkerResponse = Annotated[
 _WORKER_RESPONSE: TypeAdapter[WorkerResponse] = TypeAdapter(WorkerResponse)
 
 
-class ArtifactWorker:
-    """Run an artifact-facing adapter behind the canonical subprocess boundary."""
+class IsolatedWorkerHarness:
+    """Own the one bounded request/response protocol for isolated native readers."""
 
     def __init__(self, workspace: Workspace, *, broker: SubprocessBroker | None = None) -> None:
         self.workspace = workspace
         self.broker = broker or SubprocessBroker()
+        self.executable_binding = ExecutableResolver().resolve(
+            ExecutableResolutionRequest(
+                token=sys.executable,
+                cwd=workspace.project_root,
+                environment={},
+                policy=ExecutableTrustPolicy.TRUSTED_HOST_TOOL,
+            )
+        )
 
     def run_sync(
         self,
@@ -141,6 +155,7 @@ class ArtifactWorker:
                 "--response",
                 str(response_path),
             ),
+            executable_binding=self.executable_binding,
             cwd=self.workspace.project_root,
             environment_allowlist=tuple(
                 self.workspace.config.execution.child_environment_allowlist
@@ -176,16 +191,14 @@ class ArtifactWorker:
                     "stderr": stderr.decode(errors="replace")[-2_000:],
                 },
             )
-        response_size = response_path.stat().st_size
         response_limit = self.workspace.config.execution.max_output_bytes
-        if response_size > response_limit:
-            raise DomainError(
-                ErrorCode.QUERY_BUDGET_EXCEEDED,
-                f"{name} worker response exceeds the configured output budget.",
-                details={"byte_length": response_size, "max_bytes": response_limit},
-            )
         try:
-            response = _WORKER_RESPONSE.validate_json(response_path.read_text())
+            payload = BoundedFileSystem((response_path.parent,)).read_bytes(
+                response_path,
+                max_bytes=response_limit,
+                require_single_link=True,
+            )
+            response = _WORKER_RESPONSE.validate_json(payload)
         except (OSError, ValidationError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,

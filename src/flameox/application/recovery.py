@@ -55,12 +55,7 @@ class RecoveryService:
         active: list[str] = []
         recoverable: list[str] = []
         indeterminate: list[str] = []
-        for projection in sorted(self.workspace.paths.runs.glob("*/manifest.json")):
-            try:
-                run = self.runs.read(projection.parent.name)
-            except DomainError:
-                indeterminate.append(projection.parent.name)
-                continue
+        for run in self.runs.list():
             recoverable_lifecycle = run.execution_status is ExecutionStatus.RUNNING or (
                 run.execution_status is ExecutionStatus.PLANNED
                 and run.capture_status is CaptureStatus.PENDING
@@ -80,9 +75,9 @@ class RecoveryService:
             if path.is_dir() and path != self.workspace.paths.staging / "captures"
         )
         return RecoveryInspection(
-            active_run_ids=tuple(active),
-            recoverable_run_ids=tuple(recoverable),
-            indeterminate_run_ids=tuple(indeterminate),
+            active_run_ids=tuple(sorted(active)),
+            recoverable_run_ids=tuple(sorted(recoverable)),
+            indeterminate_run_ids=tuple(sorted(indeterminate)),
             staging_paths=staging_paths,
         )
 

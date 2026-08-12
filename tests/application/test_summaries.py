@@ -18,8 +18,10 @@ from flameox.application import (
     SummarySupportStatus,
     render_evidence_summary_markdown,
 )
+from flameox.application.run_rows import run_row
 from flameox.catalog import Catalog
 from flameox.domain import EvidenceLevel, ExternalExecutionContext, FindingAssessment, Sensitivity
+from flameox.evidence import GenerationPublisher
 from flameox.storage import RunStore, Workspace
 from tests.support.capture import disable_containment
 
@@ -61,7 +63,7 @@ async def test_summary_is_stable_and_redacts_sensitive_execution_context(
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
         external_context=context,
     )
-    captured = await service.execute(plan.plan_id)
+    captured = await service.execute(plan.plan_token)
     request = EvidenceSummaryRequest(candidate_run_id=captured.run.run_id)
 
     first = EvidenceSummaryService(workspace).summarize(request)
@@ -103,15 +105,21 @@ async def test_summary_never_excerpts_sensitive_process_output(
         parameters={"message": "candidate"},
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    captured = await service.execute(plan.plan_id)
+    captured = await service.execute(plan.plan_token)
     store = RunStore(workspace)
     run = store.read(captured.run.run_id)
     registrations = tuple(
         item.validated_copy(update={"sensitivity": Sensitivity.SENSITIVE}) for item in run.artifacts
     )
-    store.append(
+    sensitive_run = store.append(
         run.validated_copy(update={"revision": run.revision + 1, "artifacts": registrations}),
         expected_revision=run.revision,
+    )
+    GenerationPublisher(workspace).publish_rows(
+        {"runs": [run_row(sensitive_run)]},
+        publisher="test.sensitive-run",
+        publisher_version="1",
+        input_run_ids=(run.run_id,),
     )
     Catalog(workspace).rebuild()
 

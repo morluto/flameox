@@ -146,7 +146,8 @@ class EvidenceQueryService:
             escaped = name_prefix.replace("^", "^^").replace("%", "^%").replace("_", "^_")
             parameters.append(f"{escaped}%")
         where = " AND ".join(predicates)
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             count_row = snapshot.execute(
                 "SELECT count(*) FROM measurements WHERE " + where,
                 tuple(parameters),
@@ -259,7 +260,8 @@ class EvidenceQueryService:
         if after is not None:
             where += " AND request_id > ?"
             parameters.append(after)
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             count_row = snapshot.execute(
                 "SELECT COUNT(*) FROM inference_requests WHERE run_id = ?", (run_id,)
             ).fetchone()

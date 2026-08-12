@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import platform
 import re
-import shutil
 import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -13,6 +12,7 @@ from xml.etree import ElementTree
 from pydantic import JsonValue
 
 from flameox.application.workloads import AcceleratorIdentityRequirement
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
     AcceleratorDevice,
     AcceleratorIdentityFacet,
@@ -22,6 +22,7 @@ from flameox.domain import (
     AcceleratorMigMode,
     DomainError,
 )
+from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.identity import digest_model
 from flameox.domain.models import EnvironmentRecord, IdentityQuality, utc_now
 from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
@@ -89,7 +90,7 @@ class AcceleratorIdentityService:
     ) -> AcceleratorIdentityFacet | None:
         if not required:
             return None
-        executable = shutil.which("nvidia-smi")
+        executable = ExecutableResolver().resolve_host_tool("nvidia-smi")
         if executable is None:
             return self._unavailable(
                 required,
@@ -165,15 +166,20 @@ class AcceleratorIdentityService:
             limitations=topology_limitation,
         )
 
-    async def _run(self, executable: str, *arguments: str) -> ExecutionOutcome:
+    async def _run(
+        self,
+        executable: ResolvedExecutable,
+        *arguments: str,
+    ) -> ExecutionOutcome:
         return await self.broker.run(
             ExecutionRequest(
-                argv=(executable, *arguments),
+                argv=(str(executable.invocation_path), *arguments),
                 cwd=self.project_root,
                 environment_allowlist=("PATH",),
                 allowed_working_roots=(self.project_root,),
                 timeout_seconds=10,
                 max_output_bytes=1_048_576,
+                executable_binding=executable,
             )
         )
 

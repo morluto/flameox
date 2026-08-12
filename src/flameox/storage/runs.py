@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import overload
 
-from flameox.atomic import atomic_write_json
 from flameox.domain.errors import DomainError, ErrorCode
 from flameox.domain.models import (
     ExecutionRunManifest,
@@ -12,6 +10,7 @@ from flameox.domain.models import (
     parse_run_manifest,
     parse_run_manifest_json,
 )
+from flameox.storage.control_plane import ControlPlane, canonical_json
 from flameox.storage.workspace import Workspace
 
 _OUTPUT_ONLY_FIELDS = {"process": {"timed_out"}}
@@ -20,6 +19,7 @@ _OUTPUT_ONLY_FIELDS = {"process": {"timed_out"}}
 class RunStore:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
+        self.control_plane = ControlPlane(workspace)
 
     @overload
     def create(self, manifest: ImportRunManifest) -> ImportRunManifest: ...
@@ -35,32 +35,42 @@ class RunStore:
                 "A new run must start at revision zero.",
             )
         with self.workspace.write_locked():
-            run_root = self._run_root(manifest.run_id)
-            if run_root.exists():
-                raise DomainError(
-                    ErrorCode.REVISION_CONFLICT,
-                    f"Run {manifest.run_id!r} already exists.",
-                )
-            (run_root / "revisions").mkdir(parents=True)
-            self._write_revision(manifest)
-            self._write_projection(manifest)
+            self.control_plane.create_run(
+                run_id=manifest.run_id,
+                run_type=type(manifest).__name__,
+                revision=manifest.revision,
+                payload_json=self._json(manifest),
+            )
         return manifest
 
     def read(self, run_id: str) -> RunManifest:
         try:
-            return parse_run_manifest_json((self._run_root(run_id) / "manifest.json").read_text())
-        except FileNotFoundError as exc:
-            raise DomainError(
-                ErrorCode.RUN_NOT_FOUND,
-                f"Run {run_id!r} does not exist.",
-                remediation=("Call list_runs to choose an existing run.",),
-                details={"missing_entity": "run"},
-            ) from exc
+            return parse_run_manifest_json(self.control_plane.read_run(run_id))
         except ValueError as exc:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
                 f"Run {run_id!r} has an invalid manifest.",
             ) from exc
+
+    def list(self) -> tuple[RunManifest, ...]:
+        try:
+            return tuple(
+                parse_run_manifest_json(payload) for payload in self.control_plane.list_runs()
+            )
+        except ValueError as exc:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                "The SQLite control plane contains an invalid run manifest.",
+            ) from exc
+
+    def exists(self, run_id: str) -> bool:
+        try:
+            self.control_plane.read_run(run_id)
+        except DomainError as error:
+            if error.code is ErrorCode.RUN_NOT_FOUND:
+                return False
+            raise
+        return True
 
     @overload
     def append(
@@ -86,24 +96,13 @@ class RunStore:
     ) -> RunManifest:
         manifest = self._canonical(manifest)
         with self.workspace.write_locked():
-            current = self.read(manifest.run_id)
-            if current.revision != expected_revision:
-                raise DomainError(
-                    ErrorCode.REVISION_CONFLICT,
-                    f"Run {manifest.run_id!r} changed before the update.",
-                    retryable=True,
-                    details={
-                        "expected_revision": expected_revision,
-                        "actual_revision": current.revision,
-                    },
-                )
-            if manifest.revision != expected_revision + 1:
-                raise DomainError(
-                    ErrorCode.REVISION_CONFLICT,
-                    "The next run revision is not consecutive.",
-                )
-            self._write_revision(manifest)
-            self._write_projection(manifest)
+            self.control_plane.append_run(
+                run_id=manifest.run_id,
+                run_type=type(manifest).__name__,
+                expected_revision=expected_revision,
+                next_revision=manifest.revision,
+                payload_json=self._json(manifest),
+            )
         return manifest
 
     @staticmethod
@@ -124,32 +123,6 @@ class RunStore:
             )
         return canonical
 
-    def _run_root(self, run_id: str) -> Path:
-        if (
-            not run_id
-            or "/" in run_id
-            or "\\" in run_id
-            or "\x00" in run_id
-            or run_id == ".."
-            or run_id.startswith(".")
-        ):
-            raise DomainError(ErrorCode.WORKSPACE_INVALID, "Invalid run identifier.")
-        return self.workspace.paths.runs / run_id
-
-    def _write_revision(self, manifest: RunManifest) -> None:
-        path = self._run_root(manifest.run_id) / "revisions" / f"{manifest.revision:08d}.json"
-        if path.exists():
-            existing = parse_run_manifest_json(path.read_text())
-            if existing != manifest:
-                raise DomainError(
-                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                    "An immutable run revision already contains different data.",
-                )
-            return
-        atomic_write_json(path, manifest.model_dump(mode="json", exclude=_OUTPUT_ONLY_FIELDS))
-
-    def _write_projection(self, manifest: RunManifest) -> None:
-        atomic_write_json(
-            self._run_root(manifest.run_id) / "manifest.json",
-            manifest.model_dump(mode="json", exclude=_OUTPUT_ONLY_FIELDS),
-        )
+    @staticmethod
+    def _json(manifest: RunManifest) -> str:
+        return canonical_json(manifest.model_dump(mode="json", exclude=_OUTPUT_ONLY_FIELDS))

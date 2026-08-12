@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import tomllib
 from collections.abc import Mapping
 from enum import StrEnum
@@ -38,6 +37,7 @@ from flameox.application.inference_providers import (
     _loopback_http_url,
 )
 from flameox.atomic import atomic_write_text
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
     CapabilityPermissionStatus,
     CapabilityReport,
@@ -54,6 +54,11 @@ from flameox.domain import (
     WorkloadDefinition,
     WorkloadInstance,
     digest_model,
+)
+from flameox.domain.executables import (
+    ExecutableResolutionRequest,
+    ExecutableTrustPolicy,
+    ResolvedExecutable,
 )
 from flameox.domain.models import Digest
 from flameox.models import ContractModel
@@ -206,6 +211,7 @@ class WorkloadConfig(ContractModel):
         max_length=128,
     )
     environment: dict[str, str] = Field(default_factory=dict, max_length=128)
+    executable_policy: ExecutableTrustPolicy = ExecutableTrustPolicy.TRUSTED_HOST_TOOL
     oracle: WorkloadOracleConfig | None = None
     requirements: WorkloadRequirementsConfig = Field(default_factory=WorkloadRequirementsConfig)
     writable_paths: Annotated[tuple[str, ...], Field(max_length=16)] = ()
@@ -1025,6 +1031,7 @@ class InferenceConfigurationList(ContractModel):
 class ResolvedOracle(ContractModel):
     strength: OracleStrength
     command: CommandSpec
+    executable_binding: ResolvedExecutable | None = None
     receipt_schema: Literal["flameox.oracle-receipt.v1"] | None = None
 
 
@@ -1762,27 +1769,34 @@ class WorkloadService:
                 "Resolved workload directory leaves the project root.",
             ) from exc
         rendered_argv = tuple(_render(value, selected) for value in config.argv)
+        environment = {name: _render(value, selected) for name, value in config.environment.items()}
+        binding = self._bind_executable(
+            rendered_argv[0],
+            cwd,
+            environment,
+            config.executable_policy,
+        )
         command = CommandSpec(
             argv=(
-                str(self._resolve_executable(rendered_argv[0], cwd)),
+                str(binding.invocation_path),
                 *rendered_argv[1:],
             ),
             cwd=str(cwd),
-            env_overrides={
-                name: _render(value, selected) for name, value in config.environment.items()
-            },
+            env_overrides=environment,
             timeout_seconds=config.timeout_seconds,
         )
         json_parameters = {name: cast(JsonValue, value) for name, value in selected.items()}
         content: dict[str, JsonValue] = {
             "workload_definition_id": definition.workload_definition_id,
             "command": command.model_dump(mode="json"),
+            "executable_binding": binding.model_dump(mode="json"),
             "parameters": json_parameters,
         }
         return WorkloadInstance(
             workload_instance_id=digest_model(content),
             workload_definition_id=definition.workload_definition_id,
             command=command,
+            executable_binding=binding,
             parameters=json_parameters,
         )
 
@@ -1804,17 +1818,25 @@ class WorkloadService:
         selected = self._parameters(config, overrides or {}, dynamic_parameters=dynamic_parameters)
         cwd = (self.workspace.project_root / _render(config.cwd, selected)).resolve()
         rendered = tuple(_render(value, selected) for value in config.oracle.argv)
+        environment = {name: _render(value, selected) for name, value in config.environment.items()}
+        binding = self._bind_executable(
+            rendered[0],
+            cwd,
+            environment,
+            config.executable_policy,
+        )
         return ResolvedOracle(
             strength=config.oracle.strength,
             receipt_schema=config.oracle.receipt_schema,
             command=CommandSpec(
                 argv=(
-                    str(self._resolve_executable(rendered[0], cwd)),
+                    str(binding.invocation_path),
                     *rendered[1:],
                 ),
                 cwd=str(cwd),
                 timeout_seconds=config.timeout_seconds,
             ),
+            executable_binding=binding,
         )
 
     def writable_targets(self, name: str) -> tuple[tuple[Path, str], ...]:
@@ -1861,34 +1883,42 @@ class WorkloadService:
             raise DomainError(ErrorCode.EXECUTION_REFUSED, "Writable paths must be unique.")
         return tuple(resolved)
 
-    def _resolve_executable(self, value: str, cwd: Path) -> Path:
-        if os.sep in value or (os.altsep is not None and os.altsep in value):
-            candidate = Path(value)
-            candidate = candidate if candidate.is_absolute() else cwd / candidate
-            resolved = candidate.parent.resolve() / candidate.name
-        else:
-            located = shutil.which(value)
-            if located is None:
-                raise DomainError(
-                    ErrorCode.CAPABILITY_UNAVAILABLE,
-                    f"Workload executable {value!r} is unavailable.",
-                    details={
-                        "next_tool": "get_declared_workflow",
-                        "missing_executable": value,
-                        "requirement_kind": "workload_executable",
-                    },
-                    remediation=(
-                        f"Install executable {value!r} in the local environment or configure a "
-                        "named workload using an available executable, then retry planning.",
-                    ),
+    def _bind_executable(
+        self,
+        value: str,
+        cwd: Path,
+        environment: dict[str, str],
+        policy: ExecutableTrustPolicy,
+    ) -> ResolvedExecutable:
+        effective_environment = dict(environment)
+        if "PATH" not in effective_environment and "PATH" in os.environ:
+            effective_environment["PATH"] = os.environ["PATH"]
+        try:
+            return ExecutableResolver().resolve(
+                ExecutableResolutionRequest(
+                    token=value,
+                    cwd=cwd,
+                    environment=effective_environment,
+                    policy=policy,
+                    allowed_roots=(self.workspace.project_root,),
                 )
-            resolved = Path(located).absolute()
-        if not resolved.is_file() or not os.access(resolved, os.X_OK):
-            raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                f"Workload executable is not runnable: {resolved}",
             )
-        return resolved
+        except DomainError as error:
+            if error.code is not ErrorCode.CAPABILITY_UNAVAILABLE:
+                raise
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                f"Workload executable {value!r} is unavailable.",
+                details={
+                    "next_tool": "get_declared_workflow",
+                    "missing_executable": value,
+                    "requirement_kind": "workload_executable",
+                },
+                remediation=(
+                    f"Install executable {value!r} in the workload environment or configure a "
+                    "named workload using an available executable, then retry planning.",
+                ),
+            ) from error
 
     def _selected(self, name: str) -> WorkloadConfig:
         try:

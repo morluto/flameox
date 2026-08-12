@@ -144,7 +144,8 @@ class DrilldownService:
         if after_duration is not None and after_stack_id is not None:
             page_where = " WHERE duration_ns < ? OR (duration_ns = ? AND stack_id > ?)"
             page_parameters = (after_duration, after_duration, after_stack_id)
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             scope = resolve_evidence_scope(snapshot, input_id)
             where, parameters = scope.predicate(
                 run_column="run_id",
@@ -263,7 +264,8 @@ class DrilldownService:
         if after_duration is not None and after_frame_id is not None:
             page_where = " WHERE duration_ns < ? OR (duration_ns = ? AND frame_id > ?)"
             page_parameters = (after_duration, after_duration, after_frame_id)
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             scope = resolve_evidence_scope(snapshot, input_id)
             where, parameters = scope.predicate(
                 run_column="run_id",

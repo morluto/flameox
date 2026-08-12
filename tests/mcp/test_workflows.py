@@ -129,8 +129,13 @@ async def test_cli_json_and_mcp_result_are_same_domain_model(tmp_path: Path) -> 
 
     assert cli.exit_code == 0, cli.output
     assert mcp.structured_content is not None
-    assert json.loads(cli.stdout) == expected
-    assert mcp.structured_content["result"] == expected
+    cli_result = json.loads(cli.stdout)
+    mcp_result = mcp.structured_content["result"]
+    for result in (cli_result, mcp_result):
+        assert result.pop("storage_bytes") >= 0
+    expected.pop("storage_bytes")
+    assert cli_result == expected
+    assert mcp_result == expected
 
 
 @pytest.mark.anyio

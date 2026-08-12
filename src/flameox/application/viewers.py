@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 from pathlib import Path
 from typing import Literal
 
 from flameox.application.artifacts import ArtifactService
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, ProcessResult
 from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.models import ContractModel
@@ -120,7 +120,8 @@ class NativeViewerService:
                     ).resolve()
                 )
                 if configured is not None
-                else shutil.which("trace_processor_shell") or shutil.which("trace_processor")
+                else self._optional_executable("trace_processor_shell")
+                or self._optional_executable("trace_processor")
             )
             if (
                 trace_executable is None
@@ -144,7 +145,7 @@ class NativeViewerService:
         return self._opener(path)
 
     def _required_executable(self, name: str, remediation: str) -> str:
-        executable = shutil.which(name)
+        executable = self._optional_executable(name)
         if executable is None:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
@@ -155,13 +156,13 @@ class NativeViewerService:
 
     def _opener(self, path: Path) -> tuple[str, tuple[str, ...]]:
         if sys.platform == "darwin":
-            executable = shutil.which("open")
+            executable = self._optional_executable("open")
             name = "open"
         elif os.name == "nt":
-            executable = shutil.which("explorer")
+            executable = self._optional_executable("explorer")
             name = "explorer"
         else:
-            executable = shutil.which("xdg-open")
+            executable = self._optional_executable("xdg-open")
             name = "xdg-open"
         if executable is None:
             raise DomainError(
@@ -170,3 +171,8 @@ class NativeViewerService:
                 remediation=("Install xdg-utils or open the reported artifact path manually.",),
             )
         return name, (executable, str(path))
+
+    @staticmethod
+    def _optional_executable(name: str) -> str | None:
+        binding = ExecutableResolver().resolve_host_tool(name)
+        return str(binding.invocation_path) if binding is not None else None

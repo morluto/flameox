@@ -1250,7 +1250,7 @@ def create_server(
             return _success(
                 result,
                 f"Planned inference scenario {scenario_name!r}. Next tool: "
-                "run_inference_scenario with the same scenario_name and "
+                f"run_inference_scenario with plan_token={result.plan_token!r} and "
                 f"expected_plan_id={result.plan_id!r}.",
             )
         except DomainError as error:
@@ -1258,9 +1258,8 @@ def create_server(
 
     @server.tool(name="run_inference_scenario", annotations=ADDITIVE)
     async def run_inference_scenario_tool(
-        scenario_name: Annotated[str, Field(min_length=1, max_length=100)],
+        plan_token: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
         ctx: Context[AppContext],
-        timeout_seconds: Annotated[StrictFloat | None, Field(gt=0, le=86_400)] = None,
         expected_plan_id: Annotated[str | None, Field(pattern=r"^sha256:[0-9a-f]{64}$")] = None,
     ) -> Annotated[CallToolResult, ToolPayload[InferenceReplayResult]]:
         """Plan and execute one bounded replay against a managed or existing-local server."""
@@ -1269,13 +1268,10 @@ def create_server(
                 ctx.request_context.lifespan_context.require_workspace()
             )
             result = await service.run(
-                service.plan(
-                    scenario_name,
-                    timeout_seconds=timeout_seconds,
-                    expected_plan_id=expected_plan_id,
-                )
+                plan_token,
+                expected_plan_id=expected_plan_id,
             )
-            return _success(result, f"Completed inference scenario {scenario_name!r}.")
+            return _success(result, f"Completed inference scenario {result.scenario_name!r}.")
         except DomainError as error:
             return _failure(error)
 
@@ -1298,8 +1294,11 @@ def create_server(
     @server.tool(name="plan_inference_profile", annotations=READ_ONLY)
     async def plan_inference_profile_tool(
         server_name: Annotated[str, Field(min_length=1, max_length=100)],
+        scenario_name: Annotated[str, Field(min_length=1, max_length=100)],
         profiler: SupportedInferenceProfiler,
+        measurement_run_id: Annotated[str, Field(min_length=1, max_length=200)],
         ctx: Context[AppContext],
+        timeout_seconds: Annotated[StrictFloat, Field(gt=0, le=86_400)] = 300.0,
     ) -> Annotated[CallToolResult, ToolPayload[InferenceProfilingPlan]]:
         """Build a diagnostic-only profile plan for one managed vLLM server."""
         try:
@@ -1308,12 +1307,14 @@ def create_server(
             ).plan(
                 server_name,
                 profiler=profiler,
+                scenario_name=scenario_name,
+                measurement_run_id=measurement_run_id,
+                timeout_seconds=timeout_seconds,
             )
             return _success(
                 result,
                 f"Planned {profiler} capture for {server_name!r}. Next tool: "
-                "run_inference_profile with the same server_name and profiler, a compatible "
-                "scenario_name, a successful unprofiled measurement_run_id, and "
+                f"run_inference_profile with plan_token={result.plan_token!r} and "
                 f"expected_plan_id={result.plan_id!r}.",
             )
         except DomainError as error:
@@ -1321,19 +1322,8 @@ def create_server(
 
     @server.tool(name="run_inference_profile", annotations=ADDITIVE)
     async def run_inference_profile_tool(
-        server_name: Annotated[str, Field(min_length=1, max_length=100)],
-        scenario_name: Annotated[str, Field(min_length=1, max_length=100)],
-        profiler: SupportedInferenceProfiler,
-        measurement_run_id: Annotated[
-            str,
-            Field(
-                min_length=1,
-                max_length=200,
-                description="Successful compatible unprofiled inference run to link.",
-            ),
-        ],
+        plan_token: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
         ctx: Context[AppContext],
-        timeout_seconds: Annotated[StrictFloat, Field(gt=0, le=86_400)] = 300.0,
         expected_plan_id: Annotated[str | None, Field(pattern=r"^sha256:[0-9a-f]{64}$")] = None,
     ) -> Annotated[CallToolResult, ToolPayload[InferenceProfilingResult]]:
         """Run one diagnostic-only profile window against a managed vLLM server."""
@@ -1341,18 +1331,11 @@ def create_server(
             service = InferenceProfilingService(
                 ctx.request_context.lifespan_context.require_workspace()
             )
-            plan = service.plan(
-                server_name,
-                profiler=profiler,
+            result = await service.capture(
+                plan_token,
                 expected_plan_id=expected_plan_id,
             )
-            result = await service.capture(
-                plan,
-                scenario_name=scenario_name,
-                measurement_run_id=measurement_run_id,
-                timeout_seconds=timeout_seconds,
-            )
-            return _success(result, f"Completed {profiler} diagnostic capture.")
+            return _success(result, f"Completed {result.profiler} diagnostic capture.")
         except DomainError as error:
             return _failure(error)
 
@@ -1686,7 +1669,7 @@ def create_server(
 
     @server.tool(name="execute_capture_plan", annotations=EXECUTE)
     async def execute_capture_plan_tool(
-        plan_id: str,
+        plan_token: str,
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[CaptureReceipt]]:
         """Run one current plan with side effects; the token is single-use, then get_run."""
@@ -1701,7 +1684,7 @@ def create_server(
                 await ctx.report_progress(completed, total, message)
 
             result = await ctx.request_context.lifespan_context.capture_service().execute(
-                plan_id,
+                plan_token,
                 progress=report,
             )
             resource_uri = f"flameox://runs/{result.run.run_id}"
@@ -1734,7 +1717,7 @@ def create_server(
 
     @server.tool(name="start_detached_capture", annotations=IDEMPOTENT_EXECUTE)
     async def start_detached_capture_tool(
-        plan_id: str,
+        plan_token: str,
         idempotency_key: Annotated[
             str,
             Field(min_length=8, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$"),
@@ -1744,7 +1727,7 @@ def create_server(
         """Start one current plan once; reconnect by run_id without keeping this call open."""
         try:
             result = await ctx.request_context.lifespan_context.detached_service().start(
-                plan_id,
+                plan_token,
                 idempotency_key,
             )
             return _success(
@@ -1822,7 +1805,7 @@ def create_server(
 
     @server.tool(name="run_experiment", annotations=EXECUTE)
     async def run_experiment_tool(
-        plan_id: str,
+        plan_token: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[ExperimentReceipt]]:
         """Execute all current trials from one single-use plan, then inspect get_experiment."""
@@ -1836,7 +1819,7 @@ def create_server(
                 await ctx.report_progress(completed, total, message)
 
             result = await ctx.request_context.lifespan_context.experiment_service().run(
-                plan_id,
+                plan_token,
                 progress=report,
             )
             experiment_id = result.experiment.experiment_id
@@ -1974,7 +1957,7 @@ def create_server(
 
     @server.tool(name="run_fault_experiment", annotations=EXECUTE)
     async def run_fault_experiment_tool(
-        plan_id: Annotated[str, Field(min_length=1)],
+        plan_token: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[FaultExperimentResult]]:
         """Run every baseline and declared treatment through its managed loopback proxy."""
@@ -1986,7 +1969,7 @@ def create_server(
             service = FaultExperimentService(
                 ctx.request_context.lifespan_context.require_workspace()
             )
-            result = await service.run(plan_id, progress=report)
+            result = await service.run(plan_token, progress=report)
             return _success(
                 result,
                 f"Recorded {len(result.trials)} fault trials for "

@@ -196,44 +196,30 @@ class DetachedCaptureManager:
             revision_field="revision",
         )
         self._tasks: dict[str, asyncio.Task[None]] = {}
-        self._idempotency: dict[str, str] = {}
         self._start_lock = asyncio.Lock()
         self._record_lock = asyncio.Lock()
 
-    async def start(self, plan_id: str, idempotency_key: str) -> DetachedCaptureStatus:
+    async def start(self, plan_token: str, idempotency_key: str) -> DetachedCaptureStatus:
         idempotency_digest = digest_model(
             {
                 "workspace_id": self.workspace.identity.workspace_id,
                 "idempotency_key": idempotency_key,
             }
         )
-        plan_digest = digest_model({"plan_id": plan_id})
+        plan_digest = digest_model({"plan_token": plan_token})
         async with self._start_lock:
-            existing_run_id = self._idempotency.get(idempotency_digest)
-            existing_record = None
-            if existing_run_id is None:
-                existing_record = next(
-                    (
-                        record
-                        for record in self.records.list()
-                        if record.idempotency_digest == idempotency_digest
-                    ),
-                    None,
-                )
-                if existing_record is not None:
-                    existing_run_id = existing_record.run_id
-
-            if existing_run_id is not None:
-                record = existing_record or self.records.read(existing_run_id)
-                if record.plan_digest != plan_digest:
+            existing = self.records.read_idempotent(
+                idempotency_digest=idempotency_digest,
+            )
+            if existing is not None:
+                stored_digest, record = existing
+                if stored_digest != plan_digest:
                     raise DomainError(
                         ErrorCode.INVALID_CAPTURE_PLAN,
                         "The detached idempotency key is already bound to another plan.",
                     )
-                self._idempotency[idempotency_digest] = record.run_id
                 return self.status(record.run_id)
-
-            plan = await self.captures.plans.inspect(plan_id)
+            plan = await self.captures.plans.inspect(plan_token)
             record = DetachedCaptureRecord(
                 run_id=plan.run_id,
                 idempotency_digest=idempotency_digest,
@@ -248,27 +234,15 @@ class DetachedCaptureManager:
                     ),
                 },
             )
-            with self.workspace.write_locked():
-                existing_record = next(
-                    (
-                        item
-                        for item in self.records.list()
-                        if item.idempotency_digest == idempotency_digest
-                    ),
-                    None,
-                )
-                if existing_record is not None:
-                    if existing_record.plan_digest != plan_digest:
-                        raise DomainError(
-                            ErrorCode.INVALID_CAPTURE_PLAN,
-                            "The detached idempotency key is already bound to another plan.",
-                        )
-                    self._idempotency[idempotency_digest] = existing_record.run_id
-                    return self.status(existing_record.run_id)
-                self.records.create_locked(record)
-            self._idempotency[idempotency_digest] = plan.run_id
+            record, created = self.records.create_idempotent(
+                record,
+                idempotency_digest=idempotency_digest,
+                intent_digest=plan_digest,
+            )
+            if not created:
+                return self.status(record.run_id)
             task = asyncio.create_task(
-                self._run(plan_id, plan.run_id),
+                self._run(plan_token, plan.run_id),
                 name=f"flameox-detached-{plan.run_id}",
             )
             self._tasks[plan.run_id] = task
@@ -370,10 +344,10 @@ class DetachedCaptureManager:
         if active:
             await asyncio.gather(*active, return_exceptions=True)
 
-    async def _run(self, plan_id: str, run_id: str) -> None:
+    async def _run(self, plan_token: str, run_id: str) -> None:
         try:
             await self.captures.execute(
-                plan_id,
+                plan_token,
                 progress=lambda completed, total, message: self._record_progress(
                     run_id,
                     completed,

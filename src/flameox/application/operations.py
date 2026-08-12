@@ -7,12 +7,14 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
 from uuid import uuid4
 
+import anyio
 from pydantic import Field, TypeAdapter, computed_field, model_validator
 
 from flameox.domain import DomainError, ErrorCode, digest_model
 from flameox.domain.models import Digest, utc_now
 from flameox.models import ContractModel
-from flameox.storage import JsonRecordStore, Workspace
+from flameox.storage import ControlPlane, Workspace
+from flameox.storage.control_plane import canonical_json
 
 
 class OperationState(StrEnum):
@@ -445,28 +447,69 @@ def _capability_setup_poll_after_ms(phase: str) -> int:
     return 1_000
 
 
+class _OperationRecords:
+    def __init__(self, workspace: Workspace) -> None:
+        self.control_plane = ControlPlane(workspace)
+
+    def create(self, record: OperationRecord) -> OperationRecord:
+        canonical = _OPERATION_RECORD.validate_python(record.model_dump(mode="python"))
+        self.control_plane.create_operation(
+            operation_id=canonical.operation_id,
+            kind=canonical.operation,
+            state=canonical.state,
+            revision=canonical.revision,
+            idempotency_digest=canonical.idempotency_digest,
+            intent_digest=canonical.request_digest,
+            payload_json=canonical_json(canonical.model_dump(mode="json")),
+        )
+        return record
+
+    def read(self, operation_id: str) -> OperationRecord:
+        try:
+            return _OPERATION_RECORD.validate_json(self.control_plane.read_operation(operation_id))
+        except ValueError as exc:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                f"Operation {operation_id!r} does not exist or is invalid.",
+            ) from exc
+
+    def list(self) -> tuple[OperationRecord, ...]:
+        try:
+            return tuple(
+                _OPERATION_RECORD.validate_json(payload)
+                for payload in self.control_plane.list_operations()
+            )
+        except ValueError as exc:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                "An operation record is invalid.",
+            ) from exc
+
+    def append(self, record: OperationRecord, *, expected_revision: int) -> OperationRecord:
+        canonical = _OPERATION_RECORD.validate_python(record.model_dump(mode="python"))
+        self.control_plane.append_operation(
+            operation_id=canonical.operation_id,
+            state=canonical.state,
+            expected_revision=expected_revision,
+            next_revision=canonical.revision,
+            payload_json=canonical_json(canonical.model_dump(mode="json")),
+        )
+        return record
+
+
 class OperationStore:
     def __init__(self, workspace: Workspace) -> None:
-        self.records: JsonRecordStore[OperationRecord] = JsonRecordStore(
-            workspace,
-            kind="operations",
-            model=_OPERATION_RECORD,
-            id_field="operation_id",
-            revision_field="revision",
-        )
+        self.records = _OperationRecords(workspace)
 
     def read(self, operation_id: str) -> OperationRecord:
         return self.records.read(operation_id)
 
     def find(self, *, operation: str, idempotency_digest: str) -> OperationRecord | None:
-        return next(
-            (
-                item
-                for item in self.records.list()
-                if item.operation == operation and item.idempotency_digest == idempotency_digest
-            ),
-            None,
+        payload = self.records.control_plane.find_operation(
+            kind=operation,
+            idempotency_digest=idempotency_digest,
         )
+        return _OPERATION_RECORD.validate_json(payload) if payload is not None else None
 
 
 def operation_digests(
@@ -499,7 +542,6 @@ class OperationRunner:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.cancel_events: dict[str, asyncio.Event] = {}
         self.cancel_hooks: dict[str, Callable[[], None]] = {}
-        self.lease_tasks: dict[str, asyncio.Task[None]] = {}
         self.owner_id = uuid4().hex
         self.record_lock = asyncio.Lock()
         self.lock = asyncio.Lock()
@@ -574,10 +616,6 @@ class OperationRunner:
                 self._execute(operation_id, run, cancel_event),
                 name=f"flameox-operation-{operation_id}",
             )
-            self.lease_tasks[operation_id] = asyncio.create_task(
-                self._heartbeat(operation_id),
-                name=f"flameox-operation-lease-{operation_id}",
-            )
         await asyncio.sleep(0)
         return OperationStatus.from_record(self.store.read(operation_id))
 
@@ -646,42 +684,45 @@ class OperationRunner:
         run: Callable[[str, Callable[..., Awaitable[None]]], Awaitable[dict[str, Any]]],
         cancel_event: asyncio.Event,
     ) -> None:
-        try:
-            started = await self._append_active_transition(
+        async with anyio.create_task_group() as lifetime:
+            lifetime.start_soon(
+                self._heartbeat,
                 operation_id,
-                lambda current: current.running(),
+                name=f"flameox-operation-lease-{operation_id}",
             )
-            if started is None:
-                return
+            try:
+                started = await self._append_active_transition(
+                    operation_id,
+                    lambda current: current.running(),
+                )
+                if started is None:
+                    return
 
-            async def progress(
-                phase: str,
-                completed: float | None = None,
-                total: float | None = None,
-                message: str = "Operation in progress.",
-            ) -> None:
-                await self._progress(operation_id, phase, completed, total, message)
+                async def progress(
+                    phase: str,
+                    completed: float | None = None,
+                    total: float | None = None,
+                    message: str = "Operation in progress.",
+                ) -> None:
+                    await self._progress(operation_id, phase, completed, total, message)
 
-            receipt = await run(operation_id, progress)
-            await self._finish_success(operation_id, cancel_event, receipt)
-        except asyncio.CancelledError:
-            await self._finish_cancelled(operation_id)
-        except OperationFailure as failure:
-            await self._finish_domain_failure(
-                operation_id,
-                cancel_event,
-                failure.error,
-                completed_items=failure.completed_items,
-            )
-        except DomainError as error:
-            await self._finish_domain_failure(operation_id, cancel_event, error)
-        except Exception as error:
-            await self._finish_unexpected_failure(operation_id, error)
-        finally:
-            lease_task = self.lease_tasks.pop(operation_id, None)
-            if lease_task is not None:
-                lease_task.cancel()
-                await asyncio.gather(lease_task, return_exceptions=True)
+                receipt = await run(operation_id, progress)
+                await self._finish_success(operation_id, cancel_event, receipt)
+            except asyncio.CancelledError:
+                await self._finish_cancelled(operation_id)
+            except OperationFailure as failure:
+                await self._finish_domain_failure(
+                    operation_id,
+                    cancel_event,
+                    failure.error,
+                    completed_items=failure.completed_items,
+                )
+            except DomainError as error:
+                await self._finish_domain_failure(operation_id, cancel_event, error)
+            except Exception as error:
+                await self._finish_unexpected_failure(operation_id, error)
+            finally:
+                lifetime.cancel_scope.cancel()
 
     async def _finish_success(
         self,

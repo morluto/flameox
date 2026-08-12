@@ -167,28 +167,25 @@ BUILTIN_ADAPTERS = {
             dependency_kind=AdapterDependencyKind.PACKAGE,
             dependency="pytest",
             supported_modes=("serial", "xdist"),
-            supported_formats=("flameox-pytest-events-jsonl",),
+            supported_formats=("pytest-reportlog-jsonl",),
             features=(
                 "test_phases",
                 "fixture_setup",
                 "failure_latency",
                 "worker_lifecycle",
             ),
-            output_filename="pytest-events.jsonl",
+            output_filename="pytest-reportlog.jsonl",
             artifact_kinds=(ArtifactKind.TEST_EXECUTION,),
             expected_overhead=(
-                "Pytest hook timestamps and JSONL event recording; fixture setup events are "
-                "written to bounded per-worker sidecars under xdist."
+                "pytest-reportlog serialization plus namespaced fixture timing annotations."
             ),
             capture_limitations=(
-                "Public xdist hooks expose scheduler strategy, worker lifecycle, and execution "
-                "start, but not an exact per-test controller queue timestamp.",
-                "If the entire pytest controller is forcibly terminated, sidecars not yet "
-                "recovered into the primary artifact may be unavailable.",
+                "Controller receipt timestamps include pytest and xdist hook scheduling delay.",
+                "A terminated worker can only contribute reports already delivered to pytest.",
             ),
             preserve_artifact_on_nonzero=True,
             managed_extra=CapabilityExtra.TEST,
-            managed_requirement="pytest>=8.3",
+            managed_requirement="pytest-reportlog>=1,<2",
         ),
         BuiltinAdapter(
             name="torch.profiler",

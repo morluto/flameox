@@ -244,7 +244,8 @@ class LifecycleEvidenceService:
             # parameters in SQL placeholder order.
             parameters.append(after)
         parameters.append(bounded + 1)
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             rows = snapshot.execute(query, tuple(parameters)).fetchall()
             orphan_query = """SELECT count(*) FROM otel_spans child
                    LEFT JOIN otel_spans parent ON parent.artifact_id = child.artifact_id
@@ -358,7 +359,8 @@ class LifecycleEvidenceService:
         query += " ORDER BY source_ordinal LIMIT ?"
         query_values.append(bounded + 1)
         count_query = cte + " SELECT count(*) FROM repeated WHERE repetition_count >= ?"
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             total_row = snapshot.execute(count_query, (artifact_id, minimum_repetitions)).fetchone()
             rows = snapshot.execute(query, tuple(query_values)).fetchall()
         selected = rows[:bounded]
@@ -432,7 +434,8 @@ class LifecycleEvidenceService:
             WHERE s.artifact_id = ?
             ORDER BY source_ordinal LIMIT ?
         """
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             rows = snapshot.execute(
                 query, (artifact_id, artifact_id, artifact_id, artifact_id, bounded + 1)
             ).fetchall()
@@ -478,7 +481,8 @@ class LifecycleEvidenceService:
                     FROM process_snapshot_entries e JOIN process_snapshots s
                       ON s.snapshot_id = e.snapshot_id WHERE {where}
                     ORDER BY e.pid LIMIT ?"""
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             rows = snapshot.execute(query, (*values, bounded + 1)).fetchall()
         items = tuple(
             ProcessLifecycleItem(
@@ -538,7 +542,8 @@ class LifecycleEvidenceService:
             predicate += " AND source_ordinal > ?"
             query_values.append(after)
         query = f"SELECT {select} FROM otel_spans WHERE {predicate} ORDER BY source_ordinal LIMIT ?"
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             total_row = snapshot.execute(
                 f"SELECT count(*) FROM otel_spans WHERE {base_predicate}",
                 tuple(base_values),

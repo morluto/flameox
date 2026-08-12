@@ -11,7 +11,7 @@ from flameox.application.recoverable_move import validate_manifest_id
 from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode, EvidenceReferenceType
 from flameox.models import ContractModel
-from flameox.storage import GenerationManifest, RunStore, Workspace
+from flameox.storage import GenerationManifest, Workspace
 
 
 class EvidenceLookupResult(ContractModel):
@@ -41,7 +41,9 @@ class EvidenceLookupService:
     ) -> EvidenceLookupResult:
         head = self.workspace.corpus.read_head()
         if ref_type is EvidenceReferenceType.RUN:
-            data = RunStore(self.workspace).read(ref_id).model_dump(mode="json")
+            catalog = Catalog(self.workspace)
+            with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
+                data = snapshot.run(ref_id).model_dump(mode="json")
         elif ref_type is EvidenceReferenceType.ARTIFACT:
             data = ArtifactService(self.workspace).get(ref_id).model_dump(mode="json")
         elif ref_type is EvidenceReferenceType.GENERATION:
@@ -58,7 +60,8 @@ class EvidenceLookupService:
                 ) from exc
         else:
             table, identifier = self._TABLES[ref_type]
-            with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+            catalog = Catalog(self.workspace)
+            with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
                 connection = snapshot.execute(
                     f'SELECT * FROM "{table}" WHERE "{identifier}" = ? '
                     "ORDER BY published_at DESC LIMIT 1",

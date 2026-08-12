@@ -17,6 +17,7 @@ from mcp import Client, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from packaging.version import InvalidVersion, Version
 
+from flameox.application.concurrency import race_with_cancellation
 from flameox.atomic import atomic_write_json, atomic_write_text
 from flameox.domain import (
     CapabilityExtra,
@@ -453,27 +454,18 @@ async def _run_brokered(
     cancellation_message: str,
     cancellation_details: dict[str, str],
 ) -> ExecutionOutcome:
-    execution = asyncio.create_task(broker.run(request))
     if cancel_event is None:
-        return await execution
-
-    cancellation = asyncio.create_task(_wait_for_cancellation(cancel_event))
-    done, _ = await asyncio.wait(
-        (execution, cancellation),
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    if cancellation in done and execution not in done:
-        execution.cancel()
-        await asyncio.gather(execution, return_exceptions=True)
-        raise DomainError(
+        return await broker.run(request)
+    return await race_with_cancellation(
+        broker.run(request),
+        lambda: _wait_for_cancellation(cancel_event),
+        lambda: DomainError(
             ErrorCode.PROCESS_CANCELLED,
             cancellation_message,
             retryable=True,
             details=cancellation_details,
-        )
-    cancellation.cancel()
-    await asyncio.gather(cancellation, return_exceptions=True)
-    return await execution
+        ),
+    )
 
 
 async def _wait_for_cancellation(cancel_event: threading.Event) -> None:

@@ -10,7 +10,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, TypeAdapter, computed_field
 
-from flameox.adapters.artifact_workers import ArtifactWorker
+from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.application.native_reducer import (
     BinaryChunkPartitioning,
     NativePartitioning,
@@ -345,7 +345,7 @@ class ReductionService:
                 ),
                 max_observed_files=(self.workspace.config.execution.max_resource_observed_files),
             )
-            worker_result = await ArtifactWorker(self.workspace, broker=self.broker).run(
+            worker_result = await IsolatedWorkerHarness(self.workspace, broker=self.broker).run(
                 "flameox.workers.reduction",
                 request.model_dump(mode="json"),
                 name="reduction",

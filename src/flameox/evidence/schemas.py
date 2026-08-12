@@ -5,7 +5,7 @@ from typing import Any
 import pyarrow as pa
 
 SCHEMA_MAJOR = 1
-SCHEMA_MINOR = 9
+SCHEMA_MINOR = 10
 UTC_TIMESTAMP = pa.timestamp("us", tz="UTC")
 
 COMMON_FIELDS: tuple[Any, ...] = (
@@ -62,6 +62,7 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("limitation_details_json", pa.string()),
             pa.field("resource_availability", pa.string()),
             pa.field("manifest_path", pa.string(), nullable=False),
+            pa.field("manifest_json", pa.string()),
         ),
     ),
     "runtime_resource_summaries": _schema(

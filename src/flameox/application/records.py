@@ -380,7 +380,8 @@ class FindingService:
                 f"Generation {item.ref_id!r} does not exist.",
             )
         table = self._TABLES[item.ref_type]
-        with Catalog(self.workspace).open_snapshot() as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin()) as snapshot:
             found = snapshot.execute(
                 f'SELECT 1 FROM "{table[0]}" WHERE "{table[1]}" = ? LIMIT 1',
                 (item.ref_id,),
@@ -413,7 +414,8 @@ class FindingService:
         }
 
     def _comparison_can_support(self, comparison_id: str) -> bool:
-        with Catalog(self.workspace).open_snapshot() as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin()) as snapshot:
             row = snapshot.execute(
                 "SELECT validity, decision FROM comparisons WHERE comparison_id = ? "
                 "ORDER BY published_at DESC LIMIT 1",

@@ -41,8 +41,6 @@ class PytestExtractionResult(ContractModel):
     fixture_setup_ns: int
     collection_duration_ns: int | None
     workers: tuple[str, ...]
-    recovered_sidecar_events: int
-    sidecar_recovery_failures: int
     first_failure_observed_ns: int | None
     first_failure_reported_ns: int | None
     measurement_count: int
@@ -101,23 +99,6 @@ class PytestExtractor:
         failure_reported: list[int] = []
         limitations: list[str] = []
         crashed = False
-        crashed_workers: set[str] = set()
-        sidecar_events = [
-            event for event in events if event.get("event") == "worker_sidecar_recovered"
-        ]
-        recovered_sidecar_events = sum(
-            _integer(event, "recovered_count") for event in sidecar_events
-        )
-        recovered_sidecars = {
-            _text(event, "worker_id")
-            for event in sidecar_events
-            if event.get("outcome") == "complete"
-        }
-        failed_sidecars = {
-            _text(event, "worker_id")
-            for event in sidecar_events
-            if event.get("outcome") != "complete"
-        }
         interrupted = any(
             event.get("event") in {"interrupted", "internal_error"} for event in events
         )
@@ -185,7 +166,6 @@ class PytestExtractor:
                 workers.add(worker_id)
                 if event_name == "worker_down" and event.get("outcome") == "crashed":
                     crashed = True
-                    crashed_workers.add(worker_id)
         outcome_counts = _test_outcomes(phases)
         executed = set(phases)
         unexecuted = collected - executed
@@ -289,12 +269,13 @@ class PytestExtractor:
             events,
             interrupted=interrupted,
             crashed=crashed,
-            failed_sidecars=failed_sidecars,
             truncated_stream=truncated_stream,
         )
         limitations.extend(completion_limitations)
         if crashed:
-            limitations.append(_crash_limitation(crashed_workers, recovered_sidecars))
+            limitations.append(
+                "At least one xdist worker crashed; native report evidence is partial."
+            )
         if any(event.get("scheduler") not in {None, "no"} for event in events):
             limitations.append(
                 "Stable xdist hooks do not expose exact per-test controller queue latency."
@@ -323,8 +304,6 @@ class PytestExtractor:
             fixture_setup_ns=fixture_setup_ns,
             collection_duration_ns=collection_duration,
             workers=tuple(sorted(workers)),
-            recovered_sidecar_events=recovered_sidecar_events,
-            sidecar_recovery_failures=len(failed_sidecars),
             first_failure_observed_ns=first_observed,
             first_failure_reported_ns=first_reported,
             measurement_count=len(rows),
@@ -466,7 +445,7 @@ class PytestExtractor:
         return matches[0]
 
     def _events(self, path: Any, run_id: str) -> tuple[list[dict[str, Any]], bool]:
-        events: list[dict[str, Any]] = []
+        payloads: list[dict[str, Any]] = []
         truncated = False
         try:
             with path.open(encoding="utf-8") as stream:
@@ -478,19 +457,35 @@ class PytestExtractor:
                             truncated = True
                             break
                         raise
-                    if (
-                        not isinstance(event, dict)
-                        or event.get("schema") != "flameox.pytest-event.v1"
-                    ):
+                    if not isinstance(event, dict):
                         raise ValueError("unsupported event")
-                    events.append(event)
+                    payloads.append(event)
         except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
                 "The artifact is not a supported pytest event stream.",
                 run_id=run_id,
             ) from exc
-        return events, truncated
+        if not payloads:
+            raise DomainError(
+                ErrorCode.ARTIFACT_PARSE_FAILED,
+                "The artifact is not a supported pytest event stream.",
+                run_id=run_id,
+            )
+        if payloads[0].get("$report_type") == "SessionStart":
+            try:
+                return _reportlog_events(payloads), truncated
+            except (TypeError, ValueError) as exc:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_PARSE_FAILED,
+                    "The artifact is not a supported pytest event stream.",
+                    run_id=run_id,
+                ) from exc
+        raise DomainError(
+            ErrorCode.ARTIFACT_PARSE_FAILED,
+            "The artifact is not a supported pytest event stream.",
+            run_id=run_id,
+        )
 
     def _row(
         self,
@@ -539,6 +534,170 @@ class PytestExtractor:
         }
 
 
+def _reportlog_events(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize maintained pytest-reportlog records into Flameox evidence semantics."""
+    events: list[dict[str, Any]] = []
+    run_started_ns: int | None = None
+    for report in reports:
+        report_type = report.get("$report_type")
+        if report_type == "CollectReport":
+            extension = report.get("flameox")
+            if isinstance(extension, dict):
+                nodeids = extension.get("collected_nodeids", ())
+                if isinstance(nodeids, list):
+                    events.extend(
+                        {
+                            "event": "test_collected",
+                            "observed_at_ns": 0,
+                            "nodeid": nodeid,
+                        }
+                        for nodeid in nodeids
+                        if isinstance(nodeid, str)
+                    )
+            continue
+        if report_type == "TestReport":
+            nodeid = report.get("nodeid")
+            phase = report.get("when")
+            outcome = report.get("outcome")
+            if not all(isinstance(value, str) for value in (nodeid, phase, outcome)):
+                raise ValueError("invalid pytest TestReport")
+            properties = _report_properties(report)
+            longrepr = report.get("longrepr")
+            worker_crash = (
+                phase == "???"
+                and isinstance(longrepr, str)
+                and " crashed while running " in longrepr
+            )
+            candidate_start = _last_property(properties.get("flameox.run_started_ns"))
+            if isinstance(candidate_start, int):
+                run_started_ns = (
+                    candidate_start
+                    if run_started_ns is None
+                    else min(run_started_ns, candidate_start)
+                )
+            worker_id = report.get("worker_id", "master")
+            if not isinstance(worker_id, str):
+                worker_id = "master"
+            started_at_ns = round(float(report.get("start", 0.0)) * 1_000_000_000)
+            stopped_at_ns = round(float(report.get("stop", 0.0)) * 1_000_000_000)
+            received = _last_property(
+                properties.get("flameox.controller_received_ns", stopped_at_ns)
+            )
+            events.append(
+                {
+                    "event": "test_collected",
+                    "observed_at_ns": started_at_ns,
+                    "nodeid": nodeid,
+                }
+            )
+            if worker_crash:
+                events.append(
+                    {
+                        "event": "worker_down",
+                        "observed_at_ns": int(received),
+                        "worker_id": worker_id,
+                        "outcome": "crashed",
+                    }
+                )
+            events.append(
+                {
+                    "event": "test_phase",
+                    "observed_at_ns": int(received),
+                    "nodeid": nodeid,
+                    "worker_id": worker_id,
+                    "phase": phase,
+                    "outcome": outcome,
+                    "duration_ns": round(float(report.get("duration", 0.0)) * 1_000_000_000),
+                    "started_at_ns": started_at_ns,
+                    "stopped_at_ns": stopped_at_ns,
+                    "controller_received_at_ns": int(received),
+                    "wasxfail": bool(report.get("wasxfail", False)),
+                }
+            )
+            fixtures = properties.get("flameox.fixture_setup", ())
+            fixtures = fixtures if isinstance(fixtures, list) else [fixtures]
+            for fixture in fixtures:
+                if not isinstance(fixture, dict):
+                    continue
+                events.append(
+                    {
+                        "event": "fixture_setup",
+                        "observed_at_ns": int(fixture.get("started_at_ns", started_at_ns)),
+                        "duration_ns": int(fixture.get("duration_ns", 0)),
+                        "fixture": str(fixture.get("fixture", "unknown")),
+                        "scope": str(fixture.get("scope", "unknown")),
+                        "nodeid": nodeid,
+                        "worker_id": worker_id,
+                        "outcome": str(fixture.get("outcome", "unknown")),
+                    }
+                )
+            continue
+        if report_type == "SessionFinish":
+            if int(report.get("exitstatus", 1)) == 2:
+                events.append(
+                    {
+                        "event": "interrupted",
+                        "observed_at_ns": max(
+                            (int(event.get("observed_at_ns", 0)) for event in events),
+                            default=0,
+                        ),
+                    }
+                )
+            events.append(
+                {
+                    "event": "session_finished",
+                    "observed_at_ns": max(
+                        (int(event.get("observed_at_ns", 0)) for event in events), default=0
+                    ),
+                    "exit_status": int(report.get("exitstatus", 1)),
+                }
+            )
+            continue
+        if report_type in {"SessionStart", "WarningMessage", "CollectReport"}:
+            continue
+        # pytest-reportlog explicitly permits consumers to ignore new report types.
+    if run_started_ns is None:
+        starts = [
+            int(event["started_at_ns"]) for event in events if event.get("event") == "test_phase"
+        ]
+        run_started_ns = min(starts, default=0)
+    events.insert(
+        0,
+        {
+            "event": "run_started",
+            "observed_at_ns": run_started_ns,
+            "run_started_at_ns": run_started_ns,
+            "scheduler": (
+                "xdist" if any(event.get("worker_id") != "master" for event in events) else "no"
+            ),
+        },
+    )
+    return events
+
+
+def _report_properties(report: dict[str, Any]) -> dict[str, Any]:
+    properties: dict[str, Any] = {}
+    raw = report.get("user_properties", ())
+    if not isinstance(raw, list):
+        return properties
+    for item in raw:
+        if not isinstance(item, list | tuple) or len(item) != 2 or not isinstance(item[0], str):
+            continue
+        name, value = item
+        current = properties.get(name)
+        if current is None:
+            properties[name] = value
+        elif isinstance(current, list):
+            current.append(value)
+        else:
+            properties[name] = [current, value]
+    return properties
+
+
+def _last_property(value: Any) -> Any:
+    return value[-1] if isinstance(value, list) and value else value
+
+
 def _test_outcomes(phases: dict[str, dict[str, str]]) -> dict[str, int]:
     counts = {"passed": 0, "failed": 0, "skipped": 0, "errored": 0}
     for reports in phases.values():
@@ -572,7 +731,6 @@ def _completion_state(
     *,
     interrupted: bool,
     crashed: bool,
-    failed_sidecars: set[str],
     truncated_stream: bool,
 ) -> tuple[PytestCompletionState, list[str]]:
     limitations: list[str] = []
@@ -585,17 +743,7 @@ def _completion_state(
         limitations.append(
             "The pytest event stream ended with a truncated record; the valid prefix was recovered."
         )
-    if failed_sidecars:
-        limitations.append(
-            "One or more worker sidecars were unavailable, partial, or failed recovery."
-        )
-    complete = (
-        has_terminal_event
-        and not interrupted
-        and not crashed
-        and not failed_sidecars
-        and not truncated_stream
-    )
+    complete = has_terminal_event and not interrupted and not crashed and not truncated_stream
     state = (
         PytestCompletionState.COMPLETE
         if complete
@@ -604,23 +752,6 @@ def _completion_state(
         )
     )
     return state, limitations
-
-
-def _crash_limitation(
-    crashed_workers: set[str],
-    recovered_sidecars: set[str],
-) -> str:
-    unrecovered_crashes = crashed_workers - recovered_sidecars
-    if unrecovered_crashes:
-        return (
-            "At least one crashed xdist worker had no complete recoverable fixture sidecar: "
-            + ", ".join(sorted(unrecovered_crashes))
-            + "."
-        )
-    return (
-        "Fixture and test-start events emitted before an xdist worker crash were "
-        "recovered from bounded sidecars."
-    )
 
 
 def _integer(value: dict[str, Any], field: str) -> int:

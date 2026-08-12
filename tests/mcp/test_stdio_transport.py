@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 
 from flameox import __version__
 from flameox.cli import app
-from flameox.domain import DomainError, RunManifest
+from flameox.domain import RunManifest
 from flameox.storage import RunStore, Workspace
 
 
@@ -179,7 +179,7 @@ async def test_real_stdio_discovers_then_plans_and_executes_declared_workload(
                 "parameters": {"value": ["baseline", "candidate"]},
             },
         )
-        assert not any(workspace.paths.runs.iterdir())
+        assert RunStore(workspace).list() == ()
         declared = await client.call_tool(
             "list_declared_workflows",
             {"kind": "workload", "limit": 10},
@@ -205,7 +205,7 @@ async def test_real_stdio_discovers_then_plans_and_executes_declared_workload(
         assert planned.structured_content is not None
         executed = await client.call_tool(
             "execute_capture_plan",
-            {"plan_id": planned.structured_content["result"]["plan_id"]},
+            {"plan_token": planned.structured_content["result"]["plan_token"]},
         )
 
     assert {tool.name for tool in tools.tools} >= {
@@ -324,13 +324,7 @@ timeout_seconds = 60
 
     def read_runs() -> list[RunManifest]:
         runs: list[RunManifest] = []
-        for path in workspace.paths.runs.iterdir():
-            if not path.is_dir():
-                continue
-            try:
-                runs.append(RunStore(workspace).read(path.name))
-            except DomainError:
-                continue
+        runs.extend(RunStore(workspace).list())
         return runs
 
     async with Client(stdio_client(parameters), raise_exceptions=True) as client:
@@ -347,7 +341,7 @@ timeout_seconds = 60
         task = asyncio.create_task(
             client.call_tool(
                 "execute_capture_plan",
-                {"plan_id": planned.structured_content["result"]["plan_id"]},
+                {"plan_token": planned.structured_content["result"]["plan_token"]},
             )
         )
         for _ in range(200):

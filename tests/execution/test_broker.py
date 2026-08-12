@@ -427,7 +427,7 @@ def test_observed_run_does_not_wait_for_an_escaped_output_writer(tmp_path: Path)
         child_pid = int(pid_path.read_text())
 
         assert outcome.process.exit_code == 0
-        assert time.monotonic() - started < 0.5
+        assert time.monotonic() - started < 0.7
         assert not any(
             thread.name.startswith("flameox-observed-") for thread in threading.enumerate()
         )

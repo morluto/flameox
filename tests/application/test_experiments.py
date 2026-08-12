@@ -174,7 +174,7 @@ implementation = ["candidate", ""]
     ) -> None:
         progress.append((completed, total, message))
 
-    result = await service.run(plan.plan_id, progress=record_progress)
+    result = await service.run(plan.plan_token, progress=record_progress)
 
     assert len(plan.blocks) == 1
     assert set(plan.blocks[0].order) == {"", "candidate"}
@@ -250,7 +250,7 @@ implementation = ["baseline", "candidate"]
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    result = await service.run(plan.plan_id)
+    result = await service.run(plan.plan_token)
 
     assert result.comparison is not None
     assert result.comparison.comparison.metric == "runtime_resource.peak_rss_bytes"
@@ -307,7 +307,7 @@ implementation = ["baseline", "candidate", "other"]
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    result = await service.run(plan.plan_id)
+    result = await service.run(plan.plan_token)
 
     assert result.comparison is None
     assert (
@@ -416,13 +416,10 @@ variant = ["baseline", "candidate"]
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    task = asyncio.create_task(service.run(plan.plan_id))
+    task = asyncio.create_task(service.run(plan.plan_token))
     running_run_id: str | None = None
     for _ in range(500):
-        for run_path in workspace.paths.runs.iterdir():
-            if not run_path.is_dir():
-                continue
-            run = RunStore(workspace).read(run_path.name)
+        for run in RunStore(workspace).list():
             if run.execution_status is ExecutionStatus.RUNNING:
                 running_run_id = run.run_id
                 break
@@ -488,7 +485,7 @@ variant = ["base", "candidate"]
     )
 
     with pytest.raises(DomainError):
-        await service.run(plan.plan_id)
+        await service.run(plan.plan_token)
 
     with Catalog(workspace).open_snapshot() as snapshot:
         rows = snapshot.execute(
@@ -718,7 +715,7 @@ case = ["bad", "clean"]
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    result = await service.run(plan.plan_id)
+    result = await service.run(plan.plan_token)
 
     assert result.comparison is None
     assert result.outcome is not None
@@ -804,7 +801,7 @@ treatment = ["base", "candidate"]
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    result = await service.run(plan.plan_id)
+    result = await service.run(plan.plan_token)
 
     assert result.outcome is not None
     assert result.outcome.disposition == "base_only_failure"
@@ -840,7 +837,7 @@ treatment = ["base", "candidate"]
         adapter="command",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    repeated = await service.run(repeated_plan.plan_id)
+    repeated = await service.run(repeated_plan.plan_token)
     assert repeated.experiment.experiment_id != result.experiment.experiment_id
     with pytest.raises(DomainError, match="ambiguous"):
         service.get_trial(by_treatment["base"].trial_id)
@@ -900,7 +897,7 @@ case = ["bad"]
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    result = await service.run(plan.plan_id)
+    result = await service.run(plan.plan_token)
 
     assert result.outcome is not None
     assert result.outcome.disposition == "insufficient_evidence"
@@ -947,7 +944,7 @@ mode = ["base", "candidate"]
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    result = await service.run(plan.plan_id)
+    result = await service.run(plan.plan_token)
 
     assert result.outcome is not None
     assert result.outcome.disposition == "unsupported"
@@ -1001,7 +998,7 @@ mode = ["base", "candidate"]
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    result = await service.run(plan.plan_id)
+    result = await service.run(plan.plan_token)
 
     assert result.outcome is not None
     assert {item.treatment: item.timed_out for item in result.outcome.counts} == {

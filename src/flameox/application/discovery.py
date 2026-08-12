@@ -164,7 +164,8 @@ class RunDiscoveryService:
             "WITH latest AS (SELECT *, row_number() OVER (PARTITION BY run_id "
             "ORDER BY published_at DESC) AS revision_order FROM runs) "
         )
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             count_row = snapshot.execute(
                 latest + "SELECT count(*) FROM latest WHERE " + where,
                 tuple(parameters),

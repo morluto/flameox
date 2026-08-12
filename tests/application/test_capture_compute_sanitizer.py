@@ -61,7 +61,7 @@ async def test_compute_sanitizer_rejects_suppression_changed_after_planning(
     suppression.write_text("# bytes changed after authorization\n")
 
     with pytest.raises(DomainError) as changed:
-        await service.execute(plan.plan_id)
+        await service.execute(plan.plan_token)
     assert changed.value.code is ErrorCode.INVALID_CAPTURE_PLAN
     assert not marker.exists()
 
@@ -100,7 +100,7 @@ async def test_compute_sanitizer_preserves_workload_suppression_argument(
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    await service.execute(plan.plan_id)
+    await service.execute(plan.plan_token)
 
     argv = captured_argv.read_text().splitlines()
     suppression_indexes = [
@@ -139,7 +139,7 @@ async def test_compute_sanitizer_clean_capture_with_unknown_xml_is_inconclusive(
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
 
     assert result.run.validation_status.value == "inconclusive"
     assert "Unknown Compute Sanitizer XML element: futureFinding." in result.run.limitations

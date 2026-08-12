@@ -177,8 +177,10 @@ def test_aiperf_discovery_rejects_unsupported_version(
 ) -> None:
     executable = tmp_path / "aiperf"
     executable.write_bytes(b"executable")
+    executable.chmod(0o755)
     monkeypatch.setattr(
-        "flameox.application.inference_providers.shutil.which", lambda _tool: str(executable)
+        "flameox.command_binding.shutil.which",
+        lambda _tool, path=None: str(executable),
     )
     monkeypatch.setattr("flameox.application.inference_providers.version", lambda _tool: "0.13.0")
 

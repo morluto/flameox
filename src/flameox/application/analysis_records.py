@@ -113,7 +113,8 @@ class AnalysisMaterializationService:
     ) -> MaterializedAnalysisResult:
         corpus_commit_id = self.workspace.corpus.read_head().commit_id
         started = datetime.now(UTC)
-        with Catalog(self.workspace).open_snapshot(corpus_commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(corpus_commit_id)) as snapshot:
             result = self._run(
                 request,
                 recipes=RecipeService(self.workspace, snapshot=snapshot),
@@ -162,11 +163,10 @@ class AnalysisMaterializationService:
             )
             return result, run_ids, artifact_ids, generation_ids
 
-        result, run_ids, artifact_ids, generation_ids = await Catalog(
-            self.workspace
-        ).run_interruptible(
+        catalog = Catalog(self.workspace)
+        result, run_ids, artifact_ids, generation_ids = await catalog.run_interruptible(
             prepare,
-            commit_id=corpus_commit_id,
+            handle=catalog.pin(corpus_commit_id),
             query_name=f"materialize.{request.recipe}",
         )
         if progress is not None:

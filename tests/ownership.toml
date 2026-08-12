@@ -262,9 +262,9 @@ markers = ["unit"]
 
 
 [[ownership]]
-owner = "repair"
+owner = "quarantine-recovery"
 lane = "storage"
-paths = ["tests/application/test_repair.py"]
+paths = ["tests/application/test_quarantine.py"]
 markers = ["integration", "serial"]
 
 
@@ -350,6 +350,36 @@ owner = "execution-broker"
 lane = "process"
 paths = ["tests/execution/test_broker.py"]
 markers = ["integration", "process", "serial"]
+
+[[ownership]]
+owner = "command-binding"
+lane = "core"
+paths = ["tests/execution/test_command_binding.py"]
+markers = ["unit"]
+
+[[ownership]]
+owner = "bound-execution"
+lane = "process"
+paths = ["tests/execution/test_bound_execution.py"]
+markers = ["integration", "process", "serial"]
+
+[[ownership]]
+owner = "sqlite-control-plane"
+lane = "storage"
+paths = ["tests/storage/test_control_plane.py"]
+markers = ["integration", "serial"]
+
+[[ownership]]
+owner = "bounded-filesystem"
+lane = "storage"
+paths = ["tests/storage/test_bounded_filesystem.py"]
+markers = ["unit"]
+
+[[ownership]]
+owner = "structured-concurrency"
+lane = "application"
+paths = ["tests/application/test_structured_concurrency.py"]
+markers = ["unit"]
 
 
 [[ownership]]
@@ -474,7 +504,12 @@ markers = ["unit"]
 [[ownership]]
 owner = "inference-artifacts"
 lane = "adapters"
-paths = ["tests/adapters/test_inference_artifacts.py"]
+paths = [
+  "tests/adapters/test_inference_aiperf.py",
+  "tests/adapters/test_inference_mooncake.py",
+  "tests/adapters/test_inference_sglang.py",
+  "tests/adapters/test_inference_vllm.py",
+]
 markers = ["unit"]
 
 [[ownership]]

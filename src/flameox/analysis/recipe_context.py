@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from flameox.catalog import Catalog, Snapshot
+from flameox.catalog import Catalog, Snapshot, SnapshotHandle
 from flameox.domain import DomainError, ErrorCode
 from flameox.storage import Workspace
 
@@ -16,9 +16,13 @@ class RecipeContext:
         workspace: Workspace,
         *,
         snapshot: Snapshot | None = None,
+        snapshot_handle: SnapshotHandle | None = None,
     ) -> None:
+        if snapshot is not None and snapshot_handle is not None:
+            raise ValueError("provide a snapshot or snapshot handle, not both")
         self.workspace = workspace
         self.snapshot = snapshot
+        self.snapshot_handle = snapshot.handle if snapshot is not None else snapshot_handle
 
     def _limit(self, value: int | None) -> int:
         if value is None:
@@ -32,15 +36,15 @@ class RecipeContext:
 
     def _pinned_commit_id(self, value: str | None) -> str:
         if value is not None:
-            if self.snapshot is not None and self.snapshot.commit.commit_id != value:
+            if self.snapshot_handle is not None and self.snapshot_handle.commit.commit_id != value:
                 raise DomainError(
                     ErrorCode.WORKSPACE_INVALID,
                     "Recipe snapshot does not match the requested corpus commit.",
                 )
             return value
-        if self.snapshot is not None:
-            return self.snapshot.commit.commit_id
-        return self.workspace.corpus.read_head().commit_id
+        if self.snapshot_handle is not None:
+            return self.snapshot_handle.commit.commit_id
+        return Catalog(self.workspace).pin().commit.commit_id
 
     @contextmanager
     def _open_snapshot(self, corpus_commit_id: str) -> Iterator[Snapshot]:
@@ -52,5 +56,15 @@ class RecipeContext:
                 )
             yield self.snapshot
             return
-        with Catalog(self.workspace).open_snapshot(corpus_commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        if (
+            self.snapshot_handle is not None
+            and self.snapshot_handle.commit.commit_id != corpus_commit_id
+        ):
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                "Recipe attempted to cross its pinned corpus snapshot.",
+            )
+        handle = self.snapshot_handle or catalog.pin(corpus_commit_id)
+        with catalog.open_snapshot(handle) as snapshot:
             yield snapshot

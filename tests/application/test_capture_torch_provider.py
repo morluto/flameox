@@ -49,7 +49,7 @@ timeout_seconds = 30
         adapter="torch.profiler",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
 
     assert result.run.execution_status is ExecutionStatus.SUCCEEDED
     trace = next(
@@ -168,7 +168,7 @@ timeout_seconds = 30
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
 
     assert result.run.execution_status is ExecutionStatus.SUCCEEDED
     assert plan.adapter_options["mode"] == "sdk"
@@ -197,7 +197,7 @@ timeout_seconds = 30
         adapter_options=plan.adapter_options,
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    invalid = await service.execute(invalid_plan.plan_id)
+    invalid = await service.execute(invalid_plan.plan_token)
     assert invalid.run.execution_status is ExecutionStatus.SUCCEEDED
     assert invalid.run.capture_status is CaptureStatus.FAILED
     assert all(item.kind.value != "execution_trace" for item in invalid.run.artifacts)
@@ -208,7 +208,7 @@ timeout_seconds = 30
         adapter_options=plan.adapter_options,
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    missing_steps = await service.execute(missing_steps_plan.plan_id)
+    missing_steps = await service.execute(missing_steps_plan.plan_token)
     assert missing_steps.run.execution_status is ExecutionStatus.FAILED
     assert missing_steps.run.capture_status is CaptureStatus.FAILED
     assert all(item.kind.value != "execution_trace" for item in missing_steps.run.artifacts)

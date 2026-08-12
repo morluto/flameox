@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import stat
 import sys
 from pathlib import Path
@@ -10,6 +9,7 @@ from typing import cast
 
 from pydantic import JsonValue
 
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
     DomainError,
     ErrorCode,
@@ -55,13 +55,13 @@ async def collect_source_state(
     workload_executable: str,
     broker: SubprocessBroker,
 ) -> SourceState:
-    git = shutil.which("git")
+    git_binding = ExecutableResolver().resolve_host_tool("git")
     resolved_executable = _resolve_executable(
         workload_executable,
         workspace.project_root,
     )
     executable_digest = _file_digest(resolved_executable)
-    if git is None or not (workspace.project_root / ".git").exists():
+    if git_binding is None or not (workspace.project_root / ".git").exists():
         return collect_partial_source_state(
             workspace,
             executable=resolved_executable,
@@ -178,23 +178,8 @@ async def _git_bytes(
 
 
 def _resolve_executable(value: str, cwd: Path) -> Path:
-    if os.sep in value:
-        candidate = Path(value)
-        resolved = (candidate if candidate.is_absolute() else cwd / candidate).resolve()
-    else:
-        located = shutil.which(value)
-        if located is None:
-            raise DomainError(
-                ErrorCode.INVALID_CAPTURE_PLAN,
-                "The workload executable could not be resolved.",
-                details={"executable": value},
-                remediation=(
-                    "Install the workload executable or declare a resolvable path, then retry "
-                    "capture.",
-                ),
-            )
-        resolved = Path(located).resolve()
-    if not resolved.is_file():
+    binding = ExecutableResolver().resolve_host_tool(value, cwd=cwd)
+    if binding is None:
         raise DomainError(
             ErrorCode.INVALID_CAPTURE_PLAN,
             "The workload executable could not be resolved.",
@@ -203,7 +188,7 @@ def _resolve_executable(value: str, cwd: Path) -> Path:
                 "Install the workload executable or declare a resolvable path, then retry capture.",
             ),
         )
-    return resolved
+    return binding.canonical_target
 
 
 def _hash_untracked(project_root: Path, output: bytes) -> list[dict[str, JsonValue]]:

@@ -302,7 +302,7 @@ timeout_seconds = 30
         adapter="pyperf",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    captured = await service.execute(plan.plan_id)
+    captured = await service.execute(plan.plan_token)
     extracted = PyPerfExtractor(workspace).extract(captured.run.run_id)
 
     assert captured.run.execution_status is ExecutionStatus.SUCCEEDED

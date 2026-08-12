@@ -52,7 +52,7 @@ argv = ["python", "-c", "raise SystemExit(3)"]
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
         external_context=context,
     )
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
 
     assert result.run.execution_status is ExecutionStatus.FAILED
     assert result.run.external_context == context
@@ -70,10 +70,9 @@ argv = ["python", "-c", "raise SystemExit(3)"]
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
         external_context=context,
     )
-    await service.plans.issue(second.model_copy(update={"external_context": replacement}))
     with pytest.raises(DomainError) as tampered:
-        await service.execute(second.plan_id)
-    assert tampered.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+        await service.plans.issue(second.model_copy(update={"external_context": replacement}))
+    assert tampered.value.code is ErrorCode.REVISION_CONFLICT
 
     with pytest.raises(ValueError):
         ExternalExecutionContext(
@@ -116,7 +115,7 @@ native_files = ["lib/extension.so"]
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
     assert plan.planned_execution_identity.quality == "partial"
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
 
     identity = result.run.execution_identity
     assert identity is not None
@@ -143,7 +142,7 @@ native_files = ["lib/extension.so"]
     )
     native.write_bytes(b"candidate-c")
     with pytest.raises(DomainError) as stale:
-        await service.execute(stale_plan.plan_id)
+        await service.execute(stale_plan.plan_token)
     assert stale.value.code is ErrorCode.INVALID_CAPTURE_PLAN
 
 
@@ -184,8 +183,8 @@ required = ["cuda.driver", "cuda.runtime", "cuda.devices", "cuda.peer_topology"]
     disable_containment(workspace)
     real_which = shutil.which
     monkeypatch.setattr(
-        "flameox.application.environment.shutil.which",
-        lambda name: None if name == "nvidia-smi" else real_which(name),
+        "flameox.command_binding.shutil.which",
+        lambda name, path=None: None if name == "nvidia-smi" else real_which(name, path=path),
     )
     service = CaptureService(workspace)
     plan = await service.plan(
@@ -194,7 +193,7 @@ required = ["cuda.driver", "cuda.runtime", "cuda.devices", "cuda.peer_topology"]
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
 
     assert result.run.execution_status is ExecutionStatus.SUCCEEDED
     with Catalog(workspace).open_snapshot() as snapshot:

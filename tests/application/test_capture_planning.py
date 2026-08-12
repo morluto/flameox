@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -303,7 +304,10 @@ argv = ["python", "-c", "print('gpu')"]
 executables = ["nvcc"]
 """
     )
-    monkeypatch.setattr("flameox.application.preflight.shutil.which", lambda _: "/usr/bin/nvcc")
+    monkeypatch.setattr(
+        "flameox.command_binding.shutil.which",
+        lambda _name, path=None: sys.executable,
+    )
 
     result = await PreflightService(
         workspace,
@@ -333,7 +337,10 @@ argv = ["python", "-c", "print('gpu')"]
 executables = ["nvcc"]
 """
     )
-    monkeypatch.setattr("flameox.application.preflight.shutil.which", lambda _: "/usr/bin/nvcc")
+    monkeypatch.setattr(
+        "flameox.command_binding.shutil.which",
+        lambda _name, path=None: sys.executable,
+    )
 
     result = await PreflightService(
         workspace,
@@ -360,7 +367,10 @@ argv = ["python", "-c", "print('gpu')"]
 executables = ["nvcc"]
 """
     )
-    monkeypatch.setattr("flameox.application.preflight.shutil.which", lambda _: "/usr/bin/nvcc")
+    monkeypatch.setattr(
+        "flameox.command_binding.shutil.which",
+        lambda _name, path=None: sys.executable,
+    )
     service = PreflightService(workspace, broker=_PathReportingNvccProbeBroker())
 
     first = await service.inspect("gpu", mode=ProbeKind.ACTIVE)
@@ -411,6 +421,8 @@ async def test_capture_planning_defaults_to_bounded_active_preflight(tmp_path: P
     )
 
     assert plan.preflight.mode == "active"
+    assert plan.collector_executable_binding.invocation_path == Path(plan.collector_argv[0])
+    assert plan.workload_instance.executable_binding is not None
 
 
 @pytest.mark.anyio
@@ -495,5 +507,5 @@ writable_paths = ["target"]
     output.mkdir()
 
     with pytest.raises(DomainError) as replaced:
-        await service.execute(plan.plan_id)
+        await service.execute(plan.plan_token)
     assert replaced.value.code is ErrorCode.INVALID_CAPTURE_PLAN

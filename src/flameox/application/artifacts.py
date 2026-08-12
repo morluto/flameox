@@ -61,7 +61,8 @@ class ArtifactService:
 
     def get(self, artifact_id: str, *, limit: int = 100) -> ArtifactMetadataResult:
         stored = ArtifactStore(self.workspace).get(artifact_id)
-        with Catalog(self.workspace).open_snapshot() as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin()) as snapshot:
             rows = snapshot.execute(
                 "SELECT registration_id, run_id, display_name, kind, media_type, "
                 "sensitivity, role, producer, producer_version, registered_at "
@@ -118,7 +119,8 @@ class ArtifactService:
         )
         if after is not None and not isinstance(after, str):
             raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.")
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             count_row = snapshot.execute(
                 "SELECT count(DISTINCT artifact_id) FROM artifact_registrations"
             ).fetchone()

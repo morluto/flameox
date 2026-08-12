@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import Any, cast
@@ -44,7 +45,7 @@ async def test_capture_plan_is_single_use_and_publishes_process_evidence(
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
 
     assert result.run.execution_status is ExecutionStatus.SUCCEEDED
     assert result.run.capture_status is CaptureStatus.REGISTERED
@@ -85,7 +86,7 @@ async def test_capture_plan_is_single_use_and_publishes_process_evidence(
     assert events[-1]["phase"] == "Evidence publication complete"
     assert "candidate" not in workspace.paths.operation_log.read_text()
     with pytest.raises(DomainError) as replay:
-        await service.execute(plan.plan_id)
+        await service.execute(plan.plan_token)
     assert replay.value.code is ErrorCode.INVALID_CAPTURE_PLAN
 
 
@@ -112,7 +113,7 @@ writable_paths = ["target"]
         adapter="command",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
 
     with Catalog(workspace).open_snapshot() as snapshot:
         row = snapshot.execute(
@@ -174,7 +175,7 @@ receipt_schema = "flameox.oracle-receipt.v1"
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
 
     assert result.run.validation_status is ValidationStatus.FAILED
     assert result.run.oracle_receipt is not None
@@ -197,30 +198,31 @@ async def test_measurement_protocol_identity_binds_collector_executable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    collector = bindir / "python"
+    collector.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    collector.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
     workspace = Workspace.initialize(tmp_path)
     write_workload(tmp_path)
     disable_containment(workspace)
     service = CaptureService(workspace)
-    identity = {"digest": "first"}
-    monkeypatch.setattr(
-        service,
-        "_executable_identity",
-        lambda _executable: dict(identity),
-    )
-
     first_plan = await service.plan(
         workload_name="echo",
         adapter="command",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    first = await service.execute(first_plan.plan_id)
-    identity["digest"] = "second"
+    first = await service.execute(first_plan.plan_token)
+    original = collector.read_bytes()
+    collector.write_bytes(original + b"\n# identity changed\n")
     second_plan = await service.plan(
         workload_name="echo",
         adapter="command",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    second = await service.execute(second_plan.plan_id)
+    second = await service.execute(second_plan.plan_token)
+    collector.write_bytes(original)
 
     assert first.run.measurement_protocol_id != second.run.measurement_protocol_id
 
@@ -250,8 +252,8 @@ async def test_concurrent_captures_execute_while_publications_serialize(
     )
 
     results = await asyncio.gather(
-        service.execute(first.plan_id),
-        service.execute(second.plan_id),
+        service.execute(first.plan_token),
+        service.execute(second.plan_token),
     )
 
     assert {result.run.execution_status for result in results} == {ExecutionStatus.SUCCEEDED}
@@ -297,13 +299,13 @@ timeout_seconds = 30
         if completed == 4:
             collector_started.set()
 
-    task = asyncio.create_task(service.execute(plan.plan_id, progress=record_progress))
+    task = asyncio.create_task(service.execute(plan.plan_token, progress=record_progress))
     await asyncio.wait_for(collector_started.wait(), timeout=5)
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await task
-    runs = [path.name for path in workspace.paths.runs.iterdir() if path.is_dir()]
+    runs = [run.run_id for run in RunStore(workspace).list()]
     assert len(runs) == 1
     terminal = RunStore(workspace).read(runs[0])
     assert terminal.execution_status is ExecutionStatus.CANCELLED
@@ -336,7 +338,7 @@ async def test_startup_identity_failure_is_terminal_and_cleans_staging(
     )
 
     with pytest.raises(DomainError, match="simulated source identity failure"):
-        await service.execute(plan.plan_id)
+        await service.execute(plan.plan_token)
 
     terminal = RunStore(workspace).read(plan.run_id)
     assert terminal.execution_status is ExecutionStatus.FAILED
@@ -371,7 +373,7 @@ async def test_startup_identity_collection_records_recoverable_owner_lease(
         "flameox.application.capture.collect_source_state",
         wait_during_source_identity,
     )
-    task = asyncio.create_task(service.execute(plan.plan_id))
+    task = asyncio.create_task(service.execute(plan.plan_token))
     await asyncio.wait_for(collecting.wait(), timeout=2)
 
     starting = RunStore(workspace).read(plan.run_id)
@@ -407,7 +409,7 @@ async def test_startup_lease_failure_terminalizes_consumed_capture_plan(
     monkeypatch.setattr(service, "_lease", fail_lease)
 
     with pytest.raises(DomainError, match="simulated lease identity failure") as error:
-        await service.execute(plan.plan_id)
+        await service.execute(plan.plan_token)
 
     terminal = RunStore(workspace).read(plan.run_id)
     assert error.value.run_id == plan.run_id
@@ -440,7 +442,7 @@ async def test_artifact_registration_failure_is_terminal_and_cleans_staging(
     )
 
     with pytest.raises(DomainError) as error:
-        await service.execute(plan.plan_id)
+        await service.execute(plan.plan_token)
 
     terminal = RunStore(workspace).read(plan.run_id)
     assert error.value.code is ErrorCode.ARTIFACT_TOO_LARGE
@@ -481,7 +483,7 @@ async def test_publication_failure_is_terminal_and_cleans_staging(
     monkeypatch.setattr(service.publisher, "publish_rows", fail_evidence_publication)
 
     with pytest.raises(DomainError, match="simulated publication failure"):
-        await service.execute(plan.plan_id)
+        await service.execute(plan.plan_token)
 
     terminal = RunStore(workspace).read(plan.run_id)
     assert terminal.execution_status is ExecutionStatus.FAILED
@@ -515,7 +517,7 @@ async def test_capture_cancellation_at_awaited_phase_is_terminal(
             raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
-        await service.execute(plan.plan_id, progress=cancel)
+        await service.execute(plan.plan_token, progress=cancel)
 
     terminal = RunStore(workspace).read(plan.run_id)
     assert terminal.execution_status is ExecutionStatus.CANCELLED
@@ -547,7 +549,7 @@ async def test_cancellation_during_atomic_publication_finishes_then_marks_run_ca
         return original(*args, **kwargs)
 
     monkeypatch.setattr(service.publisher, "publish_rows", delayed)
-    task = asyncio.create_task(service.execute(plan.plan_id))
+    task = asyncio.create_task(service.execute(plan.plan_token))
     assert await asyncio.to_thread(started.wait, 5)
     task.cancel()
     release.set()

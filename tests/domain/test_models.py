@@ -63,6 +63,7 @@ def _capture_plan_payload(**overrides: object) -> dict[str, object]:
         "missing_inputs": [],
     }
     payload: dict[str, object] = {
+        "plan_token": "token",
         "plan_id": "plan",
         "run_id": "run",
         "request_digest": DIGEST,
@@ -76,6 +77,25 @@ def _capture_plan_payload(**overrides: object) -> dict[str, object]:
         "adapter": "adapter",
         "execution_policy": "trusted_local",
         "collector_argv": ["python"],
+        "collector_executable_binding": {
+            "requested_token": "python",
+            "invocation_path": "/usr/bin/python",
+            "canonical_target": "/usr/bin/python",
+            "origin": "path_search",
+            "matched_path_entry": "/usr/bin",
+            "identity": {
+                "sha256": "a" * 64,
+                "size": 1,
+                "mode": 0o755,
+                "device": 1,
+                "inode": 1,
+                "modified_ns": 1,
+            },
+            "policy_decision": {
+                "policy": "trusted_host_tool",
+                "allowed": True,
+            },
+        },
         "expected_artifact_kinds": [],
         "expected_overhead": "low",
         "containment": "active",

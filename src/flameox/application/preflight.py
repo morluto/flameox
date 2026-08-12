@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import tempfile
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
@@ -9,6 +8,7 @@ from packaging.requirements import InvalidRequirement, Requirement
 
 from flameox.application.capabilities import CapabilityService
 from flameox.application.workloads import WorkloadService
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
     CapabilityReport,
     CapabilityStatus,
@@ -124,8 +124,8 @@ class PreflightService:
         )
 
     def _executable(self, name: str, *, required: bool) -> RequirementResult:
-        resolved = shutil.which(name)
-        if resolved is None:
+        binding = ExecutableResolver().resolve_host_tool(name)
+        if binding is None:
             return RequirementResult(
                 requirement=name,
                 kind=RequirementKind.EXECUTABLE,
@@ -137,7 +137,7 @@ class PreflightService:
                     "environment or configure a workload that uses an available executable.",
                 ),
             )
-        path = Path(resolved).resolve()
+        path = binding.canonical_target
         try:
             path.relative_to(self.workspace.project_root.resolve())
         except ValueError:
@@ -168,10 +168,10 @@ class PreflightService:
         required: bool,
         mode: ProbeKind,
     ) -> RequirementResult:
-        resolved = shutil.which("nvcc")
-        if resolved is None:
+        binding = ExecutableResolver().resolve_host_tool("nvcc")
+        if binding is None:
             return self._executable("nvcc", required=required)
-        path = Path(resolved).resolve()
+        path = binding.canonical_target
         try:
             path.relative_to(self.workspace.project_root.resolve())
         except ValueError:

@@ -309,7 +309,7 @@ async def test_run_managed_server_cleans_up_lease(
     _patch_providers(monkeypatch, executable=provider)
 
     service = InferenceReplayService(workspace)
-    result = await service.run(service.plan("aiperf_replay", timeout_seconds=5))
+    result = await service.run(service.plan("aiperf_replay", timeout_seconds=5).plan_token)
 
     assert result.exit_code == 0
     assert result.server_cleanup_complete is True
@@ -413,10 +413,15 @@ async def test_run_executes_through_broker_and_preserves_argv_and_output_path(
 
     plan = service.plan("aiperf_replay")
     assert plan.output_path is not None
+    assert plan.plan_token
     output = Path(plan.output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text('{"aggregate": true}')
-    result = await service.run(plan)
+    mutated_preview = plan.validated_copy(
+        update={"output_path": str(tmp_path / "forged"), "timeout_seconds": 1}
+    )
+    assert mutated_preview.output_path != plan.output_path
+    result = await service.run(plan.plan_token)
 
     assert isinstance(result, InferenceReplayResult)
     assert result.plan_id == plan.plan_id
@@ -461,7 +466,7 @@ async def test_run_refuses_unavailable_tool_before_broker(
 
     plan = service.plan("vllm_bench_replay")
     with pytest.raises(DomainError, match="unavailable") as exc_info:
-        await service.run(plan)
+        await service.run(plan.plan_token)
 
     assert exc_info.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
     assert len(broker.requests) == 0
@@ -487,7 +492,7 @@ async def test_run_preserves_partial_provider_artifacts_on_failure(
     service = InferenceReplayService(workspace, broker=FailingBroker())
 
     with pytest.raises(DomainError) as caught:
-        await service.run(service.plan("aiperf_replay"))
+        await service.run(service.plan("aiperf_replay").plan_token)
 
     assert caught.value.code is ErrorCode.PROCESS_FAILED
     assert caught.value.run_id is not None
@@ -517,7 +522,7 @@ async def test_run_finalizes_canonical_run_after_unexpected_broker_failure(
     service = InferenceReplayService(workspace, broker=BrokenBroker())
 
     with pytest.raises(DomainError) as caught:
-        await service.run(service.plan("aiperf_replay"))
+        await service.run(service.plan("aiperf_replay").plan_token)
 
     assert caught.value.code is ErrorCode.INTERNAL_ERROR
     assert caught.value.run_id is not None
@@ -538,7 +543,7 @@ async def test_run_records_unhealthy_server_as_limitation_without_failing(
     service = InferenceReplayService(workspace, broker=broker)
 
     plan = service.plan("vllm_bench_replay")
-    result = await service.run(plan)
+    result = await service.run(plan.plan_token)
 
     assert result.health_ready is False
     assert result.probed_model_ids == ()
@@ -557,7 +562,7 @@ def test_run_sync_executes_and_returns_typed_result(
     service = InferenceReplayService(workspace, broker=broker)
 
     plan = service.plan("vllm_bench_replay")
-    result = service.run_sync(plan)
+    result = service.run_sync(plan.plan_token)
 
     assert isinstance(result, InferenceReplayResult)
     assert result.exit_code == 0
@@ -617,7 +622,7 @@ receipt_schema = "flameox.oracle-receipt.v1"
 
     service = InferenceReplayService(workspace, broker=OracleBroker())
     plan = service.plan("vllm_bench_replay")
-    result = service.run_sync(plan)
+    result = service.run_sync(plan.plan_token)
 
     assert result.oracle_status == "pass"
     assert len(service.broker.requests) == 2  # type: ignore[attr-defined]
@@ -681,7 +686,7 @@ def test_run_sync_publishes_vllm_measurements_under_canonical_run(
         )
     )
 
-    result = service.run_sync(plan)
+    result = service.run_sync(plan.plan_token)
 
     measurements = EvidenceQueryService(workspace).measurements(run_id=result.run_id, limit=100)
     assert measurements.measurements
@@ -737,7 +742,7 @@ def test_run_sync_correlates_aiperf_outputs_under_canonical_run(
         + "\n"
     )
 
-    result = service.run_sync(plan)
+    result = service.run_sync(plan.plan_token)
 
     requests = EvidenceQueryService(workspace).inference_requests(run_id=result.run_id, limit=100)
     assert requests.returned == 1
@@ -789,7 +794,7 @@ def test_success_retains_staging_when_native_artifact_import_fails(
 
     monkeypatch.setattr("flameox.application.inference.ImportService.import_artifact", fail_import)
 
-    result = service.run_sync(plan)
+    result = service.run_sync(plan.plan_token)
 
     assert output.read_text() == "{}"
     assert result.output_path_retained is True
@@ -852,6 +857,6 @@ def test_run_sync_rejects_stale_inference_configuration(
     config_path.write_text(config_path.read_text().replace("num_prompts = 10", "num_prompts = 11"))
 
     with pytest.raises(DomainError, match="changed after this plan") as caught:
-        service.run_sync(plan)
+        service.run_sync(plan.plan_token)
 
     assert caught.value.code is ErrorCode.REVISION_CONFLICT

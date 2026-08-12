@@ -17,6 +17,7 @@ from pydantic import (
     model_validator,
 )
 
+from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.identity import digest_model
 from flameox.domain.scalars import NumericValue
 from flameox.models import ContractModel
@@ -646,17 +647,19 @@ class WorkloadInstance(ContractModel):
     workload_instance_id: Digest
     workload_definition_id: Digest
     command: CommandSpec
+    executable_binding: ResolvedExecutable | None = None
     parameters: dict[str, JsonValue] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def identity_matches_content(self) -> WorkloadInstance:
-        expected = digest_model(
-            {
-                "workload_definition_id": self.workload_definition_id,
-                "command": self.command.model_dump(mode="json"),
-                "parameters": self.parameters,
-            }
-        )
+        content: dict[str, JsonValue] = {
+            "workload_definition_id": self.workload_definition_id,
+            "command": self.command.model_dump(mode="json"),
+            "parameters": self.parameters,
+        }
+        if self.executable_binding is not None:
+            content["executable_binding"] = self.executable_binding.model_dump(mode="json")
+        expected = digest_model(content)
         if self.workload_instance_id != expected:
             raise ValueError("workload instance id must match its bound command")
         return self
@@ -926,6 +929,7 @@ type CaptureContainment = Literal["active", "degraded", "uncontained", "unavaila
 
 class _CapturePlan(ContractModel):
     schema_version: Literal[1] = 1
+    plan_token: Identifier
     plan_id: Identifier
     run_id: Identifier
     request_digest: Digest
@@ -940,6 +944,7 @@ class _CapturePlan(ContractModel):
     adapter_version: str | None = None
     adapter_execution_plan: dict[str, JsonValue] | None = None
     collector_argv: tuple[str, ...]
+    collector_executable_binding: ResolvedExecutable
     collector_environment: dict[str, str] = Field(default_factory=dict)
     expected_artifact_kinds: tuple[ArtifactKind, ...]
     expected_overhead: str

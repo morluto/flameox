@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import sys
 import time
 from enum import StrEnum
@@ -33,6 +32,7 @@ from pydantic import (
     model_validator,
 )
 
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import DomainError, ErrorCode
 from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.models import ContractModel
@@ -410,19 +410,15 @@ def _digest_executable(executable: Path) -> str | None:
 def discover_inference_tool(
     tool: Literal[InferenceTool.AIPERF, InferenceTool.VLLM],
 ) -> InferenceToolDiscovery:
-    located = shutil.which(tool)
-    if located is None:
-        scripts_dir = Path(sys.executable).resolve().parent
-        for name in (tool, f"{tool}.exe"):
-            sibling = scripts_dir / name
-            if sibling.is_file() and os.access(sibling, os.X_OK):
-                located = str(sibling)
-                break
-    executable = Path(located).resolve() if located is not None else None
+    scripts_dir = Path(sys.executable).resolve().parent
+    environment = dict(os.environ)
+    environment["PATH"] = os.pathsep.join((str(scripts_dir), environment.get("PATH", "")))
+    binding = ExecutableResolver().resolve_host_tool(str(tool), environment=environment)
+    executable = binding.canonical_target if binding is not None else None
     tool_version: str | None = None
     executable_digest: str | None = None
-    if executable is not None:
-        executable_digest = _digest_executable(executable)
+    if executable is not None and binding is not None:
+        executable_digest = binding.identity.sha256
         try:
             tool_version = version(tool)
         except PackageNotFoundError:

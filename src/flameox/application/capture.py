@@ -17,7 +17,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 from flameox.adapters.builtins import (
     BUILTIN_ADAPTERS,
@@ -70,6 +70,7 @@ from flameox.application.run_rows import run_row
 from flameox.application.source import collect_source_state
 from flameox.application.workloads import Scalar, WorkloadService
 from flameox.atomic import atomic_write_bytes
+from flameox.command_binding import ExecutableResolver
 from flameox.config import ContainmentPolicy, NetworkPolicy
 from flameox.domain import (
     AcceleratorIdentityFacet,
@@ -116,6 +117,11 @@ from flameox.domain import (
     digest_model,
     new_id,
 )
+from flameox.domain.executables import (
+    ExecutableResolutionRequest,
+    ExecutableTrustPolicy,
+    ResolvedExecutable,
+)
 from flameox.domain.models import ExecutionRunManifest, parse_capture_plan, utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.execution import (
@@ -129,9 +135,7 @@ from flameox.execution import (
 )
 from flameox.models import ContractModel
 from flameox.observability import OperationLogger, elapsed_ms
-from flameox.storage import ArtifactStore, RunStore, StorageQuota, Workspace
-
-_MAX_PYTEST_SIDECAR_BYTES = 16 * 1024 * 1024
+from flameox.storage import ArtifactStore, AuthorizedPlanStore, RunStore, StorageQuota, Workspace
 
 
 def _limitation(source: LimitationSource, code: str, message: str) -> LimitationDetail:
@@ -207,12 +211,6 @@ class _AdapterBinding:
     version: str | None
     execution_plan: AdapterExecutionPlan | None = None
     package_identity: str | None = None
-
-
-@dataclass(slots=True)
-class _PlanEntry:
-    plan: CapturePlan
-    expires_monotonic: float
 
 
 @dataclass(slots=True)
@@ -435,20 +433,34 @@ class _CaptureExecution:
 
 
 class CapturePlanRegistry:
-    """Bounded in-memory authorization tokens for one server process."""
+    """Durable, server-owned authorization tokens for capture execution."""
 
     def __init__(
         self,
         *,
-        capacity: int = 256,
+        workspace: Workspace | None = None,
         ttl_seconds: float = 300,
         max_parallel_captures: int = 2,
     ) -> None:
-        self.capacity = capacity
         self.ttl_seconds = ttl_seconds
-        self._plans: dict[str, _PlanEntry] = {}
-        self._lock = asyncio.Lock()
+        self._workspace: Workspace | None = None
+        self._store: AuthorizedPlanStore[CapturePlan] | None = None
         self._capture_slots = asyncio.Semaphore(max_parallel_captures)
+        if workspace is not None:
+            self.bind(workspace)
+
+    def bind(self, workspace: Workspace) -> None:
+        if self._workspace is not None and self._workspace.paths.root != workspace.paths.root:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                "A capture plan registry cannot span multiple workspaces.",
+            )
+        self._workspace = workspace
+        self._store = AuthorizedPlanStore(
+            workspace,
+            family="capture",
+            model=TypeAdapter(CapturePlan),
+        )
 
     async def acquire_capture_slot(self) -> None:
         await self._capture_slots.acquire()
@@ -457,49 +469,26 @@ class CapturePlanRegistry:
         self._capture_slots.release()
 
     async def issue(self, plan: CapturePlan) -> None:
-        async with self._lock:
-            self._evict_expired()
-            if len(self._plans) >= self.capacity:
-                oldest = min(
-                    self._plans,
-                    key=lambda key: self._plans[key].expires_monotonic,
-                )
-                del self._plans[oldest]
-            self._plans[plan.plan_id] = _PlanEntry(
-                plan=plan,
-                expires_monotonic=time.monotonic() + self.ttl_seconds,
+        self._require_store().issue(
+            plan.plan_token,
+            plan.request_digest,
+            plan,
+            expires_at=plan.expires_at,
+        )
+
+    async def consume(self, plan_token: str) -> CapturePlan:
+        return self._require_store().consume(plan_token)
+
+    async def inspect(self, plan_token: str) -> CapturePlan:
+        return self._require_store().inspect(plan_token)
+
+    def _require_store(self) -> AuthorizedPlanStore[CapturePlan]:
+        if self._store is None:
+            raise DomainError(
+                ErrorCode.WORKSPACE_NOT_FOUND,
+                "Capture plan storage requires an initialized workspace.",
             )
-
-    async def consume(self, plan_id: str) -> CapturePlan:
-        async with self._lock:
-            self._evict_expired()
-            entry = self._plans.get(plan_id)
-            if entry is None:
-                raise DomainError(
-                    ErrorCode.INVALID_CAPTURE_PLAN,
-                    "Capture plan is missing, expired, or belongs to another server process.",
-                )
-            plan = entry.plan
-            # Evict immediately after consumption to prevent unbounded
-            # memory growth when capture frequency exceeds TTL expiry.
-            del self._plans[plan_id]
-            return plan
-
-    async def inspect(self, plan_id: str) -> CapturePlan:
-        async with self._lock:
-            self._evict_expired()
-            entry = self._plans.get(plan_id)
-            if entry is None:
-                raise DomainError(
-                    ErrorCode.INVALID_CAPTURE_PLAN,
-                    "Capture plan is missing, expired, or belongs to another server process.",
-                )
-            return entry.plan
-
-    def _evict_expired(self) -> None:
-        now = time.monotonic()
-        for key in [key for key, entry in self._plans.items() if entry.expires_monotonic <= now]:
-            del self._plans[key]
+        return self._store
 
 
 class CaptureService:
@@ -515,12 +504,15 @@ class CaptureService:
         self.workloads = WorkloadService(workspace)
         self.capabilities = capabilities or CapabilityService(workspace, broker=broker)
         self.plans = plans or CapturePlanRegistry(
-            max_parallel_captures=workspace.config.capture.max_parallel_captures
+            workspace=workspace,
+            max_parallel_captures=workspace.config.capture.max_parallel_captures,
         )
+        self.plans.bind(workspace)
         self.broker = broker or self.capabilities.broker
         self.runs = RunStore(workspace)
         self.artifacts = ArtifactStore(workspace)
         self.publisher = GenerationPublisher(workspace)
+        self.executables = ExecutableResolver()
 
     async def plan(
         self,
@@ -644,6 +636,18 @@ class CaptureService:
             ),
             use_containment=use_containment,
         )
+        collector_executable_binding = self.executables.resolve(
+            ExecutableResolutionRequest(
+                token=collector_argv[0],
+                cwd=Path(instance.command.cwd),
+                environment={**os.environ, **collector_environment},
+                policy=ExecutableTrustPolicy.TRUSTED_HOST_TOOL,
+            )
+        )
+        collector_argv = (
+            str(collector_executable_binding.invocation_path),
+            *collector_argv[1:],
+        )
         if execution_policy is ExecutionPolicy.TRUSTED_LOCAL:
             warnings = (
                 *warnings,
@@ -662,11 +666,15 @@ class CaptureService:
         identities: dict[str, JsonValue] = {
             "collector_executable": cast(
                 JsonValue,
-                self._executable_identity(collector_argv[0]),
+                collector_executable_binding.model_dump(mode="json"),
             ),
             "workload_executable": cast(
                 JsonValue,
-                self._executable_identity(instance.command.argv[0]),
+                (
+                    instance.executable_binding.model_dump(mode="json")
+                    if instance.executable_binding is not None
+                    else None
+                ),
             ),
         }
         if adapter_binding.package_identity is not None:
@@ -689,6 +697,7 @@ class CaptureService:
             ),
             "execution_policy": execution_policy.value,
             "collector_argv": collector_argv,
+            "collector_executable_binding": collector_executable_binding.model_dump(mode="json"),
             "collector_environment": collector_environment,
             "bound_identities": identities,
             "preflight": preflight.model_dump(mode="json"),
@@ -710,6 +719,7 @@ class CaptureService:
         }
         plan = parse_capture_plan(
             {
+                "plan_token": secrets.token_hex(32),
                 "plan_id": plan_id,
                 "run_id": run_id,
                 "request_digest": digest_model(request),
@@ -728,6 +738,7 @@ class CaptureService:
                 ),
                 "execution_policy": execution_policy.value,
                 "collector_argv": collector_argv,
+                "collector_executable_binding": collector_executable_binding,
                 "collector_environment": collector_environment,
                 "expected_artifact_kinds": kinds,
                 "expected_overhead": overhead,
@@ -767,7 +778,7 @@ class CaptureService:
 
     async def execute(
         self,
-        plan_id: str,
+        plan_token: str,
         *,
         progress: Callable[[float, float, str], Awaitable[None]] | None = None,
     ) -> CaptureResult:
@@ -775,7 +786,7 @@ class CaptureService:
         operation_id = logger.new_id()
         started = time.monotonic()
 
-        plan = await self.plans.consume(plan_id)
+        plan = await self.plans.consume(plan_token)
         await self._recheck(plan)
         StorageQuota(self.workspace).require_capacity(staging=True)
         output_root = self.workspace.paths.staging / "captures" / plan.plan_id
@@ -953,6 +964,7 @@ class CaptureService:
             outcome = await self.broker.run(
                 ExecutionRequest(
                     argv=collector_argv,
+                    executable_binding=plan.collector_executable_binding,
                     cwd=Path(plan.workload_instance.command.cwd),
                     environment_allowlist=(
                         self.workspace.config.execution.child_environment_allowlist
@@ -1030,6 +1042,7 @@ class CaptureService:
                     stdout=(partial_process.stdout or "").encode(),
                     stderr=(partial_process.stderr or "").encode(),
                     resolved_executable=Path(plan.collector_argv[0]).resolve(),
+                    executable_binding=plan.collector_executable_binding,
                     containment=(
                         ProcessContainment.SYSTEMD_SCOPE
                         if plan.systemd_scope_unit is not None
@@ -2627,8 +2640,10 @@ class CaptureService:
                     "MCP capture requires containment but containment is disabled.",
                 )
             return "uncontained", False, None, argv
-        bwrap = shutil.which("bwrap") if os.name == "posix" else None
-        if bwrap is None:
+        bwrap_binding = (
+            ExecutableResolver().resolve_host_tool("bwrap") if os.name == "posix" else None
+        )
+        if bwrap_binding is None:
             if required:
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
@@ -2637,14 +2652,14 @@ class CaptureService:
                 )
             return "unavailable", False, None, argv
         bwrap_argv = self._bubblewrap_argv(
-            str(Path(bwrap).resolve()),
+            str(bwrap_binding.invocation_path),
             argv,
             cwd=cwd,
             writable=writable,
             writable_roots=writable_roots,
         )
-        systemd_run = shutil.which("systemd-run")
-        if systemd_run is None or not await self._systemd_user_scope_available(systemd_run):
+        systemd_binding = ExecutableResolver().resolve_host_tool("systemd-run")
+        if systemd_binding is None or not await self._systemd_user_scope_available(systemd_binding):
             if required:
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
@@ -2660,7 +2675,7 @@ class CaptureService:
                 bwrap_argv,
             )
         wrapped = (
-            str(Path(systemd_run).resolve()),
+            str(systemd_binding.invocation_path),
             "--user",
             "--scope",
             "--quiet",
@@ -2681,8 +2696,8 @@ class CaptureService:
             wrapped,
         )
 
-    async def _systemd_user_scope_available(self, systemd_run: str) -> bool:
-        true_executable = shutil.which("true")
+    async def _systemd_user_scope_available(self, systemd_run: ResolvedExecutable) -> bool:
+        true_executable = ExecutableResolver().resolve_host_tool("true")
         if true_executable is None:
             return False
         unit_name = f"flameox-probe-{secrets.token_hex(8)}.scope"
@@ -2690,7 +2705,7 @@ class CaptureService:
             outcome = await self.broker.run(
                 ExecutionRequest(
                     argv=(
-                        str(Path(systemd_run).resolve()),
+                        str(systemd_run.invocation_path),
                         "--user",
                         "--scope",
                         "--quiet",
@@ -2698,7 +2713,7 @@ class CaptureService:
                         "--expand-environment=no",
                         f"--unit={unit_name}",
                         "--",
-                        str(Path(true_executable).resolve()),
+                        str(true_executable.invocation_path),
                     ),
                     cwd=self.workspace.project_root,
                     environment_allowlist=(
@@ -2706,6 +2721,7 @@ class CaptureService:
                     ),
                     allowed_working_roots=self._allowed_roots(),
                     timeout_seconds=5,
+                    executable_binding=systemd_run,
                     max_output_bytes=65_536,
                     systemd_scope_unit=unit_name,
                 )
@@ -2829,6 +2845,9 @@ class CaptureService:
             "adapter_execution_plan": plan.adapter_execution_plan,
             "execution_policy": plan.execution_policy,
             "collector_argv": plan.collector_argv,
+            "collector_executable_binding": plan.collector_executable_binding.model_dump(
+                mode="json"
+            ),
             "collector_environment": plan.collector_environment,
             "bound_identities": plan.bound_identities,
             "preflight": plan.preflight.model_dump(mode="json"),
@@ -2906,17 +2925,13 @@ class CaptureService:
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "Workload definition changed after planning.",
             )
-        expected_collector = plan.bound_identities.get("collector_executable")
-        expected_workload = plan.bound_identities.get("workload_executable")
-        if (
-            self._executable_identity(plan.collector_argv[0]) != expected_collector
-            or self._executable_identity(plan.workload_instance.command.argv[0])
-            != expected_workload
-        ):
+        self.executables.revalidate(plan.collector_executable_binding)
+        if plan.workload_instance.executable_binding is None:
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
-                "A bound executable changed after planning.",
+                "The capture plan does not contain a bound workload executable.",
             )
+        self.executables.revalidate(plan.workload_instance.executable_binding)
         current_preflight = await PreflightService(
             self.workspace,
             capabilities=self.capabilities,
@@ -3158,56 +3173,7 @@ class CaptureService:
                     "limitations": list(extraction.limitations),
                 }
             )
-        if plan.adapter == "pytest":
-            sidecars, sidecar_limitations = await self._preserve_pytest_sidecars(
-                plan,
-                output_root,
-                execution_plan,
-            )
-            registrations.extend(sidecars)
-            limitations.extend(sidecar_limitations)
         return registrations, extractions, limitations
-
-    async def _preserve_pytest_sidecars(
-        self,
-        plan: CapturePlan,
-        output_root: Path,
-        execution_plan: AdapterExecutionPlan,
-    ) -> tuple[list[tuple[ArtifactRegistration, int]], list[str]]:
-        registrations: list[tuple[ArtifactRegistration, int]] = []
-        limitations: list[str] = []
-        for declaration in execution_plan.artifacts:
-            if declaration.kind is not ArtifactKind.TEST_EXECUTION:
-                continue
-            primary = output_root / declaration.relative_path
-            for sidecar in sorted(primary.parent.glob(f"{primary.name}.*.worker")):
-                if sidecar.is_symlink() or not sidecar.is_file():
-                    limitations.append(
-                        "An unrecovered pytest worker sidecar was not a regular file."
-                    )
-                    continue
-                if sidecar.stat().st_size > _MAX_PYTEST_SIDECAR_BYTES:
-                    limitations.append(
-                        "An unrecovered pytest worker sidecar exceeded the preservation limit."
-                    )
-                    continue
-                registrations.append(
-                    await self._register_path_async(
-                        plan.run_id,
-                        sidecar,
-                        kind=ArtifactKind.PROCESS_OUTPUT,
-                        role="pytest_worker_sidecar_unrecovered",
-                        media_type="application/x-ndjson",
-                        producer=plan.adapter,
-                        producer_version=plan.adapter_version,
-                        sensitivity=declaration.sensitivity,
-                    )
-                )
-        if registrations:
-            limitations.append(
-                "Unrecovered pytest worker sidecars were preserved as native artifacts."
-            )
-        return registrations, limitations
 
     def _register_path(
         self,
@@ -3274,29 +3240,6 @@ class CaptureService:
             for value in self.workspace.config.execution.allowed_working_roots
         )
         return (*roots, self.workspace.project_root)
-
-    def _executable_identity(self, executable: str) -> dict[str, Any]:
-        resolved = shutil.which(executable) if os.sep not in executable else executable
-        if resolved is None:
-            raise DomainError(
-                ErrorCode.CAPABILITY_UNAVAILABLE,
-                f"Executable {executable!r} is unavailable.",
-            )
-        invoked_path = Path(resolved).absolute()
-        path = invoked_path.resolve()
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        stat = path.stat()
-        return {
-            "invoked_path": str(invoked_path),
-            "path": str(path),
-            "sha256": digest.hexdigest(),
-            "size": stat.st_size,
-            "mtime_ns": stat.st_mtime_ns,
-            "symlink_mtime_ns": invoked_path.lstat().st_mtime_ns,
-        }
 
     def _lease(self, process_id: int) -> CaptureLease | None:
         observed = utc_now()

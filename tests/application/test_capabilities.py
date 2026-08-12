@@ -477,7 +477,6 @@ def test_capability_setup_installs_only_declared_missing_providers(
         )
     )
     monkeypatch.setattr(service, "list", lambda: next(reports))
-    monkeypatch.setattr("flameox.application.capabilities.shutil.which", lambda _: "/usr/bin/uv")
     monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
     (tmp_path / "bin").mkdir()
     result = service.prepare(("torch.profiler",))
@@ -501,9 +500,9 @@ def test_capability_setup_installs_only_declared_missing_providers(
     assert (tmp_path / "capabilities.json").read_text() == (
         '{\n  "extras": [\n    "torch"\n  ],\n  "schema_version": 1\n}\n'
     )
-    assert [list(request.argv) for request in broker.requests] == [
+    assert Path(broker.requests[0].argv[0]).name == "uv"
+    assert [list(request.argv[1:]) for request in broker.requests] == [
         [
-            "/usr/bin/uv",
             "pip",
             "install",
             "--python",
@@ -552,7 +551,6 @@ def test_capability_setup_cancellation_cleans_up_brokered_install(
         ),
     )
     monkeypatch.setattr(service, "list", lambda: CapabilityList(capabilities=(report,)))
-    monkeypatch.setattr("flameox.application.capabilities.shutil.which", lambda _: "/usr/bin/uv")
     monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
     (tmp_path / "bin").mkdir()
     cancel_event = threading.Event()
@@ -595,7 +593,7 @@ def test_capability_setup_records_failure_when_uv_is_missing(
         ),
     )
     monkeypatch.setattr(service, "list", lambda: CapabilityList(capabilities=(missing,)))
-    monkeypatch.setattr("flameox.application.capabilities.shutil.which", lambda _: None)
+    monkeypatch.setattr("flameox.command_binding.shutil.which", lambda _name, path=None: None)
 
     with pytest.raises(DomainError) as unavailable:
         service.prepare(("torch.profiler",))
@@ -628,7 +626,6 @@ def test_trace_processor_staging_preserves_phase_and_bounded_cause(
         ),
     )
     monkeypatch.setattr(service, "list", lambda: CapabilityList(capabilities=(report,)))
-    monkeypatch.setattr("flameox.application.capabilities.shutil.which", lambda _: "/usr/bin/uv")
 
     def fail_staging(*args: object, **kwargs: object) -> object:
         raise DomainError(

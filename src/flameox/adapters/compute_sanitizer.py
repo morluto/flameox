@@ -6,7 +6,7 @@ from typing import Any
 
 from packaging.version import InvalidVersion, Version
 
-from flameox.adapters.artifact_workers import ArtifactWorker
+from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
@@ -47,7 +47,7 @@ def inspect_compute_sanitizer_report(
     max_records: int,
     max_frames: int = 64,
 ) -> ComputeSanitizerInspection:
-    response = ArtifactWorker(workspace).run_sync(
+    response = IsolatedWorkerHarness(workspace).run_sync(
         "flameox.workers.compute_sanitizer",
         {
             "artifact_path": artifact_path,

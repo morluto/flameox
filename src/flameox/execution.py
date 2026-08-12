@@ -22,7 +22,13 @@ from typing import IO, Any, Literal, TypeVar, cast
 import psutil
 from pydantic import Field, field_validator
 
+from flameox.command_binding import ExecutableResolver
 from flameox.domain.errors import DomainError, ErrorCode
+from flameox.domain.executables import (
+    ExecutableResolutionRequest,
+    ExecutableTrustPolicy,
+    ResolvedExecutable,
+)
 from flameox.domain.models import (
     ProcessCancellationCause,
     ProcessResult,
@@ -137,6 +143,7 @@ class ResourcePolicy(ContractModel):
 
 class ExecutionRequest(ContractModel):
     argv: tuple[str, ...]
+    executable_binding: ResolvedExecutable | None = None
     cwd: Path
     stdin_bytes: bytes | None = None
     environment_allowlist: tuple[str, ...] = ("PATH",)
@@ -175,6 +182,7 @@ class ExecutionOutcome:
     stderr: bytes
     resolved_executable: Path
     containment: ProcessContainment
+    executable_binding: ResolvedExecutable | None = None
     peak_rss_backend: str | None = None
     process_observations: tuple[ProcessObservation, ...] = ()
 
@@ -497,7 +505,8 @@ class SubprocessBroker:
 
         cwd = self._resolve_cwd(request.cwd, request.allowed_working_roots)
         environment = self._build_environment(request)
-        executable = self._resolve_executable(request.argv[0], cwd, environment)
+        binding = self._bound_executable(request, cwd, environment)
+        executable = binding.invocation_path
         argv = (str(executable), *request.argv[1:])
         started = time.monotonic_ns()
         deadline = asyncio.get_running_loop().time() + request.timeout_seconds
@@ -719,6 +728,7 @@ class SubprocessBroker:
             stdout=stdout,
             stderr=stderr,
             resolved_executable=executable,
+            executable_binding=binding,
             containment=(
                 ProcessContainment.SYSTEMD_SCOPE
                 if request.systemd_scope_unit is not None
@@ -1011,7 +1021,8 @@ class SubprocessBroker:
 
         cwd = self._resolve_cwd(request.cwd, request.allowed_working_roots)
         environment = self._build_environment(request)
-        executable = self._resolve_executable(request.argv[0], cwd, environment)
+        binding = self._bound_executable(request, cwd, environment)
+        executable = binding.invocation_path
         argv = (str(executable), *request.argv[1:])
         started = time.monotonic_ns()
         process: subprocess.Popen[bytes] | None = None
@@ -1155,6 +1166,7 @@ class SubprocessBroker:
             stdout=stdout,
             stderr=stderr,
             resolved_executable=executable,
+            executable_binding=binding,
             containment=(
                 ProcessContainment.PROCESS_GROUP
                 if os.name == "posix"
@@ -1636,9 +1648,10 @@ class SubprocessBroker:
         *,
         timeout_seconds: float,
     ) -> bool:
-        systemctl = shutil.which("systemctl")
-        if systemctl is None:
+        systemctl_binding = ExecutableResolver().resolve_host_tool("systemctl")
+        if systemctl_binding is None:
             return False
+        systemctl = systemctl_binding.invocation_path
         process: asyncio.subprocess.Process | None = None
         try:
             process = await asyncio.create_subprocess_exec(
@@ -1743,31 +1756,33 @@ class SubprocessBroker:
             environment[name] = value
         return environment
 
-    def _resolve_executable(
+    def _bound_executable(
         self,
-        value: str,
+        request: ExecutionRequest,
         cwd: Path,
         environment: dict[str, str],
-    ) -> Path:
-        if os.sep in value or (os.altsep is not None and os.altsep in value):
-            candidate = Path(value)
-            if not candidate.is_absolute():
-                candidate = cwd / candidate
-            resolved = candidate.parent.resolve() / candidate.name
-        else:
-            located = shutil.which(value, path=environment.get("PATH"))
-            if located is None:
-                raise DomainError(
-                    ErrorCode.CAPABILITY_UNAVAILABLE,
-                    f"Executable {value!r} was not found in the allowed PATH.",
+    ) -> ResolvedExecutable:
+        resolver = ExecutableResolver()
+        if request.executable_binding is None:
+            return resolver.resolve(
+                ExecutableResolutionRequest(
+                    token=request.argv[0],
+                    cwd=cwd,
+                    environment=environment,
+                    policy=ExecutableTrustPolicy.TRUSTED_HOST_TOOL,
                 )
-            resolved = Path(located).absolute()
-        if not resolved.is_file() or not os.access(resolved, os.X_OK):
-            raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                f"Executable is not a runnable file: {resolved}",
             )
-        return resolved
+        binding = request.executable_binding
+        if request.argv[0] not in {
+            binding.requested_token,
+            str(binding.invocation_path),
+            str(binding.canonical_target),
+        }:
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "Execution argv does not match the bound executable.",
+            )
+        return resolver.revalidate(binding)
 
 
 class ManagedSidecarLease:
@@ -1956,7 +1971,7 @@ class ManagedSidecarLease:
                 ) from error
         cwd = broker._resolve_cwd(request.cwd, request.allowed_working_roots)
         environment = broker._build_environment(request)
-        executable = broker._resolve_executable(request.argv[0], cwd, environment)
+        executable = broker._bound_executable(request, cwd, environment).invocation_path
         argv = (str(executable), *request.argv[1:])
         process = await asyncio.create_subprocess_exec(
             *argv,

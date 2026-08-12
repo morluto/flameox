@@ -44,7 +44,7 @@ memory = ["memray>=1.17"]
 torch = ["torch>=2.7"]
 execution = ["coverage>=7.14,<8"]
 inference = ["aiperf>=0.12,<0.13"]
-test = ["pytest>=8.3", "pytest-xdist>=3.6"]
+test = ["pytest>=8.3", "pytest-reportlog>=1,<2", "pytest-xdist>=3.6"]
 trace = ["perfetto>=0.57,<0.58", "opentelemetry-proto>=1.44,<1.45", "protobuf>=5,<7"]
 cpu = ["py-spy>=0.4.2,<0.5"]
 all = [
@@ -57,6 +57,7 @@ all = [
     "py-spy>=0.4.2,<0.5",
     "pyperf>=2.9",
     "pytest>=8.3",
+    "pytest-reportlog>=1,<2",
     "pytest-xdist>=3.6",
     "torch>=2.7",
 ]
@@ -69,6 +70,7 @@ dev = [
     "pytest>=8.3",
     "pytest-cov>=6.1",
     "pytest-randomly>=3.16",
+    "pytest-reportlog>=1,<2",
     "pytest-rerunfailures>=15",
     "pytest-xdist>=3.6",
     "pyarrow-stubs>=20.0.0.20260625",
