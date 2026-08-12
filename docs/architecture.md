@@ -61,6 +61,10 @@ the authoritative evidence plane. DuckDB is a rebuildable analytical engine
 whose snapshot-local views are created from one pinned corpus inventory; it is
 not an application-state database.
 
+The redesigned control plane is a new workspace contract, not a legacy-file
+migration. Initialization creates its complete schema atomically and refuses an
+older or newer schema instead of guessing how to rewrite it in place.
+
 The unit of execution is a run. The unit of experimental reasoning is not.
 flameox models an investigation containing hypotheses and experiments; each
 experiment contains variants and attempted trials, and each trial references
@@ -218,6 +222,10 @@ policy for execution-time revalidation.
 
 Collectors run as child processes or explicitly selected in-process adapters.
 External commands are always executed as argument arrays with `shell=False`.
+Planning and discovery resolve the command once into a `ResolvedExecutable`
+containing the invocation path, canonical target, trust decision, and file
+identity. Every execution request must carry that object, and the broker only
+revalidates it; no downstream caller repeats PATH lookup.
 The default trusted-local agent path runs directly without a containment backend.
 The managed policy can use a cgroup v2 or systemd scope on Linux so cancellation,
 timeouts, and resource limits apply to descendants even if they create a new
@@ -236,7 +244,9 @@ trusted metadata operations may use an AnyIO worker thread.
 Artifact workers receive immutable input paths and scalar limits through a
 staged request file. They write a staged response whose size is capped by the
 execution output budget; large payload handoffs use validated files inside the
-worker's staging directory. The broker applies one absolute deadline from
+worker's staging directory. One child-side worker protocol owns bounded request
+loading, typed error envelopes, and atomic response publication. The broker
+applies one absolute deadline from
 process creation through startup callbacks, initial observation, input, output,
 and process exit. Cleanup may finish after that deadline so timeout handling
 does not leak a child. Worker process trees are sampled against the configured
