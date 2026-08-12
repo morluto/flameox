@@ -2,7 +2,7 @@
 
 This document defines flameox's authoritative local data, identity, provenance,
 publication, and schema contracts. Changes here must preserve rebuildability:
-native artifacts, JSON manifests, and committed Parquet generations are
+native artifacts, SQLite control-plane revisions, and committed Parquet generations are
 authoritative; DuckDB is derived state.
 
 [README.md](../README.md#scope) defines product scope.
@@ -37,6 +37,7 @@ configuration remains outside `.diagnostics` and may be committed deliberately.
 .diagnostics/
 ├── workspace.json
 ├── config.toml
+├── control-plane.sqlite3
 ├── write.lock
 ├── catalog.lock
 ├── retention.lock
@@ -53,11 +54,6 @@ configuration remains outside `.diagnostics` and may be committed deliberately.
 │           └── abcd.../
 │               ├── payload.pftrace
 │               └── artifact.json
-├── runs/
-│   └── <run-id>/
-│       ├── manifest.json
-│       ├── revisions/
-│       └── log.jsonl
 ├── evidence/
 │   ├── runs/generation=<generation-id>/
 │   ├── investigations/generation=<generation-id>/
@@ -82,12 +78,12 @@ configuration remains outside `.diagnostics` and may be committed deliberately.
 └── quarantine/
 ```
 
-The split between `artifact.json` and `runs/<run-id>/manifest.json` is
+The split between content-addressed `artifact.json` files and transactional run rows is
 intentional:
 
 - the artifact directory is keyed by the payload's SHA-256 and contains only
   content-level immutable metadata;
-- the run manifest contains invocation, environment, workload, and provenance;
+- SQLite stores the current run model and every immutable revision atomically;
 - multiple runs may reference the same artifact without mutating it.
 
 `corpus/HEAD` contains one commit ID. A corpus commit is immutable and lists
@@ -302,9 +298,11 @@ separate experiment-design and measurement-protocol identities. Workload
 identity does not include source or machine, allowing the same logical workload
 to be compared across those dimensions without conflating them.
 
-## Run manifest
+## Run provenance model
 
-The run manifest is the complete provenance record. Required top-level fields:
+The run model is the complete provenance record. Its canonical JSON is stored in the SQLite
+current row and revision history, then copied into the immutable evidence generation published
+for analysis. Required top-level fields:
 
 ```json
 {
@@ -916,13 +914,21 @@ materialized caches or indexes.
 It does not own:
 
 - raw artifacts;
-- run manifests;
+- mutable run rows or their revision history;
 - the only copy of a finding;
 - job state;
 - user accounts;
 - arbitrary mutable application records.
 
-Every analysis connection is bound to an explicit corpus commit inventory and
+Those mutable control-plane records belong to `control-plane.sqlite3`. SQLite
+uses foreign keys, WAL mode, explicit transactions, and compare-and-swap
+revisions. Plan issuance and single-use consumption, operation creation and
+idempotency binding, and current/revision writes are atomic database
+transactions. Run JSON files are not a second authority and are not repaired
+from mutable projections.
+
+Every analysis connection is bound to an explicit `SnapshotHandle` containing
+one corpus commit inventory and
 creates temporary snapshot views from the exact file lists in that inventory.
 Persistent definitions never use unconstrained globs over the mutable
 workspace. Empty tables are represented by checked-in typed schema anchors so
@@ -948,9 +954,9 @@ existing connection continues using its old temporary views.
 
 Existing readers continue using the old catalog until replacement. A rebuild
 does not mutate or quarantine authoritative artifacts, manifests, or evidence.
-Detected corruption is reported. The explicit `flameox repair` operation,
-separate from rebuild, may move recoverable material under the mutation locks
-only from a validated, previewable repair plan.
+Detected corruption is reported. Derived DuckDB state can be rebuilt; corrupt
+authoritative artifacts, SQLite revisions, and Parquet generations are
+quarantined or recovered, never guessed back into existence.
 
 ### SQL safety
 

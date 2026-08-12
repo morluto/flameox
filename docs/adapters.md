@@ -191,15 +191,14 @@ govern base/candidate comparisons.
 
 #### `pytest`
 
-Use for declared `pytest` or `python -m pytest` workloads. A small plugin writes
-an append-only JSONL event stream while the suite runs. Public pytest hooks
-provide collection, setup/call/teardown reports, fixture setup timing, outcomes,
-and interruption events. With local xdist, fixture and test-start events are
-flushed immediately to bounded per-worker sidecars. After each clean shutdown
-or crash, the controller validates the event schema, type, and worker identity,
-then appends accepted events to the authoritative primary JSONL artifact.
-Controller hooks also record scheduler strategy, worker creation, readiness,
-collection, clean shutdown, and crashes.
+Use for declared `pytest` or `python -m pytest` workloads. The maintained
+`pytest-reportlog` JSONL format is authoritative for native `CollectReport`,
+`TestReport`, warning, and session records. Flameox's small plugin adds only
+namespaced evidence pytest does not own: fixture setup samples, the run origin,
+controller receipt time, and collected node IDs. Consumers ignore unknown
+report types and keys as required by the producer format. Ordinary pytest and
+xdist own collection, scheduling, sharding, and report transport; Flameox does
+not maintain a parallel worker-event or sidecar protocol.
 
 `pytest.time_to_first_failure.observed` uses the worker report stop time;
 `pytest.time_to_first_failure.reported` uses controller receipt time and better
@@ -208,8 +207,8 @@ not expose an exact per-test controller queue timestamp, so the adapter records
 execution start and reports that limitation instead of inferring queue delay.
 If a run times out after the event stream exists, flameox registers the partial
 artifact and marks the run timed out; collected tests without a phase report
-remain explicitly unexecuted. A forcefully terminated controller can still lose
-sidecar events it had not recovered; the primary artifact never treats an
+remain explicitly unexecuted. A forcefully terminated worker can only
+contribute reports already delivered to pytest; the primary artifact never treats an
 unregistered sidecar as authoritative evidence.
 
 #### `py-spy`

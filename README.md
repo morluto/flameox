@@ -366,8 +366,8 @@ The project root is the client's working directory. Flameox does not create its
 workflow for that project.
 
 Through MCP, agents can configure workloads, plan captures and experiments, query evidence,
-preview analyses, and record results. Capture and experiment plans are
-short-lived and single-use; restarting the server invalidates those plan tokens.
+preview analyses, and record results. Capture plans are short-lived, single-use SQLite
+capabilities and remain valid across server restart until consumed or expired.
 Detached capture records persist across a manager restart: retry the same
 `idempotency_key` to reconnect to the original run rather than starting another
 capture. Capability setup uses the same rule; after a retryable failure or

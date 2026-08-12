@@ -272,7 +272,6 @@ are rejected.
 flameox catalog validate
 flameox catalog rebuild
 flameox recover [--quarantine QUARANTINE_ID]
-flameox repair [PLAN.json]
 flameox gc [--dry-run | --apply | --purge TRASH_MANIFEST | --restore TRASH_MANIFEST]
 ```
 
@@ -618,22 +617,24 @@ needed.
 Read-only. Default inputs are a current `workload_name`, declared scalar
 parameter overrides, adapter, and requested features. Returns the exact
 resolved plan, expected artifacts, overhead, permissions, limits, containment
-state, warnings, request digest, and a short-lived `plan_id`. The ordinary
+state, warnings, request digest, deterministic `plan_id`, and a short-lived
+opaque `plan_token`. The ordinary
 schema does not advertise `argv` or `cwd`. MCP does not expose ad-hoc capture
 planning.
 
-Plan IDs are 256-bit opaque random values held only in MCP-process memory. They
+Plan tokens are 256-bit opaque random values stored in the server-owned SQLite
+control plane. They
 are bound to workspace ID, workload definition hash, resolved executable and
 identity, arguments, working directory, child-environment policy and overrides,
 adapter/version/capabilities, requested features, validator, source state,
-limits, containment decision, and policy generation. Expiry uses monotonic
-time. Plans are atomically single-use, consumed before process creation,
-bounded in count, invalid after restart, and rejected if any bound input changes.
-A request digest is audit evidence, not an authorization boundary.
+limits, containment decision, and policy generation. Plans are atomically
+single-use, consumed before process creation, survive server restart until
+their wall-clock expiry, and are rejected if any bound input changes. A plan ID
+or request digest is audit evidence, not an authorization boundary.
 
 #### `execute_capture_plan`
 
-Mutating and command-executing. Executes an unexpired `plan_id`, streams
+Mutating and command-executing. Consumes an unexpired `plan_token`, streams
 progress, observes cancellation, and returns a completed or failed run record.
 Every bound identity, capability, workload definition, and policy input is rechecked
 immediately before execution. It never accepts a shell string or replacement
@@ -809,9 +810,8 @@ counts, coverage, and limitations. They do not accept raw SQL.
 
 #### `validate_workspace`
 
-Read-only by default. Checks manifests, artifact hashes on request, Parquet
-schemas, references, and catalog freshness. Repairs require the explicit CLI
-repair command; MCP never repairs.
+Read-only. Checks manifests, artifact hashes on request, Parquet schemas,
+references, and catalog freshness. MCP never rewrites corrupt evidence.
 
 ### MCP resources
 

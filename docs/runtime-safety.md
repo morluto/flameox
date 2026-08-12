@@ -20,7 +20,7 @@ Operations fall into three classes:
 - `capture`: long-running external collection into a unique staging directory;
 - `commit`: short mutation publishing manifests, artifacts, generations, and a
   new corpus commit;
-- `retention`: compaction, trash movement, purge, and repair that may make old
+- `retention`: compaction, trash movement, and purge that may make old
   paths unavailable.
 
 Multiple reads and captures may run concurrently. Commits are serialized.
@@ -52,9 +52,9 @@ read-only analysis.
 - workspace commits never wait for long-running analytical readers unless they
   also request catalog replacement.
 
-`.diagnostics/retention.lock` prevents garbage collection or repair from
+`.diagnostics/retention.lock` prevents garbage collection from
 removing a file used by a pinned reader. Analyses that may open artifacts or
-Parquet hold it shared for the operation; GC, purge, and repair hold it
+Parquet hold it shared for the operation; GC and purge hold it
 exclusive.
 
 The global lock order is workspace write lock, then retention lock, then
@@ -83,7 +83,7 @@ retention lock before recording a finding or performing another commit.
 11. Flush required files and directories under the filesystem durability
     policy.
 12. Atomically replace `corpus/HEAD` as the final visibility step.
-13. Publish current run projections and release the lock.
+13. Commit the SQLite run revision and release the lock.
 
 Publishing raw artifacts before extraction means an extractor crash cannot lose
 a valid, expensive capture. Extraction can be retried without executing the
@@ -250,7 +250,7 @@ namespace, and never permits remote upstreams or arbitrary endpoint targets.
 
 ### Retention and recovery safety
 
-GC and repair use the retention lock described in [the concurrency contract](#concurrency-and-atomicity) and never remove
+GC uses the retention lock described in [the concurrency contract](#concurrency-and-atomicity) and never removes
 files beneath active readers. Applying GC first moves eligible material to a
 workspace trash area and writes a recovery manifest. A separate explicit purge
 removes expired trash. MCP exposes neither operation. Shared content remains

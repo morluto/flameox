@@ -54,12 +54,12 @@ DuckDB
        └──────────────► local MCP server
 ```
 
-DuckDB is the long-term local analytical engine. Parquet and native artifacts
-are authoritative. Immutable generation manifests and an atomically published
-corpus commit define which Parquet files belong to a readable snapshot.
-`catalog.duckdb` contains rebuildable views and may contain measured,
-reproducible caches. There is no PostgreSQL service and no SQLite application
-database.
+SQLite is the transactional control plane for plans, operations, runs,
+revisions, idempotency keys, and their relationships. Native artifacts,
+normalized Parquet, immutable generation manifests, and corpus commits remain
+the authoritative evidence plane. DuckDB is a rebuildable analytical engine
+whose snapshot-local views are created from one pinned corpus inventory; it is
+not an application-state database.
 
 The unit of execution is a run. The unit of experimental reasoning is not.
 flameox models an investigation containing hypotheses and experiments; each
@@ -130,11 +130,13 @@ benchmark and semantic oracle provide confirmatory evidence.
 
 ### One analysis, one corpus snapshot
 
-The corpus is append-only. A reader pins one immutable corpus commit before its
-first query and uses the exact file inventory in that commit for every query in
-the analysis. Files that exist on disk but are absent from the pinned inventory
-are invisible. Publication becomes visible only by atomically advancing the
-corpus `HEAD`.
+The corpus is append-only. An application boundary acquires one immutable
+`SnapshotHandle` before its first lookup and passes that handle through every
+query and evidence resolution in the analysis. Files and mutable control-plane
+rows outside that handle are invisible. Published run rows include their full
+manifest, so a pinned analysis never combines a corpus ID with a newer SQLite
+run revision. Publication becomes visible only by atomically advancing corpus
+`HEAD`.
 
 ### Safe composition over custom infrastructure
 
@@ -323,7 +325,7 @@ class WorkspaceService(Protocol):
 
 class CaptureService(Protocol):
     async def plan(self, request: CaptureRequest) -> CapturePlan: ...
-    async def execute_plan(self, plan_id: str) -> RunResult: ...
+    async def execute_plan(self, plan_token: str) -> RunResult: ...
     async def import_artifact(self, request: ImportRequest) -> ImportResult: ...
 
 
@@ -352,7 +354,7 @@ class ExperimentService(Protocol):
         self, request: RecordHypothesisRequest
     ) -> Hypothesis: ...
     async def plan(self, request: ExperimentRequest) -> ExperimentPlan: ...
-    async def execute(self, plan_id: str) -> ExperimentResult: ...
+    async def execute(self, plan_token: str) -> ExperimentResult: ...
 ```
 
 CLI commands render these models. MCP handlers validate SDK inputs, call these
