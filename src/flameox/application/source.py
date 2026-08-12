@@ -157,6 +157,9 @@ async def _git_bytes(
     outcome = await broker.run(
         ExecutionRequest(
             argv=("git", "-c", "core.quotepath=false", *arguments),
+            executable_binding=ExecutableResolver().require_host_tool(
+                "git", cwd=workspace.project_root
+            ),
             cwd=workspace.project_root,
             environment_allowlist=("PATH",),
             environment_overrides={

@@ -648,6 +648,60 @@ class CaptureService:
             str(collector_executable_binding.invocation_path),
             *collector_argv[1:],
         )
+        oracle = self.workloads.resolve_oracle(
+            workload_name,
+            parameters,
+            dynamic_parameters=dynamic_parameters,
+        )
+        oracle_argv: tuple[str, ...] | None = None
+        oracle_executable_binding: ResolvedExecutable | None = None
+        oracle_launch_executable_binding: ResolvedExecutable | None = None
+        oracle_containment: CaptureContainment | None = None
+        oracle_network_contained: bool | None = None
+        oracle_systemd_scope_unit: str | None = None
+        if oracle is not None:
+            oracle_executable_binding = oracle.executable_binding
+            (
+                oracle_containment,
+                oracle_network_contained,
+                oracle_systemd_scope_unit,
+                oracle_argv,
+            ) = await self._contain(
+                oracle.command.argv,
+                cwd=Path(oracle.command.cwd),
+                writable=output_root,
+                writable_roots=writable_roots,
+                unit_name=f"flameox-validation-{plan_id[:21]}.scope",
+                required=execution_policy.requires_containment(
+                    self.workspace.config.execution.containment
+                ),
+                use_containment=use_containment,
+            )
+            if containment in {"active", "degraded"} and oracle_containment not in {
+                "active",
+                "degraded",
+            }:
+                raise DomainError(
+                    ErrorCode.EXECUTION_REFUSED,
+                    "The validation oracle cannot preserve the capture containment.",
+                )
+            if network_contained and not oracle_network_contained:
+                raise DomainError(
+                    ErrorCode.EXECUTION_REFUSED,
+                    "The validation oracle cannot preserve capture network isolation.",
+                )
+            oracle_launch_executable_binding = self.executables.resolve(
+                ExecutableResolutionRequest(
+                    token=oracle_argv[0],
+                    cwd=Path(oracle.command.cwd),
+                    environment=dict(os.environ),
+                    policy=ExecutableTrustPolicy.TRUSTED_HOST_TOOL,
+                )
+            )
+            oracle_argv = (
+                str(oracle_launch_executable_binding.invocation_path),
+                *oracle_argv[1:],
+            )
         if execution_policy is ExecutionPolicy.TRUSTED_LOCAL:
             warnings = (
                 *warnings,
@@ -670,11 +724,7 @@ class CaptureService:
             ),
             "workload_executable": cast(
                 JsonValue,
-                (
-                    instance.executable_binding.model_dump(mode="json")
-                    if instance.executable_binding is not None
-                    else None
-                ),
+                instance.executable_binding.model_dump(mode="json"),
             ),
         }
         if adapter_binding.package_identity is not None:
@@ -699,6 +749,20 @@ class CaptureService:
             "collector_argv": collector_argv,
             "collector_executable_binding": collector_executable_binding.model_dump(mode="json"),
             "collector_environment": collector_environment,
+            "oracle_argv": oracle_argv,
+            "oracle_executable_binding": (
+                oracle_executable_binding.model_dump(mode="json")
+                if oracle_executable_binding is not None
+                else None
+            ),
+            "oracle_launch_executable_binding": (
+                oracle_launch_executable_binding.model_dump(mode="json")
+                if oracle_launch_executable_binding is not None
+                else None
+            ),
+            "oracle_containment": oracle_containment,
+            "oracle_network_contained": oracle_network_contained,
+            "oracle_systemd_scope_unit": oracle_systemd_scope_unit,
             "bound_identities": identities,
             "preflight": preflight.model_dump(mode="json"),
             "adapter_capability": (
@@ -740,6 +804,12 @@ class CaptureService:
                 "collector_argv": collector_argv,
                 "collector_executable_binding": collector_executable_binding,
                 "collector_environment": collector_environment,
+                "oracle_argv": oracle_argv,
+                "oracle_executable_binding": oracle_executable_binding,
+                "oracle_launch_executable_binding": oracle_launch_executable_binding,
+                "oracle_containment": oracle_containment,
+                "oracle_network_contained": oracle_network_contained,
+                "oracle_systemd_scope_unit": oracle_systemd_scope_unit,
                 "expected_artifact_kinds": kinds,
                 "expected_overhead": overhead,
                 "containment": containment,
@@ -1305,41 +1375,15 @@ class CaptureService:
             )
             if oracle is not None and outcome.process.exit_code == 0:
                 try:
-                    (
-                        oracle_containment,
-                        oracle_network_contained,
-                        oracle_scope_unit,
-                        oracle_argv,
-                    ) = await self._contain(
-                        oracle.command.argv,
-                        cwd=Path(oracle.command.cwd),
-                        writable=output_root,
-                        writable_roots=plan.writable_roots,
-                        unit_name=f"flameox-validation-{plan.plan_id[:21]}.scope",
-                        required=ExecutionPolicy(plan.execution_policy).requires_containment(
-                            self.workspace.config.execution.containment
-                        ),
-                        use_containment=(
-                            ExecutionPolicy(plan.execution_policy)
-                            is not ExecutionPolicy.TRUSTED_LOCAL
-                        ),
-                    )
-                    if plan.containment in {"active", "degraded"} and oracle_containment not in {
-                        "active",
-                        "degraded",
-                    }:
+                    if plan.oracle_argv is None or plan.oracle_launch_executable_binding is None:
                         raise DomainError(
-                            ErrorCode.EXECUTION_REFUSED,
-                            "The validation oracle cannot preserve the capture containment.",
-                        )
-                    if plan.network_contained and not oracle_network_contained:
-                        raise DomainError(
-                            ErrorCode.EXECUTION_REFUSED,
-                            "The validation oracle cannot preserve capture network isolation.",
+                            ErrorCode.INVALID_CAPTURE_PLAN,
+                            "The capture plan is missing validation-oracle execution authority.",
                         )
                     validation = await self.broker.run(
                         ExecutionRequest(
-                            argv=oracle_argv,
+                            argv=plan.oracle_argv,
+                            executable_binding=plan.oracle_launch_executable_binding,
                             cwd=Path(oracle.command.cwd),
                             environment_allowlist=(
                                 self.workspace.config.execution.child_environment_allowlist
@@ -1352,7 +1396,7 @@ class CaptureService:
                             allowed_working_roots=self._allowed_roots(),
                             timeout_seconds=oracle.command.timeout_seconds,
                             max_output_bytes=(self.workspace.config.execution.max_output_bytes),
-                            systemd_scope_unit=oracle_scope_unit,
+                            systemd_scope_unit=plan.oracle_systemd_scope_unit,
                             resource_policy=ResourcePolicy(
                                 filesystem_path=self.workspace.paths.root,
                                 staging_root=output_root,
@@ -2849,6 +2893,20 @@ class CaptureService:
                 mode="json"
             ),
             "collector_environment": plan.collector_environment,
+            "oracle_argv": plan.oracle_argv,
+            "oracle_executable_binding": (
+                plan.oracle_executable_binding.model_dump(mode="json")
+                if plan.oracle_executable_binding is not None
+                else None
+            ),
+            "oracle_launch_executable_binding": (
+                plan.oracle_launch_executable_binding.model_dump(mode="json")
+                if plan.oracle_launch_executable_binding is not None
+                else None
+            ),
+            "oracle_containment": plan.oracle_containment,
+            "oracle_network_contained": plan.oracle_network_contained,
+            "oracle_systemd_scope_unit": plan.oracle_systemd_scope_unit,
             "bound_identities": plan.bound_identities,
             "preflight": plan.preflight.model_dump(mode="json"),
             "adapter_capability": (
@@ -2926,12 +2984,11 @@ class CaptureService:
                 "Workload definition changed after planning.",
             )
         self.executables.revalidate(plan.collector_executable_binding)
-        if plan.workload_instance.executable_binding is None:
-            raise DomainError(
-                ErrorCode.INVALID_CAPTURE_PLAN,
-                "The capture plan does not contain a bound workload executable.",
-            )
         self.executables.revalidate(plan.workload_instance.executable_binding)
+        if plan.oracle_executable_binding is not None:
+            self.executables.revalidate(plan.oracle_executable_binding)
+        if plan.oracle_launch_executable_binding is not None:
+            self.executables.revalidate(plan.oracle_launch_executable_binding)
         current_preflight = await PreflightService(
             self.workspace,
             capabilities=self.capabilities,

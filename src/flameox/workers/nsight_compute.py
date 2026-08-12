@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import argparse
 import importlib
-import json
 import math
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from itertools import islice
 from pathlib import Path
 from typing import Any, cast
+
+from flameox.domain import ErrorCode
+from flameox.workers.protocol import run_worker
 
 _NORMALIZED_MAX_COLLECTION_ITEMS = 8
 _NORMALIZED_MAX_DEPTH = 5
@@ -573,32 +574,22 @@ def _call_with_arg(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--request", required=True, type=Path)
-    parser.add_argument("--response", required=True, type=Path)
-    args = parser.parse_args()
-    try:
-        request = json.loads(args.request.read_text(encoding="utf-8"))
-        response = _extract(
-            Path(request["artifact_path"]),
-            interface_path=Path(request["interface_path"]),
-            max_ranges=int(request["max_ranges"]),
-            max_actions=int(request["max_actions"]),
-            max_metrics=int(request["max_metrics"]),
-            max_observations=int(request["max_observations"]),
+    def handle(request: dict[str, object], _request_path: Path) -> dict[str, object]:
+        return _extract(
+            Path(str(request["artifact_path"])),
+            interface_path=Path(str(request["interface_path"])),
+            max_ranges=int(str(request["max_ranges"])),
+            max_actions=int(str(request["max_actions"])),
+            max_metrics=int(str(request["max_metrics"])),
+            max_observations=int(str(request["max_observations"])),
         )
-    except Exception as exc:
-        response = {
-            "ok": False,
-            "code": "ARTIFACT_PARSE_FAILED",
-            "message": f"Nsight Compute report extraction failed: {type(exc).__name__}: {exc}",
-        }
-    temporary = args.response.with_suffix(".tmp")
-    temporary.write_text(json.dumps(response, allow_nan=False, sort_keys=True), encoding="utf-8")
-    temporary.replace(args.response)
-    # The response envelope, not the process status, carries parser failures so the
-    # parent can preserve the bounded provider diagnostic.
-    return 0
+
+    return run_worker(
+        handle,
+        invalid_code=ErrorCode.ARTIFACT_PARSE_FAILED,
+        invalid_message="Nsight Compute report extraction failed",
+        caught=(Exception,),
+    )
 
 
 if __name__ == "__main__":

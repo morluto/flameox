@@ -104,6 +104,24 @@ class ExecutableResolver:
                 return None
             raise
 
+    def require_host_tool(
+        self,
+        token: str,
+        *,
+        cwd: Path | None = None,
+        environment: dict[str, str] | None = None,
+    ) -> ResolvedExecutable:
+        """Resolve a required host tool or raise the resolver's typed unavailable error."""
+
+        binding = self.resolve_host_tool(token, cwd=cwd, environment=environment)
+        if binding is None:
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                f"Executable {token!r} was not found in the request PATH.",
+                details={"executable": token},
+            )
+        return binding
+
     def revalidate(self, resolved: ResolvedExecutable) -> ResolvedExecutable:
         """Recheck that a previously bound invocation still selects the same file bytes."""
 

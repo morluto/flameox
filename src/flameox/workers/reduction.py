@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import argparse
-import json
-import os
 import time
 from pathlib import Path
 
@@ -15,14 +12,7 @@ from flameox.application.native_reducer import (
 from flameox.application.reduction_worker import NativeReductionWorkerRequest
 from flameox.domain import DomainError, ErrorCode
 from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
-
-
-def _write_response(path: Path, payload: dict[str, object]) -> None:
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True)
-    )
-    os.replace(temporary, path)
+from flameox.workers.protocol import run_worker
 
 
 def _reduce(request: NativeReductionWorkerRequest, job_root: Path) -> dict[str, object]:
@@ -48,6 +38,7 @@ def _reduce(request: NativeReductionWorkerRequest, job_root: Path) -> dict[str, 
             outcome = broker.run_sync(
                 ExecutionRequest(
                     argv=command.argv,
+                    executable_binding=request.predicate_executable_binding,
                     cwd=Path(command.cwd),
                     environment_allowlist=("PATH",),
                     environment_overrides={
@@ -113,23 +104,14 @@ def _reduce(request: NativeReductionWorkerRequest, job_root: Path) -> dict[str, 
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--request", type=Path, required=True)
-    parser.add_argument("--response", type=Path, required=True)
-    arguments = parser.parse_args()
-    try:
-        request = NativeReductionWorkerRequest.model_validate_json(arguments.request.read_text())
-        response = _reduce(request, arguments.request.parent)
-    except DomainError as exc:
-        response = {"ok": False, "code": exc.code.value, "message": exc.message}
-    except (OSError, ValidationError, ValueError) as exc:
-        response = {
-            "ok": False,
-            "code": ErrorCode.ARTIFACT_PARSE_FAILED.value,
-            "message": f"Reduction worker request is invalid: {exc}",
-        }
-    _write_response(arguments.response, response)
-    return 0
+    return run_worker(
+        lambda request, request_path: _reduce(
+            NativeReductionWorkerRequest.model_validate(request), request_path.parent
+        ),
+        invalid_code=ErrorCode.ARTIFACT_PARSE_FAILED,
+        invalid_message="Reduction worker request is invalid",
+        caught=(OSError, ValidationError, ValueError),
+    )
 
 
 if __name__ == "__main__":

@@ -233,6 +233,7 @@ class PreflightService:
                             "-o",
                             str(output),
                         ),
+                        executable_binding=binding,
                         cwd=self.workspace.project_root,
                         environment_allowlist=("PATH",),
                         allowed_working_roots=(self.workspace.project_root, root),

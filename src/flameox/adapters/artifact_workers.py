@@ -5,9 +5,9 @@ import shutil
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypeVar, cast
+from typing import Any, TypeVar, cast
 
-from pydantic import ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
+from pydantic import JsonValue, ValidationError
 
 from flameox.atomic import atomic_write_json
 from flameox.command_binding import ExecutableResolver
@@ -18,38 +18,10 @@ from flameox.domain.executables import (
 )
 from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
 from flameox.filesystem import BoundedFileSystem
-from flameox.models import ContractModel
 from flameox.storage import Workspace
+from flameox.workers.protocol import WORKER_RESPONSE, WorkerFailure
 
 T = TypeVar("T")
-
-
-class WorkerSuccess(ContractModel):
-    """A successful worker envelope with worker-specific JSON payload fields."""
-
-    model_config = ConfigDict(extra="allow", frozen=True, validate_default=True)
-
-    ok: Literal[True]
-    __pydantic_extra__: dict[str, JsonValue] = Field(init=False)
-
-    def payload(self) -> dict[str, JsonValue]:
-        return {"ok": self.ok, **self.__pydantic_extra__}
-
-
-class WorkerFailure(ContractModel):
-    """A failed worker envelope whose code remains part of the IPC contract."""
-
-    ok: Literal[False]
-    code: ErrorCode
-    message: str
-
-
-type WorkerResponse = Annotated[
-    WorkerSuccess | WorkerFailure,
-    Field(discriminator="ok"),
-]
-
-_WORKER_RESPONSE: TypeAdapter[WorkerResponse] = TypeAdapter(WorkerResponse)
 
 
 class IsolatedWorkerHarness:
@@ -198,7 +170,7 @@ class IsolatedWorkerHarness:
                 max_bytes=response_limit,
                 require_single_link=True,
             )
-            response = _WORKER_RESPONSE.validate_json(payload)
+            response = WORKER_RESPONSE.validate_json(payload)
         except (OSError, ValidationError, ValueError) as exc:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,

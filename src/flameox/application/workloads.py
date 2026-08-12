@@ -1031,7 +1031,7 @@ class InferenceConfigurationList(ContractModel):
 class ResolvedOracle(ContractModel):
     strength: OracleStrength
     command: CommandSpec
-    executable_binding: ResolvedExecutable | None = None
+    executable_binding: ResolvedExecutable
     receipt_schema: Literal["flameox.oracle-receipt.v1"] | None = None
 
 

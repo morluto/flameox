@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import argparse
 import json
-import os
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from defusedxml.ElementTree import iterparse  # type: ignore[import-untyped]
+
+from flameox.domain import ErrorCode
+from flameox.workers.protocol import run_worker
 
 _KNOWN_RECORD_FIELDS = {"kind", "level", "who", "what", "where", "hostStack"}
 
@@ -211,35 +212,23 @@ def _extract(
     }
 
 
-def _write_response(path: Path, payload: dict[str, object]) -> None:
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True)
+def _handle(request: dict[str, object], _request_path: Path) -> dict[str, object]:
+    return _extract(
+        Path(str(request["artifact_path"])),
+        project_root=Path(str(request["project_root"])).resolve(),
+        max_records=int(str(request["max_records"])),
+        max_frames=int(str(request["max_frames"])),
     )
-    os.replace(temporary, path)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--request", required=True)
-    parser.add_argument("--response", required=True)
-    options = parser.parse_args()
-    try:
-        request = json.loads(Path(options.request).read_text())
-        payload = _extract(
-            Path(request["artifact_path"]),
-            project_root=Path(request["project_root"]).resolve(),
-            max_records=int(request["max_records"]),
-            max_frames=int(request["max_frames"]),
-        )
-    except (OSError, ET.ParseError, ValueError, KeyError, TypeError) as exc:
-        payload = {
-            "ok": False,
-            "code": "ARTIFACT_PARSE_FAILED",
-            "message": f"Compute Sanitizer XML is unsupported or invalid: {exc}",
-        }
-    _write_response(Path(options.response), payload)
+def main() -> int:
+    return run_worker(
+        _handle,
+        invalid_code=ErrorCode.ARTIFACT_PARSE_FAILED,
+        invalid_message="Compute Sanitizer XML is unsupported or invalid",
+        caught=(OSError, ET.ParseError, ValueError, KeyError, TypeError, json.JSONDecodeError),
+    )
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

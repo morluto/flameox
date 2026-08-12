@@ -44,6 +44,7 @@ from flameox.execution import (
     SubprocessBroker,
 )
 from flameox.storage import Workspace
+from tests.support.execution import executable_binding
 
 
 class _ProbeBroker(SubprocessBroker):
@@ -66,6 +67,7 @@ class _ProbeBroker(SubprocessBroker):
             stdout=b"trace_processor_shell 99.1\n",
             stderr=b"",
             resolved_executable=Path(request.argv[0]),
+            executable_binding=request.executable_binding,
             containment=ProcessContainment.PROCESS_GROUP,
         )
 
@@ -109,6 +111,7 @@ def _probe_outcome(
         stdout=stdout,
         stderr=stderr,
         resolved_executable=Path("/usr/bin/perf"),
+        executable_binding=executable_binding("/usr/bin/perf"),
         containment=ProcessContainment.PROCESS_GROUP,
     )
 
@@ -998,9 +1001,12 @@ python_distributions = ["agent-fixture>=2"]
 
     monkeypatch.setattr("flameox.application.dependencies.distribution", lookup)
     monkeypatch.setattr("flameox.application.preflight.distribution", lookup)
-    monkeypatch.setattr("flameox.application.dependencies._uv_executable", lambda: "/usr/bin/uv")
     python = tmp_path / "bin" / "python"
     python.parent.mkdir()
+    uv = python.parent / "uv"
+    uv.write_text("#!/bin/sh\nexit 0\n")
+    uv.chmod(0o755)
+    monkeypatch.setattr("flameox.application.dependencies._uv_executable", lambda: str(uv))
     monkeypatch.setattr(sys, "executable", str(python))
     broker = InstallingBroker()
 
@@ -1013,7 +1019,7 @@ python_distributions = ["agent-fixture>=2"]
     assert result.preflight.requirements[0].status == "available"
     request = broker.requests[0]
     assert request.argv == (
-        "/usr/bin/uv",
+        str(uv),
         "pip",
         "install",
         "--python",
@@ -1052,7 +1058,6 @@ python_distributions = ["agent-fixture>=2"]
         "flameox.application.preflight.distribution",
         lambda _: (_ for _ in ()).throw(PackageNotFoundError("agent-fixture")),
     )
-    monkeypatch.setattr("flameox.application.dependencies._uv_executable", lambda: "/usr/bin/uv")
 
     class FailingBroker(SubprocessBroker):
         async def run(self, request: ExecutionRequest, **_: Any) -> ExecutionOutcome:
@@ -1065,6 +1070,10 @@ python_distributions = ["agent-fixture>=2"]
 
     python = tmp_path / "bin" / "python"
     python.parent.mkdir()
+    uv = python.parent / "uv"
+    uv.write_text("#!/bin/sh\nexit 0\n")
+    uv.chmod(0o755)
+    monkeypatch.setattr("flameox.application.dependencies._uv_executable", lambda: str(uv))
     monkeypatch.setattr(sys, "executable", str(python))
 
     with pytest.raises(DomainError) as failure:

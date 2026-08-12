@@ -46,6 +46,7 @@ from flameox.execution import (
     SubprocessBroker,
 )
 from flameox.storage import RunStore, Workspace
+from tests.support.execution import executable_binding
 
 
 def _workspace(tmp_path: Path, *, mode: str = "managed") -> Workspace:
@@ -135,6 +136,7 @@ class _ProfilingBroker(SubprocessBroker):
             stdout=b"",
             stderr=b"",
             resolved_executable=Path(request.argv[0]),
+            executable_binding=request.executable_binding,
             containment=ProcessContainment.PROCESS_GROUP,
         )
 
@@ -146,6 +148,7 @@ def _patch_capture_dependencies(monkeypatch: pytest.MonkeyPatch, executable: Pat
         return AvailableInferenceToolDiscovery(
             tool=tool,
             executable=executable,
+            executable_binding=executable_binding(executable),
             version="0.12.0",
             executable_digest="sha256:" + "a" * 64,
             available=True,
@@ -305,6 +308,7 @@ def test_sglang_torch_plan_has_stable_identity_and_derived_profile_id(
     discovery = AvailableInferenceToolDiscovery(
         tool=InferenceTool.SGLANG,
         executable=launcher,
+        executable_binding=executable_binding(launcher),
         available=True,
         version="0.5.16",
         executable_digest="sha256:" + "b" * 64,

@@ -99,6 +99,7 @@ from flameox.domain import (
     digest_model,
     new_id,
 )
+from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.models import ExecutionRunManifest, utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.execution import (
@@ -127,6 +128,7 @@ class _ReadyReplayTool(ContractModel):
     executable: str
     version: str | None = None
     executable_digest: str | None = None
+    executable_binding: ResolvedExecutable
     argv: Annotated[tuple[str, ...], Field(min_length=1, max_length=1_024)]
 
 
@@ -150,6 +152,7 @@ _FLAT_REPLAY_TOOL_FIELDS = frozenset(
         "tool_executable",
         "tool_version",
         "tool_executable_digest",
+        "tool_executable_binding",
         "tool_compatibility_reason",
         "tool_remediation",
         "argv",
@@ -171,6 +174,11 @@ def _advertise_replay_tool_projections(schema: dict[str, Any]) -> None:
             "tool_executable_digest": {
                 **nullable_string,
                 "title": "Tool Executable Digest",
+            },
+            "tool_executable_binding": {
+                "anyOf": [{"type": "object"}, {"type": "null"}],
+                "default": None,
+                "title": "Tool Executable Binding",
             },
             "tool_compatibility_reason": {
                 **nullable_string,
@@ -209,6 +217,7 @@ def _advertise_replay_tool_projections(schema: dict[str, Any]) -> None:
         "tool_executable",
         "tool_version",
         "tool_executable_digest",
+        "tool_executable_binding",
         "tool_compatibility_reason",
         "tool_remediation",
         "argv",
@@ -239,6 +248,7 @@ def _parse_flat_replay_tool(value: Mapping[str, object]) -> dict[str, object]:
     if compatible is not None and compatible != planned:
         raise ValueError("tool compatibility must match executable argv")
 
+    executable_binding = parsed.pop("tool_executable_binding", None)
     snapshot: dict[str, object] = {
         "state": "ready" if planned else "unavailable",
         "executable": parsed.pop("tool_executable", None),
@@ -250,6 +260,8 @@ def _parse_flat_replay_tool(value: Mapping[str, object]) -> dict[str, object]:
     remediation = parsed.pop("tool_remediation", ())
     if planned and (reason is not None or remediation):
         raise ValueError("an available tool cannot carry incompatibility recovery")
+    if planned:
+        snapshot["executable_binding"] = executable_binding
     if not planned:
         snapshot["compatibility_reason"] = reason
         snapshot["remediation"] = remediation
@@ -266,6 +278,7 @@ def _replay_tool_snapshot(
             executable=str(discovery.executable),
             version=discovery.version,
             executable_digest=discovery.executable_digest,
+            executable_binding=discovery.executable_binding,
             argv=argv,
         )
     if argv:
@@ -339,6 +352,13 @@ class _InferenceReplayPlan(ContractModel):
     @property
     def tool_executable_digest(self) -> str | None:
         return self.replay_tool.executable_digest
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def tool_executable_binding(self) -> ResolvedExecutable | None:
+        if isinstance(self.replay_tool, _ReadyReplayTool):
+            return self.replay_tool.executable_binding
+        return None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -914,6 +934,7 @@ class InferenceReplayService:
         command = instance.command
         server_request = ExecutionRequest(
             argv=command.argv,
+            executable_binding=instance.executable_binding,
             cwd=Path(command.cwd),
             environment_allowlist=self.workspace.config.execution.child_environment_allowlist,
             environment_overrides=command.env_overrides,
@@ -996,8 +1017,14 @@ class InferenceReplayService:
                 ErrorCode.PROCESS_TIMEOUT,
                 "The inference replay deadline expired before benchmark execution.",
             )
+        if not isinstance(plan.replay_tool, _ReadyReplayTool):
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "The planned inference replay tool is unavailable.",
+            )
         return ExecutionRequest(
             argv=plan.argv,
+            executable_binding=plan.replay_tool.executable_binding,
             cwd=self.workspace.project_root,
             environment_allowlist=self.workspace.config.execution.child_environment_allowlist,
             allowed_working_roots=(self.workspace.project_root, output_path.parent),
@@ -1036,6 +1063,7 @@ class InferenceReplayService:
         )
         request = ExecutionRequest(
             argv=oracle.command.argv,
+            executable_binding=oracle.executable_binding,
             cwd=Path(oracle.command.cwd),
             environment_allowlist=self.workspace.config.execution.child_environment_allowlist,
             environment_overrides={

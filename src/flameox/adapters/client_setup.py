@@ -9,6 +9,7 @@ from typing import Any
 
 import tomlkit
 
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import DomainError, ErrorCode
 from flameox.execution import ExecutionRequest, SubprocessBroker
 
@@ -410,6 +411,9 @@ class ClientConfigRegistry:
             outcome = self.broker.run_sync(
                 ExecutionRequest(
                     argv=(self.node_executable, str(helper)),
+                    executable_binding=ExecutableResolver().require_host_tool(
+                        self.node_executable, cwd=path.parent
+                    ),
                     cwd=path.parent,
                     stdin_bytes=json.dumps(request).encode("utf-8"),
                     environment_allowlist=("PATH",),

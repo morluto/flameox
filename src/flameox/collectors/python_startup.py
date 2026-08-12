@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from flameox.command_binding import ExecutableResolver
 from flameox.execution import ExecutionRequest, SubprocessBroker
 
 _IMPORT_TIME = re.compile(
@@ -44,6 +45,7 @@ def _execute(
     outcome = SubprocessBroker().run_sync(
         ExecutionRequest(
             argv=command,
+            executable_binding=ExecutableResolver().require_host_tool(command[0], cwd=cwd),
             cwd=cwd,
             allowed_working_roots=(cwd,),
             environment_allowlist=tuple(os.environ),

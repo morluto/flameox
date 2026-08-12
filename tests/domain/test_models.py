@@ -33,6 +33,7 @@ from flameox.domain import (
     effective_sensitivity,
     parse_managed_runtime_extras,
 )
+from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.models import (
     ActiveCapturePlan,
     DigestOracleReceiptValue,
@@ -52,9 +53,29 @@ SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src" / "flameox"
 def _capture_plan_payload(**overrides: object) -> dict[str, object]:
     created_at = datetime(2026, 1, 1, tzinfo=UTC)
     command = CommandSpec(argv=("python",), cwd=".")
+    binding = {
+        "requested_token": "python",
+        "invocation_path": "/usr/bin/python",
+        "canonical_target": "/usr/bin/python",
+        "origin": "path_search",
+        "matched_path_entry": "/usr/bin",
+        "identity": {
+            "sha256": "a" * 64,
+            "size": 1,
+            "mode": 0o755,
+            "device": 1,
+            "inode": 1,
+            "modified_ns": 1,
+        },
+        "policy_decision": {
+            "policy": "trusted_host_tool",
+            "allowed": True,
+        },
+    }
     instance_content = {
         "workload_definition_id": DIGEST,
         "command": command.model_dump(mode="json"),
+        "executable_binding": ResolvedExecutable.model_validate(binding).model_dump(mode="json"),
         "parameters": {},
     }
     execution_identity_content = {
@@ -77,25 +98,7 @@ def _capture_plan_payload(**overrides: object) -> dict[str, object]:
         "adapter": "adapter",
         "execution_policy": "trusted_local",
         "collector_argv": ["python"],
-        "collector_executable_binding": {
-            "requested_token": "python",
-            "invocation_path": "/usr/bin/python",
-            "canonical_target": "/usr/bin/python",
-            "origin": "path_search",
-            "matched_path_entry": "/usr/bin",
-            "identity": {
-                "sha256": "a" * 64,
-                "size": 1,
-                "mode": 0o755,
-                "device": 1,
-                "inode": 1,
-                "modified_ns": 1,
-            },
-            "policy_decision": {
-                "policy": "trusted_host_tool",
-                "allowed": True,
-            },
-        },
+        "collector_executable_binding": binding,
         "expected_artifact_kinds": [],
         "expected_overhead": "low",
         "containment": "active",

@@ -16,13 +16,17 @@ from uuid import uuid4
 import psutil
 import pytest
 
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import DomainError, ErrorCode
 from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
+
+_PYTHON_BINDING = ExecutableResolver().require_host_tool(sys.executable)
 
 
 def request(tmp_path: Path, *arguments: str, **overrides: object) -> ExecutionRequest:
     values: dict[str, object] = {
         "argv": (sys.executable, *arguments),
+        "executable_binding": _PYTHON_BINDING,
         "cwd": tmp_path,
         "allowed_working_roots": (tmp_path,),
         "environment_allowlist": ("PATH",),
@@ -949,6 +953,9 @@ async def test_systemd_scope_cancellation_terminates_escaped_descendants(
                     "-c",
                     code,
                     str(pid_path),
+                ),
+                executable_binding=ExecutableResolver().require_host_tool(
+                    systemd_run, cwd=tmp_path
                 ),
                 cwd=tmp_path,
                 allowed_working_roots=(tmp_path,),

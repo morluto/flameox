@@ -59,6 +59,9 @@ async def test_capture_plan_uses_minimal_bubblewrap_and_systemd_limits(
     assert plan.containment == "active"
     assert plan.network_contained
     assert plan.systemd_scope_unit is not None
+    assert plan.oracle_argv is not None
+    assert plan.oracle_launch_executable_binding is not None
+    assert plan.oracle_argv[0] == str(plan.oracle_launch_executable_binding.invocation_path)
     assert "--property=KillMode=control-group" in argv
     assert f"--property=MemoryMax={workspace.config.execution.max_memory_bytes}" in argv
     assert f"--property=TasksMax={workspace.config.execution.max_processes}" in argv

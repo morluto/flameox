@@ -58,6 +58,7 @@ from flameox.domain import (
     digest_model,
     new_id,
 )
+from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.models import ExecutionRunManifest, utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.execution import ExecutionRequest, SubprocessBroker
@@ -101,6 +102,8 @@ class _InferenceProfilingPlan(ContractModel):
     server_name: str
     base_url: str
     server_argv: tuple[str, ...]
+    server_executable_binding: ResolvedExecutable
+    launch_executable_binding: ResolvedExecutable
     server_cwd: Path
     environment_names: tuple[str, ...]
     environment_digest: str
@@ -117,6 +120,7 @@ class VllmTorchProfilingPlan(_InferenceProfilingPlan):
     server_provider: Literal[InferenceServerProvider.VLLM] = InferenceServerProvider.VLLM
     profiler: Literal[ProfilerKind.TORCH_PROFILER] = ProfilerKind.TORCH_PROFILER
     nsys_executable: Literal[None] = None
+    nsys_executable_binding: Literal[None] = None
     sglang_profile_id: Literal[None] = None
     sglang_profile_options: Literal[None] = None
 
@@ -125,6 +129,7 @@ class SglangTorchProfilingPlan(_InferenceProfilingPlan):
     server_provider: Literal[InferenceServerProvider.SGLANG] = InferenceServerProvider.SGLANG
     profiler: Literal[ProfilerKind.TORCH_PROFILER] = ProfilerKind.TORCH_PROFILER
     nsys_executable: Literal[None] = None
+    nsys_executable_binding: Literal[None] = None
     sglang_profile_id: Annotated[str, Field(min_length=1, max_length=100)]
     sglang_profile_options: SglangProfileOptions
 
@@ -133,6 +138,7 @@ class NsightSystemsProfilingPlan(_InferenceProfilingPlan):
     server_provider: InferenceServerProvider
     profiler: Literal[ProfilerKind.NSIGHT_SYSTEMS] = ProfilerKind.NSIGHT_SYSTEMS
     nsys_executable: Path
+    nsys_executable_binding: ResolvedExecutable
     sglang_profile_id: Literal[None] = None
     sglang_profile_options: Literal[None] = None
 
@@ -348,6 +354,10 @@ class InferenceProfilingService:
             "server": server.model_dump(mode="json"),
             "profiler": selected_profiler,
             "native_argv": native_argv,
+            "server_executable_binding": workload.executable_binding.model_dump(mode="json"),
+            "launch_executable_binding": (nsys_binding or workload.executable_binding).model_dump(
+                mode="json"
+            ),
             "cwd": workload.command.cwd,
             "environment_digest": environment_digest,
             "nsys_executable": str(nsys_executable.resolve()) if nsys_executable else None,
@@ -396,11 +406,14 @@ class InferenceProfilingService:
                 "profiler": selected_profiler,
                 "base_url": server.base_url,
                 "server_argv": argv,
+                "server_executable_binding": workload.executable_binding,
+                "launch_executable_binding": nsys_binding or workload.executable_binding,
                 "server_cwd": Path(workload.command.cwd),
                 "environment_names": tuple(sorted(environment_names)),
                 "environment_digest": environment_digest,
                 "output_path": output_path,
                 "nsys_executable": nsys_executable,
+                "nsys_executable_binding": nsys_binding,
                 "configuration_id": digest_model(project.model_dump(mode="json")),
                 "server_executable_digest": server_executable_digest,
                 "server_version": server_version,
@@ -542,6 +555,7 @@ class InferenceProfilingService:
             raise DomainError(ErrorCode.PROCESS_TIMEOUT, "Profiling startup deadline expired.")
         server_request = ExecutionRequest(
             argv=plan.server_argv,
+            executable_binding=plan.launch_executable_binding,
             cwd=plan.server_cwd,
             environment_allowlist=self.workspace.config.execution.child_environment_allowlist,
             environment_overrides=server_environment,
@@ -587,9 +601,16 @@ class InferenceProfilingService:
                     remaining = (deadline_at - utc_now()).total_seconds()
                     if remaining <= 0:
                         raise DomainError(ErrorCode.PROCESS_TIMEOUT, "Profiling deadline expired.")
+                    replay_binding = replay_plan.tool_executable_binding
+                    if replay_binding is None:
+                        raise DomainError(
+                            ErrorCode.CAPABILITY_UNAVAILABLE,
+                            "The profiling replay tool has no executable binding.",
+                        )
                     outcome = await self.broker.run(
                         ExecutionRequest(
                             argv=replay_plan.argv,
+                            executable_binding=replay_binding,
                             cwd=self.workspace.project_root,
                             environment_allowlist=(
                                 self.workspace.config.execution.child_environment_allowlist
@@ -1033,6 +1054,7 @@ class InferenceProfilingService:
                         str(sqlite_path),
                         str(plan.output_path),
                     ),
+                    executable_binding=plan.nsys_executable_binding,
                     cwd=self.workspace.project_root,
                     environment_allowlist=(
                         self.workspace.config.execution.child_environment_allowlist

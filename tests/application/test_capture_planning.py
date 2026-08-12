@@ -46,6 +46,7 @@ class _NvccProbeBroker(SubprocessBroker):
             stdout=b"",
             stderr=b"fatal error: cuda_runtime.h: No such file or directory\n",
             resolved_executable=Path(request.argv[0]),
+            executable_binding=request.executable_binding,
             containment=ProcessContainment.PROCESS_GROUP,
         )
 
@@ -76,6 +77,7 @@ class _PathReportingNvccProbeBroker(SubprocessBroker):
                 f"{request.argv[4]}: fatal error: cuda_runtime.h: No such file or directory\n"
             ).encode(),
             resolved_executable=Path(request.argv[0]),
+            executable_binding=request.executable_binding,
             containment=ProcessContainment.PROCESS_GROUP,
         )
 

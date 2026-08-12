@@ -252,6 +252,7 @@ def test_sglang_discovery_uses_the_bounded_broker(tmp_path: Path) -> None:
                 stdout=b"0.5.16\n",
                 stderr=b"",
                 resolved_executable=executable,
+                executable_binding=request.executable_binding,
                 containment=ProcessContainment.PROCESS_GROUP,
             )
 

@@ -64,6 +64,7 @@ class _Broker:
             stdout=stdout,
             stderr=b"",
             resolved_executable=Path(request.argv[0]),
+            executable_binding=request.executable_binding,
             containment=ProcessContainment.PROCESS_GROUP,
         )
 
@@ -81,6 +82,7 @@ class _FailedBroker:
             stdout=b"",
             stderr=self.stderr,
             resolved_executable=Path(request.argv[0]),
+            executable_binding=request.executable_binding,
             containment=ProcessContainment.PROCESS_GROUP,
         )
 

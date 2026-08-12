@@ -36,6 +36,7 @@ from flameox.execution import (
     SubprocessBroker,
 )
 from flameox.storage import RunStore, Workspace
+from tests.support.execution import executable_binding
 
 DIGEST = "sha256:" + "a" * 64
 
@@ -103,6 +104,7 @@ class RecordingBroker(SubprocessBroker):
             stdout=self._stdout,
             stderr=self._stderr,
             resolved_executable=Path(request.argv[0]),
+            executable_binding=request.executable_binding,
             containment=ProcessContainment.PROCESS_GROUP,
         )
 
@@ -122,14 +124,15 @@ def _patch_providers(
     )
 
     def fake_discover(tool: InferenceTool) -> InferenceToolDiscovery:
-        return parse_inference_tool_discovery(
-            {
-                "tool": tool,
-                "executable": executable,
-                "available": executable is not None,
-                "remediation": () if executable else ("Install the inference extra.",),
-            }
-        )
+        payload: dict[str, object] = {
+            "tool": tool,
+            "executable": executable,
+            "available": executable is not None,
+            "remediation": () if executable else ("Install the inference extra.",),
+        }
+        if executable is not None:
+            payload["executable_binding"] = executable_binding(executable)
+        return parse_inference_tool_discovery(payload)
 
     def fake_probe(base_url: str, *, timeout_seconds: float = 2.0) -> ExistingServerProbe:
         del base_url, timeout_seconds
@@ -209,6 +212,7 @@ def test_sglang_protocol_identity_binds_random_shape_and_provenance(
     discovery = AvailableInferenceToolDiscovery(
         tool=InferenceTool.SGLANG,
         executable=launcher,
+        executable_binding=executable_binding(launcher),
         available=True,
         version="0.5.16",
         executable_digest="sha256:" + "c" * 64,
@@ -616,6 +620,7 @@ receipt_schema = "flameox.oracle-receipt.v1"
                     stdout=b"native oracle diagnostics",
                     stderr=b"",
                     resolved_executable=Path(request.argv[0]),
+                    executable_binding=request.executable_binding,
                     containment=ProcessContainment.PROCESS_GROUP,
                 )
             return self._outcome(request)

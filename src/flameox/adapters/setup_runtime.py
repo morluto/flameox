@@ -19,6 +19,7 @@ from packaging.version import InvalidVersion, Version
 
 from flameox.application.concurrency import race_with_cancellation
 from flameox.atomic import atomic_write_json, atomic_write_text
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
     CapabilityExtra,
     DomainError,
@@ -122,6 +123,9 @@ class ManagedRuntime:
                         "3.12",
                         f"{distribution}=={version}",
                     ),
+                    executable_binding=ExecutableResolver().require_host_tool(
+                        self.uv_executable, cwd=Path.cwd()
+                    ),
                     cwd=Path.cwd(),
                     environment_allowlist=INSTALLER_ENVIRONMENT_ALLOWLIST,
                     environment_overrides={
@@ -171,6 +175,9 @@ class ManagedRuntime:
             outcome = await self.broker.run(
                 ExecutionRequest(
                     argv=(str(executable), "--version"),
+                    executable_binding=ExecutableResolver().require_host_tool(
+                        str(executable), cwd=Path.cwd()
+                    ),
                     cwd=Path.cwd(),
                     environment_allowlist=("PATH",),
                     allowed_working_roots=(Path.cwd(),),
@@ -418,6 +425,9 @@ def _verify_trace_processor(
             execution_broker,
             ExecutionRequest(
                 argv=(str(executable), "--version"),
+                executable_binding=ExecutableResolver().require_host_tool(
+                    str(executable), cwd=Path.cwd()
+                ),
                 cwd=Path.cwd(),
                 environment_allowlist=(),
                 allowed_working_roots=(Path.cwd(),),

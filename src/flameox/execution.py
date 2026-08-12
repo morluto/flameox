@@ -20,15 +20,11 @@ from pathlib import Path
 from typing import IO, Any, Literal, TypeVar, cast
 
 import psutil
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from flameox.command_binding import ExecutableResolver
 from flameox.domain.errors import DomainError, ErrorCode
-from flameox.domain.executables import (
-    ExecutableResolutionRequest,
-    ExecutableTrustPolicy,
-    ResolvedExecutable,
-)
+from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.models import (
     ProcessCancellationCause,
     ProcessResult,
@@ -143,7 +139,7 @@ class ResourcePolicy(ContractModel):
 
 class ExecutionRequest(ContractModel):
     argv: tuple[str, ...]
-    executable_binding: ResolvedExecutable | None = None
+    executable_binding: ResolvedExecutable
     cwd: Path
     stdin_bytes: bytes | None = None
     environment_allowlist: tuple[str, ...] = ("PATH",)
@@ -165,6 +161,17 @@ class ExecutionRequest(ContractModel):
             raise ValueError("argv entries must be non-empty and cannot contain NUL")
         return value
 
+    @model_validator(mode="after")
+    def validate_executable_binding(self) -> ExecutionRequest:
+        binding = self.executable_binding
+        if self.argv[0] not in {
+            binding.requested_token,
+            str(binding.invocation_path),
+            str(binding.canonical_target),
+        }:
+            raise ValueError("argv[0] must identify the bound executable")
+        return self
+
     @field_validator("systemd_scope_unit")
     @classmethod
     def validate_scope_unit(cls, value: str | None) -> str | None:
@@ -182,7 +189,7 @@ class ExecutionOutcome:
     stderr: bytes
     resolved_executable: Path
     containment: ProcessContainment
-    executable_binding: ResolvedExecutable | None = None
+    executable_binding: ResolvedExecutable
     peak_rss_backend: str | None = None
     process_observations: tuple[ProcessObservation, ...] = ()
 
@@ -602,7 +609,11 @@ class SubprocessBroker:
                 stdout_task,
                 stderr_task,
             )
-            resources = await self._collect_resource(resource_task)
+            if request.resource_policy is None:
+                await self._settle_resource(resource_task)
+                resources = None
+            else:
+                resources = await self._collect_resource(resource_task)
             await self._settle_task(stdin_task)
             timeout_process = ProcessResult(
                 termination=process_termination_from_returncode(process.returncode),
@@ -1763,15 +1774,6 @@ class SubprocessBroker:
         environment: dict[str, str],
     ) -> ResolvedExecutable:
         resolver = ExecutableResolver()
-        if request.executable_binding is None:
-            return resolver.resolve(
-                ExecutableResolutionRequest(
-                    token=request.argv[0],
-                    cwd=cwd,
-                    environment=environment,
-                    policy=ExecutableTrustPolicy.TRUSTED_HOST_TOOL,
-                )
-            )
         binding = request.executable_binding
         if request.argv[0] not in {
             binding.requested_token,
@@ -1792,7 +1794,7 @@ class ManagedSidecarLease:
         self,
         broker: SubprocessBroker,
         process: asyncio.subprocess.Process,
-        executable: Path,
+        executable_binding: ResolvedExecutable,
         admin_host: str,
         admin_port: int,
         stdout_task: asyncio.Task[bytes],
@@ -1805,7 +1807,7 @@ class ManagedSidecarLease:
     ) -> None:
         self._broker = broker
         self._process = process
-        self._executable = executable
+        self._executable_binding = executable_binding
         self.admin_host = admin_host
         self.admin_port = admin_port
         self._stdout_task = stdout_task
@@ -1864,8 +1866,12 @@ class ManagedSidecarLease:
             )
         if not resolved.is_file() or not os.access(resolved, os.X_OK):
             raise DomainError(ErrorCode.CAPABILITY_UNAVAILABLE, "Toxiproxy server is not runnable.")
+        executable_binding = ExecutableResolver().require_host_tool(
+            str(resolved), cwd=resolved.parent
+        )
         request = ExecutionRequest(
             argv=(str(resolved), "-host", admin_host, "-port", str(admin_port)),
+            executable_binding=executable_binding,
             cwd=resolved.parent,
             environment_allowlist=("PATH",),
             allowed_working_roots=(resolved.parent,),
@@ -1889,7 +1895,7 @@ class ManagedSidecarLease:
         lease = cls(
             broker,
             process,
-            resolved,
+            executable_binding,
             admin_host,
             admin_port,
             asyncio.create_task(
@@ -1988,7 +1994,7 @@ class ManagedSidecarLease:
         lease = cls(
             broker,
             process,
-            executable,
+            request.executable_binding,
             host,
             port,
             asyncio.create_task(
@@ -2141,9 +2147,10 @@ class ManagedSidecarLease:
                 except (ToxiproxyApiError, OSError) as error:
                     cleanup_failures.append(f"proxy {name}: {error}")
         request = ExecutionRequest(
-            argv=(str(self._executable),),
-            cwd=self._executable.parent,
-            allowed_working_roots=(self._executable.parent,),
+            argv=(str(self._executable_binding.invocation_path),),
+            executable_binding=self._executable_binding,
+            cwd=self._executable_binding.invocation_path.parent,
+            allowed_working_roots=(self._executable_binding.invocation_path.parent,),
             graceful_shutdown_seconds=2,
         )
         self._observations.extend(

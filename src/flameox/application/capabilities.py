@@ -623,6 +623,9 @@ class CapabilityService:
             outcome = await self.broker.run(
                 ExecutionRequest(
                     argv=(passive.executable, *version_args),
+                    executable_binding=ExecutableResolver().require_host_tool(
+                        passive.executable, cwd=cwd
+                    ),
                     cwd=cwd,
                     environment_allowlist=(),
                     allowed_working_roots=(cwd,),
@@ -699,6 +702,9 @@ class CapabilityService:
                         "-S",
                         "-c",
                         "pass",
+                    ),
+                    executable_binding=ExecutableResolver().require_host_tool(
+                        passive.executable, cwd=self.workspace.project_root
                     ),
                     cwd=self.workspace.project_root,
                     environment_allowlist=(),
@@ -798,6 +804,9 @@ class CapabilityService:
                         "-S",
                         "-c",
                         "pass",
+                    ),
+                    executable_binding=ExecutableResolver().require_host_tool(
+                        passive.executable, cwd=self.workspace.project_root
                     ),
                     cwd=self.workspace.project_root,
                     environment_allowlist=(),
@@ -1108,6 +1117,7 @@ class CapabilityService:
             )
         try:
             if requirements:
+                assert uv_binding is not None
                 with portalocker.Lock(lock_path, mode="a", timeout=30):
                     self._check_cancelled(cancel_event)
                     command = [
@@ -1122,6 +1132,7 @@ class CapabilityService:
                         self.broker,
                         ExecutionRequest(
                             argv=tuple(command),
+                            executable_binding=uv_binding,
                             cwd=Path.cwd(),
                             environment_allowlist=INSTALLER_ENVIRONMENT_ALLOWLIST,
                             environment_overrides={"UV_NO_PROGRESS": "1"},
