@@ -6,12 +6,13 @@ cells cover matching reference/candidate behavior, a typed candidate mismatch,
 an expected rejection that counts as a pass, and an intentionally unavailable
 backend that stays unsupported.
 
-From this directory, initialize and approve the local workload, then create and
-run an investigation:
+From this directory, initialize the workspace. The valid workload in
+`flameox.toml` is immediately authoritative; there is no approval copy. Then
+create and run an investigation:
 
 ```console
 flameox init
-flameox workload approve semantic
+flameox workload show semantic --json
 flameox investigations create '{"question":"Does the candidate preserve the declared semantic contract?"}' --json
 flameox experiment plan semantic_matrix --investigation <investigation-id> --adapter command --json
 flameox experiment run semantic_matrix --investigation <investigation-id> --adapter command --json

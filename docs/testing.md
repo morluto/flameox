@@ -1,31 +1,30 @@
-# Testing flameox
+# Testing
 
-Tests are owned by behavior. [tests/ownership.toml](../tests/ownership.toml) assigns every test
-file one semantic owner and primary lane; `tools/test.py` is the shared local/CI runner. Markers
-describe requirements such as processes, providers, and performance, but do not create a second
-owner.
+Tests are owned by behavior, not by implementation file. `tests/ownership.toml`
+assigns each test module one semantic owner and primary lane. `tools/test.py` is
+the shared local and CI runner; markers describe process, provider, platform, or
+performance requirements without creating another ownership system.
 
-The suite has five kinds of proof:
+The suite contains:
 
-- property and conformance tests for central invariants such as command binding, plan
-  capabilities, SQLite revisions, bounded file access, and snapshot pinning;
-- behavioral tests through application, CLI, and MCP seams;
-- representative SQLite, process, and provider integration tests;
-- a small golden set of end-to-end evidence investigations;
-- explicit optional, live-provider, platform, and performance lanes.
+- property and conformance tests for central invariants;
+- behavior through application, CLI, and MCP seams;
+- representative SQLite, process, and provider integration;
+- a small set of end-to-end evidence investigations;
+- explicit live-provider, platform, and performance lanes.
 
-Provider families live in separate modules and share conformance contracts. A provider module
-must not become a general inference, extraction, privacy, or publication test bucket.
+Provider families live in separate modules and share conformance behavior. A
+provider test file must not become an omnibus home for unrelated extraction,
+privacy, correlation, and publication tests.
 
 ## Commands
-
-Install development dependencies, inspect ownership, then run the narrowest relevant lane:
 
 ```console
 uv sync --extra dev
 uv run python tools/test.py list
 uv run python tools/test.py ownership
 uv run python tools/test.py collection
+uv run python tools/test.py core
 uv run python tools/test.py storage
 uv run python tools/test.py application
 uv run python tools/test.py analysis
@@ -33,22 +32,19 @@ uv run python tools/test.py mcp
 uv run python tools/test.py process
 uv run python tools/test.py adapters
 uv run python tools/test.py cli
+uv run python tools/test.py security
 uv run python tools/test.py golden
 ```
 
-`uv run pytest -q` follows pytest's default marker exclusions; it is not an owned CI lane.
-`tools/test.py` prints the exact pytest command and writes logs, JUnit, and a command receipt under
-`.test-results/`.
+Each lane prints its exact pytest command and writes JUnit, log, and command
+receipts under `.test-results/`. `pytest -q` uses the configured default marker
+selection; it is useful locally but is not a named ownership lane.
 
-Before moving, splitting, or deleting tests, run `ownership` and `collection`. Collection is
-checked against [tests/collection-baseline.toml](../tests/collection-baseline.toml); update the
-baseline only when the changed node IDs are intentional and behavior remains accounted for.
+Run `ownership` and `collection` before and after moving, splitting, or deleting
+tests. Update `tests/collection-baseline.toml` only when node-ID changes are
+intentional and every removed behavior is accounted for.
 
-## Optional providers and performance
-
-Optional providers fail as classified skips when their package, executable, permission, or host
-facility is unavailable. A skip is not validation evidence. Install only the required extra and
-run its named `optional-*` lane, or use:
+## Optional and live evidence
 
 ```console
 uv run python tools/test.py providers
@@ -58,21 +54,38 @@ uv run python tools/test.py performance
 uv run python tools/test.py full
 ```
 
-Performance checks are measurements with declared workloads and budgets. The scheduled and manual
-lanes enable the larger acceptance cases; ordinary regression results do not substitute for them.
+An unavailable package, executable, permission, driver, or host facility is a
+classified skip. A skip is not provider evidence. Run the named `optional-*`
+lane on a qualified host for claims about that producer or platform.
 
-## CI contract
+Performance tests are measurements with declared workloads and budgets. Enable
+the larger acceptance cases only in the scheduled/manual lane or an equivalent
+explicit local environment.
 
-Pull requests use the affected-path planner. Source, dependency, test-topology, workflow, or
-unknown changes conservatively select the required lanes. Missing git history also selects the
-full matrix. Standard lanes publish coverage fragments for one aggregate gate.
+## CI
 
-`merge_group`, scheduled, and manual runs select the deterministic full matrix. The single
-`required` job validates the planner receipt and every selected job result, so branch protection
-does not depend on a changing matrix of check names. Live/provider/platform lanes stay explicit
-and never masquerade as deterministic evidence.
+Pull requests use the ownership-driven affected planner for early feedback and
+required lane selection. Source, dependency, test-topology, workflow, unknown,
+or missing-history changes conservatively select broader validation. The planner
+is CI routing metadata, not a product contract.
 
-Keep mutable workspaces and process handles function-scoped. Add shared fixtures only for a real
-semantic boundary. Process tests must prove cleanup and terminal state; snapshot tests must pin a
-handle before analysis; storage tests must assert SQLite transactions rather than filesystem
-projections. Do not make flaky tests pass by adding retries or broad timeouts.
+Merge queues, scheduled runs, and manual full runs execute the deterministic
+full matrix. The stable `required` job validates the planner receipt and every
+selected result so branch protection does not depend on dynamic matrix names.
+Provider and platform jobs remain explicit and cannot masquerade as deterministic
+coverage when their prerequisite was absent.
+
+## Test design
+
+- Keep mutable workspaces, processes, and handles function-scoped.
+- Share a fixture only when it represents a real semantic boundary.
+- Assert observable behavior or stable artifacts, not private helper text.
+- Process tests prove cleanup and terminal state.
+- Storage tests prove transactions, conflicts, and immutable revision history.
+- Analysis tests pin one snapshot before lookup.
+- Adapter tests preserve the native format and prove explicit compatibility.
+- Security tests include hostile paths, bounds, identities, and cancellation.
+- Do not hide nondeterminism with retries or broad timeouts.
+
+A passing suite is not evidence for behavior it never exercises. State provider,
+platform, race, crash, or performance proof gaps explicitly.

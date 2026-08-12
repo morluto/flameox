@@ -4,8 +4,8 @@ Thanks for helping improve flameox. Contributions are most useful when they
 strengthen the path from a runtime symptom to evidence that another person or
 agent can inspect and try to disprove.
 
-Before proposing a large change, read the [system overview and design
-principles](docs/architecture.md#system-overview). flameox coordinates existing
+Before proposing a large change, read the [authority
+map](docs/architecture.md#authority-map). flameox coordinates existing
 profilers and trace processors; it is not a new profiler, a hosted observability
 service, an unrestricted command or SQL gateway, or a generic source-code
 modification system.
@@ -36,7 +36,7 @@ uv run python tools/test.py list
 ```
 
 Install only the optional providers needed for the area you are changing. The
-[testing guide](docs/testing.md#optional-providers-and-performance) lists the
+[testing guide](docs/testing.md#optional-and-live-evidence) lists the
 available extras and their test lanes. To install every supported integration,
 run:
 
@@ -62,6 +62,7 @@ Read the contract that owns the behavior before editing it:
 | Profiler integrations, compatibility, and capability probing | [Adapters](docs/adapters.md) |
 | Concurrency, recovery, integrity, security, and privacy | [Runtime safety](docs/runtime-safety.md) |
 | CLI and MCP behavior and trust boundaries | [Interfaces](docs/interfaces.md) |
+| Test ownership, lanes, and collection preservation | [Testing](docs/testing.md) |
 
 Keep the CLI and MCP server as thin transports over the same application
 services. Preserve native artifacts, provenance, failed attempts, and

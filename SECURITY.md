@@ -8,10 +8,12 @@ Do not open a public issue.
 
 ## Secrets management
 
-flameox is a local CLI tool and MCP server. It does not transmit data over the
-network. Configuration that could contain sensitive values (API keys, tokens,
-paths) should be provided through environment variables, not hardcoded in
-source or committed to the repository.
+flameox is a local CLI tool and MCP server. Ordinary capture, import,
+extraction, and analysis do not make control-process network requests. Explicit
+setup, upgrade, approved provider acquisition, and enabled symbol services may
+use the network; declared workloads may use it unless containment denies it.
+Configuration that could contain sensitive values should be provided through
+environment variables, not committed to the repository.
 
 - Copy `.env.example` to `.env` for local development and keep `.env` in
   `.gitignore` (already configured).
@@ -27,6 +29,7 @@ source or committed to the repository.
 ## Log safety
 
 flameox's structured operation logger (`observability.py`) enforces a bounded
-event schema that forbids arbitrary payloads. String fields are sanitized to
-redact email addresses and IP addresses before writing. No user data, process
-arguments, or file contents are ever logged.
+event schema. Logs exclude raw environments, artifact contents, core memory,
+and unrestricted child output. Native artifacts and explicitly preserved
+bounded output may still contain workload data and retain their sensitivity
+classification.

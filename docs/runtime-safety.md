@@ -1,327 +1,173 @@
 # Runtime safety
 
-This document defines the invariants that keep local capture, publication,
-analysis, recovery, and retention honest under concurrency, cancellation,
-malformed inputs, and agent-controlled requests. These are product contracts,
-not implementation suggestions.
-
-Storage formats and snapshot identity are defined in
-[Storage and evidence contracts](storage-and-evidence.md). Human and agent
-operations are defined in [CLI and MCP boundaries](interfaces.md).
-
-## Concurrency and atomicity
-
-### Operations
-
-Operations fall into three classes:
-
-- `read`: pinned manifests, commit inventories, Parquet, artifact metadata, and
-  analytical queries;
-- `capture`: long-running external collection into a unique staging directory;
-- `commit`: short mutation publishing manifests, artifacts, generations, and a
-  new corpus commit;
-- `retention`: compaction, trash movement, and purge that may make old
-  paths unavailable.
-
-Multiple reads and captures may run concurrently. Commits are serialized.
-
-### Workspace write lock
-
-Portalocker controls `.diagnostics/write.lock` with an exclusive advisory lock.
-Both CLI and MCP honor it. Portalocker is used instead of a custom lock because
-it exposes cross-platform shared and exclusive lock modes and bounded waits.
-
-The lock covers:
-
-- allocating or transitioning persistent run state;
-- publishing an artifact into the content store;
-- publishing immutable generation manifests and corpus commits;
-- updating or replacing `catalog.duckdb`;
-- retention mutations.
-
-It does not cover workload execution, profiling, extraction into staging, or
-read-only analysis.
-
-`.diagnostics/catalog.lock` is separate:
-
-- analytical readers hold a shared catalog lock only while a DuckDB connection
-  uses `catalog.duckdb`;
-- catalog rebuild holds the exclusive catalog lock;
-- ordinary evidence publication does not rebuild the catalog; new analyses pin
-  the new commit and resolve its explicit inventory;
-- workspace commits never wait for long-running analytical readers unless they
-  also request catalog replacement.
-
-`.diagnostics/retention.lock` prevents garbage collection from
-removing a file used by a pinned reader. Analyses that may open artifacts or
-Parquet hold it shared for the operation; GC and purge hold it
-exclusive.
-
-The global lock order is workspace write lock, then retention lock, then
-catalog lock when multiple exclusive locks are needed. Readers acquire
-retention before shared catalog. Code never acquires the workspace write lock
-while holding a read connection. An analysis releases its connection and
-retention lock before recording a finding or performing another commit.
-
-### Commit protocol
-
-1. Capture in `.diagnostics/staging/<operation-id>/`.
-2. Close producer descriptors; validate, size, and hash payloads.
-3. Acquire the write lock, publish content-addressed objects and run-artifact
-   registrations, append lifecycle revisions, and release the lock.
-4. Extract from immutable objects into a staged generation using checked-in
-   Arrow schemas.
-5. Validate row budgets, referential integrity, Parquet hashes, and row counts.
-6. Write and validate the immutable generation manifest containing exact
-   inputs and output files.
-7. Acquire the write lock.
-8. Pin and recheck current `corpus/HEAD`, run revisions, and supersession
-   preconditions.
-9. Move all generation files and its manifest to final immutable paths.
-10. Write an immutable corpus commit whose inventory is the previous commit
-    plus the new/superseding generation.
-11. Flush required files and directories under the filesystem durability
-    policy.
-12. Atomically replace `corpus/HEAD` as the final visibility step.
-13. Commit the SQLite run revision and release the lock.
-
-Publishing raw artifacts before extraction means an extractor crash cannot lose
-a valid, expensive capture. Extraction can be retried without executing the
-workload again.
-
-If the process crashes before `HEAD` advances, any new immutable files are
-orphans and invisible. Recovery may resume or quarantine staging and reports
-unreachable final files without guessing that they are committed. If `HEAD`
-advances, the referenced generation is complete by construction.
-Content-addressed publication, generation placement, and commit creation are
-idempotent.
-
-This protocol assumes a supported local filesystem with advisory locks and
-same-volume atomic replace. Initialization validates those assumptions.
-Durability requires flushing files before the directory entry or `HEAD`
-replacement. Platforms without equivalent semantics are reported as degraded;
-their precise crash guarantees are tested and documented rather than assumed.
-
-### Reader behavior
-
-Readers:
-
-- never read from staging;
-- pin `corpus/HEAD` once and resolve only files in that commit's immutable
-  inventory;
-- use read-only DuckDB connections;
-- keep the shared retention lock for all file-backed work in the analysis;
-- remain unaffected by newer commits appearing between queries;
-- include the corpus commit ID and snapshot timestamp in results;
-- retry once when a catalog replacement invalidates a connection.
-
-Within the MCP server, a process-local asynchronous read/write coordination
-primitive prevents catalog replacement while active readers hold connections.
-Cross-process catalog coordination uses the shared/exclusive catalog lock.
-
-## Security and privacy
-
-### Local does not mean harmless
-
-The MCP host may be controlled by an agent. flameox must not turn a diagnostic
-tool into unrestricted command, filesystem, or secret access.
-
-The default threat model protects against malformed inputs, accidental
-confused-deputy behavior, stale plans, symlink races, resource exhaustion, and
-untrusted artifact contents. A named workload is still arbitrary same-user
-code. Without an active containment backend it can read the user's accessible
-files, mutate the project or `.diagnostics`, access inherited credentials, and
-use the network. flameox reports that boundary honestly rather than calling a
-named workload safe.
-
-### Command execution
-
-- Accept only argument arrays.
-- Never invoke a shell.
-- Resolve executables through a documented policy.
-- By default, allow MCP execution only for named workloads declared through the
-  validated `flameox.toml` configuration path.
-- `configure_workload` may create or replace a typed named workload under the
-  workspace write lock, atomically updating only `flameox.toml`. It validates the
-  complete project and never executes the configured command.
-- Do not expose ad-hoc argument-array planning through MCP.
-- Bind MCP execution to the single-use plan invariants in [the MCP execution contract](interfaces.md#mcp-server-specification).
-- Restrict working directories to configured roots.
-- reject NUL bytes and invalid path encodings;
-- apply time and artifact-size limits;
-- preserve a previewable capture plan;
-- treat privileged collectors as disabled by default;
-- use Bubblewrap plus cgroup/systemd-scope containment on Linux when policy
-  requires it, hiding `.diagnostics`, limiting writable roots, constructing a
-  minimal environment, applying CPU/memory/process limits, and controlling
-  network access;
-- run the default MCP `capture_mode='auto'` directly as a trusted-local named
-  workload and record the absence of enforced descendant containment; callers
-  whose project policy requires the stronger guarantee can select
-  `capture_mode='managed'`, which refuses the plan when that guarantee is not
-  available;
-- never execute commands embedded in imported artifacts.
-
-### Environment collection
-
-Child environment and recorded environment use separate allowlists. The broker
-constructs a minimal child environment rather than forwarding the host
-environment. Dangerous loader and interpreter controls such as `LD_PRELOAD`,
-`LD_LIBRARY_PATH`, `DYLD_*`, `PYTHONPATH`, debugger init variables, and
-credential variables are excluded even when a workload is agent-authored.
-Declared workload environment overrides are the authority for that named
-workload and are passed through the same validation path as other command
-inputs; they are not gated on a human approval step. Inherited host variables
-remain limited to `child_environment_allowlist`. Recorded metadata uses a
-second, normally narrower allowlist. Names indicating tokens, passwords,
-secrets, keys, credentials, or cookies are excluded even from broad patterns
-unless explicitly allowed by local policy.
-
-Process observations are deliberately narrower than ordinary OS inspection.
-They use `(pid, create_time)` identity to avoid PID reuse and publish only
-bounded identity, parent, status, RSS/CPU/thread/FD readings, observation
-phase, cleanup outcome, and field-level failures. They never publish command
-lines, environments, working directories, executable paths, open-file paths,
-or network addresses. Snapshot collection has a two-second budget and cannot
-delay required cleanup; partial access is evidence, not a reason to weaken
-termination policy.
-
-### Filesystem access
-
-- Canonicalize and validate every requested root.
-- Reject traversal outside configured roots in MCP.
-- For imports, open beneath an approved directory without following symlinks,
-  require a regular file with an acceptable link count, reject
-  devices/FIFOs/sockets and mutable hard-link sources, stream from that same
-  descriptor into staging under a size budget, compare `fstat` identity and
-  size before and after, then hash the staged destination.
-- Do not retain mutable hard links or source references.
-- use restrictive permissions for `.diagnostics`;
-- mark sensitive artifacts explicitly;
-- treat extracted strings, source names, log text, and artifact metadata as
-  untrusted data that may contain terminal escapes or prompt injection;
-- return no stdout/stderr excerpt over MCP by default; expose only metadata and
-  an explicitly bounded local reference.
-
-Workspace, staging, import, file-count, row-count, string-length, nesting,
-stdout/stderr, temporary-disk, memory, CPU, and process quotas are enforced
-before or while consuming input. Publication checks remaining free space.
-
-### DuckDB
-
-Raw SQL is absent from both flameox interfaces. Internal connections use the
-allowlisted-path, locked-configuration, extension, attachment, secret, memory,
-thread, and temporary-file restrictions in [the DuckDB contract](storage-and-evidence.md#duckdb-catalog). Parameterized query APIs
-select from known views only.
-
-### Core dumps and process memory
-
-Core dumps may contain credentials, source data, user content, and encryption
-keys. They require explicit local configuration and are never exposed as MCP
-binary resources. Default analyses return only bounded structural metadata.
-Future debugger extraction runs in a bounded worker with GDB `-nx`, autoload
-and debuginfod disabled, or the LLDB equivalent with user initialization
-disabled.
-
-### Network behavior
-
-The flameox control process performs no network calls during capture or analysis.
-The explicit MCP `start_capability_setup` operation may fetch and install only
-the allowlisted FlameOx optional providers into the managed runtime; poll
-`get_capability_setup` for its durable receipt or use `cancel_capability_setup`
-for cleanup. The setup operation follows the same
-policy. Setup never executes a workload and records the selected extras for
-future runtime upgrades. Host executables and permissions remain manual
-limitations.
-Symbol-server or debuginfod access is disabled unless explicitly enabled
-in local configuration and invoked through the CLI. Child workloads may use
-the network unless an active containment backend denies it; this is displayed
-in every capture plan and result.
-
-The declared fault-experiment boundary is loopback-only and does not authorize
-remote upstreams, arbitrary endpoint injection, or a general-purpose proxy.
-The broker-owned Toxiproxy lease starts only the pinned server executable on a
-loopback admin address, rejects non-loopback proxy targets and unknown toxic
-types, captures bounded logs and process observations, deletes tracked proxies,
-and terminates the sidecar through the broker. The workload's configured
-containment and the sidecar's managed-process-group containment are recorded
-separately. The service does not claim that the sidecar shares the workload's
-namespace, and never permits remote upstreams or arbitrary endpoint targets.
-
-### Retention and recovery safety
-
-GC uses the retention lock described in [the concurrency contract](#concurrency-and-atomicity) and never removes
-files beneath active readers. Applying GC first moves eligible material to a
-workspace trash area and writes a recovery manifest. A separate explicit purge
-removes expired trash. MCP exposes neither operation. Shared content remains
-retained while any reachable run registration or pinned corpus commit requires
-it.
-
-## Catalog and artifact integrity
-
-### Validation levels
-
-`flameox validate` supports:
-
-- `quick`: manifests, referenced paths, schemas, and sizes;
-- `standard`: quick plus Parquet reads and catalog consistency;
-- `full`: standard plus rehashing every raw artifact.
-
-MCP uses quick validation at startup and exposes standard validation on request.
-Full validation is a CLI operation because it may read many gigabytes.
-Validation never mutates evidence. Repair is a separate explicit CLI operation.
-
-### Quarantine
-
-Unparseable or partially written files move to `quarantine` with:
-
-- original staged path;
-- reason;
-- expected and actual format;
-- originating run;
-- recovery suggestion.
-
-Quarantine is recoverable and never automatically deleted.
-
-### Garbage collection
-
-No automatic retention policy exists. `gc --dry-run` identifies:
-
-- abandoned staging directories;
-- unreferenced content-addressed artifacts;
-- generations unreachable from `HEAD`, retained analysis/run-set snapshots, or
-  the recovery window;
-- superseded rebuildable catalog caches.
-
-`gc --apply` requires explicit CLI invocation and moves eligible objects to
-recoverable trash with a manifest. `gc --purge` is a separate explicit,
-destructive CLI action after the recovery window. MCP does not expose either.
-Corpus commits referenced by an analysis, comparison, finding, or run set are
-retention roots and cannot be pruned while that record remains active.
-
-## Observability of flameox itself
-
-flameox writes structured local logs containing:
-
-- operation ID;
-- run ID when applicable;
-- phase;
-- adapter;
-- elapsed time;
-- bounded error details;
-- lock wait duration;
-- query name and duration;
-- rows and bytes returned.
-
-Logs must not contain raw environment dumps, core contents, or unrestricted
-stdout/stderr.
-
-`flameox status` reports:
-
-- workspace and catalog validity;
-- storage by artifact kind;
-- stale or quarantined runs;
-- active capture count;
-- last catalog rebuild;
-- extractor versions;
-- capability warnings.
+Flameox executes declared local workloads and consumes untrusted artifacts. The
+fact that it is local does not make either operation harmless. These invariants
+apply to CLI and MCP equally.
+
+## Execution authority
+
+Every launch starts with a `ResolvedExecutable` produced under an explicit cwd,
+effective environment, and trust policy. It contains the absolute invocation
+path, canonical target, origin, authorization decision, and file identity.
+Planning stores that binding; execution revalidates it. Only
+`command_binding.py` performs executable `PATH` search.
+
+An `ExecutionRequest` also contains:
+
+- an argument array, never a shell command;
+- an approved cwd and working roots;
+- a minimal environment allowlist and validated overrides;
+- timeout, graceful-cleanup, and output budgets;
+- optional memory and storage resource policy;
+- optional systemd-scope identity.
+
+The subprocess broker is the only process-creation boundary. It owns stream
+draining, callbacks, observation, deadline accounting, termination, descendant
+cleanup, and the final `ProcessResult`. A timeout includes process creation and
+startup callbacks. Cleanup may finish after the deadline so returning a timeout
+does not leak a child.
+
+Plans are server-owned SQLite intent. Execution accepts an opaque token and
+cannot replace argv, roots, network target, outputs, budgets, or identity with
+caller-carried fields. Capabilities expire and are consumed atomically.
+
+## Containment
+
+Trusted-local execution is useful but not containment. Results label it
+`uncontained`. A project may require managed execution; on supported Linux hosts
+that uses Bubblewrap plus systemd/cgroup facilities to restrict visible files,
+writable roots, network, resources, and descendants. Planning refuses if the
+required guarantee cannot be established.
+
+Containment status describes the actual workload and validation-oracle launch.
+Managed sidecars have their own containment record; Flameox does not imply that
+a Toxiproxy or inference-server lease shares the workload namespace.
+
+Privileged collectors are disabled unless explicitly selected and available.
+Imported artifacts never authorize embedded commands.
+
+## Environment and process privacy
+
+The child environment and recorded environment have separate allowlists.
+Loader, interpreter, debugger-init, and credential controls are rejected even
+when broadly allowlisted. Names resembling tokens, passwords, secrets, keys,
+credentials, or cookies are excluded from recorded metadata.
+
+Process observations use `(pid, create_time)` identity and publish only bounded
+parentage, state, RSS/CPU/thread/FD values, phase, cleanup outcome, and per-field
+failures. They omit command lines, environments, cwd, executable paths, open
+files, and network addresses. Observation is budgeted and cannot delay required
+cleanup.
+
+## Structured lifetime and cancellation
+
+An application operation owns its work and cancellation watcher in one scoped
+task group where concurrent control tasks are required. Cancellation propagates
+to the subprocess broker, DuckDB connection, publisher, or sidecar that owns the
+resource. Cleanup is shielded only for the bounded phase needed to reach a
+truthful terminal state, after which the original cancellation is re-raised.
+
+The broker's internal asyncio tasks and synchronous worker bridges are part of
+the execution substrate. They must be cancelled or joined before their owner
+returns. No task may retain a workspace lock or mutate state after the caller
+has received a terminal response.
+
+Long-running agent operations use durable operation or detached-capture records.
+An idempotency key reconnects only to the same intent. Reusing it for different
+intent is a conflict, not a new run.
+
+## Filesystem boundary
+
+Boundary-sensitive reads use `BoundedFileSystem` beneath explicit trusted roots.
+On POSIX it traverses components relative to opened directory descriptors with
+no-follow flags. On Windows it rejects reparse points and verifies the final
+opened path. The descriptor actually consumed supplies type, size, link count,
+and identity.
+
+Imports and worker responses must:
+
+- remain beneath an approved root;
+- reject traversal, symlink/reparse components, devices, FIFOs, sockets, and
+  unexpected hard links;
+- enforce byte, row, file-count, nesting, and string budgets before decoding;
+- hash the staged immutable bytes rather than a previously checked pathname;
+- treat source names, strings, logs, and metadata as untrusted display content.
+
+The current primitive provides descriptor-bound regular-file reads. Mutation
+paths that do not yet consume the same descriptor-relative primitive retain a
+documented proof gap and must not claim equivalent race resistance.
+
+## Artifact workers
+
+Native readers for Perfetto, OTLP, Nsight, Compute Sanitizer, and reductions use
+one isolated worker harness. The parent creates a unique staging root, writes a
+bounded request, launches a known module through the broker, validates a bounded
+success/error envelope, then validates any file handoff beneath that staging
+root. Child handlers use the shared protocol rather than their own argparse and
+response writers.
+
+The harness is isolation from the application process, not a sandbox by itself.
+Its execution policy, environment, roots, and resource ceilings remain explicit.
+
+## Network boundary
+
+Ordinary capture, import, extraction, and analysis make no control-process
+network requests. Declared workloads may use the network unless containment
+denies it.
+
+Network access by Flameox is limited to explicit operations:
+
+- npm setup and runtime upgrade;
+- approved capability/provider acquisition;
+- managed user-space tool acquisition;
+- explicitly enabled symbol or debuginfod access.
+
+These operations are visible, bounded, and separate from workload execution.
+Host packages, privileged tools, drivers, and permissions are never installed
+implicitly.
+
+Fault experiments are loopback-only. The broker owns the pinned Toxiproxy
+process, rejects remote upstreams and arbitrary toxic types, captures bounded
+diagnostics, deletes tracked proxies, and terminates the lease. This is not a
+general proxy API.
+
+## Concurrency and publication
+
+Capture and extraction use unique staging roots and do not hold the workspace
+publication lock during long work. SQLite transactions own control-state
+atomicity. Corpus publication briefly serializes generation registration and
+the atomic `HEAD` advance. Readers pin a snapshot before lookup and hold the
+retention protection required by that snapshot.
+
+DuckDB is read-only analytical state during queries. Each concurrent query uses
+its own snapshot-local connection. Cancellation interrupts and joins that
+connection. Public interfaces cannot submit SQL, attach databases, load
+extensions, create secrets, or select arbitrary files.
+
+## Validation, quarantine, and retention
+
+`flameox validate` has three levels:
+
+- `quick` checks manifests, references, schemas, and sizes;
+- `standard` also reads Parquet and checks catalog consistency;
+- `full` rehashes native artifacts and Parquet.
+
+Validation never mutates evidence. Invalid or incomplete staged material moves
+to quarantine with its source, reason, expected format, originating operation,
+and recovery action. `flameox recover --quarantine ID` is explicit.
+
+Garbage collection is a dry run by default. `gc --apply` moves unreachable
+objects to recoverable trash and writes a manifest. Restore and permanent purge
+both require that manifest; purge additionally requires the recovery window to
+expire. MCP exposes no destructive retention operation. Active runs, open
+snapshots, findings, analyses, comparisons, run sets, and reachable corpus
+commits remain retention roots.
+
+## Local diagnostics
+
+Operational logs use bounded typed fields such as operation ID, run ID, phase,
+adapter, elapsed time, lock wait, query name, row count, and a sanitized error
+summary. They do not contain unrestricted stdout/stderr, raw environment dumps,
+artifact contents, or core memory. Native artifacts and explicitly preserved
+bounded child output may still contain sensitive workload data and carry their
+own sensitivity classification.

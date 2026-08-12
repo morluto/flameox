@@ -37,7 +37,9 @@ When changing the product:
 - prefer integrating maintained measurement and replay tools through typed adapters;
   build custom measurement or replay machinery only when maintained tools cannot
   satisfy the required evidence, safety, or reproducibility contract;
-- keep DuckDB rebuildable and Parquet/manifests authoritative;
+- keep the SQLite control plane authoritative for mutable intent and lifecycle,
+  immutable artifacts and Parquet authoritative for preserved evidence, and
+  DuckDB rebuildable;
 - keep CLI and MCP as thin transports over the same application services;
 - let agents configure validated named workloads and proceed directly to planning;
 - expose coverage, limitations, compatibility, and containment truthfully;
@@ -57,9 +59,9 @@ remaining proof gaps.
 flameox is a Python 3.12+ package using a `src/` layout. Production code lives in
 `src/flameox/`: domain types and errors are in `domain/`, orchestration belongs in
 `application/`, persistence is in `storage/`, profiler integrations are in
-`adapters/`, and CLI/MCP entry points are in `cli.py` and `mcp/`. Tests mirror
-these boundaries under `tests/`, with additional `golden/`, `performance/`, and
-`evidence/` suites.
+`adapters/`, isolated protocols are in `workers/`, and CLI/MCP entry points are
+in `cli.py` and `mcp/`. Tests mirror these boundaries under `tests/`, with
+additional golden and performance suites.
 
 Read the relevant contract before changing product behavior:
 
@@ -82,8 +84,8 @@ Use `uv` and the committed `uv.lock`:
 uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
 uv run flameox --help
 uv run pytest -q
-uv run ruff check src tests
-uv run mypy src tests
+uv run ruff check src tests tools
+uv run mypy src tests tools
 ```
 
 The first command installs development tools and supported lightweight
