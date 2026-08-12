@@ -26,7 +26,7 @@ from flameox.domain import (
     digest_model,
 )
 from flameox.models import ContractModel
-from flameox.storage import ArtifactStore, JsonRecordStore, RunStore, Workspace
+from flameox.storage import ArtifactStore, ControlRecordStore, RunStore, Workspace
 
 _DISCARD_CHUNK_SIZE = 4096
 
@@ -209,7 +209,7 @@ class EvidenceSummaryService:
         self.runs = RunStore(workspace)
         self.artifacts = ArtifactStore(workspace)
         self.lookup = EvidenceLookupService(workspace)
-        self.findings = JsonRecordStore(
+        self.findings = ControlRecordStore(
             workspace,
             kind="findings",
             model=Finding,

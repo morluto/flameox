@@ -73,7 +73,7 @@ from flameox.domain.models import Digest, ExecutionRunManifest
 from flameox.evidence import GenerationPublisher
 from flameox.execution import ManagedSidecarLease, ManagedSidecarOutcome, SubprocessBroker
 from flameox.models import ContractModel
-from flameox.storage import AuthorizedPlanStore, JsonRecordStore, RunStore, Workspace
+from flameox.storage import AuthorizedPlanStore, ControlRecordStore, RunStore, Workspace
 
 _BASELINE = "baseline"
 
@@ -169,7 +169,7 @@ class FaultExperimentService:
         self.workloads = WorkloadService(workspace)
         self.tools = tool_manager or ToxiproxyToolManager(workspace.paths.root)
         self.publisher = GenerationPublisher(workspace)
-        self.experiments = JsonRecordStore(
+        self.experiments = ControlRecordStore(
             workspace, kind="experiments", model=Experiment, id_field="experiment_id"
         )
         self.plans = AuthorizedPlanStore(
@@ -178,7 +178,7 @@ class FaultExperimentService:
             model=TypeAdapter(FaultExperimentPlan),
             output_only_fields={"request_digest"},
         )
-        self.results = JsonRecordStore(
+        self.results = ControlRecordStore(
             workspace,
             kind="fault_experiment_results",
             model=FaultExperimentResult,
@@ -626,11 +626,11 @@ class FaultExperimentService:
         raise AssertionError("sidecar retry loop did not return")
 
     def _validate_investigation(self, investigation_id: str, hypothesis_id: str | None) -> None:
-        JsonRecordStore(
+        ControlRecordStore(
             self.workspace, kind="investigations", model=Investigation, id_field="investigation_id"
         ).read(investigation_id)
         if hypothesis_id is not None:
-            hypothesis = JsonRecordStore(
+            hypothesis = ControlRecordStore(
                 self.workspace,
                 kind="hypotheses",
                 model=Hypothesis,

@@ -75,7 +75,7 @@ from flameox.evidence import (
 )
 from flameox.models import ContractModel
 from flameox.pagination import CursorPageContract
-from flameox.storage import AuthorizedPlanStore, JsonRecordStore, RunStore, Workspace
+from flameox.storage import AuthorizedPlanStore, ControlRecordStore, RunStore, Workspace
 
 
 def _extract_adapter_measurements(workspace: Workspace, adapter: str, run_id: str) -> None:
@@ -346,7 +346,7 @@ class ExperimentService:
         self.plans = plans or ExperimentPlanRegistry(workspace=workspace)
         self.plans.bind(workspace)
         self.publisher = GenerationPublisher(workspace)
-        self.experiments = JsonRecordStore(
+        self.experiments = ControlRecordStore(
             workspace,
             kind="experiments",
             model=Experiment,
@@ -486,7 +486,7 @@ class ExperimentService:
                 ErrorCode.WORKSPACE_INVALID,
                 f"Unknown experiment {experiment_name!r}.",
             ) from exc
-        investigations = JsonRecordStore(
+        investigations = ControlRecordStore(
             self.workspace,
             kind="investigations",
             model=Investigation,
@@ -494,7 +494,7 @@ class ExperimentService:
         )
         investigations.read(investigation_id)
         if hypothesis_id is not None:
-            hypotheses = JsonRecordStore(
+            hypotheses = ControlRecordStore(
                 self.workspace,
                 kind="hypotheses",
                 model=Hypothesis,

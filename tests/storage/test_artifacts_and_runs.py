@@ -388,7 +388,7 @@ def test_run_store_reparses_unchecked_updates_before_persistence(tmp_path: Path)
 
 
 def test_record_store_reparses_unchecked_updates_before_persistence(tmp_path: Path) -> None:
-    from flameox.storage.records import JsonRecordStore
+    from flameox.storage.records import ControlRecordStore
 
     workspace = Workspace.initialize(tmp_path)
     observed = datetime(2025, 1, 2, 3, 4, tzinfo=UTC)
@@ -401,7 +401,7 @@ def test_record_store_reparses_unchecked_updates_before_persistence(tmp_path: Pa
         expires_at=observed + timedelta(seconds=1),
     )
     invalid = lease.model_copy(update={"expires_at": observed})
-    store = JsonRecordStore(
+    store = ControlRecordStore(
         workspace,
         kind="leases",
         model=CaptureLease,
@@ -436,13 +436,13 @@ def test_artifact_get_rejects_race_symlink_swap(tmp_path: Path) -> None:
 
 
 def test_record_store_rejects_dotdot_identifier(tmp_path: Path) -> None:
-    """Regression: JsonRecordStore._root must reject '..' to prevent
+    """Regression: ControlRecordStore must reject '..' identifiers to prevent
     directory traversal outside the records directory."""
     from flameox.domain.models import RunManifest
-    from flameox.storage.records import JsonRecordStore
+    from flameox.storage.records import ControlRecordStore
 
     workspace = Workspace.initialize(tmp_path)
-    store: JsonRecordStore[RunManifest] = JsonRecordStore(
+    store: ControlRecordStore[RunManifest] = ControlRecordStore(
         workspace,
         kind="test",
         model=TypeAdapter(RunManifest),
@@ -456,13 +456,13 @@ def test_record_store_rejects_dotdot_identifier(tmp_path: Path) -> None:
 
 
 def test_record_store_rejects_dot_prefix_identifier(tmp_path: Path) -> None:
-    """Regression: JsonRecordStore._root must reject dot-prefixed names
+    """Regression: ControlRecordStore must reject dot-prefixed identifiers
     to prevent hidden-file traversal and .dotfile access."""
     from flameox.domain.models import RunManifest
-    from flameox.storage.records import JsonRecordStore
+    from flameox.storage.records import ControlRecordStore
 
     workspace = Workspace.initialize(tmp_path)
-    store: JsonRecordStore[RunManifest] = JsonRecordStore(
+    store: ControlRecordStore[RunManifest] = ControlRecordStore(
         workspace,
         kind="test",
         model=TypeAdapter(RunManifest),

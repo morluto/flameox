@@ -16,7 +16,7 @@ from flameox.domain import (
 )
 from flameox.domain.models import utc_now
 from flameox.models import ContractModel
-from flameox.storage import JsonRecordStore, RunStore, Workspace
+from flameox.storage import ControlRecordStore, RunStore, Workspace
 
 
 class DetachedProgress(ContractModel):
@@ -188,7 +188,7 @@ class DetachedCaptureManager:
         self.workspace = workspace
         self.captures = captures
         self.runs = RunStore(workspace)
-        self.records = JsonRecordStore(
+        self.records = ControlRecordStore(
             workspace,
             kind="detached_captures",
             model=DetachedCaptureRecord,

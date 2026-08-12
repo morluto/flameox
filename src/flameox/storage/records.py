@@ -6,7 +6,7 @@ from typing import TypeVar
 from pydantic import BaseModel, TypeAdapter
 
 from flameox.domain import DomainError, ErrorCode
-from flameox.storage.control_plane import ControlPlane, canonical_json
+from flameox.storage.control_plane import ControlPlane, ControlRelationship, canonical_json
 from flameox.storage.workspace import Workspace
 
 RecordT = TypeVar("RecordT", bound=BaseModel)
@@ -18,8 +18,8 @@ type ModelFieldSelection = (
 )
 
 
-class JsonRecordStore[RecordT: BaseModel]:
-    """Immutable JSON revisions plus an atomic current projection."""
+class ControlRecordStore[RecordT: BaseModel]:
+    """Typed records and immutable revisions owned by the SQLite control plane."""
 
     def __init__(
         self,
@@ -39,12 +39,22 @@ class JsonRecordStore[RecordT: BaseModel]:
         self.output_only_fields = output_only_fields or set()
         self.control_plane = ControlPlane(workspace)
 
-    def create(self, record: RecordT) -> RecordT:
+    def create(
+        self,
+        record: RecordT,
+        *,
+        relationships: tuple[ControlRelationship, ...] = (),
+    ) -> RecordT:
         with self.workspace.write_locked():
-            self.create_locked(record)
+            self.create_locked(record, relationships=relationships)
         return record
 
-    def create_locked(self, record: RecordT) -> RecordT:
+    def create_locked(
+        self,
+        record: RecordT,
+        *,
+        relationships: tuple[ControlRelationship, ...] = (),
+    ) -> RecordT:
         """Create a record while the caller owns the workspace write lock.
 
         This is intentionally a small escape hatch for compound operations
@@ -58,6 +68,7 @@ class JsonRecordStore[RecordT: BaseModel]:
             record_id=identifier,
             revision=(self._revision(persisted) if self.revision_field is not None else None),
             payload_json=self._json(persisted),
+            relationships=relationships,
         )
         return record
 
@@ -133,12 +144,28 @@ class JsonRecordStore[RecordT: BaseModel]:
                 ) from exc
         return tuple(records)
 
-    def append(self, record: RecordT, *, expected_revision: int) -> RecordT:
+    def append(
+        self,
+        record: RecordT,
+        *,
+        expected_revision: int,
+        relationships: tuple[ControlRelationship, ...] | None = None,
+    ) -> RecordT:
         with self.workspace.write_locked():
-            self.append_locked(record, expected_revision=expected_revision)
+            self.append_locked(
+                record,
+                expected_revision=expected_revision,
+                relationships=relationships,
+            )
         return record
 
-    def append_locked(self, record: RecordT, *, expected_revision: int) -> RecordT:
+    def append_locked(
+        self,
+        record: RecordT,
+        *,
+        expected_revision: int,
+        relationships: tuple[ControlRelationship, ...] | None = None,
+    ) -> RecordT:
         """Append a revision while the caller owns the workspace write lock."""
         if self.revision_field is None:
             raise DomainError(
@@ -154,6 +181,7 @@ class JsonRecordStore[RecordT: BaseModel]:
             expected_revision=expected_revision,
             next_revision=next_revision,
             payload_json=self._json(persisted),
+            relationships=relationships,
         )
         return record
 

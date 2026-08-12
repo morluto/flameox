@@ -22,7 +22,9 @@ class RecipeContext:
             raise ValueError("provide a snapshot or snapshot handle, not both")
         self.workspace = workspace
         self.snapshot = snapshot
-        self.snapshot_handle = snapshot.handle if snapshot is not None else snapshot_handle
+        self.snapshot_handle = (
+            snapshot.handle if snapshot is not None else snapshot_handle or Catalog(workspace).pin()
+        )
 
     def _limit(self, value: int | None) -> int:
         if value is None:
@@ -36,15 +38,13 @@ class RecipeContext:
 
     def _pinned_commit_id(self, value: str | None) -> str:
         if value is not None:
-            if self.snapshot_handle is not None and self.snapshot_handle.commit.commit_id != value:
+            if self.snapshot_handle.commit.commit_id != value:
                 raise DomainError(
                     ErrorCode.WORKSPACE_INVALID,
                     "Recipe snapshot does not match the requested corpus commit.",
                 )
             return value
-        if self.snapshot_handle is not None:
-            return self.snapshot_handle.commit.commit_id
-        return Catalog(self.workspace).pin().commit.commit_id
+        return self.snapshot_handle.commit.commit_id
 
     @contextmanager
     def _open_snapshot(self, corpus_commit_id: str) -> Iterator[Snapshot]:
@@ -57,14 +57,10 @@ class RecipeContext:
             yield self.snapshot
             return
         catalog = Catalog(self.workspace)
-        if (
-            self.snapshot_handle is not None
-            and self.snapshot_handle.commit.commit_id != corpus_commit_id
-        ):
+        if self.snapshot_handle.commit.commit_id != corpus_commit_id:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
                 "Recipe attempted to cross its pinned corpus snapshot.",
             )
-        handle = self.snapshot_handle or catalog.pin(corpus_commit_id)
-        with catalog.open_snapshot(handle) as snapshot:
+        with catalog.open_snapshot(self.snapshot_handle) as snapshot:
             yield snapshot

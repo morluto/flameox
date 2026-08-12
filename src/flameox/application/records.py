@@ -27,7 +27,8 @@ from flameox.domain import (
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.pagination import CursorPageContract
-from flameox.storage import ArtifactStore, JsonRecordStore, RunStore, Workspace
+from flameox.storage import ArtifactStore, ControlRecordStore, RunStore, Workspace
+from flameox.storage.control_plane import ControlRelationship
 
 
 class CreateInvestigationRequest(ContractModel):
@@ -96,13 +97,13 @@ class InvestigationService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
         self.publisher = GenerationPublisher(workspace)
-        self.investigations = JsonRecordStore(
+        self.investigations = ControlRecordStore(
             workspace,
             kind="investigations",
             model=Investigation,
             id_field="investigation_id",
         )
-        self.hypotheses = JsonRecordStore(
+        self.hypotheses = ControlRecordStore(
             workspace,
             kind="hypotheses",
             model=Hypothesis,
@@ -121,7 +122,18 @@ class InvestigationService:
             status=InvestigationStatus.OPEN,
             parent_investigation_id=request.parent_investigation_id,
         )
-        self.investigations.create(investigation)
+        relationships = (
+            (
+                ControlRelationship(
+                    relationship="parent",
+                    target_kind="investigations",
+                    target_id=request.parent_investigation_id,
+                ),
+            )
+            if request.parent_investigation_id is not None
+            else ()
+        )
+        self.investigations.create(investigation, relationships=relationships)
         self.publisher.publish_rows(
             {"investigations": [self._investigation_row(investigation)]},
             publisher="flameox.investigations",
@@ -174,7 +186,16 @@ class InvestigationService:
                 assessment=request.assessment,
                 lifecycle=request.lifecycle,
             )
-            self.hypotheses.create(hypothesis)
+            self.hypotheses.create(
+                hypothesis,
+                relationships=(
+                    ControlRelationship(
+                        relationship="belongs_to",
+                        target_kind="investigations",
+                        target_id=request.investigation_id,
+                    ),
+                ),
+            )
         else:
             if request.expected_revision is None:
                 raise DomainError(
@@ -200,6 +221,13 @@ class InvestigationService:
             self.hypotheses.append(
                 hypothesis,
                 expected_revision=request.expected_revision,
+                relationships=(
+                    ControlRelationship(
+                        relationship="belongs_to",
+                        target_kind="investigations",
+                        target_id=request.investigation_id,
+                    ),
+                ),
             )
         self.publisher.publish_rows(
             {"hypotheses": [self._hypothesis_row(hypothesis)]},
@@ -234,7 +262,7 @@ class FindingService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
         self.publisher = GenerationPublisher(workspace)
-        self.findings = JsonRecordStore(
+        self.findings = ControlRecordStore(
             workspace,
             kind="findings",
             model=Finding,
@@ -273,6 +301,14 @@ class FindingService:
                     "An invalid or inconclusive comparison cannot support a finding.",
                     details={"comparison_id": item.ref_id},
                 )
+        relationships = tuple(
+            ControlRelationship(
+                relationship=item.relation.value,
+                target_kind=item.ref_type.value,
+                target_id=item.ref_id,
+            )
+            for item in request.evidence
+        )
         if request.finding_id is None:
             if request.expected_revision is not None:
                 raise DomainError(
@@ -292,7 +328,7 @@ class FindingService:
                 limitations=request.limitations,
                 next_experiments=request.next_experiments,
             )
-            self.findings.create(finding)
+            self.findings.create(finding, relationships=relationships)
         else:
             if request.expected_revision is None:
                 raise DomainError(
@@ -314,7 +350,11 @@ class FindingService:
                     "next_experiments": request.next_experiments,
                 }
             )
-            self.findings.append(finding, expected_revision=request.expected_revision)
+            self.findings.append(
+                finding,
+                expected_revision=request.expected_revision,
+                relationships=relationships,
+            )
         references = tuple(
             EvidenceReference(
                 owner_type="finding",

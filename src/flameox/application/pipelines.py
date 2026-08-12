@@ -18,7 +18,7 @@ from flameox.domain import DomainError, ErrorCode, Sensitivity, canonical_json, 
 from flameox.domain.models import utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
-from flameox.storage import ArtifactStore, JsonRecordStore, RunStore, Workspace
+from flameox.storage import ArtifactStore, ControlRecordStore, RunStore, Workspace
 
 
 class PipelineStageStatus(StrEnum):
@@ -396,13 +396,13 @@ class ArtifactPipelineService:
         self.workspace = workspace
         self.runs = RunStore(workspace)
         self.artifacts = ArtifactStore(workspace)
-        self.pipelines = JsonRecordStore(
+        self.pipelines = ControlRecordStore(
             workspace,
             kind="artifact_pipelines",
             model=ArtifactPipeline,
             id_field="pipeline_id",
         )
-        self.comparisons = JsonRecordStore(
+        self.comparisons = ControlRecordStore(
             workspace,
             kind="pipeline_comparisons",
             model=PipelineComparison,

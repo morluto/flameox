@@ -42,7 +42,7 @@ from flameox.domain import (
 from flameox.domain.models import ExcludedRunSetMember, IncludedRunSetMember
 from flameox.evidence import GenerationPublisher, numeric_value_to_columns
 from flameox.models import ContractModel
-from flameox.storage import JsonRecordStore, Workspace
+from flameox.storage import ControlRecordStore, Workspace
 
 _RUNTIME_RESOURCE_COLUMNS = {
     "runtime_resource.peak_rss_bytes": "peak_rss_bytes",
@@ -208,7 +208,7 @@ class _SampleSet:
 class RunSetService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
-        self.store = JsonRecordStore(
+        self.store = ControlRecordStore(
             workspace,
             kind="run_sets",
             model=RunSet,
@@ -360,7 +360,7 @@ class ComparisonService:
         snapshot: Snapshot,
     ) -> ComparisonResult:
         if request.experiment_id is not None:
-            JsonRecordStore(
+            ControlRecordStore(
                 self.workspace,
                 kind="experiments",
                 model=Experiment,

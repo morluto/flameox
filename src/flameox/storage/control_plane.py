@@ -5,6 +5,7 @@ import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,14 @@ from flameox.domain.models import utc_now
 
 if TYPE_CHECKING:
     from flameox.storage.workspace import Workspace
+
+
+@dataclass(frozen=True, slots=True)
+class ControlRelationship:
+    relationship: str
+    target_kind: str
+    target_id: str
+    payload_json: str = "{}"
 
 
 _SCHEMA = (
@@ -141,10 +150,11 @@ class ControlPlane:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 current_version = self._current_schema_version(connection)
-                if current_version > self.SCHEMA_VERSION:
+                if current_version not in {0, self.SCHEMA_VERSION}:
                     raise DomainError(
                         ErrorCode.WORKSPACE_INVALID,
-                        "The SQLite control plane was created by a newer Flameox version.",
+                        "The SQLite control plane uses an incompatible schema. Create a new "
+                        "workspace for this redesigned control plane.",
                         details={
                             "stored_schema_version": current_version,
                             "supported_schema_version": self.SCHEMA_VERSION,
@@ -152,7 +162,6 @@ class ControlPlane:
                     )
                 for statement in _SCHEMA:
                     connection.execute(statement)
-                self._migrate_idempotency_keys(connection)
                 connection.execute(
                     """
                     INSERT INTO control_plane_metadata(key, value) VALUES('schema_version', ?)
@@ -195,36 +204,6 @@ class ControlPlane:
                 "The SQLite control-plane schema version is invalid.",
             )
         return version
-
-    @staticmethod
-    def _migrate_idempotency_keys(connection: sqlite3.Connection) -> None:
-        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(idempotency_keys)")}
-        if "operation_id" not in columns:
-            return
-        connection.execute("ALTER TABLE idempotency_keys RENAME TO legacy_idempotency_keys")
-        connection.execute(
-            """
-            CREATE TABLE idempotency_keys (
-                scope TEXT NOT NULL,
-                key_digest TEXT NOT NULL,
-                intent_digest TEXT NOT NULL,
-                target_kind TEXT NOT NULL,
-                target_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (scope, key_digest)
-            ) STRICT
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO idempotency_keys(
-                scope, key_digest, intent_digest, target_kind, target_id, created_at
-            )
-            SELECT scope, key_digest, intent_digest, 'operation', operation_id, created_at
-            FROM legacy_idempotency_keys
-            """
-        )
-        connection.execute("DROP TABLE legacy_idempotency_keys")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -321,6 +300,7 @@ class ControlPlane:
         record_id: str,
         revision: int | None,
         payload_json: str,
+        relationships: tuple[ControlRelationship, ...] = (),
     ) -> None:
         observed_at = utc_now().isoformat()
         try:
@@ -342,6 +322,13 @@ class ControlPlane:
                         """,
                         (kind, record_id, revision, payload_json, observed_at),
                     )
+                self._replace_relationships(
+                    connection,
+                    source_kind=kind,
+                    source_id=record_id,
+                    relationships=relationships,
+                    observed_at=observed_at,
+                )
         except sqlite3.IntegrityError as exc:
             raise DomainError(
                 ErrorCode.REVISION_CONFLICT,
@@ -369,6 +356,32 @@ class ControlPlane:
             ).fetchall()
         return tuple(str(row["payload_json"]) for row in rows)
 
+    def list_relationships(
+        self,
+        *,
+        source_kind: str,
+        source_id: str,
+    ) -> tuple[ControlRelationship, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT relationship, target_kind, target_id, payload_json
+                FROM relationships
+                WHERE source_kind = ? AND source_id = ?
+                ORDER BY relationship, target_kind, target_id
+                """,
+                (source_kind, source_id),
+            ).fetchall()
+        return tuple(
+            ControlRelationship(
+                relationship=str(row["relationship"]),
+                target_kind=str(row["target_kind"]),
+                target_id=str(row["target_id"]),
+                payload_json=str(row["payload_json"]),
+            )
+            for row in rows
+        )
+
     def append_record(
         self,
         *,
@@ -377,6 +390,7 @@ class ControlPlane:
         expected_revision: int,
         next_revision: int,
         payload_json: str,
+        relationships: tuple[ControlRelationship, ...] | None = None,
     ) -> None:
         if next_revision != expected_revision + 1:
             raise DomainError(
@@ -428,6 +442,14 @@ class ControlPlane:
                     """,
                     (kind, record_id, next_revision, payload_json, observed_at),
                 )
+                if relationships is not None:
+                    self._replace_relationships(
+                        connection,
+                        source_kind=kind,
+                        source_id=record_id,
+                        relationships=relationships,
+                        observed_at=observed_at,
+                    )
         except sqlite3.IntegrityError as exc:
             raise DomainError(
                 ErrorCode.ARTIFACT_INTEGRITY_FAILED,
@@ -784,6 +806,40 @@ class ControlPlane:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 30000")
         return connection
+
+    @staticmethod
+    def _replace_relationships(
+        connection: sqlite3.Connection,
+        *,
+        source_kind: str,
+        source_id: str,
+        relationships: tuple[ControlRelationship, ...],
+        observed_at: str,
+    ) -> None:
+        connection.execute(
+            "DELETE FROM relationships WHERE source_kind = ? AND source_id = ?",
+            (source_kind, source_id),
+        )
+        connection.executemany(
+            """
+            INSERT INTO relationships(
+                source_kind, source_id, relationship, target_kind, target_id,
+                payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                (
+                    source_kind,
+                    source_id,
+                    item.relationship,
+                    item.target_kind,
+                    item.target_id,
+                    item.payload_json,
+                    observed_at,
+                )
+                for item in relationships
+            ),
+        )
 
     @staticmethod
     def _available_plan(row: sqlite3.Row | None) -> tuple[str, str]:
