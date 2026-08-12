@@ -56,8 +56,8 @@ def test_every_supported_native_kind_dispatches_to_ecosystem_viewer(
     executable.write_text("#!/bin/sh\nexit 0\n")
     executable.chmod(0o700)
     monkeypatch.setattr(
-        "flameox.application.viewers.shutil.which",
-        lambda _name: str(executable),
+        "flameox.command_binding.shutil.which",
+        lambda _name, path=None: str(executable),
     )
     artifact_path = tmp_path / f"{kind.value}.bin"
     artifact_path.write_bytes(b"native")
@@ -87,8 +87,8 @@ async def test_explicit_viewer_launch_uses_bounded_subprocess_broker(
     executable.write_text("#!/bin/sh\nexit 0\n")
     executable.chmod(0o700)
     monkeypatch.setattr(
-        "flameox.application.viewers.shutil.which",
-        lambda _name: str(executable),
+        "flameox.command_binding.shutil.which",
+        lambda _name, path=None: str(executable),
     )
     artifact_path = tmp_path / "metadata.bin"
     artifact_path.write_bytes(b"native")

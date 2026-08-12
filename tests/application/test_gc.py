@@ -81,7 +81,7 @@ def test_gc_discovers_unreferenced_final_evidence_from_interrupted_publication(
 
 def test_gc_rejects_symlink_candidate_without_moving_its_target(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    victim = workspace.paths.runs / "preserved"
+    victim = workspace.paths.root / "preserved"
     victim.mkdir(parents=True)
     payload = victim / "manifest.json"
     payload.write_text("must remain")
@@ -108,7 +108,7 @@ def test_gc_apply_rejects_candidate_swapped_to_symlink_after_recheck(
     (candidate / "partial.bin").write_bytes(b"recoverable")
     old = time.time() - 48 * 3600
     os.utime(candidate, (old, old))
-    victim = workspace.paths.runs / "preserved"
+    victim = workspace.paths.root / "preserved"
     victim.mkdir(parents=True)
     payload = victim / "manifest.json"
     payload.write_text("must remain")

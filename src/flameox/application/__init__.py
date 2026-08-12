@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     from flameox.application.records import *  # noqa: F403
     from flameox.application.recovery import *  # noqa: F403
     from flameox.application.reductions import *  # noqa: F403
-    from flameox.application.repair import *  # noqa: F403
     from flameox.application.setup import *  # noqa: F403
     from flameox.application.status import *  # noqa: F403
     from flameox.application.summaries import *  # noqa: F403
@@ -84,7 +83,6 @@ _MODULES = (
     "records",
     "recovery",
     "reductions",
-    "repair",
     "setup",
     "status",
     "summaries",
@@ -290,10 +288,6 @@ __all__ = [
     "RegisterPipelineRequest",
     "RegisteredPipelineStage",
     "RegisteredPipelineStageDeclaration",
-    "RepairEntry",
-    "RepairPlan",
-    "RepairResult",
-    "RepairService",
     "ResetPeerFault",
     "ResolvedOracle",
     "ResolvedSetupPlan",

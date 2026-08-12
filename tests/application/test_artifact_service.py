@@ -75,8 +75,8 @@ def test_native_viewer_plan_is_read_only_and_uses_content_path(
     source.write_bytes(b"profile")
     imported = ImportService(workspace).import_artifact(ImportArtifactRequest(path=source))
     monkeypatch.setattr(
-        "flameox.application.viewers.shutil.which",
-        lambda _: "/usr/bin/xdg-open",
+        "flameox.command_binding.shutil.which",
+        lambda _name, path=None: "/usr/bin/xdg-open",
     )
 
     plan = NativeViewerService(workspace).plan(imported.artifact_id)

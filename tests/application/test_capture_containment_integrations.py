@@ -59,6 +59,9 @@ async def test_capture_plan_uses_minimal_bubblewrap_and_systemd_limits(
     assert plan.containment == "active"
     assert plan.network_contained
     assert plan.systemd_scope_unit is not None
+    assert plan.oracle_argv is not None
+    assert plan.oracle_launch_executable_binding is not None
+    assert plan.oracle_argv[0] == str(plan.oracle_launch_executable_binding.invocation_path)
     assert "--property=KillMode=control-group" in argv
     assert f"--property=MemoryMax={workspace.config.execution.max_memory_bytes}" in argv
     assert f"--property=TasksMax={workspace.config.execution.max_processes}" in argv
@@ -66,7 +69,7 @@ async def test_capture_plan_uses_minimal_bubblewrap_and_systemd_limits(
     diagnostics_index = argv.index(str(workspace.paths.root.resolve()))
     assert argv[diagnostics_index - 1] == "--tmpfs"
 
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
     assert result.run.execution_status is ExecutionStatus.SUCCEEDED
     assert result.run.validation_status is ValidationStatus.PASSED
     assert result.run.process is not None
@@ -129,7 +132,7 @@ PATH = {json.dumps(toolchain_bin + ":/usr/bin:/bin")}
     )
     binding = plan.writable_roots[0]
 
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
 
     stderr = next(
         (

@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import JsonValue
 
-from flameox.adapters.artifact_workers import ArtifactWorker
+from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
 from flameox.evidence import GenerationPublisher
 from flameox.execution import SubprocessBroker
@@ -370,7 +370,7 @@ class NsightSystemsExtractor:
         )
 
     async def _run_worker(self, request: dict[str, JsonValue]) -> dict[str, Any]:
-        return await ArtifactWorker(self.workspace, broker=self.broker).run(
+        return await IsolatedWorkerHarness(self.workspace, broker=self.broker).run(
             "flameox.workers.nsight_systems",
             request,
             name="Nsight Systems",

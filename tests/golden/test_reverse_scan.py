@@ -142,7 +142,7 @@ length = [32768, 65536, 131072]
         adapter="pyperf",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    experiment = await experiment_service.run(experiment_plan.plan_id)
+    experiment = await experiment_service.run(experiment_plan.plan_token)
     assert len(experiment.trials) == 6
     assert all(trial.validation_status is ValidationStatus.PASSED for trial in experiment.trials)
     scaling = RecipeService(workspace).scaling(experiment.experiment.experiment_id)
@@ -168,7 +168,7 @@ length = [32768, 65536, 131072]
         parameters={"mode": "broken", "length": 32768},
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    broken = await capture.execute(broken_plan.plan_id)
+    broken = await capture.execute(broken_plan.plan_token)
     assert broken.run.execution_status is ExecutionStatus.SUCCEEDED
     assert broken.run.validation_status is ValidationStatus.FAILED
     finding = FindingService(workspace).record(

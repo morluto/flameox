@@ -6,6 +6,7 @@ from typing import Annotated
 from pydantic import Field
 
 from flameox.application.native_reducer import NativePartitioning, NativeReductionLimits
+from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.models import CommandSpec
 from flameox.models import ContractModel
 
@@ -16,6 +17,7 @@ class NativeReductionWorkerRequest(ContractModel):
     artifact_path: Path
     partitioning: NativePartitioning
     predicate_command: CommandSpec
+    predicate_executable_binding: ResolvedExecutable
     limits: NativeReductionLimits
     predicate_timeout_seconds: Annotated[float, Field(gt=0, le=3_600)]
     project_root: Path

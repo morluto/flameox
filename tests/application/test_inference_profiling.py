@@ -12,6 +12,7 @@ import pytest
 from flameox.application.inference import InferenceReplayService
 from flameox.application.inference_profiling import (
     InferenceProfilerControlClient,
+    InferenceProfilingPlan,
     InferenceProfilingService,
     NsightSystemsProfilingPlan,
     SglangProfileOptions,
@@ -45,6 +46,7 @@ from flameox.execution import (
     SubprocessBroker,
 )
 from flameox.storage import RunStore, Workspace
+from tests.support.execution import executable_binding
 
 
 def _workspace(tmp_path: Path, *, mode: str = "managed") -> Workspace:
@@ -134,6 +136,7 @@ class _ProfilingBroker(SubprocessBroker):
             stdout=b"",
             stderr=b"",
             resolved_executable=Path(request.argv[0]),
+            executable_binding=request.executable_binding,
             containment=ProcessContainment.PROCESS_GROUP,
         )
 
@@ -145,6 +148,7 @@ def _patch_capture_dependencies(monkeypatch: pytest.MonkeyPatch, executable: Pat
         return AvailableInferenceToolDiscovery(
             tool=tool,
             executable=executable,
+            executable_binding=executable_binding(executable),
             version="0.12.0",
             executable_digest="sha256:" + "a" * 64,
             available=True,
@@ -251,6 +255,21 @@ async def _seed_measurement_run(workspace: Workspace) -> str:
     return run.run_id
 
 
+async def _authorized_profile(
+    service: InferenceProfilingService,
+    workspace: Workspace,
+) -> tuple[InferenceProfilingPlan, str]:
+    measurement_run_id = await _seed_measurement_run(workspace)
+    plan = service.plan(
+        "local",
+        profiler="torch_profiler",
+        scenario_name="profile",
+        measurement_run_id=measurement_run_id,
+        timeout_seconds=5,
+    )
+    return plan, measurement_run_id
+
+
 def test_torch_profile_plan_uses_managed_workload_and_trace_directory(tmp_path: Path) -> None:
     service = InferenceProfilingService(_workspace(tmp_path))
     plan = service.plan("local", profiler="torch_profiler")
@@ -289,6 +308,7 @@ def test_sglang_torch_plan_has_stable_identity_and_derived_profile_id(
     discovery = AvailableInferenceToolDiscovery(
         tool=InferenceTool.SGLANG,
         executable=launcher,
+        executable_binding=executable_binding(launcher),
         available=True,
         version="0.5.16",
         executable_digest="sha256:" + "b" * 64,
@@ -507,17 +527,19 @@ async def test_capture_publishes_canonical_diagnostic_run_linked_to_measurement_
     executable.chmod(0o755)
     _patch_capture_dependencies(monkeypatch, executable)
     service = InferenceProfilingService(workspace)
-    plan = service.plan("local", profiler="torch_profiler")
-    service.broker = _ProfilingBroker(plan.output_path / "worker.pt.trace.json")
-
     measurement_run_id = await _seed_measurement_run(workspace)
-
-    result = await service.capture(
-        plan,
+    plan = service.plan(
+        "local",
+        profiler="torch_profiler",
         scenario_name="profile",
         measurement_run_id=measurement_run_id,
         timeout_seconds=5,
     )
+    service.broker = _ProfilingBroker(plan.output_path / "worker.pt.trace.json")
+
+    forged = plan.validated_copy(update={"measurement_run_id": "forged"})
+    assert forged.measurement_run_id != measurement_run_id
+    result = await service.capture(plan.plan_token)
 
     run = RunStore(workspace).read(result.run_id)
     protocol = json.loads(run.inference_protocol_identity_json or "{}")
@@ -550,20 +572,14 @@ async def test_startup_failure_finalizes_run_and_preserves_partial_trace(
     executable.chmod(0o755)
     _patch_capture_dependencies(monkeypatch, executable)
     service = InferenceProfilingService(workspace)
-    plan = service.plan("local", profiler="torch_profiler")
+    plan, _measurement_run_id = await _authorized_profile(service, workspace)
     service.broker = _ProfilingBroker(
         plan.output_path / "worker.pt.trace.json",
         startup_error=DomainError(ErrorCode.PROCESS_FAILED, "server startup failed"),
     )
-    measurement_run_id = await _seed_measurement_run(workspace)
 
     with pytest.raises(DomainError, match="server startup failed") as caught:
-        await service.capture(
-            plan,
-            scenario_name="profile",
-            measurement_run_id=measurement_run_id,
-            timeout_seconds=5,
-        )
+        await service.capture(plan.plan_token)
 
     assert caught.value.run_id is not None
     run = RunStore(workspace).read(caught.value.run_id)
@@ -589,16 +605,10 @@ async def test_profiler_flush_failure_returns_partial_capture_and_failed_run(
 
     monkeypatch.setattr(VllmProfilerControlClient, "stop", fail_stop)
     service = InferenceProfilingService(workspace)
-    plan = service.plan("local", profiler="torch_profiler")
+    plan, _measurement_run_id = await _authorized_profile(service, workspace)
     service.broker = _ProfilingBroker(plan.output_path / "worker.pt.trace.json")
-    measurement_run_id = await _seed_measurement_run(workspace)
 
-    result = await service.capture(
-        plan,
-        scenario_name="profile",
-        measurement_run_id=measurement_run_id,
-        timeout_seconds=5,
-    )
+    result = await service.capture(plan.plan_token)
 
     run = RunStore(workspace).read(result.run_id)
     assert result.coverage == "partial"
@@ -619,18 +629,12 @@ async def test_incomplete_server_cleanup_is_durable_and_downgrades_profile(
     executable.chmod(0o755)
     _patch_capture_dependencies(monkeypatch, executable)
     service = InferenceProfilingService(workspace)
-    plan = service.plan("local", profiler="torch_profiler")
+    plan, _measurement_run_id = await _authorized_profile(service, workspace)
     service.broker = _ProfilingBroker(
         plan.output_path / "worker.pt.trace.json", cleanup_complete=False
     )
-    measurement_run_id = await _seed_measurement_run(workspace)
 
-    result = await service.capture(
-        plan,
-        scenario_name="profile",
-        measurement_run_id=measurement_run_id,
-        timeout_seconds=5,
-    )
+    result = await service.capture(plan.plan_token)
 
     run = RunStore(workspace).read(result.run_id)
     assert result.server_cleanup_complete is False
@@ -650,22 +654,14 @@ async def test_cancelled_profile_window_finalizes_run_and_preserves_partial_trac
     executable.chmod(0o755)
     _patch_capture_dependencies(monkeypatch, executable)
     service = InferenceProfilingService(workspace)
-    plan = service.plan("local", profiler="torch_profiler")
+    plan, _measurement_run_id = await _authorized_profile(service, workspace)
     service.broker = _ProfilingBroker(plan.output_path / "worker.pt.trace.json", cancel_window=True)
-    measurement_run_id = await _seed_measurement_run(workspace)
 
     with pytest.raises(asyncio.CancelledError):
-        await service.capture(
-            plan,
-            scenario_name="profile",
-            measurement_run_id=measurement_run_id,
-            timeout_seconds=5,
-        )
+        await service.capture(plan.plan_token)
 
     diagnostic_runs = [
-        RunStore(workspace).read(path.name)
-        for path in workspace.paths.runs.iterdir()
-        if json.loads((path / "manifest.json").read_text()).get("collector") == "torch_profiler"
+        run for run in RunStore(workspace).list() if run.collector == "torch_profiler"
     ]
     assert len(diagnostic_runs) == 1
     run = diagnostic_runs[0]

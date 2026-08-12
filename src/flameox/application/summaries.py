@@ -26,7 +26,7 @@ from flameox.domain import (
     digest_model,
 )
 from flameox.models import ContractModel
-from flameox.storage import ArtifactStore, JsonRecordStore, RunStore, Workspace
+from flameox.storage import ArtifactStore, ControlRecordStore, RunStore, Workspace
 
 _DISCARD_CHUNK_SIZE = 4096
 
@@ -209,7 +209,7 @@ class EvidenceSummaryService:
         self.runs = RunStore(workspace)
         self.artifacts = ArtifactStore(workspace)
         self.lookup = EvidenceLookupService(workspace)
-        self.findings = JsonRecordStore(
+        self.findings = ControlRecordStore(
             workspace,
             kind="findings",
             model=Finding,
@@ -221,7 +221,8 @@ class EvidenceSummaryService:
         head = self.workspace.corpus.read_head()
         selected_runs = self._selected_runs(request)
         truncation: list[str] = []
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             runs = tuple(
                 self._run_summary(
                     snapshot,
@@ -308,7 +309,7 @@ class EvidenceSummaryService:
         request: EvidenceSummaryRequest,
         truncation: list[str],
     ) -> SummaryRun:
-        run = self.runs.read(run_id)
+        run = snapshot.run(run_id)
         source = self._identity_row(
             snapshot,
             "source_states",

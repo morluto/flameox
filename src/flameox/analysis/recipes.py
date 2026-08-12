@@ -1,8 +1,4 @@
-"""Compatibility surface and composition root for analysis recipes.
-
-The recipe families live in focused modules; this module intentionally keeps the
-historical import path and the single service facade used by CLI, MCP, and callers.
-"""
+"""Composition root for snapshot-pinned analysis recipes."""
 
 from flameox.analysis.recipe_accelerator import AcceleratorRecipes
 from flameox.analysis.recipe_execution import ExecutionRecipes
@@ -48,7 +44,7 @@ class RecipeService(
     FailureRecipes,
     ScalingRecipes,
 ):
-    """Stable facade combining the independent analysis recipe families."""
+    """Snapshot-pinned facade combining the independent analysis recipe families."""
 
 
 __all__ = [

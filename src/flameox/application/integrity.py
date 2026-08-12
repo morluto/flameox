@@ -164,18 +164,17 @@ class IntegrityService:
                         message=str(exc),
                     )
                 )
-        for projection in self.workspace.paths.runs.glob("*/manifest.json"):
-            try:
-                RunStore(self.workspace).read(projection.parent.name)
-            except DomainError as exc:
-                issues.append(
-                    IntegrityIssue(
-                        severity=IntegritySeverity.ERROR,
-                        code="INVALID_RUN",
-                        path=str(projection),
-                        message=exc.message,
-                    )
+        try:
+            RunStore(self.workspace).list()
+        except DomainError as exc:
+            issues.append(
+                IntegrityIssue(
+                    severity=IntegritySeverity.ERROR,
+                    code="INVALID_CONTROL_PLANE_RUN",
+                    path=str(self.workspace.paths.control_plane),
+                    message=exc.message,
                 )
+            )
         try:
             catalog = Catalog(self.workspace).status()
             if not catalog["fresh"]:

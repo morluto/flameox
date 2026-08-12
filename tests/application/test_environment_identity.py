@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,7 @@ class _Broker:
             stdout=stdout,
             stderr=b"",
             resolved_executable=Path(request.argv[0]),
+            executable_binding=request.executable_binding,
             containment=ProcessContainment.PROCESS_GROUP,
         )
 
@@ -80,6 +82,7 @@ class _FailedBroker:
             stdout=b"",
             stderr=self.stderr,
             resolved_executable=Path(request.argv[0]),
+            executable_binding=request.executable_binding,
             containment=ProcessContainment.PROCESS_GROUP,
         )
 
@@ -90,7 +93,9 @@ async def test_declared_accelerator_identity_is_structured_and_bounded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     broker = _Broker()
-    monkeypatch.setattr("flameox.application.environment.shutil.which", lambda _: "/bin/nvidia-smi")
+    monkeypatch.setattr(
+        "flameox.command_binding.shutil.which", lambda _name, path=None: sys.executable
+    )
     required: tuple[AcceleratorIdentityRequirement, ...] = (
         "cuda.driver",
         "cuda.runtime",
@@ -128,7 +133,7 @@ async def test_missing_required_accelerator_is_partial_not_exact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("flameox.application.environment.shutil.which", lambda _: None)
+    monkeypatch.setattr("flameox.command_binding.shutil.which", lambda _name, path=None: None)
     required: tuple[AcceleratorIdentityRequirement, ...] = ("cuda.driver", "cuda.devices")
 
     facet = await AcceleratorIdentityService(tmp_path).observe(required)
@@ -157,7 +162,9 @@ async def test_accelerator_probe_failure_states_remain_distinct(
     broker: _FailedBroker,
     expected: str,
 ) -> None:
-    monkeypatch.setattr("flameox.application.environment.shutil.which", lambda _: "/bin/nvidia-smi")
+    monkeypatch.setattr(
+        "flameox.command_binding.shutil.which", lambda _name, path=None: sys.executable
+    )
 
     facet = await AcceleratorIdentityService(tmp_path, broker=broker).observe(("cuda.devices",))
 
@@ -171,7 +178,9 @@ async def test_unknown_inventory_fields_remain_distinct_and_partial(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("flameox.application.environment.shutil.which", lambda _: "/bin/nvidia-smi")
+    monkeypatch.setattr(
+        "flameox.command_binding.shutil.which", lambda _name, path=None: sys.executable
+    )
     broker = _Broker(
         b"""<nvidia_smi_log><driver_version>N/A</driver_version><gpu>
         <product_name>H100</product_name><compute_cap>N/A</compute_cap>

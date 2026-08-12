@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from flameox.domain import ResourceAvailability, RunManifest
+from flameox.storage.control_plane import canonical_json
 
 
 def run_row(manifest: RunManifest) -> dict[str, object]:
@@ -69,5 +70,8 @@ def run_row(manifest: RunManifest) -> dict[str, object]:
                 else ResourceAvailability.PARTIAL
             )
         ),
-        "manifest_path": f"runs/{manifest.run_id}/manifest.json",
+        "manifest_path": f"control-plane:run/{manifest.run_id}@{manifest.revision}",
+        "manifest_json": canonical_json(
+            manifest.model_dump(mode="json", exclude={"process": {"timed_out"}})
+        ),
     }

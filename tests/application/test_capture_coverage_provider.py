@@ -35,7 +35,7 @@ timeout_seconds = 10
         adapter="coverage",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
 
     assert result.run.execution_status is ExecutionStatus.SUCCEEDED
     assert any(item.kind.value == "execution_coverage" for item in result.run.artifacts)

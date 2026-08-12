@@ -25,6 +25,7 @@ from flameox.application import (
 )
 from flameox.domain import ArtifactKind
 from flameox.storage import Workspace
+from tests.support.execution import executable_binding
 
 
 def _configure(project: Path, predicate_code: str) -> None:
@@ -81,10 +82,10 @@ def test_reduction_request_partitioner_variants_encode_chunk_size_requirement() 
         request.validate_python({**common, "partitioner": "text_lines", "chunk_size": 4_096})
 
 
-def test_reduction_plan_parser_preserves_schema_two_wire_variants() -> None:
+def test_reduction_plan_parser_requires_bound_schema_three_variants() -> None:
     adapter: TypeAdapter[ReductionPlan] = TypeAdapter(ReductionPlan)
     common = {
-        "schema_version": 2,
+        "schema_version": 3,
         "plan_id": "sha256:" + "2" * 64,
         "workspace_id": "workspace",
         "original_artifact_id": "sha256:" + "0" * 64,
@@ -92,6 +93,7 @@ def test_reduction_plan_parser_preserves_schema_two_wire_variants() -> None:
         "predicate_definition_id": "definition",
         "predicate_instance_id": "instance",
         "predicate_command": {"argv": ["python"], "cwd": "."},
+        "predicate_executable_binding": executable_binding("python"),
         "predicate_parameters": {},
         "predicate_executable_digest": "sha256:" + "1" * 64,
         "limits": {},
@@ -182,7 +184,7 @@ async def test_native_reduction_revalidates_final_candidate(tmp_path: Path) -> N
     service = ReductionService(workspace)
     plan = _plan(workspace, _original(workspace, tmp_path / "original.txt"))
 
-    assert plan.schema_version == 2
+    assert plan.schema_version == 3
     assert plan.engine == "native_ddmin"
     result = await service.execute(plan.plan_id)
 

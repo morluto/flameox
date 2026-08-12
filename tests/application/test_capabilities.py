@@ -44,6 +44,7 @@ from flameox.execution import (
     SubprocessBroker,
 )
 from flameox.storage import Workspace
+from tests.support.execution import executable_binding
 
 
 class _ProbeBroker(SubprocessBroker):
@@ -66,6 +67,7 @@ class _ProbeBroker(SubprocessBroker):
             stdout=b"trace_processor_shell 99.1\n",
             stderr=b"",
             resolved_executable=Path(request.argv[0]),
+            executable_binding=request.executable_binding,
             containment=ProcessContainment.PROCESS_GROUP,
         )
 
@@ -109,6 +111,7 @@ def _probe_outcome(
         stdout=stdout,
         stderr=stderr,
         resolved_executable=Path("/usr/bin/perf"),
+        executable_binding=executable_binding("/usr/bin/perf"),
         containment=ProcessContainment.PROCESS_GROUP,
     )
 
@@ -477,7 +480,6 @@ def test_capability_setup_installs_only_declared_missing_providers(
         )
     )
     monkeypatch.setattr(service, "list", lambda: next(reports))
-    monkeypatch.setattr("flameox.application.capabilities.shutil.which", lambda _: "/usr/bin/uv")
     monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
     (tmp_path / "bin").mkdir()
     result = service.prepare(("torch.profiler",))
@@ -501,9 +503,9 @@ def test_capability_setup_installs_only_declared_missing_providers(
     assert (tmp_path / "capabilities.json").read_text() == (
         '{\n  "extras": [\n    "torch"\n  ],\n  "schema_version": 1\n}\n'
     )
-    assert [list(request.argv) for request in broker.requests] == [
+    assert Path(broker.requests[0].argv[0]).name == "uv"
+    assert [list(request.argv[1:]) for request in broker.requests] == [
         [
-            "/usr/bin/uv",
             "pip",
             "install",
             "--python",
@@ -552,7 +554,6 @@ def test_capability_setup_cancellation_cleans_up_brokered_install(
         ),
     )
     monkeypatch.setattr(service, "list", lambda: CapabilityList(capabilities=(report,)))
-    monkeypatch.setattr("flameox.application.capabilities.shutil.which", lambda _: "/usr/bin/uv")
     monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
     (tmp_path / "bin").mkdir()
     cancel_event = threading.Event()
@@ -595,7 +596,7 @@ def test_capability_setup_records_failure_when_uv_is_missing(
         ),
     )
     monkeypatch.setattr(service, "list", lambda: CapabilityList(capabilities=(missing,)))
-    monkeypatch.setattr("flameox.application.capabilities.shutil.which", lambda _: None)
+    monkeypatch.setattr("flameox.command_binding.shutil.which", lambda _name, path=None: None)
 
     with pytest.raises(DomainError) as unavailable:
         service.prepare(("torch.profiler",))
@@ -628,7 +629,6 @@ def test_trace_processor_staging_preserves_phase_and_bounded_cause(
         ),
     )
     monkeypatch.setattr(service, "list", lambda: CapabilityList(capabilities=(report,)))
-    monkeypatch.setattr("flameox.application.capabilities.shutil.which", lambda _: "/usr/bin/uv")
 
     def fail_staging(*args: object, **kwargs: object) -> object:
         raise DomainError(
@@ -1001,9 +1001,12 @@ python_distributions = ["agent-fixture>=2"]
 
     monkeypatch.setattr("flameox.application.dependencies.distribution", lookup)
     monkeypatch.setattr("flameox.application.preflight.distribution", lookup)
-    monkeypatch.setattr("flameox.application.dependencies._uv_executable", lambda: "/usr/bin/uv")
     python = tmp_path / "bin" / "python"
     python.parent.mkdir()
+    uv = python.parent / "uv"
+    uv.write_text("#!/bin/sh\nexit 0\n")
+    uv.chmod(0o755)
+    monkeypatch.setattr("flameox.application.dependencies._uv_executable", lambda: str(uv))
     monkeypatch.setattr(sys, "executable", str(python))
     broker = InstallingBroker()
 
@@ -1016,7 +1019,7 @@ python_distributions = ["agent-fixture>=2"]
     assert result.preflight.requirements[0].status == "available"
     request = broker.requests[0]
     assert request.argv == (
-        "/usr/bin/uv",
+        str(uv),
         "pip",
         "install",
         "--python",
@@ -1055,7 +1058,6 @@ python_distributions = ["agent-fixture>=2"]
         "flameox.application.preflight.distribution",
         lambda _: (_ for _ in ()).throw(PackageNotFoundError("agent-fixture")),
     )
-    monkeypatch.setattr("flameox.application.dependencies._uv_executable", lambda: "/usr/bin/uv")
 
     class FailingBroker(SubprocessBroker):
         async def run(self, request: ExecutionRequest, **_: Any) -> ExecutionOutcome:
@@ -1068,6 +1070,10 @@ python_distributions = ["agent-fixture>=2"]
 
     python = tmp_path / "bin" / "python"
     python.parent.mkdir()
+    uv = python.parent / "uv"
+    uv.write_text("#!/bin/sh\nexit 0\n")
+    uv.chmod(0o755)
+    monkeypatch.setattr("flameox.application.dependencies._uv_executable", lambda: str(uv))
     monkeypatch.setattr(sys, "executable", str(python))
 
     with pytest.raises(DomainError) as failure:

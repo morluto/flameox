@@ -42,7 +42,7 @@ from flameox.domain import (
 from flameox.domain.models import ExcludedRunSetMember, IncludedRunSetMember
 from flameox.evidence import GenerationPublisher, numeric_value_to_columns
 from flameox.models import ContractModel
-from flameox.storage import JsonRecordStore, RunStore, Workspace
+from flameox.storage import ControlRecordStore, Workspace
 
 _RUNTIME_RESOURCE_COLUMNS = {
     "runtime_resource.peak_rss_bytes": "peak_rss_bytes",
@@ -208,7 +208,7 @@ class _SampleSet:
 class RunSetService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
-        self.store = JsonRecordStore(
+        self.store = ControlRecordStore(
             workspace,
             kind="run_sets",
             model=RunSet,
@@ -226,9 +226,19 @@ class RunSetService:
             )
         else:
             requested = request.members
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             for order, item in enumerate(requested):
-                RunStore(self.workspace).read(item.run_id)
+                exists = snapshot.execute(
+                    "SELECT 1 FROM runs WHERE run_id = ? LIMIT 1",
+                    (item.run_id,),
+                ).fetchone()
+                if exists is None:
+                    raise DomainError(
+                        ErrorCode.RUN_NOT_FOUND,
+                        f"Run {item.run_id!r} is absent from the pinned corpus snapshot.",
+                        run_id=item.run_id,
+                    )
                 if item.trial_id is not None:
                     experiment_id = request.selection.get("experiment_id")
                     if isinstance(experiment_id, str):
@@ -319,8 +329,9 @@ class ComparisonService:
         self.publisher = GenerationPublisher(workspace)
 
     def compare(self, request: CompareRunSetsRequest) -> ComparisonResult:
-        corpus_commit_id = self.workspace.corpus.read_head().commit_id
-        with Catalog(self.workspace).open_snapshot(corpus_commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        handle = catalog.pin()
+        with catalog.open_snapshot(handle) as snapshot:
             return self._compare_at_snapshot(request, snapshot)
 
     async def compare_async(
@@ -329,12 +340,13 @@ class ComparisonService:
         *,
         progress: Callable[[float, float, str], Awaitable[None]] | None = None,
     ) -> ComparisonResult:
-        corpus_commit_id = self.workspace.corpus.read_head().commit_id
+        catalog = Catalog(self.workspace)
+        handle = catalog.pin()
         if progress is not None:
             await progress(0, 2, "Comparison snapshot pinned")
-        result = await Catalog(self.workspace).run_interruptible(
+        result = await catalog.run_interruptible(
             lambda snapshot: self._compare_at_snapshot(request, snapshot),
-            commit_id=corpus_commit_id,
+            handle=handle,
             query_name="compare_run_sets",
         )
         if progress is not None:
@@ -348,7 +360,7 @@ class ComparisonService:
         snapshot: Snapshot,
     ) -> ComparisonResult:
         if request.experiment_id is not None:
-            JsonRecordStore(
+            ControlRecordStore(
                 self.workspace,
                 kind="experiments",
                 model=Experiment,
@@ -465,8 +477,10 @@ class ComparisonService:
         started = datetime.now(UTC)
         if progress is not None:
             await progress(0, 3, "Comparison snapshot pinned")
-        result = await Catalog(self.workspace).run_interruptible(
+        catalog = Catalog(self.workspace)
+        result = await catalog.run_interruptible(
             lambda snapshot: self._compare_at_snapshot(request, snapshot),
+            handle=catalog.pin(),
             query_name="record_comparison",
         )
         if progress is not None:

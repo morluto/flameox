@@ -69,12 +69,12 @@ async def test_trusted_local_capture_is_uncontained_when_containment_tools_are_u
     service = CaptureService(workspace)
     real_which = shutil.which
 
-    def without_containment_tools(name: str) -> str | None:
+    def without_containment_tools(name: str, path: str | None = None) -> str | None:
         if name in {"bwrap", "systemd-run"}:
             return None
-        return real_which(name)
+        return real_which(name, path=path)
 
-    monkeypatch.setattr("flameox.application.capture.shutil.which", without_containment_tools)
+    monkeypatch.setattr("flameox.command_binding.shutil.which", without_containment_tools)
 
     plan = await service.plan(
         workload_name="echo",
@@ -118,7 +118,7 @@ timeout_seconds = 20
     )
 
     with pytest.raises(DomainError) as terminated:
-        await service.execute(plan.plan_id)
+        await service.execute(plan.plan_token)
 
     run = RunStore(workspace).read(plan.run_id)
     assert terminated.value.code is ErrorCode.STORAGE_QUOTA_EXCEEDED

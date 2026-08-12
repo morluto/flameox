@@ -25,8 +25,8 @@ def main() -> None:
     else:
         parser.error("the pytest adapter requires `pytest` or `python -m pytest`")
 
+    command.append(f"--report-log={arguments.output}")
     environment = os.environ.copy()
-    environment["FLAMEOX_PYTEST_EVIDENCE_PATH"] = str(arguments.output)
     environment["FLAMEOX_PYTEST_RUN_STARTED_NS"] = str(time.time_ns())
     os.execvpe(command[0], command, environment)
 

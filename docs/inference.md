@@ -131,8 +131,8 @@ GPU capture is supported only where the corresponding vLLM, PyTorch/CUDA, or Nsi
 available. The deterministic tests use fake processes and endpoints; Windows GPU profiling remains
 unsupported and unexecuted until it is validated on a supported vLLM environment.
 
-For agent handoff, plan IDs are stable across operation-owned staging paths. Pass the returned
-`plan_id` back as `expected_plan_id` when running a replay or profile; execution refuses when the
-configuration or provider/server executable identity changed after review. Request queries return
+For agent handoff, the opaque `plan_token` authorizes execution; `plan_id` is stable audit evidence
+and may also be passed as `expected_plan_id`. Execution refuses when the configuration or
+provider/server executable identity changed after review. Request queries return
 both a total and typed evidence availability, and reject unknown run IDs instead of returning an
 ambiguous empty page.

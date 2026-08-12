@@ -47,6 +47,7 @@ class _NcuProbeBroker(SubprocessBroker):
             stdout=stdout,
             stderr=stderr,
             resolved_executable=Path(request.argv[0]),
+            executable_binding=request.executable_binding,
             containment=ProcessContainment.PROCESS_GROUP,
         )
 

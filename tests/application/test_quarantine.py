@@ -2,46 +2,13 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
-from flameox.application import (
-    ImportArtifactRequest,
-    ImportService,
-    QuarantineService,
-    RepairService,
-)
+from flameox.application import QuarantineService
 from flameox.domain import DomainError, ErrorCode
-from flameox.storage import RunStore, Workspace
-
-
-def test_repair_quarantines_invalid_projection_and_rebuilds_from_revision(
-    tmp_path: Path,
-) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    source = tmp_path / "profile.bin"
-    source.write_bytes(b"profile")
-    imported = ImportService(workspace).import_artifact(ImportArtifactRequest(path=source))
-    projection = workspace.paths.runs / imported.run.run_id / "manifest.json"
-    projection.write_text("{partial")
-
-    service = RepairService(workspace)
-    plan = service.plan()
-    result = service.apply(plan)
-
-    assert result.repaired_paths == (f"runs/{imported.run.run_id}/manifest.json",)
-    assert RunStore(workspace).read(imported.run.run_id) == imported.run
-    quarantine = result.quarantine[0]
-    assert quarantine.operation == f"repair:{plan.plan_id}"
-    assert quarantine.originating_run_id == imported.run.run_id
-
-    projection.unlink()
-    restored = QuarantineService(workspace).restore(quarantine.quarantine_id)
-    assert restored.restored_path == f"runs/{imported.run.run_id}/manifest.json"
-    assert projection.read_text() == "{partial"
+from flameox.storage import Workspace
 
 
 def test_quarantine_manifest_preserves_native_capture_context(tmp_path: Path) -> None:
@@ -64,59 +31,6 @@ def test_quarantine_manifest_preserves_native_capture_context(tmp_path: Path) ->
     assert manifest.expected_format == "perf.data"
     assert manifest.actual_format == "regular_file"
     assert "timed out" in manifest.reason
-
-
-def test_repair_revalidates_projection_after_acquiring_write_lock(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    source = tmp_path / "profile.bin"
-    source.write_bytes(b"profile")
-    imported = ImportService(workspace).import_artifact(ImportArtifactRequest(path=source))
-    projection = workspace.paths.runs / imported.run.run_id / "manifest.json"
-    projection.write_text("{partial")
-    service = RepairService(workspace)
-    plan = service.plan()
-    original_write_lock = workspace.write_locked
-
-    @contextmanager
-    def concurrent_projection_update() -> Iterator[None]:
-        with original_write_lock():
-            projection.write_text(imported.run.model_dump_json())
-            yield
-
-    monkeypatch.setattr(workspace, "write_locked", concurrent_projection_update)
-
-    with pytest.raises(DomainError) as error:
-        service.apply(plan)
-
-    assert error.value.code is ErrorCode.REVISION_CONFLICT
-    assert RunStore(workspace).read(imported.run.run_id) == imported.run
-    assert service.quarantine.list_manifests() == ()
-
-
-def test_repair_rejects_symlink_projection_without_mutating_its_target(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    source = tmp_path / "profile.bin"
-    source.write_bytes(b"profile")
-    imported = ImportService(workspace).import_artifact(ImportArtifactRequest(path=source))
-    projection = workspace.paths.runs / imported.run.run_id / "manifest.json"
-    victim = workspace.paths.staging / "preserved.json"
-    victim.write_text("{partial")
-    projection.unlink()
-    try:
-        projection.symlink_to(victim)
-    except OSError:
-        pytest.skip("The platform does not permit symbolic links.")
-
-    with pytest.raises(DomainError) as error:
-        RepairService(workspace).plan()
-
-    assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
-    assert victim.read_text() == "{partial"
-    assert projection.is_symlink()
-    assert QuarantineService(workspace).list_manifests() == ()
 
 
 def test_quarantine_resume_completes_crash_after_manifest_publication(
@@ -312,7 +226,7 @@ def test_quarantine_resume_rejects_source_replaced_by_symbolic_link(
             operation="test",
         )
     (manifest,) = QuarantineService(workspace).list_manifests()
-    victim = workspace.paths.runs / "preserved.bin"
+    victim = workspace.paths.root / "preserved.bin"
     victim.write_bytes(b"shared content")
     source.unlink()
     try:

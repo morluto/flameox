@@ -94,10 +94,6 @@ class WorkspacePaths:
         return self.root / "artifacts" / "sha256"
 
     @property
-    def runs(self) -> Path:
-        return self.root / "runs"
-
-    @property
     def records(self) -> Path:
         return self.root / "records"
 
@@ -149,6 +145,10 @@ class WorkspacePaths:
     def catalog(self) -> Path:
         return self.root / "catalog.duckdb"
 
+    @property
+    def control_plane(self) -> Path:
+        return self.root / "control-plane.sqlite3"
+
 
 class Workspace:
     DIRECTORY_NAMES = (
@@ -159,7 +159,6 @@ class Workspace:
         "logs",
         "quarantine",
         "records",
-        "runs",
         "staging",
         "trash",
     )
@@ -257,6 +256,9 @@ class Workspace:
                 atomic_write_text(workspace.paths.config, WorkspaceConfig().to_toml())
             _ = workspace._load_config()
             workspace.corpus.initialize()
+            from flameox.storage.control_plane import ControlPlane
+
+            ControlPlane(workspace).initialize()
 
         if root == project_root / ".diagnostics":
             cls._exclude_local_workspace(project_root)

@@ -363,7 +363,7 @@ def test_nvbench_import_service_rejects_malformed_json(tmp_path: Path) -> None:
         NvbenchImportService(workspace).import_json(json_path, allow_external_path=True)
     assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
     assert tuple(workspace.paths.artifacts.rglob("artifact.json")) == ()
-    assert tuple(workspace.paths.runs.iterdir()) == ()
+    assert RunStore(workspace).list() == ()
     assert tuple(workspace.paths.staging.iterdir()) == ()
 
 

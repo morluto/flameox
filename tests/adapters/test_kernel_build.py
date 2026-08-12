@@ -13,7 +13,7 @@ from flameox.application import (
     KernelBuildImportService,
 )
 from flameox.domain import DomainError, ErrorCode
-from flameox.storage import Workspace
+from flameox.storage import RunStore, Workspace
 
 
 def _manifest(**updates: object) -> KernelBuildManifestV1:
@@ -244,7 +244,7 @@ def test_malformed_kernel_build_manifest_leaves_no_anonymous_state(tmp_path: Pat
 
     assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
     assert tuple(workspace.paths.artifacts.rglob("artifact.json")) == ()
-    assert tuple(workspace.paths.runs.iterdir()) == ()
+    assert RunStore(workspace).list() == ()
     assert tuple(workspace.paths.staging.iterdir()) == ()
 
 

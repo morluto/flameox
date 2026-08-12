@@ -20,9 +20,11 @@ from pathlib import Path
 from typing import IO, Any, Literal, TypeVar, cast
 
 import psutil
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
+from flameox.command_binding import ExecutableResolver
 from flameox.domain.errors import DomainError, ErrorCode
+from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.models import (
     ProcessCancellationCause,
     ProcessResult,
@@ -137,6 +139,7 @@ class ResourcePolicy(ContractModel):
 
 class ExecutionRequest(ContractModel):
     argv: tuple[str, ...]
+    executable_binding: ResolvedExecutable
     cwd: Path
     stdin_bytes: bytes | None = None
     environment_allowlist: tuple[str, ...] = ("PATH",)
@@ -158,6 +161,17 @@ class ExecutionRequest(ContractModel):
             raise ValueError("argv entries must be non-empty and cannot contain NUL")
         return value
 
+    @model_validator(mode="after")
+    def validate_executable_binding(self) -> ExecutionRequest:
+        binding = self.executable_binding
+        if self.argv[0] not in {
+            binding.requested_token,
+            str(binding.invocation_path),
+            str(binding.canonical_target),
+        }:
+            raise ValueError("argv[0] must identify the bound executable")
+        return self
+
     @field_validator("systemd_scope_unit")
     @classmethod
     def validate_scope_unit(cls, value: str | None) -> str | None:
@@ -175,6 +189,7 @@ class ExecutionOutcome:
     stderr: bytes
     resolved_executable: Path
     containment: ProcessContainment
+    executable_binding: ResolvedExecutable
     peak_rss_backend: str | None = None
     process_observations: tuple[ProcessObservation, ...] = ()
 
@@ -497,7 +512,8 @@ class SubprocessBroker:
 
         cwd = self._resolve_cwd(request.cwd, request.allowed_working_roots)
         environment = self._build_environment(request)
-        executable = self._resolve_executable(request.argv[0], cwd, environment)
+        binding = self._bound_executable(request, cwd, environment)
+        executable = binding.invocation_path
         argv = (str(executable), *request.argv[1:])
         started = time.monotonic_ns()
         deadline = asyncio.get_running_loop().time() + request.timeout_seconds
@@ -593,7 +609,11 @@ class SubprocessBroker:
                 stdout_task,
                 stderr_task,
             )
-            resources = await self._collect_resource(resource_task)
+            if request.resource_policy is None:
+                await self._settle_resource(resource_task)
+                resources = None
+            else:
+                resources = await self._collect_resource(resource_task)
             await self._settle_task(stdin_task)
             timeout_process = ProcessResult(
                 termination=process_termination_from_returncode(process.returncode),
@@ -719,6 +739,7 @@ class SubprocessBroker:
             stdout=stdout,
             stderr=stderr,
             resolved_executable=executable,
+            executable_binding=binding,
             containment=(
                 ProcessContainment.SYSTEMD_SCOPE
                 if request.systemd_scope_unit is not None
@@ -1011,7 +1032,8 @@ class SubprocessBroker:
 
         cwd = self._resolve_cwd(request.cwd, request.allowed_working_roots)
         environment = self._build_environment(request)
-        executable = self._resolve_executable(request.argv[0], cwd, environment)
+        binding = self._bound_executable(request, cwd, environment)
+        executable = binding.invocation_path
         argv = (str(executable), *request.argv[1:])
         started = time.monotonic_ns()
         process: subprocess.Popen[bytes] | None = None
@@ -1155,6 +1177,7 @@ class SubprocessBroker:
             stdout=stdout,
             stderr=stderr,
             resolved_executable=executable,
+            executable_binding=binding,
             containment=(
                 ProcessContainment.PROCESS_GROUP
                 if os.name == "posix"
@@ -1636,9 +1659,10 @@ class SubprocessBroker:
         *,
         timeout_seconds: float,
     ) -> bool:
-        systemctl = shutil.which("systemctl")
-        if systemctl is None:
+        systemctl_binding = ExecutableResolver().resolve_host_tool("systemctl")
+        if systemctl_binding is None:
             return False
+        systemctl = systemctl_binding.invocation_path
         process: asyncio.subprocess.Process | None = None
         try:
             process = await asyncio.create_subprocess_exec(
@@ -1743,31 +1767,24 @@ class SubprocessBroker:
             environment[name] = value
         return environment
 
-    def _resolve_executable(
+    def _bound_executable(
         self,
-        value: str,
+        request: ExecutionRequest,
         cwd: Path,
         environment: dict[str, str],
-    ) -> Path:
-        if os.sep in value or (os.altsep is not None and os.altsep in value):
-            candidate = Path(value)
-            if not candidate.is_absolute():
-                candidate = cwd / candidate
-            resolved = candidate.parent.resolve() / candidate.name
-        else:
-            located = shutil.which(value, path=environment.get("PATH"))
-            if located is None:
-                raise DomainError(
-                    ErrorCode.CAPABILITY_UNAVAILABLE,
-                    f"Executable {value!r} was not found in the allowed PATH.",
-                )
-            resolved = Path(located).absolute()
-        if not resolved.is_file() or not os.access(resolved, os.X_OK):
+    ) -> ResolvedExecutable:
+        resolver = ExecutableResolver()
+        binding = request.executable_binding
+        if request.argv[0] not in {
+            binding.requested_token,
+            str(binding.invocation_path),
+            str(binding.canonical_target),
+        }:
             raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                f"Executable is not a runnable file: {resolved}",
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "Execution argv does not match the bound executable.",
             )
-        return resolved
+        return resolver.revalidate(binding)
 
 
 class ManagedSidecarLease:
@@ -1777,7 +1794,7 @@ class ManagedSidecarLease:
         self,
         broker: SubprocessBroker,
         process: asyncio.subprocess.Process,
-        executable: Path,
+        executable_binding: ResolvedExecutable,
         admin_host: str,
         admin_port: int,
         stdout_task: asyncio.Task[bytes],
@@ -1790,7 +1807,7 @@ class ManagedSidecarLease:
     ) -> None:
         self._broker = broker
         self._process = process
-        self._executable = executable
+        self._executable_binding = executable_binding
         self.admin_host = admin_host
         self.admin_port = admin_port
         self._stdout_task = stdout_task
@@ -1849,8 +1866,12 @@ class ManagedSidecarLease:
             )
         if not resolved.is_file() or not os.access(resolved, os.X_OK):
             raise DomainError(ErrorCode.CAPABILITY_UNAVAILABLE, "Toxiproxy server is not runnable.")
+        executable_binding = ExecutableResolver().require_host_tool(
+            str(resolved), cwd=resolved.parent
+        )
         request = ExecutionRequest(
             argv=(str(resolved), "-host", admin_host, "-port", str(admin_port)),
+            executable_binding=executable_binding,
             cwd=resolved.parent,
             environment_allowlist=("PATH",),
             allowed_working_roots=(resolved.parent,),
@@ -1874,7 +1895,7 @@ class ManagedSidecarLease:
         lease = cls(
             broker,
             process,
-            resolved,
+            executable_binding,
             admin_host,
             admin_port,
             asyncio.create_task(
@@ -1956,7 +1977,7 @@ class ManagedSidecarLease:
                 ) from error
         cwd = broker._resolve_cwd(request.cwd, request.allowed_working_roots)
         environment = broker._build_environment(request)
-        executable = broker._resolve_executable(request.argv[0], cwd, environment)
+        executable = broker._bound_executable(request, cwd, environment).invocation_path
         argv = (str(executable), *request.argv[1:])
         process = await asyncio.create_subprocess_exec(
             *argv,
@@ -1973,7 +1994,7 @@ class ManagedSidecarLease:
         lease = cls(
             broker,
             process,
-            executable,
+            request.executable_binding,
             host,
             port,
             asyncio.create_task(
@@ -2126,9 +2147,10 @@ class ManagedSidecarLease:
                 except (ToxiproxyApiError, OSError) as error:
                     cleanup_failures.append(f"proxy {name}: {error}")
         request = ExecutionRequest(
-            argv=(str(self._executable),),
-            cwd=self._executable.parent,
-            allowed_working_roots=(self._executable.parent,),
+            argv=(str(self._executable_binding.invocation_path),),
+            executable_binding=self._executable_binding,
+            cwd=self._executable_binding.invocation_path.parent,
+            allowed_working_roots=(self._executable_binding.invocation_path.parent,),
             graceful_shutdown_seconds=2,
         )
         self._observations.extend(

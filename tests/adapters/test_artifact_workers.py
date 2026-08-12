@@ -4,13 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from flameox.adapters.artifact_workers import ArtifactWorker
+from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.domain import DomainError, ErrorCode
 from flameox.storage import Workspace
 
 
 def _read_response(tmp_path: Path, payload: str) -> dict[str, object]:
-    worker = ArtifactWorker(Workspace.initialize(tmp_path))
+    worker = IsolatedWorkerHarness(Workspace.initialize(tmp_path))
     response = tmp_path / "response.json"
     response.write_text(payload)
     return worker._load_response(0, b"", response, name="test")

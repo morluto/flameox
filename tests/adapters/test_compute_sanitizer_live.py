@@ -120,7 +120,7 @@ async def test_live_compute_sanitizer_wrapper_preserves_finding_as_validation(
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
 
     assert result.run.execution_status is ExecutionStatus.SUCCEEDED
     assert result.run.validation_status is ValidationStatus.FAILED

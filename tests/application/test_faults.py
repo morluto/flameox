@@ -233,7 +233,7 @@ latency_ms = 10
         await FaultExperimentService(
             workspace,
             tool_manager=_ToolManager(Path("/bin/true")),
-        ).run(plan.plan_id)
+        ).run(plan.plan_token)
     assert error.value.code is ErrorCode.INVALID_CAPTURE_PLAN
 
 
@@ -313,7 +313,7 @@ latency_ms = 10
             investigation_id=investigation.investigation_id,
             execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
         )
-        result = await service.run(plan.plan_id)
+        result = await service.run(plan.plan_token)
     finally:
         upstream.shutdown()
         thread.join(timeout=2)

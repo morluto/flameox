@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import TypeAdapter
 
+import flameox.filesystem as filesystem_module
 from flameox.domain import (
     CaptureLease,
     CaptureStatus,
@@ -18,6 +19,7 @@ from flameox.domain import (
     ValidationStatus,
 )
 from flameox.domain.models import ExecutionRunManifest, ImportRunManifest
+from flameox.filesystem import BoundedFileSystem
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
 DIGEST = "sha256:" + ("a" * 64)
@@ -129,14 +131,14 @@ def test_windows_artifact_import_fallback_opens_regular_source(
     source.write_bytes(b"windows-compatible bytes")
     store = ArtifactStore(workspace)
     monkeypatch.setattr(
-        ArtifactStore,
+        BoundedFileSystem,
         "_open_beneath",
-        staticmethod(ArtifactStore._open_windows_beneath),
+        staticmethod(filesystem_module._open_windows_beneath),
     )
     monkeypatch.setattr(
-        ArtifactStore,
+        filesystem_module,
         "_windows_final_path",
-        staticmethod(lambda descriptor: source),
+        lambda descriptor: source,
     )
 
     stored = store.import_path(source, allowed_roots=(tmp_path,), max_bytes=100)
@@ -155,14 +157,14 @@ def test_windows_artifact_import_fallback_opens_nested_source(
     source.write_bytes(b"nested windows-compatible bytes")
     store = ArtifactStore(workspace)
     monkeypatch.setattr(
-        ArtifactStore,
+        BoundedFileSystem,
         "_open_beneath",
-        staticmethod(ArtifactStore._open_windows_beneath),
+        staticmethod(filesystem_module._open_windows_beneath),
     )
     monkeypatch.setattr(
-        ArtifactStore,
+        filesystem_module,
         "_windows_final_path",
-        staticmethod(lambda descriptor: source),
+        lambda descriptor: source,
     )
 
     stored = store.import_path(source, allowed_roots=(tmp_path,), max_bytes=100)
@@ -181,9 +183,9 @@ def test_windows_artifact_import_fallback_rejects_reparse_source(
     source.symlink_to(target)
     store = ArtifactStore(workspace)
     monkeypatch.setattr(
-        ArtifactStore,
+        BoundedFileSystem,
         "_open_beneath",
-        staticmethod(ArtifactStore._open_windows_beneath),
+        staticmethod(filesystem_module._open_windows_beneath),
     )
 
     with pytest.raises(DomainError) as error:
@@ -203,14 +205,14 @@ def test_windows_artifact_import_fallback_rejects_hard_link_source(
     os.link(original, source)
     store = ArtifactStore(workspace)
     monkeypatch.setattr(
-        ArtifactStore,
+        BoundedFileSystem,
         "_open_beneath",
-        staticmethod(ArtifactStore._open_windows_beneath),
+        staticmethod(filesystem_module._open_windows_beneath),
     )
     monkeypatch.setattr(
-        ArtifactStore,
+        filesystem_module,
         "_windows_final_path",
-        staticmethod(lambda descriptor: source),
+        lambda descriptor: source,
     )
 
     with pytest.raises(DomainError) as error:
@@ -230,14 +232,14 @@ def test_windows_artifact_import_fallback_checks_open_handle_containment(
     outside.write_bytes(b"outside")
     store = ArtifactStore(workspace)
     monkeypatch.setattr(
-        ArtifactStore,
+        BoundedFileSystem,
         "_open_beneath",
-        staticmethod(ArtifactStore._open_windows_beneath),
+        staticmethod(filesystem_module._open_windows_beneath),
     )
     monkeypatch.setattr(
-        ArtifactStore,
+        filesystem_module,
         "_windows_final_path",
-        staticmethod(lambda descriptor: outside),
+        lambda descriptor: outside,
     )
 
     with pytest.raises(DomainError) as error:
@@ -360,8 +362,9 @@ def test_run_revisions_use_compare_and_swap(tmp_path: Path) -> None:
 
     assert error.value.code is ErrorCode.REVISION_CONFLICT
     assert store.read("run") == completed
-    revisions = list((workspace.paths.runs / "run" / "revisions").glob("*.json"))
-    assert len(revisions) == 2
+    with workspace.paths.control_plane.open("rb") as stream:
+        assert stream.read(16) == b"SQLite format 3\x00"
+    assert [run.run_id for run in store.list()] == ["run"]
 
 
 def test_run_store_reparses_unchecked_updates_before_persistence(tmp_path: Path) -> None:
@@ -381,11 +384,11 @@ def test_run_store_reparses_unchecked_updates_before_persistence(tmp_path: Path)
         RunStore(workspace).create(invalid)
 
     assert error.value.code is ErrorCode.WORKSPACE_INVALID
-    assert not (workspace.paths.runs / run.run_id).exists()
+    assert RunStore(workspace).list() == ()
 
 
 def test_record_store_reparses_unchecked_updates_before_persistence(tmp_path: Path) -> None:
-    from flameox.storage.records import JsonRecordStore
+    from flameox.storage.records import ControlRecordStore
 
     workspace = Workspace.initialize(tmp_path)
     observed = datetime(2025, 1, 2, 3, 4, tzinfo=UTC)
@@ -398,7 +401,7 @@ def test_record_store_reparses_unchecked_updates_before_persistence(tmp_path: Pa
         expires_at=observed + timedelta(seconds=1),
     )
     invalid = lease.model_copy(update={"expires_at": observed})
-    store = JsonRecordStore(
+    store = ControlRecordStore(
         workspace,
         kind="leases",
         model=CaptureLease,
@@ -433,13 +436,13 @@ def test_artifact_get_rejects_race_symlink_swap(tmp_path: Path) -> None:
 
 
 def test_record_store_rejects_dotdot_identifier(tmp_path: Path) -> None:
-    """Regression: JsonRecordStore._root must reject '..' to prevent
+    """Regression: ControlRecordStore must reject '..' identifiers to prevent
     directory traversal outside the records directory."""
     from flameox.domain.models import RunManifest
-    from flameox.storage.records import JsonRecordStore
+    from flameox.storage.records import ControlRecordStore
 
     workspace = Workspace.initialize(tmp_path)
-    store: JsonRecordStore[RunManifest] = JsonRecordStore(
+    store: ControlRecordStore[RunManifest] = ControlRecordStore(
         workspace,
         kind="test",
         model=TypeAdapter(RunManifest),
@@ -453,13 +456,13 @@ def test_record_store_rejects_dotdot_identifier(tmp_path: Path) -> None:
 
 
 def test_record_store_rejects_dot_prefix_identifier(tmp_path: Path) -> None:
-    """Regression: JsonRecordStore._root must reject dot-prefixed names
+    """Regression: ControlRecordStore must reject dot-prefixed identifiers
     to prevent hidden-file traversal and .dotfile access."""
     from flameox.domain.models import RunManifest
-    from flameox.storage.records import JsonRecordStore
+    from flameox.storage.records import ControlRecordStore
 
     workspace = Workspace.initialize(tmp_path)
-    store: JsonRecordStore[RunManifest] = JsonRecordStore(
+    store: ControlRecordStore[RunManifest] = ControlRecordStore(
         workspace,
         kind="test",
         model=TypeAdapter(RunManifest),

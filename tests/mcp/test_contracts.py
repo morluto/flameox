@@ -559,7 +559,7 @@ async def test_mcp_initialize_is_idempotent_without_discarding_capture_plans(
         second = await client.call_tool("initialize_workspace", {})
         executed = await client.call_tool(
             "execute_capture_plan",
-            {"plan_id": planned.structured_content["result"]["plan_id"]},
+            {"plan_token": planned.structured_content["result"]["plan_token"]},
         )
         status = await client.call_tool("workspace_status", {})
 

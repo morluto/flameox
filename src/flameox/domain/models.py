@@ -17,6 +17,7 @@ from pydantic import (
     model_validator,
 )
 
+from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.identity import digest_model
 from flameox.domain.scalars import NumericValue
 from flameox.models import ContractModel
@@ -646,17 +647,18 @@ class WorkloadInstance(ContractModel):
     workload_instance_id: Digest
     workload_definition_id: Digest
     command: CommandSpec
+    executable_binding: ResolvedExecutable
     parameters: dict[str, JsonValue] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def identity_matches_content(self) -> WorkloadInstance:
-        expected = digest_model(
-            {
-                "workload_definition_id": self.workload_definition_id,
-                "command": self.command.model_dump(mode="json"),
-                "parameters": self.parameters,
-            }
-        )
+        content: dict[str, JsonValue] = {
+            "workload_definition_id": self.workload_definition_id,
+            "command": self.command.model_dump(mode="json"),
+            "parameters": self.parameters,
+        }
+        content["executable_binding"] = self.executable_binding.model_dump(mode="json")
+        expected = digest_model(content)
         if self.workload_instance_id != expected:
             raise ValueError("workload instance id must match its bound command")
         return self
@@ -926,6 +928,7 @@ type CaptureContainment = Literal["active", "degraded", "uncontained", "unavaila
 
 class _CapturePlan(ContractModel):
     schema_version: Literal[1] = 1
+    plan_token: Identifier
     plan_id: Identifier
     run_id: Identifier
     request_digest: Digest
@@ -940,6 +943,13 @@ class _CapturePlan(ContractModel):
     adapter_version: str | None = None
     adapter_execution_plan: dict[str, JsonValue] | None = None
     collector_argv: tuple[str, ...]
+    collector_executable_binding: ResolvedExecutable
+    oracle_argv: tuple[str, ...] | None = None
+    oracle_executable_binding: ResolvedExecutable | None = None
+    oracle_launch_executable_binding: ResolvedExecutable | None = None
+    oracle_containment: CaptureContainment | None = None
+    oracle_network_contained: bool | None = None
+    oracle_systemd_scope_unit: str | None = None
     collector_environment: dict[str, str] = Field(default_factory=dict)
     expected_artifact_kinds: tuple[ArtifactKind, ...]
     expected_overhead: str
@@ -960,6 +970,20 @@ class _CapturePlan(ContractModel):
     def expiry_follows_creation(self) -> _CapturePlan:
         if self.expires_at <= self.created_at:
             raise ValueError("capture plan expiry must follow creation")
+        return self
+
+    @model_validator(mode="after")
+    def oracle_authority_is_complete(self) -> _CapturePlan:
+        authority = (
+            self.oracle_executable_binding,
+            self.oracle_launch_executable_binding,
+            self.oracle_containment,
+            self.oracle_network_contained,
+        )
+        if self.oracle_argv is None and any(item is not None for item in authority):
+            raise ValueError("oracle authority requires planned argv")
+        if self.oracle_argv is not None and any(item is None for item in authority):
+            raise ValueError("planned oracle requires complete execution authority")
         return self
 
 

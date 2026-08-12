@@ -47,7 +47,7 @@ timeout_seconds = 120
         adapter="nsight.compute",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
 
     assert result.run.execution_status is ExecutionStatus.SUCCEEDED
     assert result.run.capture_status is CaptureStatus.REGISTERED

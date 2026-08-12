@@ -13,6 +13,7 @@ from pydantic import ConfigDict, computed_field, model_validator
 
 from flameox.application.preflight import PreflightService
 from flameox.application.workloads import WorkloadService
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
     DomainError,
     ErrorCode,
@@ -221,6 +222,9 @@ class WorkloadDependencyService:
         outcome = await self.broker.run(
             ExecutionRequest(
                 argv=tuple(command),
+                executable_binding=ExecutableResolver().require_host_tool(
+                    command[0], cwd=self.workspace.project_root
+                ),
                 cwd=self.workspace.project_root,
                 allowed_working_roots=(self.workspace.project_root,),
                 environment_allowlist=INSTALLER_ENVIRONMENT_ALLOWLIST,

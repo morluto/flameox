@@ -93,7 +93,7 @@ mode = ["bad", "fixed"]
             parameters={"mode": mode},
             execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
         )
-        result = await capture.execute(plan.plan_id)
+        result = await capture.execute(plan.plan_token)
         extracted = ObservationExtractor(workspace).extract(result.run.run_id)
         assert extracted.observation_count == 4
         runs[mode] = result.run

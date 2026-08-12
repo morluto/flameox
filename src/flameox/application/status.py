@@ -51,7 +51,8 @@ def workspace_status(workspace: Workspace) -> WorkspaceStatus:
             catalog_fresh = bool(catalog_status["fresh"])
             catalog_valid = True
             last_rebuild = str(catalog_status["built_at"])
-            with Catalog(workspace).open_snapshot() as snapshot:
+            catalog = Catalog(workspace)
+            with catalog.open_snapshot(catalog.pin()) as snapshot:
                 rows = snapshot.execute(
                     "WITH unique_objects AS ("
                     "SELECT kind, artifact_id, max(byte_length) AS byte_length "
@@ -62,15 +63,10 @@ def workspace_status(workspace: Workspace) -> WorkspaceStatus:
             storage_by_kind = {str(row[0]): int(row[1]) for row in rows}
         except DomainError:
             catalog_valid = False
-    run_directories = [path for path in workspace.paths.runs.iterdir() if path.is_dir()]
+    runs = RunStore(workspace).list()
     active = 0
     warnings: list[str] = []
-    for path in run_directories:
-        try:
-            run = RunStore(workspace).read(path.name)
-        except DomainError:
-            warnings.append(f"Run projection is unreadable: {path.name}")
-            continue
+    for run in runs:
         if run.execution_status is ExecutionStatus.RUNNING:
             active += 1
     storage_bytes = tree_bytes(workspace.paths.root)
@@ -103,7 +99,7 @@ def workspace_status(workspace: Workspace) -> WorkspaceStatus:
         catalog_valid=catalog_valid,
         catalog_fresh=catalog_fresh,
         last_catalog_rebuild_at=last_rebuild,
-        run_count=len(run_directories),
+        run_count=len(runs),
         artifact_object_count=sum(1 for _ in workspace.paths.artifacts.glob("*/*/artifact.json")),
         storage_bytes=storage_bytes,
         storage_by_artifact_kind=storage_by_kind,

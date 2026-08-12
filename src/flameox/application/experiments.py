@@ -4,15 +4,13 @@ import asyncio
 import json
 import random
 import secrets
-import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
 from itertools import product
 from typing import Any, Literal, cast
 
-from pydantic import ConfigDict, Field, JsonValue, computed_field, model_validator
+from pydantic import ConfigDict, Field, JsonValue, TypeAdapter, computed_field, model_validator
 
 from flameox.adapters import PyPerfExtractor, PytestExtractor, PythonStartupExtractor
 from flameox.application.async_work import run_atomic_thread
@@ -77,7 +75,7 @@ from flameox.evidence import (
 )
 from flameox.models import ContractModel
 from flameox.pagination import CursorPageContract
-from flameox.storage import JsonRecordStore, RunStore, Workspace
+from flameox.storage import AuthorizedPlanStore, ControlRecordStore, RunStore, Workspace
 
 
 def _extract_adapter_measurements(workspace: Workspace, adapter: str, run_id: str) -> None:
@@ -133,6 +131,7 @@ class ExperimentBlock(ContractModel):
 
 class ExperimentPlan(ContractModel):
     schema_version: int = 1
+    plan_token: str
     plan_id: str
     request_digest: str
     workspace_id: str
@@ -292,49 +291,45 @@ class OutcomeExperimentResult(ContractModel):
         return self.first_failure.factors if self.first_failure is not None else None
 
 
-@dataclass(slots=True)
-class _ExperimentEntry:
-    plan: ExperimentPlan
-    expires_monotonic: float
-
-
 class ExperimentPlanRegistry:
-    def __init__(self, *, capacity: int = 64, ttl_seconds: float = 300) -> None:
-        self.capacity = capacity
+    def __init__(self, *, workspace: Workspace | None = None, ttl_seconds: float = 300) -> None:
         self.ttl_seconds = ttl_seconds
-        self._plans: dict[str, _ExperimentEntry] = {}
-        self._lock = asyncio.Lock()
+        self._workspace: Workspace | None = None
+        self._store: AuthorizedPlanStore[ExperimentPlan] | None = None
+        if workspace is not None:
+            self.bind(workspace)
+
+    def bind(self, workspace: Workspace) -> None:
+        if self._workspace is not None and self._workspace.paths.root != workspace.paths.root:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                "An experiment plan registry cannot span multiple workspaces.",
+            )
+        self._workspace = workspace
+        self._store = AuthorizedPlanStore(
+            workspace,
+            family="experiment",
+            model=TypeAdapter(ExperimentPlan),
+        )
 
     async def issue(self, plan: ExperimentPlan) -> None:
-        async with self._lock:
-            self._evict()
-            if len(self._plans) >= self.capacity:
-                oldest = min(
-                    self._plans,
-                    key=lambda key: self._plans[key].expires_monotonic,
-                )
-                del self._plans[oldest]
-            self._plans[plan.plan_id] = _ExperimentEntry(
-                plan=plan,
-                expires_monotonic=time.monotonic() + self.ttl_seconds,
+        self._require_store().issue(
+            plan.plan_token,
+            plan.request_digest,
+            plan,
+            expires_at=plan.expires_at,
+        )
+
+    async def consume(self, plan_token: str) -> ExperimentPlan:
+        return self._require_store().consume(plan_token)
+
+    def _require_store(self) -> AuthorizedPlanStore[ExperimentPlan]:
+        if self._store is None:
+            raise DomainError(
+                ErrorCode.WORKSPACE_NOT_FOUND,
+                "Experiment plan storage requires an initialized workspace.",
             )
-
-    async def consume(self, plan_id: str) -> ExperimentPlan:
-        async with self._lock:
-            self._evict()
-            entry = self._plans.get(plan_id)
-            if entry is None:
-                raise DomainError(
-                    ErrorCode.INVALID_CAPTURE_PLAN,
-                    "Experiment plan is missing, expired, or already consumed.",
-                )
-            del self._plans[plan_id]
-            return entry.plan
-
-    def _evict(self) -> None:
-        now = time.monotonic()
-        for key in [key for key, entry in self._plans.items() if entry.expires_monotonic <= now]:
-            del self._plans[key]
+        return self._store
 
 
 class ExperimentService:
@@ -348,9 +343,10 @@ class ExperimentService:
         self.workspace = workspace
         self.workloads = WorkloadService(workspace)
         self.captures = captures or CaptureService(workspace)
-        self.plans = plans or ExperimentPlanRegistry()
+        self.plans = plans or ExperimentPlanRegistry(workspace=workspace)
+        self.plans.bind(workspace)
         self.publisher = GenerationPublisher(workspace)
-        self.experiments = JsonRecordStore(
+        self.experiments = ControlRecordStore(
             workspace,
             kind="experiments",
             model=Experiment,
@@ -385,7 +381,8 @@ class ExperimentService:
             offset = position[0]
             if offset < 0:
                 raise DomainError(ErrorCode.STALE_CURSOR, "Trial cursor position is invalid.")
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             rows = snapshot.execute(
                 _TRIAL_SELECT + "WHERE experiment_id = ? QUALIFY row_number() OVER ("
                 "PARTITION BY trial_id ORDER BY published_at DESC) = 1 "
@@ -417,7 +414,8 @@ class ExperimentService:
         if experiment_id is not None:
             where += " AND experiment_id = ?"
             parameters.append(experiment_id)
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             rows = snapshot.execute(
                 _TRIAL_SELECT + f"WHERE {where} QUALIFY row_number() OVER ("
                 "PARTITION BY experiment_id ORDER BY published_at DESC) = 1 "
@@ -488,7 +486,7 @@ class ExperimentService:
                 ErrorCode.WORKSPACE_INVALID,
                 f"Unknown experiment {experiment_name!r}.",
             ) from exc
-        investigations = JsonRecordStore(
+        investigations = ControlRecordStore(
             self.workspace,
             kind="investigations",
             model=Investigation,
@@ -496,7 +494,7 @@ class ExperimentService:
         )
         investigations.read(investigation_id)
         if hypothesis_id is not None:
-            hypotheses = JsonRecordStore(
+            hypotheses = ControlRecordStore(
                 self.workspace,
                 kind="hypotheses",
                 model=Hypothesis,
@@ -651,6 +649,7 @@ class ExperimentService:
             "experiment_config_digest": digest_model(config.model_dump(mode="json")),
         }
         plan = ExperimentPlan(
+            plan_token=secrets.token_hex(32),
             plan_id=plan_id,
             request_digest=digest_model(request),
             workspace_id=self.workspace.identity.workspace_id,
@@ -685,11 +684,11 @@ class ExperimentService:
 
     async def run(
         self,
-        plan_id: str,
+        plan_token: str,
         *,
         progress: Callable[[float, float, str], Awaitable[None]] | None = None,
     ) -> ExperimentRunResult:
-        plan = await self.plans.consume(plan_id)
+        plan = await self.plans.consume(plan_token)
         trial_count = sum(len(block.cells) for block in plan.blocks)
         total_phases = trial_count + 4
         completed = 0
@@ -737,7 +736,7 @@ class ExperimentService:
                     parameters=parameters,
                     execution_policy=plan.execution_policy,
                 )
-                captured = await self.captures.execute(capture_plan.plan_id)
+                captured = await self.captures.execute(capture_plan.plan_token)
                 run = captured.run
                 outcome, failure_class = self._classify_run(run)
                 if _has_extractable_artifact(run, plan.adapter):
@@ -753,7 +752,7 @@ class ExperimentService:
                 run = (
                     RunStore(self.workspace).read(capture_plan.run_id)
                     if capture_plan is not None
-                    and (self.workspace.paths.runs / capture_plan.run_id).exists()
+                    and RunStore(self.workspace).exists(capture_plan.run_id)
                     else None
                 )
                 trial = self._make_trial(

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -27,12 +30,17 @@ def _request(
     operation: ConfigurationOperation = ConfigurationOperation.CREATE,
     argv: tuple[str, ...] = ("python", "-c", "print('ok')"),
     parameters: dict[str, tuple[str | int | float | bool, ...]] | None = None,
+    environment: dict[str, str] | None = None,
     expected_configuration_id: str | None = None,
 ) -> ConfigureWorkloadRequest:
     return ConfigureWorkloadRequest(
         name=name,
         operation=operation,
-        config=WorkloadConfig(argv=argv, parameters=parameters or {}),
+        config=WorkloadConfig(
+            argv=argv,
+            parameters=parameters or {},
+            environment=environment or {},
+        ),
         expected_configuration_id=expected_configuration_id,
     )
 
@@ -147,6 +155,29 @@ def test_placeholder_renders_before_escaped_closing_brace(tmp_path: Path) -> Non
     instance = service.resolve("json", {"batch": 4})
 
     assert instance.command.argv[-1] == 'print({"batch": 4})'
+
+
+def test_resolve_binds_the_workload_executable_using_its_effective_path(tmp_path: Path) -> None:
+    executable = tmp_path / "bin" / ("tool.exe" if os.name == "nt" else "tool")
+    executable.parent.mkdir()
+    shutil.copy2(sys.executable, executable)
+    executable.chmod(0o755)
+    workspace = Workspace.initialize(tmp_path)
+    service = WorkloadService(workspace)
+    service.configure(
+        _request(
+            "bound",
+            argv=("tool", "--version"),
+            environment={"PATH": "bin"},
+        )
+    )
+
+    instance = service.resolve("bound")
+
+    assert instance.executable_binding is not None
+    assert instance.executable_binding.requested_token == "tool"
+    assert instance.executable_binding.invocation_path == executable.absolute()
+    assert instance.command.argv[0] == str(instance.executable_binding.invocation_path)
 
 
 def test_unknown_plain_placeholder_is_still_rejected(tmp_path: Path) -> None:

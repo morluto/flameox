@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import shutil
 import time
 from collections.abc import Mapping
@@ -28,7 +29,7 @@ from flameox.application.evidence_rows import (
     source_state_row,
 )
 from flameox.application.imports import ImportArtifactRequest, ImportService
-from flameox.application.inference import InferenceReplayService
+from flameox.application.inference import InferenceReplayPlan, InferenceReplayService
 from flameox.application.inference_providers import (
     InferenceServerMode,
     InferenceServerProvider,
@@ -39,6 +40,7 @@ from flameox.application.run_rows import run_row
 from flameox.application.source import collect_partial_source_state
 from flameox.application.workloads import WorkloadService, _ManagedInferenceServerConfig
 from flameox.atomic import atomic_write_bytes
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
     ArtifactKind,
     ArtifactRegistration,
@@ -56,11 +58,12 @@ from flameox.domain import (
     digest_model,
     new_id,
 )
+from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.models import ExecutionRunManifest, utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.models import ContractModel
-from flameox.storage import ArtifactStore, RunStore, Workspace
+from flameox.storage import ArtifactStore, AuthorizedPlanStore, RunStore, Workspace
 
 type SupportedInferenceProfiler = Literal[
     ProfilerKind.TORCH_PROFILER,
@@ -91,9 +94,16 @@ class SglangProfileOptions(ContractModel):
 class _InferenceProfilingPlan(ContractModel):
     schema_version: Literal[1] = 1
     plan_id: str
+    plan_token: str = ""
+    scenario_name: str | None = None
+    measurement_run_id: str | None = None
+    timeout_seconds: float | None = None
+    replay_plan: InferenceReplayPlan | None = None
     server_name: str
     base_url: str
     server_argv: tuple[str, ...]
+    server_executable_binding: ResolvedExecutable
+    launch_executable_binding: ResolvedExecutable
     server_cwd: Path
     environment_names: tuple[str, ...]
     environment_digest: str
@@ -110,6 +120,7 @@ class VllmTorchProfilingPlan(_InferenceProfilingPlan):
     server_provider: Literal[InferenceServerProvider.VLLM] = InferenceServerProvider.VLLM
     profiler: Literal[ProfilerKind.TORCH_PROFILER] = ProfilerKind.TORCH_PROFILER
     nsys_executable: Literal[None] = None
+    nsys_executable_binding: Literal[None] = None
     sglang_profile_id: Literal[None] = None
     sglang_profile_options: Literal[None] = None
 
@@ -118,6 +129,7 @@ class SglangTorchProfilingPlan(_InferenceProfilingPlan):
     server_provider: Literal[InferenceServerProvider.SGLANG] = InferenceServerProvider.SGLANG
     profiler: Literal[ProfilerKind.TORCH_PROFILER] = ProfilerKind.TORCH_PROFILER
     nsys_executable: Literal[None] = None
+    nsys_executable_binding: Literal[None] = None
     sglang_profile_id: Annotated[str, Field(min_length=1, max_length=100)]
     sglang_profile_options: SglangProfileOptions
 
@@ -126,6 +138,7 @@ class NsightSystemsProfilingPlan(_InferenceProfilingPlan):
     server_provider: InferenceServerProvider
     profiler: Literal[ProfilerKind.NSIGHT_SYSTEMS] = ProfilerKind.NSIGHT_SYSTEMS
     nsys_executable: Path
+    nsys_executable_binding: ResolvedExecutable
     sglang_profile_id: Literal[None] = None
     sglang_profile_options: Literal[None] = None
 
@@ -184,6 +197,11 @@ class InferenceProfilingService:
         self.artifacts = ArtifactStore(workspace)
         self.runs = RunStore(workspace)
         self.publisher = GenerationPublisher(workspace)
+        self.plans = AuthorizedPlanStore(
+            workspace,
+            family="inference_profiling",
+            model=_INFERENCE_PROFILING_PLAN,
+        )
 
     def plan(
         self,
@@ -192,7 +210,18 @@ class InferenceProfilingService:
         profiler: SupportedInferenceProfiler | str,
         nsys_executable: Path | None = None,
         expected_plan_id: str | None = None,
+        scenario_name: str | None = None,
+        measurement_run_id: str | None = None,
+        timeout_seconds: Annotated[float, Field(gt=0, le=86_400)] | None = None,
     ) -> InferenceProfilingPlan:
+        operation_values = (scenario_name, measurement_run_id, timeout_seconds)
+        if any(value is not None for value in operation_values) and not all(
+            value is not None for value in operation_values
+        ):
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "A profiling execution plan requires scenario, measurement run, and timeout.",
+            )
         selected_profiler = _SUPPORTED_INFERENCE_PROFILER.validate_python(profiler)
         project = self.workloads.load()
         try:
@@ -233,6 +262,7 @@ class InferenceProfilingService:
         output_root = self.workspace.paths.staging / f"inference-profile-{server_name}" / new_id()
         environment = dict(workload.command.env_overrides)
         limitations: tuple[str, ...]
+        nsys_binding = None
         if (
             selected_profiler is ProfilerKind.TORCH_PROFILER
             and server.provider is InferenceServerProvider.VLLM
@@ -253,8 +283,10 @@ class InferenceProfilingService:
             )
         else:
             if nsys_executable is None:
-                discovered_nsys = shutil.which("nsys")
-                nsys_executable = Path(discovered_nsys) if discovered_nsys is not None else None
+                nsys_binding = ExecutableResolver().resolve_host_tool("nsys")
+            else:
+                nsys_binding = ExecutableResolver().resolve_host_tool(str(nsys_executable))
+            nsys_executable = nsys_binding.canonical_target if nsys_binding is not None else None
             if (
                 nsys_executable is None
                 or not nsys_executable.is_file()
@@ -298,15 +330,39 @@ class InferenceProfilingService:
         ):
             environment_names.add("VLLM_TORCH_PROFILER_DIR")
         environment_digest = digest_model(workload.command.env_overrides)
+        replay_plan = (
+            replay.plan(scenario_name, timeout_seconds=timeout_seconds)
+            if scenario_name is not None and timeout_seconds is not None
+            else None
+        )
+        if replay_plan is not None and (
+            replay_plan.server_name != server_name or replay_plan.server_mode != "managed"
+        ):
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "Profiling scenario must target the planned managed server.",
+            )
+        if replay_plan is not None and not replay_plan.tool_available:
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "The inference workload provider is unavailable for the profiling window.",
+                remediation=replay_plan.tool_remediation,
+            )
+        if measurement_run_id is not None:
+            self.runs.read(measurement_run_id)
         identity = {
             "server": server.model_dump(mode="json"),
             "profiler": selected_profiler,
             "native_argv": native_argv,
+            "server_executable_binding": workload.executable_binding.model_dump(mode="json"),
+            "launch_executable_binding": (nsys_binding or workload.executable_binding).model_dump(
+                mode="json"
+            ),
             "cwd": workload.command.cwd,
             "environment_digest": environment_digest,
             "nsys_executable": str(nsys_executable.resolve()) if nsys_executable else None,
             "nsys_executable_digest": (
-                replay._executable_digest(nsys_executable) if nsys_executable else None
+                nsys_binding.identity.sha256 if nsys_binding is not None else None
             ),
             "configuration_id": digest_model(project.model_dump(mode="json")),
             "server_provider": server.provider,
@@ -320,6 +376,14 @@ class InferenceProfilingService:
                 if sglang_profile_options is not None
                 else None
             ),
+            "scenario_name": scenario_name,
+            "measurement_run_id": measurement_run_id,
+            "timeout_seconds": timeout_seconds,
+            "replay_plan": (
+                replay_plan.model_dump(mode="json", exclude={"plan_token"})
+                if replay_plan is not None
+                else None
+            ),
         }
         plan_id = digest_model(identity)
         if expected_plan_id is not None and expected_plan_id != plan_id:
@@ -329,19 +393,27 @@ class InferenceProfilingService:
                 remediation=("Plan the inference profile again and review the replacement.",),
                 details={"expected_plan_id": expected_plan_id, "actual_plan_id": plan_id},
             )
-        return parse_inference_profiling_plan(
+        plan = parse_inference_profiling_plan(
             {
                 "plan_id": plan_id,
+                "plan_token": secrets.token_hex(32) if replay_plan is not None else "",
+                "scenario_name": scenario_name,
+                "measurement_run_id": measurement_run_id,
+                "timeout_seconds": timeout_seconds,
+                "replay_plan": replay_plan,
                 "server_name": server_name,
                 "server_provider": server.provider,
                 "profiler": selected_profiler,
                 "base_url": server.base_url,
                 "server_argv": argv,
+                "server_executable_binding": workload.executable_binding,
+                "launch_executable_binding": nsys_binding or workload.executable_binding,
                 "server_cwd": Path(workload.command.cwd),
                 "environment_names": tuple(sorted(environment_names)),
                 "environment_digest": environment_digest,
                 "output_path": output_path,
                 "nsys_executable": nsys_executable,
+                "nsys_executable_binding": nsys_binding,
                 "configuration_id": digest_model(project.model_dump(mode="json")),
                 "server_executable_digest": server_executable_digest,
                 "server_version": server_version,
@@ -356,17 +428,37 @@ class InferenceProfilingService:
                 "sglang_profile_options": sglang_profile_options,
             }
         )
+        if replay_plan is not None:
+            self.plans.issue(
+                plan.plan_token,
+                plan.plan_id,
+                plan,
+                expires_at=replay_plan.deadline_at,
+            )
+        return plan
 
     async def capture(  # noqa: C901 - one lifecycle boundary owns every terminal transition
         self,
-        plan: InferenceProfilingPlan,
+        plan_token: str,
         *,
-        scenario_name: str,
-        measurement_run_id: str,
-        timeout_seconds: Annotated[float, Field(gt=0, le=86_400)] = 300,
+        expected_plan_id: str | None = None,
     ) -> InferenceProfilingResult:
-        """Capture one small diagnostic window under a single absolute deadline."""
+        """Consume and execute one complete server-owned profiling intent."""
 
+        plan = self.plans.consume(plan_token, expected_digest=expected_plan_id)
+        if (
+            plan.scenario_name is None
+            or plan.measurement_run_id is None
+            or plan.timeout_seconds is None
+            or plan.replay_plan is None
+        ):
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "The profiling capability does not contain a complete execution intent.",
+            )
+        scenario_name = plan.scenario_name
+        measurement_run_id = plan.measurement_run_id
+        timeout_seconds = plan.timeout_seconds
         replay = InferenceReplayService(self.workspace, broker=self.broker)
         project = self.workloads.load()
         if digest_model(project.model_dump(mode="json")) != plan.configuration_id:
@@ -415,7 +507,7 @@ class InferenceProfilingService:
                 "Managed server executable identity changed after profiling was planned.",
                 remediation=("Plan the inference profile again, then retry capture.",),
             )
-        replay_plan = replay.plan(scenario_name, timeout_seconds=timeout_seconds)
+        replay_plan = plan.replay_plan
         if replay_plan.server_name != plan.server_name or replay_plan.server_mode != "managed":
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
@@ -463,6 +555,7 @@ class InferenceProfilingService:
             raise DomainError(ErrorCode.PROCESS_TIMEOUT, "Profiling startup deadline expired.")
         server_request = ExecutionRequest(
             argv=plan.server_argv,
+            executable_binding=plan.launch_executable_binding,
             cwd=plan.server_cwd,
             environment_allowlist=self.workspace.config.execution.child_environment_allowlist,
             environment_overrides=server_environment,
@@ -508,9 +601,16 @@ class InferenceProfilingService:
                     remaining = (deadline_at - utc_now()).total_seconds()
                     if remaining <= 0:
                         raise DomainError(ErrorCode.PROCESS_TIMEOUT, "Profiling deadline expired.")
+                    replay_binding = replay_plan.tool_executable_binding
+                    if replay_binding is None:
+                        raise DomainError(
+                            ErrorCode.CAPABILITY_UNAVAILABLE,
+                            "The profiling replay tool has no executable binding.",
+                        )
                     outcome = await self.broker.run(
                         ExecutionRequest(
                             argv=replay_plan.argv,
+                            executable_binding=replay_binding,
                             cwd=self.workspace.project_root,
                             environment_allowlist=(
                                 self.workspace.config.execution.child_environment_allowlist
@@ -954,6 +1054,7 @@ class InferenceProfilingService:
                         str(sqlite_path),
                         str(plan.output_path),
                     ),
+                    executable_binding=plan.nsys_executable_binding,
                     cwd=self.workspace.project_root,
                     environment_allowlist=(
                         self.workspace.config.execution.child_environment_allowlist

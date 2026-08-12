@@ -104,7 +104,10 @@ def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
         input_artifact_ids=(imported.artifact_id,),
     )
 
-    analysis = RecipeService(workspace).memory(
+    analysis = RecipeService(
+        workspace,
+        snapshot_handle=Catalog(workspace).pin(pinned_commit_id),
+    ).memory(
         imported.run.run_id,
         corpus_commit_id=pinned_commit_id,
     )

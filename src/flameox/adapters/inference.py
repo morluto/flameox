@@ -1839,14 +1839,7 @@ class InferenceArtifactExtractor:
         )
 
     def _list_run_ids(self) -> list[str]:
-        runs_root = self.workspace.paths.runs
-        if not runs_root.is_dir():
-            return []
-        return sorted(
-            entry.name
-            for entry in runs_root.iterdir()
-            if entry.is_dir() and not entry.name.startswith(".")
-        )
+        return sorted(run.run_id for run in self.runs.list())
 
     def _registration(self, run_id: str, kind: ArtifactKind) -> Any:
         run = self.runs.read(run_id)

@@ -3,14 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import secrets
 import shutil
 import socket
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Literal, cast
 
-from pydantic import Field, JsonValue, computed_field
+from pydantic import Field, JsonValue, TypeAdapter, computed_field
 
 from flameox.adapters.toxiproxy import ToxiproxyApiError, ToxiproxyClient, ToxiproxyToolManager
 from flameox.application.async_work import run_atomic_thread
@@ -72,13 +73,14 @@ from flameox.domain.models import Digest, ExecutionRunManifest
 from flameox.evidence import GenerationPublisher
 from flameox.execution import ManagedSidecarLease, ManagedSidecarOutcome, SubprocessBroker
 from flameox.models import ContractModel
-from flameox.storage import JsonRecordStore, RunStore, Workspace
+from flameox.storage import AuthorizedPlanStore, ControlRecordStore, RunStore, Workspace
 
 _BASELINE = "baseline"
 
 
 class FaultExperimentPlan(ContractModel):
     schema_version: Literal[1] = 1
+    plan_token: str
     plan_id: Digest
     workspace_id: str
     experiment_name: str
@@ -96,8 +98,6 @@ class FaultExperimentPlan(ContractModel):
     containment: Literal["managed_process_group"] = "managed_process_group"
     workload_containment: ExecutionPolicy = ExecutionPolicy.TRUSTED_LOCAL
     limitations: tuple[str, ...] = ()
-    revision: int = 0
-    consumed_at: datetime | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -169,18 +169,16 @@ class FaultExperimentService:
         self.workloads = WorkloadService(workspace)
         self.tools = tool_manager or ToxiproxyToolManager(workspace.paths.root)
         self.publisher = GenerationPublisher(workspace)
-        self.experiments = JsonRecordStore(
+        self.experiments = ControlRecordStore(
             workspace, kind="experiments", model=Experiment, id_field="experiment_id"
         )
-        self.plans = JsonRecordStore(
+        self.plans = AuthorizedPlanStore(
             workspace,
-            kind="fault_experiment_plans",
-            model=FaultExperimentPlan,
-            id_field="plan_id",
-            revision_field="revision",
+            family="fault_experiment",
+            model=TypeAdapter(FaultExperimentPlan),
             output_only_fields={"request_digest"},
         )
-        self.results = JsonRecordStore(
+        self.results = ControlRecordStore(
             workspace,
             kind="fault_experiment_results",
             model=FaultExperimentResult,
@@ -276,6 +274,7 @@ class FaultExperimentService:
             )
         created = experiment.created_at
         embedded = ExperimentPlan(
+            plan_token=secrets.token_hex(32),
             plan_id=digest_model(
                 {
                     "experiment": experiment.model_dump(mode="json"),
@@ -316,6 +315,7 @@ class FaultExperimentService:
             },
         }
         plan = FaultExperimentPlan(
+            plan_token=secrets.token_hex(32),
             plan_id=digest_model(bound),
             workspace_id=self.workspace.identity.workspace_id,
             experiment_name=experiment_name,
@@ -340,16 +340,21 @@ class FaultExperimentService:
                 "without the declared workload metric and semantic oracle.",
             ),
         )
-        self.plans.create(plan)
+        self.plans.issue(
+            plan.plan_token,
+            plan.request_digest,
+            plan,
+            expires_at=plan.experiment_plan.expires_at,
+        )
         return plan
 
     async def run(  # noqa: C901 - this is the bounded fault-trial state machine
         self,
-        plan_id: str,
+        plan_token: str,
         *,
         progress: Callable[[float, float, str], Awaitable[None]] | None = None,
     ) -> FaultExperimentResult:
-        plan = self._consume_plan(plan_id)
+        plan = self.plans.consume(plan_token)
         config = self._config(plan.experiment_name)
         if (
             digest_model(config.model_dump(mode="json"))
@@ -438,15 +443,17 @@ class FaultExperimentService:
                     execution_policy=plan.experiment_plan.execution_policy,
                     dynamic_parameters=(plan.endpoint_parameter,),
                 )
-                captured = await self.captures.execute(capture_plan.plan_id)
+                captured = await self.captures.execute(capture_plan.plan_token)
                 run = captured.run
                 outcome, failure_class = helper._classify_run(run)
             except asyncio.CancelledError as error:
                 cancellation = error
-                if run is None and capture_plan is not None:
-                    run_path = self.workspace.paths.runs / capture_plan.run_id
-                    if run_path.exists():
-                        run = RunStore(self.workspace).read(capture_plan.run_id)
+                if (
+                    run is None
+                    and capture_plan is not None
+                    and RunStore(self.workspace).exists(capture_plan.run_id)
+                ):
+                    run = RunStore(self.workspace).read(capture_plan.run_id)
                 outcome, failure_class = (
                     TrialOutcome.CANCELLED,
                     TrialFailureClass.CANCELLATION,
@@ -569,26 +576,6 @@ class FaultExperimentService:
         )
         return tuple(variants)
 
-    def _consume_plan(self, plan_id: str) -> FaultExperimentPlan:
-        now = datetime.now(UTC)
-        with self.workspace.write_locked():
-            plan = self.plans.read(plan_id)
-            if plan.consumed_at is not None:
-                raise DomainError(
-                    ErrorCode.INVALID_CAPTURE_PLAN,
-                    "Fault experiment plan has already been consumed.",
-                )
-            if now >= plan.experiment_plan.expires_at:
-                raise DomainError(
-                    ErrorCode.INVALID_CAPTURE_PLAN,
-                    "Fault experiment plan has expired.",
-                )
-            consumed = plan.validated_copy(
-                update={"revision": plan.revision + 1, "consumed_at": now}
-            )
-            self.plans.append_locked(consumed, expected_revision=plan.revision)
-            return consumed
-
     def _config(self, name: str) -> FaultExperimentConfig:
         try:
             return self.workloads.load().fault_experiments[name]
@@ -639,11 +626,11 @@ class FaultExperimentService:
         raise AssertionError("sidecar retry loop did not return")
 
     def _validate_investigation(self, investigation_id: str, hypothesis_id: str | None) -> None:
-        JsonRecordStore(
+        ControlRecordStore(
             self.workspace, kind="investigations", model=Investigation, id_field="investigation_id"
         ).read(investigation_id)
         if hypothesis_id is not None:
-            hypothesis = JsonRecordStore(
+            hypothesis = ControlRecordStore(
                 self.workspace,
                 kind="hypotheses",
                 model=Hypothesis,

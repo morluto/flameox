@@ -22,88 +22,91 @@ from flameox.domain import (
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
 
-def _event(event: str, **fields: Any) -> str:
-    return json.dumps(
-        {
-            "schema": "flameox.pytest-event.v1",
-            "event": event,
-            "observed_at_ns": fields.pop("observed_at_ns", 1_000),
-            **fields,
-        }
+def _report(report_type: str, **fields: Any) -> str:
+    return json.dumps({"$report_type": report_type, **fields})
+
+
+def _test_report(nodeid: str, when: str, outcome: str, **fields: Any) -> str:
+    return _report(
+        "TestReport",
+        nodeid=nodeid,
+        when=when,
+        outcome=outcome,
+        duration=fields.pop("duration", 0.000_000_1),
+        start=fields.pop("start", 0.000_001_1),
+        stop=fields.pop("stop", 0.000_001_2),
+        user_properties=fields.pop(
+            "user_properties",
+            [
+                ["flameox.run_started_ns", 1_000],
+                ["flameox.controller_received_ns", 1_300],
+            ],
+        ),
+        **fields,
     )
 
 
 def _write_events(path: Path) -> None:
     events = [
-        _event(
-            "run_started",
-            run_started_at_ns=1_000,
-            pytest_version="9.0",
-            python_version="3.12",
-            platform="test",
-            scheduler="load",
-            requested_workers="2",
-        ),
-        _event("collection_started", observed_at_ns=1_010),
-        _event("worker_created", worker_id="gw0"),
-        _event("worker_ready", worker_id="gw0"),
-        _event("test_collected", nodeid="test_suite.py::test_passes"),
-        _event("test_collected", nodeid="test_suite.py::test_errors"),
-        _event("test_collected", nodeid="test_suite.py::test_unexecuted"),
-        _event(
-            "collection_finished",
-            observed_at_ns=1_060,
-            test_count=3,
-            worker_id="gw0",
-        ),
-        _event(
-            "fixture_setup",
-            observed_at_ns=1_100,
-            duration_ns=500,
-            fixture="database",
-            scope="session",
-            nodeid="",
-            worker_id="gw0",
+        _report("SessionStart", pytest_version="9.1.1"),
+        _report(
+            "CollectReport",
+            nodeid="test_suite.py",
             outcome="passed",
+            flameox={
+                "collected_nodeids": [
+                    "test_suite.py::test_passes",
+                    "test_suite.py::test_errors",
+                    "test_suite.py::test_unexecuted",
+                ]
+            },
         ),
-        _event(
-            "test_phase",
-            nodeid="test_suite.py::test_passes",
+        _test_report(
+            "test_suite.py::test_passes",
+            "setup",
+            "passed",
             worker_id="gw0",
-            phase="setup",
-            outcome="passed",
-            duration_ns=600,
-            started_at_ns=1_100,
-            stopped_at_ns=1_700,
-            controller_received_at_ns=1_800,
-            wasxfail=False,
+            duration=0.000_000_6,
+            start=0.000_001_1,
+            stop=0.000_001_7,
+            user_properties=[
+                ["flameox.run_started_ns", 1_000],
+                ["flameox.controller_received_ns", 1_800],
+                [
+                    "flameox.fixture_setup",
+                    {
+                        "duration_ns": 500,
+                        "fixture": "database",
+                        "scope": "session",
+                        "started_at_ns": 1_100,
+                        "outcome": "passed",
+                    },
+                ],
+            ],
         ),
-        _event(
-            "test_phase",
-            nodeid="test_suite.py::test_passes",
+        _test_report(
+            "test_suite.py::test_passes",
+            "call",
+            "passed",
             worker_id="gw0",
-            phase="call",
-            outcome="passed",
-            duration_ns=200,
-            started_at_ns=1_800,
-            stopped_at_ns=2_000,
-            controller_received_at_ns=2_100,
-            wasxfail=False,
+            duration=0.000_000_2,
+            start=0.000_001_8,
+            stop=0.000_002,
         ),
-        _event(
-            "test_phase",
-            nodeid="test_suite.py::test_errors",
+        _test_report(
+            "test_suite.py::test_errors",
+            "setup",
+            "failed",
             worker_id="gw0",
-            phase="setup",
-            outcome="failed",
-            duration_ns=300,
-            started_at_ns=2_100,
-            stopped_at_ns=2_400,
-            controller_received_at_ns=2_800,
-            wasxfail=False,
+            duration=0.000_000_3,
+            start=0.000_002_1,
+            stop=0.000_002_4,
+            user_properties=[
+                ["flameox.run_started_ns", 1_000],
+                ["flameox.controller_received_ns", 2_800],
+            ],
         ),
-        _event("worker_down", worker_id="gw0", outcome="clean", error_type=None),
-        _event("session_finished", exit_status=1),
+        _report("SessionFinish", exitstatus=1),
     ]
     path.write_text("\n".join(events) + "\n")
 
@@ -136,7 +139,7 @@ def test_pytest_extracts_fixture_cost_outcomes_and_failure_latency(tmp_path: Pat
     assert result.unexecuted_count == 1
     assert result.fixture_setup_count == 1
     assert result.fixture_setup_ns == 500
-    assert result.collection_duration_ns == 50
+    assert result.collection_duration_ns is None
     assert result.first_failure_observed_ns == 1_400
     assert result.first_failure_reported_ns == 1_800
     assert result.workers == ("gw0",)
@@ -147,9 +150,67 @@ def test_pytest_extracts_fixture_cost_outcomes_and_failure_latency(tmp_path: Pat
             "FROM measurements ORDER BY name"
         ).fetchall()
     assert ("pytest.fixture_setup", 500, "gw0", "database") in rows
-    assert ("pytest.collection", 50, None, None) in rows
     assert ("pytest.tests.unexecuted", 1, None, None) in rows
     assert ("pytest.time_to_first_failure.reported", 1_800, None, None) in rows
+
+
+def test_pytest_reportlog_is_the_authoritative_producer_format(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+    source = tmp_path / "pytest-reportlog.jsonl"
+    source.write_text(
+        "\n".join(
+            (
+                _report("SessionStart", pytest_version="9.1.1"),
+                _report("FutureReport", value="ignored by contract"),
+                _report(
+                    "CollectReport",
+                    nodeid="tests/test_sample.py",
+                    outcome="passed",
+                    flameox={
+                        "collected_nodeids": [
+                            "tests/test_sample.py::test_passes",
+                            "tests/test_sample.py::test_unexecuted",
+                        ]
+                    },
+                ),
+                _test_report(
+                    "tests/test_sample.py::test_passes",
+                    "setup",
+                    "passed",
+                    user_properties=[
+                        ["flameox.run_started_ns", 1_000],
+                        ["flameox.controller_received_ns", 1_800],
+                        [
+                            "flameox.fixture_setup",
+                            {
+                                "duration_ns": 500,
+                                "fixture": "database",
+                                "scope": "function",
+                                "started_at_ns": 1_100,
+                                "outcome": "passed",
+                            },
+                        ],
+                    ],
+                ),
+                _test_report("tests/test_sample.py::test_passes", "call", "passed"),
+                _report("SessionFinish", exitstatus=0),
+            )
+        )
+        + "\n"
+    )
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(path=source, kind=ArtifactKind.TEST_EXECUTION)
+    )
+
+    result = PytestExtractor(workspace).extract(imported.run.run_id)
+
+    assert result.complete is True
+    assert result.collected_count == 2
+    assert result.executed_count == 1
+    assert result.unexecuted_count == 1
+    assert result.fixture_setup_count == 1
+    assert result.fixture_setup_ns == 500
 
 
 def test_pytest_marks_external_cuda_compile_failure_as_environment_blocked(
@@ -161,43 +222,31 @@ def test_pytest_marks_external_cuda_compile_failure_as_environment_blocked(
     source.write_text(
         "\n".join(
             (
-                _event(
-                    "run_started",
-                    run_started_at_ns=1_000,
-                    pytest_version="9.0",
-                    python_version="3.12",
-                    platform="test",
-                    scheduler="no",
-                    requested_workers="0",
+                _report("SessionStart", pytest_version="9.1.1"),
+                _report(
+                    "CollectReport",
+                    nodeid="test_gpu.py",
+                    outcome="passed",
+                    flameox={
+                        "collected_nodeids": [
+                            "test_gpu.py::test_compile",
+                            "test_gpu.py::test_unrelated",
+                        ]
+                    },
                 ),
-                _event("collection_started"),
-                _event("test_collected", nodeid="test_gpu.py::test_compile"),
-                _event("test_collected", nodeid="test_gpu.py::test_unrelated"),
-                _event(
-                    "test_phase",
-                    nodeid="test_gpu.py::test_compile",
+                _test_report(
+                    "test_gpu.py::test_compile",
+                    "setup",
+                    "failed",
                     worker_id="master",
-                    phase="setup",
-                    outcome="failed",
-                    duration_ns=10,
-                    started_at_ns=1_100,
-                    stopped_at_ns=1_110,
-                    controller_received_at_ns=1_120,
-                    wasxfail=False,
                 ),
-                _event(
-                    "test_phase",
-                    nodeid="test_gpu.py::test_unrelated",
+                _test_report(
+                    "test_gpu.py::test_unrelated",
+                    "call",
+                    "failed",
                     worker_id="master",
-                    phase="call",
-                    outcome="failed",
-                    duration_ns=10,
-                    started_at_ns=1_100,
-                    stopped_at_ns=1_110,
-                    controller_received_at_ns=1_120,
-                    wasxfail=False,
                 ),
-                _event("session_finished", exit_status=1),
+                _report("SessionFinish", exitstatus=1),
             )
         )
         + "\n"
@@ -271,17 +320,8 @@ def test_pytest_interrupt_is_explicitly_non_complete(tmp_path: Path) -> None:
     source.write_text(
         "\n".join(
             (
-                _event(
-                    "run_started",
-                    run_started_at_ns=1_000,
-                    pytest_version="9.0",
-                    python_version="3.12",
-                    platform="test",
-                    scheduler="no",
-                    requested_workers="0",
-                ),
-                _event("interrupted", exception_type="KeyboardInterrupt"),
-                _event("session_finished", exit_status=2),
+                _report("SessionStart", pytest_version="9.1.1"),
+                _report("SessionFinish", exitstatus=2),
             )
         )
         + "\n"
@@ -304,19 +344,11 @@ def test_pytest_recovers_valid_prefix_from_truncated_final_record(tmp_path: Path
     source.write_text(
         "\n".join(
             (
-                _event(
-                    "run_started",
-                    run_started_at_ns=1_000,
-                    pytest_version="9.0",
-                    python_version="3.12",
-                    platform="test",
-                    scheduler="no",
-                    requested_workers="0",
-                ),
-                _event("session_finished", exit_status=2),
+                _report("SessionStart", pytest_version="9.1.1"),
+                _report("SessionFinish", exitstatus=2),
             )
         )
-        + '\n{"schema":'
+        + '\n{"$report_type":'
     )
     imported = ImportService(workspace).import_artifact(
         ImportArtifactRequest(path=source, kind=ArtifactKind.TEST_EXECUTION)

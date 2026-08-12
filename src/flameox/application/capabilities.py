@@ -5,7 +5,6 @@ import json
 import os
 import platform
 import re
-import shutil
 import socket
 import sys
 import tempfile
@@ -31,8 +30,10 @@ from flameox.adapters.nsight_compute import find_ncu_report_interface
 from flameox.adapters.registry import AdapterRegistry
 from flameox.adapters.setup_runtime import install_trace_processor
 from flameox.adapters.toxiproxy import ToxiproxyClient, ToxiproxyToolManager, ToxiproxyToolReceipt
+from flameox.application.concurrency import race_with_cancellation
 from flameox.application.operations import OperationFailure, OperationRunner, OperationStatus
 from flameox.atomic import atomic_write_json
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
     AdapterSetup,
     CapabilityExtra,
@@ -622,6 +623,9 @@ class CapabilityService:
             outcome = await self.broker.run(
                 ExecutionRequest(
                     argv=(passive.executable, *version_args),
+                    executable_binding=ExecutableResolver().require_host_tool(
+                        passive.executable, cwd=cwd
+                    ),
                     cwd=cwd,
                     environment_allowlist=(),
                     allowed_working_roots=(cwd,),
@@ -698,6 +702,9 @@ class CapabilityService:
                         "-S",
                         "-c",
                         "pass",
+                    ),
+                    executable_binding=ExecutableResolver().require_host_tool(
+                        passive.executable, cwd=self.workspace.project_root
                     ),
                     cwd=self.workspace.project_root,
                     environment_allowlist=(),
@@ -797,6 +804,9 @@ class CapabilityService:
                         "-S",
                         "-c",
                         "pass",
+                    ),
+                    executable_binding=ExecutableResolver().require_host_tool(
+                        passive.executable, cwd=self.workspace.project_root
                     ),
                     cwd=self.workspace.project_root,
                     environment_allowlist=(),
@@ -1089,7 +1099,8 @@ class CapabilityService:
             )
         staging_phase: CapabilitySetupProgressPhase | None = None
         lock_path = Path(sys.executable).parent / ".flameox-capability-setup.lock"
-        uv = shutil.which("uv") if requirements else None
+        uv_binding = ExecutableResolver().resolve_host_tool("uv") if requirements else None
+        uv = str(uv_binding.invocation_path) if uv_binding is not None else None
         if requirements and uv is None:
             self._record_setup_failure(
                 requested,
@@ -1106,6 +1117,7 @@ class CapabilityService:
             )
         try:
             if requirements:
+                assert uv_binding is not None
                 with portalocker.Lock(lock_path, mode="a", timeout=30):
                     self._check_cancelled(cancel_event)
                     command = [
@@ -1120,6 +1132,7 @@ class CapabilityService:
                         self.broker,
                         ExecutionRequest(
                             argv=tuple(command),
+                            executable_binding=uv_binding,
                             cwd=Path.cwd(),
                             environment_allowlist=INSTALLER_ENVIRONMENT_ALLOWLIST,
                             environment_overrides={"UV_NO_PROGRESS": "1"},
@@ -1551,7 +1564,10 @@ class CapabilityService:
             ("containment.bubblewrap", "bwrap", ("pid_namespace", "network_namespace")),
             ("containment.systemd", "systemd-run", ("cgroup_scope", "resource_limits")),
         ):
-            resolved = shutil.which(executable) if system == "linux" else None
+            binding = (
+                ExecutableResolver().resolve_host_tool(executable) if system == "linux" else None
+            )
+            resolved = str(binding.invocation_path) if binding is not None else None
             reports.append(
                 CapabilityReport(
                     adapter=name,
@@ -1599,7 +1615,8 @@ class CapabilityService:
             )
             if candidate.is_file():
                 return str(candidate.absolute())
-        return shutil.which(executable)
+        binding = ExecutableResolver().resolve_host_tool(executable)
+        return str(binding.invocation_path) if binding is not None else None
 
     @staticmethod
     def _import_location(package: str) -> str | None:
@@ -1720,27 +1737,18 @@ async def _run_brokered(
     cancellation_message: str,
     cancellation_details: dict[str, str],
 ) -> ExecutionOutcome:
-    execution = asyncio.create_task(broker.run(request))
     if cancel_event is None:
-        return await execution
-
-    cancellation = asyncio.create_task(_wait_for_cancellation(cancel_event))
-    done, _ = await asyncio.wait(
-        (execution, cancellation),
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    if cancellation in done and execution not in done:
-        execution.cancel()
-        await asyncio.gather(execution, return_exceptions=True)
-        raise DomainError(
+        return await broker.run(request)
+    return await race_with_cancellation(
+        broker.run(request),
+        lambda: _wait_for_cancellation(cancel_event),
+        lambda: DomainError(
             ErrorCode.PROCESS_CANCELLED,
             cancellation_message,
             retryable=True,
             details=cancellation_details,
-        )
-    cancellation.cancel()
-    await asyncio.gather(cancellation, return_exceptions=True)
-    return await execution
+        ),
+    )
 
 
 async def _wait_for_cancellation(cancel_event: threading.Event) -> None:

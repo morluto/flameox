@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import shutil
 from datetime import datetime
 from enum import StrEnum
@@ -10,7 +9,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, TypeAdapter, computed_field
 
-from flameox.adapters.artifact_workers import ArtifactWorker
+from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.application.native_reducer import (
     BinaryChunkPartitioning,
     NativePartitioning,
@@ -26,11 +25,12 @@ from flameox.application.native_reducer import (
 from flameox.application.reduction_worker import NativeReductionWorkerRequest
 from flameox.application.workloads import WorkloadService
 from flameox.domain import DomainError, ErrorCode, digest_model
+from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.models import CommandSpec, Digest, utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.execution import SubprocessBroker
 from flameox.models import ContractModel
-from flameox.storage import ArtifactStore, JsonRecordStore, Workspace
+from flameox.storage import ArtifactStore, ControlRecordStore, Workspace
 
 
 class ReductionDeterminism(StrEnum):
@@ -77,7 +77,7 @@ type PlanReductionRequest = Annotated[
 
 
 class _ReductionPlan(ContractModel):
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     plan_id: Digest
     workspace_id: str
     original_artifact_id: str
@@ -86,6 +86,7 @@ class _ReductionPlan(ContractModel):
     predicate_definition_id: str
     predicate_instance_id: str
     predicate_command: CommandSpec
+    predicate_executable_binding: ResolvedExecutable
     predicate_parameters: dict[str, str | int | float | bool]
     predicate_executable_digest: str
     limits: ReductionLimits
@@ -105,7 +106,6 @@ class BinaryChunkReductionPlan(_ReductionPlan):
 
 class StructuredReductionPlan(_ReductionPlan):
     partitioner: StructuredNativePartitioner
-    # Kept in schema 2's durable projection for byte-for-byte compatible records.
     chunk_size: Literal[None] = None
 
 
@@ -158,14 +158,14 @@ class ReductionService:
         self.artifacts = ArtifactStore(workspace)
         self.workloads = WorkloadService(workspace)
         self.broker = SubprocessBroker()
-        self.plans: JsonRecordStore[ReductionPlan] = JsonRecordStore(
+        self.plans: ControlRecordStore[ReductionPlan] = ControlRecordStore(
             workspace,
             kind="reduction_plans",
             model=_REDUCTION_PLAN_ADAPTER,
             id_field="plan_id",
             output_only_fields={"request_digest"},
         )
-        self.results = JsonRecordStore(
+        self.results = ControlRecordStore(
             workspace,
             kind="reduction_results",
             model=ReductionResult,
@@ -185,12 +185,13 @@ class ReductionService:
             "predicate_definition_id": predicate.workload_definition_id,
             "predicate_instance_id": predicate.workload_instance_id,
             "predicate_command": predicate.command.model_dump(mode="json"),
-            "predicate_executable_digest": _executable_digest(predicate.command),
+            "predicate_executable_binding": predicate.executable_binding.model_dump(mode="json"),
+            "predicate_executable_digest": predicate.executable_binding.identity.sha256,
         }
         request_digest = digest_model(bound)
         if isinstance(request, BinaryChunkReductionRequest):
             plan: ReductionPlan = BinaryChunkReductionPlan(
-                schema_version=2,
+                schema_version=3,
                 plan_id=request_digest,
                 workspace_id=self.workspace.identity.workspace_id,
                 original_artifact_id=request.original_artifact_id,
@@ -201,14 +202,15 @@ class ReductionService:
                 predicate_definition_id=predicate.workload_definition_id,
                 predicate_instance_id=predicate.workload_instance_id,
                 predicate_command=predicate.command,
+                predicate_executable_binding=predicate.executable_binding,
                 predicate_parameters=request.predicate_parameters,
-                predicate_executable_digest=_executable_digest(predicate.command),
+                predicate_executable_digest=predicate.executable_binding.identity.sha256,
                 limits=request.limits,
                 expected_determinism=request.expected_determinism,
             )
         else:
             plan = StructuredReductionPlan(
-                schema_version=2,
+                schema_version=3,
                 plan_id=request_digest,
                 workspace_id=self.workspace.identity.workspace_id,
                 original_artifact_id=request.original_artifact_id,
@@ -218,8 +220,9 @@ class ReductionService:
                 predicate_definition_id=predicate.workload_definition_id,
                 predicate_instance_id=predicate.workload_instance_id,
                 predicate_command=predicate.command,
+                predicate_executable_binding=predicate.executable_binding,
                 predicate_parameters=request.predicate_parameters,
-                predicate_executable_digest=_executable_digest(predicate.command),
+                predicate_executable_digest=predicate.executable_binding.identity.sha256,
                 limits=request.limits,
                 expected_determinism=request.expected_determinism,
             )
@@ -328,6 +331,7 @@ class ReductionService:
                 artifact_path=artifact_path,
                 partitioning=partitioning,
                 predicate_command=plan.predicate_command,
+                predicate_executable_binding=plan.predicate_executable_binding,
                 limits=NativeReductionLimits(
                     max_attempts=plan.limits.max_attempts,
                     wall_time_seconds=plan.limits.wall_time_seconds,
@@ -345,7 +349,7 @@ class ReductionService:
                 ),
                 max_observed_files=(self.workspace.config.execution.max_resource_observed_files),
             )
-            worker_result = await ArtifactWorker(self.workspace, broker=self.broker).run(
+            worker_result = await IsolatedWorkerHarness(self.workspace, broker=self.broker).run(
                 "flameox.workers.reduction",
                 request.model_dump(mode="json"),
                 name="reduction",
@@ -536,7 +540,8 @@ class ReductionService:
             predicate.workload_definition_id != plan.predicate_definition_id
             or predicate.workload_instance_id != plan.predicate_instance_id
             or predicate.command != plan.predicate_command
-            or _executable_digest(predicate.command) != plan.predicate_executable_digest
+            or predicate.executable_binding != plan.predicate_executable_binding
+            or predicate.executable_binding.identity.sha256 != plan.predicate_executable_digest
         ):
             raise DomainError(
                 ErrorCode.EXECUTION_REFUSED,
@@ -580,14 +585,3 @@ class ReductionService:
     def _cleanup(root: Path) -> bool:
         shutil.rmtree(root, ignore_errors=True)
         return not root.exists()
-
-
-def _executable_digest(command: CommandSpec) -> str:
-    try:
-        with Path(command.argv[0]).open("rb") as stream:
-            return f"sha256:{hashlib.file_digest(stream, 'sha256').hexdigest()}"
-    except OSError as error:
-        raise DomainError(
-            ErrorCode.EXECUTION_REFUSED,
-            f"Cannot bind executable identity for {command.argv[0]!r}.",
-        ) from error

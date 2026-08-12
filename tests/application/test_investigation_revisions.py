@@ -15,6 +15,7 @@ from flameox.domain import (
     ErrorCode,
 )
 from flameox.storage import Workspace
+from flameox.storage.control_plane import ControlPlane, ControlRelationship
 
 
 def test_investigation_hypothesis_revision_uses_compare_and_swap(
@@ -48,6 +49,16 @@ def test_investigation_hypothesis_revision_uses_compare_and_swap(
     )
 
     assert second.revision == 2
+    assert ControlPlane(workspace).list_relationships(
+        source_kind="hypotheses",
+        source_id=second.hypothesis_id,
+    ) == (
+        ControlRelationship(
+            relationship="belongs_to",
+            target_kind="investigations",
+            target_id=investigation.investigation_id,
+        ),
+    )
     with pytest.raises(DomainError) as stale:
         service.record_hypothesis(
             RecordHypothesisRequest(

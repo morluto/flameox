@@ -47,7 +47,8 @@ class CompactionService:
                 row_counts={},
             )
         rows_by_table: dict[str, list[dict[str, object]]] = {}
-        with Catalog(self.workspace).open_snapshot(head.commit_id) as snapshot:
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             for table_name in table_names():
                 schema = schema_for(table_name)
                 columns = [name for name in schema.names if name not in _COMMON_COLUMNS]

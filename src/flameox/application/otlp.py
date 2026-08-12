@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import ConfigDict, computed_field
 
-from flameox.adapters.artifact_workers import ArtifactWorker
+from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.application.evidence_rows import _json
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.evidence import GenerationPublisher
@@ -62,7 +62,7 @@ class OtlpTraceService:
         self.artifacts = ArtifactStore(workspace)
         self.runs = RunStore(workspace)
         self.publisher = GenerationPublisher(workspace)
-        self.worker = ArtifactWorker(workspace)
+        self.worker = IsolatedWorkerHarness(workspace)
 
     def extract_otlp_trace(
         self,

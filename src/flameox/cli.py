@@ -81,8 +81,6 @@ from flameox.application import (
     RecordHypothesisRequest,
     RecoveryService,
     RegisterPipelineRequest,
-    RepairPlan,
-    RepairService,
     RunDiscoveryService,
     RunFilter,
     RunSetService,
@@ -781,36 +779,6 @@ def recover(
     _emit(result, as_json=json_output)
 
 
-@app.command("repair")
-def repair(
-    plan_path: Annotated[
-        Path | None,
-        typer.Argument(
-            help="Validated repair-plan JSON to apply; omit to preview a plan.",
-        ),
-    ] = None,
-    workspace: WorkspaceOption = None,
-    json_output: JsonOption = False,
-) -> None:
-    """Preview safe repairs, or apply one exact structured plan."""
-    try:
-        service = RepairService(_workspace(workspace))
-        if plan_path is None:
-            result: BaseModel = service.plan()
-        else:
-            try:
-                plan = RepairPlan.model_validate_json(plan_path.read_text())
-            except (OSError, ValueError) as exc:
-                raise DomainError(
-                    ErrorCode.EXECUTION_REFUSED,
-                    f"Repair plan is unreadable or invalid: {plan_path}",
-                ) from exc
-            result = service.apply(plan)
-    except DomainError as error:
-        _fail(error)
-    _emit(result, as_json=json_output)
-
-
 @config_app.command("show")
 def config_show(
     workspace: WorkspaceOption = None,
@@ -1039,7 +1007,7 @@ def workload_run(
             parameters=_parameter_overrides(parameters),
             execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
         )
-        return await service.execute(plan.plan_id)
+        return await service.execute(plan.plan_token)
 
     try:
         result = _run_async(run)
@@ -1208,13 +1176,12 @@ def inference_run(
 
     async def run() -> BaseModel:
         service = InferenceReplayService(_workspace(workspace))
-        return await service.run(
-            service.plan(
-                name,
-                timeout_seconds=timeout_seconds,
-                expected_plan_id=expected_plan_id,
-            )
+        plan = service.plan(
+            name,
+            timeout_seconds=timeout_seconds,
+            expected_plan_id=expected_plan_id,
         )
+        return await service.run(plan.plan_token, expected_plan_id=expected_plan_id)
 
     try:
         result = _run_async(run)
@@ -1286,13 +1253,11 @@ def inference_profile_run(
             profiler=profiler,
             nsys_executable=nsys_executable,
             expected_plan_id=expected_plan_id,
-        )
-        return await service.capture(
-            plan,
             scenario_name=scenario,
             measurement_run_id=measurement_run_id,
             timeout_seconds=timeout_seconds,
         )
+        return await service.capture(plan.plan_token, expected_plan_id=expected_plan_id)
 
     try:
         result = _run_async(run)
@@ -1368,7 +1333,7 @@ def experiment_run(
             parameter_overrides=_parameter_overrides(parameters),
             execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
         )
-        return await service.run(plan.plan_id)
+        return await service.run(plan.plan_token)
 
     try:
         result = _run_async(run)
@@ -1565,7 +1530,7 @@ def capture_run(
             adapter_options=options,
             execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
         )
-        return await service.execute(plan.plan_id)
+        return await service.execute(plan.plan_token)
 
     try:
         result = _run_async(run)

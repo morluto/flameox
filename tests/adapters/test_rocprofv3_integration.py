@@ -48,7 +48,7 @@ async def test_rocprofv3_capture_preserves_partial_pftrace_on_nonzero_exit(
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
 
     assert result.run.execution_status is ExecutionStatus.FAILED
     assert result.run.capture_status is CaptureStatus.REGISTERED

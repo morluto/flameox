@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from pathlib import Path
 from typing import TypeVar
 
 from pydantic import BaseModel, TypeAdapter
 
-from flameox.atomic import atomic_write_json
 from flameox.domain import DomainError, ErrorCode
+from flameox.storage.control_plane import ControlPlane, ControlRelationship, canonical_json
 from flameox.storage.workspace import Workspace
 
 RecordT = TypeVar("RecordT", bound=BaseModel)
@@ -19,8 +18,8 @@ type ModelFieldSelection = (
 )
 
 
-class JsonRecordStore[RecordT: BaseModel]:
-    """Immutable JSON revisions plus an atomic current projection."""
+class ControlRecordStore[RecordT: BaseModel]:
+    """Typed records and immutable revisions owned by the SQLite control plane."""
 
     def __init__(
         self,
@@ -38,13 +37,24 @@ class JsonRecordStore[RecordT: BaseModel]:
         self.id_field = id_field
         self.revision_field = revision_field
         self.output_only_fields = output_only_fields or set()
+        self.control_plane = ControlPlane(workspace)
 
-    def create(self, record: RecordT) -> RecordT:
+    def create(
+        self,
+        record: RecordT,
+        *,
+        relationships: tuple[ControlRelationship, ...] = (),
+    ) -> RecordT:
         with self.workspace.write_locked():
-            self.create_locked(record)
+            self.create_locked(record, relationships=relationships)
         return record
 
-    def create_locked(self, record: RecordT) -> RecordT:
+    def create_locked(
+        self,
+        record: RecordT,
+        *,
+        relationships: tuple[ControlRelationship, ...] = (),
+    ) -> RecordT:
         """Create a record while the caller owns the workspace write lock.
 
         This is intentionally a small escape hatch for compound operations
@@ -53,80 +63,109 @@ class JsonRecordStore[RecordT: BaseModel]:
         """
         persisted = self._canonical(record)
         identifier = self._identifier(persisted)
-        root = self._root(identifier)
-        try:
-            root.mkdir(parents=True)
-        except FileExistsError:
-            raise DomainError(
-                ErrorCode.REVISION_CONFLICT,
-                f"{self.kind} {identifier!r} already exists.",
-            ) from None
-        if self.revision_field is not None:
-            (root / "revisions").mkdir()
-            self._write_revision(persisted)
-        self._write_projection(persisted)
+        self.control_plane.create_record(
+            kind=self.kind,
+            record_id=identifier,
+            revision=(self._revision(persisted) if self.revision_field is not None else None),
+            payload_json=self._json(persisted),
+            relationships=relationships,
+        )
         return record
 
-    def _any_ancestor_is_symlink(self, path: Path) -> bool:
-        """Check whether any ancestor of path (up to the workspace root) is a symlink."""
-        workspace_root = self.workspace.paths.root
-        for ancestor in path.parents:
-            if ancestor == workspace_root:
-                break
-            if ancestor.is_symlink():
-                return True
-        return False
-
     def read(self, identifier: str) -> RecordT:
-        record_path = self._root(identifier) / "record.json"
-        if (
-            record_path.is_symlink()
-            or record_path.parent.is_symlink()
-            or self._any_ancestor_is_symlink(record_path)
-        ):
-            raise DomainError(
-                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                f"{self.kind} {identifier!r} record path contains a symbolic link.",
-            )
         try:
-            return self._adapter.validate_json(record_path.read_text())
-        except (FileNotFoundError, ValueError) as exc:
+            return self._adapter.validate_json(
+                self.control_plane.read_record(kind=self.kind, record_id=identifier)
+            )
+        except ValueError as exc:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
                 f"{self.kind} {identifier!r} does not exist or is invalid.",
             ) from exc
 
-    def list(self) -> tuple[RecordT, ...]:
-        root = self.workspace.paths.records / self.kind
-        if not root.exists():
-            return ()
-        if root.is_symlink() or self._any_ancestor_is_symlink(root):
+    def create_idempotent(
+        self,
+        record: RecordT,
+        *,
+        idempotency_digest: str,
+        intent_digest: str,
+    ) -> tuple[RecordT, bool]:
+        persisted = self._canonical(record)
+        stored_intent, payload, created = self.control_plane.create_idempotent_record(
+            kind=self.kind,
+            record_id=self._identifier(persisted),
+            revision=(self._revision(persisted) if self.revision_field is not None else None),
+            payload_json=self._json(persisted),
+            idempotency_digest=idempotency_digest,
+            intent_digest=intent_digest,
+        )
+        if stored_intent != intent_digest:
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "The idempotency key is already bound to another intent.",
+            )
+        try:
+            return self._adapter.validate_json(payload), created
+        except ValueError as exc:
             raise DomainError(
                 ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                f"{self.kind} records root is a symbolic link.",
-            )
+                f"Invalid {self.kind} idempotency record in the control plane.",
+            ) from exc
+
+    def read_idempotent(
+        self,
+        *,
+        idempotency_digest: str,
+    ) -> tuple[str, RecordT] | None:
+        stored = self.control_plane.read_idempotent_record(
+            kind=self.kind,
+            idempotency_digest=idempotency_digest,
+        )
+        if stored is None:
+            return None
+        intent_digest, payload = stored
+        try:
+            return intent_digest, self._adapter.validate_json(payload)
+        except ValueError as exc:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                f"Invalid {self.kind} idempotency record in the control plane.",
+            ) from exc
+
+    def list(self) -> tuple[RecordT, ...]:
         records: list[RecordT] = []
-        for path in sorted(root.glob("*/record.json")):
-            if path.is_symlink() or path.parent.is_symlink() or self._any_ancestor_is_symlink(path):
-                raise DomainError(
-                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                    f"Invalid {self.kind} record at {path}: contains a symbolic link.",
-                )
+        for payload in self.control_plane.list_records(kind=self.kind):
             try:
-                records.append(self._adapter.validate_json(path.read_text()))
+                records.append(self._adapter.validate_json(payload))
             except ValueError as exc:
                 raise DomainError(
                     ErrorCode.WORKSPACE_INVALID,
-                    f"Invalid {self.kind} record at {path}.",
+                    f"Invalid {self.kind} record in the control plane.",
                 ) from exc
         return tuple(records)
 
-    def append(self, record: RecordT, *, expected_revision: int) -> RecordT:
+    def append(
+        self,
+        record: RecordT,
+        *,
+        expected_revision: int,
+        relationships: tuple[ControlRelationship, ...] | None = None,
+    ) -> RecordT:
         with self.workspace.write_locked():
-            self.append_locked(record, expected_revision=expected_revision)
+            self.append_locked(
+                record,
+                expected_revision=expected_revision,
+                relationships=relationships,
+            )
         return record
 
-    def append_locked(self, record: RecordT, *, expected_revision: int) -> RecordT:
+    def append_locked(
+        self,
+        record: RecordT,
+        *,
+        expected_revision: int,
+        relationships: tuple[ControlRelationship, ...] | None = None,
+    ) -> RecordT:
         """Append a revision while the caller owns the workspace write lock."""
         if self.revision_field is None:
             raise DomainError(
@@ -135,34 +174,15 @@ class JsonRecordStore[RecordT: BaseModel]:
             )
         persisted = self._canonical(record)
         identifier = self._identifier(persisted)
-        current = self.read(identifier)
-        actual = self._revision(current)
         next_revision = self._revision(persisted)
-        if next_revision != expected_revision + 1:
-            # Caller bug: the supplied next revision does not match the
-            # expected sequence. Retrying would loop forever, so this is
-            # not retryable.
-            raise DomainError(
-                ErrorCode.REVISION_CONFLICT,
-                f"{self.kind} {identifier!r} has a stale expected revision.",
-                details={
-                    "expected_revision": expected_revision,
-                    "supplied_next_revision": next_revision,
-                },
-            )
-        if actual != expected_revision:
-            # Genuine race: another writer committed first. Retryable.
-            raise DomainError(
-                ErrorCode.REVISION_CONFLICT,
-                f"{self.kind} {identifier!r} changed before the update.",
-                retryable=True,
-                details={
-                    "expected_revision": expected_revision,
-                    "actual_revision": actual,
-                },
-            )
-        self._write_revision(persisted)
-        self._write_projection(persisted)
+        self.control_plane.append_record(
+            kind=self.kind,
+            record_id=identifier,
+            expected_revision=expected_revision,
+            next_revision=next_revision,
+            payload_json=self._json(persisted),
+            relationships=relationships,
+        )
         return record
 
     def _canonical(self, record: RecordT) -> RecordT:
@@ -176,7 +196,7 @@ class JsonRecordStore[RecordT: BaseModel]:
                 f"Invalid {self.kind} record cannot be persisted.",
             ) from exc
 
-    def _root(self, identifier: str) -> Path:
+    def _validate_identifier(self, identifier: str) -> str:
         if (
             not identifier
             or "/" in identifier
@@ -186,13 +206,13 @@ class JsonRecordStore[RecordT: BaseModel]:
             or identifier.startswith(".")
         ):
             raise DomainError(ErrorCode.WORKSPACE_INVALID, "Invalid record identifier.")
-        return self.workspace.paths.records / self.kind / identifier
+        return identifier
 
     def _identifier(self, record: RecordT) -> str:
         value = getattr(record, self.id_field, None)
         if not isinstance(value, str):
             raise DomainError(ErrorCode.WORKSPACE_INVALID, "Record identifier is invalid.")
-        return value
+        return self._validate_identifier(value)
 
     def _revision(self, record: RecordT) -> int:
         if self.revision_field is None:
@@ -205,21 +225,5 @@ class JsonRecordStore[RecordT: BaseModel]:
             raise DomainError(ErrorCode.WORKSPACE_INVALID, "Record revision is invalid.")
         return value
 
-    def _write_revision(self, record: RecordT) -> None:
-        revision = self._revision(record)
-        path = self._root(self._identifier(record)) / "revisions" / f"{revision:08d}.json"
-        if path.exists():
-            existing = self._adapter.validate_json(path.read_text())
-            if existing != record:
-                raise DomainError(
-                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                    "An immutable record revision already contains different data.",
-                )
-            return
-        atomic_write_json(path, record.model_dump(mode="json", exclude=self.output_only_fields))
-
-    def _write_projection(self, record: RecordT) -> None:
-        atomic_write_json(
-            self._root(self._identifier(record)) / "record.json",
-            record.model_dump(mode="json", exclude=self.output_only_fields),
-        )
+    def _json(self, record: RecordT) -> str:
+        return canonical_json(record.model_dump(mode="json", exclude=self.output_only_fields))

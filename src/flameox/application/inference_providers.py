@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import sys
 import time
 from enum import StrEnum
@@ -33,7 +32,9 @@ from pydantic import (
     model_validator,
 )
 
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import DomainError, ErrorCode
+from flameox.domain.executables import ResolvedExecutable
 from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.models import ContractModel
 
@@ -319,6 +320,7 @@ class _InferenceToolDiscovery(ContractModel):
 
 class AvailableInferenceToolDiscovery(_InferenceToolDiscovery):
     executable: Path
+    executable_binding: ResolvedExecutable
     available: Literal[True] = True
     compatibility_reason: Literal[None] = None
     remediation: tuple[()] = ()
@@ -352,9 +354,14 @@ def discover_sglang(
 ) -> InferenceToolDiscovery:
     """Discover SGLang through its declared launcher, never Flameox's PATH."""
     executable = benchmark_python.resolve()
-    digest = _digest_executable(executable)
+    binding = (
+        ExecutableResolver().resolve_host_tool(str(executable), cwd=executable.parent)
+        if executable.is_file() and os.access(executable, os.X_OK)
+        else None
+    )
+    digest = binding.identity.sha256 if binding is not None else _digest_executable(executable)
     tool_version: str | None = None
-    if executable.is_file() and os.access(executable, os.X_OK):
+    if binding is not None:
         try:
             outcome = (broker or SubprocessBroker()).run_sync(
                 ExecutionRequest(
@@ -363,6 +370,7 @@ def discover_sglang(
                         "-c",
                         "from importlib.metadata import version; print(version('sglang'))",
                     ),
+                    executable_binding=binding,
                     cwd=executable.parent,
                     environment_allowlist=("PATH",),
                     allowed_working_roots=(executable.parent,),
@@ -376,10 +384,11 @@ def discover_sglang(
         except (DomainError, OSError, UnicodeDecodeError):
             pass
     compatible = tool_version == "0.5.16"
-    if executable.is_file() and os.access(executable, os.X_OK) and compatible:
+    if binding is not None and compatible:
         return AvailableInferenceToolDiscovery(
             tool=InferenceTool.SGLANG,
             executable=executable,
+            executable_binding=binding,
             version=tool_version,
             executable_digest=digest,
         )
@@ -410,19 +419,15 @@ def _digest_executable(executable: Path) -> str | None:
 def discover_inference_tool(
     tool: Literal[InferenceTool.AIPERF, InferenceTool.VLLM],
 ) -> InferenceToolDiscovery:
-    located = shutil.which(tool)
-    if located is None:
-        scripts_dir = Path(sys.executable).resolve().parent
-        for name in (tool, f"{tool}.exe"):
-            sibling = scripts_dir / name
-            if sibling.is_file() and os.access(sibling, os.X_OK):
-                located = str(sibling)
-                break
-    executable = Path(located).resolve() if located is not None else None
+    scripts_dir = Path(sys.executable).resolve().parent
+    environment = dict(os.environ)
+    environment["PATH"] = os.pathsep.join((str(scripts_dir), environment.get("PATH", "")))
+    binding = ExecutableResolver().resolve_host_tool(str(tool), environment=environment)
+    executable = binding.canonical_target if binding is not None else None
     tool_version: str | None = None
     executable_digest: str | None = None
-    if executable is not None:
-        executable_digest = _digest_executable(executable)
+    if executable is not None and binding is not None:
+        executable_digest = binding.identity.sha256
         try:
             tool_version = version(tool)
         except PackageNotFoundError:
@@ -435,10 +440,11 @@ def discover_inference_tool(
             compatibility_reason = (
                 "AIPerf version is unknown or outside Flameox's supported >=0.12,<0.13 range."
             )
-    if executable is not None and compatible:
+    if executable is not None and binding is not None and compatible:
         return AvailableInferenceToolDiscovery(
             tool=tool,
             executable=executable,
+            executable_binding=binding,
             version=tool_version,
             executable_digest=executable_digest,
         )

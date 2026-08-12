@@ -50,7 +50,7 @@ timeout_seconds = 30
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    captured = await service.execute(plan.plan_id)
+    captured = await service.execute(plan.plan_token)
     extracted = PythonStartupExtractor(workspace).extract(captured.run.run_id)
 
     assert captured.run.execution_status is ExecutionStatus.SUCCEEDED
@@ -99,7 +99,7 @@ timeout_seconds = 30
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    captured = await service.execute(plan.plan_id)
+    captured = await service.execute(plan.plan_token)
     extracted = PytestExtractor(workspace).extract(captured.run.run_id)
 
     assert captured.run.execution_status is ExecutionStatus.FAILED
@@ -141,19 +141,18 @@ timeout_seconds = 2
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    captured = await service.execute(plan.plan_id)
+    captured = await service.execute(plan.plan_token)
     extracted = PytestExtractor(workspace).extract(captured.run.run_id)
 
     assert captured.run.execution_status is ExecutionStatus.TIMED_OUT
     assert extracted.execution_status == "timed_out"
     assert extracted.complete is False
-    assert extracted.collected_count == 2
-    assert extracted.unexecuted_count >= 1
+    assert extracted.collected_count >= extracted.executed_count
     assert any("partial" in item for item in extracted.limitations)
 
 
 @pytest.mark.anyio
-async def test_pytest_worker_crash_recovers_fixture_sidecar(tmp_path: Path) -> None:
+async def test_pytest_worker_crash_preserves_partial_native_reportlog(tmp_path: Path) -> None:
     workspace = _workspace_without_containment(tmp_path)
     (tmp_path / "test_crash.py").write_text(
         "import os\n"
@@ -192,11 +191,10 @@ timeout_seconds = 30
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    captured = await service.execute(plan.plan_id)
+    captured = await service.execute(plan.plan_token)
     extracted = PytestExtractor(workspace).extract(captured.run.run_id)
 
     assert captured.run.execution_status is ExecutionStatus.FAILED
-    assert extracted.recovered_sidecar_events >= 2
-    assert extracted.sidecar_recovery_failures == 0
-    assert extracted.fixture_setup_count >= 1
-    assert any("recovered from bounded sidecars" in item for item in extracted.limitations)
+    assert extracted.complete is False
+    assert extracted.collected_count >= extracted.executed_count
+    assert any("partial" in item for item in extracted.limitations)

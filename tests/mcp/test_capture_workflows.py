@@ -55,10 +55,10 @@ timeout_seconds = 5
         )
         assert planned.is_error is False, planned.structured_content
         assert planned.structured_content is not None
-        plan_id = planned.structured_content["result"]["plan_id"]
+        plan_token = planned.structured_content["result"]["plan_token"]
         executed = await client.call_tool(
             "execute_capture_plan",
-            {"plan_id": plan_id},
+            {"plan_token": plan_token},
             progress_callback=record_progress,
         )
         assert executed.structured_content is not None
@@ -66,7 +66,7 @@ timeout_seconds = 5
         fetched = await client.call_tool("get_run", {"run_id": run_id})
         replayed = await client.call_tool(
             "execute_capture_plan",
-            {"plan_id": plan_id},
+            {"plan_token": plan_token},
         )
 
     assert executed.is_error is False
@@ -263,7 +263,7 @@ timeout_seconds = 60
         task = asyncio.create_task(
             client.call_tool(
                 "execute_capture_plan",
-                {"plan_id": planned.structured_content["result"]["plan_id"]},
+                {"plan_token": planned.structured_content["result"]["plan_token"]},
                 progress_callback=record_progress,
             )
         )
@@ -272,11 +272,7 @@ timeout_seconds = 60
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    runs = [
-        RunStore(workspace).read(path.name)
-        for path in workspace.paths.runs.iterdir()
-        if path.is_dir()
-    ]
+    runs = list(RunStore(workspace).list())
     assert len(runs) == 1
     assert runs[0].execution_status.value == "cancelled"
     assert runs[0].process is not None
@@ -315,7 +311,7 @@ timeout_seconds = 60
         )
         assert planned.structured_content is not None
         arguments = {
-            "plan_id": planned.structured_content["result"]["plan_id"],
+            "plan_token": planned.structured_content["result"]["plan_token"],
             "idempotency_key": "transport-retry-001",
         }
         started = await client.call_tool("start_detached_capture", arguments)

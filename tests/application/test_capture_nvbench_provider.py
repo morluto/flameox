@@ -128,7 +128,7 @@ timeout_seconds = 10
         adapter="nvbench",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    return service, await service.execute(plan.plan_id)
+    return service, await service.execute(plan.plan_token)
 
 
 def _benchmark_registrations(result: CaptureResult) -> list[ArtifactRegistration]:

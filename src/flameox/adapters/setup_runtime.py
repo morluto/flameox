@@ -17,7 +17,9 @@ from mcp import Client, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from packaging.version import InvalidVersion, Version
 
+from flameox.application.concurrency import race_with_cancellation
 from flameox.atomic import atomic_write_json, atomic_write_text
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
     CapabilityExtra,
     DomainError,
@@ -121,6 +123,9 @@ class ManagedRuntime:
                         "3.12",
                         f"{distribution}=={version}",
                     ),
+                    executable_binding=ExecutableResolver().require_host_tool(
+                        self.uv_executable, cwd=Path.cwd()
+                    ),
                     cwd=Path.cwd(),
                     environment_allowlist=INSTALLER_ENVIRONMENT_ALLOWLIST,
                     environment_overrides={
@@ -170,6 +175,9 @@ class ManagedRuntime:
             outcome = await self.broker.run(
                 ExecutionRequest(
                     argv=(str(executable), "--version"),
+                    executable_binding=ExecutableResolver().require_host_tool(
+                        str(executable), cwd=Path.cwd()
+                    ),
                     cwd=Path.cwd(),
                     environment_allowlist=("PATH",),
                     allowed_working_roots=(Path.cwd(),),
@@ -417,6 +425,9 @@ def _verify_trace_processor(
             execution_broker,
             ExecutionRequest(
                 argv=(str(executable), "--version"),
+                executable_binding=ExecutableResolver().require_host_tool(
+                    str(executable), cwd=Path.cwd()
+                ),
                 cwd=Path.cwd(),
                 environment_allowlist=(),
                 allowed_working_roots=(Path.cwd(),),
@@ -453,27 +464,18 @@ async def _run_brokered(
     cancellation_message: str,
     cancellation_details: dict[str, str],
 ) -> ExecutionOutcome:
-    execution = asyncio.create_task(broker.run(request))
     if cancel_event is None:
-        return await execution
-
-    cancellation = asyncio.create_task(_wait_for_cancellation(cancel_event))
-    done, _ = await asyncio.wait(
-        (execution, cancellation),
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    if cancellation in done and execution not in done:
-        execution.cancel()
-        await asyncio.gather(execution, return_exceptions=True)
-        raise DomainError(
+        return await broker.run(request)
+    return await race_with_cancellation(
+        broker.run(request),
+        lambda: _wait_for_cancellation(cancel_event),
+        lambda: DomainError(
             ErrorCode.PROCESS_CANCELLED,
             cancellation_message,
             retryable=True,
             details=cancellation_details,
-        )
-    cancellation.cancel()
-    await asyncio.gather(cancellation, return_exceptions=True)
-    return await execution
+        ),
+    )
 
 
 async def _wait_for_cancellation(cancel_event: threading.Event) -> None:

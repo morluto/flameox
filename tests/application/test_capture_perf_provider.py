@@ -48,7 +48,7 @@ timeout_seconds = 30
         ):
             pytest.skip("The host kernel does not permit perf sampling for this process.")
         raise
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
 
     assert result.run.execution_status is ExecutionStatus.SUCCEEDED
     assert any(

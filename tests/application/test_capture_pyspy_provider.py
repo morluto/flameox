@@ -55,7 +55,7 @@ timeout_seconds = 30
         adapter="py-spy",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    captured = await service.execute(plan.plan_id)
+    captured = await service.execute(plan.plan_token)
     extracted = await PerfettoExtractor(workspace).extract(captured.run.run_id)
 
     assert captured.run.process is not None

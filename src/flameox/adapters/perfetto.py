@@ -3,13 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 from pathlib import Path
 from typing import Any
 
 from pydantic import Field, JsonValue
 
-from flameox.adapters.artifact_workers import ArtifactWorker
+from flameox.adapters.artifact_workers import IsolatedWorkerHarness
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
     ArtifactKind,
     ArtifactRegistration,
@@ -661,7 +661,7 @@ class PerfettoExtractor:
         self,
         request: dict[str, JsonValue],
     ) -> dict[str, Any]:
-        return await ArtifactWorker(self.workspace, broker=self.broker).run(
+        return await IsolatedWorkerHarness(self.workspace, broker=self.broker).run(
             "flameox.workers.perfetto",
             request,
             name="Perfetto",
@@ -676,7 +676,9 @@ class PerfettoExtractor:
             path = Path(configured)
             candidate = str(path if path.is_absolute() else self.workspace.project_root / path)
         else:
-            candidate = shutil.which("trace_processor_shell") or shutil.which("trace_processor")
+            binding = ExecutableResolver().resolve_host_tool("trace_processor_shell")
+            binding = binding or ExecutableResolver().resolve_host_tool("trace_processor")
+            candidate = str(binding.invocation_path) if binding is not None else None
         if candidate is None:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,

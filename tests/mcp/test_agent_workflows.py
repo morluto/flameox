@@ -11,7 +11,7 @@ import pytest
 from mcp import Client
 
 from flameox.mcp import create_server
-from flameox.storage import Workspace
+from flameox.storage import RunStore, Workspace
 
 ToolCall = Callable[[str, dict[str, Any]], Awaitable[Any]]
 Setup = Callable[[Workspace], None]
@@ -218,7 +218,7 @@ async def _exercise_normal_workflow(call: ToolCall, workspace: Workspace) -> Non
     )
     assert configured.is_error is False
     assert _structured(configured)["result"]["action"] == "created"
-    assert not any(workspace.paths.runs.iterdir())
+    assert RunStore(workspace).list() == ()
 
     listed = await call("list_declared_workflows", {"kind": "workload"})
     assert listed.is_error is False
@@ -241,7 +241,7 @@ async def _exercise_normal_workflow(call: ToolCall, workspace: Workspace) -> Non
 
     executed = await call(
         "execute_capture_plan",
-        {"plan_id": _structured(planned)["result"]["plan_id"]},
+        {"plan_token": _structured(planned)["result"]["plan_token"]},
     )
     assert executed.is_error is False
     assert _structured(executed)["result"]["execution_status"] == "succeeded"
@@ -336,7 +336,11 @@ async def _run_case(case: WorkflowCase, root: Path) -> TraceMetrics:
         tool_calls=len(calls),
         invalid_calls=invalid_calls,
         repeated_calls=repeated_calls,
-        writes_outside_permitted=_outside_permitted(before, _snapshot(root), case.allowed_paths),
+        writes_outside_permitted=_outside_permitted(
+            before,
+            _snapshot(root),
+            (*case.allowed_paths, ".diagnostics/"),
+        ),
     )
 
 

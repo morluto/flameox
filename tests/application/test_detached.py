@@ -89,8 +89,8 @@ async def test_detached_start_is_idempotent_and_reconnects_by_run_id(
         execution_policy=ExecutionPolicy.APPROVED_AGENT,
     )
 
-    started = await manager.start(plan.plan_id, "review-attempt-001")
-    repeated = await manager.start(plan.plan_id, "review-attempt-001")
+    started = await manager.start(plan.plan_token, "review-attempt-001")
+    repeated = await manager.start(plan.plan_token, "review-attempt-001")
     reconnected = manager.status(started.run_id)
 
     assert started.run_id == plan.run_id
@@ -127,10 +127,10 @@ async def test_detached_idempotency_key_cannot_authorize_another_plan(
         adapter="command",
         execution_policy=ExecutionPolicy.APPROVED_AGENT,
     )
-    await manager.start(first.plan_id, "review-attempt-002")
+    await manager.start(first.plan_token, "review-attempt-002")
 
     with pytest.raises(DomainError) as reused:
-        await manager.start(second.plan_id, "review-attempt-002")
+        await manager.start(second.plan_token, "review-attempt-002")
 
     assert reused.value.code is ErrorCode.INVALID_CAPTURE_PLAN
     await manager.cancel(first.run_id)
@@ -155,8 +155,8 @@ async def test_detached_idempotency_creation_is_atomic_across_managers(
     )
 
     results = await asyncio.gather(
-        first_manager.start(first_plan.plan_id, "cross-process-key"),
-        second_manager.start(second_plan.plan_id, "cross-process-key"),
+        first_manager.start(first_plan.plan_token, "cross-process-key"),
+        second_manager.start(second_plan.plan_token, "cross-process-key"),
         return_exceptions=True,
     )
 
@@ -184,7 +184,7 @@ async def test_detached_startup_crash_returns_replan_recovery(
         DetachedCaptureRecord(
             run_id=plan.run_id,
             idempotency_digest="sha256:startup-crash",
-            plan_digest=digest_model({"plan_id": plan.plan_id}),
+            plan_digest=digest_model({"plan_id": plan.plan_token}),
             plan_request={
                 "workload_name": "detached",
                 "adapter": "command",
@@ -228,7 +228,7 @@ async def test_detached_task_failure_never_reports_nonterminal_run_as_running(
         execution_policy=ExecutionPolicy.APPROVED_AGENT,
     )
 
-    await manager.start(plan.plan_id, "failed-start-001")
+    await manager.start(plan.plan_token, "failed-start-001")
     for _ in range(200):
         status = manager.status(plan.run_id)
         if status.state == "failed_to_start":
@@ -253,7 +253,7 @@ async def test_lost_start_caller_does_not_cancel_or_orphan_owned_capture(
         adapter="command",
         execution_policy=ExecutionPolicy.APPROVED_AGENT,
     )
-    start_call = asyncio.create_task(manager.start(plan.plan_id, "review-disconnect-001"))
+    start_call = asyncio.create_task(manager.start(plan.plan_token, "review-disconnect-001"))
     for _ in range(200):
         try:
             manager.status(plan.run_id)
@@ -289,7 +289,7 @@ async def test_detached_timeout_is_terminal_and_published_once(tmp_path: Path) -
         execution_policy=ExecutionPolicy.APPROVED_AGENT,
     )
 
-    await manager.start(plan.plan_id, "review-timeout-001")
+    await manager.start(plan.plan_token, "review-timeout-001")
     for _ in range(200):
         status = manager.status(plan.run_id)
         if status.state == "terminal":
@@ -322,7 +322,7 @@ async def test_detached_output_limit_failure_remains_inspectable(tmp_path: Path)
         execution_policy=ExecutionPolicy.APPROVED_AGENT,
     )
 
-    await manager.start(plan.plan_id, "review-output-001")
+    await manager.start(plan.plan_token, "review-output-001")
     for _ in range(200):
         status = manager.status(plan.run_id)
         if status.state == "terminal":
@@ -343,11 +343,11 @@ async def test_restart_reconnect_is_truthfully_read_only(tmp_path: Path) -> None
         adapter="command",
         execution_policy=ExecutionPolicy.APPROVED_AGENT,
     )
-    await manager.start(plan.plan_id, "review-restart-001")
+    await manager.start(plan.plan_token, "review-restart-001")
 
     replacement_captures = CaptureService(workspace)
     replacement = DetachedCaptureManager(workspace, replacement_captures)
-    repeated = await replacement.start(plan.plan_id, "review-restart-001")
+    repeated = await replacement.start(plan.plan_token, "review-restart-001")
     status = replacement.status(plan.run_id)
 
     assert repeated.run_id == plan.run_id

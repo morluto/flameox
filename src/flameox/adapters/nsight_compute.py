@@ -3,13 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import shutil
 from pathlib import Path
 from typing import Any
 
 from packaging.version import InvalidVersion, Version
 
-from flameox.adapters.artifact_workers import ArtifactWorker
+from flameox.adapters.artifact_workers import IsolatedWorkerHarness
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
@@ -115,8 +115,9 @@ class NsightComputeExtractor:
                 ErrorCode.ARTIFACT_PARSE_FAILED,
                 "Only unchanged .ncu-rep and .ncu-repz reports are supported.",
             )
+        binding = ExecutableResolver().resolve_host_tool("ncu")
         interface = find_ncu_report_interface(
-            executable=shutil.which("ncu"),
+            executable=str(binding.invocation_path) if binding is not None else None,
             producer_version=registration.producer_version,
         )
         if interface is None:
@@ -152,7 +153,7 @@ class NsightComputeExtractor:
             )
         max_metrics = normalized_rows // 2
         max_observations = normalized_rows - max_metrics
-        response = ArtifactWorker(self.workspace).run_sync(
+        response = IsolatedWorkerHarness(self.workspace).run_sync(
             "flameox.workers.nsight_compute",
             {
                 "artifact_path": str(artifact.payload_path),

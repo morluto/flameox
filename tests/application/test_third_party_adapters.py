@@ -26,7 +26,7 @@ from flameox.domain import (
     ErrorCode,
     ExecutionStatus,
 )
-from flameox.storage import ArtifactStore, Workspace
+from flameox.storage import ArtifactStore, RunStore, Workspace
 
 _WRAPPER = """\
 import pathlib
@@ -185,7 +185,7 @@ async def test_approved_adapter_runs_full_lifecycle_and_publishes_linked_extract
         execution_policy=ExecutionPolicy.APPROVED_AGENT,
     )
 
-    result = await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_token)
 
     assert result.run.execution_status is ExecutionStatus.SUCCEEDED
     assert plan.permissions == ("process_observation",)
@@ -230,10 +230,10 @@ async def test_adapter_package_change_invalidates_unconsumed_plan(
     identity["value"] = "sha256:" + "b" * 64
 
     with pytest.raises(DomainError) as changed:
-        await service.execute(plan.plan_id)
+        await service.execute(plan.plan_token)
 
     assert changed.value.code is ErrorCode.INVALID_CAPTURE_PLAN
-    assert not workspace.paths.runs.joinpath(plan.run_id).exists()
+    assert RunStore(workspace).list() == ()
 
 
 @pytest.mark.anyio
@@ -288,7 +288,7 @@ async def test_adapter_execution_failures_are_structured_and_leave_no_staging(
         execution_policy=ExecutionPolicy.APPROVED_AGENT,
     )
     with pytest.raises(DomainError, match=message) as failure:
-        await service.execute(plan.plan_id)
+        await service.execute(plan.plan_token)
 
     assert failure.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
     assert failure.value.run_id == plan.run_id
@@ -309,7 +309,7 @@ async def test_adapter_capture_cancellation_uses_normal_process_ownership(
         adapter="fixture",
         execution_policy=ExecutionPolicy.APPROVED_AGENT,
     )
-    task = asyncio.create_task(service.execute(plan.plan_id))
+    task = asyncio.create_task(service.execute(plan.plan_token))
     for _ in range(200):
         try:
             running = service.runs.read(plan.run_id)
@@ -359,7 +359,7 @@ async def test_adapter_artifact_quota_uses_normal_capture_policy(
     )
 
     with pytest.raises(DomainError) as limited:
-        await service.execute(plan.plan_id)
+        await service.execute(plan.plan_token)
 
     assert limited.value.code is ErrorCode.ARTIFACT_TOO_LARGE
     assert service.runs.read(plan.run_id).execution_status is ExecutionStatus.FAILED

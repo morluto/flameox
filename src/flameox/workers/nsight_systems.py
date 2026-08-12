@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
-import os
 import sqlite3
 from pathlib import Path
 from urllib.parse import quote
+
+from flameox.domain import ErrorCode
+from flameox.workers.protocol import run_worker
 
 
 def _identifier(value: str) -> str:
@@ -448,33 +449,21 @@ def _extract(path: Path, *, limit: int) -> dict[str, object]:
         connection.close()
 
 
-def _write_response(path: Path, payload: dict[str, object]) -> None:
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True)
+def _handle(request: dict[str, object], _request_path: Path) -> dict[str, object]:
+    return _extract(
+        Path(str(request["artifact_path"])),
+        limit=int(str(request["max_rows_per_table"])),
     )
-    os.replace(temporary, path)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--request", required=True)
-    parser.add_argument("--response", required=True)
-    options = parser.parse_args()
-    try:
-        request = json.loads(Path(options.request).read_text())
-        payload = _extract(
-            Path(request["artifact_path"]),
-            limit=int(request["max_rows_per_table"]),
-        )
-    except (OSError, sqlite3.DatabaseError, ValueError, KeyError, TypeError) as exc:
-        payload = {
-            "ok": False,
-            "code": "ARTIFACT_PARSE_FAILED",
-            "message": f"Nsight Systems structured export is unsupported or invalid: {exc}",
-        }
-    _write_response(Path(options.response), payload)
+def main() -> int:
+    return run_worker(
+        _handle,
+        invalid_code=ErrorCode.ARTIFACT_PARSE_FAILED,
+        invalid_message="Nsight Systems structured export is unsupported or invalid",
+        caught=(OSError, sqlite3.DatabaseError, ValueError, KeyError, TypeError),
+    )
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

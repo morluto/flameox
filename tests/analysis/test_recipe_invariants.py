@@ -8,10 +8,24 @@ from pydantic import ValidationError
 
 from flameox.analysis import RecipeService
 from flameox.analysis.recipe_models import FailureAnalysisResult
+from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode
 from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
 from tests.support.analysis import run_row
+
+
+def test_recipe_service_pins_snapshot_when_constructed(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    service = RecipeService(workspace)
+    pinned = service.snapshot_handle.commit.commit_id
+
+    Catalog(workspace).rebuild()
+
+    assert service.snapshot_handle.commit.commit_id == pinned
+    assert RecipeService(workspace).snapshot_handle.commit.commit_id == (
+        workspace.corpus.read_head().commit_id
+    )
 
 
 def test_read_only_analysis_pins_snapshot_without_workspace_write_lock(

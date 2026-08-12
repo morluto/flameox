@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import cast
@@ -67,8 +68,11 @@ def test_operation_store_rejects_terminal_state_without_a_receipt(tmp_path: Path
             "owner_heartbeat_at": None,
         }
     )
-    record_path = workspace.paths.records / "operations" / record.operation_id / "record.json"
-    record_path.write_text(json.dumps(serialized))
+    with sqlite3.connect(workspace.paths.control_plane) as connection:
+        connection.execute(
+            "UPDATE operations SET payload_json = ? WHERE operation_id = ?",
+            (json.dumps(serialized), record.operation_id),
+        )
 
     with pytest.raises(DomainError) as error:
         store.read(record.operation_id)
@@ -97,8 +101,11 @@ def test_operation_store_rejects_version_one_records(tmp_path: Path) -> None:
     store.records.create(record)
     serialized = record.model_dump(mode="json")
     serialized["schema_version"] = 1
-    record_path = workspace.paths.records / "operations" / record.operation_id / "record.json"
-    record_path.write_text(json.dumps(serialized))
+    with sqlite3.connect(workspace.paths.control_plane) as connection:
+        connection.execute(
+            "UPDATE operations SET payload_json = ? WHERE operation_id = ?",
+            (json.dumps(serialized), record.operation_id),
+        )
 
     with pytest.raises(DomainError) as error:
         store.read(record.operation_id)

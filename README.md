@@ -171,8 +171,8 @@ When FlameOx is connected to an agent, the agent does not need to guess package
 names. `list_capabilities` reports the exact managed providers that are missing;
 the agent calls `start_capability_setup` with an idempotency key, then polls
 `get_capability_setup` (or calls `cancel_capability_setup` when needed).
-`prepare_capabilities` remains as a compatibility wrapper. These actions verify
-their result and never run a workload. `prepare_workload_dependencies` installs
+These actions verify their result and never run a workload.
+`prepare_workload_dependencies` installs
 only Python distributions declared by a named workload. Non-privileged
 user-space tools such as Trace Processor are staged automatically; host
 executables, permissions, and privileged collectors remain explicit limitations.
@@ -366,8 +366,8 @@ The project root is the client's working directory. Flameox does not create its
 workflow for that project.
 
 Through MCP, agents can configure workloads, plan captures and experiments, query evidence,
-preview analyses, and record results. Capture and experiment plans are
-short-lived and single-use; restarting the server invalidates those plan tokens.
+preview analyses, and record results. Capture plans are short-lived, single-use SQLite
+capabilities and remain valid across server restart until consumed or expired.
 Detached capture records persist across a manager restart: retry the same
 `idempotency_key` to reconnect to the original run rather than starting another
 capture. Capability setup uses the same rule; after a retryable failure or

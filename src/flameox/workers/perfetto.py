@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import argparse
 import json
-import os
-from pathlib import Path
 from typing import Any
+
+from flameox.domain import ErrorCode
+from flameox.workers.protocol import run_worker
 
 _SLICE_QUERY = """
     SELECT
@@ -176,32 +176,13 @@ def _query(request: dict[str, object]) -> dict[str, object]:
             processor.close()
 
 
-def _write_response(path: Path, payload: dict[str, object]) -> None:
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True)
-    )
-    os.replace(temporary, path)
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--request", type=Path, required=True)
-    parser.add_argument("--response", type=Path, required=True)
-    arguments = parser.parse_args()
-    try:
-        request = json.loads(arguments.request.read_text())
-        if not isinstance(request, dict):
-            raise ValueError("request must be a JSON object")
-        response = _query(request)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        response = {
-            "ok": False,
-            "code": "WORKSPACE_INVALID",
-            "message": f"Perfetto worker request is invalid: {exc}",
-        }
-    _write_response(arguments.response, response)
-    return 0
+    return run_worker(
+        lambda request, _path: _query(request),
+        invalid_code=ErrorCode.WORKSPACE_INVALID,
+        invalid_message="Perfetto worker request is invalid",
+        caught=(OSError, ValueError, json.JSONDecodeError),
+    )
 
 
 if __name__ == "__main__":

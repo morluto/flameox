@@ -15,6 +15,7 @@ from flameox.domain import (
     WorkloadExecutionIdentity,
     digest_model,
 )
+from flameox.domain.executables import ResolvedExecutable
 from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.storage import Workspace
 
@@ -101,6 +102,7 @@ class ExecutionIdentityService:
                 await self._modules(
                     config.identity.python_modules,
                     executable=instance.command.argv[0],
+                    executable_binding=instance.executable_binding,
                     cwd=Path(instance.command.cwd),
                     environment=instance.command.env_overrides,
                 )
@@ -113,6 +115,7 @@ class ExecutionIdentityService:
         names: tuple[str, ...],
         *,
         executable: str,
+        executable_binding: ResolvedExecutable,
         cwd: Path,
         environment: dict[str, str],
     ) -> tuple[ExecutionIdentityInput, ...]:
@@ -130,6 +133,7 @@ class ExecutionIdentityService:
             outcome = await self.broker.run(
                 ExecutionRequest(
                     argv=(executable, "-c", _MODULE_PROBE, *names),
+                    executable_binding=executable_binding,
                     cwd=cwd,
                     environment_allowlist=(
                         self.workspace.config.execution.child_environment_allowlist

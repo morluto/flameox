@@ -16,6 +16,7 @@ from uuid import uuid4
 from flameox.atomic import atomic_write_json, fsync_directory
 from flameox.domain.errors import DomainError, ErrorCode
 from flameox.domain.models import ArtifactContent, Integrity, utc_now
+from flameox.filesystem import BoundedFileSystem
 from flameox.storage.quotas import StorageQuota
 from flameox.storage.workspace import Workspace
 
@@ -185,140 +186,7 @@ class ArtifactStore:
         source: Path,
         allowed_roots: tuple[Path, ...],
     ) -> int:
-        source_absolute = Path(os.path.abspath(source))
-        for allowed_root in allowed_roots:
-            root_absolute = Path(os.path.abspath(allowed_root))
-            try:
-                relative_source = source_absolute.relative_to(root_absolute)
-            except ValueError:
-                continue
-            if not relative_source.parts:
-                continue
-            try:
-                return self._open_beneath(root_absolute, relative_source)
-            except OSError as exc:
-                if exc.errno in {errno.ELOOP, errno.ENOENT, errno.ENOTDIR}:
-                    raise DomainError(
-                        ErrorCode.EXECUTION_REFUSED,
-                        "Artifact import source is missing or is a symbolic link.",
-                    ) from exc
-                raise
-        raise DomainError(
-            ErrorCode.EXECUTION_REFUSED,
-            "Artifact import source is outside the allowed roots.",
-        )
-
-    @staticmethod
-    def _open_beneath(root: Path, relative_source: Path) -> int:
-        if os.name == "nt":
-            return ArtifactStore._open_windows_beneath(root, relative_source)
-
-        directory_flags = os.O_RDONLY
-        source_flags = os.O_RDONLY
-        for flags_name in ("O_CLOEXEC", "O_NOFOLLOW"):
-            flag = getattr(os, flags_name, 0)
-            directory_flags |= flag
-            source_flags |= flag
-        directory_flags |= getattr(os, "O_DIRECTORY", 0)
-
-        directory_fd = os.open(root, directory_flags)
-        try:
-            components = relative_source.parts
-            for component in components[:-1]:
-                next_directory_fd = os.open(
-                    component,
-                    directory_flags,
-                    dir_fd=directory_fd,
-                )
-                os.close(directory_fd)
-                directory_fd = next_directory_fd
-            return os.open(components[-1], source_flags, dir_fd=directory_fd)
-        finally:
-            os.close(directory_fd)
-
-    @staticmethod
-    def _open_windows_beneath(root: Path, relative_source: Path) -> int:
-        """Open a source on Windows without relying on POSIX ``dir_fd`` support.
-
-        Windows ``os.open`` follows reparse points and has no descriptor-relative
-        equivalent for the POSIX ``O_NOFOLLOW`` sequence above.  Rejecting every
-        reparse point in the lexical path, then checking the canonical path of the
-        opened handle, prevents ordinary symlink/junction escapes and catches a
-        path swap that happens between those checks and the open.  The descriptor
-        is still checked with ``fstat`` by ``import_path`` for regular-file and
-        hard-link policy.
-        """
-        candidate = root.joinpath(*relative_source.parts)
-        ArtifactStore._reject_windows_reparse_points(root, relative_source)
-
-        source_flags = os.O_RDONLY
-        for flags_name in ("O_BINARY", "O_NOINHERIT"):
-            source_flags |= getattr(os, flags_name, 0)
-        descriptor = os.open(candidate, source_flags)
-        try:
-            ArtifactStore._reject_windows_reparse_points(root, relative_source)
-            final_path = ArtifactStore._windows_final_path(descriptor)
-            try:
-                final_path.relative_to(root.resolve(strict=True))
-            except ValueError as exc:
-                raise OSError(
-                    errno.ELOOP,
-                    "Artifact import source resolves outside the allowed root.",
-                ) from exc
-        except BaseException:
-            os.close(descriptor)
-            raise
-        return descriptor
-
-    @staticmethod
-    def _reject_windows_reparse_points(root: Path, relative_source: Path) -> None:
-        ancestors: list[Path] = [root]
-        for component in relative_source.parts:
-            ancestors.append(ancestors[-1] / component)
-        paths = tuple(ancestors)
-        for index, path in enumerate(paths):
-            metadata = os.lstat(path)
-            reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-            if (
-                stat.S_ISLNK(metadata.st_mode)
-                or bool(getattr(metadata, "st_file_attributes", 0) & reparse_attribute)
-                or bool(getattr(path, "is_junction", lambda: False)())
-            ):
-                raise OSError(errno.ELOOP, "Artifact import source contains a reparse point.")
-            if index < len(paths) - 1 and not stat.S_ISDIR(metadata.st_mode):
-                raise OSError(errno.ENOTDIR, "Artifact import source parent is not a directory.")
-
-    @staticmethod
-    def _windows_final_path(descriptor: int) -> Path:
-        """Return the normalized Windows path represented by an open descriptor."""
-        import ctypes
-
-        msvcrt = __import__("msvcrt")
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
-        get_final_path = kernel32.GetFinalPathNameByHandleW
-        get_final_path.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_wchar_p,
-            ctypes.c_uint32,
-            ctypes.c_uint32,
-        ]
-        get_final_path.restype = ctypes.c_uint32
-        buffer = ctypes.create_unicode_buffer(32768)
-        length = get_final_path(
-            msvcrt.get_osfhandle(descriptor),
-            buffer,
-            len(buffer),
-            0,
-        )
-        if length == 0 or length >= len(buffer):
-            error = ctypes.get_last_error()  # type: ignore[attr-defined]
-            raise OSError(error or errno.EACCES, "Could not verify the opened artifact path.")
-        value = buffer.value
-        if value.startswith("\\\\?\\UNC\\"):
-            value = "\\\\" + value[8:]
-        elif value.startswith("\\\\?\\"):
-            value = value[4:]
-        return Path(value)
+        return BoundedFileSystem(allowed_roots).open_descriptor(source)
 
     def get(self, artifact_id: str) -> StoredArtifact:
         hexadecimal = artifact_id.removeprefix("sha256:")
