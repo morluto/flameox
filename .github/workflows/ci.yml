@@ -48,7 +48,7 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
-      - run: uv sync --extra dev
+      - run: uv sync --extra dev --extra inference
       - name: Run parallel-safe tests
         run: >-
           uv run pytest -o addopts='' -ra -q -n auto
@@ -91,7 +91,7 @@ jobs:
       - run: >-
           uv run deptry src
           --optional-dependencies-dev-groups dev,test
-          --per-rule-ignores 'DEP002=aiperf|pytz|py-spy|pytest-reportlog|pytest-xdist'
+          --per-rule-ignores 'DEP002=aiperf|nvidia-ml-py|pytz|py-spy|pytest-reportlog|pytest-xdist'
       - run: uv run pip-audit
 
   npm:

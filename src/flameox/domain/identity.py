@@ -6,7 +6,6 @@ from uuid import uuid4
 
 import rfc8785
 from pydantic import BaseModel, JsonValue, TypeAdapter
-from pydantic_core import to_jsonable_python
 
 from flameox.models import ContractModel
 
@@ -26,7 +25,7 @@ def normalize_identity_value(value: Any) -> JsonValue:
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json", exclude_none=False)
     else:
-        value = to_jsonable_python(value, inf_nan_mode="constants")
+        value = _JSON_VALUE.dump_python(value, mode="json", warnings=False)
     value = _normalize_wide_integers(value)
     return _JSON_VALUE.validate_python(value)
 

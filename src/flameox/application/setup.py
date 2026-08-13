@@ -412,9 +412,7 @@ class SetupService:
                     ErrorCode.REVISION_CONFLICT,
                     f"Configuration changed during setup: {edit.path}",
                     retryable=True,
-                    remediation=(
-                        "Review the file, then run `npx flameox@latest setup` again.",
-                    ),
+                    remediation=("Review the file, then run `npx flameox@latest setup` again.",),
                 )
             if edit.updated is not None:
                 atomic_write_bytes(edit.path, edit.updated, mode=edit.mode)

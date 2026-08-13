@@ -70,9 +70,7 @@ class OfficialCliDriver:
         self.cwd = (cwd or Path.cwd()).resolve()
 
     def probe(self) -> tuple[ResolvedExecutable, str] | None:
-        executable = self.resolver.resolve_host_tool(
-            self._EXECUTABLES[self.client], cwd=self.cwd
-        )
+        executable = self.resolver.resolve_host_tool(self._EXECUTABLES[self.client], cwd=self.cwd)
         if executable is None:
             return None
         outcome = self.broker.run_sync(
@@ -96,9 +94,7 @@ class OfficialCliDriver:
         current = self._current_launcher(inspected)
         if remove:
             action = (
-                ClientPlanAction.REMOVE
-                if current is not None
-                else ClientPlanAction.NOT_CONFIGURED
+                ClientPlanAction.REMOVE if current is not None else ClientPlanAction.NOT_CONFIGURED
             )
             mutations = () if current is None else (self._remove_argv(executable),)
             expected: Launcher | None = None
@@ -135,9 +131,7 @@ class OfficialCliDriver:
         for argv in plan.mutation_argv:
             outcome = await self.broker.run(self._request(plan.executable, argv))
             self._require_success(outcome, "mutation")
-        inspected = await self.broker.run(
-            self._request(plan.executable, plan.inspect_argv)
-        )
+        inspected = await self.broker.run(self._request(plan.executable, plan.inspect_argv))
         current = self._current_launcher(inspected)
         if current != plan.launcher:
             raise DomainError(
@@ -151,15 +145,17 @@ class OfficialCliDriver:
         token = executable.requested_token
         if self.client is SetupClient.CODEX:
             return (token, "mcp", "get", "flameox", "--json")
-        return (token, "mcp", "get", "flameox") if self.client is SetupClient.CLAUDE else (
-            token,
-            "mcp",
-            "list",
+        return (
+            (token, "mcp", "get", "flameox")
+            if self.client is SetupClient.CLAUDE
+            else (
+                token,
+                "mcp",
+                "list",
+            )
         )
 
-    def _add_argv(
-        self, executable: ResolvedExecutable, launcher: Launcher
-    ) -> tuple[str, ...]:
+    def _add_argv(self, executable: ResolvedExecutable, launcher: Launcher) -> tuple[str, ...]:
         token = executable.requested_token
         if self.client is SetupClient.CLAUDE:
             payload = json.dumps(
@@ -216,9 +212,7 @@ class OfficialCliDriver:
         parsed_args = tuple(json.loads(args)) if args and args.startswith("[") else ()
         return Launcher(command=command, args=parsed_args)
 
-    def _request(
-        self, executable: ResolvedExecutable, argv: tuple[str, ...]
-    ) -> ExecutionRequest:
+    def _request(self, executable: ResolvedExecutable, argv: tuple[str, ...]) -> ExecutionRequest:
         return ExecutionRequest(
             argv=argv,
             executable_binding=executable,

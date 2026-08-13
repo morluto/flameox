@@ -1475,9 +1475,7 @@ class CapabilityService:
                 CapabilityReport(
                     adapter=provider.name,
                     status=(
-                        CapabilityStatus.AVAILABLE
-                        if available
-                        else CapabilityStatus.UNAVAILABLE
+                        CapabilityStatus.AVAILABLE if available else CapabilityStatus.UNAVAILABLE
                     ),
                     provisioning=CapabilityProvisioning.MANAGED_RUNTIME,
                     executable=executable,
