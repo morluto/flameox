@@ -1,6 +1,40 @@
 # Changelog
 
 All notable changes to flameox are documented in this file.
+## [0.1.14] - 2026-08-13
+### Bug Fixes
+
+- **xctrace:** Admit managed external staging
+- **runtime:** Fail closed on abandoned resource state
+- **reductions:** Retry failed durable operations
+- **providers:** Preserve and contain runtime paths
+- **capture:** Preserve timeout evidence reporting
+- **types:** Tolerate absent optional OTLP modules
+- **ci:** Align deterministic lanes with collected dependencies
+- Structural issue batch — bounded reads, oracle coherence, protocol comparison, vLLM percentiles (#293) ([#293](https://github.com/morluto/flameox/pull/293))
+- **adapters:** Harden GPU evidence boundaries
+### Chores
+
+- Reconcile issues resolved by #295 (#296) ([#296](https://github.com/morluto/flameox/pull/296))
+- **ci:** Replace custom test scheduling with pytest lanes
+### Documentation
+
+- Align guides with redesigned architecture
+- **adapters:** Align rocprofv3 test provenance
+### Features
+
+- **adapters:** Add GPU profiling and trace evidence (#139) ([#139](https://github.com/morluto/flameox/pull/139))
+- **adapters:** Add GPU benchmark and compiler evidence (#138) ([#138](https://github.com/morluto/flameox/pull/138))
+- **adapters:** Add GPU correctness evidence (#137) ([#137](https://github.com/morluto/flameox/pull/137))
+### Refactoring
+
+- Center runtime evidence on explicit authorities (#295) ([#295](https://github.com/morluto/flameox/pull/295))
+- **core:** Center runtime evidence on explicit authorities
+- Establish authoritative execution and control boundaries (#294) ([#294](https://github.com/morluto/flameox/pull/294))
+- Make invalid contract states unrepresentable (#152) ([#152](https://github.com/morluto/flameox/pull/152))
+### Testing
+
+- **gpu:** Focus evidence lanes on behavioral coverage (#204) ([#204](https://github.com/morluto/flameox/pull/204))
 
 ## [Unreleased]
 ### Chores
