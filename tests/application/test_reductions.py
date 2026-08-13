@@ -201,6 +201,44 @@ async def test_shrinkray_reduction_preserves_receipts_and_revalidates_final_cand
 
 
 @pytest.mark.anyio
+async def test_failed_reduction_operation_can_be_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, service = _service(tmp_path, "raise SystemExit(0)")
+    original_id = _original(workspace, tmp_path / "retry.data", b"KEEP\n")
+    plan = service.plan(
+        PlanReductionRequest(
+            original_artifact_id=original_id,
+            predicate_workload="predicate",
+            limits=ReductionLimits(max_attempts=16, max_staging_files=64),
+        )
+    )
+    execute = service._execute_shrinkray
+    attempts = 0
+
+    async def fail_once(*args: object, **kwargs: object) -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise DomainError(
+                ErrorCode.PROCESS_FAILED, "transient provider failure", retryable=True
+            )
+        return await execute(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service, "_execute_shrinkray", fail_once)
+
+    with pytest.raises(DomainError):
+        await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_id)
+
+    assert result.reduction_id == digest_model(
+        {"plan_id": plan.plan_id, "contract": "reduction-v4"}
+    )
+    assert attempts == 2
+
+
+@pytest.mark.anyio
 async def test_unresolved_candidate_is_recorded_but_never_adopted(tmp_path: Path) -> None:
     workspace, service = _service(
         tmp_path,

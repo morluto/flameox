@@ -459,6 +459,17 @@ def _validate_operation_transition(
             "An operation transition changed immutable identity or intent.",
             details={"operation_id": current.operation_id},
         )
+    if isinstance(current, (FailedOperationRecord, CancelledOperationRecord)) and isinstance(
+        updated,
+        ActiveOperationRecord,
+    ):
+        if updated.state is not OperationState.STARTING:
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                "A retried operation must transition through the starting state.",
+                details={"operation_id": current.operation_id},
+            )
+        return
     if isinstance(current, UnmanagedOperationRecord) and isinstance(
         updated,
         ActiveOperationRecord,
@@ -784,6 +795,53 @@ class OperationRunner:
                     return OperationStatus.from_record(existing, adapter=self.adapter)
                 started_event = self._schedule(operation_id, run)
         assert started_event is not None
+        await started_event.wait()
+        return OperationStatus.from_record(
+            self.store.read(operation_id),
+            adapter=self.adapter,
+        )
+
+    async def retry_terminal(
+        self,
+        operation_id: str,
+        run: Callable[[str, Callable[..., Awaitable[None]]], Awaitable[dict[str, Any]]],
+    ) -> OperationStatus:
+        """Restart one failed or cancelled operation without changing its durable intent."""
+        started_event: anyio.Event | None = None
+        async with self.lock:
+            current = self.store.read(operation_id)
+            if isinstance(current, ActiveOperationRecord):
+                return OperationStatus.from_record(current, adapter=self.adapter)
+            if not isinstance(current, (FailedOperationRecord, CancelledOperationRecord)):
+                return OperationStatus.from_record(current, adapter=self.adapter)
+            retried = ActiveOperationRecord.model_validate(
+                {
+                    **current.model_dump(mode="python"),
+                    "state": OperationState.STARTING,
+                    "phase": "retrying",
+                    "revision": current.revision + 1,
+                    "updated_at": utc_now(),
+                    "item_outcomes": (),
+                    "failure_code": None,
+                    "failure_message": None,
+                    "failure_details": None,
+                    "cleanup_status": OperationCleanupStatus.NOT_REQUIRED,
+                    "terminal_receipt": None,
+                    "recovery": None,
+                    "owner_id": self.owner_id,
+                    "owner_heartbeat_at": utc_now(),
+                }
+            )
+            try:
+                self.store.records.append(retried, expected_revision=current.revision)
+            except DomainError as error:
+                if error.code is not ErrorCode.REVISION_CONFLICT:
+                    raise
+                return OperationStatus.from_record(
+                    self.store.read(operation_id),
+                    adapter=self.adapter,
+                )
+            started_event = self._schedule(operation_id, run)
         await started_event.wait()
         return OperationStatus.from_record(
             self.store.read(operation_id),

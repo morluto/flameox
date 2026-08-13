@@ -299,12 +299,22 @@ class ReductionService:
             )
             return {"result": result.model_dump(mode="json")}
 
+        prior_operation = self.runner.store.find_subject(
+            operation=self._OPERATION.kind,
+            subject_id=reduction_id,
+        )
         operation = await self.runner.start(
             {"plan_id": plan.plan_id, "reduction_id": reduction_id},
             reduction_id,
             run,
             subject_id=reduction_id,
         )
+        if (
+            prior_operation is not None
+            and prior_operation.state in {OperationState.FAILED, OperationState.CANCELLED}
+            and operation.operation_id == prior_operation.operation_id
+        ):
+            operation = await self.runner.retry_terminal(operation.operation_id, run)
         operation = await self.runner.wait(
             operation.operation_id,
             timeout_seconds=plan.limits.wall_time_seconds
