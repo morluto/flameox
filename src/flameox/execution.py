@@ -1476,6 +1476,19 @@ class SubprocessBroker:
                 growth = self._writable_growth(policy, initial_sizes)
                 if growth is None:
                     unavailable.add("writable_root_growth_bytes")
+                    summary = self._resource_summary(
+                        policy,
+                        initial_sizes=initial_sizes,
+                        initial_staging=initial_staging,
+                        minimum_free=minimum_free,
+                        peak_rss=peak_rss,
+                        unavailable=unavailable,
+                        termination=ProcessCancellationCause.WRITABLE_LIMIT_EXCEEDED,
+                    )
+                    raise _ResourcePolicyExceeded(
+                        summary,
+                        ProcessCancellationCause.WRITABLE_LIMIT_EXCEEDED,
+                    )
                 elif growth > policy.maximum_writable_growth_bytes:
                     summary = self._resource_summary(
                         policy,

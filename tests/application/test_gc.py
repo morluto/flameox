@@ -125,6 +125,19 @@ def test_gc_preserves_old_staging_until_its_exact_owner_releases_it(tmp_path: Pa
     assert "staging/live-operation" in {entry.path for entry in after_release.entries}
 
 
+def test_gc_reclaims_old_staging_without_an_ownership_record(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    staging = workspace.paths.staging / "interrupted-unowned-publication"
+    staging.mkdir()
+    (staging / "partial.bin").write_bytes(b"abandoned")
+    old = time.time() - 48 * 3600
+    os.utime(staging, (old, old))
+
+    plan = GarbageCollector(workspace).plan(minimum_age_hours=24)
+
+    assert "staging/interrupted-unowned-publication" in {entry.path for entry in plan.entries}
+
+
 def test_gc_discovers_unreferenced_final_evidence_from_interrupted_publication(
     tmp_path: Path,
 ) -> None:

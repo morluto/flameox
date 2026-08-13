@@ -96,11 +96,11 @@ class StagingOwnershipService:
         )
         return StagingOwnership(self.store, self.store.acquire(record))
 
-    def collectible(self, path: Path) -> tuple[StagingOwnerRecord, str] | None:
+    def collectible(self, path: Path) -> tuple[StagingOwnerRecord | None, str] | None:
         relative = self._relative(path)
         record = self.store.read(relative)
         if record is None:
-            return None
+            return None, digest_model({"path": relative, "ownership": "unowned"})
         if record.state is StagingOwnerState.ACTIVE and not exact_process_is_dead(
             record.process_lease
         ):
