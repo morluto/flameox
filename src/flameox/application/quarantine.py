@@ -19,6 +19,7 @@ from flameox.domain import DomainError, ErrorCode
 from flameox.domain.models import utc_now
 from flameox.models import ContractModel
 from flameox.storage import Workspace
+from flameox.storage.locks import RETENTION_EXCLUSIVE, WRITE_EXCLUSIVE
 
 
 class _QuarantineManifest(ContractModel):
@@ -113,9 +114,10 @@ class QuarantineService:
         adapter: str | None = None,
         originating_run_id: str | None = None,
     ) -> QuarantineManifest:
-        with (
-            self.workspace.write_locked(),
-            self.workspace.retention_locked(shared=False),
+        with self.workspace.locked(
+            WRITE_EXCLUSIVE,
+            RETENTION_EXCLUSIVE,
+            phase="quarantine move",
         ):
             return self.quarantine_locked(
                 source,
@@ -169,9 +171,10 @@ class QuarantineService:
         return quarantined
 
     def restore(self, quarantine_id: str) -> QuarantineRestoreResult:
-        with (
-            self.workspace.write_locked(),
-            self.workspace.retention_locked(shared=False),
+        with self.workspace.locked(
+            WRITE_EXCLUSIVE,
+            RETENTION_EXCLUSIVE,
+            phase="quarantine restore",
         ):
             quarantine_root, manifest = self._read_manifest(quarantine_id)
             if not isinstance(manifest, QuarantinedManifest):
@@ -202,9 +205,10 @@ class QuarantineService:
 
     def resume(self, quarantine_id: str) -> QuarantineManifest:
         """Resolve a quarantine move interrupted between its two atomic steps."""
-        with (
-            self.workspace.write_locked(),
-            self.workspace.retention_locked(shared=False),
+        with self.workspace.locked(
+            WRITE_EXCLUSIVE,
+            RETENTION_EXCLUSIVE,
+            phase="quarantine resume",
         ):
             quarantine_root, manifest = self._read_manifest(quarantine_id)
             if isinstance(manifest, RestoringQuarantineManifest):

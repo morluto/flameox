@@ -1,29 +1,56 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from pydantic import JsonValue
 
 from flameox.application import (
     CaptureService,
+    EvidenceLookupService,
     EvidenceSummary,
     EvidenceSummaryRequest,
     EvidenceSummaryService,
     ExecutionPolicy,
+    RunProjectionService,
     SummaryClaim,
     SummaryExcerptPolicy,
+    SummaryProofAssessment,
     SummaryProofShape,
+    SummarySelectionShape,
     SummarySensitiveContextPolicy,
     SummarySupportStatus,
     render_evidence_summary_markdown,
 )
 from flameox.application.run_rows import run_row
 from flameox.catalog import Catalog
-from flameox.domain import EvidenceLevel, ExternalExecutionContext, FindingAssessment, Sensitivity
+from flameox.domain import (
+    CaptureStatus,
+    EvidenceLevel,
+    EvidenceReferenceType,
+    ExecutionStatus,
+    ExternalExecutionContext,
+    FindingAssessment,
+    OracleReceiptRecord,
+    OracleReceiptV1,
+    OracleStatus,
+    Sensitivity,
+    ValidationStatus,
+    digest_model,
+)
+from flameox.domain.models import ExecutionRunManifest, IncludedRunSetMember, RunSet
 from flameox.evidence import GenerationPublisher
 from flameox.storage import RunStore, Workspace
 from tests.support.capture import disable_containment
+
+pytestmark = pytest.mark.unit
+
+_ENVIRONMENT_ID = "sha256:" + "1" * 64
+_WORKLOAD_DEFINITION_ID = "sha256:" + "2" * 64
+_WORKLOAD_INSTANCE_ID = "sha256:" + "3" * 64
+_MEASUREMENT_PROTOCOL_ID = "sha256:" + "4" * 64
 
 
 def _write_workload(project: Path) -> None:
@@ -37,6 +64,299 @@ timeout_seconds = 5
 [workloads.proof.parameters]
 message = ["candidate", "token-secret"]
 """
+    )
+
+
+def _analysis_row(workspace: Workspace, *, result_digest: str) -> dict[str, object]:
+    observed_at = datetime.now(UTC)
+    return {
+        "analysis_id": "analysis-1",
+        "recipe": "snapshot-proof",
+        "recipe_version": "1",
+        "parameters_json": "{}",
+        "parameters_digest": "0" * 64,
+        "corpus_commit_id": workspace.corpus.read_head().commit_id,
+        "input_generation_ids": [],
+        "input_run_ids": [],
+        "input_artifact_ids": [],
+        "result_digest": result_digest,
+        "result_artifact_id": None,
+        "coverage_json": "{}",
+        "limitations": [],
+        "started_at": observed_at,
+        "completed_at": observed_at,
+    }
+
+
+def _publish_validated_run(
+    workspace: Workspace,
+    run_id: str,
+    *,
+    include_receipt: bool = True,
+) -> ExecutionRunManifest:
+    receipt = (
+        OracleReceiptRecord(
+            receipt=OracleReceiptV1(
+                schema_version="flameox.oracle-receipt.v1",
+                status=OracleStatus.PASS,
+                reason="semantic_match",
+            ),
+            receipt_artifact_id="sha256:" + "5" * 64,
+        )
+        if include_receipt
+        else None
+    )
+    manifest = ExecutionRunManifest(
+        run_id=run_id,
+        execution_status=ExecutionStatus.SUCCEEDED,
+        capture_status=CaptureStatus.REGISTERED,
+        validation_status=ValidationStatus.PASSED,
+        finished_at=datetime.now(UTC),
+        workload_definition_id=_WORKLOAD_DEFINITION_ID,
+        workload_instance_id=_WORKLOAD_INSTANCE_ID,
+        measurement_protocol_id=_MEASUREMENT_PROTOCOL_ID,
+        environment_id=_ENVIRONMENT_ID,
+        oracle_receipt=receipt,
+    )
+    RunStore(workspace).create(manifest)
+    GenerationPublisher(workspace).publish_rows(
+        {"runs": [run_row(manifest)]},
+        publisher="summary-proof-run-test",
+        publisher_version="1",
+        input_run_ids=(run_id,),
+    )
+    return manifest
+
+
+def _publish_comparison_binding(
+    workspace: Workspace,
+    *,
+    baseline_run_id: str,
+    candidate_run_id: str,
+    comparison_id: str = "comparison-proof",
+) -> str:
+    corpus_commit_id = workspace.corpus.read_head().commit_id
+    created_at = datetime.now(UTC)
+
+    def run_set(run_id: str) -> RunSet:
+        member = IncludedRunSetMember(run_id=run_id, order=0)
+        members = (member,)
+        selection: dict[str, JsonValue] = {"mode": "proof-test"}
+        member_payload = [item.model_dump(mode="json") for item in members]
+        return RunSet(
+            run_set_id=digest_model(
+                {
+                    "corpus_commit_id": corpus_commit_id,
+                    "selection": selection,
+                    "members": member_payload,
+                }
+            ),
+            corpus_commit_id=corpus_commit_id,
+            created_at=created_at,
+            selection=selection,
+            members=members,
+            membership_digest=digest_model(member_payload),
+        )
+
+    baseline = run_set(baseline_run_id)
+    candidate = run_set(candidate_run_id)
+
+    def run_set_row(value: RunSet) -> dict[str, object]:
+        return {
+            "run_set_id": value.run_set_id,
+            "corpus_commit_id": value.corpus_commit_id,
+            "created_at": value.created_at,
+            "selection_json": json.dumps(value.selection, sort_keys=True),
+            "members_json": json.dumps(
+                [item.model_dump(mode="json") for item in value.members],
+                sort_keys=True,
+            ),
+            "membership_digest": value.membership_digest,
+        }
+
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "run_sets": [run_set_row(baseline), run_set_row(candidate)],
+            "comparisons": [
+                {
+                    "comparison_id": comparison_id,
+                    "experiment_id": None,
+                    "baseline_run_set_id": baseline.run_set_id,
+                    "candidate_run_set_id": candidate.run_set_id,
+                    "metric": "latency",
+                    "unit": "ns",
+                    "metric_source": "measurement",
+                    "metric_contract_id": "sha256:" + "6" * 64,
+                    "measurement_series_id": None,
+                    "protocol_identity_id": "sha256:" + "7" * 64,
+                    "value_domain": "strictly_positive",
+                    "zero_policy": "reject",
+                    "polarity": "lower_is_better",
+                    "estimand": "difference_in_median_logs",
+                    "practical_threshold": 0.05,
+                    "baseline_value_int": 10,
+                    "baseline_value_float": None,
+                    "candidate_value_int": 5,
+                    "candidate_value_float": None,
+                    "absolute_change_int": -5,
+                    "absolute_change_float": None,
+                    "relative_change": -0.5,
+                    "effect_size": -0.5,
+                    "confidence_low": -0.6,
+                    "confidence_high": -0.4,
+                    "confidence_level": 0.95,
+                    "method": "bootstrap",
+                    "random_seed": 1,
+                    "independent_unit": "run",
+                    "paired": False,
+                    "baseline_attempted_n": 1,
+                    "baseline_eligible_n": 1,
+                    "baseline_failed_n": 0,
+                    "baseline_excluded_n": 0,
+                    "baseline_missing_n": 0,
+                    "baseline_out_of_domain_n": 0,
+                    "candidate_attempted_n": 1,
+                    "candidate_eligible_n": 1,
+                    "candidate_failed_n": 0,
+                    "candidate_excluded_n": 0,
+                    "candidate_missing_n": 0,
+                    "candidate_out_of_domain_n": 0,
+                    "complete_pair_n": None,
+                    "multiplicity_json": None,
+                    "decision": "meaningful_improvement",
+                    "validity": "valid",
+                    "mismatches": [],
+                }
+            ],
+        },
+        publisher="summary-proof-binding-test",
+        publisher_version="1",
+        input_run_ids=(baseline_run_id, candidate_run_id),
+    )
+    return comparison_id
+
+
+def test_summary_resolves_references_inside_its_pinned_snapshot(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    published = GenerationPublisher(workspace).publish_rows(
+        {"analyses": [_analysis_row(workspace, result_digest="old-result")]},
+        publisher="summary-snapshot-test",
+        publisher_version="1",
+    )
+
+    result = EvidenceSummaryService(workspace).summarize(
+        EvidenceSummaryRequest(analysis_ids=("analysis-1",))
+    )
+
+    assert result.summary.corpus_commit_id == published.commit.commit_id
+    assert result.summary.references[0].data["result_digest"] == "old-result"
+
+
+def test_evidence_session_does_not_advance_when_head_changes(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    publisher = GenerationPublisher(workspace)
+    first = publisher.publish_rows(
+        {"analyses": [_analysis_row(workspace, result_digest="old-result")]},
+        publisher="session-snapshot-test",
+        publisher_version="1",
+    )
+    lookup = EvidenceLookupService(workspace)
+
+    with lookup.session() as session:
+        second = publisher.publish_rows(
+            {"analyses": [_analysis_row(workspace, result_digest="new-result")]},
+            publisher="concurrent-session-test",
+            publisher_version="1",
+        )
+        pinned = session.get(EvidenceReferenceType.ANALYSIS, "analysis-1")
+
+    current = lookup.get(EvidenceReferenceType.ANALYSIS, "analysis-1")
+    assert pinned.corpus_commit_id == first.commit.commit_id
+    assert pinned.data["result_digest"] == "old-result"
+    assert current.corpus_commit_id == second.commit.commit_id
+    assert current.data["result_digest"] == "new-result"
+
+
+def test_candidate_validation_requires_a_passing_semantic_receipt(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    _publish_validated_run(workspace, "candidate-spoofed", include_receipt=False)
+
+    spoofed = EvidenceSummaryService(workspace).summarize(
+        EvidenceSummaryRequest(candidate_run_id="candidate-spoofed")
+    )
+
+    assert spoofed.summary.proof_shape == "incomplete"
+    assert "semantic_validation_receipt" in spoofed.summary.proof_assessment.missing_conditions
+    assert spoofed.summary.proof_assessment.verified_candidate_run_id is None
+
+    _publish_validated_run(workspace, "candidate-validated")
+    validated = EvidenceSummaryService(workspace).summarize(
+        EvidenceSummaryRequest(candidate_run_id="candidate-validated")
+    )
+
+    assert validated.summary.proof_shape == "candidate_validated"
+    assert validated.summary.proof_assessment.binding_type == "run_validation"
+    assert validated.summary.proof_assessment.verified_candidate_run_id == "candidate-validated"
+
+
+def test_two_claimed_runs_are_not_a_validated_pair_without_an_exact_binding(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    _publish_validated_run(workspace, "baseline")
+    _publish_validated_run(workspace, "candidate")
+
+    result = EvidenceSummaryService(workspace).summarize(
+        EvidenceSummaryRequest(
+            baseline_run_id="baseline",
+            candidate_run_id="candidate",
+        )
+    )
+
+    assert result.summary.selection_shape == "two_claimed_runs"
+    assert result.summary.proof_shape == "incomplete"
+    assert "exact_valid_comparison_binding" in result.summary.proof_assessment.missing_conditions
+    assert result.summary.proof_assessment.verified_baseline_run_id is None
+    assert result.summary.proof_assessment.verified_candidate_run_id is None
+
+
+def test_validated_pair_requires_comparison_membership_in_the_claimed_roles(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    _publish_validated_run(workspace, "baseline")
+    _publish_validated_run(workspace, "candidate")
+    comparison_id = _publish_comparison_binding(
+        workspace,
+        baseline_run_id="baseline",
+        candidate_run_id="candidate",
+    )
+
+    result = EvidenceSummaryService(workspace).summarize(
+        EvidenceSummaryRequest(
+            baseline_run_id="baseline",
+            candidate_run_id="candidate",
+            comparison_ids=(comparison_id,),
+        )
+    )
+
+    assert result.summary.selection_shape == "mixed_evidence"
+    assert result.summary.proof_shape == "validated_pair"
+    assert result.summary.proof_assessment.binding_id == comparison_id
+    assert result.summary.proof_assessment.verified_baseline_run_id == "baseline"
+    assert result.summary.proof_assessment.verified_candidate_run_id == "candidate"
+
+    reversed_roles = EvidenceSummaryService(workspace).summarize(
+        EvidenceSummaryRequest(
+            baseline_run_id="candidate",
+            candidate_run_id="baseline",
+            comparison_ids=(comparison_id,),
+        )
+    )
+    assert reversed_roles.summary.proof_shape == "incomplete"
+    assert (
+        "exact_valid_comparison_binding"
+        in reversed_roles.summary.proof_assessment.missing_conditions
     )
 
 
@@ -70,7 +390,9 @@ async def test_summary_is_stable_and_redacts_sensitive_execution_context(
     second = EvidenceSummaryService(workspace).summarize(request)
 
     assert first == second
-    assert first.summary.proof_shape == "candidate_only_validation"
+    assert first.summary.selection_shape == "single_run"
+    assert first.summary.proof_shape == "incomplete"
+    assert "validation_passed" in first.summary.proof_assessment.missing_conditions
     summarized_context = first.summary.runs[0].external_context
     assert summarized_context is not None
     assert summarized_context["provider"] == "runpod"
@@ -80,7 +402,7 @@ async def test_summary_is_stable_and_redacts_sensitive_execution_context(
     assert "arguments redacted" in first.summary.runs[0].argv[-1]
     assert first.summary.summary_digest in first.markdown
     assert json.loads(first.summary.model_dump_json())["summary_digest"] in first.markdown
-    assert any("without a base observation" in item for item in first.summary.limitations)
+    assert any("Proof remains incomplete" in item for item in first.summary.limitations)
 
     included = EvidenceSummaryService(workspace).summarize(
         request.validated_copy(update={"sensitive_context": SummarySensitiveContextPolicy.INCLUDE})
@@ -89,6 +411,17 @@ async def test_summary_is_stable_and_redacts_sensitive_execution_context(
     assert included.summary.runs[0].external_context["lease_id"] == "lease-secret"
     assert included.summary.runs[0].argv[-1] == "print('candidate')"
     assert included.summary.summary_digest != first.summary.summary_digest
+
+    projection = RunProjectionService(workspace).get(captured.run.run_id)
+    projection_json = projection.model_dump_json()
+    assert "candidate" not in projection_json
+    assert "lease-secret" not in projection_json
+    assert "worker-secret" not in projection_json
+    assert "remote-secret" not in projection_json
+    assert projection.command is not None
+    assert projection.command.argument_count == 2
+    assert projection.external_context is not None
+    assert projection.external_context.lease_id == "[redacted]"
 
 
 @pytest.mark.anyio
@@ -147,7 +480,10 @@ def test_markdown_renderer_contains_untrusted_text_without_structure_injection()
     summary = EvidenceSummary(
         summary_digest="0" * 64,
         corpus_commit_id="1" * 64,
+        selection_shape=SummarySelectionShape.MIXED_EVIDENCE,
+        claimed_roles=(),
         proof_shape=SummaryProofShape.SELECTED_EVIDENCE,
+        proof_assessment=SummaryProofAssessment(shape=SummaryProofShape.SELECTED_EVIDENCE),
         runs=(),
         references=(),
         claims=(claim,),

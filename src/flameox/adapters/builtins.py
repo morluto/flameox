@@ -18,6 +18,7 @@ from flameox.adapters.options import (
 )
 from flameox.adapters.torch_profiler import SdkTorchProfilerOptions, torch_profiler_options
 from flameox.domain import ArtifactKind, CapabilityExtra, DomainError, ErrorCode
+from flameox.startup_profile import PYTHON_STARTUP_PROFILE
 
 
 class AdapterDependencyKind(StrEnum):
@@ -72,6 +73,21 @@ BUILTIN_ADAPTERS = {
             capture_limitations=("No sampled stack or operator evidence is collected.",),
         ),
         BuiltinAdapter(
+            name="benchmark-samples",
+            dependency_kind=AdapterDependencyKind.INTERNAL,
+            dependency=None,
+            supported_modes=("named_workload",),
+            supported_formats=("flameox.benchmark-samples.v1",),
+            features=("structured_benchmark_samples", "worker_hierarchy", "warmups"),
+            output_filename="benchmark-samples.json",
+            artifact_kinds=(ArtifactKind.BENCHMARK_SAMPLES,),
+            expected_overhead="Workload-defined structured benchmark collection.",
+            capture_limitations=(
+                "The workload owns measurement clock, synchronization, warm-up, and sample "
+                "semantics and must declare them in the structured document.",
+            ),
+        ),
+        BuiltinAdapter(
             name="py-spy",
             dependency_kind=AdapterDependencyKind.EXECUTABLE,
             dependency="py-spy",
@@ -92,6 +108,21 @@ BUILTIN_ADAPTERS = {
             ),
             managed_extra=CapabilityExtra.CPU,
             managed_requirement="py-spy>=0.4.2,<0.5",
+        ),
+        BuiltinAdapter(
+            name="aiperf",
+            dependency_kind=AdapterDependencyKind.EXECUTABLE,
+            dependency="aiperf",
+            supported_modes=("profile",),
+            supported_formats=("aiperf-profile-export-jsonl",),
+            features=("inference_replay", "per_request_metrics", "fixed_schedule"),
+            remediation=(
+                "Call start_capability_setup with adapter='aiperf' to create a verified "
+                "provider environment.",
+            ),
+            version_args=("--version",),
+            managed_extra=CapabilityExtra.INFERENCE,
+            managed_requirement="aiperf>=0.12,<0.13",
         ),
         BuiltinAdapter(
             name="perf",
@@ -145,22 +176,24 @@ BUILTIN_ADAPTERS = {
         ),
         BuiltinAdapter(
             name="python-startup",
-            dependency_kind=AdapterDependencyKind.INTERNAL,
-            dependency=None,
+            dependency_kind=AdapterDependencyKind.PACKAGE,
+            dependency="pyperf",
             supported_modes=("repeated_process",),
-            supported_formats=("flameox-python-startup-json", "python-importtime"),
+            supported_formats=("pyperf-json", "python-importtime"),
             features=("wall_time", "import_cost", "module_count", "peak_rss"),
-            output_filename="python-startup.json",
-            artifact_kinds=(ArtifactKind.PYTHON_STARTUP,),
+            output_filename=PYTHON_STARTUP_PROFILE.wall_output_name,
+            artifact_kinds=(ArtifactKind.BENCHMARK_SAMPLES, ArtifactKind.PYTHON_STARTUP),
             expected_overhead=(
-                "Fresh interpreter launches with import timing enabled; target output is "
-                "captured by the launcher and replayed after each sample."
+                "Five one-loop pyperf command workers plus one separately instrumented "
+                "import-time execution."
             ),
             capture_limitations=(
                 "The initial OS file-cache state is observed but not controlled; flameox does "
                 "not drop caches.",
                 "Import timing instruments imports and therefore adds measurement overhead.",
+                "Peak RSS is available only when pyperf records command_max_rss for the host.",
             ),
+            preserve_artifact_on_nonzero=True,
         ),
         BuiltinAdapter(
             name="pytest",
@@ -442,6 +475,9 @@ def build_capture_invocation(  # noqa: C901 - provider routing is intentionally 
     limitations = adapter.capture_limitations
     if adapter_name == "command":
         argv = workload_argv
+    elif adapter_name == "benchmark-samples":
+        argv = workload_argv
+        environment["FLAMEOX_BENCHMARK_OUTPUT"] = output
     elif adapter_name == "py-spy":
         argv = (
             _require_executable(adapter_name, executable),
@@ -565,10 +601,10 @@ def build_capture_invocation(  # noqa: C901 - provider routing is intentionally 
             python,
             "-m",
             "flameox.collectors.python_startup",
-            "--output",
-            output,
-            "--samples",
-            "5",
+            "--benchmark-output",
+            str(output_root / PYTHON_STARTUP_PROFILE.wall_output_name),
+            "--import-trace-output",
+            str(output_root / PYTHON_STARTUP_PROFILE.import_trace_output_name),
             "--timeout-seconds",
             str(timeout_seconds),
             "--",

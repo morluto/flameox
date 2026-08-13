@@ -10,6 +10,8 @@ import pytest
 
 from flameox import __version__
 
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
+
 
 def _next_patch_version(version: str) -> str:
     major, minor, patch = (int(part) for part in version.split("."))

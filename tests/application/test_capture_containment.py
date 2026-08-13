@@ -22,6 +22,8 @@ from flameox.domain import (
 from flameox.storage import RunStore, Workspace
 from tests.support.capture import disable_containment, write_workload
 
+pytestmark = pytest.mark.integration
+
 
 def test_approved_agent_parses_containment_mode_before_policy_decision() -> None:
     configured_mode = ContainmentPolicy.REQUIRED_FOR_MCP.value

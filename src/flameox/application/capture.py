@@ -17,10 +17,13 @@ from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
+from packaging.requirements import Requirement
 from pydantic import JsonValue, TypeAdapter
 
+from flameox.action_graph import ActionId, NextAction, manual_action, tool_action
 from flameox.adapters.builtins import (
     BUILTIN_ADAPTERS,
+    AdapterDependencyKind,
     build_capture_invocation,
     builtin_adapter,
     replace_compute_sanitizer_suppression,
@@ -29,30 +32,29 @@ from flameox.adapters.compute_sanitizer import (
     compute_sanitizer_compatibility_limitations,
     inspect_compute_sanitizer_report,
 )
-from flameox.adapters.kernel_build import KernelBuildManifestV1
+from flameox.adapters.kernel_build import KernelBuildManifestV2
 from flameox.adapters.options import (
     bind_adapter_options,
     compute_sanitizer_options,
     read_compute_sanitizer_suppression,
 )
-from flameox.adapters.registry import AdapterRegistry
+from flameox.adapters.registry import AdapterDescriptor, AdapterRegistry
 from flameox.adapters.torch_profiler import SdkTorchProfilerOptions, torch_profiler_options
 from flameox.application.async_work import run_atomic_thread
 from flameox.application.capabilities import CapabilityService
+from flameox.application.capture_admission import CaptureAdmission, CaptureAdmissionService
 from flameox.application.environment import AcceleratorIdentityService, collect_environment
 from flameox.application.evidence_rows import (
-    artifact_registration_row,
-    environment_row,
     process_observation_rows,
     runtime_resource_summary_row,
     runtime_writable_root_rows,
-    source_state_row,
 )
 from flameox.application.execution_identity import ExecutionIdentityService
 from flameox.application.execution_policy import ExecutionPolicy
 from flameox.application.kernel_builds import (
     KernelBuildCaptureCollector,
     kernel_build_pipeline_request,
+    managed_kernel_build_context,
 )
 from flameox.application.nvbench_imports import (
     collect_nvbench_sidecar_specs,
@@ -65,9 +67,12 @@ from flameox.application.oracle_receipts import parse_oracle_receipt
 from flameox.application.pipelines import ArtifactPipelineService
 from flameox.application.preflight import PreflightService
 from flameox.application.proc import read_boot_id, read_proc_stat_start_identity
+from flameox.application.progress import ProgressReporter
+from flameox.application.projections import ProjectionCoordinator
+from flameox.application.python_environment import PythonEnvironmentProbe
 from flameox.application.quarantine import QuarantineService
-from flameox.application.run_rows import run_row
 from flameox.application.source import collect_source_state
+from flameox.application.staging_ownership import StagingOwnership, StagingOwnershipService
 from flameox.application.workloads import Scalar, WorkloadService
 from flameox.atomic import atomic_write_bytes
 from flameox.command_binding import ExecutableResolver
@@ -85,6 +90,7 @@ from flameox.domain import (
     ArtifactKind,
     ArtifactRegistration,
     CapabilityPermissionStatus,
+    CapabilityProvisioning,
     CapabilityReport,
     CapabilityStatus,
     CaptureContainment,
@@ -135,6 +141,7 @@ from flameox.execution import (
 )
 from flameox.models import ContractModel
 from flameox.observability import OperationLogger, elapsed_ms
+from flameox.startup_profile import PYTHON_STARTUP_PROFILE
 from flameox.storage import ArtifactStore, AuthorizedPlanStore, RunStore, StorageQuota, Workspace
 
 
@@ -221,7 +228,8 @@ class _CaptureExecution:
     logger: OperationLogger
     operation_id: str
     started_monotonic: float
-    progress: Callable[[float, float, str], Awaitable[None]] | None
+    progress: ProgressReporter
+    staging_ownership: StagingOwnership
     run: RunManifest | None = None
     cleanup_complete: bool | None = None
 
@@ -234,8 +242,7 @@ class _CaptureExecution:
             adapter=self.plan.adapter,
             elapsed_ms=elapsed_ms(self.started_monotonic),
         )
-        if self.progress is not None:
-            await self.progress(completed, 8, message)
+        await self.progress.report(completed, 8, message)
 
     async def record_lease(self, process_id: int) -> None:
         if self.run is None:
@@ -409,6 +416,8 @@ class _CaptureExecution:
 
     def cleanup_staging(self) -> None:
         shutil.rmtree(self.output_root, ignore_errors=True)
+        self.staging_ownership.release()
+        self.staging_ownership.forget_if_removed(self.output_root)
 
     async def terminate_startup_failure(
         self,
@@ -440,12 +449,11 @@ class CapturePlanRegistry:
         *,
         workspace: Workspace | None = None,
         ttl_seconds: float = 300,
-        max_parallel_captures: int = 2,
     ) -> None:
         self.ttl_seconds = ttl_seconds
         self._workspace: Workspace | None = None
         self._store: AuthorizedPlanStore[CapturePlan] | None = None
-        self._capture_slots = asyncio.Semaphore(max_parallel_captures)
+        self._admissions: CaptureAdmissionService | None = None
         if workspace is not None:
             self.bind(workspace)
 
@@ -461,12 +469,18 @@ class CapturePlanRegistry:
             family="capture",
             model=TypeAdapter(CapturePlan),
         )
+        self._admissions = CaptureAdmissionService(
+            workspace,
+            limit=workspace.config.capture.max_parallel_captures,
+        )
 
-    async def acquire_capture_slot(self) -> None:
-        await self._capture_slots.acquire()
-
-    def release_capture_slot(self) -> None:
-        self._capture_slots.release()
+    async def acquire_capture_slot(self, run_id: str) -> CaptureAdmission:
+        if self._admissions is None:
+            raise DomainError(
+                ErrorCode.WORKSPACE_NOT_FOUND,
+                "Capture admission requires an initialized workspace.",
+            )
+        return await self._admissions.acquire(run_id)
 
     async def issue(self, plan: CapturePlan) -> None:
         self._require_store().issue(
@@ -505,13 +519,13 @@ class CaptureService:
         self.capabilities = capabilities or CapabilityService(workspace, broker=broker)
         self.plans = plans or CapturePlanRegistry(
             workspace=workspace,
-            max_parallel_captures=workspace.config.capture.max_parallel_captures,
         )
         self.plans.bind(workspace)
         self.broker = broker or self.capabilities.broker
         self.runs = RunStore(workspace)
         self.artifacts = ArtifactStore(workspace)
         self.publisher = GenerationPublisher(workspace)
+        self.projections = ProjectionCoordinator(workspace)
         self.executables = ExecutableResolver()
 
     async def plan(
@@ -546,21 +560,33 @@ class CaptureService:
                 if item.kind is RequirementKind.PYTHON_DISTRIBUTION
                 and item.status is RequirementStatus.ABSENT
             )
-            next_tool = "get_declared_workflow"
+            next_action: NextAction = tool_action(
+                ActionId.GET_DECLARED_WORKFLOW,
+                kind="workload",
+                name=workload_name,
+            )
             if missing_distributions:
-                next_tool = "prepare_workload_dependencies"
-            elif any(item.next_tool == "prepare_adapter" for item in preflight.requirements):
-                next_tool = "prepare_adapter"
-            elif any(item.next_tool == "start_capability_setup" for item in preflight.requirements):
-                next_tool = "start_capability_setup"
+                next_action = manual_action(
+                    "Install the missing distributions in the workload's declared Python "
+                    "environment or select another workload, then plan capture again.",
+                    suggested_action=ActionId.GET_DECLARED_WORKFLOW,
+                )
+            elif requirement_action := next(
+                (
+                    item.next_action
+                    for item in preflight.requirements
+                    if item.next_action is not None
+                ),
+                None,
+            ):
+                next_action = requirement_action
             elif any(item.kind is RequirementKind.CAPABILITY for item in preflight.requirements):
-                next_tool = "list_capabilities"
+                next_action = tool_action(ActionId.INSPECT_CAPABILITIES)
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 f"Required preflight checks failed for workload {workload_name!r}.",
                 details={
                     "preflight": preflight.model_dump(mode="json"),
-                    "next_tool": next_tool,
                     "workload_name": workload_name,
                     "missing_python_distributions": list(missing_distributions),
                 },
@@ -569,8 +595,13 @@ class CaptureService:
                     for item in preflight.requirements
                     for remediation in item.remediation
                 ),
+                next_action=next_action,
             )
-        adapter_capability = await self._adapter_capability(adapter, mode=preflight_mode)
+        adapter_capability = await self._adapter_capability(
+            adapter,
+            mode=preflight_mode,
+            workload_name=workload_name,
+        )
         if adapter == "compute-sanitizer" and execution_policy is not ExecutionPolicy.TRUSTED_LOCAL:
             raise DomainError(
                 ErrorCode.EXECUTION_REFUSED,
@@ -585,7 +616,7 @@ class CaptureService:
         planned_execution_identity = ExecutionIdentityService(
             self.workspace,
             broker=self.broker,
-        ).plan(workload_name)
+        ).plan(workload_name, cwd=Path(instance.command.cwd))
         plan_id = secrets.token_hex(32)
         run_id = new_id()
         output_root = self.workspace.paths.staging / "captures" / plan_id
@@ -865,6 +896,15 @@ class CaptureService:
             Path(binding.storage_path).mkdir(parents=True, exist_ok=False)
         if plan.adapter in {"triton.compiler", "cute.compiler"}:
             self._create_kernel_build_dump_dir(plan, output_root)
+        try:
+            staging_ownership = StagingOwnershipService(self.workspace).acquire(
+                output_root,
+                owner_kind="capture",
+                owner_id=plan.run_id,
+            )
+        except BaseException:
+            shutil.rmtree(output_root, ignore_errors=True)
+            raise
         capture = _CaptureExecution(
             service=self,
             plan=plan,
@@ -872,7 +912,8 @@ class CaptureService:
             logger=logger,
             operation_id=operation_id,
             started_monotonic=started,
-            progress=progress,
+            progress=ProgressReporter(progress),
+            staging_ownership=staging_ownership,
         )
         startup_lease: CaptureLease | None = None
         startup_lease_error: DomainError | None = None
@@ -888,7 +929,14 @@ class CaptureService:
         )
         planned_accelerator = (
             AcceleratorIdentityFacet(
-                provider="cuda",
+                provider=(
+                    "metal"
+                    if any(
+                        item.startswith("metal.") or item == "macos.build"
+                        for item in identity_requirements
+                    )
+                    else "cuda"
+                ),
                 status=AcceleratorIdentityStatus.UNKNOWN,
                 identity_quality=IdentityQuality.PARTIAL,
                 missing_fields=identity_requirements,
@@ -944,7 +992,7 @@ class CaptureService:
                 startup_lease_error.run_id = terminal.run_id
             raise startup_lease_error
         try:
-            accelerator = await AcceleratorIdentityService(self.workspace.project_root).observe(
+            accelerator = await AcceleratorIdentityService(self.workspace).observe(
                 identity_requirements
             )
             environment = collect_environment(accelerator)
@@ -971,6 +1019,7 @@ class CaptureService:
             await capture.terminate_cancelled(
                 message="Capture cancelled while collecting source identity.",
                 phase="capture cancelled during source identity",
+                cleanup_complete=True,
             )
             raise
         except DomainError as error:
@@ -995,26 +1044,23 @@ class CaptureService:
                 "execution_identity": execution_identity,
             }
         )
-        self.runs.append(prepared, expected_revision=0)
-        running = initial.validated_copy(
-            update={
-                "revision": 2,
-                "started_at": utc_now(),
-                "execution_status": ExecutionStatus.RUNNING,
-                "capture_status": CaptureStatus.RUNNING,
-                "environment_id": environment.environment_id,
-                "source_state_id": source_state.source_state_id,
-                "execution_identity": execution_identity,
-            }
-        )
-        running = self.runs.append(running, expected_revision=1)
-        capture.run = running
-        acquired_slot = False
+        prepared = self.runs.append(prepared, expected_revision=0)
+        capture.run = prepared
+        admission: CaptureAdmission | None = None
         collector_limitation_details: list[LimitationDetail] = []
 
         try:
-            await self.plans.acquire_capture_slot()
-            acquired_slot = True
+            admission = await self.plans.acquire_capture_slot(run_id)
+            running = prepared.validated_copy(
+                update={
+                    "revision": 2,
+                    "started_at": utc_now(),
+                    "execution_status": ExecutionStatus.RUNNING,
+                    "capture_status": CaptureStatus.RUNNING,
+                }
+            )
+            running = self.runs.append(running, expected_revision=1)
+            capture.run = running
             await capture.report(4, "Capture slot acquired")
             collector_argv = plan.collector_argv
             if plan.adapter == "compute-sanitizer":
@@ -1031,53 +1077,59 @@ class CaptureService:
                         staged_suppression,
                         workload_argv=plan.workload_instance.command.argv,
                     )
-            outcome = await self.broker.run(
-                ExecutionRequest(
-                    argv=collector_argv,
-                    executable_binding=plan.collector_executable_binding,
-                    cwd=Path(plan.workload_instance.command.cwd),
-                    environment_allowlist=(
-                        self.workspace.config.execution.child_environment_allowlist
+            outcome = await admission.run(
+                self.broker.run(
+                    ExecutionRequest(
+                        argv=collector_argv,
+                        executable_binding=plan.collector_executable_binding,
+                        cwd=Path(plan.workload_instance.command.cwd),
+                        environment_allowlist=(
+                            self.workspace.config.execution.child_environment_allowlist
+                        ),
+                        environment_overrides=(
+                            {
+                                **plan.workload_instance.command.env_overrides,
+                                **plan.collector_environment,
+                            }
+                        ),
+                        allowed_working_roots=self._allowed_roots(),
+                        timeout_seconds=plan.workload_instance.command.timeout_seconds,
+                        max_output_bytes=self.workspace.config.execution.max_output_bytes,
+                        systemd_scope_unit=plan.systemd_scope_unit,
+                        resource_policy=ResourcePolicy(
+                            filesystem_path=self.workspace.paths.root,
+                            staging_root=output_root,
+                            writable_roots=(
+                                *(Path(item.storage_path) for item in plan.writable_roots),
+                            ),
+                            minimum_free_bytes=cast(
+                                int,
+                                plan.limits["minimum_free_bytes"],
+                            ),
+                            sampling_interval_ms=cast(
+                                int,
+                                plan.limits["resource_sampling_interval_ms"],
+                            ),
+                            max_observed_files=cast(
+                                int,
+                                plan.limits["max_resource_observed_files"],
+                            ),
+                        ),
                     ),
-                    environment_overrides=(
-                        {
-                            **plan.workload_instance.command.env_overrides,
-                            **plan.collector_environment,
-                        }
-                    ),
-                    allowed_working_roots=self._allowed_roots(),
-                    timeout_seconds=plan.workload_instance.command.timeout_seconds,
-                    max_output_bytes=self.workspace.config.execution.max_output_bytes,
-                    systemd_scope_unit=plan.systemd_scope_unit,
-                    resource_policy=ResourcePolicy(
-                        filesystem_path=self.workspace.paths.root,
-                        staging_root=output_root,
-                        writable_roots=(
-                            *(Path(item.storage_path) for item in plan.writable_roots),
-                        ),
-                        minimum_free_bytes=cast(
-                            int,
-                            plan.limits["minimum_free_bytes"],
-                        ),
-                        sampling_interval_ms=cast(
-                            int,
-                            plan.limits["resource_sampling_interval_ms"],
-                        ),
-                        max_observed_files=cast(
-                            int,
-                            plan.limits["max_resource_observed_files"],
-                        ),
-                    ),
-                ),
-                on_started=capture.record_lease,
-                on_cleanup=capture.record_cleanup,
+                    on_started=capture.record_lease,
+                    on_cleanup=capture.record_cleanup,
+                )
             )
+            capture.cleanup_complete = outcome.process.cleanup_complete
             StorageQuota(self.workspace).require_capacity(staging=True)
             await capture.report(5, "Collector execution complete")
         except asyncio.CancelledError:
             await capture.terminate_cancelled(
                 message="Capture cancelled by caller after bounded cleanup.",
                 phase="capture cancelled during collector execution",
+                cleanup_complete=(
+                    capture.cleanup_complete if capture.cleanup_complete is not None else True
+                ),
             )
             raise
         except DomainError as error:
@@ -1222,8 +1274,8 @@ class CaptureService:
                 error.run_id = terminal.run_id
                 raise
         finally:
-            if acquired_slot:
-                self.plans.release_capture_slot()
+            if admission is not None:
+                await run_atomic_thread(admission.release)
         running = capture.run
         if running is None:
             raise DomainError(
@@ -1324,9 +1376,10 @@ class CaptureService:
             )
 
         registrations: list[tuple[ArtifactRegistration, int]] = []
-        kernel_build_manifest: KernelBuildManifestV1 | None = None
+        kernel_build_manifest: KernelBuildManifestV2 | None = None
         process_snapshot_rows: list[dict[str, object]] = []
         process_snapshot_entries: list[dict[str, object]] = []
+        adapter_validation_rows: list[dict[str, object]] = []
         adapter_extraction_rows: list[dict[str, object]] = []
         validation_status = ValidationStatus.NOT_REQUESTED
         validation_limitations: list[str] = []
@@ -1601,10 +1654,12 @@ class CaptureService:
             elif plan.adapter_execution_plan is not None and collector_succeeded:
                 (
                     plugin_registrations,
+                    plugin_validations,
                     plugin_extractions,
                     plugin_limitations,
                 ) = await self._process_adapter_artifacts(plan, output_root)
                 registrations.extend(plugin_registrations)
+                adapter_validation_rows.extend(plugin_validations)
                 adapter_extraction_rows.extend(plugin_extractions)
                 validation_limitations.extend(plugin_limitations)
             elif plan.adapter_execution_plan is not None:
@@ -1642,7 +1697,24 @@ class CaptureService:
             else:
                 for native in valid_native_paths:
                     cycle_index = native_paths.index(native)
-                    if outcome.process.timed_out:
+                    kind = plan.expected_artifact_kinds[0]
+                    producer = plan.adapter
+                    producer_version = plan.adapter_version
+                    media_type = mimetypes.guess_type(native.name)[0] or "application/octet-stream"
+                    if plan.adapter == "python-startup":
+                        is_wall = native.name == PYTHON_STARTUP_PROFILE.wall_output_name
+                        kind = (
+                            ArtifactKind.BENCHMARK_SAMPLES
+                            if is_wall
+                            else ArtifactKind.PYTHON_STARTUP
+                        )
+                        role = "startup_wall" if is_wall else "import_trace"
+                        producer = "pyperf" if is_wall else "cpython"
+                        producer_version = plan.adapter_version if is_wall else None
+                        media_type = "application/json" if is_wall else "text/plain"
+                        if outcome.process.timed_out:
+                            role = f"partial_{role}"
+                    elif outcome.process.timed_out:
                         role = (
                             f"partial_cycle_{cycle_index:04d}"
                             if len(native_paths) > 1
@@ -1655,13 +1727,11 @@ class CaptureService:
                     registration = await self._register_path_async(
                         run_id,
                         native,
-                        kind=plan.expected_artifact_kinds[0],
+                        kind=kind,
                         role=role,
-                        media_type=(
-                            mimetypes.guess_type(native.name)[0] or "application/octet-stream"
-                        ),
-                        producer=plan.adapter,
-                        producer_version=plan.adapter_version,
+                        media_type=media_type,
+                        producer=producer,
+                        producer_version=producer_version,
                     )
                     registrations.append(registration)
                     if plan.adapter == "compute-sanitizer":
@@ -1914,7 +1984,20 @@ class CaptureService:
                 "limitation_details": terminal_limitation_details,
             }
         )
-        terminal = self.runs.append(terminal, expected_revision=running.revision)
+        terminal_run = cast(RunManifest, terminal)
+        try:
+            projected = await run_atomic_thread(
+                lambda: self.projections.append_run(
+                    terminal_run,
+                    expected_revision=running.revision,
+                    environment=environment,
+                    source_state=source_state,
+                )
+            )
+        except BaseException:
+            capture.cleanup_staging()
+            raise
+        terminal = projected.run
         capture.run = terminal
         if kernel_build_manifest is not None:
             registration_ids_by_path = {
@@ -1925,12 +2008,13 @@ class CaptureService:
             }
             try:
                 await run_atomic_thread(
-                    lambda: ArtifactPipelineService(self.workspace).register(
+                    lambda: ArtifactPipelineService(self.workspace).register_managed(
                         kernel_build_pipeline_request(
                             kernel_build_manifest,
                             run_id=terminal.run_id,
                             registration_ids_by_path=registration_ids_by_path,
-                        )
+                        ),
+                        workload_instance=plan.workload_instance,
                     )
                 )
             except DomainError as error:
@@ -1941,10 +2025,12 @@ class CaptureService:
                         "limitations": (*terminal.limitations, error.message),
                     }
                 )
-                pipeline_failed = self.runs.append(
+                pipeline_failed = self.projections.append_run(
                     pipeline_failed,
                     expected_revision=terminal.revision,
-                )
+                    environment=environment,
+                    source_state=source_state,
+                ).run
                 capture.run = pipeline_failed
                 error.run_id = pipeline_failed.run_id
                 raise
@@ -1982,14 +2068,8 @@ class CaptureService:
                 }
             )
         publication_rows = {
-            "runs": [run_row(terminal)],
-            "artifact_registrations": [
-                artifact_registration_row(registration, byte_length=byte_length)
-                for registration, byte_length in registrations
-            ],
+            "adapter_validations": adapter_validation_rows,
             "adapter_extractions": adapter_extraction_rows,
-            "environments": [environment_row(environment)],
-            "source_states": [source_state_row(source_state)],
             "measurements": measurement_rows,
             "runtime_resource_summaries": [
                 runtime_resource_summary_row(
@@ -2011,7 +2091,7 @@ class CaptureService:
             published = await run_atomic_thread(
                 lambda: self.publisher.publish_rows(
                     publication_rows,
-                    publisher="flameox.capture",
+                    publisher="flameox.capture.observations",
                     publisher_version="1",
                     input_run_ids=(run_id,),
                     input_artifact_ids=tuple(
@@ -2063,6 +2143,7 @@ class CaptureService:
         adapter: str,
         *,
         mode: PreflightMode,
+        workload_name: str,
     ) -> CapabilityReport:
         choices = self._capture_adapter_choices()
         approved_third_party = self._is_approved_third_party(adapter)
@@ -2072,13 +2153,56 @@ class CaptureService:
                 f"Unknown or non-capture adapter {adapter!r}.",
                 details={
                     "allowed_adapters": list(choices),
-                    "next_tool": "get_declared_workflow",
                 },
                 remediation=(
                     "Choose one of the bounded adapter options returned by get_declared_workflow.",
                 ),
+                next_action=tool_action(
+                    ActionId.GET_DECLARED_WORKFLOW,
+                    kind="workload",
+                    name=workload_name,
+                ),
             )
         report = self.capabilities.get(adapter)
+        definition = builtin_adapter(adapter)
+        if (
+            definition is not None
+            and definition.dependency_kind is AdapterDependencyKind.PACKAGE
+            and definition.dependency is not None
+        ):
+            requirement = Requirement(definition.managed_requirement or definition.dependency)
+            environment = await PythonEnvironmentProbe(
+                self.workspace,
+                broker=self.broker,
+            ).inspect(workload_name, (requirement,))
+            observed = environment.versions[requirement.name]
+            available = observed is not None and requirement.specifier.contains(
+                observed,
+                prereleases=True,
+            )
+            report = CapabilityReport(
+                adapter=adapter,
+                status=(CapabilityStatus.AVAILABLE if available else CapabilityStatus.UNAVAILABLE),
+                provisioning=CapabilityProvisioning.WORKLOAD_ENVIRONMENT,
+                version=observed,
+                supported_modes=definition.supported_modes if available else (),
+                supported_formats=definition.supported_formats if available else (),
+                platform=report.platform,
+                architecture=report.architecture,
+                features=definition.features,
+                limitations=(
+                    "Package availability was inspected through the exact workload interpreter; "
+                    "module importability was not exercised.",
+                ),
+                remediation=(
+                    ()
+                    if available
+                    else (
+                        f"Install {requirement!s} in the declared workload interpreter "
+                        f"{environment.interpreter!s}, then plan again.",
+                    )
+                ),
+            )
         permission_sensitive = report.permission_status in {
             CapabilityPermissionStatus.UNKNOWN_UNTIL_ACTIVE_PROBE,
             CapabilityPermissionStatus.NOT_EXERCISED,
@@ -2088,13 +2212,15 @@ class CaptureService:
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                     f"Adapter {adapter!r} requires an active permission probe before planning.",
-                    details={
-                        "next_tool": "plan_capture",
-                        "required_preflight_mode": "active",
-                    },
+                    details={"required_preflight_mode": "active"},
                     remediation=(
                         "Re-plan with preflight_mode='auto' so FlameOx can perform the bounded "
                         "active permission probe during planning.",
+                    ),
+                    next_action=manual_action(
+                        "Supply the declared parameters and re-plan with preflight_mode='auto'.",
+                        suggested_action=ActionId.PLAN_CAPTURE,
+                        missing_arguments=("parameters",),
                     ),
                 )
             report = await self.capabilities.probe(adapter, refresh=True)
@@ -2114,9 +2240,6 @@ class CaptureService:
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 f"Adapter {adapter!r} is unavailable for capture planning.",
                 details={
-                    "next_tool": (
-                        "start_capability_setup" if setup_pending else "list_capabilities"
-                    ),
                     "adapter": adapter,
                     "capability_status": report.status.value,
                     "setup_adapters": [adapter] if setup_pending else [],
@@ -2133,6 +2256,11 @@ class CaptureService:
                         "Choose an available adapter option from get_declared_workflow; "
                         "the fallback changes the evidence collected.",
                     )
+                ),
+                next_action=(
+                    report.setup.next_action
+                    if report.setup is not None
+                    else tool_action(ActionId.INSPECT_CAPABILITIES, adapter=adapter)
                 ),
             )
         return report
@@ -2168,6 +2296,11 @@ class CaptureService:
         if plan.adapter == "torch.profiler":
             options = torch_profiler_options(cast(dict[str, object], plan.adapter_options))
             return tuple(output_root / filename for filename in options.output_filenames)
+        if plan.adapter == "python-startup":
+            return (
+                output_root / PYTHON_STARTUP_PROFILE.wall_output_name,
+                output_root / PYTHON_STARTUP_PROFILE.import_trace_output_name,
+            )
         return (output_root / definition.output_filename,)
 
     async def _register_nvbench_sidecars(
@@ -2262,7 +2395,7 @@ class CaptureService:
         output_root: Path,
         run_id: str,
         exit_code: int,
-    ) -> tuple[list[tuple[ArtifactRegistration, int]], KernelBuildManifestV1]:
+    ) -> tuple[list[tuple[ArtifactRegistration, int]], KernelBuildManifestV2]:
         env_key = "TRITON_DUMP_DIR" if plan.adapter == "triton.compiler" else "CUTE_DSL_DUMP_DIR"
         dump_path = plan.collector_environment.get(env_key)
         dump_dir = Path(dump_path) if dump_path is not None else output_root / "dumps"
@@ -2281,12 +2414,19 @@ class CaptureService:
         if reproducer_env is not None:
             reproducer_path = Path(reproducer_env)
         collector = KernelBuildCaptureCollector(self.workspace)
+        build_context = managed_kernel_build_context(
+            workload_instance=plan.workload_instance,
+            adapter=plan.adapter,
+            producer_version=plan.adapter_version,
+            adapter_options=plan.adapter_options,
+        )
         manifest, manifest_path, native_paths = await run_atomic_thread(
             lambda: collector.collect(
                 adapter=plan.adapter,
                 dump_dir=dump_dir,
                 output_root=output_root,
-                workload_name=plan.workload_name,
+                workload_label=plan.workload_name,
+                build_context=build_context,
                 exit_code=exit_code,
                 producer_version=plan.adapter_version,
                 source_environment=source_environment,
@@ -2560,9 +2700,12 @@ class CaptureService:
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                     f"Adapter {adapter!r} is unavailable.",
-                    details={"next_tool": "get_declared_workflow"},
                     remediation=capability.remediation
                     or ("Call list_capabilities and choose an available capture adapter.",),
+                    next_action=tool_action(
+                        ActionId.INSPECT_CAPABILITIES,
+                        adapter=adapter,
+                    ),
                 )
             invocation = build_capture_invocation(
                 adapter,
@@ -2969,7 +3112,7 @@ class CaptureService:
         current_execution_identity = ExecutionIdentityService(
             self.workspace,
             broker=self.broker,
-        ).plan(plan.workload_name)
+        ).plan(plan.workload_name, cwd=Path(plan.workload_instance.command.cwd))
         if current_execution_identity.identity_id != plan.planned_execution_identity.identity_id:
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
@@ -3090,18 +3233,14 @@ class CaptureService:
                 "limitation_details": details,
             }
         )
-        terminal = self.runs.append(terminal, expected_revision=running.revision)
-        registration_rows = [
-            artifact_registration_row(
-                registration,
-                byte_length=self.artifacts.get(registration.artifact_id).content.byte_length,
-            )
-            for registration in artifacts
-        ]
+        terminal = self.projections.append_run(
+            terminal,
+            expected_revision=running.revision,
+            environment=None,
+            source_state=None,
+        ).run
         self.publisher.publish_rows(
             {
-                "runs": [run_row(terminal)],
-                "artifact_registrations": registration_rows,
                 "runtime_resource_summaries": [
                     runtime_resource_summary_row(
                         terminal,
@@ -3115,7 +3254,7 @@ class CaptureService:
                 "process_snapshots": process_snapshot_rows or [],
                 "process_snapshot_entries": process_snapshot_entries or [],
             },
-            publisher="flameox.capture",
+            publisher="flameox.capture.observations",
             publisher_version="1",
             input_run_ids=(terminal.run_id,),
         )
@@ -3128,11 +3267,15 @@ class CaptureService:
     ) -> tuple[
         list[tuple[ArtifactRegistration, int]],
         list[dict[str, object]],
+        list[dict[str, object]],
         list[str],
     ]:
         execution_plan = AdapterExecutionPlan.model_validate(plan.adapter_execution_plan)
-        descriptor, contract = AdapterRegistry(self.workspace).load_contract(plan.adapter)
+        registry = AdapterRegistry(self.workspace)
+        descriptor, contract = registry.load_contract(plan.adapter)
+        self._require_bound_adapter_identity(plan, descriptor)
         registrations: list[tuple[ArtifactRegistration, int]] = []
+        validations: list[dict[str, object]] = []
         extractions: list[dict[str, object]] = []
         limitations: list[str] = []
         for declaration in execution_plan.artifacts:
@@ -3153,9 +3296,21 @@ class CaptureService:
                     "A declared adapter artifact is not a regular file.",
                     run_id=plan.run_id,
                 )
+            stored = await run_atomic_thread(
+                partial(
+                    self.artifacts.import_path,
+                    resolved,
+                    allowed_roots=(self.workspace.paths.staging,),
+                    max_bytes=self.workspace.config.capture.max_artifact_bytes,
+                )
+            )
+            self._require_bound_adapter_identity(
+                plan,
+                registry.approved_descriptor(plan.adapter),
+            )
             try:
                 validation = AdapterValidationResult.model_validate(
-                    await contract.validate(str(resolved), declaration)
+                    await contract.validate(str(stored.payload_path), declaration)
                 )
             except Exception as error:
                 raise DomainError(
@@ -3164,6 +3319,26 @@ class CaptureService:
                     details={"exception_type": type(error).__name__},
                     run_id=plan.run_id,
                 ) from error
+            if validation.validator_version != execution_plan.validator_version:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_PARSE_FAILED,
+                    "Adapter validation version differs from the bound plan.",
+                    run_id=plan.run_id,
+                )
+            validation_identity = {
+                "run_id": plan.run_id,
+                "input_artifact_id": stored.content.artifact_id,
+                "adapter": plan.adapter,
+                "adapter_package_identity": descriptor.package_identity,
+                "validator_version": validation.validator_version,
+                "valid": validation.valid,
+                "limitations": list(validation.limitations),
+            }
+            validation_row = {
+                "validation_id": digest_model(validation_identity),
+                **validation_identity,
+                "input_byte_length": stored.content.byte_length,
+            }
             if not validation.valid:
                 raise DomainError(
                     ErrorCode.ARTIFACT_PARSE_FAILED,
@@ -3172,22 +3347,28 @@ class CaptureService:
                     run_id=plan.run_id,
                 )
             limitations.extend(validation.limitations)
-            registration, byte_length = await self._register_path_async(
-                plan.run_id,
-                resolved,
+            validations.append(validation_row)
+            registration = ArtifactRegistration(
+                registration_id=new_id(),
+                run_id=plan.run_id,
+                artifact_id=stored.content.artifact_id,
+                display_name=resolved.name,
+                media_type=declaration.media_type,
                 kind=declaration.kind,
                 role=declaration.role,
-                media_type=declaration.media_type,
                 producer=plan.adapter,
                 producer_version=plan.adapter_version,
                 sensitivity=declaration.sensitivity,
             )
-            registrations.append((registration, byte_length))
-            immutable = self.artifacts.get(registration.artifact_id)
+            registrations.append((registration, stored.content.byte_length))
+            self._require_bound_adapter_identity(
+                plan,
+                registry.approved_descriptor(plan.adapter),
+            )
             try:
                 extraction = AdapterExtractionResult.model_validate(
                     await contract.extract(
-                        str(immutable.payload_path),
+                        str(stored.payload_path),
                         declaration,
                     )
                 )
@@ -3230,7 +3411,21 @@ class CaptureService:
                     "limitations": list(extraction.limitations),
                 }
             )
-        return registrations, extractions, limitations
+        return registrations, validations, extractions, limitations
+
+    @staticmethod
+    def _require_bound_adapter_identity(
+        plan: CapturePlan,
+        descriptor: AdapterDescriptor,
+    ) -> None:
+        if (
+            descriptor.version != plan.adapter_version
+            or descriptor.package_identity != plan.bound_identities.get("adapter_package_identity")
+        ):
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "The approved adapter package identity changed before artifact processing.",
+            )
 
     def _register_path(
         self,

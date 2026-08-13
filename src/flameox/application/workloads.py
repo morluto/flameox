@@ -26,6 +26,14 @@ from pydantic import (
 from tomlkit.exceptions import ParseError
 from tomlkit.items import Table
 
+from flameox.action_graph import (
+    ActionId,
+    ManualAction,
+    NextAction,
+    ToolAction,
+    manual_action,
+    tool_action,
+)
 from flameox.adapters.builtins import BUILTIN_ADAPTERS
 from flameox.adapters.registry import AdapterRegistry
 from flameox.application.capabilities import CapabilityService
@@ -36,6 +44,7 @@ from flameox.application.inference_providers import (
     InferenceServerProvider,
     _loopback_http_url,
 )
+from flameox.application.runtime_resources import RUNTIME_RESOURCE_METRICS
 from flameox.atomic import atomic_write_text
 from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
@@ -43,11 +52,14 @@ from flameox.domain import (
     CapabilityReport,
     CapabilityStatus,
     CommandSpec,
-    CursorCodec,
+    CursorNamespace,
     DomainError,
     ErrorCode,
     ExperimentOutcomeGoal,
+    MeasurementSeriesSelector,
     MetricPolarity,
+    MetricValueDomain,
+    MetricZeroPolicy,
     OracleStrength,
     ProbeKind,
     RequirementKind,
@@ -66,6 +78,7 @@ from flameox.pagination import CursorPageContract
 from flameox.storage import Workspace
 
 Scalar = str | int | float | bool
+_DECLARATION_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 
 def scalar_identity(value: Scalar) -> tuple[str, object]:
@@ -109,15 +122,6 @@ def scalar_subset(subset_values: list[Scalar], superset_values: list[Scalar]) ->
     """Return True only when every identity in ``subset_values`` is in ``superset_values``."""
     superset = scalar_identity_set(superset_values)
     return all(identity in superset for identity in (scalar_identity(v) for v in subset_values))
-
-
-RUNTIME_RESOURCE_METRICS = frozenset(
-    {
-        "runtime_resource.peak_rss_bytes",
-        "runtime_resource.minimum_free_bytes",
-        "runtime_resource.staging_growth_bytes",
-    }
-)
 
 
 class ConfigurationOperation(StrEnum):
@@ -181,6 +185,10 @@ AcceleratorIdentityRequirement = Literal[
     "cuda.runtime",
     "cuda.devices",
     "cuda.peer_topology",
+    "metal.devices",
+    "metal.support",
+    "metal.unified_memory",
+    "macos.build",
 ]
 
 
@@ -191,6 +199,12 @@ class WorkloadEnvironmentIdentityConfig(ContractModel):
     def requirements_are_unique(self) -> WorkloadEnvironmentIdentityConfig:
         if len(set(self.required)) != len(self.required):
             raise ValueError("environment identity requirements must be unique")
+        providers = {
+            "metal" if item.startswith("metal.") or item == "macos.build" else "cuda"
+            for item in self.required
+        }
+        if len(providers) > 1:
+            raise ValueError("one workload cannot mix CUDA and Metal identity requirements")
         return self
 
 
@@ -245,8 +259,8 @@ class _CommonExperimentConfig(ContractModel):
     primary_metric: str = "categorical_outcome"
     polarity: MetricPolarity = MetricPolarity.NEUTRAL
     estimand: str = "median_paired_log_ratio"
-    practical_threshold: Annotated[float, Field(ge=0)] = 0
-    confidence_level: Annotated[float, Field(gt=0, lt=1)] = 0.95
+    practical_threshold: Annotated[float, Field(ge=0, allow_inf_nan=False)] = 0
+    confidence_level: Annotated[float, Field(gt=0, lt=1, allow_inf_nan=False)] = 0.95
     random_seed: Annotated[int, Field(ge=0)] = 0
 
     @field_validator("primary_metric")
@@ -255,8 +269,7 @@ class _CommonExperimentConfig(ContractModel):
         if value.startswith("runtime_resource.") and value not in RUNTIME_RESOURCE_METRICS:
             raise ValueError(
                 "runtime-resource primary_metric must be one of "
-                "runtime_resource.peak_rss_bytes, runtime_resource.minimum_free_bytes, "
-                "or runtime_resource.staging_growth_bytes"
+                + ", ".join(sorted(RUNTIME_RESOURCE_METRICS))
             )
         return value
 
@@ -340,6 +353,10 @@ class _ScaledLegacyExperimentConfig(_LegacyExperimentConfig):
 
 class _PerformanceExperimentConfig(_CommonExperimentConfig):
     analysis: Literal["performance"] = "performance"
+    primary_metric_unit: str | None = None
+    measurement_series: MeasurementSeriesSelector | None = None
+    value_domain: Literal[MetricValueDomain.STRICTLY_POSITIVE] = MetricValueDomain.STRICTLY_POSITIVE
+    zero_policy: Literal[MetricZeroPolicy.REJECT] = MetricZeroPolicy.REJECT
     outcome_goal: Literal[None] = None
     minimum_attempts: Literal[None] = None
     maximum_attempts: Literal[None] = None
@@ -347,7 +364,7 @@ class _PerformanceExperimentConfig(_CommonExperimentConfig):
 
 class _OutcomeExperimentConfig(_CommonExperimentConfig):
     analysis: Literal["outcome"]
-    outcome_goal: ExperimentOutcomeGoal
+    outcome_goal: Literal[ExperimentOutcomeGoal.ABSENCE_OF_FAILURE]
     minimum_attempts: Annotated[int, Field(gt=0, le=1_000)] | None = None
     maximum_attempts: Annotated[int, Field(gt=0, le=1_000)] | None = None
 
@@ -787,6 +804,17 @@ class ProjectConfig(ContractModel):
         max_length=1_000,
     )
 
+    @field_validator("inference_servers", "inference_scenarios")
+    @classmethod
+    def inference_names_are_safe_identifiers(cls, value: dict[str, object]) -> dict[str, object]:
+        invalid = sorted(name for name in value if _DECLARATION_NAME.fullmatch(name) is None)
+        if invalid:
+            raise ValueError(
+                "inference declaration names must match "
+                "[A-Za-z0-9][A-Za-z0-9._-]{0,99}: " + ", ".join(invalid)
+            )
+        return value
+
     @model_validator(mode="after")
     def experiments_reference_workloads(self) -> ProjectConfig:
         missing = sorted(
@@ -916,6 +944,42 @@ class _WorkloadConfigurationStatus(ContractModel):
     config_path: Literal["flameox.toml"] = "flameox.toml"
 
 
+def _configure_workload_action() -> ManualAction:
+    return manual_action(
+        "Supply a complete named workload definition before continuing.",
+        suggested_action=ActionId.CONFIGURE_WORKLOAD,
+        missing_arguments=("name", "operation", "argv"),
+    )
+
+
+def _list_workloads_action() -> ToolAction:
+    return tool_action(ActionId.LIST_DECLARED_WORKFLOWS)
+
+
+def _configure_request_action(
+    request: ConfigureWorkloadRequest,
+    *,
+    operation: ConfigurationOperation,
+    expected_configuration_id: str | None,
+) -> ToolAction:
+    config = request.config.model_dump(mode="json")
+    return tool_action(
+        ActionId.CONFIGURE_WORKLOAD,
+        name=request.name,
+        operation=operation.value,
+        argv=config["argv"],
+        cwd=config["cwd"],
+        timeout_seconds=config["timeout_seconds"],
+        parameters=config["parameters"],
+        environment=config["environment"],
+        oracle=config["oracle"],
+        requirements=config["requirements"],
+        writable_paths=config["writable_paths"],
+        identity=config["identity"],
+        expected_configuration_id=expected_configuration_id,
+    )
+
+
 class _UnavailableWorkloadConfigurationStatus(_WorkloadConfigurationStatus):
     configuration_id: Literal[None] = None
     workload_names: tuple[()] = ()
@@ -923,7 +987,7 @@ class _UnavailableWorkloadConfigurationStatus(_WorkloadConfigurationStatus):
         tuple[Annotated[str, Field(max_length=512)], ...],
         Field(min_length=1, max_length=8),
     ]
-    next_tool: Literal["configure_workload"] = "configure_workload"
+    next_action: ManualAction = Field(default_factory=_configure_workload_action)
 
 
 class MissingWorkloadConfigurationStatus(_UnavailableWorkloadConfigurationStatus):
@@ -945,17 +1009,17 @@ class ValidWorkloadConfigurationStatus(_WorkloadConfigurationStatus):
         tuple[Annotated[str, Field(max_length=512)], ...],
         Field(max_length=8),
     ] = ()
-    next_tool: Literal["configure_workload", "list_declared_workflows"]
+    next_action: NextAction
 
     @model_validator(mode="after")
     def recovery_matches_declared_workloads(self) -> ValidWorkloadConfigurationStatus:
         expected_diagnostics = (
             () if self.workload_names else ("No named workloads are declared yet.",)
         )
-        expected_next_tool = (
-            "list_declared_workflows" if self.workload_names else "configure_workload"
+        expected_next_action: NextAction = (
+            _list_workloads_action() if self.workload_names else _configure_workload_action()
         )
-        if self.diagnostics != expected_diagnostics or self.next_tool != expected_next_tool:
+        if self.diagnostics != expected_diagnostics or self.next_action != expected_next_action:
             raise ValueError("valid configuration recovery must match declared workloads")
         return self
 
@@ -977,7 +1041,7 @@ class WorkloadConfigurationResult(ContractModel):
     configuration_id: str
     workload_definition_id: str
     configuration_source: Literal["agent"] = "agent"
-    next_tool: Literal["list_declared_workflows"] = "list_declared_workflows"
+    next_action: ToolAction = Field(default_factory=_list_workloads_action)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -1210,7 +1274,8 @@ class WorkloadService:
                     "Call configure_workload with a named command definition, then retry "
                     "discovery.",
                 ),
-                details={"next_tool": "configure_workload", "config_path": "flameox.toml"},
+                details={"config_path": "flameox.toml"},
+                next_action=_configure_workload_action(),
             ) from exc
         except (tomllib.TOMLDecodeError, ValueError) as exc:
             raise DomainError(
@@ -1223,8 +1288,8 @@ class WorkloadService:
                 details={
                     "config_path": "flameox.toml",
                     "invalid_configuration": True,
-                    "next_tool": "configure_workload",
                 },
+                next_action=_configure_workload_action(),
             ) from exc
 
     def configuration_status(self) -> WorkloadConfigurationStatus:
@@ -1243,7 +1308,9 @@ class WorkloadService:
             configuration_id=digest_model(project),
             workload_names=tuple(sorted(project.workloads)),
             diagnostics=(("No named workloads are declared yet.",) if not has_workloads else ()),
-            next_tool=("list_declared_workflows" if has_workloads else "configure_workload"),
+            next_action=(
+                _list_workloads_action() if has_workloads else _configure_workload_action()
+            ),
         )
 
     def names(self) -> tuple[str, ...]:
@@ -1269,16 +1336,16 @@ class WorkloadService:
         query_id = digest_model({"kind": kind})
         offset = 0
         if cursor is not None:
-            position = CursorCodec.decode(
-                cursor,
-                namespace="declared_workflows",
-                snapshot_id=configuration_id,
-                scope_digest=query_id,
+            position = cast(
+                tuple[int],
+                self.workspace.cursors.resolve(
+                    cursor,
+                    namespace=CursorNamespace.DECLARED_WORKFLOWS,
+                    snapshot_id=configuration_id,
+                    scope_digest=query_id,
+                ),
             )
-            try:
-                offset = int(position[0])
-            except (IndexError, TypeError, ValueError) as exc:
-                raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.") from exc
+            offset = position[0]
 
         names = sorted(
             project.workloads
@@ -1293,8 +1360,8 @@ class WorkloadService:
         selected = summaries[offset : offset + limit]
         next_offset = offset + len(selected)
         next_cursor = (
-            CursorCodec.encode(
-                namespace="declared_workflows",
+            self.workspace.cursors.issue(
+                namespace=CursorNamespace.DECLARED_WORKFLOWS,
                 snapshot_id=configuration_id,
                 scope_digest=query_id,
                 position=(next_offset,),
@@ -1515,7 +1582,11 @@ class WorkloadService:
                 ErrorCode.WORKSPACE_INVALID,
                 f"Unknown declared {kind} {name!r}.",
                 remediation=(f"Call list_declared_workflows with kind={kind!r}.",),
-                details={"next_tool": "list_declared_workflows", "kind": kind},
+                details={"kind": kind},
+                next_action=tool_action(
+                    ActionId.LIST_DECLARED_WORKFLOWS,
+                    kind=kind.value,
+                ),
             ) from exc
 
     def definition(self, name: str) -> WorkloadDefinition:
@@ -1565,9 +1636,12 @@ class WorkloadService:
                             details={
                                 "config_path": "flameox.toml",
                                 "invalid_configuration": True,
-                                "next_tool": "manual",
                                 "diagnostic": str(candidate_error)[:500],
                             },
+                            next_action=manual_action(
+                                "Repair flameox.toml manually, then verify its status.",
+                                suggested_action=ActionId.INSPECT_WORKLOAD_CONFIGURATION,
+                            ),
                         ) from error
                     recovered_invalid = True
             else:
@@ -1584,8 +1658,8 @@ class WorkloadService:
                         ),
                         details={
                             "configuration_id": current_id,
-                            "next_tool": "workload_configuration_status",
                         },
+                        next_action=tool_action(ActionId.INSPECT_WORKLOAD_CONFIGURATION),
                     )
                 action = (
                     ConfigurationAction.CREATED
@@ -1602,7 +1676,11 @@ class WorkloadService:
                         ErrorCode.REVISION_CONFLICT,
                         f"Cannot replace workload {name!r} because it is not declared.",
                         remediation=("Retry with operation='create' for a new workload.",),
-                        details={"next_tool": "configure_workload"},
+                        next_action=_configure_request_action(
+                            request,
+                            operation=ConfigurationOperation.CREATE,
+                            expected_configuration_id=None,
+                        ),
                     )
                 if request.expected_configuration_id != current_id:
                     raise DomainError(
@@ -1614,8 +1692,8 @@ class WorkloadService:
                         ),
                         details={
                             "configuration_id": current_id,
-                            "next_tool": "workload_configuration_status",
                         },
+                        next_action=tool_action(ActionId.INSPECT_WORKLOAD_CONFIGURATION),
                     )
                 action = ConfigurationAction.UPDATED
 
@@ -1775,6 +1853,7 @@ class WorkloadService:
             cwd,
             environment,
             config.executable_policy,
+            workload_name=name,
         )
         command = CommandSpec(
             argv=(
@@ -1824,6 +1903,7 @@ class WorkloadService:
             cwd,
             environment,
             config.executable_policy,
+            workload_name=name,
         )
         return ResolvedOracle(
             strength=config.oracle.strength,
@@ -1889,6 +1969,8 @@ class WorkloadService:
         cwd: Path,
         environment: dict[str, str],
         policy: ExecutableTrustPolicy,
+        *,
+        workload_name: str,
     ) -> ResolvedExecutable:
         effective_environment = dict(environment)
         if "PATH" not in effective_environment and "PATH" in os.environ:
@@ -1910,13 +1992,17 @@ class WorkloadService:
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 f"Workload executable {value!r} is unavailable.",
                 details={
-                    "next_tool": "get_declared_workflow",
                     "missing_executable": value,
                     "requirement_kind": "workload_executable",
                 },
                 remediation=(
                     f"Install executable {value!r} in the workload environment or configure a "
                     "named workload using an available executable, then retry planning.",
+                ),
+                next_action=tool_action(
+                    ActionId.GET_DECLARED_WORKFLOW,
+                    kind="workload",
+                    name=workload_name,
                 ),
             ) from error
 

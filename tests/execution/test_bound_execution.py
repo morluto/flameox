@@ -13,6 +13,8 @@ from flameox.domain.executables import (
 )
 from flameox.execution import ExecutionRequest, SubprocessBroker
 
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
+
 
 @pytest.mark.anyio
 async def test_broker_executes_the_bound_executable_without_repeating_path_search(

@@ -17,6 +17,8 @@ from flameox.domain import (
 from flameox.domain.models import ExecutionRunManifest
 from flameox.storage import RunStore, Workspace
 
+pytestmark = pytest.mark.unit
+
 DIGEST = "sha256:" + ("a" * 64)
 OBSERVED_AT = datetime(2025, 1, 2, 3, 4, tzinfo=UTC)
 

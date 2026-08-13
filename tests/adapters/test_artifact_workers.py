@@ -3,50 +3,111 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import TypeAdapter
 
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.domain import DomainError, ErrorCode
+from flameox.models import ContractModel
 from flameox.storage import Workspace
+from flameox.workers.protocol import (
+    WorkerDefinition,
+    WorkerOperationId,
+    WorkerOutputFile,
+)
+
+pytestmark = pytest.mark.unit
 
 
-def _read_response(tmp_path: Path, payload: str) -> dict[str, object]:
+class _Request(ContractModel):
+    value: int
+
+
+class _Response(ContractModel):
+    value: int
+
+
+_DEFINITION = WorkerDefinition(
+    operation=WorkerOperationId.OTLP_PARSE,
+    module="example.worker",
+    request=TypeAdapter(_Request),
+    response=TypeAdapter(_Response),
+    name="example",
+    implementation="example.worker/v1",
+)
+
+
+def test_typed_worker_response_is_bound_and_exact(tmp_path: Path) -> None:
     worker = IsolatedWorkerHarness(Workspace.initialize(tmp_path))
     response = tmp_path / "response.json"
-    response.write_text(payload)
-    return worker._load_response(0, b"", response, name="test")
+    response.write_text(
+        '{"transport":"flameox.artifact-worker/v1","request_id":"'
+        + "a" * 32
+        + '","operation":"otlp.parse","implementation":"example.worker/v1",'
+        '"kind":"success","payload":{"value":7}}'
+    )
 
+    parsed = worker._load_typed_response(
+        0,
+        b"",
+        response,
+        definition=_DEFINITION,
+        request_id="a" * 32,
+    )
 
-def test_worker_response_parses_success_payload_without_assuming_its_shape(tmp_path: Path) -> None:
-    response = _read_response(tmp_path, '{"ok":true,"rows":[{"id":1}],"truncated":false}')
-
-    assert response == {"ok": True, "rows": [{"id": 1}], "truncated": False}
-
-
-def test_worker_response_preserves_declared_failure_code(tmp_path: Path) -> None:
-    with pytest.raises(DomainError) as error:
-        _read_response(
-            tmp_path,
-            '{"ok":false,"code":"CAPABILITY_UNAVAILABLE","message":"not installed"}',
-        )
-
-    assert error.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
-    assert error.value.message == "not installed"
+    assert parsed == _Response(value=7)
 
 
 @pytest.mark.parametrize(
-    "payload",
+    ("exit_code", "request_id", "implementation"),
     [
-        "[]",
-        '{"ok":false,"code":"UNKNOWN","message":"drift"}',
-        '{"ok":false,"code":"PROCESS_FAILED"}',
-        "not json",
+        (1, "a" * 32, "example.worker/v1"),
+        (0, "b" * 32, "example.worker/v1"),
+        (0, "a" * 32, "example.worker/v2"),
     ],
 )
-def test_worker_response_refuses_malformed_or_drifted_envelopes(
+def test_typed_worker_rejects_exit_or_identity_mismatch(
     tmp_path: Path,
-    payload: str,
+    exit_code: int,
+    request_id: str,
+    implementation: str,
 ) -> None:
-    with pytest.raises(DomainError) as error:
-        _read_response(tmp_path, payload)
+    worker = IsolatedWorkerHarness(Workspace.initialize(tmp_path))
+    response = tmp_path / "response.json"
+    response.write_text(
+        '{"transport":"flameox.artifact-worker/v1","request_id":"'
+        + request_id
+        + '","operation":"otlp.parse","implementation":"'
+        + implementation
+        + '","kind":"success","payload":{"value":7}}'
+    )
 
-    assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
+    with pytest.raises(DomainError):
+        worker._load_typed_response(
+            exit_code,
+            b"",
+            response,
+            definition=_DEFINITION,
+            request_id="a" * 32,
+        )
+
+
+def test_worker_output_file_rejects_symlink(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    worker = IsolatedWorkerHarness(workspace)
+    job_root = workspace.paths.staging / "worker-output-proof"
+    job_root.mkdir(parents=True)
+    outside = tmp_path / "outside.jsonl"
+    outside.write_bytes(b"{}\n")
+    (job_root / "projection.jsonl").symlink_to(outside)
+    output = WorkerOutputFile(
+        role="projection",
+        relative_path="projection.jsonl",
+        media_type="application/x-ndjson",
+        byte_length=3,
+        sha256="sha256:" + "0" * 64,
+    )
+
+    with pytest.raises(DomainError) as error:
+        worker.validate_output_file(job_root, output)
+
+    assert error.value.code is ErrorCode.EXECUTION_REFUSED

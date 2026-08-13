@@ -17,6 +17,8 @@ from flameox.domain import (
 from flameox.storage import Workspace
 from flameox.storage.control_plane import ControlPlane, ControlRelationship
 
+pytestmark = [pytest.mark.integration, pytest.mark.serial]
+
 
 def test_investigation_hypothesis_revision_uses_compare_and_swap(
     tmp_path: Path,

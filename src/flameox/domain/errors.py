@@ -3,6 +3,8 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
+from flameox.action_graph import NextAction
+
 
 class ErrorCode(StrEnum):
     INVALID_ARGUMENTS = "INVALID_ARGUMENTS"
@@ -18,11 +20,13 @@ class ErrorCode(StrEnum):
     ARTIFACT_TOO_LARGE = "ARTIFACT_TOO_LARGE"
     ARTIFACT_INTEGRITY_FAILED = "ARTIFACT_INTEGRITY_FAILED"
     ARTIFACT_PARSE_FAILED = "ARTIFACT_PARSE_FAILED"
+    ADAPTER_INCOMPATIBLE = "ADAPTER_INCOMPATIBLE"
     EVIDENCE_SCHEMA_MISMATCH = "EVIDENCE_SCHEMA_MISMATCH"
     COMPARISON_INVALID = "COMPARISON_INVALID"
     QUERY_BUDGET_EXCEEDED = "QUERY_BUDGET_EXCEEDED"
     STORAGE_QUOTA_EXCEEDED = "STORAGE_QUOTA_EXCEEDED"
     WRITE_LOCK_TIMEOUT = "WRITE_LOCK_TIMEOUT"
+    LOCK_ORDER_VIOLATION = "LOCK_ORDER_VIOLATION"
     SENSITIVE_ARTIFACT_REFUSED = "SENSITIVE_ARTIFACT_REFUSED"
     REVISION_CONFLICT = "REVISION_CONFLICT"
     STALE_CURSOR = "STALE_CURSOR"
@@ -39,14 +43,22 @@ class DomainError(Exception):
         details: dict[str, Any] | None = None,
         remediation: tuple[str, ...] = (),
         run_id: str | None = None,
+        next_action: NextAction | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.retryable = retryable
-        self.details = details or {}
+        self.details = dict(details or {})
         self.remediation = remediation
         self.run_id = run_id
+        forbidden_recovery_fields = {"next_tool", "next_arguments"} & self.details.keys()
+        if forbidden_recovery_fields:
+            raise ValueError(
+                "Legacy recovery fields are not accepted; pass a validated next_action "
+                f"instead: {', '.join(sorted(forbidden_recovery_fields))}."
+            )
+        self.next_action = next_action
 
     def to_detail(self) -> dict[str, Any]:
         return {
@@ -56,4 +68,7 @@ class DomainError(Exception):
             "details": self.details,
             "remediation": list(self.remediation),
             "run_id": self.run_id,
+            "next_action": (
+                self.next_action.model_dump(mode="json") if self.next_action is not None else None
+            ),
         }

@@ -17,6 +17,8 @@ from flameox.execution import (
 )
 from flameox.storage import Workspace
 
+pytestmark = pytest.mark.integration
+
 
 class _NcuProbeBroker(SubprocessBroker):
     def __init__(

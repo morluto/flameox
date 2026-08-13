@@ -9,6 +9,8 @@ from flameox.adapters.builtins import build_capture_invocation
 from flameox.adapters.options import bind_adapter_options
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 
+pytestmark = pytest.mark.unit
+
 
 def test_rocprofv3_invocation_uses_only_selected_pftrace_domains(tmp_path: Path) -> None:
     bound = bind_adapter_options(

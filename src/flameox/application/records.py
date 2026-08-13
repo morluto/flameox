@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
-from typing import ClassVar
+from typing import Annotated, cast
 
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, model_validator
 
-from flameox.application.recoverable_move import validate_manifest_id
-from flameox.catalog import Catalog
+from flameox.application.evidence_lookup import EvidenceLookupService
+from flameox.application.evidence_relations import (
+    assessment_relation_error,
+    qualify_evidence_relation,
+)
 from flameox.domain import (
-    CursorCodec,
+    CursorNamespace,
     DomainError,
     ErrorCode,
     EvidenceLevel,
@@ -27,7 +30,7 @@ from flameox.domain import (
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.pagination import CursorPageContract
-from flameox.storage import ArtifactStore, ControlRecordStore, RunStore, Workspace
+from flameox.storage import ControlRecordStore, CursorStore, Workspace
 from flameox.storage.control_plane import ControlRelationship
 
 
@@ -64,9 +67,16 @@ class RecordFindingRequest(ContractModel):
     lifecycle: FindingLifecycle = FindingLifecycle.ACTIVE
     limitations: tuple[str, ...] = ()
     next_experiments: tuple[dict[str, JsonValue], ...] = ()
-    evidence: tuple[EvidenceInput, ...] = ()
+    evidence: Annotated[tuple[EvidenceInput, ...], Field(max_length=50)] = ()
     finding_id: str | None = None
     expected_revision: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def evidence_edges_are_unique(self) -> RecordFindingRequest:
+        edges = tuple((item.ref_type, item.ref_id, item.relation) for item in self.evidence)
+        if len(edges) != len(set(edges)):
+            raise ValueError("finding evidence relations must be unique")
+        return self
 
 
 class FindingResult(ContractModel):
@@ -97,6 +107,7 @@ class InvestigationService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
         self.publisher = GenerationPublisher(workspace)
+        self.evidence = EvidenceLookupService(workspace)
         self.investigations = ControlRecordStore(
             workspace,
             kind="investigations",
@@ -142,30 +153,26 @@ class InvestigationService:
         return investigation
 
     def list(self, *, limit: int, cursor: str | None = None) -> InvestigationListResult:
-        head = self.workspace.corpus.read_head()
-        offset = _decode_offset(
-            cursor,
-            namespace="investigations",
-            snapshot_id=head.commit_id,
-        )
-        values = tuple(
-            sorted(
-                self.investigations.list(),
-                key=lambda item: (item.created_at, item.investigation_id),
-                reverse=True,
+        with self.evidence.session() as evidence:
+            offset = _decode_offset(
+                cursor,
+                cursors=self.workspace.cursors,
+                namespace=CursorNamespace.INVESTIGATIONS,
+                snapshot_id=evidence.commit_id,
             )
-        )
-        selected = values[offset : offset + limit]
+            selected, total = evidence.list_investigations(offset=offset, limit=limit)
+            corpus_commit_id = evidence.commit_id
         next_offset = offset + len(selected)
         return InvestigationListResult(
-            corpus_commit_id=head.commit_id,
+            corpus_commit_id=corpus_commit_id,
             investigations=selected,
-            total=len(values),
+            total=total,
             next_cursor=_encode_offset(
-                namespace="investigations",
-                snapshot_id=head.commit_id,
+                cursors=self.workspace.cursors,
+                namespace=CursorNamespace.INVESTIGATIONS,
+                snapshot_id=corpus_commit_id,
                 offset=next_offset,
-                total=len(values),
+                total=total,
             ),
         )
 
@@ -251,17 +258,10 @@ class InvestigationService:
 
 
 class FindingService:
-    _TABLES: ClassVar[dict[str, tuple[str, str]]] = {
-        "analysis": ("analyses", "analysis_id"),
-        "comparison": ("comparisons", "comparison_id"),
-        "observation": ("observations", "observation_id"),
-        "run_set": ("run_sets", "run_set_id"),
-        "trial": ("trials", "trial_id"),
-    }
-
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
         self.publisher = GenerationPublisher(workspace)
+        self.evidence = EvidenceLookupService(workspace)
         self.findings = ControlRecordStore(
             workspace,
             kind="findings",
@@ -271,10 +271,14 @@ class FindingService:
         )
 
     def record(self, request: RecordFindingRequest) -> FindingResult:
-        if request.assessment is FindingAssessment.SUPPORTED and not request.evidence:
+        relation_error = assessment_relation_error(
+            request.assessment,
+            tuple(item.relation for item in request.evidence),
+        )
+        if relation_error is not None:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
-                "A supported finding requires at least one evidence reference.",
+                relation_error,
             )
         if request.evidence_level is EvidenceLevel.OBSERVED and any(
             item.ref_type
@@ -288,19 +292,28 @@ class FindingService:
                 ErrorCode.WORKSPACE_INVALID,
                 "Derived analyses cannot be labeled as directly observed evidence.",
             )
-        for item in request.evidence:
-            self._require_reference(item)
-            if (
-                request.assessment is FindingAssessment.SUPPORTED
-                and item.relation is EvidenceRelation.SUPPORTS
-                and item.ref_type is EvidenceReferenceType.COMPARISON
-                and not self._comparison_can_support(item.ref_id)
-            ):
-                raise DomainError(
-                    ErrorCode.COMPARISON_INVALID,
-                    "An invalid or inconclusive comparison cannot support a finding.",
-                    details={"comparison_id": item.ref_id},
+        with self.evidence.session() as evidence:
+            for item in request.evidence:
+                qualification = qualify_evidence_relation(
+                    evidence,
+                    ref_type=item.ref_type,
+                    ref_id=item.ref_id,
+                    relation=item.relation,
                 )
+                if not qualification.qualified:
+                    raise DomainError(
+                        (
+                            ErrorCode.COMPARISON_INVALID
+                            if item.ref_type is EvidenceReferenceType.COMPARISON
+                            else ErrorCode.WORKSPACE_INVALID
+                        ),
+                        f"Evidence cannot carry its declared relation: {qualification.reason}.",
+                        details={
+                            "ref_type": item.ref_type.value,
+                            "ref_id": item.ref_id,
+                            "relation": item.relation.value,
+                        },
+                    )
         relationships = tuple(
             ControlRelationship(
                 relationship=item.relation.value,
@@ -359,6 +372,7 @@ class FindingService:
             EvidenceReference(
                 owner_type="finding",
                 owner_id=finding.finding_id,
+                owner_revision=finding.revision,
                 ref_type=item.ref_type,
                 ref_id=item.ref_id,
                 relation=item.relation,
@@ -368,7 +382,10 @@ class FindingService:
         published = self.publisher.publish_rows(
             {
                 "findings": [self._finding_row(finding)],
-                "evidence_refs": [reference.model_dump(mode="python") for reference in references],
+                "evidence_refs": [
+                    reference.model_dump(mode="python", exclude={"schema_version"})
+                    for reference in references
+                ],
             },
             publisher="flameox.findings",
             publisher_version="1",
@@ -380,57 +397,28 @@ class FindingService:
         )
 
     def list(self, *, limit: int, cursor: str | None = None) -> FindingListResult:
-        head = self.workspace.corpus.read_head()
-        offset = _decode_offset(cursor, namespace="findings", snapshot_id=head.commit_id)
-        values = tuple(
-            sorted(
-                self.findings.list(),
-                key=lambda item: (item.created_at, item.finding_id),
-                reverse=True,
+        with self.evidence.session() as evidence:
+            offset = _decode_offset(
+                cursor,
+                cursors=self.workspace.cursors,
+                namespace=CursorNamespace.FINDINGS,
+                snapshot_id=evidence.commit_id,
             )
-        )
-        selected = values[offset : offset + limit]
+            selected, total = evidence.list_findings(offset=offset, limit=limit)
+            corpus_commit_id = evidence.commit_id
         next_offset = offset + len(selected)
         return FindingListResult(
-            corpus_commit_id=head.commit_id,
+            corpus_commit_id=corpus_commit_id,
             findings=selected,
-            total=len(values),
+            total=total,
             next_cursor=_encode_offset(
-                namespace="findings",
-                snapshot_id=head.commit_id,
+                cursors=self.workspace.cursors,
+                namespace=CursorNamespace.FINDINGS,
+                snapshot_id=corpus_commit_id,
                 offset=next_offset,
-                total=len(values),
+                total=total,
             ),
         )
-
-    def _require_reference(self, item: EvidenceInput) -> None:
-        if item.ref_type is EvidenceReferenceType.RUN:
-            RunStore(self.workspace).read(item.ref_id)
-            return
-        if item.ref_type is EvidenceReferenceType.ARTIFACT:
-            ArtifactStore(self.workspace).get(item.ref_id)
-            return
-        if item.ref_type is EvidenceReferenceType.GENERATION:
-            validate_manifest_id(item.ref_id, kind="generation")
-            path = self.workspace.paths.generations / item.ref_id / "manifest.json"
-            if path.is_file():
-                return
-            raise DomainError(
-                ErrorCode.WORKSPACE_INVALID,
-                f"Generation {item.ref_id!r} does not exist.",
-            )
-        table = self._TABLES[item.ref_type]
-        catalog = Catalog(self.workspace)
-        with catalog.open_snapshot(catalog.pin()) as snapshot:
-            found = snapshot.execute(
-                f'SELECT 1 FROM "{table[0]}" WHERE "{table[1]}" = ? LIMIT 1',
-                (item.ref_id,),
-            ).fetchone()
-        if found is None:
-            raise DomainError(
-                ErrorCode.WORKSPACE_INVALID,
-                f"{item.ref_type} evidence {item.ref_id!r} does not exist.",
-            )
 
     def _finding_row(self, value: Finding) -> dict[str, object]:
         return {
@@ -453,45 +441,39 @@ class FindingService:
             ),
         }
 
-    def _comparison_can_support(self, comparison_id: str) -> bool:
-        catalog = Catalog(self.workspace)
-        with catalog.open_snapshot(catalog.pin()) as snapshot:
-            row = snapshot.execute(
-                "SELECT validity, decision FROM comparisons WHERE comparison_id = ? "
-                "ORDER BY published_at DESC LIMIT 1",
-                (comparison_id,),
-            ).fetchone()
-        return (
-            row is not None
-            and row[0] == "valid"
-            and row[1] not in {"inconclusive", "descriptive_only"}
-        )
 
-
-def _decode_offset(cursor: str | None, *, namespace: str, snapshot_id: str) -> int:
+def _decode_offset(
+    cursor: str | None,
+    *,
+    cursors: CursorStore,
+    namespace: CursorNamespace,
+    snapshot_id: str,
+) -> int:
     if cursor is None:
         return 0
-    position = CursorCodec.decode(
-        cursor,
-        namespace=namespace,
-        snapshot_id=snapshot_id,
-        scope_digest="all",
+    position = cast(
+        tuple[int],
+        cursors.resolve(
+            cursor,
+            namespace=namespace,
+            snapshot_id=snapshot_id,
+            scope_digest="all",
+        ),
     )
-    if len(position) != 1 or not isinstance(position[0], int):
-        raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.")
     return position[0]
 
 
 def _encode_offset(
     *,
-    namespace: str,
+    cursors: CursorStore,
+    namespace: CursorNamespace,
     snapshot_id: str,
     offset: int,
     total: int,
 ) -> str | None:
     if offset >= total:
         return None
-    return CursorCodec.encode(
+    return cursors.issue(
         namespace=namespace,
         snapshot_id=snapshot_id,
         scope_digest="all",

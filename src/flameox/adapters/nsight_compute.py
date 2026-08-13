@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,10 @@ from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
+from flameox.workers.nsight_compute_contract import (
+    NSIGHT_COMPUTE_WORKER,
+    NsightComputeWorkerRequest,
+)
 
 _NCU_INSTALL_ROOTS = (
     Path("/opt/nvidia/nsight-compute"),
@@ -21,6 +26,9 @@ _NCU_INSTALL_ROOTS = (
 )
 _WORKER_RESPONSE_OVERHEAD_BYTES = 64 * 1024
 _WORKER_RESPONSE_BYTES_PER_ROW = 16 * 1024
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+_UINT64_MAX = 2**64 - 1
 
 
 class NsightComputeExtractionResult(ContractModel):
@@ -153,30 +161,23 @@ class NsightComputeExtractor:
             )
         max_metrics = normalized_rows // 2
         max_observations = normalized_rows - max_metrics
-        response = IsolatedWorkerHarness(self.workspace).run_sync(
-            "flameox.workers.nsight_compute",
-            {
-                "artifact_path": str(artifact.payload_path),
-                "interface_path": str(interface),
-                "max_ranges": min(1_000, max_observations),
-                "max_actions": min(10_000, max_observations),
-                "max_metrics": max_metrics,
-                "max_observations": max_observations,
-            },
-            name="Nsight Compute",
-            timeout_seconds=120,
+        response = IsolatedWorkerHarness(self.workspace).run_typed_sync(
+            NSIGHT_COMPUTE_WORKER,
+            NsightComputeWorkerRequest(
+                artifact_path=str(artifact.payload_path),
+                interface_path=str(interface),
+                max_ranges=min(1_000, max_observations),
+                max_actions=min(10_000, max_observations),
+                max_metrics=max_metrics,
+                max_observations=max_observations,
+            ),
         )
-        measurements = _dict_list(response.get("measurements"), "measurements")
-        observations = _dict_list(response.get("observations"), "observations")
-        metric_ids = _string_list(response.get("metric_ids"), "metric_ids")
-        section_ids = _string_list(response.get("section_ids"), "section_ids")
-        limitations = _string_list(response.get("limitations"), "limitations")
-        report_version = response.get("report_version")
-        if not isinstance(report_version, str):
-            raise DomainError(
-                ErrorCode.ARTIFACT_PARSE_FAILED,
-                "The ncu_report worker omitted its report version.",
-            )
+        measurements = [dict(item) for item in response.measurements]
+        observations = [dict(item) for item in response.observations]
+        metric_ids = list(response.metric_ids)
+        section_ids = list(response.section_ids)
+        limitations = list(response.limitations)
+        report_version = response.report_version
         schema_fingerprint = digest_model(
             {
                 "compatibility_family": self.compatibility_family,
@@ -207,7 +208,7 @@ class NsightComputeExtractor:
                         "producer_version": registration.producer_version,
                         "report_interface_sha256": report_interface_sha256,
                         "report_version": report_version,
-                        "roofline_present": bool(response.get("roofline_present", False)),
+                        "roofline_present": response.roofline_present,
                         "schema_fingerprint": schema_fingerprint,
                         "section_ids": section_ids,
                     },
@@ -234,11 +235,11 @@ class NsightComputeExtractor:
             artifact_id=registration.artifact_id,
             producer_version=registration.producer_version,
             report_version=report_version,
-            range_count=_nonnegative_int(response.get("range_count"), "range_count"),
-            action_count=_nonnegative_int(response.get("action_count"), "action_count"),
+            range_count=response.range_count,
+            action_count=response.action_count,
             metric_count=len(measurements),
             observation_count=len(observations),
-            roofline_present=bool(response.get("roofline_present", False)),
+            roofline_present=response.roofline_present,
             report_interface_sha256=report_interface_sha256,
             schema_fingerprint=schema_fingerprint,
             corpus_commit_id=published.commit.commit_id,
@@ -255,6 +256,46 @@ class NsightComputeExtractor:
         value = metric.get("value")
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise DomainError(ErrorCode.ARTIFACT_PARSE_FAILED, "Invalid numeric metric value.")
+        provider_value_kind = metric.get("provider_value_kind")
+        if not isinstance(provider_value_kind, str):
+            raise DomainError(
+                ErrorCode.ADAPTER_INCOMPATIBLE,
+                "The ncu_report worker omitted the provider numeric value kind.",
+            )
+        value_int: int | None = None
+        value_float: float | None = None
+        value_uint: int | None = None
+        normalized_value_kind: str
+        if provider_value_kind in {"uint32", "uint64"}:
+            maximum = 2**32 - 1 if provider_value_kind == "uint32" else _UINT64_MAX
+            if not isinstance(value, int) or not 0 <= value <= maximum:
+                raise DomainError(
+                    ErrorCode.ADAPTER_INCOMPATIBLE,
+                    "Unsigned ncu_report metric value contradicts its provider kind.",
+                )
+            value_uint = value
+            normalized_value_kind = "unsigned_integer"
+        elif provider_value_kind == "integer":
+            if not isinstance(value, int) or not _INT64_MIN <= value <= _INT64_MAX:
+                raise DomainError(
+                    ErrorCode.ADAPTER_INCOMPATIBLE,
+                    "Integer ncu_report metric cannot be represented as a signed int64.",
+                )
+            value_int = value
+            normalized_value_kind = "integer"
+        elif provider_value_kind in {"float", "float32", "float64"}:
+            if not isinstance(value, int | float) or not math.isfinite(value):
+                raise DomainError(
+                    ErrorCode.ADAPTER_INCOMPATIBLE,
+                    "Floating ncu_report metric is not finite.",
+                )
+            value_float = float(value)
+            normalized_value_kind = "floating"
+        else:
+            raise DomainError(
+                ErrorCode.ADAPTER_INCOMPATIBLE,
+                "The ncu_report worker returned an unsupported numeric value kind.",
+            )
         name = metric.get("name")
         unit = metric.get("unit")
         if not isinstance(name, str) or not isinstance(unit, str):
@@ -264,6 +305,7 @@ class NsightComputeExtractor:
             "action_name": str(metric.get("action_name")),
             "range_index": str(metric.get("range_index")),
             "report_provider": "nsight.compute",
+            "provider_value_kind": provider_value_kind,
         }
         return {
             "measurement_id": digest_model(
@@ -272,8 +314,10 @@ class NsightComputeExtractor:
             "run_id": run_id,
             "artifact_id": artifact_id,
             "name": name,
-            "value_int": value if isinstance(value, int) else None,
-            "value_float": value if isinstance(value, float) else None,
+            "value_int": value_int,
+            "value_float": value_float,
+            "value_uint": value_uint,
+            "value_kind": normalized_value_kind,
             "unit": unit or "unknown",
             "aggregation": "reported",
             "scope": "device",
@@ -319,21 +363,3 @@ class NsightComputeExtractor:
             "context": "extractor_provenance" if kind == "profile.extraction" else None,
             "evidence_level": "derived" if kind == "profile.extraction" else "observed",
         }
-
-
-def _dict_list(value: object, name: str) -> list[dict[str, Any]]:
-    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
-        raise DomainError(ErrorCode.ARTIFACT_PARSE_FAILED, f"Invalid ncu_report {name} payload.")
-    return value
-
-
-def _string_list(value: object, name: str) -> list[str]:
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise DomainError(ErrorCode.ARTIFACT_PARSE_FAILED, f"Invalid ncu_report {name} payload.")
-    return value
-
-
-def _nonnegative_int(value: object, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise DomainError(ErrorCode.ARTIFACT_PARSE_FAILED, f"Invalid ncu_report {name} value.")
-    return value

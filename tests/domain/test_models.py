@@ -29,6 +29,7 @@ from flameox.domain import (
     TrialOutcome,
     ValidationStatus,
     Variant,
+    VariantIdentityQuality,
     digest_model,
     effective_sensitivity,
     parse_managed_runtime_extras,
@@ -45,6 +46,8 @@ from flameox.domain.models import (
     parse_capture_plan,
 )
 from flameox.domain.scalars import FloatingValue, IntegerValue, NumericValue, parse_numeric_value
+
+pytestmark = pytest.mark.unit
 
 DIGEST = "sha256:" + ("a" * 64)
 SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src" / "flameox"
@@ -135,6 +138,7 @@ def test_variant_name_allows_empty_labels_with_a_bounded_length(name: str) -> No
             variant_id="variant",
             experiment_id="experiment",
             name=name,
+            identity_quality=VariantIdentityQuality.INCOMPLETE,
         ).name
         == name
     )
@@ -144,6 +148,7 @@ def test_variant_name_allows_empty_labels_with_a_bounded_length(name: str) -> No
             variant_id="variant",
             experiment_id="experiment",
             name="x" * 201,
+            identity_quality=VariantIdentityQuality.INCOMPLETE,
         )
 
 

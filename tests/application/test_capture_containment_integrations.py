@@ -18,6 +18,13 @@ from flameox.domain import (
 from flameox.storage import ArtifactStore, Workspace
 from tests.support.providers import systemd_user_scope_available
 
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.optional,
+    pytest.mark.process,
+    pytest.mark.serial,
+]
+
 
 @pytest.mark.anyio
 @pytest.mark.optional

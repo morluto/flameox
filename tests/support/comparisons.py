@@ -22,12 +22,43 @@ def benchmark(path: Path, values: tuple[float, float, float]) -> None:
     )
 
 
+def benchmark_workers(
+    path: Path,
+    workers: tuple[tuple[float, float, float], ...],
+) -> None:
+    runs = [
+        pyperf.Run(
+            values,
+            metadata={"name": "scan", "unit": "second", "loops": 1},
+            collect_metadata=False,
+        )
+        for values in workers
+    ]
+    pyperf.BenchmarkSuite([pyperf.Benchmark(runs)]).dump(str(path), replace=True)
+
+
 def imported_benchmark(
     workspace: Workspace,
     path: Path,
     values: tuple[float, float, float],
 ) -> str:
     benchmark(path, values)
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(
+            path=path,
+            kind=ArtifactKind.BENCHMARK_SAMPLES,
+        )
+    )
+    PyPerfExtractor(workspace).extract(imported.run.run_id)
+    return imported.run.run_id
+
+
+def imported_benchmark_workers(
+    workspace: Workspace,
+    path: Path,
+    workers: tuple[tuple[float, float, float], ...],
+) -> str:
+    benchmark_workers(path, workers)
     imported = ImportService(workspace).import_artifact(
         ImportArtifactRequest(
             path=path,

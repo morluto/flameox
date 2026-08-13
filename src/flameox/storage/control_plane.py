@@ -7,13 +7,16 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 from flameox.domain import DomainError, ErrorCode
 from flameox.domain.models import utc_now
+from flameox.domain.projections import ProjectionIntent, ProjectionIntentSpec, ProjectionState
 
 if TYPE_CHECKING:
     from flameox.storage.workspace import Workspace
+
+type RelationshipOwnershipQuality = Literal["exact", "legacy_current_only"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +25,20 @@ class ControlRelationship:
     target_kind: str
     target_id: str
     payload_json: str = "{}"
+    ownership_quality: RelationshipOwnershipQuality = "exact"
+
+
+@dataclass(frozen=True, slots=True)
+class CursorControlRecord:
+    schema_version: int
+    workspace_id: str
+    namespace: str
+    snapshot_id: str
+    scope_digest: str
+    position_json: str
+    created_at: datetime
+    expires_at: datetime
+    revoked_at: datetime | None
 
 
 _SCHEMA = (
@@ -47,6 +64,24 @@ _SCHEMA = (
     ON authorized_plans(family, expires_at)
     """,
     """
+    CREATE TABLE IF NOT EXISTS cursors (
+        cursor_digest TEXT PRIMARY KEY,
+        schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+        workspace_id TEXT NOT NULL,
+        namespace TEXT NOT NULL,
+        snapshot_id TEXT NOT NULL,
+        scope_digest TEXT NOT NULL,
+        position_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT
+    ) STRICT
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS cursors_expiry
+    ON cursors(expires_at)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS operations (
         operation_id TEXT PRIMARY KEY,
         kind TEXT NOT NULL,
@@ -58,6 +93,45 @@ _SCHEMA = (
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     ) STRICT
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS operations_kind_run_id
+    ON operations(kind, run_id) WHERE run_id IS NOT NULL
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS capture_admissions (
+        run_id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        process_id INTEGER NOT NULL,
+        process_start_identity TEXT NOT NULL,
+        boot_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        acquired_at TEXT NOT NULL,
+        heartbeat_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS capture_admissions_expiry
+    ON capture_admissions(expires_at)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS staging_owners (
+        path TEXT PRIMARY KEY,
+        owner_kind TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('active', 'released')),
+        process_id INTEGER NOT NULL,
+        process_start_identity TEXT NOT NULL,
+        boot_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS staging_owners_state
+    ON staging_owners(state, updated_at)
     """,
     """
     CREATE TABLE IF NOT EXISTS operation_revisions (
@@ -99,6 +173,48 @@ _SCHEMA = (
     ) STRICT
     """,
     """
+    CREATE TABLE IF NOT EXISTS projection_intents (
+        intent_id TEXT PRIMARY KEY,
+        domain_kind TEXT NOT NULL,
+        domain_id TEXT NOT NULL,
+        domain_revision INTEGER NOT NULL CHECK (domain_revision >= 0),
+        domain_digest TEXT NOT NULL,
+        projection_kind TEXT NOT NULL,
+        projection_schema_version INTEGER NOT NULL CHECK (projection_schema_version >= 1),
+        operation_digest TEXT NOT NULL UNIQUE,
+        spec_json TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'published', 'failed')),
+        generation_id TEXT,
+        corpus_commit_id TEXT,
+        failure_code TEXT,
+        failure_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (
+            domain_kind, domain_id, domain_revision,
+            projection_kind, projection_schema_version
+        ),
+        CHECK (
+            (state = 'pending' AND generation_id IS NULL AND corpus_commit_id IS NULL
+                AND failure_code IS NULL AND failure_message IS NULL)
+            OR
+            (state = 'published' AND generation_id IS NOT NULL AND corpus_commit_id IS NOT NULL
+                AND failure_code IS NULL AND failure_message IS NULL)
+            OR
+            (state = 'failed' AND generation_id IS NULL AND corpus_commit_id IS NULL
+                AND failure_code IS NOT NULL AND failure_message IS NOT NULL)
+        )
+    ) STRICT
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS projection_intents_state
+    ON projection_intents(state, updated_at, intent_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS projection_intents_domain
+    ON projection_intents(domain_kind, domain_id, domain_revision DESC)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS records (
         kind TEXT NOT NULL,
         record_id TEXT NOT NULL,
@@ -128,8 +244,42 @@ _SCHEMA = (
         target_kind TEXT NOT NULL,
         target_id TEXT NOT NULL,
         payload_json TEXT NOT NULL DEFAULT '{}',
+        ownership_quality TEXT NOT NULL DEFAULT 'exact'
+            CHECK (ownership_quality IN ('exact', 'legacy_current_only')),
         created_at TEXT NOT NULL,
         PRIMARY KEY (source_kind, source_id, relationship, target_kind, target_id)
+    ) STRICT
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS record_revision_relationships (
+        source_kind TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        source_revision INTEGER NOT NULL CHECK (source_revision >= 0),
+        relationship TEXT NOT NULL,
+        target_kind TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        ownership_quality TEXT NOT NULL
+            CHECK (ownership_quality IN ('exact', 'legacy_current_only')),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (
+            source_kind, source_id, source_revision, relationship, target_kind, target_id
+        ),
+        FOREIGN KEY (source_kind, source_id, source_revision)
+            REFERENCES record_revisions(kind, record_id, revision) ON DELETE CASCADE
+    ) STRICT
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS record_revision_relationship_sets (
+        source_kind TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        source_revision INTEGER NOT NULL CHECK (source_revision >= 0),
+        ownership_quality TEXT NOT NULL
+            CHECK (ownership_quality IN ('exact', 'legacy_current_only')),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (source_kind, source_id, source_revision),
+        FOREIGN KEY (source_kind, source_id, source_revision)
+            REFERENCES record_revisions(kind, record_id, revision) ON DELETE CASCADE
     ) STRICT
     """,
 )
@@ -138,7 +288,9 @@ _SCHEMA = (
 class ControlPlane:
     """The transactional authority for mutable workspace control state."""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 5
+    MAX_OPERATION_REVISIONS = 64
+    MAX_PROJECTION_SPEC_BYTES = 256 * 1024
 
     def __init__(self, workspace: Workspace) -> None:
         self.path = workspace.paths.control_plane
@@ -150,7 +302,7 @@ class ControlPlane:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 current_version = self._current_schema_version(connection)
-                if current_version not in {0, self.SCHEMA_VERSION}:
+                if current_version not in {0, 2, 3, 4, self.SCHEMA_VERSION}:
                     raise DomainError(
                         ErrorCode.WORKSPACE_INVALID,
                         "The SQLite control plane uses an incompatible schema. Create a new "
@@ -160,8 +312,12 @@ class ControlPlane:
                             "supported_schema_version": self.SCHEMA_VERSION,
                         },
                     )
+                if current_version == 2:
+                    self._prepare_v2_relationship_migration(connection)
                 for statement in _SCHEMA:
                     connection.execute(statement)
+                if current_version == 2:
+                    self._backfill_v2_relationships(connection)
                 connection.execute(
                     """
                     INSERT INTO control_plane_metadata(key, value) VALUES('schema_version', ?)
@@ -175,6 +331,45 @@ class ControlPlane:
                 raise
         with suppress(OSError):
             os.chmod(self.path, 0o600)
+
+    @staticmethod
+    def _prepare_v2_relationship_migration(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(relationships)").fetchall()
+        }
+        if "ownership_quality" not in columns:
+            connection.execute(
+                "ALTER TABLE relationships ADD COLUMN ownership_quality TEXT NOT NULL "
+                "DEFAULT 'legacy_current_only' CHECK (ownership_quality IN "
+                "('exact', 'legacy_current_only'))"
+            )
+
+    @staticmethod
+    def _backfill_v2_relationships(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO record_revision_relationship_sets(
+                source_kind, source_id, source_revision, ownership_quality, created_at
+            )
+            SELECT kind, record_id, current_revision, 'legacy_current_only', updated_at
+            FROM records
+            WHERE current_revision IS NOT NULL
+            """
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO record_revision_relationships(
+                source_kind, source_id, source_revision, relationship, target_kind,
+                target_id, payload_json, ownership_quality, created_at
+            )
+            SELECT r.source_kind, r.source_id, records.current_revision, r.relationship,
+                   r.target_kind, r.target_id, r.payload_json, 'legacy_current_only', r.created_at
+            FROM relationships AS r
+            JOIN records
+              ON records.kind = r.source_kind AND records.record_id = r.source_id
+            WHERE records.current_revision IS NOT NULL
+            """
+        )
 
     @staticmethod
     def _current_schema_version(connection: sqlite3.Connection) -> int:
@@ -293,6 +488,101 @@ class ControlPlane:
                 raise self._unavailable_plan()
             return intent_digest, payload_json
 
+    def issue_cursor(
+        self,
+        *,
+        cursor_digest: str,
+        workspace_id: str,
+        namespace: str,
+        snapshot_id: str,
+        scope_digest: str,
+        position_json: str,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> None:
+        try:
+            with self.transaction() as connection:
+                self._purge_cursors(connection, observed_at=created_at, limit=128)
+                connection.execute(
+                    """
+                    INSERT INTO cursors(
+                        cursor_digest, schema_version, workspace_id, namespace,
+                        snapshot_id, scope_digest, position_json, created_at, expires_at
+                    ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cursor_digest,
+                        workspace_id,
+                        namespace,
+                        snapshot_id,
+                        scope_digest,
+                        position_json,
+                        created_at.isoformat(),
+                        expires_at.isoformat(),
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                "A cursor handle collision occurred.",
+                retryable=True,
+            ) from exc
+
+    def read_cursor(
+        self,
+        *,
+        cursor_digest: str,
+        workspace_id: str,
+    ) -> CursorControlRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT schema_version, workspace_id, namespace, snapshot_id, scope_digest,
+                       position_json, created_at, expires_at, revoked_at
+                FROM cursors
+                WHERE cursor_digest = ? AND workspace_id = ?
+                """,
+                (cursor_digest, workspace_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return CursorControlRecord(
+            schema_version=int(row["schema_version"]),
+            workspace_id=str(row["workspace_id"]),
+            namespace=str(row["namespace"]),
+            snapshot_id=str(row["snapshot_id"]),
+            scope_digest=str(row["scope_digest"]),
+            position_json=str(row["position_json"]),
+            created_at=datetime.fromisoformat(str(row["created_at"])),
+            expires_at=datetime.fromisoformat(str(row["expires_at"])),
+            revoked_at=(
+                datetime.fromisoformat(str(row["revoked_at"]))
+                if row["revoked_at"] is not None
+                else None
+            ),
+        )
+
+    def revoke_cursor(
+        self,
+        *,
+        cursor_digest: str,
+        workspace_id: str,
+        revoked_at: datetime,
+    ) -> bool:
+        with self.transaction() as connection:
+            changed = connection.execute(
+                """
+                UPDATE cursors SET revoked_at = ?
+                WHERE cursor_digest = ? AND workspace_id = ? AND revoked_at IS NULL
+                """,
+                (revoked_at.isoformat(), cursor_digest, workspace_id),
+            ).rowcount
+        return changed == 1
+
+    def purge_cursors(self, *, observed_at: datetime, limit: int = 128) -> int:
+        with self.transaction() as connection:
+            return self._purge_cursors(connection, observed_at=observed_at, limit=limit)
+
     def create_record(
         self,
         *,
@@ -326,6 +616,7 @@ class ControlPlane:
                     connection,
                     source_kind=kind,
                     source_id=record_id,
+                    source_revision=revision,
                     relationships=relationships,
                     observed_at=observed_at,
                 )
@@ -365,7 +656,7 @@ class ControlPlane:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT relationship, target_kind, target_id, payload_json
+                SELECT relationship, target_kind, target_id, payload_json, ownership_quality
                 FROM relationships
                 WHERE source_kind = ? AND source_id = ?
                 ORDER BY relationship, target_kind, target_id
@@ -378,6 +669,70 @@ class ControlPlane:
                 target_kind=str(row["target_kind"]),
                 target_id=str(row["target_id"]),
                 payload_json=str(row["payload_json"]),
+                ownership_quality=cast(
+                    RelationshipOwnershipQuality,
+                    str(row["ownership_quality"]),
+                ),
+            )
+            for row in rows
+        )
+
+    def list_revision_relationships(
+        self,
+        *,
+        source_kind: str,
+        source_id: str,
+        source_revision: int,
+    ) -> tuple[ControlRelationship, ...]:
+        with self._connect() as connection:
+            ownership = connection.execute(
+                """
+                SELECT ownership_quality FROM record_revision_relationship_sets
+                WHERE source_kind = ? AND source_id = ? AND source_revision = ?
+                """,
+                (source_kind, source_id, source_revision),
+            ).fetchone()
+            if ownership is None:
+                raise DomainError(
+                    ErrorCode.WORKSPACE_INVALID,
+                    "The requested record revision has no exact relationship-set authority.",
+                    details={
+                        "source_kind": source_kind,
+                        "source_id": source_id,
+                        "source_revision": source_revision,
+                        "ownership_quality": "unknown",
+                    },
+                )
+            if str(ownership["ownership_quality"]) != "exact":
+                raise DomainError(
+                    ErrorCode.WORKSPACE_INVALID,
+                    "Legacy relationships cannot be assigned to an exact historical revision.",
+                    details={
+                        "source_kind": source_kind,
+                        "source_id": source_id,
+                        "source_revision": source_revision,
+                        "ownership_quality": str(ownership["ownership_quality"]),
+                    },
+                )
+            rows = connection.execute(
+                """
+                SELECT relationship, target_kind, target_id, payload_json, ownership_quality
+                FROM record_revision_relationships
+                WHERE source_kind = ? AND source_id = ? AND source_revision = ?
+                ORDER BY relationship, target_kind, target_id
+                """,
+                (source_kind, source_id, source_revision),
+            ).fetchall()
+        return tuple(
+            ControlRelationship(
+                relationship=str(row["relationship"]),
+                target_kind=str(row["target_kind"]),
+                target_id=str(row["target_id"]),
+                payload_json=str(row["payload_json"]),
+                ownership_quality=cast(
+                    RelationshipOwnershipQuality,
+                    str(row["ownership_quality"]),
+                ),
             )
             for row in rows
         )
@@ -447,6 +802,7 @@ class ControlPlane:
                         connection,
                         source_kind=kind,
                         source_id=record_id,
+                        source_revision=next_revision,
                         relationships=relationships,
                         observed_at=observed_at,
                     )
@@ -463,6 +819,7 @@ class ControlPlane:
         run_type: str,
         revision: int,
         payload_json: str,
+        projection_intent: ProjectionIntentSpec | None = None,
     ) -> None:
         observed_at = utc_now().isoformat()
         try:
@@ -482,6 +839,17 @@ class ControlPlane:
                     """,
                     (run_id, revision, payload_json, observed_at),
                 )
+                if projection_intent is not None:
+                    self._require_run_projection_binding(
+                        projection_intent,
+                        run_id=run_id,
+                        revision=revision,
+                    )
+                    self._insert_projection_intent(
+                        connection,
+                        projection_intent,
+                        observed_at=observed_at,
+                    )
         except sqlite3.IntegrityError as exc:
             raise DomainError(
                 ErrorCode.REVISION_CONFLICT,
@@ -503,6 +871,23 @@ class ControlPlane:
             )
         return str(row["payload_json"])
 
+    def read_run_revision(self, run_id: str, revision: int) -> str:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json FROM run_revisions
+                WHERE run_id = ? AND revision = ?
+                """,
+                (run_id, revision),
+            ).fetchone()
+        if row is None:
+            raise DomainError(
+                ErrorCode.RUN_NOT_FOUND,
+                f"Run {run_id!r} has no revision {revision}.",
+                details={"missing_entity": "run_revision", "revision": revision},
+            )
+        return str(row["payload_json"])
+
     def list_runs(self) -> tuple[str, ...]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -518,6 +903,7 @@ class ControlPlane:
         expected_revision: int,
         next_revision: int,
         payload_json: str,
+        projection_intent: ProjectionIntentSpec | None = None,
     ) -> None:
         if next_revision != expected_revision + 1:
             raise DomainError(
@@ -570,11 +956,149 @@ class ControlPlane:
                     """,
                     (run_id, next_revision, payload_json, observed_at),
                 )
+                if projection_intent is not None:
+                    self._require_run_projection_binding(
+                        projection_intent,
+                        run_id=run_id,
+                        revision=next_revision,
+                    )
+                    self._insert_projection_intent(
+                        connection,
+                        projection_intent,
+                        observed_at=observed_at,
+                    )
         except sqlite3.IntegrityError as exc:
             raise DomainError(
                 ErrorCode.ARTIFACT_INTEGRITY_FAILED,
                 "An immutable run revision already contains different data.",
             ) from exc
+
+    def create_projection_intent(self, spec: ProjectionIntentSpec) -> ProjectionIntent:
+        observed_at = utc_now().isoformat()
+        with self.transaction() as connection:
+            self._insert_projection_intent(connection, spec, observed_at=observed_at)
+            row = self._projection_intent_row(connection, spec.intent_id)
+        return self._projection_intent(row)
+
+    def read_projection_intent(self, intent_id: str) -> ProjectionIntent:
+        with self._connect() as connection:
+            row = self._projection_intent_row(connection, intent_id)
+        return self._projection_intent(row)
+
+    def list_projection_intents(
+        self,
+        *,
+        state: ProjectionState | None = None,
+    ) -> tuple[ProjectionIntent, ...]:
+        with self._connect() as connection:
+            if state is None:
+                rows = connection.execute(
+                    "SELECT * FROM projection_intents ORDER BY created_at, intent_id"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM projection_intents
+                    WHERE state = ? ORDER BY created_at, intent_id
+                    """,
+                    (state.value,),
+                ).fetchall()
+        return tuple(self._projection_intent(row) for row in rows)
+
+    def latest_projection_intent(
+        self,
+        *,
+        domain_kind: str,
+        domain_id: str,
+        projection_kind: str,
+    ) -> ProjectionIntent | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM projection_intents
+                WHERE domain_kind = ? AND domain_id = ? AND projection_kind = ?
+                ORDER BY domain_revision DESC, created_at DESC LIMIT 1
+                """,
+                (domain_kind, domain_id, projection_kind),
+            ).fetchone()
+        return self._projection_intent(row) if row is not None else None
+
+    def mark_projection_published(
+        self,
+        *,
+        intent_id: str,
+        generation_id: str,
+        corpus_commit_id: str,
+    ) -> ProjectionIntent:
+        observed_at = utc_now().isoformat()
+        with self.transaction() as connection:
+            row = self._projection_intent_row(connection, intent_id)
+            current = self._projection_intent(row)
+            if current.state is ProjectionState.PUBLISHED:
+                if (
+                    current.generation_id != generation_id
+                    or current.corpus_commit_id != corpus_commit_id
+                ):
+                    raise DomainError(
+                        ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                        "A projection intent is already linked to a different publication.",
+                    )
+                return current
+            connection.execute(
+                """
+                UPDATE projection_intents
+                SET state = 'published', generation_id = ?, corpus_commit_id = ?,
+                    failure_code = NULL, failure_message = NULL, updated_at = ?
+                WHERE intent_id = ?
+                """,
+                (generation_id, corpus_commit_id, observed_at, intent_id),
+            )
+            updated = self._projection_intent_row(connection, intent_id)
+        return self._projection_intent(updated)
+
+    def mark_projection_failed(
+        self,
+        *,
+        intent_id: str,
+        failure_code: str,
+        failure_message: str,
+    ) -> ProjectionIntent:
+        observed_at = utc_now().isoformat()
+        with self.transaction() as connection:
+            row = self._projection_intent_row(connection, intent_id)
+            current = self._projection_intent(row)
+            if current.state is ProjectionState.PUBLISHED:
+                return current
+            connection.execute(
+                """
+                UPDATE projection_intents
+                SET state = 'failed', generation_id = NULL, corpus_commit_id = NULL,
+                    failure_code = ?, failure_message = ?, updated_at = ?
+                WHERE intent_id = ?
+                """,
+                (failure_code, failure_message, observed_at, intent_id),
+            )
+            updated = self._projection_intent_row(connection, intent_id)
+        return self._projection_intent(updated)
+
+    def retry_projection(self, intent_id: str) -> ProjectionIntent:
+        observed_at = utc_now().isoformat()
+        with self.transaction() as connection:
+            row = self._projection_intent_row(connection, intent_id)
+            current = self._projection_intent(row)
+            if current.state is not ProjectionState.FAILED:
+                return current
+            connection.execute(
+                """
+                UPDATE projection_intents
+                SET state = 'pending', failure_code = NULL, failure_message = NULL,
+                    updated_at = ?
+                WHERE intent_id = ? AND state = 'failed'
+                """,
+                (observed_at, intent_id),
+            )
+            updated = self._projection_intent_row(connection, intent_id)
+        return self._projection_intent(updated)
 
     def create_operation(
         self,
@@ -586,6 +1110,7 @@ class ControlPlane:
         idempotency_digest: str,
         intent_digest: str,
         payload_json: str,
+        run_id: str | None = None,
     ) -> None:
         observed_at = utc_now().isoformat()
         try:
@@ -593,10 +1118,20 @@ class ControlPlane:
                 connection.execute(
                     """
                     INSERT INTO operations(
-                        operation_id, kind, state, revision, payload_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        operation_id, kind, state, revision, run_id, payload_json, created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (operation_id, kind, state, revision, payload_json, observed_at, observed_at),
+                    (
+                        operation_id,
+                        kind,
+                        state,
+                        revision,
+                        run_id,
+                        payload_json,
+                        observed_at,
+                        observed_at,
+                    ),
                 )
                 connection.execute(
                     """
@@ -644,6 +1179,14 @@ class ControlPlane:
                   AND idempotency_keys.target_kind = 'operation'
                 """,
                 (kind, idempotency_digest),
+            ).fetchone()
+        return str(row["payload_json"]) if row is not None else None
+
+    def find_operation_by_run_id(self, *, kind: str, run_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM operations WHERE kind = ? AND run_id = ?",
+                (kind, run_id),
             ).fetchone()
         return str(row["payload_json"]) if row is not None else None
 
@@ -794,6 +1337,25 @@ class ControlPlane:
                 """,
                 (operation_id, next_revision, payload_json, observed_at),
             )
+            # The current operation row and idempotency binding are retained for
+            # reconnectability. Historical heartbeat/progress revisions are diagnostic
+            # context, so retain the creation revision plus a bounded recent tail.
+            connection.execute(
+                """
+                DELETE FROM operation_revisions
+                WHERE operation_id = ? AND revision != 0 AND revision NOT IN (
+                    SELECT revision FROM operation_revisions
+                    WHERE operation_id = ?
+                    ORDER BY revision DESC
+                    LIMIT ?
+                )
+                """,
+                (
+                    operation_id,
+                    operation_id,
+                    self.MAX_OPERATION_REVISIONS - 1,
+                ),
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -808,11 +1370,34 @@ class ControlPlane:
         return connection
 
     @staticmethod
+    def _purge_cursors(
+        connection: sqlite3.Connection,
+        *,
+        observed_at: datetime,
+        limit: int,
+    ) -> int:
+        if limit < 1:
+            return 0
+        return connection.execute(
+            """
+            DELETE FROM cursors
+            WHERE cursor_digest IN (
+                SELECT cursor_digest FROM cursors
+                WHERE expires_at <= ? OR revoked_at IS NOT NULL
+                ORDER BY expires_at, cursor_digest
+                LIMIT ?
+            )
+            """,
+            (observed_at.isoformat(), limit),
+        ).rowcount
+
+    @staticmethod
     def _replace_relationships(
         connection: sqlite3.Connection,
         *,
         source_kind: str,
         source_id: str,
+        source_revision: int | None,
         relationships: tuple[ControlRelationship, ...],
         observed_at: str,
     ) -> None:
@@ -824,8 +1409,8 @@ class ControlPlane:
             """
             INSERT INTO relationships(
                 source_kind, source_id, relationship, target_kind, target_id,
-                payload_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                payload_json, ownership_quality, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'exact', ?)
             """,
             (
                 (
@@ -840,6 +1425,157 @@ class ControlPlane:
                 for item in relationships
             ),
         )
+        if source_revision is not None:
+            connection.execute(
+                """
+                INSERT INTO record_revision_relationship_sets(
+                    source_kind, source_id, source_revision, ownership_quality, created_at
+                ) VALUES (?, ?, ?, 'exact', ?)
+                """,
+                (source_kind, source_id, source_revision, observed_at),
+            )
+            connection.executemany(
+                """
+                INSERT INTO record_revision_relationships(
+                    source_kind, source_id, source_revision, relationship, target_kind,
+                    target_id, payload_json, ownership_quality, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'exact', ?)
+                """,
+                (
+                    (
+                        source_kind,
+                        source_id,
+                        source_revision,
+                        item.relationship,
+                        item.target_kind,
+                        item.target_id,
+                        item.payload_json,
+                        observed_at,
+                    )
+                    for item in relationships
+                ),
+            )
+
+    @staticmethod
+    def _require_run_projection_binding(
+        spec: ProjectionIntentSpec,
+        *,
+        run_id: str,
+        revision: int,
+    ) -> None:
+        if (
+            spec.domain_kind != "run"
+            or spec.domain_id != run_id
+            or spec.domain_revision != revision
+        ):
+            raise DomainError(
+                ErrorCode.INVALID_ARGUMENTS,
+                "A run revision can only commit its own exact projection intent.",
+            )
+
+    def _insert_projection_intent(
+        self,
+        connection: sqlite3.Connection,
+        spec: ProjectionIntentSpec,
+        *,
+        observed_at: str,
+    ) -> bool:
+        spec_json = canonical_json(spec.model_dump(mode="json"))
+        if len(spec_json.encode("utf-8")) > self.MAX_PROJECTION_SPEC_BYTES:
+            raise DomainError(
+                ErrorCode.STORAGE_QUOTA_EXCEEDED,
+                "Projection replay context exceeds the bounded control-plane limit.",
+                details={"max_projection_spec_bytes": self.MAX_PROJECTION_SPEC_BYTES},
+            )
+        try:
+            connection.execute(
+                """
+                INSERT INTO projection_intents(
+                    intent_id, domain_kind, domain_id, domain_revision, domain_digest,
+                    projection_kind, projection_schema_version, operation_digest, spec_json,
+                    state, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    spec.intent_id,
+                    spec.domain_kind,
+                    spec.domain_id,
+                    spec.domain_revision,
+                    spec.domain_digest,
+                    spec.projection_kind,
+                    spec.projection_schema_version,
+                    spec.operation_digest,
+                    spec_json,
+                    observed_at,
+                    observed_at,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            row = connection.execute(
+                """
+                SELECT spec_json FROM projection_intents
+                WHERE intent_id = ? OR operation_digest = ? OR (
+                    domain_kind = ? AND domain_id = ? AND domain_revision = ?
+                    AND projection_kind = ? AND projection_schema_version = ?
+                )
+                LIMIT 1
+                """,
+                (
+                    spec.intent_id,
+                    spec.operation_digest,
+                    spec.domain_kind,
+                    spec.domain_id,
+                    spec.domain_revision,
+                    spec.projection_kind,
+                    spec.projection_schema_version,
+                ),
+            ).fetchone()
+            if row is not None and str(row["spec_json"]) == spec_json:
+                return False
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "A projection identity is already bound to different immutable intent.",
+            ) from exc
+        return True
+
+    @staticmethod
+    def _projection_intent_row(
+        connection: sqlite3.Connection,
+        intent_id: str,
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT * FROM projection_intents WHERE intent_id = ?",
+            (intent_id,),
+        ).fetchone()
+        if row is None:
+            raise DomainError(
+                ErrorCode.RUN_NOT_FOUND,
+                f"Projection intent {intent_id!r} does not exist.",
+                details={"missing_entity": "projection_intent"},
+            )
+        return cast(sqlite3.Row, row)
+
+    @staticmethod
+    def _projection_intent(row: sqlite3.Row) -> ProjectionIntent:
+        try:
+            spec = ProjectionIntentSpec.model_validate_json(str(row["spec_json"]))
+            return ProjectionIntent.model_validate(
+                {
+                    **spec.model_dump(mode="python"),
+                    "state": row["state"],
+                    "generation_id": row["generation_id"],
+                    "corpus_commit_id": row["corpus_commit_id"],
+                    "failure_code": row["failure_code"],
+                    "failure_message": row["failure_message"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                "The control plane contains an invalid projection intent.",
+            ) from exc
 
     @staticmethod
     def _available_plan(row: sqlite3.Row | None) -> tuple[str, str]:

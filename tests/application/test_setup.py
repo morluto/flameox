@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 from pathlib import Path
 
@@ -12,6 +10,8 @@ from flameox.adapters import RuntimeInstallation, SetupClient
 from flameox.application import SetupOperation, SetupService
 from flameox.atomic import atomic_write_bytes, atomic_write_json
 from flameox.domain import DomainError, ErrorCode
+
+pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
 
 class FakeRuntime:
@@ -275,90 +275,6 @@ async def test_setup_refuses_stale_plan_after_active_runtime_changes(
     assert not (home / ".gemini" / "settings.json").exists()
 
 
-@pytest.mark.anyio
-async def test_setup_recovers_interrupted_config_transaction(tmp_path: Path) -> None:
-    service, _, home = make_service(tmp_path)
-    config = home / ".claude.json"
-    config.write_text('{"before": true}\n')
-    original = config.read_bytes()
-    config.write_text('{"partial": true}\n')
-    service.data_root.mkdir(parents=True)
-    atomic_write_json(
-        service.journal_path,
-        {
-            "schema_version": 1,
-            "mutations": [
-                {
-                    "path": str(config),
-                    "original": "eyJiZWZvcmUiOiB0cnVlfQo=",
-                    "original_sha256": hashlib.sha256(original).hexdigest(),
-                    "updated_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
-                    "mode": 0o600,
-                }
-            ],
-        },
-    )
-
-    plan = service.plan(
-        operation=SetupOperation.VERIFY,
-        clients=(),
-        version=None,
-    )
-    with pytest.raises(DomainError) as caught:
-        await service.apply(plan)
-
-    assert caught.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
-    assert config.read_bytes() == original
-    assert not service.journal_path.exists()
-
-
-def test_setup_recovers_interrupted_transaction_before_planning(tmp_path: Path) -> None:
-    service, runtime, home = make_service(tmp_path)
-    config = home / ".claude.json"
-    original = b'{"mcpServers": {}}\n'
-    staged = (
-        json.dumps(
-            {
-                "mcpServers": {
-                    "flameox": {
-                        "command": str(runtime.executable("0.1.0")),
-                        "args": ["mcp", "serve", "--project-root", "."],
-                    }
-                }
-            }
-        )
-        + "\n"
-    ).encode()
-    config.write_bytes(staged)
-    service.data_root.mkdir(parents=True)
-    atomic_write_json(
-        service.journal_path,
-        {
-            "schema_version": 1,
-            "mutations": [
-                {
-                    "path": str(config),
-                    "original": base64.b64encode(original).decode(),
-                    "original_sha256": hashlib.sha256(original).hexdigest(),
-                    "updated_sha256": hashlib.sha256(staged).hexdigest(),
-                    "mode": 0o600,
-                }
-            ],
-        },
-    )
-
-    plan = service.plan(
-        operation=SetupOperation.CONFIGURE,
-        clients=(SetupClient.CLAUDE,),
-        version="0.1.0",
-    )
-
-    assert plan.edits[0].action.value == "update"
-    assert plan.edits[0].original == original
-    assert config.read_bytes() == original
-    assert not service.journal_path.exists()
-
-
 def test_codex_toml_edit_preserves_comments(tmp_path: Path) -> None:
     service, _, home = make_service(tmp_path)
     config = home / ".codex" / "config.toml"
@@ -447,7 +363,7 @@ def test_jsonc_helper_does_not_relax_standard_json_clients(tmp_path: Path) -> No
 
 
 @pytest.mark.anyio
-async def test_setup_restores_every_config_after_partial_write(
+async def test_setup_does_not_roll_back_an_independent_client_after_later_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -457,7 +373,7 @@ async def test_setup_restores_every_config_after_partial_write(
     claude.write_text('{"before": "claude"}\n')
     gemini.parent.mkdir()
     gemini.write_text('{"before": "gemini"}\n')
-    originals = {claude: claude.read_bytes(), gemini: gemini.read_bytes()}
+    gemini_original = gemini.read_bytes()
     plan = service.plan(
         operation=SetupOperation.CONFIGURE,
         clients=(SetupClient.CLAUDE, SetupClient.GEMINI),
@@ -478,10 +394,9 @@ async def test_setup_restores_every_config_after_partial_write(
     with pytest.raises(OSError, match="injected write failure"):
         await service.apply(plan)
 
-    assert claude.read_bytes() == originals[claude]
-    assert gemini.read_bytes() == originals[gemini]
+    assert "flameox" in json.loads(claude.read_text())["mcpServers"]
+    assert gemini.read_bytes() == gemini_original
     assert not service.install_manifest.exists()
-    assert not service.journal_path.exists()
 
 
 @pytest.mark.anyio
@@ -552,40 +467,3 @@ async def test_rollback_refuses_target_removed_after_preview(tmp_path: Path) -> 
     assert caught.value.code is ErrorCode.REVISION_CONFLICT
     assert runtime.versions == set()
     assert json.loads(config.read_text())["mcpServers"]["flameox"] == {"command": "old"}
-
-
-def test_recovery_refuses_to_overwrite_a_post_crash_user_edit(
-    tmp_path: Path,
-) -> None:
-    service, _, home = make_service(tmp_path)
-    config = home / ".claude.json"
-    original = b'{"state": "original"}\n'
-    staged = b'{"state": "staged"}\n'
-    user_edit = b'{"state": "user-edit"}\n'
-    config.write_bytes(user_edit)
-    service.data_root.mkdir(parents=True)
-    atomic_write_json(
-        service.journal_path,
-        {
-            "schema_version": 1,
-            "mutations": [
-                {
-                    "path": str(config),
-                    "original": base64.b64encode(original).decode(),
-                    "original_sha256": hashlib.sha256(original).hexdigest(),
-                    "updated_sha256": hashlib.sha256(staged).hexdigest(),
-                    "mode": 0o600,
-                }
-            ],
-        },
-    )
-    with pytest.raises(DomainError) as caught:
-        service.plan(
-            operation=SetupOperation.VERIFY,
-            clients=(),
-            version=None,
-        )
-
-    assert caught.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
-    assert config.read_bytes() == user_edit
-    assert service.journal_path.exists()

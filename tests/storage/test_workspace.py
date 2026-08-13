@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,14 @@ import pytest
 from flameox.config import WorkspaceConfig
 from flameox.domain import DomainError, ErrorCode
 from flameox.storage import CorpusCommit, Workspace
+from flameox.storage.locks import (
+    CATALOG_SHARED,
+    RETENTION_EXCLUSIVE,
+    RETENTION_SHARED,
+    WRITE_EXCLUSIVE,
+)
+
+pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
 
 def test_initialize_creates_static_identity_and_empty_corpus(tmp_path: Path) -> None:
@@ -160,7 +169,7 @@ def test_corpus_commit_rejects_contradictory_persisted_digest_projections(
         CorpusCommit.model_validate(payload)
 
 
-def test_lock_timeout_maps_to_structured_retryable_error(tmp_path: Path) -> None:
+def test_reentrant_workspace_lock_is_rejected_before_blocking(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
 
     with (
@@ -168,7 +177,62 @@ def test_lock_timeout_maps_to_structured_retryable_error(tmp_path: Path) -> None
         pytest.raises(DomainError) as error,
         workspace.write_locked(timeout=0.01),
     ):
-        raise AssertionError("contended lock was unexpectedly acquired")
+        raise AssertionError("reentrant lock was unexpectedly acquired")
+
+    assert error.value.code is ErrorCode.LOCK_ORDER_VIOLATION
+
+
+def test_ranked_workspace_locks_reject_inversion_and_upgrades(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+
+    with (
+        workspace.locked(WRITE_EXCLUSIVE),
+        pytest.raises(DomainError) as inversion,
+        workspace.locked(CATALOG_SHARED),
+    ):
+        pass
+    assert inversion.value.code is ErrorCode.LOCK_ORDER_VIOLATION
+
+    with (
+        workspace.locked(RETENTION_SHARED),
+        pytest.raises(DomainError) as upgrade,
+        workspace.locked(RETENTION_EXCLUSIVE),
+    ):
+        pass
+    assert upgrade.value.code is ErrorCode.LOCK_ORDER_VIOLATION
+
+    with workspace.locked(CATALOG_SHARED, WRITE_EXCLUSIVE, RETENTION_SHARED):
+        pass
+
+
+def test_lock_timeout_names_resource_and_phase(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_write_lock() -> None:
+        with workspace.write_locked():
+            held.set()
+            release.wait()
+
+    holder = threading.Thread(target=hold_write_lock)
+    holder.start()
+    assert held.wait(1)
+    try:
+        with (
+            pytest.raises(DomainError) as error,
+            workspace.locked(
+                WRITE_EXCLUSIVE,
+                timeout=0.01,
+                phase="test publication",
+            ),
+        ):
+            pass
+    finally:
+        release.set()
+        holder.join(timeout=1)
 
     assert error.value.code is ErrorCode.WRITE_LOCK_TIMEOUT
     assert error.value.retryable
+    assert error.value.details["resource"] == "write"
+    assert error.value.details["phase"] == "test publication"

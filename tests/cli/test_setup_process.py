@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
+
 
 @pytest.mark.skipif(os.name != "posix", reason="PTY smoke test requires POSIX")
 @pytest.mark.process

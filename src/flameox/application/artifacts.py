@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+from typing import cast
 
-from flameox.catalog import Catalog
+from flameox.catalog import Catalog, Snapshot
 from flameox.domain import (
     ArtifactContent,
     ArtifactKind,
-    CursorCodec,
+    CursorNamespace,
     DomainError,
     ErrorCode,
+    EvidenceReferenceType,
     Sensitivity,
 )
 from flameox.models import ContractModel
@@ -55,28 +59,63 @@ class ArtifactListResult(CursorPageContract):
     total: int
 
 
+@dataclass(frozen=True, slots=True)
+class SnapshotArtifact:
+    """An artifact whose registration and effective policy came from one snapshot."""
+
+    metadata: ArtifactMetadataResult
+    payload_path: Path
+
+
 class ArtifactService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
 
     def get(self, artifact_id: str, *, limit: int = 100) -> ArtifactMetadataResult:
-        stored = ArtifactStore(self.workspace).get(artifact_id)
         catalog = Catalog(self.workspace)
         with catalog.open_snapshot(catalog.pin()) as snapshot:
-            rows = snapshot.execute(
-                "SELECT registration_id, run_id, display_name, kind, media_type, "
-                "sensitivity, role, producer, producer_version, registered_at "
-                "FROM artifact_registrations WHERE artifact_id = ? "
-                "ORDER BY registered_at DESC, registration_id LIMIT ?",
-                (artifact_id, limit),
-            ).fetchall()
-            count_row = snapshot.execute(
-                "SELECT count(*), max(CASE sensitivity WHEN 'sensitive' THEN 2 "
-                "WHEN 'internal' THEN 1 ELSE 0 END) "
-                "FROM artifact_registrations WHERE artifact_id = ?",
-                (artifact_id,),
-            ).fetchone()
-            assert count_row is not None
+            return self.get_at_snapshot(snapshot, artifact_id, limit=limit)
+
+    def get_at_snapshot(
+        self,
+        snapshot: Snapshot,
+        artifact_id: str,
+        *,
+        limit: int = 100,
+    ) -> ArtifactMetadataResult:
+        return self.resolve_at_snapshot(snapshot, artifact_id, limit=limit).metadata
+
+    def resolve_at_snapshot(
+        self,
+        snapshot: Snapshot,
+        artifact_id: str,
+        *,
+        limit: int = 100,
+    ) -> SnapshotArtifact:
+        rows = snapshot.execute(
+            "SELECT registration_id, run_id, display_name, kind, media_type, "
+            "sensitivity, role, producer, producer_version, registered_at "
+            "FROM artifact_registrations WHERE artifact_id = ? "
+            "ORDER BY registered_at DESC, registration_id LIMIT ?",
+            (artifact_id, limit),
+        ).fetchall()
+        count_row = snapshot.execute(
+            "SELECT count(*), max(CASE sensitivity WHEN 'sensitive' THEN 2 "
+            "WHEN 'internal' THEN 1 ELSE 0 END) "
+            "FROM artifact_registrations WHERE artifact_id = ?",
+            (artifact_id,),
+        ).fetchone()
+        assert count_row is not None
+        if int(count_row[0]) == 0:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                f"Artifact {artifact_id!r} is absent from the pinned corpus snapshot.",
+                details={
+                    "missing_entity": EvidenceReferenceType.ARTIFACT.value,
+                    "corpus_commit_id": snapshot.handle.commit_id,
+                },
+            )
+        stored = ArtifactStore(self.workspace).get(artifact_id)
         registrations = tuple(
             ArtifactRegistrationSummary(
                 registration_id=row[0],
@@ -92,7 +131,7 @@ class ArtifactService:
             )
             for row in rows
         )
-        return ArtifactMetadataResult(
+        metadata = ArtifactMetadataResult(
             content=stored.content,
             resource_uri=f"flameox://artifacts/{artifact_id}",
             registrations=registrations,
@@ -104,21 +143,23 @@ class ArtifactService:
                 2: Sensitivity.SENSITIVE,
             }[count_row[1]],
         )
+        return SnapshotArtifact(metadata=metadata, payload_path=stored.payload_path)
 
     def list(self, *, limit: int = 100, cursor: str | None = None) -> ArtifactListResult:
         head = self.workspace.corpus.read_head()
         after = (
-            CursorCodec.decode(
-                cursor,
-                namespace="artifacts",
-                snapshot_id=head.commit_id,
-                scope_digest="all",
+            cast(
+                tuple[str],
+                self.workspace.cursors.resolve(
+                    cursor,
+                    namespace=CursorNamespace.ARTIFACTS,
+                    snapshot_id=head.commit_id,
+                    scope_digest="all",
+                ),
             )[0]
             if cursor is not None
             else None
         )
-        if after is not None and not isinstance(after, str):
-            raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.")
         catalog = Catalog(self.workspace)
         with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             count_row = snapshot.execute(
@@ -159,8 +200,8 @@ class ArtifactService:
             artifacts=artifacts,
             total=total,
             next_cursor=(
-                CursorCodec.encode(
-                    namespace="artifacts",
+                self.workspace.cursors.issue(
+                    namespace=CursorNamespace.ARTIFACTS,
                     snapshot_id=head.commit_id,
                     scope_digest="all",
                     position=(artifacts[-1].artifact_id,),

@@ -5,9 +5,12 @@ import tomllib
 from importlib.metadata import requires
 from pathlib import Path
 
+import pytest
 from packaging.requirements import Requirement
 
 from flameox import __version__
+
+pytestmark = pytest.mark.unit
 
 
 def test_npm_bootstrap_matches_python_release_version() -> None:

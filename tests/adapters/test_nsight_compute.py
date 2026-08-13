@@ -7,10 +7,12 @@ from pathlib import Path
 import pytest
 
 from flameox.adapters.nsight_compute import NsightComputeExtractor
-from flameox.application import ImportArtifactRequest, ImportService
+from flameox.application import EvidenceQueryService, ImportArtifactRequest, ImportService
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import ArtifactStore, RunStore, Workspace
+
+pytestmark = [pytest.mark.integration, pytest.mark.process]
 
 _INTERFACE_FIXTURES = Path(__file__).parent.parent / "fixtures" / "nsight_compute"
 
@@ -114,6 +116,81 @@ def test_extractor_bounds_published_rows_by_worker_response_budget(
     assert result.observation_count == 1
     assert "Metrics were truncated to 1 entries." in result.limitations
     assert "Observations were bounded to 1 entries." in result.limitations
+
+
+def test_uint_metrics_round_trip_exactly_with_provider_signedness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source = tmp_path / "uint-boundaries.ncu-rep"
+    source.write_bytes(b"opaque")
+    run_id = _import_report(workspace, source)
+    interface = _interface_fixture(tmp_path / "uint-interface", "uint_boundaries")
+    monkeypatch.setattr(
+        "flameox.adapters.nsight_compute.find_ncu_report_interface",
+        lambda **_: interface,
+    )
+
+    result = NsightComputeExtractor(workspace).extract(run_id)
+    queried = EvidenceQueryService(workspace).measurements(run_id=run_id, limit=10)
+
+    assert result.metric_count == 5
+    values = {item.name: item.value for item in queried.measurements}
+    uint32_max = values["uint32.max"]
+    assert uint32_max is not None
+    assert uint32_max.model_dump(mode="json") == {
+        "kind": "unsigned_integer",
+        "value": 2**32 - 1,
+    }
+    for name, expected in (
+        ("uint64.signed_boundary", 2**63),
+        ("uint64.signed_boundary_plus_one", 2**63 + 1),
+        ("uint64.max", 2**64 - 1),
+    ):
+        value = values[name]
+        assert value is not None
+        assert value.model_dump(mode="json") == {
+            "kind": "unsigned_integer",
+            "value": expected,
+        }
+    fallback = values["fallback.signed"]
+    assert fallback is not None
+    assert fallback.model_dump(mode="json") == {
+        "kind": "integer",
+        "value": -42,
+    }
+    with Catalog(workspace).open_snapshot() as snapshot:
+        rows = snapshot.execute(
+            "SELECT name, value_uint, value_kind, dimensions['provider_value_kind'] "
+            "FROM measurements ORDER BY name"
+        ).fetchall()
+    assert ("uint64.max", 2**64 - 1, "unsigned_integer", "uint64") in rows
+
+
+def test_declared_uint64_outside_provider_range_fails_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source = tmp_path / "invalid-uint64.ncu-rep"
+    source.write_bytes(b"opaque")
+    run_id = _import_report(workspace, source)
+    interface = _interface_fixture(tmp_path / "invalid-uint-interface", "invalid_uint64")
+    monkeypatch.setattr(
+        "flameox.adapters.nsight_compute.find_ncu_report_interface",
+        lambda **_: interface,
+    )
+
+    with pytest.raises(DomainError) as failure:
+        NsightComputeExtractor(workspace).extract(run_id)
+
+    assert failure.value.code is ErrorCode.ADAPTER_INCOMPATIBLE
+    with Catalog(workspace).open_snapshot() as snapshot:
+        assert snapshot.execute(
+            "SELECT count(*) FROM measurements WHERE run_id = ?",
+            (run_id,),
+        ).fetchone() == (0,)
 
 
 def test_action_limit_reports_unvisited_later_ranges(

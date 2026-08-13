@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import importlib.metadata
 import json
+import platform
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,7 +24,13 @@ from flameox.application.inference_providers import (
     InferenceServerMode,
     InferenceTool,
 )
+from flameox.application.provider_runtime import (
+    ProviderRuntime,
+    ProviderRuntimeManager,
+    ProviderRuntimeReceipt,
+)
 from flameox.domain import (
+    CapabilityExtra,
     CaptureStatus,
     DomainError,
     ErrorCode,
@@ -38,7 +48,42 @@ from flameox.execution import (
 from flameox.storage import RunStore, Workspace
 from tests.support.execution import executable_binding
 
+pytestmark = pytest.mark.unit
+
 DIGEST = "sha256:" + "a" * 64
+
+
+def _sha256(path: Path) -> str:
+    with path.open("rb") as stream:
+        return "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def _test_aiperf_runtime() -> ProviderRuntime:
+    root = Path(sys.prefix)
+    python = Path(sys.executable)
+    executable = root / "bin/aiperf"
+    return ProviderRuntime(
+        root,
+        ProviderRuntimeReceipt(
+            environment_id="sha256:" + "3" * 64,
+            flameox_version=importlib.metadata.version("flameox"),
+            extra=CapabilityExtra.INFERENCE,
+            requirement="aiperf<0.13,>=0.12",
+            python_requirement=f"{sys.version_info.major}.{sys.version_info.minor}",
+            platform=platform.system().lower(),
+            architecture=platform.machine().lower(),
+            uv_version="test",
+            uv_sha256="sha256:" + "4" * 64,
+            python_relative_path=python.relative_to(root).as_posix(),
+            python_sha256=_sha256(python.resolve()),
+            distributions={
+                "flameox": importlib.metadata.version("flameox"),
+                "aiperf": importlib.metadata.version("aiperf"),
+            },
+            executable_relative_path=executable.relative_to(root).as_posix(),
+            executable_sha256=_sha256(executable),
+        ),
+    )
 
 
 def _write_project(tmp_path: Path, *, server_mode: str = "existing_local") -> None:
@@ -123,7 +168,7 @@ def _patch_providers(
         parse_inference_tool_discovery,
     )
 
-    def fake_discover(tool: InferenceTool) -> InferenceToolDiscovery:
+    def fake_discover(tool: InferenceTool, **_: object) -> InferenceToolDiscovery:
         payload: dict[str, object] = {
             "tool": tool,
             "executable": executable,
@@ -132,6 +177,15 @@ def _patch_providers(
         }
         if executable is not None:
             payload["executable_binding"] = executable_binding(executable)
+            if tool is InferenceTool.AIPERF:
+                runtime = _test_aiperf_runtime()
+                payload.update(
+                    {
+                        "provider_environment_id": runtime.receipt.environment_id,
+                        "provider_python": runtime.python,
+                        "provider_python_sha256": runtime.receipt.python_sha256,
+                    }
+                )
         return parse_inference_tool_discovery(payload)
 
     def fake_probe(base_url: str, *, timeout_seconds: float = 2.0) -> ExistingServerProbe:
@@ -142,8 +196,27 @@ def _patch_providers(
             model_ids=model_ids,
         )
 
+    async def fake_probe_async(
+        base_url: str,
+        *,
+        timeout_seconds: float = 2.0,
+        http_client: object | None = None,
+    ) -> ExistingServerProbe:
+        del http_client
+        return fake_probe(base_url, timeout_seconds=timeout_seconds)
+
     monkeypatch.setattr(inference_module, "discover_inference_tool", fake_discover)
     monkeypatch.setattr(inference_module, "probe_existing_vllm_server", fake_probe)
+    monkeypatch.setattr(inference_module, "probe_existing_vllm_server_async", fake_probe_async)
+    monkeypatch.setattr(
+        ProviderRuntimeManager,
+        "get",
+        lambda _self, environment_id: (
+            _test_aiperf_runtime()
+            if environment_id == _test_aiperf_runtime().receipt.environment_id
+            else None
+        ),
+    )
 
 
 def test_plan_existing_local_aiperf_builds_typed_argv_and_records_exploratory_reason(
@@ -256,6 +329,31 @@ def test_each_replay_plan_uses_an_isolated_output_directory(
     assert Path(first.output_path).parent.parent == Path(second.output_path).parent.parent
 
 
+def test_run_refuses_output_directory_replaced_after_planning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    _write_project(tmp_path)
+    _patch_providers(monkeypatch, executable=Path("/tools/vllm"))
+    broker = RecordingBroker()
+    service = InferenceReplayService(workspace, broker=broker)
+    plan = service.plan("vllm_bench_replay")
+    output_root = Path(plan.output_path).parent
+    parked = output_root.with_name(f"{output_root.name}-parked")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    output_root.rename(parked)
+    output_root.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(DomainError) as caught:
+        service.run_sync(plan.plan_token)
+
+    assert caught.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+    assert broker.requests == []
+    assert list(outside.iterdir()) == []
+
+
 def test_replay_plan_parses_provider_specific_fields_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -365,7 +463,7 @@ def test_plan_incompatible_but_present_tool_returns_remediation_without_argv(
         InferenceToolDiscovery,
     )
 
-    def fake_discover(tool: str) -> InferenceToolDiscovery:
+    def fake_discover(tool: str, **_: object) -> InferenceToolDiscovery:
         from flameox.application.inference_providers import (
             UnavailableInferenceToolDiscovery,
         )
@@ -733,6 +831,9 @@ def test_run_sync_correlates_aiperf_outputs_under_canonical_run(
                     "x_request_id": "provider-1",
                     "request_start_ns": 100,
                     "request_end_ns": 1_000_100,
+                    "worker_id": "worker-0",
+                    "record_processor_id": "processor-0",
+                    "benchmark_phase": "profiling",
                     "was_cancelled": False,
                 },
                 "metrics": {
@@ -768,7 +869,10 @@ def test_run_sync_correlates_aiperf_outputs_under_canonical_run(
         "inputs.json",
         "profile_export.jsonl",
     }
-    reextracted = InferenceArtifactExtractor(workspace).extract_aiperf_result(result.run_id)
+    reextracted = InferenceArtifactExtractor(
+        workspace,
+        aiperf_runtime=_test_aiperf_runtime(),
+    ).extract_aiperf_result(result.run_id)
     assert reextracted.evidence_run_id == result.run_id
     requests_after = EvidenceQueryService(workspace).inference_requests(
         run_id=result.run_id, limit=100
@@ -797,7 +901,10 @@ def test_success_retains_staging_when_native_artifact_import_fails(
     def fail_import(*_args: object, **_kwargs: object) -> object:
         raise DomainError(ErrorCode.ARTIFACT_PARSE_FAILED, "injected import failure")
 
-    monkeypatch.setattr("flameox.application.inference.ImportService.import_artifact", fail_import)
+    monkeypatch.setattr(
+        "flameox.application.inference.ImportService.import_descriptor",
+        fail_import,
+    )
 
     result = service.run_sync(plan.plan_token)
 
@@ -806,18 +913,24 @@ def test_success_retains_staging_when_native_artifact_import_fails(
     assert any("staging was retained" in item for item in result.limitations)
 
 
-def test_output_discovery_reports_file_limit_instead_of_claiming_complete(
+def test_output_preservation_uses_reviewed_provider_manifest(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = tmp_path / "provider-output"
-    root.mkdir()
+    workspace = Workspace.initialize(tmp_path)
+    _write_project(tmp_path)
+    _patch_providers(monkeypatch, executable=Path("/tools/aiperf"))
+    service = InferenceReplayService(workspace, broker=RecordingBroker(exit_code=0))
+    plan = service.plan("aiperf_replay")
+    root = Path(plan.output_path).parent
     for index in range(129):
         (root / f"result-{index}.json").write_text("{}")
+    (root / "profile_export.jsonl").write_text("{}\n")
 
-    candidates, limitations = InferenceReplayService._bounded_output_candidates(root)
+    result = service.run_sync(plan.plan_token)
 
-    assert len(candidates) == 128
-    assert limitations == ("Provider output discovery stopped at 128 files.",)
+    registrations = service.runs.read(result.run_id).artifacts
+    assert {registration.display_name for registration in registrations} == {"profile_export.jsonl"}
 
 
 def test_plan_honors_explicit_timeout_override(

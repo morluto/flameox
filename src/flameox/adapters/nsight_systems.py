@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import heapq
 import json
-from typing import Any
-
-from pydantic import JsonValue
+from typing import cast
 
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
@@ -12,6 +10,11 @@ from flameox.evidence import GenerationPublisher
 from flameox.execution import SubprocessBroker
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
+from flameox.workers.nsight_systems_contract import (
+    NSIGHT_SYSTEMS_WORKER,
+    NsightSystemsWorkerRequest,
+    NsightSystemsWorkerResult,
+)
 
 
 def _integer(value: object) -> int:
@@ -194,35 +197,20 @@ class NsightSystemsExtractor:
             )
         max_rows_per_table = (maximum - 1) // 6
         response = await self._run_worker(
-            {
-                "artifact_path": str(artifact.payload_path),
-                "max_rows_per_table": max_rows_per_table,
-            }
-        )
-        raw_events = response.get("events")
-        raw_coverage = response.get("coverage")
-        raw_tables = response.get("tables")
-        if (
-            not isinstance(raw_events, list)
-            or not isinstance(raw_coverage, dict)
-            or not isinstance(raw_tables, list)
-            or any(not isinstance(table, str) for table in raw_tables)
-        ):
-            raise DomainError(
-                ErrorCode.ARTIFACT_PARSE_FAILED,
-                "Nsight Systems worker returned an invalid normalized result.",
+            NsightSystemsWorkerRequest(
+                artifact_path=str(artifact.payload_path),
+                max_rows_per_table=max_rows_per_table,
             )
+        )
+        raw_events = response.events
+        raw_coverage = response.coverage
+        raw_tables = response.tables
         if len(raw_events) > maximum:
             raise DomainError(
                 ErrorCode.QUERY_BUDGET_EXCEEDED,
                 "Nsight Systems events exceed the workspace generation row limit.",
             )
-        events = [event for event in raw_events if isinstance(event, dict)]
-        if len(events) != len(raw_events):
-            raise DomainError(
-                ErrorCode.ARTIFACT_PARSE_FAILED,
-                "Nsight Systems worker returned a non-object event.",
-            )
+        events = cast(list[dict[str, object]], [dict(event) for event in raw_events])
 
         phase_assignments = _nvtx_phase_assignments(events)
         rows: list[dict[str, object]] = []
@@ -270,7 +258,7 @@ class NsightSystemsExtractor:
             )
 
         coverage = {str(key): bool(value) for key, value in raw_coverage.items()}
-        schema_fingerprint = str(response["schema_fingerprint"])
+        schema_fingerprint = response.schema_fingerprint
         rows.append(
             {
                 "observation_id": digest_model(
@@ -304,7 +292,7 @@ class NsightSystemsExtractor:
                 "evidence_level": "observed",
             }
         )
-        truncated_tables = response.get("truncated_tables")
+        truncated_tables = response.truncated_tables
         limitations = [
             "The SQLite export is authoritative; normalized rows cover only the declared "
             "compatibility schema.",
@@ -317,7 +305,7 @@ class NsightSystemsExtractor:
                 limitations.append(
                     f"Optional Nsight Systems evidence is unavailable: {capability}."
                 )
-        if isinstance(truncated_tables, list) and truncated_tables:
+        if truncated_tables:
             limitations.append(
                 "Structured extraction reached the row budget for: "
                 + ", ".join(str(item) for item in truncated_tables)
@@ -369,11 +357,11 @@ class NsightSystemsExtractor:
             limitations=tuple(limitations),
         )
 
-    async def _run_worker(self, request: dict[str, JsonValue]) -> dict[str, Any]:
-        return await IsolatedWorkerHarness(self.workspace, broker=self.broker).run(
-            "flameox.workers.nsight_systems",
+    async def _run_worker(
+        self,
+        request: NsightSystemsWorkerRequest,
+    ) -> NsightSystemsWorkerResult:
+        return await IsolatedWorkerHarness(self.workspace, broker=self.broker).run_typed(
+            NSIGHT_SYSTEMS_WORKER,
             request,
-            name="Nsight Systems",
-            timeout_seconds=120,
-            consume=lambda response, _root: response,
         )

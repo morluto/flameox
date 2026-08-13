@@ -4,6 +4,7 @@ import json
 from collections import Counter, defaultdict
 from typing import Any
 
+from flameox.action_graph import ActionId, next_action_for_action
 from flameox.analysis.recipe_context import RecipeContext
 from flameox.analysis.recipe_models import (
     AcceleratorLaunchAnalysisResult,
@@ -210,12 +211,12 @@ class AcceleratorRecipes(RecipeContext):
                 else ()
             )
             producers = {str(row[0]).casefold() for row in producer_rows if row[0] is not None}
-            next_tool = (
-                "extract_nsight_systems"
+            next_action_id = (
+                ActionId.EXTRACT_NSIGHT_SYSTEMS
                 if producers & {"nsight.systems", "nsys"}
-                else "extract_perfetto"
+                else ActionId.EXTRACT_PERFETTO
             )
-            details: dict[str, object] = {"next_tool": next_tool}
+            details: dict[str, object] = {}
             if scope.run_ids:
                 details["run_id"] = scope.run_ids[0]
             raise DomainError(
@@ -223,8 +224,13 @@ class AcceleratorRecipes(RecipeContext):
                 "Accelerator launch analysis requires current normalized trace-event evidence.",
                 details=details,
                 remediation=(
-                    f"Call {next_tool} for the reported run, then retry "
+                    f"Call the {next_action_id.value} action for the reported run, then retry "
                     "analyze_accelerator_launches.",
+                ),
+                next_action=next_action_for_action(
+                    next_action_id,
+                    context=details,
+                    instruction="Select the run whose accelerator trace should be extracted.",
                 ),
             )
         events_by_region: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)

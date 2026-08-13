@@ -9,13 +9,32 @@ from pathlib import Path
 import pytest
 
 from flameox.application import (
+    ArtifactPipeline,
     ArtifactPipelineService,
+    CapabilityService,
     CaptureService,
     ExecutionPolicy,
 )
-from flameox.domain import ArtifactKind, CaptureStatus, DomainError, ErrorCode, ExecutionStatus
+from flameox.domain import (
+    ArtifactKind,
+    CapabilityReport,
+    CaptureStatus,
+    DomainError,
+    ErrorCode,
+    ExecutionStatus,
+)
 from flameox.storage import ArtifactStore, Workspace
 from tests.support.capture import disable_containment
+
+pytestmark = [pytest.mark.integration, pytest.mark.process]
+
+
+class _VersionedCompilerCapabilities(CapabilityService):
+    def get(self, adapter: str) -> CapabilityReport:
+        report = super().get(adapter)
+        if adapter in {"triton.compiler", "cute.compiler"}:
+            return report.model_copy(update={"version": "fixture-compiler-1"})
+        return report
 
 
 def _write_workload(
@@ -55,6 +74,31 @@ sys.exit({exit_code})
     )
 
 
+def _write_identity_workloads(project: Path, script: Path, *, changed_argv: bool = False) -> None:
+    suffix = ', "--changed"' if changed_argv else ""
+    (project / "flameox.toml").write_text(
+        f"""
+schema_version = 1
+
+[workloads.compile]
+argv = ["python", "{script}", "{{size}}"{suffix}]
+cwd = "."
+timeout_seconds = 30
+
+[workloads.compile.parameters]
+size = [1, 2]
+
+[workloads.renamed]
+argv = ["python", "{script}", "{{size}}"]
+cwd = "."
+timeout_seconds = 30
+
+[workloads.renamed.parameters]
+size = [1, 2]
+"""
+    )
+
+
 @pytest.mark.anyio
 async def test_capture_plan_rejects_conflicting_compiler_environment(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
@@ -66,7 +110,10 @@ async def test_capture_plan_rejects_conflicting_compiler_environment(tmp_path: P
         environment={"TRITON_DUMP_DIR": "/elsewhere"},
     )
     disable_containment(workspace)
-    service = CaptureService(workspace)
+    service = CaptureService(
+        workspace,
+        capabilities=_VersionedCompilerCapabilities(workspace),
+    )
     with pytest.raises(DomainError) as error:
         await service.plan(
             workload_name="compile",
@@ -109,10 +156,14 @@ async def test_triton_compiler_capture_emits_manifest_with_native_artifacts(
     _dump_script(script)
     _write_workload(tmp_path, script=str(script))
     disable_containment(workspace)
-    service = CaptureService(workspace)
+    service = CaptureService(
+        workspace,
+        capabilities=_VersionedCompilerCapabilities(workspace),
+    )
     plan = await service.plan(
         workload_name="compile",
         adapter="triton.compiler",
+        adapter_options={"target": {"backend": "cuda", "architecture": "sm_86", "warp_size": 32}},
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
     result = await service.execute(plan.plan_token)
@@ -133,14 +184,26 @@ async def test_triton_compiler_capture_emits_manifest_with_native_artifacts(
     pipelines = ArtifactPipelineService(workspace).pipelines.list()
     assert len(pipelines) == 1
     assert pipelines[0].run_id == result.run.run_id
+    assert pipelines[0].identity_quality == "managed_exact"
+    assert pipelines[0].workload_definition_id == result.run.workload_definition_id
+    assert pipelines[0].workload_instance_id == result.run.workload_instance_id
     assert {stage.artifact_id for stage in pipelines[0].stages} == {
         registration.artifact_id for registration in native_regs
     }
     artifact = ArtifactStore(workspace).get(manifest_reg.artifact_id)
     manifest = json.loads(artifact.payload_path.read_text())
-    assert manifest["schema_version"] == "flameox.kernel-build.v1"
+    assert manifest["schema_version"] == "flameox.kernel-build.v2"
     assert manifest["producer"] == "triton"
-    assert manifest["workload_identity"] == "compile"
+    assert manifest["workload_label"] == "compile"
+    assert manifest["build_context"]["workload_definition_id"] == (
+        result.run.workload_definition_id
+    )
+    assert manifest["build_context"]["workload_instance_id"] == result.run.workload_instance_id
+    assert manifest["build_context"]["target"] == {
+        "architecture": "sm_86",
+        "backend": "cuda",
+        "warp_size": 32,
+    }
     assert manifest["outcome"] == "succeeded"
     assert len(manifest["stages"]) == 3
     native_artifacts = {
@@ -168,7 +231,10 @@ async def test_triton_compiler_capture_preserves_manifest_on_nonzero_exit(
     _dump_script(script, exit_code=1)
     _write_workload(tmp_path, script=str(script))
     disable_containment(workspace)
-    service = CaptureService(workspace)
+    service = CaptureService(
+        workspace,
+        capabilities=_VersionedCompilerCapabilities(workspace),
+    )
     plan = await service.plan(
         workload_name="compile",
         adapter="triton.compiler",
@@ -218,3 +284,79 @@ sys.exit(0)
     assert {stage.artifact_id for stage in pipelines[0].stages} == {
         registration.artifact_id for registration in native_regs
     }
+
+
+@pytest.mark.anyio
+async def test_managed_kernel_build_comparison_binds_every_input_identity(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    script = tmp_path / "compile.py"
+    _dump_script(script)
+    _write_identity_workloads(tmp_path, script)
+    disable_containment(workspace)
+    service = CaptureService(
+        workspace,
+        capabilities=_VersionedCompilerCapabilities(workspace),
+    )
+
+    async def capture(
+        *,
+        workload_name: str = "compile",
+        size: int = 1,
+        architecture: str = "sm_86",
+    ) -> ArtifactPipeline:
+        plan = await service.plan(
+            workload_name=workload_name,
+            parameters={"size": size},
+            adapter="triton.compiler",
+            adapter_options={
+                "target": {
+                    "backend": "cuda",
+                    "architecture": architecture,
+                    "warp_size": 32,
+                }
+            },
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
+        result = await service.execute(plan.plan_token)
+        return next(
+            pipeline
+            for pipeline in ArtifactPipelineService(workspace).pipelines.list()
+            if pipeline.run_id == result.run.run_id
+        )
+
+    baseline = await capture()
+    exact_repeat = await capture()
+    changed_parameter = await capture(size=2)
+    renamed = await capture(workload_name="renamed")
+    changed_target = await capture(architecture="sm_90")
+    _write_identity_workloads(tmp_path, script, changed_argv=True)
+    changed_command = await capture()
+
+    comparisons = ArtifactPipelineService(workspace)
+    repeat_result = comparisons.compare(baseline.pipeline_id, exact_repeat.pipeline_id)
+    parameter_result = comparisons.compare(baseline.pipeline_id, changed_parameter.pipeline_id)
+    renamed_result = comparisons.compare(baseline.pipeline_id, renamed.pipeline_id)
+    target_result = comparisons.compare(baseline.pipeline_id, changed_target.pipeline_id)
+    command_result = comparisons.compare(baseline.pipeline_id, changed_command.pipeline_id)
+
+    assert repeat_result.compatibility == "compatible"
+    assert parameter_result.compatibility == "incompatible"
+    assert {"workload_instance_id", "command_digest", "parameters_digest"}.issubset(
+        parameter_result.identity_mismatches
+    )
+    assert renamed_result.compatibility == "incompatible"
+    assert {"workload_definition_id", "workload_instance_id"}.issubset(
+        renamed_result.identity_mismatches
+    )
+    assert target_result.compatibility == "incompatible"
+    assert {"build_protocol_id", "target_identity_id"}.issubset(target_result.identity_mismatches)
+    assert command_result.compatibility == "incompatible"
+    assert {"workload_definition_id", "workload_instance_id", "command_digest"}.issubset(
+        command_result.identity_mismatches
+    )
+    assert all(
+        result.first_observed_divergent_stage is None
+        for result in (parameter_result, renamed_result, target_result, command_result)
+    )

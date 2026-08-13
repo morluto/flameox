@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from flameox.application import (
     ImportArtifactRequest,
     ImportService,
@@ -11,6 +13,8 @@ from flameox.application import (
 from flameox.domain import ArtifactKind
 from flameox.observability import OperationLogger
 from flameox.storage import Workspace
+
+pytestmark = pytest.mark.integration
 
 
 def test_status_reports_integrity_storage_recovery_and_capabilities(

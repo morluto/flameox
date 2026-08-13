@@ -20,8 +20,11 @@ from flameox.application import (
     ScalingAnalysisRequest,
 )
 from flameox.catalog import Catalog, Snapshot
+from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
-from flameox.storage import Workspace
+from flameox.storage import RetentionIntentStore, Workspace
+
+pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
 _REQUEST_ADAPTER: TypeAdapter[MaterializeAnalysisRequest] = TypeAdapter(MaterializeAnalysisRequest)
 
@@ -67,6 +70,77 @@ def test_materialize_analysis_request_rejects_cross_recipe_fields(
 ) -> None:
     with pytest.raises(ValidationError):
         _REQUEST_ADAPTER.validate_python(payload)
+
+
+def test_materialized_analysis_retry_reuses_exact_persisted_provenance(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source_commit_id = workspace.corpus.read_head().commit_id
+    request = FailureAnalysisRequest(
+        recipe="failures",
+        corpus_commit_id=source_commit_id,
+    )
+    service = AnalysisMaterializationService(workspace)
+
+    first = service.record(request)
+    second = service.record(request)
+
+    assert second == first
+    assert first.analysis.corpus_commit_id == source_commit_id
+    assert "corpus_commit_id" not in first.analysis.parameters
+    assert RetentionIntentStore(workspace).pending() == ()
+    with Catalog(workspace).open_snapshot() as snapshot:
+        assert snapshot.execute("SELECT count(*) FROM analyses").fetchone() == (1,)
+
+
+def test_materialized_analysis_failure_keeps_source_commit_retained(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source_commit_id = workspace.corpus.read_head().commit_id
+    request = FailureAnalysisRequest(
+        recipe="failures",
+        corpus_commit_id=source_commit_id,
+    )
+
+    def fail_publication(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("publication failed")
+
+    monkeypatch.setattr(GenerationPublisher, "publish_rows_idempotent", fail_publication)
+
+    with pytest.raises(RuntimeError, match="publication failed"):
+        AnalysisMaterializationService(workspace).record(request)
+
+    pending = RetentionIntentStore(workspace).pending()
+    assert len(pending) == 1
+    assert pending[0].corpus_commit_id == source_commit_id
+
+
+@pytest.mark.anyio
+async def test_materialized_analysis_progress_failure_does_not_block_publication(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source_commit_id = workspace.corpus.read_head().commit_id
+
+    async def failed_notification(completed: float, total: float, message: str) -> None:
+        raise RuntimeError("progress transport closed")
+
+    result = await AnalysisMaterializationService(workspace).record_async(
+        FailureAnalysisRequest(
+            recipe="failures",
+            corpus_commit_id=source_commit_id,
+        ),
+        progress=failed_notification,
+    )
+
+    with Catalog(workspace).open_snapshot(result.materialized_commit_id) as snapshot:
+        assert snapshot.execute(
+            "SELECT count(*) FROM analyses WHERE analysis_id = ?",
+            (result.analysis.analysis_id,),
+        ).fetchone() == (1,)
 
 
 @pytest.mark.anyio

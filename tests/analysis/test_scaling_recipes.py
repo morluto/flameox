@@ -12,7 +12,39 @@ from flameox.domain import canonical_json
 from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
 
+pytestmark = pytest.mark.integration
+
 FIXTURE_CREATED_AT = datetime(2025, 1, 2, 3, 4, tzinfo=UTC)
+
+
+def _scaling_variant_row() -> dict[str, object]:
+    return {
+        "variant_id": "variant-baseline",
+        "experiment_id": "scaling-experiment",
+        "name": "baseline",
+        "identity_quality": "heterogeneous",
+        "source_state_id": "source",
+        "workload_instance_id": None,
+        "environment_id": "stable-environment",
+        "source_state_ids": ["source"],
+        "workload_instance_ids": [
+            "workload-32768",
+            "workload-32768.0",
+            "workload-65536",
+            "workload-131072",
+        ],
+        "environment_ids": ["stable-environment"],
+        "combination_ids": [
+            "combination-32768",
+            "combination-32768.0",
+            "combination-65536",
+            "combination-131072",
+        ],
+        "environment_requirements_json": "{}",
+        "parameters_json": '{"implementation":"baseline"}',
+        "varying_factors_json": '{"length":[32768,65536,131072]}',
+        "limitations": [],
+    }
 
 
 def test_scaling_reports_dispersion_models_and_supported_range(
@@ -25,17 +57,7 @@ def test_scaling_reports_dispersion_models_and_supported_range(
     trial_rows = []
     measurement_rows: list[dict[str, object]] = []
     frame_measurement_rows = []
-    variant_rows = [
-        {
-            "variant_id": "variant-baseline",
-            "experiment_id": "scaling-experiment",
-            "name": "baseline",
-            "source_state_id": "source",
-            "workload_instance_id": "workload-family",
-            "environment_requirements_json": "{}",
-            "parameters_json": '{"implementation":"baseline"}',
-        }
-    ]
+    variant_rows = [_scaling_variant_row()]
     for input_value in variants:
         is_integer = type(input_value) is int
         variant_id = "variant-baseline"
@@ -223,17 +245,7 @@ def test_scaling_correlated_hotspots_empty_when_all_filtered(tmp_path: Path) -> 
     trial_rows: list[dict[str, object]] = []
     measurement_rows: list[dict[str, object]] = []
     frame_measurement_rows: list[dict[str, object]] = []
-    variant_rows = [
-        {
-            "variant_id": "variant-baseline",
-            "experiment_id": "scaling-experiment",
-            "name": "baseline",
-            "source_state_id": "source",
-            "workload_instance_id": "workload-family",
-            "environment_requirements_json": "{}",
-            "parameters_json": '{"implementation":"baseline"}',
-        }
-    ]
+    variant_rows = [_scaling_variant_row()]
     for input_value in (32_768,):
         for block in range(1):
             run_id = f"run-{input_value}-{block}"

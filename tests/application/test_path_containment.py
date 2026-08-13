@@ -22,6 +22,8 @@ from flameox.domain import (
 )
 from flameox.storage import Workspace
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.parametrize("value", [".", "..", "D:outside"])
 def test_manifest_ids_reject_current_and_parent_directory(value: str) -> None:

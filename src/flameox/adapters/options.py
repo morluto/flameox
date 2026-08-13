@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal, cast
 
 from pydantic import Field, JsonValue, StringConstraints, field_validator, model_validator
 
+from flameox.adapters.kernel_build import KernelBuildTarget
 from flameox.adapters.torch_profiler import torch_profiler_options
 from flameox.domain import DomainError, ErrorCode
 from flameox.models import ContractModel
@@ -166,6 +167,7 @@ class TritonCompilerOptions(ContractModel):
     dump_subdir: _BoundedSubdir = "triton-dumps"
     kernel_dump: bool = True
     reproducer_filename: _BoundedFilename | None = None
+    target: KernelBuildTarget | None = None
 
 
 CuteDslKeepToken = Literal["ir", "ir-debug", "ptx", "cubin", "sass", "llvm", "all"]
@@ -180,6 +182,7 @@ class CuteCompilerOptions(ContractModel):
     """
 
     dump_subdir: _BoundedSubdir = "cute-dsl-dumps"
+    target: KernelBuildTarget | None = None
     keep_allowlist: Annotated[
         tuple[CuteDslKeepToken, ...],
         Field(min_length=1, max_length=20),

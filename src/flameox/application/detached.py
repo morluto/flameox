@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import ConfigDict, Field, computed_field, model_validator
 
+from flameox.action_graph import ActionId, NextAction, next_action_for_action
 from flameox.application.capture import CaptureService
+from flameox.application.operations import (
+    OperationAdapter,
+    OperationRecord,
+    OperationRunner,
+    OperationStatus,
+    operation_digests,
+)
+from flameox.application.task_supervisor import TaskSupervisor
 from flameox.domain import (
     CaptureStatus,
     DomainError,
@@ -136,8 +146,17 @@ class DetachedCaptureRecord(_DetachedFailureFields):
 
 class DetachedRecovery(ContractModel):
     action: Literal["replan"] = "replan"
-    tool: Literal["plan_capture"] = "plan_capture"
-    arguments: dict[str, object]
+    next_action: NextAction
+
+
+def _replan_recovery(arguments: dict[str, object]) -> DetachedRecovery:
+    return DetachedRecovery(
+        next_action=next_action_for_action(
+            ActionId.PLAN_CAPTURE,
+            context=arguments,
+            instruction="Supply the complete inputs required to plan this capture again.",
+        )
+    )
 
 
 class DetachedCaptureStatus(_DetachedFailureFields):
@@ -182,12 +201,32 @@ class DetachedCaptureStatus(_DetachedFailureFields):
 
 
 class DetachedCaptureManager:
-    """Own server-lifetime capture tasks while persisting their bounded status."""
+    """Project capture domain state over the shared durable operation kernel."""
 
-    def __init__(self, workspace: Workspace, captures: CaptureService) -> None:
+    _ADAPTER = OperationAdapter(
+        kind="capture.detached",
+        start_action=ActionId.START_DETACHED_CAPTURE,
+        status_action=ActionId.GET_DETACHED_CAPTURE,
+        status_identifier="run_id",
+    )
+
+    def __init__(
+        self,
+        workspace: Workspace,
+        captures: CaptureService,
+        *,
+        supervisor: TaskSupervisor | None = None,
+    ) -> None:
         self.workspace = workspace
         self.captures = captures
         self.runs = RunStore(workspace)
+        self.runner = OperationRunner(
+            workspace,
+            self._ADAPTER,
+            supervisor=supervisor,
+        )
+        # Version-one records are read-only migration input. New captures write only
+        # the shared operation envelope and authoritative run manifest.
         self.records = ControlRecordStore(
             workspace,
             kind="detached_captures",
@@ -195,71 +234,114 @@ class DetachedCaptureManager:
             id_field="run_id",
             revision_field="revision",
         )
-        self._tasks: dict[str, asyncio.Task[None]] = {}
-        self._start_lock = asyncio.Lock()
-        self._record_lock = asyncio.Lock()
 
     async def start(self, plan_token: str, idempotency_key: str) -> DetachedCaptureStatus:
-        idempotency_digest = digest_model(
-            {
-                "workspace_id": self.workspace.identity.workspace_id,
-                "idempotency_key": idempotency_key,
-            }
-        )
         plan_digest = digest_model({"plan_token": plan_token})
-        async with self._start_lock:
-            existing = self.records.read_idempotent(
-                idempotency_digest=idempotency_digest,
+        _, idempotency_digest = operation_digests(
+            self.workspace,
+            self._ADAPTER.kind,
+            {},
+            idempotency_key,
+        )
+        existing = self.runner.store.find(
+            operation=self._ADAPTER.kind,
+            idempotency_digest=idempotency_digest,
+        )
+        if existing is not None:
+            if existing.request.get("plan_digest") != plan_digest:
+                raise DomainError(
+                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    "The detached idempotency key is already bound to another plan.",
+                )
+            if existing.subject_id is None:
+                raise DomainError(
+                    ErrorCode.WORKSPACE_INVALID,
+                    "The detached operation has no run identity.",
+                )
+            return self.status(existing.subject_id)
+
+        plan = await self.captures.plans.inspect(plan_token)
+        plan_request: dict[str, object] = {
+            "workload_name": plan.workload_name,
+            "adapter": plan.adapter,
+            "parameters": plan.workload_instance.parameters,
+            "preflight_mode": "auto",
+            "capture_mode": (
+                "managed" if plan.execution_policy == "approved_agent" else "trusted_local"
+            ),
+        }
+        request: dict[str, Any] = {
+            "run_id": plan.run_id,
+            "plan_digest": plan_digest,
+            "plan_request": plan_request,
+        }
+        ready = asyncio.Event()
+
+        async def execute(
+            operation_id: str,
+            progress: Callable[..., Awaitable[None]],
+        ) -> dict[str, Any]:
+            return await self._run(
+                plan_token,
+                operation_id,
+                ready=ready,
+                progress=progress,
             )
-            if existing is not None:
-                stored_digest, record = existing
-                if stored_digest != plan_digest:
-                    raise DomainError(
-                        ErrorCode.INVALID_CAPTURE_PLAN,
-                        "The detached idempotency key is already bound to another plan.",
-                    )
-                return self.status(record.run_id)
-            plan = await self.captures.plans.inspect(plan_token)
-            record = DetachedCaptureRecord(
-                run_id=plan.run_id,
-                idempotency_digest=idempotency_digest,
-                plan_digest=plan_digest,
-                plan_request={
-                    "workload_name": plan.workload_name,
-                    "adapter": plan.adapter,
-                    "parameters": plan.workload_instance.parameters,
-                    "preflight_mode": "auto",
-                    "capture_mode": (
-                        "managed" if plan.execution_policy == "approved_agent" else "trusted_local"
-                    ),
-                },
+
+        try:
+            operation = await self.runner.start(
+                request,
+                idempotency_key,
+                execute,
+                subject_id=plan.run_id,
             )
-            record, created = self.records.create_idempotent(
-                record,
-                idempotency_digest=idempotency_digest,
-                intent_digest=plan_digest,
-            )
-            if not created:
-                return self.status(record.run_id)
-            task = asyncio.create_task(
-                self._run(plan_token, plan.run_id),
-                name=f"flameox-detached-{plan.run_id}",
-            )
-            self._tasks[plan.run_id] = task
-        await self._wait_until_owned_or_terminal(plan.run_id)
+        except DomainError as error:
+            if error.code is ErrorCode.REVISION_CONFLICT:
+                raise DomainError(
+                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    "The detached idempotency key or run is already bound to another plan.",
+                ) from error
+            raise
+        if operation.operation_id in self.runner.tasks:
+            await ready.wait()
         return self.status(plan.run_id)
 
     def status(self, run_id: str) -> DetachedCaptureStatus:
-        record = self.records.read(run_id)
+        record = self.runner.store.find_subject(
+            operation=self._ADAPTER.kind,
+            subject_id=run_id,
+        )
+        if record is None:
+            return self._legacy_status(self.records.read(run_id))
+        return self._project(record)
+
+    def _project(self, record: OperationRecord) -> DetachedCaptureStatus:
+        run_id = record.subject_id
+        if run_id is None:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                "The detached operation has no run identity.",
+            )
+        operation = OperationStatus.from_record(record, adapter=self._ADAPTER)
+        progress = tuple(
+            DetachedProgress(
+                completed=item.completed,
+                total=item.total,
+                message=item.message,
+                observed_at=item.observed_at,
+            )
+            for item in operation.progress
+            if item.completed is not None and item.total is not None
+        )
         try:
             run = self.runs.read(run_id)
         except DomainError:
-            managed = run_id in self._tasks and not self._tasks[run_id].done()
+            managed = operation.operation_id in self.runner.tasks
             return DetachedCaptureStatus(
                 run_id=run_id,
                 state="starting" if managed else "failed_to_start",
-                progress=record.progress,
-                failure=record.failure,
+                progress=progress,
+                failure=self._failure(operation),
                 limitations=(
                     (
                         "The server stopped before publishing a run manifest. Re-plan the "
@@ -269,8 +351,8 @@ class DetachedCaptureManager:
                     else ()
                 ),
                 recovery=(
-                    DetachedRecovery(arguments=record.plan_request)
-                    if not managed and record.plan_request
+                    _replan_recovery(self._plan_request(record))
+                    if not managed and self._plan_request(record)
                     else None
                 ),
             )
@@ -280,8 +362,7 @@ class DetachedCaptureManager:
             ExecutionStatus.TIMED_OUT,
             ExecutionStatus.CANCELLED,
         }
-        task = self._tasks.get(run_id)
-        managed = task is not None and not task.done()
+        managed = operation.operation_id in self.runner.tasks
         state: Literal[
             "starting",
             "running",
@@ -291,6 +372,9 @@ class DetachedCaptureManager:
         ]
         limitations: tuple[str, ...] = ()
         if terminal:
+            # The run manifest is domain-authoritative, but the operation still owns
+            # preservation/publication. Do not advertise terminal completion until
+            # that task has committed its receipt and evicted local ownership.
             state = "running" if managed else "terminal"
         elif run.execution_status is ExecutionStatus.RUNNING:
             if managed:
@@ -311,112 +395,123 @@ class DetachedCaptureManager:
             execution_status=run.execution_status,
             capture_status=run.capture_status,
             artifact_count=len(run.artifacts),
-            progress=record.progress,
-            failure=record.failure,
+            progress=progress,
+            failure=self._failure(operation),
             limitations=limitations,
             recovery=(
-                DetachedRecovery(arguments=record.plan_request)
-                if state == "failed_to_start" and record.plan_request
+                _replan_recovery(self._plan_request(record))
+                if state == "failed_to_start" and self._plan_request(record)
                 else None
             ),
         )
 
     async def cancel(self, run_id: str) -> DetachedCaptureStatus:
-        status = self.status(run_id)
-        if status.state == "terminal":
-            return status
-        task = self._tasks.get(run_id)
-        if task is None:
+        record = self.runner.store.find_subject(
+            operation=self._ADAPTER.kind,
+            subject_id=run_id,
+        )
+        if record is None:
+            status = self.status(run_id)
+            if status.state == "terminal":
+                return status
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
-                "This server does not own the detached capture task.",
-                remediation=("Inspect the exact process lease; recover only after it disappears.",),
+                "This server does not own the legacy detached capture task.",
                 run_id=run_id,
             )
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        await self.runner.cancel(record.operation_id)
         return self.status(run_id)
 
     async def shutdown(self) -> None:
-        active = [task for task in self._tasks.values() if not task.done()]
-        for task in active:
-            task.cancel()
-        if active:
-            await asyncio.gather(*active, return_exceptions=True)
+        await self.runner.shutdown()
 
-    async def _run(self, plan_token: str, run_id: str) -> None:
-        try:
-            await self.captures.execute(
-                plan_token,
-                progress=lambda completed, total, message: self._record_progress(
-                    run_id,
-                    completed,
-                    total,
-                    message,
-                ),
-            )
-        except asyncio.CancelledError:
-            pass
-        except DomainError as error:
-            await self._record_failure(
-                run_id,
-                failure_code=error.code.value,
-                failure_message=error.message,
-            )
-        except Exception as error:
-            await self._record_failure(
-                run_id,
-                failure_code=ErrorCode.INTERNAL_ERROR.value,
-                failure_message=f"Detached capture failed: {type(error).__name__}.",
-            )
-
-    async def _record_progress(
+    async def _run(
         self,
-        run_id: str,
-        completed: float,
-        total: float,
-        message: str,
-    ) -> None:
-        async with self._record_lock:
-            current = self.records.read(run_id)
-            updated = current.with_progress(
-                DetachedProgress(completed=completed, total=total, message=message)
-            )
-            self.records.append(
-                updated,
-                expected_revision=current.revision,
-            )
-
-    async def _record_failure(
-        self,
-        run_id: str,
+        plan_token: str,
+        operation_id: str,
         *,
-        failure_code: str,
-        failure_message: str,
-    ) -> None:
-        async with self._record_lock:
-            current = self.records.read(run_id)
-            updated = current.with_failure(code=failure_code, message=failure_message)
-            self.records.append(
-                updated,
-                expected_revision=current.revision,
-            )
+        ready: asyncio.Event,
+        progress: Callable[..., Awaitable[None]],
+    ) -> dict[str, Any]:
+        task = self.runner.tasks[operation_id]
+        self.runner.set_cancel_hook(operation_id, task.cancel)
 
-    async def _wait_until_owned_or_terminal(self, run_id: str) -> None:
-        for _ in range(1_200):
-            task = self._tasks[run_id]
-            if task.done():
-                return
-            try:
-                run = self.runs.read(run_id)
-            except DomainError:
-                await asyncio.sleep(0.025)
-                continue
-            if run.lease is not None or run.execution_status in {
-                ExecutionStatus.SUCCEEDED,
-                ExecutionStatus.FAILED,
-                ExecutionStatus.TIMED_OUT,
-                ExecutionStatus.CANCELLED,
-            }:
-                return
-            await asyncio.sleep(0.025)
+        async def report(completed: float, total: float, message: str) -> None:
+            if completed >= 4:
+                ready.set()
+            await progress("capturing", completed, total, message)
+
+        try:
+            result = await self.captures.execute(
+                plan_token,
+                progress=report,
+            )
+            return {
+                "run_id": result.run.run_id,
+                "execution_status": result.run.execution_status.value,
+                "capture_status": result.run.capture_status.value,
+                "artifact_count": len(result.run.artifacts),
+            }
+        finally:
+            ready.set()
+            self.runner.clear_cancel_hook(operation_id)
+
+    @staticmethod
+    def _failure(operation: OperationStatus) -> DetachedFailure | None:
+        if operation.failure_code is None or operation.failure_message is None:
+            return None
+        return DetachedFailure(
+            code=operation.failure_code,
+            message=operation.failure_message,
+        )
+
+    @staticmethod
+    def _plan_request(record: OperationRecord) -> dict[str, object]:
+        value = record.request.get("plan_request")
+        return value if isinstance(value, dict) else {}
+
+    def _legacy_status(self, record: DetachedCaptureRecord) -> DetachedCaptureStatus:
+        try:
+            run = self.runs.read(record.run_id)
+        except DomainError:
+            return DetachedCaptureStatus(
+                run_id=record.run_id,
+                state="failed_to_start",
+                progress=record.progress,
+                failure=record.failure,
+                limitations=(
+                    "This version-one detached record has no run manifest and cannot resume.",
+                ),
+                recovery=(_replan_recovery(record.plan_request) if record.plan_request else None),
+            )
+        terminal = run.execution_status in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.TIMED_OUT,
+            ExecutionStatus.CANCELLED,
+        }
+        return DetachedCaptureStatus(
+            run_id=record.run_id,
+            state=(
+                "terminal"
+                if terminal
+                else (
+                    "unmanaged_after_restart"
+                    if run.execution_status is ExecutionStatus.RUNNING
+                    else "failed_to_start"
+                )
+            ),
+            execution_status=run.execution_status,
+            capture_status=run.capture_status,
+            artifact_count=len(run.artifacts),
+            progress=record.progress,
+            failure=record.failure,
+            limitations=("Legacy detached lifecycle state is read-only after migration.",),
+            recovery=(
+                _replan_recovery(record.plan_request)
+                if not terminal
+                and run.execution_status is not ExecutionStatus.RUNNING
+                and record.plan_request
+                else None
+            ),
+        )

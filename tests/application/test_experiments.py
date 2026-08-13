@@ -9,14 +9,21 @@ from pydantic import ValidationError
 
 from flameox.analysis import RecipeService
 from flameox.application import (
+    ComparisonService,
     CreateInvestigationRequest,
     ExecutionPolicy,
     ExperimentPlan,
     ExperimentService,
+    FreezeRunIdsRequest,
+    FreezeRunMembersRequest,
+    IncludedFreezeRunSetMember,
     InvestigationService,
+    MeasurementCompareRunSetsRequest,
+    RunSetService,
     parse_experiment_config,
 )
 from flameox.application.experiments import OutcomeExperimentResult
+from flameox.application.runtime_resources import RUNTIME_RESOURCE_METRIC_CATALOG
 from flameox.catalog import Catalog
 from flameox.config import WorkspaceConfig
 from flameox.domain import (
@@ -26,9 +33,13 @@ from flameox.domain import (
     ExecutionStatus,
     ExperimentOutcomeDisposition,
     ExperimentOutcomeGoal,
+    TrialFailureClass,
     TrialOutcome,
+    VariantIdentityQuality,
 )
 from flameox.storage import RunStore, Workspace
+
+pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
 
 def _git(project: Path, *args: str) -> None:
@@ -46,7 +57,7 @@ def test_outcome_result_rejects_half_a_first_failure() -> None:
         OutcomeExperimentResult.model_validate(
             {
                 "experiment_id": "experiment",
-                "goal": ExperimentOutcomeGoal.EQUIVALENCE,
+                "goal": ExperimentOutcomeGoal.ABSENCE_OF_FAILURE,
                 "disposition": ExperimentOutcomeDisposition.INSUFFICIENT_EVIDENCE,
                 "counts": (),
                 "complete_pairs": 0,
@@ -74,6 +85,23 @@ def test_experiment_config_accepts_closed_runtime_resource_catalog(metric: str) 
     )
 
     assert config.primary_metric == metric
+
+
+def test_runtime_resource_catalog_records_the_admission_contract() -> None:
+    assert set(RUNTIME_RESOURCE_METRIC_CATALOG) == {
+        "runtime_resource.peak_rss_bytes",
+        "runtime_resource.minimum_free_bytes",
+        "runtime_resource.staging_growth_bytes",
+    }
+    for metric, definition in RUNTIME_RESOURCE_METRIC_CATALOG.items():
+        assert definition.metric == metric
+        assert definition.unit == "bytes"
+        assert definition.scope
+        assert definition.aggregation
+        assert definition.collection_backend
+        assert definition.unavailable_behavior
+        assert definition.limitations
+        assert definition.supports_confirmatory_paired_comparison is True
 
 
 def test_experiment_config_rejects_writable_root_growth_metric() -> None:
@@ -122,7 +150,7 @@ workload = "scan"
 treatment_factor = "implementation"
 baseline_value = ""
 design = "randomized_complete_blocks"
-blocks = 1
+blocks = 2
 primary_metric = "pyperf.workload"
 polarity = "lower_is_better"
 estimand = "median_paired_log_ratio"
@@ -176,30 +204,139 @@ implementation = ["candidate", ""]
 
     result = await service.run(plan.plan_token, progress=record_progress)
 
-    assert len(plan.blocks) == 1
-    assert set(plan.blocks[0].order) == {"", "candidate"}
+    assert len(plan.blocks) == 2
+    assert all(set(block.order) == {"", "candidate"} for block in plan.blocks)
     assert plan.baseline_variant == ""
-    assert len(result.trials) == 2
+    assert len(result.trials) == 4
     assert all(trial.outcome is TrialOutcome.SUCCEEDED for trial in result.trials)
     assert len(result.run_sets) == 2
     assert result.comparison is not None
     assert result.comparison.comparison.experiment_id == result.experiment.experiment_id
     assert result.comparison.comparison.validity is ComparisonValidity.EXPLORATORY
-    assert result.comparison.comparison.complete_pair_n == 1
+    assert result.comparison.comparison.complete_pair_n == 2
+    assert result.comparison.comparison.protocol_identity_id is not None
+    assert result.comparison.comparison.metric_contract_id.startswith("sha256:")
     assert result.comparison.baseline_run_set.selection["variant"] == ""
     assert result.comparison.candidate_run_set.selection["variant"] == "candidate"
     assert result.limitations == ()
+    with Catalog(workspace).open_snapshot(result.corpus_commit_id) as snapshot:
+        assert snapshot.execute(
+            "SELECT count(*) FROM experiments WHERE experiment_id = ?",
+            (result.experiment.experiment_id,),
+        ).fetchone() == (1,)
+        assert snapshot.execute(
+            "SELECT count(DISTINCT variant_id) FROM variants WHERE experiment_id = ?",
+            (result.experiment.experiment_id,),
+        ).fetchone() == (len(result.variants),)
+        assert snapshot.execute(
+            "SELECT count(DISTINCT trial_id) FROM trials WHERE experiment_id = ?",
+            (result.experiment.experiment_id,),
+        ).fetchone() == (len(result.trials),)
+        assert snapshot.execute(
+            "SELECT count(*) FROM run_sets WHERE run_set_id IN (?, ?)",
+            tuple(value.run_set_id for value in result.run_sets),
+        ).fetchone() == (len(result.run_sets),)
+        assert snapshot.execute(
+            "SELECT count(*) FROM comparisons WHERE comparison_id = ?",
+            (result.comparison.comparison.comparison_id,),
+        ).fetchone() == (1,)
     assert service.experiments.read(result.experiment.experiment_id) == result.experiment
     scaling = RecipeService(workspace).scaling(result.experiment.experiment_id)
-    assert scaling.attempted_trials == 2
-    assert scaling.complete_blocks == 1
+    assert scaling.attempted_trials == 4
+    assert scaling.complete_blocks == 2
     assert {point.variant for point in scaling.points} == {
         "",
         "candidate",
     }
-    assert [item[0] for item in progress] == list(range(7))
-    assert {item[1] for item in progress} == {6}
+    assert [item[0] for item in progress] == list(range(9))
+    assert {item[1] for item in progress} == {8}
     assert all(item[2] for item in progress)
+
+    declared_request = MeasurementCompareRunSetsRequest(
+        baseline_run_set_id=result.comparison.baseline_run_set.run_set_id,
+        candidate_run_set_id=result.comparison.candidate_run_set.run_set_id,
+        experiment_id=result.experiment.experiment_id,
+        metric=result.experiment.primary_metric,
+        unit="ns",
+        polarity=result.experiment.polarity,
+        estimand="median_paired_log_ratio",
+        practical_threshold=result.experiment.practical_threshold,
+        confidence_level=result.experiment.confidence_level,
+        random_seed=result.experiment.random_seed,
+    )
+    for update, field_name in (
+        ({"metric": "other.metric"}, "metric"),
+        ({"unit": "milliseconds"}, "unit"),
+        ({"estimand": "difference_in_median_logs"}, "estimand"),
+        ({"practical_threshold": 0.9}, "practical_threshold"),
+        ({"confidence_level": 0.8}, "confidence_level"),
+        ({"random_seed": 999}, "random_seed"),
+    ):
+        mismatched = ComparisonService(workspace).compare(
+            declared_request.validated_copy(update=update)
+        )
+        assert mismatched.comparison.validity is ComparisonValidity.INVALID
+        assert any(
+            f"comparison {field_name} differs" in reason
+            for reason in mismatched.comparison.mismatches
+        )
+
+    partial_run_sets = RunSetService(workspace)
+    partial_baseline_member = result.comparison.baseline_run_set.members[0]
+    partial_candidate_member = result.comparison.candidate_run_set.members[0]
+    assert partial_baseline_member.trial_id is not None
+    assert partial_candidate_member.trial_id is not None
+    partial_baseline = partial_run_sets.freeze(
+        FreezeRunMembersRequest(
+            selection=result.comparison.baseline_run_set.selection,
+            members=(
+                IncludedFreezeRunSetMember(
+                    run_id=partial_baseline_member.run_id,
+                    trial_id=partial_baseline_member.trial_id,
+                ),
+            ),
+        )
+    )
+    partial_candidate = partial_run_sets.freeze(
+        FreezeRunMembersRequest(
+            selection=result.comparison.candidate_run_set.selection,
+            members=(
+                IncludedFreezeRunSetMember(
+                    run_id=partial_candidate_member.run_id,
+                    trial_id=partial_candidate_member.trial_id,
+                ),
+            ),
+        )
+    )
+    partial = ComparisonService(workspace).compare(
+        declared_request.validated_copy(
+            update={
+                "baseline_run_set_id": partial_baseline.run_set_id,
+                "candidate_run_set_id": partial_candidate.run_set_id,
+            }
+        )
+    )
+    assert partial.comparison.validity is ComparisonValidity.INVALID
+    assert any(
+        "full declared trial population" in reason for reason in partial.comparison.mismatches
+    )
+
+    unbound_baseline = partial_run_sets.freeze(
+        FreezeRunIdsRequest(run_ids=(partial_baseline_member.run_id,))
+    )
+    unbound_candidate = partial_run_sets.freeze(
+        FreezeRunIdsRequest(run_ids=(partial_candidate_member.run_id,))
+    )
+    unbound = ComparisonService(workspace).compare(
+        declared_request.validated_copy(
+            update={
+                "baseline_run_set_id": unbound_baseline.run_set_id,
+                "candidate_run_set_id": unbound_candidate.run_set_id,
+            }
+        )
+    )
+    assert unbound.comparison.validity is ComparisonValidity.INVALID
+    assert any("without a trial identity" in reason for reason in unbound.comparison.mismatches)
 
 
 @pytest.mark.anyio
@@ -257,7 +394,117 @@ implementation = ["baseline", "candidate"]
 
 
 @pytest.mark.anyio
-async def test_explicit_factor_comparison_requires_the_declared_baseline(tmp_path: Path) -> None:
+async def test_structured_benchmark_samples_run_the_automatic_paired_analysis(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "structured_bench.py").write_text(
+        "import json, os, sys\n"
+        "treatment = sys.argv[1].split('=', 1)[1]\n"
+        "samples = [50, 50, 50] if treatment == 'candidate' else [100, 100, 100]\n"
+        "document = {\n"
+        "  'schema_version': 'flameox.benchmark-samples.v1',\n"
+        "  'producer': 'fixture-benchmark', 'producer_version': '1',\n"
+        "  'benchmarks': [{\n"
+        "    'name': 'kernel.time', 'unit': 'ns',\n"
+        "    'measurement_clock': 'device_event',\n"
+        "    'synchronization': 'event_synchronize',\n"
+        "    'scope': 'device', 'phase': 'steady_state', 'loop_count': 1,\n"
+        "    'device': {'type': 'mps', 'index': 0},\n"
+        "    'dimensions': {'shape': 'small'}, 'warmups': [110],\n"
+        "    'samples': samples\n"
+        "  }]\n"
+        "}\n"
+        "with open(os.environ['FLAMEOX_BENCHMARK_OUTPUT'], 'w') as stream:\n"
+        "    json.dump(document, stream)\n"
+    )
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.kernel]
+argv = ["python", "structured_bench.py", "implementation={implementation}"]
+[workloads.kernel.parameters]
+implementation = ["baseline", "candidate"]
+[workloads.kernel.oracle]
+strength = "cross_treatment_equivalence"
+argv = ["python", "-c", "print('same-output')"]
+
+[experiments.kernel]
+workload = "kernel"
+design = "randomized_complete_blocks"
+blocks = 3
+treatment_factor = "implementation"
+baseline_value = "baseline"
+primary_metric = "kernel.time"
+primary_metric_unit = "ns"
+polarity = "lower_is_better"
+estimand = "median_paired_log_ratio"
+practical_threshold = 0.05
+random_seed = 7
+[experiments.kernel.factors]
+implementation = ["baseline", "candidate"]
+[experiments.kernel.measurement_series]
+scope = "device"
+aggregation = "sample"
+phase = "steady_state"
+loop_count = 1
+[experiments.kernel.measurement_series.dimensions]
+measurement_clock = "device_event"
+synchronization = "event_synchronize"
+producer = "fixture-benchmark"
+producer_version = "1"
+"device.type" = "mps"
+"device.index" = "0"
+shape = "small"
+"""
+    )
+    workspace.paths.config.write_text(
+        workspace.config.validated_copy(
+            update={
+                "execution": workspace.config.execution.validated_copy(
+                    update={"containment": "disabled"}
+                )
+            }
+        ).to_toml()
+    )
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "add", "structured_bench.py", "flameox.toml")
+    _git(
+        tmp_path,
+        "-c",
+        "user.name=flameox Test",
+        "-c",
+        "user.email=flameox@example.invalid",
+        "commit",
+        "-qm",
+        "fixture",
+    )
+    investigation = InvestigationService(workspace).create(
+        CreateInvestigationRequest(question="Does the candidate reduce device time?")
+    )
+    service = ExperimentService(workspace)
+    plan = await service.plan(
+        experiment_name="kernel",
+        investigation_id=investigation.investigation_id,
+        adapter="benchmark-samples",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    result = await service.run(plan.plan_token)
+
+    assert result.comparison is not None
+    comparison = result.comparison.comparison
+    assert comparison.validity is ComparisonValidity.VALID
+    assert comparison.complete_pair_n == 3
+    assert comparison.independent_unit == "block"
+    assert comparison.relative_change == pytest.approx(-0.5)
+    assert comparison.measurement_series_id is not None
+
+
+@pytest.mark.anyio
+async def test_explicit_factor_matrix_completes_when_progress_delivery_fails(
+    tmp_path: Path,
+) -> None:
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "bench.py").write_text("assert sum(range(1000)) >= 0\n")
     (tmp_path / "flameox.toml").write_text(
@@ -307,8 +554,12 @@ implementation = ["baseline", "candidate", "other"]
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
 
-    result = await service.run(plan.plan_token)
+    async def failed_notification(completed: float, total: float, message: str) -> None:
+        raise RuntimeError("progress transport closed")
 
+    result = await service.run(plan.plan_token, progress=failed_notification)
+
+    assert len(result.trials) == 2
     assert result.comparison is None
     assert (
         "Automatic paired comparison requires the declared baseline and exactly one candidate "
@@ -565,6 +816,130 @@ case = ["empty", "boundary", "ordinary"]
 
 
 @pytest.mark.anyio
+async def test_factorial_variants_preserve_cohort_identity_without_a_representative_cell(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.matrix]
+argv = ["python", "-c", "print('{implementation}', '{size}')"]
+[workloads.matrix.parameters]
+implementation = ["baseline", "candidate"]
+size = [1, 2]
+
+[experiments.matrix]
+workload = "matrix"
+design = "fixed_order"
+blocks = 1
+treatment_factor = "implementation"
+baseline_value = "baseline"
+primary_metric = "runtime_resource.peak_rss_bytes"
+polarity = "lower_is_better"
+[experiments.matrix.factors]
+implementation = ["baseline", "candidate"]
+size = [1, 2]
+"""
+    )
+    workspace.paths.config.write_text(
+        workspace.config.validated_copy(
+            update={
+                "execution": workspace.config.execution.validated_copy(
+                    update={"containment": "disabled"}
+                )
+            }
+        ).to_toml()
+    )
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "add", "flameox.toml")
+    _git(
+        tmp_path,
+        "-c",
+        "user.name=flameox Test",
+        "-c",
+        "user.email=flameox@example.invalid",
+        "commit",
+        "-qm",
+        "fixture",
+    )
+    investigation = InvestigationService(workspace).create(
+        CreateInvestigationRequest(question="How does size interact with implementation?")
+    )
+    service = ExperimentService(workspace)
+    plan = await service.plan(
+        experiment_name="matrix",
+        investigation_id=investigation.investigation_id,
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    result = await service.run(plan.plan_token)
+
+    assert len(result.trials) == 4
+    assert len(result.variants) == 2
+    for variant in result.variants:
+        assert variant.identity_quality is VariantIdentityQuality.HETEROGENEOUS
+        assert variant.parameters == {"implementation": variant.treatment_value}
+        assert variant.varying_factors == {"size": (1, 2)}
+        assert variant.workload_instance_id is None
+        assert len(variant.workload_instance_ids) == 2
+        assert len(variant.combination_ids) == 2
+        selected_trials = [
+            trial for trial in result.trials if trial.variant_id == variant.variant_id
+        ]
+        assert {trial.combination_id for trial in selected_trials} == set(variant.combination_ids)
+        run_set = next(
+            item for item in result.run_sets if item.selection["variant_id"] == variant.variant_id
+        )
+        assert run_set.selection["treatment_identity_id"] == variant.treatment_identity_id
+        assert run_set.selection["combination_count"] == 2
+    with Catalog(workspace).open_snapshot(result.corpus_commit_id) as snapshot:
+        rows = snapshot.execute(
+            "SELECT identity_quality, workload_instance_id, "
+            "array_length(workload_instance_ids), varying_factors_json "
+            "FROM variants WHERE experiment_id = ? ORDER BY name",
+            (result.experiment.experiment_id,),
+        ).fetchall()
+    assert rows == [
+        ("heterogeneous", None, 2, '{"size":[1,2]}'),
+        ("heterogeneous", None, 2, '{"size":[1,2]}'),
+    ]
+
+    baseline_cells = [
+        (block, order, cell)
+        for block in plan.blocks
+        for order, cell in enumerate(block.cells)
+        if cell.treatment == "baseline"
+    ]
+    first_block, first_order, first_cell = baseline_cells[0]
+    missing_first = service._make_trial(
+        plan=plan,
+        cell=first_cell,
+        run=None,
+        block_id=first_block.block_id,
+        order=first_order,
+        outcome=TrialOutcome.UNSUPPORTED,
+        failure_class=TrialFailureClass.UNSUPPORTED_ENVIRONMENT,
+    )
+    surviving = next(
+        trial
+        for trial in result.trials
+        if trial.factors == {"implementation": "baseline", "size": 2}
+    )
+    partial = service._variant_for_treatment(
+        plan,
+        "baseline",
+        [missing_first, surviving],
+    )
+    assert partial.identity_quality is VariantIdentityQuality.INCOMPLETE
+    assert partial.parameters == {"implementation": "baseline"}
+    assert partial.varying_factors == {"size": (1, 2)}
+    assert partial.workload_instance_id is None
+    assert len(partial.workload_instance_ids) == 1
+
+
+@pytest.mark.anyio
 async def test_multifactor_explicit_partial_matrix_and_budget_validation(
     tmp_path: Path,
 ) -> None:
@@ -688,7 +1063,7 @@ blocks = 1
 treatment_factor = "mode"
 baseline_value = ""
 analysis = "outcome"
-outcome_goal = "equivalence"
+outcome_goal = "absence_of_failure"
 minimum_attempts = 1
 maximum_attempts = 1
 [experiments.semantic.factors]
@@ -727,14 +1102,18 @@ case = ["bad", "clean"]
     counts = {item.treatment: item for item in result.outcome.counts}
     assert counts[""].oracle_failed == 1
     assert counts[""].failure_rate == 0.5
+    assert counts[""].failure_rate_upper_bound is not None
+    assert counts[""].failure_rate_upper_bound > 0.5
     assert counts["candidate"].pass_rate == 1
-    with Catalog(workspace).open_snapshot() as snapshot:
+    assert counts["candidate"].failure_rate_upper_bound is not None
+    assert counts["candidate"].failure_rate_upper_bound > 0
+    with Catalog(workspace).open_snapshot(result.corpus_commit_id) as snapshot:
         row = snapshot.execute(
             "SELECT method, disposition, complete_pairs FROM experiment_outcomes "
             "WHERE experiment_id = ?",
             (result.experiment.experiment_id,),
         ).fetchone()
-    assert row == ("fixed_attempts_v1", "base_only_failure", 2)
+    assert row == ("absence_of_failure_fixed_attempts_v1", "base_only_failure", 2)
 
 
 @pytest.mark.anyio
@@ -775,7 +1154,7 @@ design = "fixed_order"
 blocks = 1
 treatment_factor = "treatment"
 analysis = "outcome"
-outcome_goal = "equivalence"
+outcome_goal = "absence_of_failure"
 minimum_attempts = 1
 maximum_attempts = 1
 [experiments.semantic.factors]
@@ -974,7 +1353,7 @@ workload = "hang"
 blocks = 1
 treatment_factor = "mode"
 analysis = "outcome"
-outcome_goal = "bounded_rate"
+outcome_goal = "absence_of_failure"
 [experiments.hangs.factors]
 mode = ["base", "candidate"]
 """

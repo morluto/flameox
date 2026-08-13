@@ -19,6 +19,8 @@ from flameox.storage import ArtifactStore, Workspace
 from tests.support.capture import disable_containment
 from tests.support.providers import require_trace_processor
 
+pytestmark = [pytest.mark.integration, pytest.mark.process]
+
 _FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "rocprofv3"
 
 

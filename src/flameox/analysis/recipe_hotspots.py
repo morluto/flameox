@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from flameox.action_graph import ActionId, tool_action
 from flameox.analysis.recipe_context import RecipeContext
 from flameox.analysis.recipe_models import (
     Hotspot,
@@ -250,8 +251,7 @@ class HotspotRecipes(RecipeContext):
         elif has_memory_profile and memory_run_id is not None:
             evidence = recoverable_unavailable_evidence(
                 "memory_profile_not_extracted",
-                next_tool="extract_memray",
-                next_arguments={"run_id": memory_run_id},
+                next_action=tool_action(ActionId.EXTRACT_MEMRAY, run_id=memory_run_id),
             )
         else:
             evidence = unavailable_availability(

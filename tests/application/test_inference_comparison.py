@@ -14,6 +14,8 @@ import json
 from pathlib import Path
 from typing import Literal
 
+import pytest
+
 from flameox.analysis.inference_protocol import (
     HardwareIdentity,
     InferenceProtocolIdentity,
@@ -48,6 +50,8 @@ from flameox.domain import (
 from flameox.domain.models import ImportRunManifest
 from flameox.evidence import GenerationPublisher
 from flameox.storage import RunStore, Workspace
+
+pytestmark = pytest.mark.unit
 
 
 def _protocol_identity(
@@ -216,7 +220,7 @@ def test_inference_runs_with_incomplete_identity_are_exploratory_not_invalid(
     assert validity is ComparisonValidity.EXPLORATORY
 
 
-def test_complete_inference_protocol_is_valid_without_generic_validation_artifact(
+def test_complete_inference_protocol_does_not_promote_one_worker_to_three_units(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
@@ -239,7 +243,7 @@ def test_complete_inference_protocol_is_valid_without_generic_validation_artifac
 
     validity = _compare(workspace, baseline_id, candidate_id)
 
-    assert validity is ComparisonValidity.VALID
+    assert validity is ComparisonValidity.EXPLORATORY
 
 
 def test_inference_runs_with_differing_protocol_facets_are_invalid(

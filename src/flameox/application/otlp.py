@@ -9,10 +9,19 @@ from pydantic import ConfigDict, computed_field
 
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.application.evidence_rows import _json
-from flameox.domain import ArtifactKind, DomainError, ErrorCode
-from flameox.evidence import GenerationPublisher
+from flameox.application.projections import ProjectionCoordinator
+from flameox.domain import (
+    ArtifactKind,
+    DomainError,
+    ErrorCode,
+    ProjectionIntentSpec,
+    digest_model,
+    projection_intent_id,
+)
+from flameox.evidence import publication_operation_digest
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
+from flameox.workers.otlp_contract import OTLP_WORKER, OtlpWorkerRequest, OtlpWorkerResult
 
 
 class OtlpExtractionResult(ContractModel):
@@ -61,7 +70,7 @@ class OtlpTraceService:
         self.workspace = workspace
         self.artifacts = ArtifactStore(workspace)
         self.runs = RunStore(workspace)
-        self.publisher = GenerationPublisher(workspace)
+        self.projections = ProjectionCoordinator(workspace)
         self.worker = IsolatedWorkerHarness(workspace)
 
     def extract_otlp_trace(
@@ -87,31 +96,34 @@ class OtlpTraceService:
             )
         path = self.artifacts.get(registration.artifact_id).payload_path
         try:
-            response = self.worker.run_sync(
-                "flameox.workers.otlp",
-                {
-                    "artifact_path": str(path),
-                    "media_type": registration.media_type,
-                    "row_limit": self.workspace.config.storage.max_rows_per_generation,
-                },
-                name="OTLP",
-            )
-            if response.get("row_limit_exceeded") is True:
-                raw_counts = response.get("counts")
-                raw_limitations = response.get("limitations")
-                if not isinstance(raw_counts, dict) or not isinstance(raw_limitations, list):
-                    raise ValueError("OTLP row-limit response is invalid")
+            with self.worker.run_typed_sync_session(
+                OTLP_WORKER,
+                OtlpWorkerRequest(
+                    artifact_path=str(path),
+                    media_type=registration.media_type,
+                    row_limit=self.workspace.config.storage.max_rows_per_generation,
+                ),
+            ) as (response, _job_root):
+                response = OtlpWorkerResult.model_validate(response)
+            if response.row_limit_exceeded:
                 return OtlpExtractionResult(
                     run_id=run_id,
                     artifact_id=registration.artifact_id,
-                    resource_count=int(raw_counts["resources"]),
-                    scope_count=int(raw_counts["scopes"]),
-                    span_count=int(raw_counts["spans"]),
-                    event_count=int(raw_counts["events"]),
-                    link_count=int(raw_counts["links"]),
-                    limitations=tuple(str(item) for item in raw_limitations),
+                    resource_count=response.counts["resources"],
+                    scope_count=response.counts["scopes"],
+                    span_count=response.counts["spans"],
+                    event_count=response.counts["events"],
+                    link_count=response.counts["links"],
+                    limitations=response.limitations,
                 )
-            parsed = _parsed_response(response)
+            parsed = _ParsedOtlp(
+                resources=[dict(row) for row in response.resources],
+                scopes=[dict(row) for row in response.scopes],
+                spans=[dict(row) for row in response.spans],
+                events=[dict(row) for row in response.events],
+                links=[dict(row) for row in response.links],
+                limitations=response.limitations,
+            )
         except _OtlpRowLimitExceeded as error:
             return OtlpExtractionResult(
                 run_id=run_id,
@@ -146,14 +158,51 @@ class OtlpTraceService:
             for row in table_rows:
                 row["run_id"] = run_id
                 row["artifact_id"] = registration.artifact_id
-        published = self.publisher.publish_rows_idempotent(
-            rows,
-            publisher="flameox.otlp",
-            publisher_version=self.extractor_version,
-            input_run_ids=(run_id,),
-            input_artifact_ids=(registration.artifact_id,),
-            operation_identity={"media_type": registration.media_type},
+        intent_id = projection_intent_id(
+            workspace_id=self.workspace.identity.workspace_id,
+            domain_kind="artifact_registration",
+            domain_id=registration.registration_id,
+            domain_revision=run.revision,
+            projection_kind="extract.otlp",
+            projection_schema_version=1,
         )
+        operation_identity = {"projection_intent_id": intent_id}
+        intent = self.projections.stage(
+            ProjectionIntentSpec(
+                intent_id=intent_id,
+                workspace_id=self.workspace.identity.workspace_id,
+                domain_kind="artifact_registration",
+                domain_id=registration.registration_id,
+                domain_revision=run.revision,
+                domain_digest=digest_model(
+                    {
+                        "run_digest": digest_model(run.model_dump(mode="json")),
+                        "registration": registration.model_dump(mode="json"),
+                    }
+                ),
+                projection_kind="extract.otlp",
+                projection_schema_version=1,
+                publisher="flameox.otlp",
+                publisher_version=self.extractor_version,
+                input_run_ids=(run_id,),
+                input_artifact_ids=(registration.artifact_id,),
+                expected_tables=tuple(rows),
+                operation_digest=publication_operation_digest(
+                    publisher="flameox.otlp",
+                    publisher_version=self.extractor_version,
+                    input_run_ids=(run_id,),
+                    input_artifact_ids=(registration.artifact_id,),
+                    operation_identity=operation_identity,
+                ),
+                replay_context={
+                    "run_id": run_id,
+                    "artifact_id": registration.artifact_id,
+                    "registration_id": registration.registration_id,
+                    "media_type": registration.media_type,
+                },
+            )
+        )
+        published = self.projections.publish_rows(intent.intent_id, rows)
         return OtlpExtractionResult(
             run_id=run_id,
             artifact_id=registration.artifact_id,
@@ -334,26 +383,6 @@ def _parse_otlp(path: Path, media_type: str, *, row_limit: int) -> _ParsedOtlp:
             details={"media_type": media_type},
         )
     return OtlpTraceService._normalize(request, row_limit=row_limit)
-
-
-def _parsed_response(response: dict[str, Any]) -> _ParsedOtlp:
-    def rows(name: str) -> list[dict[str, object]]:
-        value = response.get(name)
-        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
-            raise ValueError(f"OTLP worker field {name!r} is invalid")
-        return value
-
-    limitations = response.get("limitations")
-    if not isinstance(limitations, list):
-        raise ValueError("OTLP worker limitations are invalid")
-    return _ParsedOtlp(
-        resources=rows("resources"),
-        scopes=rows("scopes"),
-        spans=rows("spans"),
-        events=rows("events"),
-        links=rows("links"),
-        limitations=tuple(str(item) for item in limitations),
-    )
 
 
 def _id(value: bytes, expected: int, label: str, limitations: list[str]) -> str:

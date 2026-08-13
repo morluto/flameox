@@ -56,6 +56,7 @@ _MODULES = (
 __all__ = [
     "ALL_SETUP_CLIENTS",
     "KERNEL_BUILD_SCHEMA_VERSION",
+    "KERNEL_BUILD_SCHEMA_VERSION_V1",
     "AIPerfCorrelationSummary",
     "AIPerfInputsIndex",
     "AIPerfRecordParser",
@@ -80,11 +81,15 @@ __all__ = [
     "InferenceArtifactExtractor",
     "InferenceExtractionResult",
     "KernelBuildArtifact",
+    "KernelBuildContext",
+    "KernelBuildManifest",
     "KernelBuildManifestV1",
+    "KernelBuildManifestV2",
     "KernelBuildStage",
+    "KernelBuildTarget",
     "KernelValidationExtractionResult",
     "KernelValidationExtractor",
-    "KernelValidationV1",
+    "KernelValidationV2",
     "Launcher",
     "ManagedRuntime",
     "MemrayExtractionResult",
@@ -138,6 +143,8 @@ __all__ = [
     "bind_adapter_options",
     "install_trace_processor",
     "kernel_build_json_schema",
+    "kernel_build_v1_json_schema",
+    "parse_kernel_build_manifest",
 ]
 
 

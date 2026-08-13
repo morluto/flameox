@@ -10,6 +10,8 @@ import pytest
 
 from flameox.collectors import torch_launcher
 
+pytestmark = pytest.mark.unit
+
 
 def test_torch_launcher_records_workload_phase_on_failure(
     tmp_path: Path,

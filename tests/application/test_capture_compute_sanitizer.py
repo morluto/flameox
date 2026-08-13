@@ -12,6 +12,8 @@ from flameox.domain import DomainError, ErrorCode
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
 
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
+
 
 def _install_fake_compute_sanitizer(
     project: Path,

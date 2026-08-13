@@ -10,6 +10,15 @@ from flameox.domain import ExecutionStatus
 from flameox.storage import Workspace
 from tests.support.providers import require_trace_processor
 
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.optional,
+    pytest.mark.process,
+    pytest.mark.serial,
+    pytest.mark.requires_perfetto,
+    pytest.mark.requires_pyspy,
+]
+
 
 @pytest.mark.anyio
 @pytest.mark.optional

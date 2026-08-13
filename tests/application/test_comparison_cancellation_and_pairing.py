@@ -17,6 +17,8 @@ from flameox.application import (
 )
 from flameox.catalog import Catalog, Snapshot
 from flameox.domain import (
+    DomainError,
+    ErrorCode,
     MetricPolarity,
     RunSet,
     digest_model,
@@ -26,6 +28,8 @@ from flameox.storage import Workspace
 from tests.support.comparisons import (
     imported_benchmark,
 )
+
+pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
 
 @pytest.mark.anyio
@@ -178,3 +182,103 @@ def test_trial_block_identity_makes_pairing_independent_of_member_order(
 
     assert forward.comparison.complete_pair_n == 2
     assert forward.comparison.relative_change == reversed_result.comparison.relative_change
+
+
+def test_repeated_trial_ids_are_resolved_by_experiment_and_run_identity(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    runs = {
+        name: imported_benchmark(workspace, tmp_path / f"{name}.json", values)
+        for name, values in {
+            "e1-base": (0.010, 0.010, 0.010),
+            "e1-candidate": (0.005, 0.005, 0.005),
+            "e2-base": (0.020, 0.020, 0.020),
+            "e2-candidate": (0.030, 0.030, 0.030),
+        }.items()
+    }
+    rows: list[dict[str, object]] = []
+    for experiment_id in ("experiment-1", "experiment-2"):
+        for treatment in ("base", "candidate"):
+            run_id = runs[f"{'e1' if experiment_id == 'experiment-1' else 'e2'}-{treatment}"]
+            rows.append(
+                {
+                    "trial_id": f"trial-{treatment}",
+                    "experiment_id": experiment_id,
+                    "variant_id": f"{experiment_id}-{treatment}",
+                    "run_id": run_id,
+                    "combination_id": digest_model(
+                        {"experiment": experiment_id, "treatment": treatment}
+                    ),
+                    "factors_json": json.dumps({"treatment": treatment}),
+                    "block_id": "shared-block",
+                    "order_in_block": 0,
+                    "parameter_name": None,
+                    "parameter_value_int": None,
+                    "parameter_value_float": None,
+                    "attempt": 1,
+                    "outcome": ("succeeded" if experiment_id == "experiment-1" else "failed"),
+                    "exclusion_reason": (
+                        None if experiment_id == "experiment-1" else "later failure"
+                    ),
+                    "validation_status": "not_requested",
+                    "failure_class": (
+                        "none" if experiment_id == "experiment-1" else "process_failure"
+                    ),
+                }
+            )
+    GenerationPublisher(workspace).publish_rows(
+        {"trials": rows},
+        publisher="repeated-trial-fixture",
+        publisher_version="1",
+        input_run_ids=tuple(runs.values()),
+    )
+    run_sets = RunSetService(workspace)
+    with pytest.raises(DomainError) as ambiguous:
+        run_sets.freeze(
+            FreezeRunMembersRequest(
+                members=(
+                    IncludedFreezeRunSetMember(
+                        run_id=runs["e1-base"],
+                        trial_id="trial-base",
+                    ),
+                )
+            )
+        )
+    assert ambiguous.value.code is ErrorCode.COMPARISON_INVALID
+
+    baseline = run_sets.freeze(
+        FreezeRunMembersRequest(
+            selection={"experiment_id": "experiment-1"},
+            members=(
+                IncludedFreezeRunSetMember(
+                    run_id=runs["e1-base"],
+                    trial_id="trial-base",
+                ),
+            ),
+        )
+    )
+    candidate = run_sets.freeze(
+        FreezeRunMembersRequest(
+            selection={"experiment_id": "experiment-1"},
+            members=(
+                IncludedFreezeRunSetMember(
+                    run_id=runs["e1-candidate"],
+                    trial_id="trial-candidate",
+                ),
+            ),
+        )
+    )
+    result = ComparisonService(workspace).compare(
+        MeasurementCompareRunSetsRequest(
+            baseline_run_set_id=baseline.run_set_id,
+            candidate_run_set_id=candidate.run_set_id,
+            metric="pyperf.scan",
+            unit="ns",
+            polarity=MetricPolarity.LOWER_IS_BETTER,
+            practical_threshold=0.01,
+        )
+    )
+
+    assert result.comparison.complete_pair_n == 1
+    assert not any("trial evidence" in reason for reason in result.comparison.mismatches)

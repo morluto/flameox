@@ -17,6 +17,8 @@ from flameox.domain import DomainError
 from flameox.mcp import create_server
 from flameox.storage import Workspace
 
+pytestmark = [pytest.mark.integration, pytest.mark.serial]
+
 
 @pytest.mark.anyio
 async def test_unknown_declared_workflow_routes_back_to_discovery(tmp_path: Path) -> None:
@@ -30,8 +32,18 @@ async def test_unknown_declared_workflow_routes_back_to_discovery(tmp_path: Path
 
     assert result.is_error is True
     assert result.structured_content is not None
-    assert result.structured_content["error"]["recovery"]["kind"] == "discover_workflows"
-    assert result.structured_content["error"]["recovery"]["next_tool"] == "list_declared_workflows"
+    assert result.structured_content["error"]["recovery"] == {
+        "kind": "tool_action",
+        "safe_to_repeat_same_call": False,
+        "retry_after_ms": None,
+        "action": {
+            "kind": "tool",
+            "action": "workflow.list",
+            "arguments": {"kind": "workload", "limit": 50},
+        },
+        "next_tool": "list_declared_workflows",
+        "next_arguments": {"kind": "workload", "limit": 50},
+    }
 
 
 @pytest.mark.anyio
@@ -67,15 +79,26 @@ async def test_missing_workload_configuration_routes_to_configure_workload(
         "configuration_id": None,
         "workload_names": [],
         "diagnostics": ["No named workload configuration exists yet."],
-        "next_tool": "configure_workload",
+        "next_action": {
+            "kind": "manual",
+            "instruction": "Supply a complete named workload definition before continuing.",
+            "suggested_action": "workload.configure",
+            "missing_arguments": ["name", "operation", "argv"],
+        },
     }
     assert missing.is_error is True
     assert missing.structured_content is not None
     assert missing.structured_content["error"]["recovery"] == {
-        "kind": "configure_workload",
+        "kind": "manual",
         "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
-        "next_tool": "configure_workload",
+        "next_tool": None,
+        "action": {
+            "kind": "manual",
+            "instruction": "Supply a complete named workload definition before continuing.",
+            "suggested_action": "workload.configure",
+            "missing_arguments": ["name", "operation", "argv"],
+        },
     }
     assert configured.is_error is False
     assert configured.structured_content is not None
@@ -113,7 +136,18 @@ argv = ["python", "-c", "print('ok')"]
     assert result.structured_content is not None
     error = result.structured_content["error"]
     assert error["details"]["allowed_adapters"]
-    assert error["recovery"]["next_tool"] == "get_declared_workflow"
+    assert error["recovery"] == {
+        "kind": "tool_action",
+        "safe_to_repeat_same_call": False,
+        "retry_after_ms": None,
+        "action": {
+            "kind": "tool",
+            "action": "workflow.get",
+            "arguments": {"kind": "workload", "name": "probe"},
+        },
+        "next_tool": "get_declared_workflow",
+        "next_arguments": {"kind": "workload", "name": "probe"},
+    }
 
 
 @pytest.mark.anyio

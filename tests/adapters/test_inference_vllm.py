@@ -13,6 +13,8 @@ from flameox.application import EvidenceQueryService, ImportArtifactRequest, Imp
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import Workspace
 
+pytestmark = pytest.mark.unit
+
 
 def _vllm_metrics(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {

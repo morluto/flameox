@@ -17,6 +17,8 @@ import pytest
 
 from flameox.adapters.toxiproxy import ToxiproxyClient
 
+pytestmark = [pytest.mark.integration, pytest.mark.optional, pytest.mark.requires_toxiproxy]
+
 
 class _PayloadHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:

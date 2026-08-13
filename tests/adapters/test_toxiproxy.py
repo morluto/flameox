@@ -7,11 +7,15 @@ import platform
 import tarfile
 from pathlib import Path
 
+import httpx
 import pytest
 
-from flameox.adapters import toxiproxy as _toxiproxy
 from flameox.adapters.toxiproxy import ToxiproxyClient, ToxiproxyToolManager
 from flameox.domain import DomainError, ErrorCode
+from flameox.http_transport import BoundedHttpClient
+from flameox.managed_tools import ManagedToolAsset
+
+pytestmark = pytest.mark.unit
 
 
 def test_toxiproxy_client_shapes_proxy_and_toxic_requests(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,6 +137,26 @@ def test_toxiproxy_client_rejects_unknown_toxic() -> None:
         ToxiproxyClient().add_toxic(proxy="proxy", name="toxic", toxic_type="unknown")
 
 
+@pytest.mark.anyio
+async def test_toxiproxy_control_has_native_async_bounded_transport() -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            stream=httpx.ByteStream(b'"2.12.0"'),
+        )
+
+    async with BoundedHttpClient(async_transport=httpx.MockTransport(handler)) as http_client:
+        client = ToxiproxyClient(http_client=http_client)
+        version = await client.version_async()
+
+    assert version == "2.12.0"
+    assert calls == [("GET", "/version")]
+
+
 @pytest.mark.parametrize(
     ("system", "machine", "asset", "executable"),
     [
@@ -144,7 +168,7 @@ def test_toxiproxy_client_rejects_unknown_toxic() -> None:
             "Windows",
             "AMD64",
             "toxiproxy_2.12.0_windows_amd64.tar.gz",
-            "toxiproxy-server-windows-amd64.exe",
+            "toxiproxy-server.exe",
         ),
     ],
 )
@@ -189,20 +213,43 @@ def _stage_release(
     archive: bytes,
     *,
     expected_digest: str | None = None,
-) -> None:
+) -> BoundedHttpClient:
     digest = expected_digest or hashlib.sha256(archive).hexdigest()
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as bundle:
+            member = next(
+                item for item in bundle.getmembers() if item.name.endswith("toxiproxy-server")
+            )
+            stream = bundle.extractfile(member)
+            executable = stream.read() if stream is not None else b""
+    except (StopIteration, tarfile.TarError):
+        executable = b""
+    asset = ManagedToolAsset(
+        manifest_revision="test-manifest",
+        tool="toxiproxy",
+        version="2.12.0",
+        platform="linux",
+        machine="x86_64",
+        asset_name="toxiproxy-test.tar.gz",
+        url="https://github.com/Shopify/toxiproxy/releases/download/v2.12.0/toxiproxy-test.tar.gz",
+        allowed_origins=("https://github.com",),
+        sha256=digest,
+        byte_length=len(archive),
+        max_bytes=max(1024 * 1024, len(archive)),
+        executable_member="toxiproxy-server",
+        executable_sha256=hashlib.sha256(executable).hexdigest(),
+    )
     monkeypatch.setattr(
         ToxiproxyToolManager,
-        "release_for_host",
-        staticmethod(lambda: ("toxiproxy-test.tar.gz", digest, "toxiproxy-server")),
+        "_asset_for_host",
+        staticmethod(lambda: asset),
     )
 
-    def open_archive(url: str, timeout: float) -> io.BytesIO:
-        assert url.endswith("/toxiproxy-test.tar.gz")
-        assert timeout == 120
-        return io.BytesIO(archive)
+    def download(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/toxiproxy-test.tar.gz")
+        return httpx.Response(200, stream=httpx.ByteStream(archive))
 
-    monkeypatch.setattr(_toxiproxy, "urlopen", open_archive)
+    return BoundedHttpClient(sync_transport=httpx.MockTransport(download))
 
 
 def test_toxiproxy_stage_verifies_archive_and_publishes_receipt(
@@ -210,16 +257,17 @@ def test_toxiproxy_stage_verifies_archive_and_publishes_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     archive = _archive("release/toxiproxy-server")
-    _stage_release(monkeypatch, archive)
+    http_client = _stage_release(monkeypatch, archive)
 
-    manager = ToxiproxyToolManager(tmp_path)
-    receipt = manager.stage()
-    persisted = json.loads(manager.receipt_path.read_text())
+    with http_client:
+        manager = ToxiproxyToolManager(tmp_path, http_client=http_client)
+        receipt = manager.stage()
+        persisted = json.loads(manager.receipt_path.read_text())
 
     assert receipt == manager.staged_receipt()
     assert receipt.executable.read_bytes() == b"toxiproxy-server"
     assert receipt.executable.stat().st_mode & 0o111
-    assert persisted["sha256"] == hashlib.sha256(archive).hexdigest()
+    assert persisted["asset_sha256"] == hashlib.sha256(archive).hexdigest()
     assert persisted["executable_sha256"] == hashlib.sha256(b"toxiproxy-server").hexdigest()
 
 
@@ -228,43 +276,49 @@ def test_toxiproxy_stage_rejects_digest_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     archive = _archive("toxiproxy-server")
-    _stage_release(monkeypatch, archive, expected_digest="0" * 64)
+    http_client = _stage_release(monkeypatch, archive, expected_digest="0" * 64)
 
-    with pytest.raises(DomainError) as error:
-        ToxiproxyToolManager(tmp_path).stage()
+    with http_client, pytest.raises(DomainError) as error:
+        ToxiproxyToolManager(tmp_path, http_client=http_client).stage()
 
     assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
-    assert error.value.details["expected"] == "0" * 64
-    assert error.value.details["actual"] == hashlib.sha256(archive).hexdigest()
+    assert error.value.details["expected_sha256"] == "0" * 64
+    assert error.value.details["actual_sha256"] == hashlib.sha256(archive).hexdigest()
 
 
 def test_toxiproxy_download_is_bounded_before_digest_verification(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class OversizedResponse:
-        chunks = 0
-
-        def __enter__(self) -> OversizedResponse:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-        def read(self, _size: int) -> bytes:
-            self.chunks += 1
-            return b"x" * 800 if self.chunks <= 2 else b""
-
-    monkeypatch.setattr(_toxiproxy, "_MAX_RELEASE_BYTES", 1_024, raising=False)
+    expected = b"x" * 800
+    asset = ManagedToolAsset(
+        manifest_revision="test-manifest",
+        tool="toxiproxy",
+        version="2.12.0",
+        platform="linux",
+        machine="x86_64",
+        asset_name="release.tar.gz",
+        url="https://github.com/Shopify/toxiproxy/releases/download/v2.12.0/release.tar.gz",
+        allowed_origins=("https://github.com",),
+        sha256=hashlib.sha256(expected).hexdigest(),
+        byte_length=len(expected),
+        max_bytes=1_024,
+        executable_member="toxiproxy-server",
+        executable_sha256="0" * 64,
+    )
     monkeypatch.setattr(
         ToxiproxyToolManager,
-        "release_for_host",
-        staticmethod(lambda: ("release.tar.gz", "0" * 64, "toxiproxy-server")),
+        "_asset_for_host",
+        staticmethod(lambda: asset),
     )
-    monkeypatch.setattr(_toxiproxy, "urlopen", lambda *_args, **_kwargs: OversizedResponse())
+    http_client = BoundedHttpClient(
+        sync_transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, stream=httpx.ByteStream(b"x" * 1_600))
+        )
+    )
 
-    with pytest.raises(DomainError) as error:
-        ToxiproxyToolManager(tmp_path).stage()
+    with http_client, pytest.raises(DomainError) as error:
+        ToxiproxyToolManager(tmp_path, http_client=http_client).stage()
 
     assert error.value.code is ErrorCode.ARTIFACT_TOO_LARGE
     assert not any((tmp_path / "staging").iterdir())
@@ -286,10 +340,10 @@ def test_toxiproxy_stage_rejects_unsafe_archive_members(
             member.size = 1
         bundle.addfile(member, io.BytesIO(b"x") if member.size else None)
     archive_bytes = archive.getvalue()
-    _stage_release(monkeypatch, archive_bytes)
+    http_client = _stage_release(monkeypatch, archive_bytes)
 
-    with pytest.raises(DomainError) as error:
-        ToxiproxyToolManager(tmp_path).stage()
+    with http_client, pytest.raises(DomainError) as error:
+        ToxiproxyToolManager(tmp_path, http_client=http_client).stage()
 
     assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
     assert not (tmp_path / "tools" / "toxiproxy-server").exists()

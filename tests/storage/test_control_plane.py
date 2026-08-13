@@ -9,8 +9,15 @@ import pytest
 from flameox.domain import DomainError, ErrorCode
 from flameox.domain.models import utc_now
 from flameox.models import ContractModel
-from flameox.storage import AuthorizedPlanStore, Workspace
-from flameox.storage.control_plane import ControlPlane
+from flameox.storage import (
+    AuthorizedPlanStore,
+    CompletedRetentionIntent,
+    RetentionIntentStore,
+    Workspace,
+)
+from flameox.storage.control_plane import ControlPlane, ControlRelationship
+
+pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
 
 class ExampleIntent(ContractModel):
@@ -114,3 +121,91 @@ def test_control_plane_refuses_older_schema_instead_of_migrating_it(tmp_path: Pa
         ControlPlane(workspace).initialize()
 
     assert error.value.code is ErrorCode.WORKSPACE_INVALID
+
+
+def test_control_plane_migrates_v2_relationships_without_guessing_history(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    control = ControlPlane(workspace)
+    control.create_record(
+        kind="findings",
+        record_id="finding-1",
+        revision=1,
+        payload_json='{"revision":1}',
+        relationships=(
+            ControlRelationship(
+                relationship="supports",
+                target_kind="analysis",
+                target_id="analysis-1",
+            ),
+        ),
+    )
+    with sqlite3.connect(workspace.paths.control_plane) as connection:
+        connection.executescript(
+            """
+            DROP TABLE record_revision_relationships;
+            DROP TABLE record_revision_relationship_sets;
+            ALTER TABLE relationships RENAME TO relationships_v3;
+            CREATE TABLE relationships (
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                relationship TEXT NOT NULL,
+                target_kind TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (source_kind, source_id, relationship, target_kind, target_id)
+            ) STRICT;
+            INSERT INTO relationships(
+                source_kind, source_id, relationship, target_kind, target_id,
+                payload_json, created_at
+            )
+            SELECT source_kind, source_id, relationship, target_kind, target_id,
+                   payload_json, created_at
+            FROM relationships_v3;
+            DROP TABLE relationships_v3;
+            UPDATE control_plane_metadata SET value = '2' WHERE key = 'schema_version';
+            """
+        )
+
+    ControlPlane(workspace).initialize()
+
+    current = control.list_relationships(
+        source_kind="findings",
+        source_id="finding-1",
+    )
+    assert current[0].ownership_quality == "legacy_current_only"
+    with pytest.raises(DomainError) as ambiguous:
+        control.list_revision_relationships(
+            source_kind="findings",
+            source_id="finding-1",
+            source_revision=1,
+        )
+    assert ambiguous.value.details["ownership_quality"] == "legacy_current_only"
+
+
+def test_retention_intent_durably_bridges_snapshot_to_materialization(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    commit_id = workspace.corpus.read_head().commit_id
+    store = RetentionIntentStore(workspace)
+
+    first = store.acquire(
+        corpus_commit_id=commit_id,
+        owner_kind="analysis",
+        owner_id="analysis-1",
+        operation_digest="operation-1",
+    )
+    repeated = store.acquire(
+        corpus_commit_id=commit_id,
+        owner_kind="analysis",
+        owner_id="analysis-1",
+        operation_digest="operation-1",
+    )
+
+    assert repeated == first
+    assert store.pending_commit_ids() == (commit_id,)
+    completed = store.complete(first, materialized_commit_id="materialized-1")
+    assert isinstance(completed, CompletedRetentionIntent)
+    assert store.pending_commit_ids() == ()
+    assert store.complete(completed, materialized_commit_id="materialized-1") == completed

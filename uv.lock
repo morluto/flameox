@@ -580,6 +580,18 @@ wheels = [
 ]
 
 [[package]]
+name = "concurrent-log-handler"
+version = "0.9.29"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "portalocker" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9c/2c/ba185acc438cff6b58cd8f8dec27e7f4fcabf6968a1facbb6d0cacbde7fe/concurrent_log_handler-0.9.29.tar.gz", hash = "sha256:bc37a76d3f384cbf4a98f693ebd770543edc0f4cd5c6ab6bc70e9e1d7d582265", size = 42114, upload-time = "2026-02-22T18:18:25.758Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/f3/3e3188fdb3e53c6343fd1c7de41c55d4db626f07db3877eae77b28d58bd2/concurrent_log_handler-0.9.29-py3-none-any.whl", hash = "sha256:0d6c077fbaef2dae49a25975dcf72a602fe0a6a4ce80a3b7c37696d37e10459a", size = 32052, upload-time = "2026-02-22T18:18:24.558Z" },
+]
+
+[[package]]
 name = "contourpy"
 version = "1.3.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1098,8 +1110,10 @@ version = "0.1.13"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
+    { name = "concurrent-log-handler" },
     { name = "defusedxml" },
     { name = "duckdb" },
+    { name = "httpx" },
     { name = "ijson" },
     { name = "mcp" },
     { name = "mcp-types" },
@@ -1111,8 +1125,10 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pyperf" },
+    { name = "python-json-logger" },
     { name = "pytz" },
     { name = "questionary" },
+    { name = "rfc8785" },
     { name = "scipy" },
     { name = "statsmodels" },
     { name = "tomli-w" },
@@ -1125,6 +1141,7 @@ all = [
     { name = "aiperf" },
     { name = "coverage" },
     { name = "memray" },
+    { name = "nvidia-ml-py" },
     { name = "opentelemetry-proto" },
     { name = "perfetto" },
     { name = "protobuf" },
@@ -1159,6 +1176,9 @@ dev = [
 execution = [
     { name = "coverage" },
 ]
+hardware = [
+    { name = "nvidia-ml-py" },
+]
 inference = [
     { name = "aiperf" },
 ]
@@ -1192,11 +1212,13 @@ requires-dist = [
     { name = "aiperf", marker = "extra == 'all'", specifier = ">=0.12,<0.13" },
     { name = "aiperf", marker = "extra == 'inference'", specifier = ">=0.12,<0.13" },
     { name = "anyio", specifier = ">=4.9,<5" },
+    { name = "concurrent-log-handler", specifier = ">=0.9.28,<0.10" },
     { name = "coverage", marker = "extra == 'all'", specifier = ">=7.14,<8" },
     { name = "coverage", marker = "extra == 'execution'", specifier = ">=7.14,<8" },
     { name = "defusedxml", specifier = ">=0.7.1,<0.8" },
     { name = "deptry", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "duckdb", specifier = ">=1.5.4,<1.6" },
+    { name = "httpx", specifier = ">=0.28,<0.29" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.130" },
     { name = "ijson", specifier = ">=3.4,<4" },
     { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2.2" },
@@ -1206,6 +1228,8 @@ requires-dist = [
     { name = "memray", marker = "extra == 'memory'", specifier = ">=1.17" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.15" },
     { name = "numpy", specifier = ">=2.2,<3" },
+    { name = "nvidia-ml-py", marker = "extra == 'all'", specifier = "==13.610.43" },
+    { name = "nvidia-ml-py", marker = "extra == 'hardware'", specifier = "==13.610.43" },
     { name = "opentelemetry-proto", marker = "extra == 'all'", specifier = ">=1.44,<1.45" },
     { name = "opentelemetry-proto", marker = "extra == 'trace'", specifier = ">=1.44,<1.45" },
     { name = "packaging", specifier = ">=24,<27" },
@@ -1222,9 +1246,9 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=20,<26" },
     { name = "pyarrow-stubs", marker = "extra == 'dev'", specifier = ">=20.0.0.20260625" },
     { name = "pydantic", specifier = ">=2.13.4,<2.14" },
-    { name = "pyperf", specifier = ">=2.9" },
-    { name = "pyperf", marker = "extra == 'all'", specifier = ">=2.9" },
-    { name = "pyperf", marker = "extra == 'python'", specifier = ">=2.9" },
+    { name = "pyperf", specifier = ">=2.10,<2.11" },
+    { name = "pyperf", marker = "extra == 'all'", specifier = ">=2.10,<2.11" },
+    { name = "pyperf", marker = "extra == 'python'", specifier = ">=2.10,<2.11" },
     { name = "pytest", marker = "extra == 'all'", specifier = ">=8.3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.3" },
@@ -1237,8 +1261,10 @@ requires-dist = [
     { name = "pytest-xdist", marker = "extra == 'all'", specifier = ">=3.6" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.6" },
     { name = "pytest-xdist", marker = "extra == 'test'", specifier = ">=3.6" },
+    { name = "python-json-logger", specifier = ">=3.3,<4" },
     { name = "pytz", specifier = ">=2024.2" },
     { name = "questionary", specifier = ">=2.1,<3" },
+    { name = "rfc8785", specifier = "==0.1.4" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11" },
     { name = "scipy", specifier = ">=1.15,<2" },
     { name = "scipy-stubs", marker = "extra == 'dev'", specifier = ">=1.18.0.1,<1.19" },
@@ -1251,7 +1277,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.16,<1" },
     { name = "vulture", marker = "extra == 'dev'", specifier = ">=2.14" },
 ]
-provides-extras = ["python", "memory", "torch", "execution", "inference", "test", "trace", "cpu", "all", "dev"]
+provides-extras = ["python", "memory", "torch", "execution", "hardware", "inference", "test", "trace", "cpu", "all", "dev"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "types-psutil", specifier = ">=7.2,<8" }]
@@ -3837,6 +3863,15 @@ wheels = [
 ]
 
 [[package]]
+name = "python-json-logger"
+version = "3.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9e/de/d3144a0bceede957f961e975f3752760fbe390d57fbe194baf709d8f1f7b/python_json_logger-3.3.0.tar.gz", hash = "sha256:12b7e74b17775e7d565129296105bbe3910842d9d0eb083fc83a6a617aa8df84", size = 16642, upload-time = "2025-03-07T07:08:27.301Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/08/20/0f2523b9e50a8052bc6a8b732dfc8568abbdc42010aef03a2d750bdab3b2/python_json_logger-3.3.0-py3-none-any.whl", hash = "sha256:dd980fae8cffb24c13caf6e158d3d61c0d6d22342f932cb6e9deedab3d35eec7", size = 15163, upload-time = "2025-03-07T07:08:25.627Z" },
+]
+
+[[package]]
 name = "python-multipart"
 version = "0.0.32"
 source = { registry = "https://pypi.org/simple" }
@@ -4152,6 +4187,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/85/40/1520d68bfa07ab5a6f065a186815fb6610c86fe957bc065754e47f7b0840/rfc3986-2.0.0.tar.gz", hash = "sha256:97aacf9dbd4bfd829baad6e6309fa6573aaf1be3f6fa735c8ab05e46cecb261c", size = 49026, upload-time = "2022-01-10T00:52:30.832Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl", hash = "sha256:50b1502b60e289cb37883f3dfd34532b8873c7de9f49bb546641ce9cbd256ebd", size = 31326, upload-time = "2022-01-10T00:52:29.594Z" },
+]
+
+[[package]]
+name = "rfc8785"
+version = "0.1.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ef/2f/fa1d2e740c490191b572d33dbca5daa180cb423c24396b856f5886371d8b/rfc8785-0.1.4.tar.gz", hash = "sha256:e545841329fe0eee4f6a3b44e7034343100c12b4ec566dc06ca9735681deb4da", size = 14321, upload-time = "2024-09-27T16:33:31.206Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4d/78/119878110660b2ad709888c8a1614fce7e2fab39080ab960656dc8605bf6/rfc8785-0.1.4-py3-none-any.whl", hash = "sha256:520d690b448ecf0703691c76e1a34a24ddcd4fc5bc41d589cb7c58ec651bcd48", size = 9240, upload-time = "2024-09-27T16:33:29.683Z" },
 ]
 
 [[package]]

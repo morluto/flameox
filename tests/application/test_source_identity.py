@@ -11,6 +11,8 @@ from flameox.domain import DomainError, ErrorCode, IdentityQuality
 from flameox.execution import SubprocessBroker
 from flameox.storage import Workspace
 
+pytestmark = pytest.mark.integration
+
 
 def git(project: Path, *arguments: str) -> None:
     subprocess.run(
@@ -54,6 +56,33 @@ async def test_git_source_identity_includes_dirty_and_untracked_content(
     assert clean.source_state_id != dirty.source_state_id
     assert clean.diff_digest != dirty.diff_digest
     assert dirty.fields["untracked_inputs"]
+
+
+@pytest.mark.anyio
+async def test_workspace_created_before_git_is_never_a_source_input(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    git(tmp_path, "init")
+    git(tmp_path, "config", "user.email", "test@example.invalid")
+    git(tmp_path, "config", "user.name", "Test")
+    (tmp_path / "tracked.py").write_text("value = 1\n")
+    git(tmp_path, "add", "tracked.py")
+    git(tmp_path, "commit", "-m", "initial")
+
+    before = await collect_source_state(
+        workspace,
+        workload_executable=sys.executable,
+        broker=SubprocessBroker(),
+    )
+    (workspace.paths.logs / "internal-state.log").write_text("changed\n")
+    after = await collect_source_state(
+        workspace,
+        workload_executable=sys.executable,
+        broker=SubprocessBroker(),
+    )
+
+    assert before.identity_quality is IdentityQuality.CLEAN
+    assert after.identity_quality is IdentityQuality.CLEAN
+    assert after.source_state_id == before.source_state_id
 
 
 @pytest.mark.anyio

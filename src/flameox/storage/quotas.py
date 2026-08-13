@@ -70,7 +70,9 @@ class StorageQuota:
         self,
         rows_by_table: Mapping[str, Sequence[Mapping[str, Any]]],
     ) -> None:
-        row_count = sum(len(rows) for rows in rows_by_table.values())
+        self.require_generation_row_count(sum(len(rows) for rows in rows_by_table.values()))
+
+    def require_generation_row_count(self, row_count: int) -> None:
         limit = self.workspace.config.storage.max_rows_per_generation
         if row_count > limit:
             raise DomainError(

@@ -1,10 +1,13 @@
 import json
 from pathlib import Path
 
+import pytest
 from click import unstyle
 from typer.testing import CliRunner
 
 from flameox.cli import app
+
+pytestmark = pytest.mark.integration
 
 
 def test_help_lists_flameoxs_purpose() -> None:

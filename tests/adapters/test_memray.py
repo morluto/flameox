@@ -14,6 +14,8 @@ from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
 
+pytestmark = [pytest.mark.integration, pytest.mark.optional, pytest.mark.requires_memray]
+
 
 def _memray_module() -> ModuleType:
     return cast(

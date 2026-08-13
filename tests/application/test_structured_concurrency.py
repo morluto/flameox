@@ -7,6 +7,8 @@ import pytest
 from flameox.application.concurrency import race_with_cancellation
 from flameox.domain import DomainError, ErrorCode
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.anyio
 async def test_race_scope_cancels_and_joins_losing_task() -> None:

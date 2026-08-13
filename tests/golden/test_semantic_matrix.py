@@ -14,6 +14,8 @@ from flameox.application import (
 from flameox.domain import TrialOutcome, ValidationStatus
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
+
 
 @pytest.mark.anyio
 async def test_semantic_matrix_preserves_typed_categorical_evidence(tmp_path: Path) -> None:

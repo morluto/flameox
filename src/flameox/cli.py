@@ -71,6 +71,8 @@ from flameox.application import (
     IntegrityService,
     InvestigationService,
     KernelBuildImportService,
+    KernelValidationCompareRequest,
+    KernelValidationComparisonService,
     LifecycleEvidenceService,
     MaterializeAnalysisRequest,
     NativeViewerService,
@@ -89,6 +91,8 @@ from flameox.application import (
     SummaryExcerptPolicy,
     SummarySensitiveContextPolicy,
     WorkloadService,
+    XctraceImportRequest,
+    XctraceService,
     parse_inference_scenario_config,
     parse_inference_server_config,
     workspace_status,
@@ -830,9 +834,27 @@ def import_artifact(
     _emit(result, as_json=json_output)
 
 
+@app.command("import-xctrace")
+def import_xctrace(
+    path: Annotated[Path, typer.Argument(help="Native Metal System Trace .trace bundle.")],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Preserve a native Metal trace bundle and its bounded xctrace TOC export."""
+    try:
+        result = _run_async(
+            lambda: XctraceService(_workspace(workspace)).import_trace(
+                XctraceImportRequest(trace_path=path, allow_external_path=True),
+            )
+        )
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
 @app.command("import-kernel-build")
 def import_kernel_build(
-    path: Annotated[Path, typer.Argument(help="flameox.kernel-build.v1 manifest to import.")],
+    path: Annotated[Path, typer.Argument(help="flameox.kernel-build.v1 or v2 manifest to import.")],
     sensitivity: Annotated[
         Sensitivity,
         typer.Option("--sensitivity", case_sensitive=False),
@@ -1801,13 +1823,23 @@ def findings_show(
 @run_sets_app.command("freeze")
 def run_sets_freeze(
     run_ids: Annotated[list[str], typer.Argument(help="Run IDs in stable order.")],
+    corpus_commit_id: Annotated[
+        str | None,
+        typer.Option(
+            "--corpus-commit",
+            help="Freeze against this explicit corpus commit instead of current HEAD.",
+        ),
+    ] = None,
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
     """Freeze a cohort against the current corpus snapshot."""
     try:
         result = RunSetService(_workspace(workspace)).freeze(
-            FreezeRunIdsRequest(run_ids=tuple(run_ids))
+            FreezeRunIdsRequest(
+                run_ids=tuple(run_ids),
+                corpus_commit_id=corpus_commit_id,
+            )
         )
     except DomainError as error:
         _fail(error)
@@ -1854,6 +1886,38 @@ def analyze_record_comparison(
     try:
         result = ComparisonService(_workspace(workspace)).record(
             _adapt_request(TypeAdapter(CompareRunSetsRequest), structured_input)
+        )
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@analyze_app.command("compare-kernel-validation")
+def analyze_compare_kernel_validation(
+    structured_input: Annotated[str, typer.Argument(help="JSON request or @file.")],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Compare exact correctness metrics from two frozen run cohorts."""
+    try:
+        result = KernelValidationComparisonService(_workspace(workspace)).compare(
+            _adapt_request(TypeAdapter(KernelValidationCompareRequest), structured_input)
+        )
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@analyze_app.command("record-kernel-validation-comparison")
+def analyze_record_kernel_validation_comparison(
+    structured_input: Annotated[str, typer.Argument(help="JSON request or @file.")],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Persist a correctness comparison and its exact input provenance."""
+    try:
+        result = KernelValidationComparisonService(_workspace(workspace)).record(
+            _adapt_request(TypeAdapter(KernelValidationCompareRequest), structured_input)
         )
     except DomainError as error:
         _fail(error)
@@ -2419,7 +2483,10 @@ def extract_inference_result(
 
 @extract_app.command("python-startup")
 def extract_python_startup(
-    run_id: Annotated[str, typer.Argument(help="Run containing Python startup JSON.")],
+    run_id: Annotated[
+        str,
+        typer.Argument(help="Run containing startup pyperf JSON and an import-time trace."),
+    ],
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:

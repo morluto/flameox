@@ -15,6 +15,8 @@ from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, Sensitivity
 from flameox.storage import Workspace
 
+pytestmark = pytest.mark.integration
+
 
 def test_benchmark_artifact_uses_pyperf_viewer(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)

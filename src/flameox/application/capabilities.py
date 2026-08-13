@@ -11,15 +11,20 @@ import tempfile
 import threading
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
-from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Literal
 
-import portalocker
 from platformdirs import user_data_path
 from pydantic import ConfigDict, Field, TypeAdapter, computed_field, model_validator
 
+from flameox.action_graph import (
+    ActionId,
+    NextAction,
+    ToolAction,
+    manual_action,
+    tool_action,
+)
 from flameox.adapters.builtins import (
     BUILTIN_ADAPTERS,
     AdapterDependencyKind,
@@ -31,7 +36,15 @@ from flameox.adapters.registry import AdapterRegistry
 from flameox.adapters.setup_runtime import install_trace_processor
 from flameox.adapters.toxiproxy import ToxiproxyClient, ToxiproxyToolManager, ToxiproxyToolReceipt
 from flameox.application.concurrency import race_with_cancellation
-from flameox.application.operations import OperationFailure, OperationRunner, OperationStatus
+from flameox.application.operations import (
+    OperationAdapter,
+    OperationFailure,
+    OperationRunner,
+    OperationStatus,
+)
+from flameox.application.provider_catalog import MANAGED_PROVIDERS, managed_provider
+from flameox.application.provider_runtime import ProviderRuntimeManager
+from flameox.application.task_supervisor import TaskSupervisor
 from flameox.atomic import atomic_write_json
 from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
@@ -46,16 +59,9 @@ from flameox.domain import (
     DomainError,
     ErrorCode,
     ProbeKind,
-    parse_managed_runtime_extras,
 )
 from flameox.domain.models import utc_now
-from flameox.execution import (
-    INSTALLER_ENVIRONMENT_ALLOWLIST,
-    ExecutionOutcome,
-    ExecutionRequest,
-    ResourcePolicy,
-    SubprocessBroker,
-)
+from flameox.execution import ExecutionOutcome, ExecutionRequest, ResourcePolicy, SubprocessBroker
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
@@ -69,10 +75,12 @@ type CapabilitySetupProgressPhase = Literal[
 class _CapabilitySetupReceipt(ContractModel):
     """Fields shared by every durable capability-setup state."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     requested: tuple[str, ...]
     updated_at: datetime
-    next_tool: Literal["list_capabilities"] = "list_capabilities"
+    next_action: ToolAction = Field(
+        default_factory=lambda: tool_action(ActionId.INSPECT_CAPABILITIES)
+    )
 
 
 class _IncompleteCapabilitySetupReceipt(_CapabilitySetupReceipt):
@@ -127,6 +135,7 @@ class CapabilityList(ContractModel):
     capabilities: tuple[CapabilityReport, ...]
     recommendation_scope: str | None = None
     latest_setup: CapabilitySetupReceipt | None = None
+    next_action: NextAction | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -148,12 +157,15 @@ class CapabilityList(ContractModel):
     def available_setup_third_party_adapters(self) -> tuple[str, ...]:
         return _capability_setup_projections(self.capabilities, self.recommendation_scope)[3]
 
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def next_tool(
-        self,
-    ) -> Literal["start_capability_setup", "prepare_adapter"] | None:
-        return _capability_setup_projections(self.capabilities, self.recommendation_scope)[4]
+    @model_validator(mode="after")
+    def action_matches_selected_adapter(self) -> CapabilityList:
+        expected = _capability_setup_projections(
+            self.capabilities,
+            self.recommendation_scope,
+        )[4]
+        if self.next_action != expected:
+            raise ValueError("next action must match the selected adapter recommendation")
+        return self
 
 
 class SetupVerification(ContractModel):
@@ -197,7 +209,9 @@ class CapabilitySetupResult(ContractModel):
     schema_version: int = 1
     requested: tuple[str, ...]
     already_available: tuple[str, ...]
-    next_tool: Literal["list_capabilities"] = "list_capabilities"
+    next_action: ToolAction = Field(
+        default_factory=lambda: tool_action(ActionId.INSPECT_CAPABILITIES)
+    )
     setup_verification: SetupVerification
     workload_executed: Literal[False] = False
 
@@ -226,7 +240,9 @@ class AdapterPreparationResult(ContractModel):
     version: str
     package_identity: str
     approval_provenance: Literal["agent"] = "agent"
-    next_tool: Literal["list_capabilities"] = "list_capabilities"
+    next_action: ToolAction = Field(
+        default_factory=lambda: tool_action(ActionId.INSPECT_CAPABILITIES)
+    )
     setup_verification: SetupVerification
     workload_executed: Literal[False] = False
 
@@ -239,7 +255,7 @@ def _capability_setup_projections(
     tuple[str, ...],
     tuple[str, ...],
     tuple[str, ...],
-    Literal["start_capability_setup", "prepare_adapter"] | None,
+    NextAction | None,
 ]:
     available_setup_adapters = tuple(
         sorted(
@@ -272,16 +288,20 @@ def _capability_setup_projections(
         for item in scoped
         if item.status is not CapabilityStatus.AVAILABLE and isinstance(item.setup, AdapterSetup)
     )
+    selected_setup = next(
+        (
+            item.setup
+            for item in scoped
+            if item.status is not CapabilityStatus.AVAILABLE and item.setup is not None
+        ),
+        None,
+    )
     return (
         setup_adapters,
         third_party,
         available_setup_adapters,
         available_setup_third_party_adapters,
-        (
-            "start_capability_setup"
-            if setup_adapters
-            else ("prepare_adapter" if third_party else None)
-        ),
+        selected_setup.next_action if selected_setup is not None else None,
     )
 
 
@@ -290,7 +310,13 @@ _CONTAINMENT_VERSION_ARGS = {
     "containment.systemd": ("--version",),
 }
 
-_CAPABILITY_INSTALL_TIMEOUT_SECONDS = 1_800
+
+def _retry_capability_setup_action() -> NextAction:
+    return manual_action(
+        "Choose an idempotency key and retry the reported capability setup request.",
+        suggested_action=ActionId.START_CAPABILITY_SETUP,
+        missing_arguments=("idempotency_key",),
+    )
 
 
 class CapabilityService:
@@ -305,15 +331,16 @@ class CapabilityService:
     ) -> None:
         self.workspace = workspace
         self.broker = broker or SubprocessBroker()
-        self._uses_default_workspace_manifest = (
-            capability_manifest is None and workspace is not None
-        )
         self.capability_manifest = capability_manifest or (
             workspace.paths.records / "capabilities.json"
             if workspace is not None
             else Path(user_data_path("flameox", appauthor=False)) / "capabilities.json"
         )
         self.setup_receipt_path = self.capability_manifest.with_name("capability-setup.json")
+        self.provider_runtimes = ProviderRuntimeManager(
+            self.capability_manifest.parent / "provider-runtimes",
+            broker=self.broker,
+        )
         self._active_cache: dict[str, CapabilityReport] = {}
 
     def list(self) -> CapabilityList:
@@ -444,58 +471,27 @@ class CapabilityService:
                     ErrorCode.INTERNAL_ERROR,
                     "Builtin adapter is missing its dependency declaration.",
                 )
-            try:
-                package_version = version(adapter.dependency)
-            except PackageNotFoundError:
-                package_version = None
-            import_location = (
-                self._import_location(adapter.dependency) if package_version is not None else None
-            )
             reports.append(
                 CapabilityReport(
                     adapter=adapter.name,
-                    status=(
-                        CapabilityStatus.AVAILABLE
-                        if package_version is not None
-                        else CapabilityStatus.UNAVAILABLE
-                    ),
-                    provisioning=(
-                        CapabilityProvisioning.MANAGED_RUNTIME
-                        if adapter.managed_extra is not None
-                        else CapabilityProvisioning.HOST
-                    ),
-                    import_location=import_location,
-                    version=package_version,
-                    supported_modes=adapter.supported_modes if package_version else (),
-                    supported_formats=adapter.supported_formats if package_version else (),
+                    status=CapabilityStatus.UNKNOWN,
+                    provisioning=CapabilityProvisioning.WORKLOAD_ENVIRONMENT,
                     platform=system,
                     architecture=architecture,
                     features=adapter.features,
                     remediation=(
-                        ()
-                        if package_version
-                        else (
-                            (
-                                "Call start_capability_setup with this adapter to install it into "
-                                "FlameOx's managed runtime.",
-                            )
-                            if adapter.managed_extra is not None
-                            else (f"Install flameox's optional dependency for {adapter.name}.",)
-                        )
+                        "Select a declared workload and plan capture so Flameox can inspect this "
+                        "package through that workload's exact Python interpreter.",
                     ),
-                    setup=self._setup(adapter),
-                    setup_verification=(
-                        CapabilitySetupVerification.PENDING
-                        if package_version is None and adapter.managed_extra is not None
-                        else (
-                            CapabilitySetupVerification.PASSIVE
-                            if package_version is not None
-                            else CapabilitySetupVerification.NOT_REQUIRED
-                        )
+                    setup_verification=CapabilitySetupVerification.NOT_REQUIRED,
+                    limitations=(
+                        "Python package capabilities are workload-scoped and cannot be determined "
+                        "from the Flameox control interpreter.",
                     ),
                 )
             )
         if self.workspace is not None:
+            reports.extend(self._managed_provider_reports(system, architecture))
             reports.append(self._toxiproxy_report(self.workspace, system, architecture))
             for descriptor in AdapterRegistry(self.workspace).discover().adapters:
                 reports.append(
@@ -531,11 +527,18 @@ class CapabilityService:
                             None
                             if descriptor.approved
                             else AdapterSetup(
-                                method="prepare_adapter",
                                 adapter=descriptor.adapter,
                                 distribution=descriptor.distribution,
                                 package_identity=descriptor.package_identity,
-                                next_tool="prepare_adapter",
+                                next_action=tool_action(
+                                    ActionId.PREPARE_ADAPTER,
+                                    adapter=descriptor.adapter,
+                                    distribution=descriptor.distribution,
+                                ),
+                                verification_action=tool_action(
+                                    ActionId.INSPECT_CAPABILITIES,
+                                    adapter=descriptor.adapter,
+                                ),
                             )
                         ),
                         setup_verification=(
@@ -561,10 +564,15 @@ class CapabilityService:
         reports: list[CapabilityReport] = []
         for report in passive.capabilities:
             definition = builtin_adapter(report.adapter)
+            provider = managed_provider(report.adapter)
             version_args = (
                 definition.version_args
                 if definition is not None
-                else _CONTAINMENT_VERSION_ARGS.get(report.adapter, ())
+                else (
+                    provider.version_args
+                    if provider is not None
+                    else _CONTAINMENT_VERSION_ARGS.get(report.adapter, ())
+                )
             )
             if not version_args or report.executable is None:
                 reports.append(report)
@@ -583,10 +591,15 @@ class CapabilityService:
         if passive.executable is None or passive.status is not CapabilityStatus.AVAILABLE:
             return passive
         definition = builtin_adapter(adapter)
+        provider = managed_provider(adapter)
         version_args = (
             definition.version_args
             if definition is not None
-            else _CONTAINMENT_VERSION_ARGS.get(adapter, ())
+            else (
+                provider.version_args
+                if provider is not None
+                else _CONTAINMENT_VERSION_ARGS.get(adapter, ())
+            )
         )
         if not version_args:
             return passive
@@ -1039,7 +1052,6 @@ class CapabilityService:
                 details={
                     "unsupported_adapters": list(unsupported),
                     "unsupported_platform": list(unsupported_platform),
-                    "next_tool": "list_capabilities",
                 },
                 remediation=(
                     (
@@ -1050,6 +1062,7 @@ class CapabilityService:
                         "not installed by FlameOx."
                     ),
                 ),
+                next_action=tool_action(ActionId.INSPECT_CAPABILITIES),
             )
 
         already_available = tuple(
@@ -1059,13 +1072,6 @@ class CapabilityService:
         )
         pending = tuple(adapter for adapter in requested if adapter not in already_available)
         if not pending:
-            self._record_managed_extras(
-                tuple(
-                    item.extra
-                    for item in (reports[adapter].setup for adapter in requested)
-                    if isinstance(item, CapabilitySetup)
-                )
-            )
             return CapabilitySetupResult(
                 requested=requested,
                 already_available=already_available,
@@ -1098,66 +1104,14 @@ class CapabilityService:
                 phase=initial_phase,
             )
         staging_phase: CapabilitySetupProgressPhase | None = None
-        lock_path = Path(sys.executable).parent / ".flameox-capability-setup.lock"
-        uv_binding = ExecutableResolver().resolve_host_tool("uv") if requirements else None
-        uv = str(uv_binding.invocation_path) if uv_binding is not None else None
-        if requirements and uv is None:
-            self._record_setup_failure(
-                requested,
-                completed=already_available,
-                error="uv is missing from PATH.",
-            )
-            raise DomainError(
-                ErrorCode.CAPABILITY_UNAVAILABLE,
-                "The managed runtime cannot prepare optional capabilities because uv is missing.",
-                details={"next_tool": "start_capability_setup"},
-                remediation=(
-                    "Install uv, then reconnect FlameOx and call start_capability_setup again.",
-                ),
-            )
         try:
             if requirements:
-                assert uv_binding is not None
-                with portalocker.Lock(lock_path, mode="a", timeout=30):
+                for adapter in pending:
+                    capability_setup = reports[adapter].setup
+                    if not isinstance(capability_setup, CapabilitySetup):
+                        continue
                     self._check_cancelled(cancel_event)
-                    command = [
-                        str(uv),
-                        "pip",
-                        "install",
-                        "--python",
-                        sys.executable,
-                        *requirements,
-                    ]
-                    outcome = _run_brokered_sync(
-                        self.broker,
-                        ExecutionRequest(
-                            argv=tuple(command),
-                            executable_binding=uv_binding,
-                            cwd=Path.cwd(),
-                            environment_allowlist=INSTALLER_ENVIRONMENT_ALLOWLIST,
-                            environment_overrides={"UV_NO_PROGRESS": "1"},
-                            allowed_working_roots=(Path.cwd(),),
-                            timeout_seconds=_CAPABILITY_INSTALL_TIMEOUT_SECONDS,
-                            max_output_bytes=16 * 1024 * 1024,
-                        ),
-                        cancel_event=cancel_event,
-                        cancellation_message=(
-                            "Capability setup was cancelled and its installer was terminated."
-                        ),
-                        cancellation_details={"next_tool": "start_capability_setup"},
-                    )
-                if outcome.process.exit_code != 0:
-                    detail = _output_detail(outcome)[:500]
-                    raise DomainError(
-                        ErrorCode.PROCESS_FAILED,
-                        "FlameOx could not prepare the requested optional capabilities.",
-                        retryable=True,
-                        details={"next_tool": "start_capability_setup", "error": detail},
-                        remediation=(
-                            "Retry start_capability_setup after checking the bounded installer "
-                            "error.",
-                        ),
-                    )
+                    self._prepare_provider(adapter, capability_setup, cancel_event=cancel_event)
                 next_phase: CapabilitySetupProgressPhase | None = (
                     "staging_trace_processor"
                     if pending_trace
@@ -1175,7 +1129,7 @@ class CapabilityService:
                     raise DomainError(
                         ErrorCode.WORKSPACE_NOT_FOUND,
                         "A workspace is required to stage the managed Trace Processor.",
-                        details={"next_tool": "initialize_workspace"},
+                        next_action=tool_action(ActionId.INITIALIZE_WORKSPACE),
                     )
                 staging_phase = "staging_trace_processor"
                 self._record_setup_progress(
@@ -1197,7 +1151,7 @@ class CapabilityService:
                     raise DomainError(
                         ErrorCode.WORKSPACE_NOT_FOUND,
                         "A workspace is required to stage managed Toxiproxy.",
-                        details={"next_tool": "initialize_workspace"},
+                        next_action=tool_action(ActionId.INITIALIZE_WORKSPACE),
                     )
                 staging_phase = "staging_toxiproxy"
                 self._record_setup_progress(
@@ -1220,7 +1174,7 @@ class CapabilityService:
             if failure is exc:
                 raise
             raise failure from exc
-        except (OSError, portalocker.exceptions.LockException) as exc:
+        except OSError as exc:
             detail = self._bounded_setup_detail(exc)
             phase_detail = f" [phase={staging_phase}]" if staging_phase is not None else ""
             self._record_setup_failure(
@@ -1233,13 +1187,14 @@ class CapabilityService:
                 "FlameOx could not prepare the requested optional capabilities.",
                 retryable=True,
                 details={
-                    "next_tool": "start_capability_setup",
+                    "adapters": list(requested),
                     "error": detail,
                     **({"phase": staging_phase} if staging_phase is not None else {}),
                 },
                 remediation=(
                     "Retry start_capability_setup after checking uv and package-index access.",
                 ),
+                next_action=_retry_capability_setup_action(),
             ) from exc
         refreshed = {item.adapter: item for item in self.list().capabilities}
         not_ready = tuple(
@@ -1256,24 +1211,58 @@ class CapabilityService:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 "The installer completed but one or more capabilities did not become available.",
-                details={"adapters": list(not_ready), "next_tool": "list_capabilities"},
+                details={"adapters": list(not_ready)},
                 remediation=(
                     "Call list_capabilities to inspect the verified provider state before "
                     "planning.",
                 ),
+                next_action=tool_action(ActionId.INSPECT_CAPABILITIES),
             )
-        self._record_managed_extras(
-            tuple(
-                item.extra
-                for item in (refreshed[adapter].setup for adapter in requested)
-                if isinstance(item, CapabilitySetup)
-            )
-        )
         self._record_setup_completed(requested)
         return CapabilitySetupResult(
             requested=requested,
             already_available=already_available,
             setup_verification=self._verification(requested, refreshed),
+        )
+
+    def _prepare_provider(
+        self,
+        adapter: str,
+        setup: CapabilitySetup,
+        *,
+        cancel_event: threading.Event | None,
+    ) -> None:
+        if setup.requirement is None:
+            return
+        definition = builtin_adapter(adapter)
+        provider = managed_provider(adapter)
+        executable_name = (
+            definition.dependency
+            if definition is not None
+            and definition.dependency_kind is AdapterDependencyKind.EXECUTABLE
+            and adapter != "perfetto"
+            else None
+        )
+        if provider is not None:
+            executable_name = provider.executable
+
+        def run(request: ExecutionRequest) -> ExecutionOutcome:
+            return _run_brokered_sync(
+                self.broker,
+                request,
+                cancel_event=cancel_event,
+                cancellation_message=(
+                    "Capability setup was cancelled and its provider process was terminated."
+                ),
+                cancellation_details={"adapter": adapter},
+                cancellation_next_action=_retry_capability_setup_action(),
+            )
+
+        self.provider_runtimes.prepare(
+            extra=setup.extra,
+            requirement=setup.requirement,
+            executable_name=executable_name,
+            request_runner=run,
         )
 
     @staticmethod
@@ -1294,6 +1283,7 @@ class CapabilityService:
             details=details,
             remediation=error.remediation,
             run_id=error.run_id,
+            next_action=error.next_action,
         )
 
     @classmethod
@@ -1313,8 +1303,8 @@ class CapabilityService:
                 ErrorCode.PROCESS_CANCELLED,
                 "Capability setup was cancelled before the next side effect.",
                 retryable=True,
-                details={"next_tool": "start_capability_setup"},
                 remediation=("Retry the exact capability setup request when ready.",),
+                next_action=_retry_capability_setup_action(),
             )
 
     def prepare_adapter(self, adapter: str, distribution: str) -> AdapterPreparationResult:
@@ -1322,7 +1312,7 @@ class CapabilityService:
             raise DomainError(
                 ErrorCode.WORKSPACE_NOT_FOUND,
                 "A workspace is required to record an adapter approval.",
-                details={"next_tool": "initialize_workspace"},
+                next_action=tool_action(ActionId.INITIALIZE_WORKSPACE),
             )
         descriptor = AdapterRegistry(self.workspace).prepare(adapter, distribution)
         return AdapterPreparationResult(
@@ -1343,10 +1333,15 @@ class CapabilityService:
         latest_setup: CapabilitySetupReceipt | None = None,
         recommendation_adapter: str | None = None,
     ) -> CapabilityList:
+        capabilities = tuple(reports)
         return CapabilityList(
-            capabilities=tuple(reports),
+            capabilities=capabilities,
             recommendation_scope=recommendation_adapter,
             latest_setup=latest_setup,
+            next_action=_capability_setup_projections(
+                capabilities,
+                recommendation_adapter,
+            )[4],
         )
 
     def _available_requested(self, requested: tuple[str, ...]) -> tuple[str, ...]:
@@ -1406,9 +1401,21 @@ class CapabilityService:
 
     def _read_setup_receipt(self) -> CapabilitySetupReceipt | None:
         try:
-            return _CAPABILITY_SETUP_RECEIPT_ADAPTER.validate_json(
-                self.setup_receipt_path.read_text()
-            )
+            payload = json.loads(self.setup_receipt_path.read_text())
+            if (
+                isinstance(payload, dict)
+                and payload.get("schema_version") == 1
+                and payload.get("next_tool") == "list_capabilities"
+            ):
+                payload = {
+                    **payload,
+                    "schema_version": 2,
+                    "next_action": tool_action(ActionId.INSPECT_CAPABILITIES).model_dump(
+                        mode="json"
+                    ),
+                }
+                payload.pop("next_tool", None)
+            return _CAPABILITY_SETUP_RECEIPT_ADAPTER.validate_python(payload)
         except (OSError, ValueError):
             return None
 
@@ -1432,11 +1439,83 @@ class CapabilityService:
         if adapter.managed_extra is None or adapter.managed_requirement is None:
             return None
         return CapabilitySetup(
-            method="start_capability_setup",
             extra=adapter.managed_extra,
             requirement=adapter.managed_requirement,
-            next_tool="start_capability_setup",
+            next_action=manual_action(
+                "Choose an idempotency key and start setup for the reported adapter.",
+                suggested_action=ActionId.START_CAPABILITY_SETUP,
+                missing_arguments=("idempotency_key",),
+            ),
+            verification_action=tool_action(
+                ActionId.INSPECT_CAPABILITIES,
+                adapter=adapter.name,
+            ),
         )
+
+    def _managed_provider_reports(
+        self,
+        system: str,
+        architecture: str,
+    ) -> tuple[CapabilityReport, ...]:
+        reports: list[CapabilityReport] = []
+        for provider in MANAGED_PROVIDERS.values():
+            runtime = self.provider_runtimes.find(
+                extra=provider.extra,
+                requirement=provider.requirement,
+            )
+            executable = (
+                str(runtime.executable)
+                if runtime is not None and runtime.executable is not None
+                else None
+            )
+            available = runtime is not None and (
+                provider.executable is None or executable is not None
+            )
+            reports.append(
+                CapabilityReport(
+                    adapter=provider.name,
+                    status=(
+                        CapabilityStatus.AVAILABLE
+                        if available
+                        else CapabilityStatus.UNAVAILABLE
+                    ),
+                    provisioning=CapabilityProvisioning.MANAGED_RUNTIME,
+                    executable=executable,
+                    supported_modes=provider.supported_modes if available else (),
+                    supported_formats=provider.supported_formats if available else (),
+                    platform=system,
+                    architecture=architecture,
+                    features=provider.features,
+                    setup=CapabilitySetup(
+                        extra=provider.extra,
+                        requirement=provider.requirement,
+                        next_action=manual_action(
+                            "Choose an idempotency key and start setup for this provider.",
+                            suggested_action=ActionId.START_CAPABILITY_SETUP,
+                            missing_arguments=("idempotency_key",),
+                        ),
+                        verification_action=tool_action(
+                            ActionId.INSPECT_CAPABILITIES,
+                            adapter=provider.name,
+                        ),
+                    ),
+                    setup_verification=(
+                        CapabilitySetupVerification.PASSIVE
+                        if available
+                        else CapabilitySetupVerification.PENDING
+                    ),
+                    remediation=(
+                        ()
+                        if executable
+                        else (
+                            "Call start_capability_setup with this provider name to create its "
+                            "isolated runtime.",
+                        )
+                    ),
+                    limitations=provider.limitations,
+                )
+            )
+        return tuple(reports)
 
     def _toxiproxy_report(
         self,
@@ -1475,10 +1554,17 @@ class CapabilityService:
             if receipt is not None
             else ("Call start_capability_setup with adapter='toxiproxy'.",),
             setup=CapabilitySetup(
-                method="start_capability_setup",
                 extra=CapabilityExtra.TOXIPROXY,
                 requirement=None,
-                next_tool="start_capability_setup",
+                next_action=manual_action(
+                    "Choose an idempotency key and start setup for the toxiproxy adapter.",
+                    suggested_action=ActionId.START_CAPABILITY_SETUP,
+                    missing_arguments=("idempotency_key",),
+                ),
+                verification_action=tool_action(
+                    ActionId.INSPECT_CAPABILITIES,
+                    adapter="toxiproxy",
+                ),
             ),
             setup_verification=(
                 CapabilitySetupVerification.PASSIVE
@@ -1496,7 +1582,7 @@ class CapabilityService:
                 receipt.executable,
                 admin_host="127.0.0.1",
                 admin_port=admin_port,
-                readiness=lambda: asyncio.to_thread(client.health),
+                readiness=client.health_async,
                 tool_receipt=receipt,
                 readiness_timeout_seconds=5,
             )
@@ -1519,40 +1605,6 @@ class CapabilityService:
                 retryable=True,
                 details={"error": str(error)[:500]},
             ) from error
-
-    def _record_managed_extras(self, extras: tuple[CapabilityExtra, ...]) -> None:
-        values = set(parse_managed_runtime_extras(extras))
-        if not values:
-            return
-        existing: set[CapabilityExtra] = set()
-        try:
-            payload = json.loads(self.capability_manifest.read_text())
-            if isinstance(payload, dict) and isinstance(payload.get("extras"), list):
-                existing = set(parse_managed_runtime_extras(payload["extras"]))
-        except (OSError, ValueError):
-            pass
-        payload = {"schema_version": 1, "extras": sorted(existing | values)}
-        atomic_write_json(self.capability_manifest, payload)
-        if self.workspace is not None and self._uses_default_workspace_manifest:
-            runtime_manifest = (
-                Path(user_data_path("flameox", appauthor=False)) / "capabilities.json"
-            )
-            if runtime_manifest != self.capability_manifest:
-                runtime_existing: set[CapabilityExtra] = set()
-                try:
-                    runtime_payload = json.loads(runtime_manifest.read_text())
-                    if isinstance(runtime_payload, dict) and isinstance(
-                        runtime_payload.get("extras"), list
-                    ):
-                        runtime_existing = set(
-                            parse_managed_runtime_extras(runtime_payload["extras"])
-                        )
-                except (OSError, ValueError):
-                    pass
-                atomic_write_json(
-                    runtime_manifest,
-                    {"schema_version": 1, "extras": sorted(runtime_existing | values)},
-                )
 
     def _containment_reports(
         self,
@@ -1604,6 +1656,18 @@ class CapabilityService:
         return tuple(reports)
 
     def _resolved_executable(self, adapter: str, executable: str) -> str | None:
+        definition = builtin_adapter(adapter)
+        if (
+            definition is not None
+            and definition.managed_extra is not None
+            and definition.managed_requirement is not None
+        ):
+            runtime = self.provider_runtimes.find(
+                extra=definition.managed_extra,
+                requirement=definition.managed_requirement,
+            )
+            if runtime is not None and runtime.executable is not None:
+                return str(runtime.executable)
         if (
             adapter == "perfetto"
             and self.workspace is not None
@@ -1641,10 +1705,24 @@ class CapabilityService:
 class CapabilitySetupManager:
     """Durable MCP lifecycle for providers and managed runtime tools."""
 
-    def __init__(self, workspace: Workspace, service: CapabilityService) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        service: CapabilityService,
+        *,
+        supervisor: TaskSupervisor | None = None,
+    ) -> None:
         self.workspace = workspace
         self.service = service
-        self.runner = OperationRunner(workspace, "capability.setup")
+        self.runner = OperationRunner(
+            workspace,
+            OperationAdapter(
+                kind="capability.setup",
+                start_action=ActionId.START_CAPABILITY_SETUP,
+                status_action=ActionId.GET_CAPABILITY_SETUP,
+            ),
+            supervisor=supervisor,
+        )
 
     async def start(
         self,
@@ -1736,6 +1814,7 @@ async def _run_brokered(
     cancel_event: threading.Event | None,
     cancellation_message: str,
     cancellation_details: dict[str, str],
+    cancellation_next_action: NextAction,
 ) -> ExecutionOutcome:
     if cancel_event is None:
         return await broker.run(request)
@@ -1747,6 +1826,7 @@ async def _run_brokered(
             cancellation_message,
             retryable=True,
             details=cancellation_details,
+            next_action=cancellation_next_action,
         ),
     )
 
@@ -1763,6 +1843,7 @@ def _run_brokered_sync(
     cancel_event: threading.Event | None,
     cancellation_message: str,
     cancellation_details: dict[str, str],
+    cancellation_next_action: NextAction,
 ) -> ExecutionOutcome:
     coroutine = _run_brokered(
         broker,
@@ -1770,6 +1851,7 @@ def _run_brokered_sync(
         cancel_event=cancel_event,
         cancellation_message=cancellation_message,
         cancellation_details=cancellation_details,
+        cancellation_next_action=cancellation_next_action,
     )
     try:
         asyncio.get_running_loop()

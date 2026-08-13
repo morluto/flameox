@@ -14,6 +14,8 @@ from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import Workspace
 
+pytestmark = [pytest.mark.integration, pytest.mark.optional, pytest.mark.requires_coverage]
+
 
 def _coverage_module() -> ModuleType:
     return cast(

@@ -15,6 +15,8 @@ from flameox.domain import ErrorCode
 from flameox.mcp import create_server
 from flameox.storage import Workspace
 
+pytestmark = [pytest.mark.integration, pytest.mark.serial]
+
 
 def _open_object_schema_paths(schema: object, path: str = "$") -> list[str]:
     if isinstance(schema, dict):
@@ -91,7 +93,7 @@ async def test_mcp_tools_use_explicit_envelopes_and_annotations(
     assert definitions["FailurePayload"]["properties"]["ok"]["const"] is False
     assert set(definitions["ErrorCode"]["enum"]) == {code.value for code in ErrorCode}
     assert definitions["RecoveryAction"]["discriminator"]["propertyName"] == "kind"
-    assert "context" not in definitions["InitializeWorkspaceRecovery"]["properties"]
+    assert "context" not in definitions["ToolActionRecovery"]["properties"]
     assert "never executes" in (by_name["configure_workload"].description or "")
     assert result.is_error is False
     assert result.structured_content is not None
@@ -115,6 +117,9 @@ async def test_mcp_tools_use_explicit_envelopes_and_annotations(
     assert "temp" in by_name["import_artifact"].input_schema["properties"]["source_root"]["enum"]
     assert "prepare_adapter" in by_name
     assert "prepare_workload_dependencies" in by_name
+    assert by_name["prepare_workload_dependencies"].annotations is not None
+    assert by_name["prepare_workload_dependencies"].annotations.read_only_hint is True
+    assert by_name["prepare_workload_dependencies"].annotations.destructive_hint is False
     assert "exact installed package identity" in (by_name["prepare_adapter"].description or "")
     assert "never executes" in (by_name["prepare_workload_dependencies"].description or "")
 
@@ -172,6 +177,8 @@ async def test_mcp_nested_models_only_advertise_intentional_flexible_object_maps
         tool.name for tool in tools if _open_object_schema_paths(tool.input_schema)
     }
     assert open_object_tools == {
+        "compare_kernel_validation",  # bounded named case dimensions and inputs
+        "compare_run_sets",  # bounded measurement-series dimensions
         "configure_workload",  # environment and declared parameter names
         "freeze_run_set",  # persisted comparison-selection projection
         "plan_capture",  # names declared by the selected workload
@@ -179,7 +186,8 @@ async def test_mcp_nested_models_only_advertise_intentional_flexible_object_maps
         "plan_fault_experiment",  # names declared by the selected fault experiment
         "plan_reduction",  # names accepted by the declared predicate workload
         "record_finding",  # bounded JSON handoff to a human investigation
-        "register_artifact_pipeline",  # bounded extractor-provided structural summary
+        "record_comparison",  # bounded measurement-series dimensions
+        "record_kernel_validation_comparison",  # bounded named case dimensions and inputs
     }
 
 
@@ -419,10 +427,16 @@ async def test_mcp_domain_errors_remain_structured(tmp_path: Path) -> None:
         "initialize_workspace."
     ]
     assert result.structured_content["error"]["recovery"] == {
-        "kind": "initialize_workspace",
+        "kind": "tool_action",
         "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
+        "action": {
+            "kind": "tool",
+            "action": "workspace.initialize",
+            "arguments": {},
+        },
         "next_tool": "initialize_workspace",
+        "next_arguments": {},
     }
     assert configuration.is_error is True
     assert configuration.structured_content is not None
@@ -454,7 +468,7 @@ async def test_mcp_workspace_initialization_failures_remain_structured(
 
 
 @pytest.mark.anyio
-async def test_mcp_invalid_configuration_exposes_typed_recovery_context(tmp_path: Path) -> None:
+async def test_mcp_invalid_configuration_exposes_missing_action_inputs(tmp_path: Path) -> None:
     Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         "schema_version = 1\n[experiments.broken]\nworkload = 'missing'\n"
@@ -466,18 +480,24 @@ async def test_mcp_invalid_configuration_exposes_typed_recovery_context(tmp_path
         failed = await client.call_tool("list_declared_workflows", {"kind": "workload"})
 
     assert status.structured_content is not None
-    assert status.structured_content["result"]["next_tool"] == "configure_workload"
+    assert status.structured_content["result"]["next_action"] == {
+        "kind": "manual",
+        "instruction": "Supply a complete named workload definition before continuing.",
+        "suggested_action": "workload.configure",
+        "missing_arguments": ["name", "operation", "argv"],
+    }
     assert failed.is_error is True
     assert failed.structured_content is not None
     assert failed.structured_content["error"]["recovery"] == {
-        "kind": "configure_workload",
+        "kind": "manual",
         "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
-        "next_tool": "configure_workload",
-        "context": {
-            "kind": "configure_workload",
-            "operation": "create",
-            "config_path": "flameox.toml",
+        "next_tool": None,
+        "action": {
+            "kind": "manual",
+            "instruction": "Supply a complete named workload definition before continuing.",
+            "suggested_action": "workload.configure",
+            "missing_arguments": ["name", "operation", "argv"],
         },
     }
 
@@ -507,15 +527,16 @@ async def test_mcp_invalid_configuration_falls_back_to_typed_manual_recovery(
         "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
         "next_tool": None,
-        "context": {
-            "kind": "manual_configuration",
-            "config_path": "flameox.toml",
-            "diagnostic": recovery["context"]["diagnostic"],
-            "verification_tool": "workload_configuration_status",
+        "action": {
+            "kind": "manual",
+            "instruction": "Repair flameox.toml manually, then verify its status.",
+            "suggested_action": "workload.configuration.inspect",
+            "missing_arguments": [],
         },
     }
-    assert recovery["context"]["diagnostic"]
-    assert len(recovery["context"]["diagnostic"]) <= 500
+    diagnostic = failed.structured_content["error"]["details"]["diagnostic"]
+    assert diagnostic
+    assert len(diagnostic) <= 500
 
 
 @pytest.mark.anyio
@@ -602,7 +623,7 @@ async def test_mcp_modes_make_capability_and_integrity_choices_explicit(tmp_path
     assert passive.is_error is False
     assert passive.structured_content is not None
     assert passive.structured_content["result"]["setup_adapters"] == []
-    assert passive.structured_content["result"]["next_tool"] is None
+    assert passive.structured_content["result"]["next_action"] is None
     assert scoped.is_error is False
     assert scoped.structured_content is not None
     assert scoped.structured_content["result"]["recommendation_scope"] == "torch.profiler"

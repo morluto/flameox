@@ -65,6 +65,7 @@ class AdapterExecutionPlan(ContractModel):
     permissions: Annotated[tuple[str, ...], Field(max_length=32)] = ()
     expected_overhead: Annotated[str, StringConstraints(min_length=1, max_length=1_000)]
     limitations: Annotated[tuple[str, ...], Field(max_length=32)] = ()
+    validator_version: Annotated[str, StringConstraints(min_length=1, max_length=100)]
     extractor_version: Annotated[str, StringConstraints(min_length=1, max_length=100)]
 
     @model_validator(mode="after")
@@ -77,6 +78,7 @@ class AdapterExecutionPlan(ContractModel):
 
 class AdapterValidationResult(ContractModel):
     api_version: Literal[1] = ADAPTER_API_VERSION
+    validator_version: Annotated[str, StringConstraints(min_length=1, max_length=100)]
     valid: bool
     limitations: Annotated[tuple[str, ...], Field(max_length=32)] = ()
 

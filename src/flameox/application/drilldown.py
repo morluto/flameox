@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import cast
 
 from pydantic import Field
 
 from flameox.catalog import Catalog, Snapshot
-from flameox.domain import CursorCodec, DomainError, ErrorCode, digest_model
+from flameox.domain import CursorNamespace, DomainError, ErrorCode, digest_model
 from flameox.evidence_scope import resolve_evidence_scope
 from flameox.evidence_status import (
     EvidenceAvailability,
@@ -123,18 +124,15 @@ class DrilldownService:
         after_duration: int | None = None
         after_stack_id: str | None = None
         if cursor is not None:
-            position = CursorCodec.decode(
-                cursor,
-                namespace="stack_examples",
-                snapshot_id=head.commit_id,
-                scope_digest=scope_digest,
+            position = cast(
+                tuple[int, str],
+                self.workspace.cursors.resolve(
+                    cursor,
+                    namespace=CursorNamespace.STACK_EXAMPLES,
+                    snapshot_id=head.commit_id,
+                    scope_digest=scope_digest,
+                ),
             )
-            if (
-                len(position) != 2
-                or not isinstance(position[0], int)
-                or not isinstance(position[1], str)
-            ):
-                raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.")
             duration_value, stack_value = position
             assert isinstance(duration_value, int)
             assert isinstance(stack_value, str)
@@ -189,8 +187,8 @@ class DrilldownService:
         )
         has_more = len(rows) > limit
         next_cursor = (
-            CursorCodec.encode(
-                namespace="stack_examples",
+            self.workspace.cursors.issue(
+                namespace=CursorNamespace.STACK_EXAMPLES,
                 snapshot_id=head.commit_id,
                 scope_digest=scope_digest,
                 position=(examples[-1].duration_ns, examples[-1].stack_id),
@@ -238,18 +236,15 @@ class DrilldownService:
         after_duration: int | None = None
         after_frame_id: str | None = None
         if cursor is not None:
-            position = CursorCodec.decode(
-                cursor,
-                namespace="call_edges",
-                snapshot_id=head.commit_id,
-                scope_digest=scope_digest,
+            position = cast(
+                tuple[int, str],
+                self.workspace.cursors.resolve(
+                    cursor,
+                    namespace=CursorNamespace.CALL_EDGES,
+                    snapshot_id=head.commit_id,
+                    scope_digest=scope_digest,
+                ),
             )
-            if (
-                len(position) != 2
-                or not isinstance(position[0], int)
-                or not isinstance(position[1], str)
-            ):
-                raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.")
             duration_value, frame_value = position
             assert isinstance(duration_value, int)
             assert isinstance(frame_value, str)
@@ -314,8 +309,8 @@ class DrilldownService:
         )
         has_more = len(rows) > limit
         next_cursor = (
-            CursorCodec.encode(
-                namespace="call_edges",
+            self.workspace.cursors.issue(
+                namespace=CursorNamespace.CALL_EDGES,
                 snapshot_id=head.commit_id,
                 scope_digest=scope_digest,
                 position=(frames[-1].duration_ns, frames[-1].frame_id),

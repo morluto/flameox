@@ -8,6 +8,8 @@ from typer.testing import CliRunner
 
 from flameox.cli import app
 
+pytestmark = pytest.mark.integration
+
 
 def test_setup_dry_run_emits_machine_readable_exact_plan(
     tmp_path: Path,
@@ -85,6 +87,8 @@ def test_setup_verify_dry_run_reports_configured_launcher_status(
             "path": str(home / ".claude.json"),
             "action": "already_current",
             "detected": True,
+            "mechanism": "qualified_config_file",
+            "client_version": None,
         }
     ]
 
@@ -113,6 +117,6 @@ def test_npm_bootstrap_prints_runtime_to_wizard_handoff(
     monkeypatch.setenv("FLAMEOX_NPM_BOOTSTRAP", "1")
     result = CliRunner().invoke(app, ["setup", "--claude", "--dry-run"])
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 3, result.output
     assert "Managed runtime ready. Starting flameox setup..." in result.output
-    assert result.output.index("Managed runtime ready") < result.output.index("flameox setup")
+    assert "qualified Claude Code MCP management CLI was not found" in result.output

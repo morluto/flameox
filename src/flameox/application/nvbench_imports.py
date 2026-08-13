@@ -129,7 +129,7 @@ class NvbenchImportService:
             expected_byte_length=document_bytes,
             expected_sha256=document_sha256,
         )
-        imported = importer._import_provider_bundle(
+        imported = importer.import_provider_bundle(
             ImportBundleRequest(
                 primary=primary_member,
                 sidecars=tuple(sidecar_members),

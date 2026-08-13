@@ -11,6 +11,10 @@ from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
+from flameox.workers.compute_sanitizer_contract import (
+    COMPUTE_SANITIZER_WORKER,
+    ComputeSanitizerWorkerRequest,
+)
 
 _SUPPORTED_PRODUCER_MAJOR = 2026
 
@@ -47,41 +51,23 @@ def inspect_compute_sanitizer_report(
     max_records: int,
     max_frames: int = 64,
 ) -> ComputeSanitizerInspection:
-    response = IsolatedWorkerHarness(workspace).run_sync(
-        "flameox.workers.compute_sanitizer",
-        {
-            "artifact_path": artifact_path,
-            "project_root": str(workspace.project_root),
-            "max_records": max_records,
-            "max_frames": max_frames,
-        },
-        name="Compute Sanitizer",
-        timeout_seconds=120,
+    response = IsolatedWorkerHarness(workspace).run_typed_sync(
+        COMPUTE_SANITIZER_WORKER,
+        ComputeSanitizerWorkerRequest(
+            artifact_path=artifact_path,
+            project_root=str(workspace.project_root),
+            max_records=max_records,
+            max_frames=max_frames,
+        ),
     )
-    records = response.get("records")
-    classifications = response.get("classifications")
-    raw_limitations = response.get("limitations")
-    if (
-        not isinstance(records, list)
-        or any(not isinstance(item, dict) for item in records)
-        or not isinstance(classifications, dict)
-        or any(
-            not isinstance(key, str) or isinstance(value, bool) or not isinstance(value, int)
-            for key, value in classifications.items()
-        )
-        or not isinstance(raw_limitations, list)
-        or any(not isinstance(item, str) for item in raw_limitations)
-    ):
-        raise DomainError(
-            ErrorCode.ARTIFACT_PARSE_FAILED,
-            "Compute Sanitizer worker returned an invalid normalized result.",
-        )
-    limitations = list(raw_limitations)
+    records = response.records
+    classifications = response.classifications
+    limitations = list(response.limitations)
     if any(record.get("classification") == "unknown" for record in records):
         limitations.append("One or more Compute Sanitizer record shapes were not classified.")
     return ComputeSanitizerInspection(
-        records=tuple(records),
-        classifications={str(key): int(value) for key, value in classifications.items()},
+        records=tuple(dict(record) for record in records),
+        classifications=classifications,
         limitations=tuple(dict.fromkeys(limitations)),
     )
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -10,6 +9,13 @@ from flameox.analysis import RecipeService
 from flameox.application import ImportArtifactRequest, ImportService
 from flameox.domain import ArtifactKind
 from flameox.storage import Workspace
+from flameox.workers.perfetto_contract import (
+    PerfettoExtractRequest,
+    PerfettoExtractResult,
+    PerfettoSliceRow,
+)
+
+pytestmark = pytest.mark.integration
 
 
 @pytest.mark.anyio
@@ -30,7 +36,7 @@ async def test_perfetto_normalization_inherits_trace_visible_sdk_phase(
     extractor = PerfettoExtractor(workspace)
     monkeypatch.setattr(extractor, "_trace_processor_path", lambda: trace)
 
-    async def worker(_request: dict[str, Any]) -> dict[str, Any]:
+    async def worker(_request: PerfettoExtractRequest) -> PerfettoExtractResult:
         def row(
             event_id: int,
             parent_id: int | None,
@@ -59,14 +65,17 @@ async def test_perfetto_normalization_inherits_trace_visible_sdk_phase(
                 "stream": "9" if event_id == 3 else None,
             }
 
-        return {
-            "ok": True,
-            "rows": [
-                row(1, None, "flameox.phase:decode", "user_annotation", 0, 100),
-                row(2, 1, "cudaLaunchKernel", "cuda_runtime", 10, 2),
-                row(3, 1, "projection_kernel", "kernel", 20, 5),
-            ],
-        }
+        return PerfettoExtractResult(
+            truncated=False,
+            rows=tuple(
+                PerfettoSliceRow.model_validate(item)
+                for item in (
+                    row(1, None, "flameox.phase:decode", "user_annotation", 0, 100),
+                    row(2, 1, "cudaLaunchKernel", "cuda_runtime", 10, 2),
+                    row(3, 1, "projection_kernel", "kernel", 20, 5),
+                )
+            ),
+        )
 
     monkeypatch.setattr(extractor, "_run_worker", worker)
 

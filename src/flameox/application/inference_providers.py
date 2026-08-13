@@ -9,33 +9,39 @@ readiness checks.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import sys
 import time
 from enum import StrEnum
 from importlib.metadata import PackageNotFoundError, version
-from ipaddress import ip_address
 from pathlib import Path
-from typing import Annotated, Literal, cast
-from urllib.error import HTTPError, URLError
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
-from urllib.response import addinfourl
 
 from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
+    ValidationError,
     computed_field,
     field_validator,
     model_validator,
 )
 
+from flameox.action_graph import manual_action
+from flameox.application.provider_runtime import ProviderRuntime
 from flameox.command_binding import ExecutableResolver
 from flameox.domain import DomainError, ErrorCode
 from flameox.domain.executables import ResolvedExecutable
 from flameox.execution import ExecutionRequest, SubprocessBroker
+from flameox.http_transport import (
+    BoundedHttpClient,
+    BoundedHttpError,
+    BoundedHttpResponse,
+    HttpMethod,
+    LoopbackHttpRequest,
+    validate_loopback_base_url,
+)
 from flameox.models import ContractModel
 
 _MAX_PROBE_RESPONSE_BYTES = 1024 * 1024
@@ -68,28 +74,8 @@ class InferenceTool(StrEnum):
     SGLANG = "sglang"
 
 
-class _RejectRedirects(HTTPRedirectHandler):
-    """Keep passive loopback probes on the declared endpoint."""
-
-    def redirect_request(self, *args: object, **kwargs: object) -> None:
-        return None
-
-
-def _open_probe(request: Request, timeout: float) -> addinfourl:
-    return cast(addinfourl, build_opener(_RejectRedirects()).open(request, timeout=timeout))
-
-
 def _loopback_http_url(value: str) -> str:
-    parsed = urlsplit(value)
-    if parsed.scheme != "http" or not parsed.hostname or parsed.username or parsed.password:
-        raise ValueError("server URL must be an unauthenticated http URL")
-    try:
-        loopback = ip_address(parsed.hostname).is_loopback
-    except ValueError:
-        loopback = parsed.hostname.lower() == "localhost"
-    if not loopback or parsed.query or parsed.fragment:
-        raise ValueError("server URL must target a loopback address without query or fragment")
-    return value.rstrip("/")
+    return validate_loopback_base_url(value)
 
 
 class AIPerfProfileRequest(ContractModel):
@@ -310,6 +296,9 @@ class _InferenceToolDiscovery(ContractModel):
     tool: InferenceTool
     version: str | None = None
     executable_digest: str | None = None
+    provider_environment_id: str | None = None
+    provider_python: Path | None = None
+    provider_python_sha256: str | None = None
     available: bool
 
     @computed_field  # type: ignore[prop-decorator]
@@ -418,20 +407,42 @@ def _digest_executable(executable: Path) -> str | None:
 
 def discover_inference_tool(
     tool: Literal[InferenceTool.AIPERF, InferenceTool.VLLM],
+    *,
+    provider_runtime: ProviderRuntime | None = None,
 ) -> InferenceToolDiscovery:
-    scripts_dir = Path(sys.executable).resolve().parent
-    environment = dict(os.environ)
-    environment["PATH"] = os.pathsep.join((str(scripts_dir), environment.get("PATH", "")))
-    binding = ExecutableResolver().resolve_host_tool(str(tool), environment=environment)
+    if tool is InferenceTool.AIPERF and provider_runtime is None:
+        return UnavailableInferenceToolDiscovery(
+            tool=tool,
+            compatibility_reason="No verified AIPerf provider environment is available.",
+            remediation=(
+                "Call start_capability_setup with adapters=['aiperf'], wait for completion, "
+                "then plan the inference scenario again.",
+            ),
+        )
+    if provider_runtime is not None:
+        candidate = provider_runtime.executable
+        binding = (
+            ExecutableResolver().resolve_host_tool(str(candidate), cwd=provider_runtime.root)
+            if candidate is not None
+            else None
+        )
+    else:
+        scripts_dir = Path(sys.executable).resolve().parent
+        environment = dict(os.environ)
+        environment["PATH"] = os.pathsep.join((str(scripts_dir), environment.get("PATH", "")))
+        binding = ExecutableResolver().resolve_host_tool(str(tool), environment=environment)
     executable = binding.canonical_target if binding is not None else None
     tool_version: str | None = None
     executable_digest: str | None = None
     if executable is not None and binding is not None:
         executable_digest = binding.identity.sha256
-        try:
-            tool_version = version(tool)
-        except PackageNotFoundError:
-            tool_version = None
+        if provider_runtime is not None:
+            tool_version = provider_runtime.receipt.distributions.get(str(tool))
+        else:
+            try:
+                tool_version = version(tool)
+            except PackageNotFoundError:
+                tool_version = None
     compatible = executable is not None
     compatibility_reason: str | None = None
     if executable is not None and tool is InferenceTool.AIPERF:
@@ -447,6 +458,13 @@ def discover_inference_tool(
             executable_binding=binding,
             version=tool_version,
             executable_digest=executable_digest,
+            provider_environment_id=(
+                provider_runtime.receipt.environment_id if provider_runtime is not None else None
+            ),
+            provider_python=provider_runtime.python if provider_runtime is not None else None,
+            provider_python_sha256=(
+                provider_runtime.receipt.python_sha256 if provider_runtime is not None else None
+            ),
         )
     return UnavailableInferenceToolDiscovery(
         tool=tool,
@@ -455,7 +473,10 @@ def discover_inference_tool(
         executable_digest=executable_digest,
         compatibility_reason=compatibility_reason,
         remediation=(
-            ("Install a compatible AIPerf >=0.12,<0.13 in the Flameox runtime, then retry.",)
+            (
+                "Call start_capability_setup with adapters=['aiperf'] to create a compatible "
+                "provider environment, then retry.",
+            )
             if tool is InferenceTool.AIPERF
             else ("Install vLLM in the target runtime; Flameox does not install it.",)
         ),
@@ -468,8 +489,23 @@ class ExistingServerProbe(ContractModel):
     model_ids: tuple[str, ...]
 
 
+class _ModelRecord(ContractModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: Annotated[str, Field(min_length=1, max_length=500)]
+
+
+class _ModelsResponse(ContractModel):
+    model_config = ConfigDict(extra="ignore")
+
+    data: tuple[_ModelRecord, ...]
+
+
 def probe_existing_vllm_server(
-    base_url: str, *, timeout_seconds: float = 2.0
+    base_url: str,
+    *,
+    timeout_seconds: float = 2.0,
+    http_client: BoundedHttpClient | None = None,
 ) -> ExistingServerProbe:
     """Probe only documented read endpoints; never send an inference request."""
 
@@ -477,53 +513,99 @@ def probe_existing_vllm_server(
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
     deadline = time.monotonic() + timeout_seconds
-
-    def remaining() -> float:
-        value = deadline - time.monotonic()
-        if value <= 0:
-            raise TimeoutError("passive inference probe deadline expired")
-        return value
-
+    client = http_client or BoundedHttpClient()
+    owns_client = http_client is None
     try:
-        with _open_probe(
-            Request(f"{normalized}/health", method="GET"), timeout=remaining()
-        ) as response:
-            health_ready = response.status is not None and 200 <= response.status < 300
-        with _open_probe(
-            Request(f"{normalized}/v1/models", method="GET"), timeout=remaining()
-        ) as response:
-            chunks: list[bytes] = []
-            total = 0
-            while True:
-                chunk = response.read(min(64 * 1024, _MAX_PROBE_RESPONSE_BYTES + 1 - total))
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > _MAX_PROBE_RESPONSE_BYTES:
-                    raise ValueError("/v1/models response exceeded the passive probe limit")
-                chunks.append(chunk)
-                remaining()
-            payload = json.loads(b"".join(chunks))
-    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
-        raise DomainError(
-            ErrorCode.CAPABILITY_UNAVAILABLE,
-            "The loopback inference server did not satisfy passive readiness probes.",
-            remediation=("Start or inspect the declared local server, then retry planning.",),
-            details={
-                "base_url": normalized,
-                "probe_stage": "health_and_models",
-                "next_tool": "manual",
-            },
-        ) from exc
-    records = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(records, list):
-        raise DomainError(
+        health = client.request_loopback(_probe_request(normalized, "/health", deadline))
+        models = client.request_loopback(
+            _probe_request(normalized, "/v1/models", deadline, maximum=_MAX_PROBE_RESPONSE_BYTES)
+        )
+    except BoundedHttpError as exc:
+        raise _probe_failure(normalized, "health_and_models") from exc
+    finally:
+        if owns_client:
+            client.close()
+    return _parse_probe(normalized, health, models)
+
+
+async def probe_existing_vllm_server_async(
+    base_url: str,
+    *,
+    timeout_seconds: float = 2.0,
+    http_client: BoundedHttpClient | None = None,
+) -> ExistingServerProbe:
+    """Asynchronously probe the same bounded read-only readiness contract."""
+
+    normalized = _loopback_http_url(base_url)
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    deadline = time.monotonic() + timeout_seconds
+    client = http_client or BoundedHttpClient()
+    owns_client = http_client is None
+    try:
+        health = await client.request_loopback_async(
+            _probe_request(normalized, "/health", deadline)
+        )
+        models = await client.request_loopback_async(
+            _probe_request(normalized, "/v1/models", deadline, maximum=_MAX_PROBE_RESPONSE_BYTES)
+        )
+    except BoundedHttpError as exc:
+        raise _probe_failure(normalized, "health_and_models") from exc
+    finally:
+        if owns_client:
+            await client.aclose()
+    return _parse_probe(normalized, health, models)
+
+
+def _probe_request(
+    base_url: str,
+    path: Literal["/health", "/v1/models"],
+    deadline: float,
+    *,
+    maximum: int = 64 * 1024,
+) -> LoopbackHttpRequest:
+    return LoopbackHttpRequest(
+        base_url=base_url,
+        method=HttpMethod.GET,
+        path=path,
+        deadline_monotonic=deadline,
+        max_response_bytes=maximum,
+    )
+
+
+def _parse_probe(
+    normalized: str,
+    health: BoundedHttpResponse,
+    models: BoundedHttpResponse,
+) -> ExistingServerProbe:
+    try:
+        payload = _ModelsResponse.model_validate(models.json())
+    except (BoundedHttpError, ValidationError) as exc:
+        raise _probe_failure(normalized, "models_schema") from exc
+    return ExistingServerProbe(
+        base_url=normalized,
+        health_ready=200 <= health.status_code < 300,
+        model_ids=tuple(record.id for record in payload.data),
+    )
+
+
+def _probe_failure(base_url: str, stage: str) -> DomainError:
+    if stage == "models_schema":
+        return DomainError(
             ErrorCode.CAPABILITY_UNAVAILABLE,
             "The inference server returned an unsupported /v1/models response.",
             remediation=("Inspect the declared server's OpenAI-compatible models endpoint.",),
-            details={"base_url": normalized, "probe_stage": "models_schema", "next_tool": "manual"},
+            details={"base_url": base_url, "probe_stage": stage},
+            next_action=manual_action(
+                "Repair the declared server's OpenAI-compatible models endpoint before retrying."
+            ),
         )
-    model_ids = tuple(
-        item["id"] for item in records if isinstance(item, dict) and isinstance(item.get("id"), str)
+    return DomainError(
+        ErrorCode.CAPABILITY_UNAVAILABLE,
+        "The loopback inference server did not satisfy passive readiness probes.",
+        remediation=("Start or inspect the declared local server, then retry planning.",),
+        details={"base_url": base_url, "probe_stage": stage},
+        next_action=manual_action(
+            "Start or inspect the declared loopback inference server before retrying."
+        ),
     )
-    return ExistingServerProbe(base_url=normalized, health_ready=health_ready, model_ids=model_ids)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -19,6 +21,9 @@ from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode
 from flameox.evidence import GenerationPublisher, schema_for
 from flameox.storage import CorpusCommit, Workspace
+from flameox.storage.locks import RETENTION_EXCLUSIVE, WorkspaceLockIntent
+
+pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
 DIGEST = "sha256:" + ("a" * 64)
 
@@ -70,6 +75,64 @@ def test_publication_is_visible_only_through_new_corpus_commit(tmp_path: Path) -
         assert new_snapshot.execute(
             "SELECT count(*) FROM runtime_writable_root_growth"
         ).fetchone() == (0,)
+
+
+def test_current_runs_uses_domain_revision_not_projection_completion_order(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    publisher = GenerationPublisher(workspace)
+    revision_two = {
+        **run_row("run-1"),
+        "run_revision": 2,
+        "run_manifest_digest": "sha256:" + "2" * 64,
+        "execution_status": "succeeded",
+    }
+    delayed_revision_one = {
+        **run_row("run-1"),
+        "run_revision": 1,
+        "run_manifest_digest": "sha256:" + "1" * 64,
+        "execution_status": "running",
+    }
+
+    publisher.publish_rows(
+        {"runs": [revision_two]},
+        publisher="revision-test",
+        publisher_version="1",
+    )
+    publisher.publish_rows(
+        {"runs": [delayed_revision_one]},
+        publisher="revision-test",
+        publisher_version="1",
+    )
+
+    with Catalog(workspace).open_snapshot() as snapshot:
+        assert snapshot.execute(
+            "SELECT run_revision, execution_status FROM current_runs WHERE run_id = 'run-1'"
+        ).fetchone() == (2, "succeeded")
+
+
+def test_snapshot_rejects_conflicting_content_for_one_run_revision(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    publisher = GenerationPublisher(workspace)
+    for digest in ("1", "2"):
+        publisher.publish_rows(
+            {
+                "runs": [
+                    {
+                        **run_row("run-1"),
+                        "run_revision": 1,
+                        "run_manifest_digest": "sha256:" + digest * 64,
+                    }
+                ]
+            },
+            publisher="revision-test",
+            publisher_version="1",
+        )
+
+    with pytest.raises(DomainError) as conflict, Catalog(workspace).open_snapshot():
+        pass
+    assert conflict.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
 
 
 def test_idempotent_publication_reuses_or_supersedes_exact_operation(tmp_path: Path) -> None:
@@ -218,6 +281,171 @@ async def test_interruptible_catalog_query_cancels_and_releases_snapshot(
         assert snapshot.execute("SELECT 1").fetchone() == (1,)
 
 
+@pytest.mark.anyio
+async def test_interruptible_catalog_cancellation_aborts_pre_snapshot_lock_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    catalog = Catalog(workspace)
+    original_locked = workspace.locked
+    lock_held = threading.Event()
+    lock_attempted = threading.Event()
+    release_lock = threading.Event()
+    operation_started = threading.Event()
+
+    def hold_retention_lock() -> None:
+        with original_locked(RETENTION_EXCLUSIVE):
+            lock_held.set()
+            release_lock.wait()
+
+    @contextmanager
+    def observed_locked(
+        *intents: WorkspaceLockIntent,
+        timeout: float = 30,
+        phase: str = "workspace mutation",
+    ) -> Any:
+        lock_attempted.set()
+        with original_locked(*intents, timeout=timeout, phase=phase) as streams:
+            yield streams
+
+    holder = threading.Thread(target=hold_retention_lock)
+    holder.start()
+    assert await asyncio.to_thread(lock_held.wait, 1)
+    monkeypatch.setattr(workspace, "locked", observed_locked)
+
+    def query_after_lock(snapshot: Any) -> list[tuple[object, ...]]:
+        operation_started.set()
+        return cast(list[tuple[object, ...]], snapshot.execute("SELECT 1").fetchall())
+
+    task = asyncio.create_task(
+        catalog.run_interruptible(
+            query_after_lock,
+            query_name="blocked-before-snapshot",
+        )
+    )
+    assert await asyncio.to_thread(lock_attempted.wait, 1)
+    task.cancel()
+    try:
+        async with asyncio.timeout(1):
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert holder.is_alive()
+        assert not operation_started.is_set()
+
+        events = [
+            json.loads(line)
+            for line in workspace.paths.operation_log.read_text().splitlines()
+            if '"query_name":"blocked-before-snapshot"' in line
+        ]
+        assert events[-2]["cleanup_status"] == "pending"
+        assert events[-1]["phase"] == "query cancelled"
+        assert events[-1]["cleanup_status"] == "complete"
+    finally:
+        release_lock.set()
+        holder.join(timeout=1)
+
+
+@pytest.mark.anyio
+async def test_interruptible_catalog_retains_slow_worker_until_locks_are_released(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    catalog = Catalog(workspace)
+    operation_started = threading.Event()
+    release_operation = threading.Event()
+    operation_finished = threading.Event()
+
+    def slow_operation(snapshot: Any) -> list[tuple[object, ...]]:
+        operation_started.set()
+        try:
+            release_operation.wait()
+            return cast(list[tuple[object, ...]], snapshot.execute("SELECT 1").fetchall())
+        finally:
+            operation_finished.set()
+
+    task = asyncio.create_task(
+        catalog.run_interruptible(slow_operation, query_name="slow-python-operation")
+    )
+    assert await asyncio.to_thread(operation_started.wait, 1)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+
+    done, _ = await asyncio.wait({task}, timeout=0.1)
+    try:
+        assert not done
+        assert not operation_finished.is_set()
+        assert '"phase":"query cancelled"' not in "\n".join(
+            line
+            for line in workspace.paths.operation_log.read_text().splitlines()
+            if '"query_name":"slow-python-operation"' in line
+        )
+    finally:
+        release_operation.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert operation_finished.is_set()
+    with (
+        workspace.retention_locked(shared=False, timeout=1),
+        workspace.catalog_locked(shared=False, timeout=1),
+    ):
+        pass
+
+    events = [
+        json.loads(line)
+        for line in workspace.paths.operation_log.read_text().splitlines()
+        if '"query_name":"slow-python-operation"' in line
+    ]
+    assert events[-1]["phase"] == "query cancelled"
+    assert events[-1]["cleanup_status"] == "complete"
+
+
+@pytest.mark.anyio
+async def test_interruptible_catalog_admission_is_bounded_and_cancellable(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    catalog = Catalog(workspace)
+    release_operations = threading.Event()
+    active_lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+    four_started = threading.Event()
+
+    def slow_operation(snapshot: Any) -> list[tuple[object, ...]]:
+        nonlocal active, maximum_active
+        with active_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+            if active == 4:
+                four_started.set()
+        try:
+            release_operations.wait()
+            return cast(list[tuple[object, ...]], snapshot.execute("SELECT 1").fetchall())
+        finally:
+            with active_lock:
+                active -= 1
+
+    active_tasks = [
+        asyncio.create_task(catalog.run_interruptible(slow_operation)) for _ in range(4)
+    ]
+    assert await asyncio.to_thread(four_started.wait, 2)
+    waiting = asyncio.create_task(catalog.run_interruptible(slow_operation))
+    await asyncio.sleep(0.05)
+    waiting.cancel()
+    try:
+        async with asyncio.timeout(1):
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
+        assert maximum_active == 4
+    finally:
+        release_operations.set()
+
+    assert all(await asyncio.gather(*active_tasks))
+
+
 def test_concurrent_publishers_retry_contention_without_losing_generations(
     tmp_path: Path,
 ) -> None:
@@ -265,6 +493,11 @@ def test_compaction_replaces_reachable_small_generations(
             publisher="test",
             publisher_version="1",
         )
+    with Catalog(workspace).open_snapshot() as snapshot:
+        provenance_before = snapshot.execute(
+            "SELECT run_id, evidence_generation_id, published_at, extractor_name, "
+            "extractor_version FROM runs ORDER BY run_id"
+        ).fetchall()
 
     result = CompactionService(workspace).compact()
 
@@ -274,6 +507,13 @@ def test_compaction_replaces_reachable_small_generations(
     assert len(workspace.corpus.read_head().generation_manifests) == 1
     with Catalog(workspace).open_snapshot() as snapshot:
         assert snapshot.execute("SELECT count(*) FROM runs").fetchone() == (3,)
+        assert (
+            snapshot.execute(
+                "SELECT run_id, evidence_generation_id, published_at, extractor_name, "
+                "extractor_version FROM runs ORDER BY run_id"
+            ).fetchall()
+            == provenance_before
+        )
 
 
 def test_generation_row_quota_is_enforced_before_staging(tmp_path: Path) -> None:

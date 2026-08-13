@@ -10,6 +10,8 @@ from flameox.adapters import (
 )
 from flameox.adapters.torch_profiler import torch_profiler_options
 
+pytestmark = pytest.mark.unit
+
 
 def test_torch_profiler_parser_routes_mode_to_schedule_variant() -> None:
     whole = torch_profiler_options({})

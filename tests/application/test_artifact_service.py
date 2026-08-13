@@ -6,13 +6,22 @@ import pytest
 
 from flameox.application import (
     ArtifactService,
+    EvidenceLookupService,
     ImportArtifactRequest,
     ImportService,
     NativeViewerService,
 )
 from flameox.catalog import Catalog
-from flameox.domain import ArtifactKind, DomainError, ErrorCode, Sensitivity
-from flameox.storage import Workspace
+from flameox.domain import (
+    ArtifactKind,
+    DomainError,
+    ErrorCode,
+    EvidenceReferenceType,
+    Sensitivity,
+)
+from flameox.storage import ArtifactStore, Workspace
+
+pytestmark = pytest.mark.integration
 
 
 def test_artifact_metadata_keeps_registrations_and_max_sensitivity(
@@ -64,6 +73,25 @@ def test_artifact_metadata_effective_sensitivity_includes_registrations_outside_
     assert len(result.registrations) == 1
     assert result.registrations[0].sensitivity is Sensitivity.NORMAL
     assert result.effective_sensitivity is Sensitivity.SENSITIVE
+
+
+def test_evidence_lookup_rejects_cas_object_outside_the_snapshot(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source = tmp_path / "unregistered.bin"
+    source.write_bytes(b"unregistered")
+    stored = ArtifactStore(workspace).import_path(
+        source,
+        allowed_roots=(tmp_path,),
+        max_bytes=1024,
+    )
+
+    with pytest.raises(DomainError) as error:
+        EvidenceLookupService(workspace).get(
+            EvidenceReferenceType.ARTIFACT,
+            stored.content.artifact_id,
+        )
+
+    assert error.value.code is ErrorCode.WORKSPACE_INVALID
 
 
 def test_native_viewer_plan_is_read_only_and_uses_content_path(

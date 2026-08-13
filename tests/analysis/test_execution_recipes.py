@@ -10,6 +10,8 @@ from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
 from tests.support.analysis import run_row
 
+pytestmark = pytest.mark.integration
+
 
 def test_execution_compares_path_and_semantic_observation_changes(
     tmp_path: Path,

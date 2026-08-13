@@ -17,6 +17,14 @@ from flameox.domain import ArtifactKind, ExecutionStatus, ValidationStatus
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
 
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.optional,
+    pytest.mark.process,
+    pytest.mark.serial,
+    pytest.mark.requires_compute_sanitizer,
+]
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 

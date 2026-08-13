@@ -13,6 +13,8 @@ from mcp import Client
 from flameox.mcp import create_server
 from flameox.storage import RunStore, Workspace
 
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
+
 ToolCall = Callable[[str, dict[str, Any]], Awaitable[Any]]
 Setup = Callable[[Workspace], None]
 Exercise = Callable[[ToolCall, Workspace], Awaitable[None]]
@@ -123,7 +125,9 @@ async def _exercise_fresh_repository(call: ToolCall, workspace: Workspace) -> No
     )
 
     assert status.is_error is False
-    assert _structured(status)["result"]["next_tool"] == "configure_workload"
+    assert _structured(status)["result"]["next_action"]["suggested_action"] == (
+        "workload.configure"
+    )
     assert _structured(repeated) == _structured(status)
     assert configured.is_error is False
     assert _structured(configured)["result"]["action"] == "created"
@@ -138,7 +142,7 @@ async def _exercise_add_workload(call: ToolCall, workspace: Workspace) -> None:
     )
 
     assert status.is_error is False
-    assert _structured(status)["result"]["next_tool"] == "list_declared_workflows"
+    assert _structured(status)["result"]["next_action"]["action"] == "workflow.list"
     assert configured.is_error is False
     assert _structured(configured)["result"]["action"] == "created"
 
@@ -179,7 +183,9 @@ async def _exercise_invalid_configuration(call: ToolCall, workspace: Workspace) 
 
     assert status.is_error is False
     assert _structured(status)["result"]["status"] == "invalid"
-    assert _structured(status)["result"]["next_tool"] == "configure_workload"
+    assert _structured(status)["result"]["next_action"]["suggested_action"] == (
+        "workload.configure"
+    )
 
 
 async def _exercise_ignored_adhoc_capture_arguments(

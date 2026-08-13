@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from flameox.action_graph import ActionId, ToolAction
 from flameox.adapters import PyPerfExtractor
 from flameox.adapters.builtins import build_capture_invocation
 from flameox.analysis import RecipeService
@@ -20,6 +21,8 @@ from flameox.domain import ArtifactKind, DomainError, ErrorCode, ExecutionStatus
 from flameox.storage import Workspace
 from flameox.storage.artifacts import StoredArtifact
 
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
+
 
 def test_python_startup_invocation_uses_declared_workload_timeout(tmp_path: Path) -> None:
     invocation = build_capture_invocation(
@@ -32,6 +35,13 @@ def test_python_startup_invocation_uses_declared_workload_timeout(tmp_path: Path
 
     timeout_index = invocation.argv.index("--timeout-seconds")
     assert invocation.argv[timeout_index + 1] == "7.5"
+    assert invocation.argv[invocation.argv.index("--benchmark-output") + 1] == str(
+        tmp_path / "startup-wall.pyperf.json"
+    )
+    assert invocation.argv[invocation.argv.index("--import-trace-output") + 1] == str(
+        tmp_path / "python-importtime.log"
+    )
+    assert "--samples" not in invocation.argv
 
 
 def test_pytest_capture_plan_rejects_non_pytest_workload(tmp_path: Path) -> None:
@@ -259,10 +269,10 @@ def test_imported_torch_trace_requires_perfetto_extraction_before_analysis(
         RecipeService(workspace).pytorch(imported.run.run_id)
 
     assert unavailable.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
-    assert unavailable.value.details == {
-        "next_tool": "extract_perfetto",
-        "run_id": imported.run.run_id,
-    }
+    assert unavailable.value.details == {"run_id": imported.run.run_id}
+    assert isinstance(unavailable.value.next_action, ToolAction)
+    assert unavailable.value.next_action.action is ActionId.EXTRACT_PERFETTO
+    assert unavailable.value.next_action.arguments == {"run_id": imported.run.run_id}
     assert "extract_perfetto" in unavailable.value.remediation[0]
 
 

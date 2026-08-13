@@ -18,6 +18,8 @@ from flameox.application.workloads import (
 )
 from flameox.storage import Workspace
 
+pytestmark = pytest.mark.unit
+
 
 def _server(**config: object) -> InferenceServerConfig:
     return parse_inference_server_config(config)
@@ -105,7 +107,7 @@ def test_inference_configuration_references_managed_workload() -> None:
 
 @pytest.mark.parametrize("base_url", ["https://127.0.0.1:8000", "http://example.test:8000"])
 def test_existing_inference_server_must_be_loopback_http(base_url: str) -> None:
-    with pytest.raises(ValidationError, match=r"loopback|unauthenticated http"):
+    with pytest.raises(ValidationError, match=r"loopback|unauthenticated HTTP"):
         ProjectConfig.model_validate(
             {
                 "inference_servers": {
@@ -144,7 +146,7 @@ def test_sglang_server_requires_an_absolute_benchmark_launcher(launcher: str | N
 
 
 def test_sglang_server_rejects_non_root_base_url() -> None:
-    with pytest.raises(ValidationError, match="root base_url"):
+    with pytest.raises(ValidationError, match="loopback origin without URL extras"):
         _server(
             provider="sglang",
             benchmark_python="/opt/sglang/bin/python",

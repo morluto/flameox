@@ -18,6 +18,8 @@ from flameox.domain import (
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
 
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
+
 
 def _fake_nvbench_bench(path: Path) -> None:
     path.write_text(

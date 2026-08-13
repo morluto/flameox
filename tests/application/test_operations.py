@@ -4,22 +4,37 @@ import asyncio
 import json
 import sqlite3
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 from pathlib import Path
 from typing import cast
 
+import anyio
 import pytest
 
+from flameox.action_graph import ActionId, ManualAction, ToolAction
 from flameox.application.operations import (
     ActiveOperationRecord,
+    OperationAdapter,
     OperationFailure,
     OperationProgress,
     OperationRunner,
+    OperationState,
     OperationStore,
     operation_digests,
 )
+from flameox.application.task_supervisor import TaskSupervisor
 from flameox.domain import DomainError, ErrorCode
 from flameox.domain.models import utc_now
 from flameox.storage import Workspace
+from flameox.storage.control_plane import ControlPlane
+
+pytestmark = pytest.mark.unit
+
+_TEST_OPERATION = OperationAdapter(
+    kind="test.operation",
+    start_action=ActionId.START_CAPABILITY_SETUP,
+    status_action=ActionId.GET_CAPABILITY_SETUP,
+)
 
 
 @pytest.mark.parametrize(
@@ -145,10 +160,121 @@ def test_operation_record_rejects_contradictory_identity_projections(tmp_path: P
         )
 
 
+def test_operation_store_rejects_transition_after_terminal_state(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    request = {"value": 1}
+    _, idempotency_digest = operation_digests(
+        workspace,
+        "test.operation",
+        request,
+        "terminal-immutability",
+    )
+    active = ActiveOperationRecord(
+        operation="test.operation",
+        workspace_id=workspace.identity.workspace_id,
+        request=request,
+        idempotency_digest=idempotency_digest,
+        owner_id="test-owner",
+        owner_heartbeat_at=utc_now(),
+    )
+    store = OperationStore(workspace)
+    store.records.create(active)
+    terminal = active.completed(receipt={"result": "done"}, item_outcomes=())
+    store.records.append(terminal, expected_revision=active.revision)
+    reactivated = ActiveOperationRecord(
+        operation=active.operation,
+        workspace_id=active.workspace_id,
+        request=active.request,
+        idempotency_digest=active.idempotency_digest,
+        revision=terminal.revision + 1,
+        state=OperationState.RUNNING,
+        owner_id="new-owner",
+        owner_heartbeat_at=utc_now(),
+        created_at=active.created_at,
+    )
+
+    with pytest.raises(DomainError, match="cannot transition again"):
+        store.records.append(reactivated, expected_revision=terminal.revision)
+
+    assert store.read(active.operation_id) == terminal
+
+
+def test_operation_store_rejects_running_to_starting_transition(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    request = {"value": 1}
+    _, idempotency_digest = operation_digests(
+        workspace,
+        "test.operation",
+        request,
+        "state-regression",
+    )
+    active = ActiveOperationRecord(
+        operation="test.operation",
+        workspace_id=workspace.identity.workspace_id,
+        request=request,
+        idempotency_digest=idempotency_digest,
+        owner_id="test-owner",
+        owner_heartbeat_at=utc_now(),
+    )
+    store = OperationStore(workspace)
+    store.records.create(active)
+    running = active.running()
+    store.records.append(running, expected_revision=active.revision)
+    regressed = ActiveOperationRecord.model_validate(
+        {
+            **running.model_dump(mode="python"),
+            "revision": running.revision + 1,
+            "state": "starting",
+        }
+    )
+
+    with pytest.raises(DomainError, match="back to starting"):
+        store.records.append(regressed, expected_revision=running.revision)
+
+
+def test_operation_revision_history_retains_creation_and_a_bounded_tail(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    request = {"value": 1}
+    _, idempotency_digest = operation_digests(
+        workspace,
+        "test.operation",
+        request,
+        "bounded-history",
+    )
+    record = ActiveOperationRecord(
+        operation="test.operation",
+        workspace_id=workspace.identity.workspace_id,
+        request=request,
+        idempotency_digest=idempotency_digest,
+        owner_id="test-owner",
+        owner_heartbeat_at=utc_now(),
+    )
+    store = OperationStore(workspace)
+    store.records.create(record)
+
+    for _ in range(ControlPlane.MAX_OPERATION_REVISIONS * 2):
+        updated = record.heartbeat()
+        store.records.append(updated, expected_revision=record.revision)
+        record = updated
+
+    with sqlite3.connect(workspace.paths.control_plane) as connection:
+        revisions = [
+            int(row[0])
+            for row in connection.execute(
+                "SELECT revision FROM operation_revisions WHERE operation_id = ? ORDER BY revision",
+                (record.operation_id,),
+            )
+        ]
+
+    assert len(revisions) == ControlPlane.MAX_OPERATION_REVISIONS
+    assert revisions[0] == 0
+    assert revisions[-1] == record.revision
+
+
 @pytest.mark.anyio
 async def test_operation_runner_persists_exact_request_and_reconnects(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    runner = OperationRunner(workspace, "test.operation")
+    runner = OperationRunner(workspace, _TEST_OPERATION)
 
     async def run(
         operation_id: str,
@@ -178,8 +304,46 @@ async def test_operation_runner_persists_exact_request_and_reconnects(tmp_path: 
     assert [item.completed for item in status.progress] == [0, 2]
     assert status.terminal_receipt == {"receipt": "ok"}
 
+    for _ in range(50):
+        if not runner.tasks:
+            break
+        await asyncio.sleep(0.01)
+    assert runner.tasks == {}
+    assert runner.cancel_events == {}
+    assert runner.cancel_hooks == {}
+
+    restarted = OperationRunner(workspace, _TEST_OPERATION)
+    reconnected = await restarted.start({"run_id": "run-1"}, "same-key", run)
+    assert reconnected.state == "terminal"
+    assert restarted.tasks == {}
+
     with pytest.raises(DomainError, match="different request"):
         await runner.start({"run_id": "run-2"}, "same-key", run)
+
+
+@pytest.mark.anyio
+async def test_operation_runner_uses_lifespan_task_supervisor(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    async with anyio.create_task_group() as tasks:
+        runner = OperationRunner(
+            workspace,
+            _TEST_OPERATION,
+            supervisor=TaskSupervisor(tasks),
+        )
+
+        async def run(operation_id: str, progress: object) -> dict[str, object]:
+            return {"operation_id": operation_id}
+
+        started = await runner.start({"value": 1}, "supervised-key", run)
+        status = await runner.status(started.operation_id)
+
+        assert status.state == "terminal"
+        for _ in range(50):
+            if not runner.tasks:
+                break
+            await asyncio.sleep(0.01)
+        assert runner.tasks == {}
+        tasks.cancel_scope.cancel()
 
 
 @pytest.mark.anyio
@@ -187,7 +351,7 @@ async def test_operation_runner_cancellation_persists_cleanup_and_is_replayable(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    runner = OperationRunner(workspace, "test.operation")
+    runner = OperationRunner(workspace, _TEST_OPERATION)
     stopped = asyncio.Event()
 
     async def run(
@@ -213,14 +377,15 @@ async def test_operation_runner_cancellation_persists_cleanup_and_is_replayable(
     assert cancelled.cancellation_requested is True
     assert cancelled.recovery is not None
     assert cancelled.recovery.action == "retry_new_operation"
-    assert cancelled.recovery.arguments["value"] == 1
-    assert cancelled.recovery.arguments["idempotency_key"]
+    assert isinstance(cancelled.recovery.next_action, ManualAction)
+    assert cancelled.recovery.next_action.suggested_action is ActionId.START_CAPABILITY_SETUP
+    assert set(cancelled.recovery.next_action.missing_arguments) == {"adapters"}
 
 
 @pytest.mark.anyio
 async def test_operation_runner_cancellation_preserves_failure_details(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    runner = OperationRunner(workspace, "test.operation")
+    runner = OperationRunner(workspace, _TEST_OPERATION)
 
     async def run(
         operation_id: str,
@@ -249,8 +414,8 @@ async def test_operation_runner_cancellation_preserves_failure_details(tmp_path:
 @pytest.mark.anyio
 async def test_operation_runner_idempotency_is_shared_by_runners(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    first_runner = OperationRunner(workspace, "test.operation")
-    second_runner = OperationRunner(workspace, "test.operation")
+    first_runner = OperationRunner(workspace, _TEST_OPERATION)
+    second_runner = OperationRunner(workspace, _TEST_OPERATION)
     started = 0
     invoked = asyncio.Event()
     release = asyncio.Event()
@@ -292,8 +457,8 @@ async def test_operation_runner_does_not_steal_a_live_cross_process_lease(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    first_runner = OperationRunner(workspace, "test.operation")
-    second_runner = OperationRunner(workspace, "test.operation")
+    first_runner = OperationRunner(workspace, _TEST_OPERATION)
+    second_runner = OperationRunner(workspace, _TEST_OPERATION)
     stopped = asyncio.Event()
 
     async def run(
@@ -310,15 +475,64 @@ async def test_operation_runner_does_not_steal_a_live_cross_process_lease(
     observed = await second_runner.status(started.operation_id)
 
     assert observed.state == "running"
-    assert observed.recovery is None
+    assert observed.recovery is not None
+    assert observed.recovery.action == "poll"
+    assert isinstance(observed.recovery.next_action, ToolAction)
+    assert observed.recovery.next_action.action is ActionId.GET_CAPABILITY_SETUP
+    assert observed.recovery.next_action.arguments == {"operation_id": started.operation_id}
     await first_runner.cancel(started.operation_id)
     assert stopped.is_set()
 
 
 @pytest.mark.anyio
+async def test_operation_runner_recovers_one_stale_owner_under_cas(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    adapter = OperationAdapter(
+        kind="test.recoverable",
+        start_action=ActionId.START_CAPABILITY_SETUP,
+        status_action=ActionId.GET_CAPABILITY_SETUP,
+        recover_unmanaged=True,
+    )
+    request = {"value": 1}
+    _, idempotency_digest = operation_digests(
+        workspace,
+        adapter.kind,
+        request,
+        "recover-key",
+    )
+    stale = ActiveOperationRecord(
+        operation=adapter.kind,
+        workspace_id=workspace.identity.workspace_id,
+        request=request,
+        idempotency_digest=idempotency_digest,
+        owner_id="dead-owner",
+        owner_heartbeat_at=utc_now() - timedelta(minutes=1),
+    )
+    OperationStore(workspace).records.create(stale)
+    first_runner = OperationRunner(workspace, adapter)
+    second_runner = OperationRunner(workspace, adapter)
+    executions = 0
+
+    async def run(operation_id: str, progress: object) -> dict[str, object]:
+        nonlocal executions
+        executions += 1
+        return {"operation_id": operation_id}
+
+    first, second = await asyncio.gather(
+        first_runner.start(request, "recover-key", run),
+        second_runner.start(request, "recover-key", run),
+    )
+    status = await first_runner.wait(first.operation_id, timeout_seconds=5)
+
+    assert first.operation_id == second.operation_id == stale.operation_id
+    assert status.state == "terminal"
+    assert executions == 1
+
+
+@pytest.mark.anyio
 async def test_operation_runner_preserves_completed_items_on_failure(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    runner = OperationRunner(workspace, "test.operation")
+    runner = OperationRunner(workspace, _TEST_OPERATION)
 
     async def run(
         operation_id: str,

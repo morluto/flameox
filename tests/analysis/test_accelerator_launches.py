@@ -11,6 +11,8 @@ from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
 from tests.support.analysis import run_row
 
+pytestmark = pytest.mark.integration
+
 
 def _event(
     run_id: str,

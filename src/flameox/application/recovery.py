@@ -4,8 +4,11 @@ from enum import StrEnum
 
 from flameox.application.gc import GarbageCollector
 from flameox.application.proc import read_boot_id, read_proc_stat_start_identity
+from flameox.application.projections import (
+    ProjectionCoordinator,
+    ProjectionReconciliationResult,
+)
 from flameox.application.quarantine import QuarantineService
-from flameox.application.run_rows import run_row
 from flameox.domain import (
     CaptureStatus,
     DomainError,
@@ -13,12 +16,12 @@ from flameox.domain import (
     ExecutionStatus,
     ProcessCancellationCause,
     ProcessResult,
+    ProjectionState,
     RunManifest,
 )
 from flameox.domain.models import utc_now
-from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
-from flameox.storage import RunStore, Workspace
+from flameox.storage import ProjectionIntentStore, RunStore, Workspace
 
 
 class LeaseState(StrEnum):
@@ -33,6 +36,8 @@ class RecoveryInspection(ContractModel):
     recoverable_run_ids: tuple[str, ...]
     indeterminate_run_ids: tuple[str, ...]
     staging_paths: tuple[str, ...]
+    pending_projection_intent_ids: tuple[str, ...] = ()
+    failed_projection_intent_ids: tuple[str, ...] = ()
 
 
 class RecoveryResult(ContractModel):
@@ -40,6 +45,7 @@ class RecoveryResult(ContractModel):
     recovered_runs: tuple[RunManifest, ...]
     resumed_trash_manifests: tuple[str, ...] = ()
     resumed_quarantine_manifests: tuple[str, ...] = ()
+    projection_reconciliation: ProjectionReconciliationResult
     inspection: RecoveryInspection
 
 
@@ -47,7 +53,8 @@ class RecoveryService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
         self.runs = RunStore(workspace)
-        self.publisher = GenerationPublisher(workspace)
+        self.projections = ProjectionCoordinator(workspace)
+        self.projection_intents = ProjectionIntentStore(workspace)
         self.garbage = GarbageCollector(workspace)
         self.quarantine = QuarantineService(workspace)
 
@@ -79,6 +86,14 @@ class RecoveryService:
             recoverable_run_ids=tuple(sorted(recoverable)),
             indeterminate_run_ids=tuple(sorted(indeterminate)),
             staging_paths=staging_paths,
+            pending_projection_intent_ids=tuple(
+                intent.intent_id
+                for intent in self.projection_intents.list(state=ProjectionState.PENDING)
+            ),
+            failed_projection_intent_ids=tuple(
+                intent.intent_id
+                for intent in self.projection_intents.list(state=ProjectionState.FAILED)
+            ),
         )
 
     def recover(self) -> RecoveryResult:
@@ -88,6 +103,7 @@ class RecoveryService:
         resumed_quarantine = self.quarantine.moving_manifests()
         for quarantine_id in resumed_quarantine:
             self.quarantine.resume(quarantine_id)
+        projection_reconciliation = self.projections.reconcile(include_failed=True)
         inspection = self.inspect()
         recovered: list[RunManifest] = []
         for run_id in inspection.recoverable_run_ids:
@@ -109,21 +125,22 @@ class RecoveryService:
                 }
             )
             try:
-                recovered.append(self.runs.append(terminal, expected_revision=current.revision))
+                recovered.append(
+                    self.projections.append_run(
+                        terminal,
+                        expected_revision=current.revision,
+                        environment=None,
+                        source_state=None,
+                    ).run
+                )
             except DomainError as error:
                 if error.code is not ErrorCode.REVISION_CONFLICT:
                     raise
-        if recovered:
-            self.publisher.publish_rows(
-                {"runs": [run_row(run) for run in recovered]},
-                publisher="flameox.recovery",
-                publisher_version="1",
-                input_run_ids=tuple(run.run_id for run in recovered),
-            )
         return RecoveryResult(
             recovered_runs=tuple(recovered),
             resumed_trash_manifests=resumed_trash,
             resumed_quarantine_manifests=resumed_quarantine,
+            projection_reconciliation=projection_reconciliation,
             inspection=self.inspect(),
         )
 

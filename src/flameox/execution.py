@@ -6,6 +6,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -17,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import IO, Any, Literal, TypeVar, cast
+from typing import IO, Annotated, Any, Literal, TypeVar, cast
 
 import psutil
 from pydantic import Field, field_validator, model_validator
@@ -135,6 +136,7 @@ class ResourcePolicy(ContractModel):
     maximum_rss_bytes: int | None = Field(default=None, gt=0)
     sampling_interval_ms: int = Field(default=250, ge=25, le=10_000)
     max_observed_files: int = Field(default=10_000, ge=1, le=1_000_000)
+    maximum_writable_growth_bytes: int | None = Field(default=None, gt=0)
 
 
 class ExecutionRequest(ContractModel):
@@ -151,6 +153,11 @@ class ExecutionRequest(ContractModel):
     observation: Literal["child_peak_rss"] | None = None
     systemd_scope_unit: str | None = None
     resource_policy: ResourcePolicy | None = None
+    inherited_directory_fds: tuple[Annotated[int, Field(ge=0)], ...] = Field(
+        default=(),
+        exclude=True,
+        max_length=8,
+    )
 
     @field_validator("argv")
     @classmethod
@@ -170,6 +177,21 @@ class ExecutionRequest(ContractModel):
             str(binding.canonical_target),
         }:
             raise ValueError("argv[0] must identify the bound executable")
+        return self
+
+    @model_validator(mode="after")
+    def inherited_descriptors_are_unique_directories(self) -> ExecutionRequest:
+        if len(set(self.inherited_directory_fds)) != len(self.inherited_directory_fds):
+            raise ValueError("inherited directory descriptors must be unique")
+        if self.inherited_directory_fds and os.name != "posix":
+            raise ValueError("inherited directory descriptors require a POSIX subprocess")
+        for descriptor in self.inherited_directory_fds:
+            try:
+                metadata = os.fstat(descriptor)
+            except OSError as exc:
+                raise ValueError("inherited directory descriptor is not open") from exc
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError("only directory descriptors can be inherited")
         return self
 
     @field_validator("systemd_scope_unit")
@@ -532,6 +554,7 @@ class SubprocessBroker:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     start_new_session=os.name == "posix",
+                    pass_fds=request.inherited_directory_fds,
                 )
         except TimeoutError as exc:
             cleanup_complete = True
@@ -668,14 +691,18 @@ class SubprocessBroker:
                 stderr_task,
             )
             await self._settle_task(stdin_task)
+            storage_cause = exc.cause in {
+                ProcessCancellationCause.STORAGE_RESERVE_EXCEEDED,
+                ProcessCancellationCause.WRITABLE_LIMIT_EXCEEDED,
+            }
             code = (
                 ErrorCode.STORAGE_QUOTA_EXCEEDED
-                if exc.cause is ProcessCancellationCause.STORAGE_RESERVE_EXCEEDED
+                if storage_cause
                 else ErrorCode.QUERY_BUDGET_EXCEEDED
             )
             message = (
-                "Runtime storage reserve was exceeded."
-                if exc.cause is ProcessCancellationCause.STORAGE_RESERVE_EXCEEDED
+                "Runtime writable-byte policy was exceeded."
+                if storage_cause
                 else "Process tree exceeded the configured memory budget."
             )
             policy_process = ProcessResult(
@@ -1052,6 +1079,7 @@ class SubprocessBroker:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=os.name == "posix",
+                pass_fds=request.inherited_directory_fds,
             )
             assert process.stdout is not None
             assert process.stderr is not None
@@ -1444,6 +1472,24 @@ class SubprocessBroker:
                     summary,
                     ProcessCancellationCause.MEMORY_LIMIT_EXCEEDED,
                 )
+            if policy.maximum_writable_growth_bytes is not None:
+                growth = self._writable_growth(policy, initial_sizes)
+                if growth is None:
+                    unavailable.add("writable_root_growth_bytes")
+                elif growth > policy.maximum_writable_growth_bytes:
+                    summary = self._resource_summary(
+                        policy,
+                        initial_sizes=initial_sizes,
+                        initial_staging=initial_staging,
+                        minimum_free=minimum_free,
+                        peak_rss=peak_rss,
+                        unavailable=unavailable,
+                        termination=ProcessCancellationCause.WRITABLE_LIMIT_EXCEEDED,
+                    )
+                    raise _ResourcePolicyExceeded(
+                        summary,
+                        ProcessCancellationCause.WRITABLE_LIMIT_EXCEEDED,
+                    )
             await asyncio.sleep(interval)
         if not free_sampled:
             unavailable.add("minimum_free_bytes")
@@ -1458,6 +1504,20 @@ class SubprocessBroker:
             unavailable=unavailable,
             termination=None,
         )
+
+    def _writable_growth(
+        self,
+        policy: ResourcePolicy,
+        initial_sizes: dict[str, int | None],
+    ) -> int | None:
+        growth = 0
+        for root in policy.writable_roots:
+            initial = initial_sizes[str(root)]
+            current = self._bounded_tree_size(root, max_files=policy.max_observed_files)
+            if initial is None or current is None:
+                return None
+            growth += max(0, current - initial)
+        return growth
 
     def _resource_summary(
         self,
@@ -1888,6 +1948,7 @@ class ManagedSidecarLease:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=os.name == "posix",
+            pass_fds=request.inherited_directory_fds,
         )
         assert process.stdout is not None and process.stderr is not None
         observations: list[ProcessObservation] = []
@@ -1987,6 +2048,7 @@ class ManagedSidecarLease:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=os.name == "posix",
+            pass_fds=request.inherited_directory_fds,
         )
         assert process.stdout is not None and process.stderr is not None
         observations: list[ProcessObservation] = []
@@ -2101,6 +2163,27 @@ class ManagedSidecarLease:
         self._tracked_proxies.add(name)
         return result
 
+    async def create_proxy_async(
+        self,
+        *,
+        name: str,
+        listen: str,
+        upstream: str,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        self._require_toxiproxy_control()
+        self._ensure_open()
+        from flameox.adapters.toxiproxy import ToxiproxyClient
+
+        result = await ToxiproxyClient(self.base_url).create_proxy_async(
+            name=name,
+            listen=listen,
+            upstream=upstream,
+            enabled=enabled,
+        )
+        self._tracked_proxies.add(name)
+        return result
+
     def update_proxy(self, name: str, *, enabled: bool) -> dict[str, Any]:
         self._require_toxiproxy_control()
         self._ensure_open()
@@ -2108,6 +2191,14 @@ class ManagedSidecarLease:
 
         self._require_tracked(name)
         return ToxiproxyClient(self.base_url).update_proxy(name, enabled=enabled)
+
+    async def update_proxy_async(self, name: str, *, enabled: bool) -> dict[str, Any]:
+        self._require_toxiproxy_control()
+        self._ensure_open()
+        from flameox.adapters.toxiproxy import ToxiproxyClient
+
+        self._require_tracked(name)
+        return await ToxiproxyClient(self.base_url).update_proxy_async(name, enabled=enabled)
 
     def add_toxic(self, **kwargs: Any) -> dict[str, Any]:
         self._require_toxiproxy_control()
@@ -2119,6 +2210,17 @@ class ManagedSidecarLease:
             raise DomainError(ErrorCode.INVALID_CAPTURE_PLAN, "A toxic requires a tracked proxy.")
         self._require_tracked(proxy)
         return ToxiproxyClient(self.base_url).add_toxic(**kwargs)
+
+    async def add_toxic_async(self, **kwargs: Any) -> dict[str, Any]:
+        self._require_toxiproxy_control()
+        self._ensure_open()
+        from flameox.adapters.toxiproxy import ToxiproxyClient
+
+        proxy = kwargs.get("proxy")
+        if not isinstance(proxy, str):
+            raise DomainError(ErrorCode.INVALID_CAPTURE_PLAN, "A toxic requires a tracked proxy.")
+        self._require_tracked(proxy)
+        return await ToxiproxyClient(self.base_url).add_toxic_async(**kwargs)
 
     @property
     def base_url(self) -> str:
@@ -2143,7 +2245,7 @@ class ManagedSidecarLease:
             client = ToxiproxyClient(self.base_url, timeout_seconds=1.0)
             for name in tuple(sorted(self._tracked_proxies)):
                 try:
-                    await asyncio.to_thread(client.delete_proxy, name)
+                    await client.delete_proxy_async(name)
                 except (ToxiproxyApiError, OSError) as error:
                     cleanup_failures.append(f"proxy {name}: {error}")
         request = ExecutionRequest(

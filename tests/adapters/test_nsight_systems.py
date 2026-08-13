@@ -6,11 +6,14 @@ from pathlib import Path
 
 import pytest
 
+from flameox.action_graph import ActionId, ToolAction
 from flameox.adapters import NsightSystemsExtractor
 from flameox.analysis import RecipeService
 from flameox.application import ImportArtifactRequest, ImportService
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import Workspace
+
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
 
 
 def _nsight_fixture(path: Path) -> None:
@@ -138,7 +141,9 @@ async def test_nsight_sqlite_extracts_launch_evidence_without_nsys_installed(
 
     with pytest.raises(DomainError) as unavailable:
         RecipeService(workspace).accelerator_launches(imported.run.run_id)
-    assert unavailable.value.details["next_tool"] == "extract_nsight_systems"
+    assert isinstance(unavailable.value.next_action, ToolAction)
+    assert unavailable.value.next_action.action is ActionId.EXTRACT_NSIGHT_SYSTEMS
+    assert unavailable.value.next_action.arguments == {"run_id": imported.run.run_id}
 
     extracted = await NsightSystemsExtractor(workspace).extract(imported.run.run_id)
     repeated = await NsightSystemsExtractor(workspace).extract(imported.run.run_id)

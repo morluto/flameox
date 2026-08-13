@@ -10,6 +10,8 @@ from flameox.application import QuarantineService
 from flameox.domain import DomainError, ErrorCode
 from flameox.storage import Workspace
 
+pytestmark = [pytest.mark.integration, pytest.mark.serial]
+
 
 def test_quarantine_manifest_preserves_native_capture_context(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)

@@ -21,6 +21,8 @@ from flameox.domain import (
 )
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
+pytestmark = pytest.mark.integration
+
 
 def _report(report_type: str, **fields: Any) -> str:
     return json.dumps({"$report_type": report_type, **fields})

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pytest
@@ -22,6 +21,8 @@ from flameox.domain import (
 )
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
+
+pytestmark = pytest.mark.integration
 
 
 @pytest.mark.anyio
@@ -114,7 +115,7 @@ native_files = ["lib/extension.so"]
         adapter="command",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    assert plan.planned_execution_identity.quality == "partial"
+    assert plan.planned_execution_identity.quality == "exact"
     result = await service.execute(plan.plan_token)
 
     identity = result.run.execution_identity
@@ -122,9 +123,12 @@ native_files = ["lib/extension.so"]
     assert identity.quality == "exact"
     module, library = identity.inputs
     assert module.requested == "project_module"
+    assert module.identity_basis == "project_source"
     assert module.resolved_path == str(tmp_path / "project_module.py")
-    assert module.loaded_path == module.resolved_path
+    assert module.loaded_path is None
     assert module.content_digest is not None
+    assert "runtime import use is not observed" in module.limitations[0]
+    assert library.identity_basis == "explicit_file"
     assert library.configured_path == str(native)
     assert library.resolved_path == str(native)
     assert library.content_digest is not None
@@ -144,6 +148,71 @@ native_files = ["lib/extension.so"]
     with pytest.raises(DomainError) as stale:
         await service.execute(stale_plan.plan_token)
     assert stale.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+
+
+@pytest.mark.anyio
+async def test_python_module_identity_never_executes_declared_module(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    sentinel = tmp_path / "identity-probe-imported"
+    (tmp_path / "hostile_module.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('imported')\n"
+        "raise RuntimeError('private-target-exception')\n"
+    )
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.identity]
+argv = ["python", "-c", "print('workload does not import the declared module')"]
+[workloads.identity.identity]
+python_modules = ["hostile_module"]
+"""
+    )
+
+    identity = await ExecutionIdentityService(workspace).observe(
+        "identity",
+        parameters={},
+    )
+
+    assert not sentinel.exists()
+    assert identity.quality == "exact"
+    assert identity.inputs[0].identity_basis == "project_source"
+    assert identity.inputs[0].loaded_path is None
+    assert "private-target-exception" not in repr(identity)
+
+
+@pytest.mark.anyio
+async def test_python_module_identity_uses_interpreter_and_distribution_metadata(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.identity]
+argv = ["python", "-c", "print('ok')"]
+[workloads.identity.identity]
+python_modules = ["json", "pydantic"]
+"""
+    )
+
+    identity = await ExecutionIdentityService(workspace).observe(
+        "identity",
+        parameters={},
+    )
+
+    standard_library, distribution = identity.inputs
+    assert identity.quality == "exact"
+    assert standard_library.identity_basis == "interpreter_stdlib"
+    assert standard_library.content_digest is not None
+    assert standard_library.resolved_path is None
+    assert standard_library.loaded_path is None
+    assert distribution.identity_basis == "distribution_metadata"
+    assert distribution.distribution == "pydantic"
+    assert distribution.version is not None
+    assert distribution.content_digest is not None
+    assert distribution.resolved_path is None
+    assert distribution.loaded_path is None
 
 
 def test_missing_declared_native_identity_is_explicitly_partial(tmp_path: Path) -> None:
@@ -168,7 +237,6 @@ native_files = ["build/missing.so"]
 @pytest.mark.anyio
 async def test_declared_missing_accelerator_downgrades_captured_environment_identity(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
@@ -181,11 +249,6 @@ required = ["cuda.driver", "cuda.runtime", "cuda.devices", "cuda.peer_topology"]
 """
     )
     disable_containment(workspace)
-    real_which = shutil.which
-    monkeypatch.setattr(
-        "flameox.command_binding.shutil.which",
-        lambda name, path=None: None if name == "nvidia-smi" else real_which(name, path=path),
-    )
     service = CaptureService(workspace)
     plan = await service.plan(
         workload_name="cuda",

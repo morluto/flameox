@@ -7,6 +7,8 @@ import pytest
 from flameox.domain import DomainError, ErrorCode
 from flameox.filesystem import BoundedFileSystem
 
+pytestmark = pytest.mark.unit
+
 
 def test_bounded_file_read_is_descriptor_relative_and_exact(tmp_path: Path) -> None:
     root = tmp_path / "root"

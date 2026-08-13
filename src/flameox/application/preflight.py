@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import tempfile
-from importlib.metadata import PackageNotFoundError, distribution
+from contextlib import suppress
 from pathlib import Path
 
 from packaging.requirements import InvalidRequirement, Requirement
 
+from flameox.action_graph import ActionId, tool_action
 from flameox.application.capabilities import CapabilityService
+from flameox.application.python_environment import (
+    PythonEnvironmentObservation,
+    PythonEnvironmentProbe,
+)
 from flameox.application.workloads import WorkloadService
 from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
@@ -53,8 +58,27 @@ class PreflightService:
                 results.append(await self._cuda_toolkit(required=required, mode=mode))
             else:
                 results.append(self._executable(name, required=required))
+        python_requirements: list[Requirement] = []
         for name in requirements.python_distributions:
-            results.append(self._distribution(name, required=name not in requirements.optional))
+            with suppress(InvalidRequirement):
+                python_requirements.append(Requirement(name))
+        python_environment = (
+            await PythonEnvironmentProbe(self.workspace, broker=self.broker).inspect(
+                workload_name,
+                tuple(python_requirements),
+            )
+            if python_requirements
+            else None
+        )
+        for name in requirements.python_distributions:
+            results.append(
+                self._distribution(
+                    name,
+                    required=name not in requirements.optional,
+                    workload_name=workload_name,
+                    environment=python_environment,
+                )
+            )
         passive = {item.adapter: item for item in self.capabilities.list().capabilities}
         for name in requirements.capabilities:
             active = name in requirements.active
@@ -375,7 +399,14 @@ class PreflightService:
             value = value.replace(temporary_root, "<cuda-preflight-root>")
         return " ".join(value.split())[:500] or "nvcc returned no diagnostic output."
 
-    def _distribution(self, name: str, *, required: bool) -> RequirementResult:
+    def _distribution(
+        self,
+        name: str,
+        *,
+        required: bool,
+        workload_name: str,
+        environment: PythonEnvironmentObservation | None,
+    ) -> RequirementResult:
         try:
             requirement = Requirement(name)
         except InvalidRequirement:
@@ -390,9 +421,9 @@ class PreflightService:
                     "requirements.",
                 ),
             )
-        try:
-            value = distribution(requirement.name)
-        except PackageNotFoundError:
+        installed_version = environment.versions.get(requirement.name) if environment else None
+        interpreter = str(environment.interpreter) if environment else "<unresolved>"
+        if installed_version is None:
             return RequirementResult(
                 requirement=name,
                 kind=RequirementKind.PYTHON_DISTRIBUTION,
@@ -400,13 +431,12 @@ class PreflightService:
                 probe_kind=ProbeKind.PASSIVE,
                 status=RequirementStatus.ABSENT,
                 remediation=(
-                    f"Call prepare_workload_dependencies for workload dependencies including "
-                    f"{name!r}.",
+                    f"Install {name!r} in the declared workload interpreter {interpreter!r}, "
+                    "or change the workload to an environment that already provides it.",
                 ),
-                next_tool="prepare_workload_dependencies",
             )
-        identity = f"{value.metadata['Name']}=={value.version}"
-        if not requirement.specifier.contains(value.version, prereleases=True):
+        identity = f"{requirement.name}=={installed_version}@{interpreter}"
+        if not requirement.specifier.contains(installed_version, prereleases=True):
             return RequirementResult(
                 requirement=name,
                 kind=RequirementKind.PYTHON_DISTRIBUTION,
@@ -416,10 +446,11 @@ class PreflightService:
                 identity=identity,
                 evidence=(identity,),
                 remediation=(
-                    f"Call prepare_workload_dependencies to install a version matching {name!r}.",
+                    f"Install a version matching {name!r} in the declared workload interpreter "
+                    f"{interpreter!r}, or select another workload environment.",
                 ),
-                next_tool="prepare_workload_dependencies",
             )
+        assert environment is not None
         return RequirementResult(
             requirement=name,
             kind=RequirementKind.PYTHON_DISTRIBUTION,
@@ -427,7 +458,7 @@ class PreflightService:
             probe_kind=ProbeKind.PASSIVE,
             status=RequirementStatus.AVAILABLE,
             identity=identity,
-            evidence=(identity,),
+            evidence=(identity, f"interpreter_sha256={environment.interpreter_sha256}"),
             limitations=("Distribution metadata does not prove which module will load.",),
         )
 
@@ -447,7 +478,10 @@ class PreflightService:
                 probe_kind=ProbeKind.ACTIVE if active else ProbeKind.PASSIVE,
                 status=RequirementStatus.UNKNOWN,
                 limitations=("Flameox does not own a probe for this capability.",),
-                next_tool="list_capabilities",
+                next_action=tool_action(
+                    ActionId.INSPECT_CAPABILITIES,
+                    adapter=name,
+                ),
             )
         statuses = {
             CapabilityStatus.AVAILABLE: RequirementStatus.AVAILABLE,
@@ -471,17 +505,13 @@ class PreflightService:
             ),
             limitations=report.limitations,
             remediation=report.remediation,
-            next_tool=(
-                "prepare_adapter"
-                if getattr(report.setup, "method", None) == "prepare_adapter"
+            next_action=(
+                report.setup.next_action
+                if report.setup is not None
                 else (
-                    "start_capability_setup"
-                    if report.setup is not None
-                    else (
-                        "list_capabilities"
-                        if report.status is not CapabilityStatus.AVAILABLE
-                        else None
-                    )
+                    tool_action(ActionId.INSPECT_CAPABILITIES, adapter=name)
+                    if report.status is not CapabilityStatus.AVAILABLE
+                    else None
                 )
             ),
         )

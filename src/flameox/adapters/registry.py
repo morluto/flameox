@@ -6,6 +6,7 @@ from importlib.metadata import Distribution, EntryPoint, entry_points
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from flameox.action_graph import ActionId, tool_action
 from flameox.atomic import atomic_write_json
 from flameox.domain import ADAPTER_API_VERSION, AdapterV1, DomainError, ErrorCode, digest_model
 from flameox.models import ContractModel
@@ -120,11 +121,12 @@ class AdapterRegistry:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 f"No installed adapter {adapter!r} belongs to distribution {distribution_name!r}.",
-                details={"next_tool": "list_capabilities", "adapter": adapter},
+                details={"adapter": adapter},
                 remediation=(
                     "Use the adapter and distribution identity returned by list_capabilities, "
                     "then retry prepare_adapter.",
                 ),
+                next_action=tool_action(ActionId.INSPECT_CAPABILITIES, adapter=adapter),
             )
         descriptor = matches[0]
         if descriptor.package_identity.startswith("unverifiable:"):
@@ -225,9 +227,13 @@ class AdapterRegistry:
             ErrorCode.REVISION_CONFLICT,
             "The approved entry point changed after discovery.",
             retryable=True,
-            details={"next_tool": "list_capabilities", "adapter": descriptor.adapter},
+            details={"adapter": descriptor.adapter},
             remediation=(
                 "Refresh list_capabilities and use the currently reported adapter identity.",
+            ),
+            next_action=tool_action(
+                ActionId.INSPECT_CAPABILITIES,
+                adapter=descriptor.adapter,
             ),
         )
 

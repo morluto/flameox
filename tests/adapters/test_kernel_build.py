@@ -7,13 +7,21 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from flameox.adapters import KernelBuildManifestV1, kernel_build_json_schema
+from flameox.adapters import (
+    KernelBuildManifestV1,
+    KernelBuildManifestV2,
+    KernelBuildTarget,
+    kernel_build_json_schema,
+    kernel_build_v1_json_schema,
+)
 from flameox.application import (
     ArtifactPipelineService,
     KernelBuildImportService,
 )
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import DomainError, ErrorCode, digest_model
 from flameox.storage import RunStore, Workspace
+
+pytestmark = pytest.mark.unit
 
 
 def _manifest(**updates: object) -> KernelBuildManifestV1:
@@ -62,6 +70,29 @@ def _manifest(**updates: object) -> KernelBuildManifestV1:
     return KernelBuildManifestV1.model_validate(payload)
 
 
+def _manifest_v2(**updates: object) -> KernelBuildManifestV2:
+    target = KernelBuildTarget(backend="cuda", architecture="sm_86", warp_size=32)
+    payload: dict[str, object] = {
+        **_manifest().model_dump(
+            mode="json",
+            exclude={"schema_version", "workload_identity", "device_identity"},
+        ),
+        "workload_label": "vector-add",
+        "build_context": {
+            "workload_definition_id": f"sha256:{'1' * 64}",
+            "workload_instance_id": f"sha256:{'2' * 64}",
+            "command_digest": f"sha256:{'3' * 64}",
+            "parameters_digest": f"sha256:{'4' * 64}",
+            "compiler_identity_id": f"sha256:{'5' * 64}",
+            "build_protocol_id": f"sha256:{'6' * 64}",
+            "target": target.model_dump(mode="json"),
+            "target_identity_id": digest_model(target.model_dump(mode="json")),
+        },
+    }
+    payload.update(updates)
+    return KernelBuildManifestV2.model_validate(payload)
+
+
 @pytest.mark.parametrize("path", ["../secret", "/absolute", "kernel/../secret", "."])
 def test_kernel_build_rejects_uncontained_artifact_paths(path: str) -> None:
     stages = _manifest().model_dump(mode="json")["stages"]
@@ -100,11 +131,23 @@ def test_kernel_build_rejects_unknown_fields() -> None:
 
 
 def test_kernel_build_generated_schema_does_not_drift() -> None:
-    schema_path = (
+    v1_schema_path = (
         Path(__file__).resolve().parents[2] / "src/flameox/schemas/kernel-build-v1.schema.json"
     )
+    v2_schema_path = (
+        Path(__file__).resolve().parents[2] / "src/flameox/schemas/kernel-build-v2.schema.json"
+    )
 
-    assert json.loads(schema_path.read_text(encoding="utf-8")) == kernel_build_json_schema()
+    assert json.loads(v1_schema_path.read_text(encoding="utf-8")) == kernel_build_v1_json_schema()
+    assert json.loads(v2_schema_path.read_text(encoding="utf-8")) == kernel_build_json_schema()
+
+
+def test_kernel_build_v2_rejects_target_identity_that_does_not_match_target() -> None:
+    context = _manifest_v2().build_context.model_dump(mode="json")
+    context["target_identity_id"] = f"sha256:{'f' * 64}"
+
+    with pytest.raises(ValidationError, match="target identity must match"):
+        _manifest_v2(build_context=context)
 
 
 def test_kernel_build_bundle_import_registers_existing_pipeline(tmp_path: Path) -> None:
@@ -145,7 +188,56 @@ def test_kernel_build_bundle_import_registers_existing_pipeline(tmp_path: Path) 
     assert result.pipeline.stages[0].artifact_id == result.run.artifacts[1].artifact_id
     assert len(result.pipeline.limitations) == 20
     assert "diagnostics are preserved" in result.pipeline.limitations[0]
-    assert result.pipeline.limitations[-1].startswith("Additional limitations")
+    assert any(item.startswith("Additional limitations") for item in result.pipeline.limitations)
+    assert "producer-declared" in result.pipeline.limitations[-1]
+
+
+def test_v2_import_preserves_exact_claims_but_does_not_authenticate_them(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    pipeline_ids: list[str] = []
+    for index, command_digit in enumerate(("3", "3", "9")):
+        root = tmp_path / f"import-{index}"
+        root.mkdir()
+        artifact = root / "kernel.ttir"
+        artifact.write_text("ttir")
+        context = _manifest_v2().build_context.model_dump(mode="json")
+        context["command_digest"] = f"sha256:{command_digit * 64}"
+        manifest = _manifest_v2(
+            build_context=context,
+            stages=[
+                {
+                    "name": "ttir",
+                    "ordinal": 0,
+                    "status": "available",
+                    "format": "mlir",
+                    "format_schema": "triton-ttir",
+                    "artifact": {
+                        "path": artifact.name,
+                        "byte_length": 4,
+                        "sha256": hashlib.sha256(b"ttir").hexdigest(),
+                    },
+                }
+            ],
+        )
+        manifest_path = root / "kernel-build.json"
+        manifest_path.write_text(manifest.model_dump_json())
+        pipeline = KernelBuildImportService(workspace).import_manifest(manifest_path).pipeline
+        assert pipeline.identity_quality == "producer_declared"
+        assert pipeline.workload_definition_id == context["workload_definition_id"]
+        assert pipeline.workload_instance_id == context["workload_instance_id"]
+        pipeline_ids.append(pipeline.pipeline_id)
+
+    service = ArtifactPipelineService(workspace)
+    same_claims = service.compare(pipeline_ids[0], pipeline_ids[1])
+    changed_command = service.compare(pipeline_ids[0], pipeline_ids[2])
+
+    assert same_claims.compatibility == "unknown"
+    assert any("identity_quality" in limitation for limitation in same_claims.limitations)
+    assert changed_command.compatibility == "incompatible"
+    assert "command_digest" in changed_command.identity_mismatches
+    assert changed_command.first_observed_divergent_stage is None
 
 
 def test_imported_pipeline_comparison_distinguishes_mismatch_from_missing_version(
@@ -286,6 +378,8 @@ def test_kernel_build_bundle_rejects_digest_mismatch_before_registration(tmp_pat
 
     with pytest.raises(DomainError, match="sha256 mismatch"):
         KernelBuildImportService(workspace).import_manifest(manifest_path)
+
+    assert tuple(workspace.paths.artifacts.rglob("artifact.json")) == ()
 
 
 def test_kernel_build_import_preserves_distinct_paths_with_same_basename(tmp_path: Path) -> None:

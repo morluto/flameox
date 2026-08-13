@@ -4,6 +4,7 @@ import hashlib
 import os
 import stat
 import sys
+from contextlib import suppress
 from pathlib import Path
 from typing import cast
 
@@ -100,7 +101,11 @@ async def collect_source_state(
             "status",
             "--recursive",
         )
-        untracked = _hash_untracked(workspace.project_root, untracked_output)
+        untracked = _hash_untracked(
+            workspace.project_root,
+            untracked_output,
+            ignored_root=workspace.paths.root,
+        )
     except (DomainError, OSError, UnicodeDecodeError):
         return collect_partial_source_state(
             workspace,
@@ -194,10 +199,24 @@ def _resolve_executable(value: str, cwd: Path) -> Path:
     return binding.canonical_target
 
 
-def _hash_untracked(project_root: Path, output: bytes) -> list[dict[str, JsonValue]]:
+def _hash_untracked(
+    project_root: Path,
+    output: bytes,
+    *,
+    ignored_root: Path | None = None,
+) -> list[dict[str, JsonValue]]:
     records: list[dict[str, JsonValue]] = []
+    ignored_relative: Path | None = None
+    if ignored_root is not None:
+        with suppress(ValueError):
+            ignored_relative = ignored_root.resolve().relative_to(project_root.resolve())
     for raw in sorted(item for item in output.split(b"\0") if item):
         relative = raw.decode("utf-8", errors="strict")
+        relative_path = Path(relative)
+        if ignored_relative is not None and (
+            relative_path == ignored_relative or ignored_relative in relative_path.parents
+        ):
+            continue
         path = (project_root / relative).resolve()
         try:
             path.relative_to(project_root)
