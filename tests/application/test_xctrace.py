@@ -71,6 +71,29 @@ async def test_xctrace_import_preserves_native_bundle_and_bounded_toc(
     assert any(request.argv[1:3] == ("xctrace", "export") for request in broker.requests)
 
 
+@pytest.mark.anyio
+async def test_xctrace_import_admits_generated_files_from_external_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    workspace = Workspace.initialize(project, workspace_root=tmp_path / "workspace")
+    trace = project / "metal.trace"
+    (trace / "Data").mkdir(parents=True)
+    (trace / "Data" / "run.data").write_bytes(b"native trace bytes")
+    monkeypatch.setattr(
+        "flameox.command_binding.shutil.which", lambda _name, path=None: sys.executable
+    )
+    monkeypatch.setattr("flameox.application.xctrace.sys.platform", "darwin")
+
+    result = await XctraceService(workspace, broker=_Broker()).import_trace(
+        XctraceImportRequest(trace_path=trace)
+    )
+
+    assert RunStore(workspace).read(result.run_id).capture_status == "registered"
+
+
 def test_trace_archiving_rejects_symlink_members(tmp_path: Path) -> None:
     trace = tmp_path / "unsafe.trace"
     trace.mkdir()

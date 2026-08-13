@@ -202,6 +202,7 @@ class XctraceService:
                     sensitivity=Sensitivity.SENSITIVE,
                     producer="xctrace",
                     producer_version=capability.version,
+                    allow_external_path=True,
                 )
             )
             return XctraceImportResult(
