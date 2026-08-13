@@ -142,6 +142,7 @@ class ProviderRuntimeManager:
                     (
                         str(uv_binding.invocation_path),
                         "venv",
+                        "--relocatable",
                         "--python",
                         sys.executable,
                         "--no-project",
@@ -276,14 +277,14 @@ class ProviderRuntimeManager:
             receipt = ProviderRuntimeReceipt.model_validate_json(
                 (root / "provider-runtime.json").read_bytes()
             )
-            python = root / receipt.python_relative_path
+            python = self._contained_receipt_path(root, receipt.python_relative_path)
             if (
                 receipt.environment_id != environment_id
                 or self._sha256(python.resolve()) != receipt.python_sha256
             ):
                 return None
             executable = (
-                root / receipt.executable_relative_path
+                self._contained_receipt_path(root, receipt.executable_relative_path)
                 if receipt.executable_relative_path is not None
                 else None
             )
@@ -294,6 +295,22 @@ class ProviderRuntimeManager:
         except (OSError, ValueError):
             return None
         return ProviderRuntime(root, receipt)
+
+    @staticmethod
+    def _contained_receipt_path(root: Path, value: str) -> Path:
+        relative = Path(value)
+        if (
+            not relative.parts
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or relative.as_posix() != value
+        ):
+            raise ValueError("provider receipt path is not normalized and relative")
+        resolved_root = root.resolve()
+        resolved = (resolved_root / relative).resolve()
+        if not resolved.is_relative_to(resolved_root):
+            raise ValueError("provider receipt path escapes its runtime")
+        return resolved
 
     def _run(
         self,

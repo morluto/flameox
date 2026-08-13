@@ -101,6 +101,8 @@ def test_provider_setup_publishes_verified_environment_without_mutating_control_
     assert install.argv[install.argv.index("--python") + 1] != sys.executable
     assert f"flameox=={__version__}" in install.argv
     assert not any(value.startswith("flameox[") for value in install.argv)
+    create = next(request for request in broker.requests if request.argv[1] == "venv")
+    assert "--relocatable" in create.argv
 
 
 def test_provider_discovery_is_passive_and_rejects_changed_executable(tmp_path: Path) -> None:
@@ -137,3 +139,32 @@ def test_provider_discovery_is_passive_and_rejects_changed_executable(tmp_path: 
     assert runtime.executable is not None
     runtime.executable.write_text("#!/bin/sh\nexit 1\n")
     assert manager.find(extra=CapabilityExtra.CPU, requirement="py-spy>=0.4.2,<0.5") is None
+
+
+@pytest.mark.parametrize("field", ("python_relative_path", "executable_relative_path"))
+def test_provider_discovery_rejects_receipt_paths_outside_runtime(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    uv = tmp_path / "uv"
+    uv.write_text("#!/bin/sh\nexit 0\n")
+    uv.chmod(0o755)
+    manager = ProviderRuntimeManager(
+        tmp_path / "providers",
+        broker=_ProviderBroker(),
+        uv_executable=str(uv),
+    )
+    runtime = manager.prepare(
+        extra=CapabilityExtra.CPU,
+        requirement="py-spy>=0.4.2,<0.5",
+        executable_name="py-spy",
+    )
+    outside = tmp_path / "outside"
+    outside.write_text("#!/bin/sh\nexit 0\n")
+    receipt_path = runtime.root / "provider-runtime.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt[field] = str(outside)
+    receipt[field.replace("relative_path", "sha256")] = manager._sha256(outside)
+    receipt_path.write_text(json.dumps(receipt))
+
+    assert manager.get(runtime.receipt.environment_id) is None
