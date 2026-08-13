@@ -19,9 +19,7 @@ The squash-merge commit and generated changelog use the PR title.
 ```console
 uv run ruff check src tests tools
 uv run mypy src tests tools
-uv run python tools/test.py core
-uv run python tools/test.py process
-uv run python tools/test.py collection
+uv run pytest -q
 ```
 
 ## Compatibility

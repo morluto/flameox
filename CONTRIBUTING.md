@@ -32,12 +32,11 @@ git clone https://github.com/morluto/flameox.git
 cd flameox
 uv sync --extra dev
 uv run flameox --help
-uv run python tools/test.py list
 ```
 
 Install only the optional providers needed for the area you are changing. The
-[testing guide](docs/testing.md#optional-and-live-evidence) lists the
-available extras and their test lanes. To install every supported integration,
+[testing guide](docs/testing.md#optional-and-performance-evidence) lists the
+available extras and their markers. To install every supported integration,
 run:
 
 ```console
@@ -62,7 +61,7 @@ Read the contract that owns the behavior before editing it:
 | Profiler integrations, compatibility, and capability probing | [Adapters](docs/adapters.md) |
 | Concurrency, recovery, integrity, security, and privacy | [Runtime safety](docs/runtime-safety.md) |
 | CLI and MCP behavior and trust boundaries | [Interfaces](docs/interfaces.md) |
-| Test ownership, lanes, and collection preservation | [Testing](docs/testing.md) |
+| Test markers, provider requirements, and CI | [Testing](docs/testing.md) |
 
 Keep the CLI and MCP server as thin transports over the same application
 services. Preserve native artifacts, provenance, failed attempts, and
@@ -100,17 +99,15 @@ uv run mypy src tests tools
 uv run pytest -q
 ```
 
-`pytest -q` runs the deterministic default suite without hidden retries. Use the
-focused lanes in [docs/testing.md](docs/testing.md) for process, storage, MCP,
-adapter, golden, optional-provider, and performance behavior. In particular:
+`pytest -q` runs the fast deterministic default suite without hidden retries.
+Use paths and registered markers from [docs/testing.md](docs/testing.md) for
+process, optional-provider, and performance behavior. In particular:
 
-- Run `uv run python tools/test.py ownership` and
-  `uv run python tools/test.py collection` when moving or reorganizing tests.
 - Run `uv run lint-imports` when changing package boundaries.
-- Run the matching optional-provider lane when changing an integration; a skip
+- Run the matching optional-provider marker when changing an integration; a skip
   because the provider is unavailable is not provider evidence.
-- Run `uv run python tools/test.py performance` only for changes whose claims or
-  risks depend on the declared performance budgets.
+- Run `FLAMEOX_RUN_PERFORMANCE=1 uv run pytest -o addopts='' -m performance`
+  only for changes whose claims depend on the declared performance budgets.
 
 For changes under `npm/`, use the package's own checks:
 

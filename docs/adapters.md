@@ -10,6 +10,7 @@ process creation, storage transactions, or analysis policy.
 Every adapter must:
 
 - preserve the native artifact unchanged;
+- validate and extract the same immutable CAS payload rather than a mutable output path;
 - bind producer, package, executable, workload, and environment identity;
 - execute through the shared broker and consume a planned executable binding;
 - parse in a bounded isolated worker when native libraries or large artifacts
@@ -20,6 +21,13 @@ Every adapter must:
 - publish limitations rather than silently falling back;
 - keep provider-specific tests beside that provider and satisfy shared
   conformance behavior.
+
+For third-party adapters, capture snapshots each declared output through the
+canonical no-follow import boundary before invoking adapter code. Validation and
+extraction receive that immutable payload path. The validation receipt binds the
+artifact ID and byte length to the exact adapter package and validator version;
+the package identity is rechecked before both phases. A passing validation of a
+mutable staging pathname is not authority for bytes imported later.
 
 Passive discovery reports candidates. It is not execution authorization.
 Planning binds the selected candidate through `ExecutableResolver` under the
@@ -47,9 +55,51 @@ Use maintained formats and models wherever they exist:
 | ROCm traces | ROCprofiler Perfetto-compatible output | qualified trace semantics |
 | Inference replay | AIPerf models, vLLM/SGLang structured exports | protocol identity and prompt-free request metrics |
 | HTTP | HTTPX policy transport | loopback/readiness limits and typed errors |
+| managed tools | checked-in upstream asset manifests | digest-before-execution and installed-byte receipts |
+| test-case reduction | ShrinkRay 26.7.8.0 CLI | predicate authority, tri-state receipts, final revalidation |
+| NVIDIA identity | nvidia-ml-py 13.610.43 / NVML | stable device identity and API-enum topology |
+| Apple identity | system_profiler, sysctl, sw_vers | Metal, GPU, memory, and macOS build identity |
+| Apple Metal traces | xcrun xctrace | immutable native bundle and bounded TOC export |
 
 Parsing human diagnostic text, guessing units from field names, or maintaining a
 parallel copy of a provider schema is not an adapter contract.
+
+NVIDIA identity runs in a dedicated module-only provider environment. Its typed
+worker uses read-only NVML queries and keeps UUID and PCI identity distinct from
+the observed NVML index. Apple identity is collected only when declared and
+never includes hardware serial numbers. Native `.trace` directories are imported
+as sensitive, link-free tar artifacts; the installed `xctrace` must recognize
+the Metal System Trace template and export a bounded table of contents. Unknown
+event-table schemas remain unavailable rather than being scraped heuristically.
+
+## Reduction provider
+
+ShrinkRay is a managed provider, not a capture adapter or a control-process
+library. The `flameox.shrinkray.offline-v1` profile fixes its public CLI,
+parallelism, seed, candidate passing, local history, and disabled formatter,
+restart, Python reducer, language model, proxy, credential, and download paths.
+
+ShrinkRay proposes candidates and records accepted history. A small Flameox
+bridge alone owns the declared predicate command. Each invocation validates and
+hashes the candidate beneath the operation root, applies repetitions and
+timeouts, and atomically records `interesting`, `not_interesting`, or
+`unresolved`. Exit 101 is passed as `--also-interesting`, so unresolved
+candidates are recorded but cannot become the reduction basis. After ShrinkRay
+returns, the worker rechecks the actual staged final file and the application
+rechecks it independently before registering a final result.
+
+Results preserve native history, candidate receipts, bounded logs, provider
+identity, sizes, and limitations. Minimality is always `not_claimed`.
+
+Managed binary adapters keep tool-specific extraction and compatibility probes,
+but they do not own download or attestation policy. A checked-in immutable asset
+value names the upstream manifest revision, exact URL, size, archive digest, and
+installed executable digest. The shared acquisition helper authenticates those
+facts before an adapter may execute bytes. Reuse re-hashes the installed file
+against the checked-in executable digest; changing both the binary and its local
+receipt therefore cannot manufacture trust. Perfetto values are transcribed
+from its generated `trace_processor_shell` manifest, and Toxiproxy values are
+qualified from its exact release archives.
 
 ## Core adapters
 
@@ -58,8 +108,13 @@ parallel copy of a provider schema is not an adapter contract.
 `pyperf` owns benchmark process isolation, warm-ups, calibration, samples, and
 metadata. Flameox stores its JSON and publishes individual values; it does not
 replace samples with a precomputed mean. Startup/import measurements use
-`pyperf command`, not a private process-timing loop. Confirmatory comparison uses
-preserved samples and declared paired estimands.
+`pyperf command`, not a private process-timing loop. Its closed startup profile
+uses five workers with one value, one loop, and no warm-ups, so every retained
+wall sample represents exactly one fresh command execution. The native pyperf
+JSON is authoritative for wall time and `command_max_rss`; a separate raw
+`-X importtime` stderr artifact is authoritative for import costs. Missing RSS
+metadata remains missing rather than being replaced by another backend.
+Confirmatory comparison uses preserved samples and declared paired estimands.
 
 ### pytest
 
@@ -222,3 +277,33 @@ artifact origin, exercised behavior, and remaining blind spots.
 Candidate formats belong in an issue until they have a maintained reader,
 bounded artifact contract, useful evidence semantics, and representative
 validation. Integration count is not a product goal.
+
+## Runtime-resource metric admission
+
+The runtime-resource comparison catalog is a reviewed registry, not a projection
+over arbitrary evidence-table columns. Every admitted scalar records its exact
+scope, unit, collection backend, aggregation, unavailable-evidence behavior,
+cross-run compatibility fields, confirmatory eligibility, and limitations. The
+workload validator and comparison service consume that same registry, so adding
+a configuration name alone cannot accidentally make a column comparable.
+
+The current catalog contains only:
+
+| Metric | Scope and aggregation | Compatibility identity |
+| --- | --- | --- |
+| `runtime_resource.peak_rss_bytes` | Maximum sampled sum of RSS for the broker-owned workload process tree and recursively discovered descendants | sampling interval and `psutil_recursive_polling` backend |
+| `runtime_resource.minimum_free_bytes` | Minimum sampled free bytes on the filesystem containing workspace staging | sampling interval; the `shutil.disk_usage` backend is fixed by the registry |
+| `runtime_resource.staging_growth_bytes` | Nonnegative before/after growth of the bounded staging tree, excluding declared writable-root growth | fixed bounded-tree producer contract |
+
+Unavailable observations make that run ineligible; they are never converted to
+zero. Peak RSS remains a sampled observation, not a lifetime maximum, and may
+miss short-lived descendants. Minimum free space includes unrelated filesystem
+activity. Staging growth can miss files created and removed between its two
+observations, and zero is outside the current positive log-ratio estimand.
+
+An expansion must change the registry and add behavioral evidence for all of the
+fields above. A different accounting scope (for example cgroups, `wait4`, or an
+allocation profiler) is a different metric contract, not a fallback backend for
+peak RSS. Writable-root growth remains outside the scalar catalog until runs can
+bind the same root identity. Metrics without a defensible independent unit or
+compatibility predicate must set confirmatory eligibility to false.
