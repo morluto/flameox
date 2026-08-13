@@ -8,13 +8,13 @@
     "url": "https://github.com/morluto/flameox",
     "source": "github"
   },
-  "version": "0.1.13",
+  "version": "0.1.14",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "flameox",
-      "version": "0.1.13",
+      "version": "0.1.14",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
