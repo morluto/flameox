@@ -1183,7 +1183,7 @@ class CaptureService:
                         "Collector timed out; the non-empty native output is partial evidence.",
                     )
                 )
-                await capture.report(5, "Collector timed out; preserving partial evidence")
+                await capture.report(5, "Collector timed out - preserving partial evidence")
             else:
                 quarantined = await run_atomic_thread(
                     lambda: self._quarantine_native_output(
