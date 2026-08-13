@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import Field, TypeAdapter
 
+from flameox.action_graph import ToolAction
 from flameox.models import ContractModel
 
 
@@ -23,8 +24,7 @@ class _EvidenceAvailability(ContractModel):
 
 
 class _EvidenceWithoutRecovery(_EvidenceAvailability):
-    next_tool: Literal[None] = None
-    next_arguments: Literal[None] = None
+    next_action: Literal[None] = None
 
 
 class AvailableEvidence(_EvidenceWithoutRecovery):
@@ -49,8 +49,7 @@ class UnavailableEvidence(_EvidenceWithoutRecovery):
 
 class RecoverableUnavailableEvidence(_EvidenceAvailability):
     status: Literal[EvidenceStatus.UNAVAILABLE] = EvidenceStatus.UNAVAILABLE
-    next_tool: str = Field(min_length=1, max_length=100)
-    next_arguments: dict[str, object]
+    next_action: ToolAction
 
 
 type EvidenceAvailability = (
@@ -90,11 +89,9 @@ def unavailable_availability(reason: str) -> EvidenceAvailability:
 def recoverable_unavailable_evidence(
     reason: str,
     *,
-    next_tool: str,
-    next_arguments: dict[str, object],
+    next_action: ToolAction,
 ) -> EvidenceAvailability:
     return RecoverableUnavailableEvidence(
         reason=reason,
-        next_tool=next_tool,
-        next_arguments=next_arguments,
+        next_action=next_action,
     )

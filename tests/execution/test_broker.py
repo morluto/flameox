@@ -20,6 +20,8 @@ from flameox.command_binding import ExecutableResolver
 from flameox.domain import DomainError, ErrorCode
 from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
 
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
+
 _PYTHON_BINDING = ExecutableResolver().require_host_tool(sys.executable)
 
 
@@ -819,6 +821,75 @@ async def test_resource_policy_terminates_process_tree_above_memory_limit(
     process = error.value.details["process"]
     assert process["cancellation_cause"] == "memory_limit_exceeded"
     assert process["resources"]["policy_termination"] == "memory_limit_exceeded"
+
+
+@pytest.mark.anyio
+async def test_resource_policy_terminates_process_tree_above_writable_growth_limit(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "bounded-output"
+    output.mkdir()
+    code = (
+        "import pathlib,sys,time; "
+        "pathlib.Path(sys.argv[1]).write_bytes(b'x' * 1000000); time.sleep(10)"
+    )
+
+    with pytest.raises(DomainError) as error:
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                code,
+                str(output / "oversized.bin"),
+                resource_policy=ResourcePolicy(
+                    filesystem_path=tmp_path,
+                    writable_roots=(output,),
+                    minimum_free_bytes=0,
+                    maximum_writable_growth_bytes=1024,
+                    sampling_interval_ms=25,
+                ),
+            )
+        )
+
+    assert error.value.code is ErrorCode.STORAGE_QUOTA_EXCEEDED
+    process = error.value.details["process"]
+    assert process["cancellation_cause"] == "writable_limit_exceeded"
+    assert process["resources"]["policy_termination"] == "writable_limit_exceeded"
+
+
+@pytest.mark.anyio
+async def test_resource_policy_fails_closed_when_writable_growth_exceeds_file_scan_bound(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "bounded-output"
+    output.mkdir()
+    code = (
+        "import pathlib,sys,time; root=pathlib.Path(sys.argv[1]); "
+        "[(root / str(i)).write_bytes(b'x') for i in range(3)]; time.sleep(10)"
+    )
+
+    with pytest.raises(DomainError) as error:
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                code,
+                str(output),
+                resource_policy=ResourcePolicy(
+                    filesystem_path=tmp_path,
+                    writable_roots=(output,),
+                    minimum_free_bytes=0,
+                    maximum_writable_growth_bytes=1024,
+                    max_observed_files=2,
+                    sampling_interval_ms=25,
+                ),
+            )
+        )
+
+    assert error.value.code is ErrorCode.STORAGE_QUOTA_EXCEEDED
+    process = error.value.details["process"]
+    assert process["cancellation_cause"] == "writable_limit_exceeded"
+    assert "writable_root_growth_bytes" in process["resources"]["unavailable_metrics"]
 
 
 @pytest.mark.anyio

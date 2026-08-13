@@ -5,9 +5,11 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -43,6 +45,25 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def publication_operation_digest(
+    *,
+    publisher: str,
+    publisher_version: str,
+    input_run_ids: tuple[str, ...],
+    input_artifact_ids: tuple[str, ...],
+    operation_identity: Mapping[str, Any],
+) -> str:
+    return digest_model(
+        {
+            "publisher": publisher,
+            "publisher_version": publisher_version,
+            "input_run_ids": input_run_ids,
+            "input_artifact_ids": input_artifact_ids,
+            "operation": dict(operation_identity),
+        }
+    )
 
 
 class GenerationPublisher:
@@ -103,15 +124,14 @@ class GenerationPublisher:
         input_run_ids: tuple[str, ...] = (),
         input_artifact_ids: tuple[str, ...] = (),
         operation_identity: Mapping[str, Any],
+        supersede_matching: bool = True,
     ) -> PublishedGeneration:
-        operation_digest = digest_model(
-            {
-                "publisher": publisher,
-                "publisher_version": publisher_version,
-                "input_run_ids": input_run_ids,
-                "input_artifact_ids": input_artifact_ids,
-                "operation": dict(operation_identity),
-            }
+        operation_digest = publication_operation_digest(
+            publisher=publisher,
+            publisher_version=publisher_version,
+            input_run_ids=input_run_ids,
+            input_artifact_ids=input_artifact_ids,
+            operation_identity=operation_identity,
         )
         expected_tables = set(rows_by_table)
         last_conflict: DomainError | None = None
@@ -142,7 +162,11 @@ class GenerationPublisher:
                     input_run_ids=input_run_ids,
                     input_artifact_ids=input_artifact_ids,
                     operation_digest=operation_digest,
-                    supersedes=tuple(manifest.generation_id for manifest in matching),
+                    supersedes=(
+                        tuple(manifest.generation_id for manifest in matching)
+                        if supersede_matching
+                        else ()
+                    ),
                     expected_head=head.commit_id,
                 )
             except DomainError as error:
@@ -151,6 +175,64 @@ class GenerationPublisher:
                 last_conflict = error
         assert last_conflict is not None
         raise last_conflict
+
+    def publish_prepared_parquet(
+        self,
+        prepare: Callable[[Path, str, datetime], Mapping[str, Path]],
+        *,
+        publisher: str,
+        publisher_version: str,
+        input_run_ids: tuple[str, ...] = (),
+        input_artifact_ids: tuple[str, ...] = (),
+        operation_digest: str | None = None,
+        supersedes: tuple[str, ...] = (),
+        expected_head: str | None = None,
+    ) -> PublishedGeneration:
+        """Publish producer-prepared Parquet without materializing rows in Python.
+
+        The callback may write only beneath the supplied staging root. This class
+        remains responsible for schema/integrity validation and atomic visibility.
+        """
+        StorageQuota(self.workspace).require_capacity(staging=True)
+        attempts = 1 if expected_head is not None else 32
+        last_error: DomainError | None = None
+        for _ in range(attempts):
+            generation_id = str(uuid4())
+            staging_root = self.workspace.paths.staging / generation_id
+            try:
+                initial_head = self.workspace.corpus.read_head()
+                if expected_head is not None and expected_head != initial_head.commit_id:
+                    raise DomainError(
+                        ErrorCode.REVISION_CONFLICT,
+                        "The corpus changed before generation staging began.",
+                        retryable=True,
+                    )
+                published_at = utc_now()
+                staging_root.mkdir(parents=True, exist_ok=False)
+                staged = prepare(staging_root, generation_id, published_at)
+                return self._publish_staged_generation(
+                    staged,
+                    generation_id=generation_id,
+                    initial_head=initial_head,
+                    published_at=published_at,
+                    publisher=publisher,
+                    publisher_version=publisher_version,
+                    input_run_ids=input_run_ids,
+                    input_artifact_ids=input_artifact_ids,
+                    operation_digest=operation_digest,
+                    supersedes=supersedes,
+                    expected_row_counts=None,
+                )
+            except BaseException as error:
+                shutil.rmtree(staging_root, ignore_errors=True)
+                if (
+                    not isinstance(error, DomainError)
+                    or error.code is not ErrorCode.REVISION_CONFLICT
+                ):
+                    raise
+                last_error = error
+        assert last_error is not None
+        raise last_error
 
     def _publish_once(
         self,
@@ -165,10 +247,7 @@ class GenerationPublisher:
         supersedes: tuple[str, ...] = (),
         expected_head: str | None = None,
     ) -> PublishedGeneration:
-        quota = StorageQuota(self.workspace)
         initial_head = self.workspace.corpus.read_head()
-        operation_id = OperationLogger(self.workspace.paths.root).new_id()
-        started = time.monotonic()
         if expected_head is not None and expected_head != initial_head.commit_id:
             raise DomainError(
                 ErrorCode.REVISION_CONFLICT,
@@ -178,8 +257,7 @@ class GenerationPublisher:
         published_at = utc_now()
         staging_root = self.workspace.paths.staging / generation_id
         staging_root.mkdir(parents=True, exist_ok=False)
-        final_files: list[GenerationFile] = []
-        staged_to_final: list[tuple[Path, Path]] = []
+        staged: dict[str, Path] = {}
 
         for table_name, rows in sorted(rows_by_table.items()):
             schema = schema_for(table_name)
@@ -210,28 +288,96 @@ class GenerationPublisher:
             )
             with staged_path.open("rb") as stream:
                 os.fsync(stream.fileno())
-            quota.require_capacity(staging=True)
-            metadata = pq.read_metadata(staged_path)
-            if metadata.num_rows != len(rows):
+            staged[table_name] = staged_path
+
+        return self._publish_staged_generation(
+            staged,
+            generation_id=generation_id,
+            initial_head=initial_head,
+            published_at=published_at,
+            publisher=publisher,
+            publisher_version=publisher_version,
+            input_run_ids=input_run_ids,
+            input_artifact_ids=input_artifact_ids,
+            operation_digest=operation_digest,
+            supersedes=supersedes,
+            expected_row_counts={name: len(rows) for name, rows in rows_by_table.items()},
+        )
+
+    def _publish_staged_generation(
+        self,
+        staged: Mapping[str, Path],
+        *,
+        generation_id: str,
+        initial_head: CorpusCommit,
+        published_at: datetime,
+        publisher: str,
+        publisher_version: str,
+        input_run_ids: tuple[str, ...],
+        input_artifact_ids: tuple[str, ...],
+        operation_digest: str | None,
+        supersedes: tuple[str, ...],
+        expected_row_counts: Mapping[str, int] | None,
+    ) -> PublishedGeneration:
+        quota = StorageQuota(self.workspace)
+        operation_id = OperationLogger(self.workspace.paths.root).new_id()
+        started = time.monotonic()
+        staging_root = self.workspace.paths.staging / generation_id
+        final_files: list[GenerationFile] = []
+        staged_to_final: list[tuple[Path, Path]] = []
+        total_rows = 0
+        for table_name, staged_path in sorted(staged.items()):
+            schema = schema_for(table_name)
+            try:
+                metadata = staged_path.lstat()
+                resolved = staged_path.resolve(strict=True)
+                resolved.relative_to(staging_root.resolve(strict=True))
+            except (FileNotFoundError, OSError, ValueError) as error:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                    f"Prepared evidence file for {table_name!r} escaped its staging root.",
+                ) from error
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                    f"Prepared evidence file for {table_name!r} is not an owned regular file.",
+                )
+            parquet_schema = pq.read_schema(resolved)
+            if (
+                not parquet_schema.equals(schema, check_metadata=False)
+                or parquet_schema.metadata != schema.metadata
+            ):
+                raise DomainError(
+                    ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
+                    f"Prepared evidence table {table_name!r} does not match its Arrow schema.",
+                )
+            parquet_metadata = pq.read_metadata(resolved)
+            expected_rows = (
+                expected_row_counts.get(table_name) if expected_row_counts is not None else None
+            )
+            if expected_rows is not None and parquet_metadata.num_rows != expected_rows:
                 raise DomainError(
                     ErrorCode.ARTIFACT_INTEGRITY_FAILED,
                     f"Parquet row count changed while writing {table_name!r}.",
                 )
+            total_rows += parquet_metadata.num_rows
+            quota.require_capacity(staging=True)
             final_relative = (
                 Path("evidence") / table_name / f"generation={generation_id}" / "part-00000.parquet"
             )
             final_files.append(
                 GenerationFile(
                     path=final_relative.as_posix(),
-                    sha256=_file_sha256(staged_path),
-                    byte_length=staged_path.stat().st_size,
-                    row_count=metadata.num_rows,
+                    sha256=_file_sha256(resolved),
+                    byte_length=metadata.st_size,
+                    row_count=parquet_metadata.num_rows,
                     table=table_name,
                     schema_major=SCHEMA_MAJOR,
                     schema_minor=SCHEMA_MINOR,
                 )
             )
-            staged_to_final.append((staged_path, self.workspace.paths.root / final_relative))
+            staged_to_final.append((resolved, self.workspace.paths.root / final_relative))
+        quota.require_generation_row_count(total_rows)
 
         final_manifest_relative = Path("generations") / generation_id / "manifest.json"
         manifest = GenerationManifest(
@@ -329,7 +475,7 @@ class GenerationPublisher:
             adapter=publisher,
             elapsed_ms=elapsed_ms(started),
             lock_wait_ms=lock_wait_ms,
-            rows_returned=sum(len(rows) for rows in rows_by_table.values()),
+            rows_returned=total_rows,
             bytes_returned=sum(file.byte_length for file in final_files),
         )
         return PublishedGeneration(manifest=manifest, commit=commit)

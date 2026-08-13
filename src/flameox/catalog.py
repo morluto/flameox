@@ -4,8 +4,10 @@ import asyncio
 import os
 import threading
 import time
+import weakref
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,7 +23,34 @@ from flameox.domain.models import RunManifest, parse_run_manifest_json
 from flameox.evidence.schemas import SCHEMA_MAJOR, SCHEMA_MINOR, schema_for, table_names
 from flameox.observability import OperationLogger, elapsed_ms
 from flameox.storage.corpus import CorpusCommit, GenerationManifest
+from flameox.storage.locks import (
+    CATALOG_EXCLUSIVE,
+    CATALOG_SHARED,
+    RETENTION_SHARED,
+    WRITE_EXCLUSIVE,
+)
 from flameox.storage.workspace import Workspace
+
+_CATALOG_QUERY_WORKERS = 4
+_CANCELLABLE_LOCK_SLICE_SECONDS = 0.1
+_CATALOG_QUERY_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_CATALOG_QUERY_WORKERS,
+    thread_name_prefix="flameox-catalog",
+)
+_QUERY_ADMISSIONS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
+_QUERY_ADMISSIONS_LOCK = threading.Lock()
+
+
+def _query_admission() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    with _QUERY_ADMISSIONS_LOCK:
+        admission = _QUERY_ADMISSIONS.get(loop)
+        if admission is None:
+            admission = asyncio.Semaphore(_CATALOG_QUERY_WORKERS)
+            _QUERY_ADMISSIONS[loop] = admission
+        return admission
 
 
 def _sql_string(value: str) -> str:
@@ -90,7 +119,7 @@ class Snapshot:
 
     def run(self, run_id: str) -> RunManifest:
         row = self.execute(
-            "SELECT manifest_json FROM runs WHERE run_id = ? ORDER BY published_at DESC LIMIT 1",
+            "SELECT manifest_json FROM current_runs WHERE run_id = ?",
             (run_id,),
         ).fetchone()
         if row is None:
@@ -177,9 +206,10 @@ class Catalog:
         lock_started = time.monotonic()
         lock_wait_ms = 0.0
         try:
-            with (
-                self.workspace.write_locked(),
-                self.workspace.catalog_locked(shared=False),
+            with self.workspace.locked(
+                WRITE_EXCLUSIVE,
+                CATALOG_EXCLUSIVE,
+                phase="catalog publication",
             ):
                 lock_wait_ms = elapsed_ms(lock_started)
                 current = self.workspace.corpus.read_head()
@@ -215,37 +245,107 @@ class Catalog:
         self,
         handle: SnapshotHandle | str | None = None,
     ) -> Iterator[Snapshot]:
+        with self._open_snapshot(handle) as snapshot:
+            yield snapshot
+
+    @contextmanager
+    def _open_snapshot(
+        self,
+        handle: SnapshotHandle | str | None = None,
+        *,
+        cancellation_requested: threading.Event | None = None,
+        snapshot_observer: Callable[[Snapshot | None], None] | None = None,
+    ) -> Iterator[Snapshot]:
         if not isinstance(handle, SnapshotHandle):
             handle = self.pin(handle)
         commit = handle.commit
-        with (
-            self.workspace.retention_locked(shared=True),
-            self.workspace.catalog_locked(shared=True),
-        ):
+        with self._snapshot_locks(cancellation_requested):
+            self._raise_if_cancelled(cancellation_requested)
             if not self.workspace.paths.catalog.exists():
                 raise DomainError(
                     ErrorCode.WORKSPACE_INVALID,
                     "The DuckDB catalog is missing.",
                     remediation=("Run `flameox catalog rebuild`.",),
                 )
-            connection = duckdb.connect(
-                str(self.workspace.paths.catalog),
-                read_only=True,
-            )
+            # Snapshot views are derived entirely from the immutable corpus inventory.
+            # Giving each snapshot its own transient database keeps connection security
+            # settings local; DuckDB otherwise shares `lock_configuration` across
+            # concurrent connections to the same catalog file.
+            connection = duckdb.connect(":memory:")
+            snapshot = Snapshot(handle=handle, connection=connection)
+            if snapshot_observer is not None:
+                snapshot_observer(snapshot)
             try:
+                self._raise_if_cancelled(cancellation_requested)
                 inventory = self._inventory(commit)
                 self._configure_connection(connection)
+                self._raise_if_cancelled(cancellation_requested)
                 self._create_snapshot_views(connection, inventory)
-                yield Snapshot(handle=handle, connection=connection)
+                self._raise_if_cancelled(cancellation_requested)
+                yield snapshot
             finally:
-                connection.close()
+                try:
+                    connection.close()
+                finally:
+                    if snapshot_observer is not None:
+                        snapshot_observer(None)
+
+    @contextmanager
+    def _snapshot_locks(
+        self,
+        cancellation_requested: threading.Event | None,
+    ) -> Iterator[None]:
+        if cancellation_requested is None:
+            with self.workspace.locked(
+                RETENTION_SHARED,
+                CATALOG_SHARED,
+                phase="snapshot acquisition",
+            ):
+                yield
+            return
+
+        while True:
+            self._raise_if_cancelled(cancellation_requested)
+            locks = ExitStack()
+            try:
+                locks.enter_context(
+                    self.workspace.locked(
+                        RETENTION_SHARED,
+                        CATALOG_SHARED,
+                        timeout=_CANCELLABLE_LOCK_SLICE_SECONDS,
+                        phase="cancellable snapshot acquisition",
+                    )
+                )
+            except DomainError as error:
+                locks.close()
+                if error.code is not ErrorCode.WRITE_LOCK_TIMEOUT:
+                    raise
+                if cancellation_requested.wait(_CANCELLABLE_LOCK_SLICE_SECONDS):
+                    raise _CancelledBeforeQuery from None
+                continue
+            except BaseException:
+                locks.close()
+                raise
+
+            try:
+                self._raise_if_cancelled(cancellation_requested)
+                with locks:
+                    yield
+                return
+            except BaseException:
+                locks.close()
+                raise
+
+    @staticmethod
+    def _raise_if_cancelled(cancellation_requested: threading.Event | None) -> None:
+        if cancellation_requested is not None and cancellation_requested.is_set():
+            raise _CancelledBeforeQuery
 
     async def run_interruptible[T](
         self,
         operation: Callable[[Snapshot], T],
         *,
         handle: SnapshotHandle | None = None,
-        cleanup_timeout_seconds: float = 5,
         query_name: str | None = None,
     ) -> T:
         pinned = handle or self.pin()
@@ -253,31 +353,51 @@ class Catalog:
         holder_lock = threading.Lock()
         active_snapshot: list[Snapshot] = []
 
-        def run() -> T:
-            with self.open_snapshot(pinned) as snapshot:
-                with holder_lock:
+        def observe_snapshot(snapshot: Snapshot | None) -> None:
+            with holder_lock:
+                active_snapshot.clear()
+                if snapshot is not None:
                     active_snapshot.append(snapshot)
-                try:
-                    if cancellation_requested.is_set():
-                        raise _CancelledBeforeQuery
-                    return operation(snapshot)
-                finally:
-                    with holder_lock:
-                        active_snapshot.clear()
+
+        def run() -> T:
+            with self._open_snapshot(
+                pinned,
+                cancellation_requested=cancellation_requested,
+                snapshot_observer=observe_snapshot,
+            ) as snapshot:
+                self._raise_if_cancelled(cancellation_requested)
+                return operation(snapshot)
 
         operation_id = OperationLogger(self.workspace.paths.root).new_id()
         started = time.monotonic()
         name = query_name or getattr(operation, "__name__", "analysis")
-        task = asyncio.create_task(asyncio.to_thread(run))
+        logger = OperationLogger(self.workspace.paths.root)
+        admission = _query_admission()
         try:
-            result = await asyncio.shield(task)
+            await admission.acquire()
+        except asyncio.CancelledError as cancellation:
+            logger.emit(
+                operation_id=operation_id,
+                operation="catalog.query",
+                phase="query cancelled before admission",
+                query_name=name,
+                query_duration_ms=elapsed_ms(started),
+                error_code="cancelled",
+                cleanup_status="complete",
+            )
+            raise cancellation from None
+
+        loop = asyncio.get_running_loop()
+        worker = loop.run_in_executor(_CATALOG_QUERY_EXECUTOR, run)
+        try:
+            result = await asyncio.shield(worker)
             rows_returned = getattr(result, "returned", None)
             bytes_returned = (
                 len(result.model_dump_json().encode("utf-8"))
                 if isinstance(result, BaseModel)
                 else None
             )
-            OperationLogger(self.workspace.paths.root).emit(
+            logger.emit(
                 operation_id=operation_id,
                 operation="catalog.query",
                 phase="query complete",
@@ -292,7 +412,7 @@ class Catalog:
             )
             return result
         except Exception as error:
-            OperationLogger(self.workspace.paths.root).emit(
+            logger.emit(
                 operation_id=operation_id,
                 operation="catalog.query",
                 phase="query failed",
@@ -303,33 +423,47 @@ class Catalog:
             raise
         except asyncio.CancelledError as cancellation:
             cancellation_requested.set()
+            logger.emit(
+                operation_id=operation_id,
+                operation="catalog.query",
+                phase="query cancellation requested",
+                query_name=name,
+                query_duration_ms=elapsed_ms(started),
+                error_code="cancelled",
+                cleanup_status="pending",
+            )
+            worker_error: BaseException | None = None
             try:
-                deadline = asyncio.get_running_loop().time() + cleanup_timeout_seconds
-                while not task.done():
+                while not worker.done():
                     with holder_lock:
                         snapshot = active_snapshot[0] if active_snapshot else None
                     if snapshot is not None:
                         with suppress(duckdb.ConnectionException):
                             snapshot.interrupt()
-                    remaining = deadline - asyncio.get_running_loop().time()
-                    if remaining <= 0:
-                        break
-                    await asyncio.wait(
-                        {task},
-                        timeout=min(0.05, remaining),
-                    )
-                if task.done():
-                    await asyncio.gather(task, return_exceptions=True)
+                    try:
+                        await asyncio.wait({worker}, timeout=0.05)
+                    except asyncio.CancelledError:
+                        # Repeated transport cancellation must not detach the query.
+                        continue
+                try:
+                    worker.result()
+                except BaseException as error:
+                    worker_error = error
             finally:
-                OperationLogger(self.workspace.paths.root).emit(
+                logger.emit(
                     operation_id=operation_id,
                     operation="catalog.query",
                     phase="query cancelled",
                     query_name=name,
                     query_duration_ms=elapsed_ms(started),
-                    error_code="cancelled",
+                    error_code=(
+                        "cancelled" if worker_error is None else type(worker_error).__name__
+                    ),
+                    cleanup_status="complete",
                 )
-                raise cancellation
+                raise cancellation from None
+        finally:
+            admission.release()
 
     def _inventory(self, commit: CorpusCommit) -> dict[str, list[Path]]:
         inventory: dict[str, list[Path]] = {name: [] for name in table_names()}
@@ -429,6 +563,27 @@ class Catalog:
                 for field in schema_for(name)
             )
             connection.execute(f"CREATE TEMP VIEW {identifier} AS SELECT {columns} WHERE FALSE")
+        conflict = connection.execute(
+            "SELECT run_id, run_revision FROM runs "
+            "WHERE run_revision IS NOT NULL AND run_manifest_digest IS NOT NULL "
+            "GROUP BY run_id, run_revision "
+            "HAVING count(DISTINCT run_manifest_digest) > 1 LIMIT 1"
+        ).fetchone()
+        if conflict is not None:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "The pinned corpus contains conflicting projections for one run revision.",
+                run_id=str(conflict[0]),
+                details={"run_revision": int(conflict[1])},
+            )
+        connection.execute(
+            "CREATE TEMP VIEW current_runs AS "
+            "SELECT * EXCLUDE (revision_order) FROM ("
+            "SELECT *, row_number() OVER (PARTITION BY run_id "
+            "ORDER BY run_revision DESC NULLS LAST, published_at DESC, "
+            "run_manifest_digest DESC NULLS LAST) AS revision_order FROM runs"
+            ") WHERE revision_order = 1"
+        )
 
     def _validated_metadata(self) -> dict[str, object]:
         if not self.workspace.paths.catalog.exists():

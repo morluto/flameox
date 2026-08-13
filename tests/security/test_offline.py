@@ -14,6 +14,8 @@ from flameox.application import (
 )
 from flameox.storage import Workspace
 
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
+
 
 def test_control_process_operations_do_not_open_network_connections(
     tmp_path: Path,

@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 
+from flameox.action_graph import ActionId, manual_action, next_action_for_action
 from flameox.analysis.recipe_context import RecipeContext
 from flameox.analysis.recipe_models import OperatorSummary, PyTorchAnalysisResult
 from flameox.catalog import Snapshot
@@ -48,7 +49,7 @@ class PyTorchRecipes(RecipeContext):
                     run_ids = tuple(str(row[0]) for row in run_rows)
                 else:
                     run_ids = ()
-                details: dict[str, object] = {"next_tool": "extract_perfetto"}
+                details: dict[str, object] = {}
                 if run_ids:
                     details["run_id"] = run_ids[0]
                 raise DomainError(
@@ -61,6 +62,11 @@ class PyTorchRecipes(RecipeContext):
                         "analyze_pytorch.",
                         "If Trace Processor is unavailable, call start_capability_setup with "
                         "adapter='perfetto'.",
+                    ),
+                    next_action=next_action_for_action(
+                        ActionId.EXTRACT_PERFETTO,
+                        context=details,
+                        instruction="Select the run whose trace should be extracted.",
                     ),
                 )
             rows = snapshot.execute(
@@ -260,10 +266,8 @@ class PyTorchRecipes(RecipeContext):
         if run_ids:
             placeholders = ", ".join("?" for _ in run_ids)
             rows = snapshot.execute(
-                "SELECT lower(coalesce(collector, '')) FROM ("
-                "SELECT *, row_number() OVER (PARTITION BY run_id "
-                "ORDER BY published_at DESC) AS revision_order FROM runs"
-                f") WHERE revision_order = 1 AND run_id IN ({placeholders})",
+                "SELECT lower(coalesce(collector, '')) FROM current_runs "
+                f"WHERE run_id IN ({placeholders})",
                 run_ids,
             ).fetchall()
             if len(rows) == len(set(run_ids)) and all("torch" in str(row[0]) for row in rows):
@@ -290,7 +294,6 @@ class PyTorchRecipes(RecipeContext):
             ErrorCode.COMPARISON_INVALID,
             "PyTorch operator analysis requires a torch.profiler-produced trace.",
             details={
-                "next_tool": "import_artifact",
                 "required_kind": "execution_trace",
                 "required_producer": "torch.profiler",
             },
@@ -298,5 +301,10 @@ class PyTorchRecipes(RecipeContext):
                 "Re-import the trace with kind='execution_trace'; Torch markers are detected "
                 "automatically.",
                 "If detection is ambiguous, set producer='torch.profiler' on import_artifact.",
+            ),
+            next_action=manual_action(
+                "Select a trace path and sensitivity classification before importing it.",
+                suggested_action=ActionId.IMPORT_ARTIFACT,
+                missing_arguments=("path", "sensitivity"),
             ),
         )

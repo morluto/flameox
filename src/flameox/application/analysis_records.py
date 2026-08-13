@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Literal, assert_never
 
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from flameox.analysis import (
     AcceleratorLaunchAnalysisResult,
@@ -17,21 +18,33 @@ from flameox.analysis import (
     ScalingAnalysisResult,
 )
 from flameox.application.analysis_provenance import (
+    AnalysisProvenance,
     AnalysisProvenanceInput,
     build_analysis_provenance,
     context_references,
 )
 from flameox.application.async_work import run_atomic_thread
+from flameox.application.evidence_lookup import EvidenceLookupService
+from flameox.application.progress import ProgressReporter
 from flameox.catalog import Catalog, Snapshot
 from flameox.domain import (
     AnalysisRecord,
+    DomainError,
+    ErrorCode,
     EvidenceReference,
     digest_model,
 )
 from flameox.evidence import GenerationPublisher
 from flameox.evidence_scope import resolve_evidence_scope
 from flameox.models import ContractModel
-from flameox.storage import ArtifactStore, GenerationManifest, Workspace
+from flameox.storage import (
+    ArtifactStore,
+    CompletedRetentionIntent,
+    GenerationManifest,
+    RetentionIntent,
+    RetentionIntentStore,
+    Workspace,
+)
 
 AnalysisValue = (
     AcceleratorLaunchAnalysisResult
@@ -44,7 +57,11 @@ AnalysisValue = (
 )
 
 
-class _InputAnalysisRequest(ContractModel):
+class _AnalysisRequest(ContractModel):
+    corpus_commit_id: str | None = None
+
+
+class _InputAnalysisRequest(_AnalysisRequest):
     input_id: str
     limit: int | None = Field(default=None, ge=1, le=1_000)
 
@@ -72,12 +89,12 @@ class AcceleratorLaunchAnalysisRequest(_InputAnalysisRequest):
     phase: str | None = Field(default=None, min_length=1, max_length=200)
 
 
-class FailureAnalysisRequest(ContractModel):
+class FailureAnalysisRequest(_AnalysisRequest):
     recipe: Literal["failures"]
     limit: int | None = Field(default=None, ge=1, le=1_000)
 
 
-class ScalingAnalysisRequest(ContractModel):
+class ScalingAnalysisRequest(_AnalysisRequest):
     recipe: Literal["scaling"]
     experiment_id: str
 
@@ -102,37 +119,29 @@ class MaterializedAnalysisResult(ContractModel):
     materialized_commit_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedAnalysis:
+    result: AnalysisValue
+    provenance: AnalysisProvenance
+    retention: RetentionIntent
+    operation_identity: dict[str, JsonValue]
+
+
 class AnalysisMaterializationService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
         self.publisher = GenerationPublisher(workspace)
+        self.retention = RetentionIntentStore(workspace)
 
     def record(
         self,
         request: MaterializeAnalysisRequest,
     ) -> MaterializedAnalysisResult:
-        corpus_commit_id = self.workspace.corpus.read_head().commit_id
         started = datetime.now(UTC)
         catalog = Catalog(self.workspace)
-        with catalog.open_snapshot(catalog.pin(corpus_commit_id)) as snapshot:
-            result = self._run(
-                request,
-                recipes=RecipeService(self.workspace, snapshot=snapshot),
-            )
-            run_ids, artifact_ids, generation_ids = self._inputs(
-                request,
-                snapshot=snapshot,
-            )
-        completed = datetime.now(UTC)
-        return self._publish(
-            request,
-            result=result,
-            run_ids=run_ids,
-            artifact_ids=artifact_ids,
-            generation_ids=generation_ids,
-            started=started,
-            completed=completed,
-        )
+        with catalog.open_snapshot(catalog.pin(request.corpus_commit_id)) as snapshot:
+            prepared = self._prepare(request, snapshot=snapshot, started=started)
+        return self._publish(prepared)
 
     async def record_async(
         self,
@@ -140,67 +149,39 @@ class AnalysisMaterializationService:
         *,
         progress: Callable[[float, float, str], Awaitable[None]] | None = None,
     ) -> MaterializedAnalysisResult:
-        corpus_commit_id = self.workspace.corpus.read_head().commit_id
         started = datetime.now(UTC)
-        if progress is not None:
-            await progress(0, 3, "Analysis snapshot pinned")
-
-        def prepare(
-            snapshot: Snapshot,
-        ) -> tuple[
-            AnalysisValue,
-            tuple[str, ...],
-            tuple[str, ...],
-            tuple[str, ...],
-        ]:
-            result = self._run(
-                request,
-                recipes=RecipeService(self.workspace, snapshot=snapshot),
-            )
-            run_ids, artifact_ids, generation_ids = self._inputs(
-                request,
-                snapshot=snapshot,
-            )
-            return result, run_ids, artifact_ids, generation_ids
+        reporter = ProgressReporter(progress)
+        await reporter.report(0, 3, "Analysis snapshot pinned")
 
         catalog = Catalog(self.workspace)
-        result, run_ids, artifact_ids, generation_ids = await catalog.run_interruptible(
-            prepare,
-            handle=catalog.pin(corpus_commit_id),
+        prepared = await catalog.run_interruptible(
+            lambda snapshot: self._prepare(request, snapshot=snapshot, started=started),
+            handle=catalog.pin(request.corpus_commit_id),
             query_name=f"materialize.{request.recipe}",
         )
-        if progress is not None:
-            await progress(1, 3, "Analysis query complete")
-        completed = datetime.now(UTC)
-        if progress is not None:
-            await progress(2, 3, "Publishing analysis provenance")
-        materialized = await run_atomic_thread(
-            lambda: self._publish(
-                request,
-                result=result,
-                run_ids=run_ids,
-                artifact_ids=artifact_ids,
-                generation_ids=generation_ids,
-                started=started,
-                completed=completed,
-            )
-        )
-        if progress is not None:
-            await progress(3, 3, "Analysis publication complete")
+        await reporter.report(1, 3, "Analysis query complete")
+        await reporter.report(2, 3, "Publishing analysis provenance")
+        materialized = await run_atomic_thread(lambda: self._publish(prepared))
+        await reporter.report(3, 3, "Analysis publication complete")
         return materialized
 
-    def _publish(
+    def _prepare(
         self,
         request: MaterializeAnalysisRequest,
         *,
-        result: AnalysisValue,
-        run_ids: tuple[str, ...],
-        artifact_ids: tuple[str, ...],
-        generation_ids: tuple[str, ...],
+        snapshot: Snapshot,
         started: datetime,
-        completed: datetime,
-    ) -> MaterializedAnalysisResult:
-        parameters = request.model_dump(mode="json")
+    ) -> _PreparedAnalysis:
+        result = self._run(
+            request,
+            recipes=RecipeService(self.workspace, snapshot=snapshot),
+        )
+        run_ids, artifact_ids, generation_ids = self._inputs(
+            request,
+            snapshot=snapshot,
+        )
+        completed = datetime.now(UTC)
+        parameters = request.model_dump(mode="json", exclude={"corpus_commit_id"})
         coverage_value = getattr(result, "coverage", {})
         coverage = coverage_value if isinstance(coverage_value, dict) else {}
         limitations_value = getattr(result, "limitations", ())
@@ -229,19 +210,99 @@ class AnalysisMaterializationService:
                 ),
             )
         )
-        published = self.publisher.publish_rows(
-            provenance.rows(),
-            publisher="flameox.analyses",
-            publisher_version="1",
-            input_run_ids=run_ids,
-            input_artifact_ids=artifact_ids,
+        operation_identity: dict[str, JsonValue] = {
+            "kind": "materialize_analysis",
+            "analysis_id": provenance.analysis.analysis_id,
+            "corpus_commit_id": provenance.analysis.corpus_commit_id,
+            "result_digest": provenance.analysis.result_digest,
+        }
+        retention = self.retention.acquire(
+            corpus_commit_id=provenance.analysis.corpus_commit_id,
+            owner_kind="analysis",
+            owner_id=provenance.analysis.analysis_id,
+            operation_digest=digest_model(operation_identity),
+        )
+        return _PreparedAnalysis(
+            result=result,
+            provenance=provenance,
+            retention=retention,
+            operation_identity=operation_identity,
+        )
+
+    def _publish(self, prepared: _PreparedAnalysis) -> MaterializedAnalysisResult:
+        if isinstance(prepared.retention, CompletedRetentionIntent):
+            materialized_commit_id = prepared.retention.materialized_commit_id
+        else:
+            analysis = prepared.provenance.analysis
+            published = self.publisher.publish_rows_idempotent(
+                prepared.provenance.rows(),
+                publisher="flameox.analyses",
+                publisher_version="1",
+                input_run_ids=analysis.input_run_ids,
+                input_artifact_ids=analysis.input_artifact_ids,
+                operation_identity=prepared.operation_identity,
+                supersede_matching=False,
+            )
+            completed = self.retention.complete(
+                prepared.retention,
+                materialized_commit_id=published.commit.commit_id,
+            )
+            materialized_commit_id = completed.materialized_commit_id
+        provenance = self._persisted_provenance(
+            materialized_commit_id=materialized_commit_id,
+            expected=prepared.provenance,
         )
         return MaterializedAnalysisResult(
-            result=result,
+            result=prepared.result,
             analysis=provenance.analysis,
             evidence=provenance.evidence,
-            materialized_commit_id=published.commit.commit_id,
+            materialized_commit_id=materialized_commit_id,
         )
+
+    def _persisted_provenance(
+        self,
+        *,
+        materialized_commit_id: str,
+        expected: AnalysisProvenance,
+    ) -> AnalysisProvenance:
+        analysis_id = expected.analysis.analysis_id
+        with EvidenceLookupService(self.workspace).session(materialized_commit_id) as session:
+            persisted = AnalysisProvenance(
+                analysis=session.analysis(analysis_id),
+                evidence=session.references(owner_type="analysis", owner_id=analysis_id),
+            )
+        expected_identity = expected.analysis.model_dump(
+            mode="json",
+            exclude={"started_at", "completed_at"},
+        )
+        persisted_identity = persisted.analysis.model_dump(
+            mode="json",
+            exclude={"started_at", "completed_at"},
+        )
+        if persisted_identity != expected_identity or persisted.evidence != expected.evidence:
+            mismatched_fields = tuple(
+                sorted(
+                    key
+                    for key in expected_identity.keys() | persisted_identity.keys()
+                    if expected_identity.get(key) != persisted_identity.get(key)
+                )
+            )
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "The materialized analysis does not match the retained operation inputs"
+                + (
+                    f" (analysis fields: {', '.join(mismatched_fields)})."
+                    if mismatched_fields
+                    else " (evidence references differ)."
+                ),
+                details={
+                    "analysis_id": analysis_id,
+                    "materialized_commit_id": materialized_commit_id,
+                    "mismatched_analysis_fields": list(mismatched_fields),
+                    "evidence_mismatch": persisted.evidence != expected.evidence,
+                },
+            )
+        return persisted
 
     def _run(
         self,

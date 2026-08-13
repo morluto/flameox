@@ -11,7 +11,6 @@ from flameox.domain import (
     EvidenceReferenceType,
     EvidenceRelation,
     digest_model,
-    new_id,
 )
 from flameox.models import ContractModel
 
@@ -45,19 +44,38 @@ class AnalysisProvenance(ContractModel):
     def rows(self) -> dict[str, list[dict[str, object]]]:
         return {
             "analyses": [analysis_row(self.analysis)],
-            "evidence_refs": [reference.model_dump(mode="python") for reference in self.evidence],
+            "evidence_refs": [
+                reference.model_dump(mode="python", exclude={"schema_version"})
+                for reference in self.evidence
+            ],
         }
 
 
 def build_analysis_provenance(
     value: AnalysisProvenanceInput,
 ) -> AnalysisProvenance:
+    parameters_digest = digest_model(value.parameters)
+    analysis_id = digest_model(
+        {
+            "identity_profile": "flameox.analysis.v1",
+            "recipe": value.recipe,
+            "recipe_version": value.recipe_version,
+            "parameters_digest": parameters_digest,
+            "corpus_commit_id": value.corpus_commit_id,
+            "input_generation_ids": value.input_generation_ids,
+            "input_run_ids": value.input_run_ids,
+            "input_artifact_ids": value.input_artifact_ids,
+            "result_digest": value.result_digest,
+            "coverage": value.coverage,
+            "limitations": value.limitations,
+        }
+    )
     analysis = AnalysisRecord(
-        analysis_id=new_id(),
+        analysis_id=analysis_id,
         recipe=value.recipe,
         recipe_version=value.recipe_version,
         parameters=value.parameters,
-        parameters_digest=digest_model(value.parameters),
+        parameters_digest=parameters_digest,
         corpus_commit_id=value.corpus_commit_id,
         input_generation_ids=value.input_generation_ids,
         input_run_ids=value.input_run_ids,
@@ -71,14 +89,23 @@ def build_analysis_provenance(
     return AnalysisProvenance(
         analysis=analysis,
         evidence=tuple(
-            EvidenceReference(
-                owner_type="analysis",
-                owner_id=analysis.analysis_id,
-                ref_type=target.ref_type,
-                ref_id=target.ref_id,
-                relation=target.relation,
+            sorted(
+                (
+                    EvidenceReference(
+                        owner_type="analysis",
+                        owner_id=analysis.analysis_id,
+                        ref_type=target.ref_type,
+                        ref_id=target.ref_id,
+                        relation=target.relation,
+                    )
+                    for target in value.references
+                ),
+                key=lambda reference: (
+                    reference.ref_type.value,
+                    reference.ref_id,
+                    reference.relation.value,
+                ),
             )
-            for target in value.references
         ),
     )
 

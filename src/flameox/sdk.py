@@ -49,15 +49,34 @@ def observe(name: str, **values: Any) -> None:
 
 @contextmanager
 def phase(name: str) -> Iterator[None]:
-    """Annotate a bounded logical phase around user code."""
+    """Annotate a bounded logical phase around user code.
+
+    Observation I/O remains fatal when the body succeeds. If both the body and
+    the closing observation fail, the body failure remains primary and receives
+    a bounded note naming the secondary instrumentation failure.
+    """
     if not name or len(name) > 200:
         raise ValueError("phase names must contain 1 to 200 characters")
     token = _PHASE.set(name)
-    observe("flameox.phase.start", phase_name=name)
+    body_error: BaseException | None = None
     try:
-        yield
+        observe("flameox.phase.start", phase_name=name)
+        try:
+            yield
+        except BaseException as error:
+            body_error = error
+            raise
+        finally:
+            try:
+                observe("flameox.phase.end", phase_name=name)
+            except BaseException as observation_error:
+                if body_error is None:
+                    raise
+                body_error.add_note(
+                    "Flameox phase-end observation also failed "
+                    f"({type(observation_error).__name__}); the workload failure remains primary."
+                )
     finally:
-        observe("flameox.phase.end", phase_name=name)
         _PHASE.reset(token)
 
 

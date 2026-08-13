@@ -8,8 +8,20 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, cast
 
-from flameox.domain import ErrorCode
-from flameox.workers.protocol import run_worker
+from pydantic import JsonValue
+
+from flameox.domain import DomainError, ErrorCode
+from flameox.workers.nsight_compute_contract import (
+    NSIGHT_COMPUTE_WORKER,
+    NsightComputeWorkerRequest,
+    NsightComputeWorkerResult,
+)
+from flameox.workers.protocol import (
+    WorkerApplication,
+    WorkerContext,
+    WorkerFailureKind,
+    run_typed_worker,
+)
 
 _NORMALIZED_MAX_COLLECTION_ITEMS = 8
 _NORMALIZED_MAX_DEPTH = 5
@@ -18,6 +30,8 @@ _NORMALIZED_MAX_NODES = 8
 _NORMALIZED_MAX_STRING_CHARS = 256
 _SOURCE_FILE_ID_CHARS = 200
 _SOURCE_FILE_PATH_CHARS = 500
+_UINT32_MAX = 2**32 - 1
+_UINT64_MAX = 2**64 - 1
 
 
 def _bounded_text(value: object, limit: int = 2_000) -> str:
@@ -242,32 +256,31 @@ def _metric_value(
     if has_value is False:
         return "missing", None
     kind = _call(metric, "kind", limitations=limitations)
-    if kind in {
-        getattr(metric, "ValueKind_UINT32", object()),
-        getattr(metric, "ValueKind_UINT64", object()),
-    }:
+    uint32_kind = getattr(metric, "ValueKind_UINT32", object())
+    uint64_kind = getattr(metric, "ValueKind_UINT64", object())
+    if kind in {uint32_kind, uint64_kind}:
         value = _call(metric, "as_uint64", limitations=limitations)
-        return (
-            ("integer", value)
-            if isinstance(value, int) and not isinstance(value, bool)
-            else (
-                "unknown",
-                None,
+        maximum = _UINT32_MAX if kind == uint32_kind else _UINT64_MAX
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+            raise DomainError(
+                ErrorCode.ADAPTER_INCOMPATIBLE,
+                "Official ncu_report returned a value outside its declared unsigned range.",
             )
-        )
-    if kind in {
-        getattr(metric, "ValueKind_FLOAT", object()),
-        getattr(metric, "ValueKind_DOUBLE", object()),
-    }:
+        return ("uint32" if kind == uint32_kind else "uint64"), value
+    float_kind = getattr(metric, "ValueKind_FLOAT", object())
+    double_kind = getattr(metric, "ValueKind_DOUBLE", object())
+    if kind in {float_kind, double_kind}:
         value = _call(metric, "as_double", limitations=limitations)
-        return (
-            ("float", value)
-            if isinstance(value, int | float) and math.isfinite(value)
-            else (
-                "unknown",
-                None,
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(value)
+        ):
+            raise DomainError(
+                ErrorCode.ADAPTER_INCOMPATIBLE,
+                "Official ncu_report returned an invalid floating-point metric value.",
             )
-        )
+        return ("float32" if kind == float_kind else "float64"), float(value)
     if kind == getattr(metric, "ValueKind_STRING", object()):
         value = _call(metric, "as_string", limitations=limitations)
         return ("string", _bounded_text(value)) if value is not None else ("missing", None)
@@ -411,8 +424,17 @@ def _extract(  # noqa: C901 - bounded traversal mirrors the official report hier
                     ),
                     "roofline": "roofline" in lower_identity,
                 }
-                if value_kind in {"integer", "float"} and isinstance(value, int | float):
-                    measurements.append({**common, "value_kind": value_kind, "value": value})
+                if value_kind in {
+                    "integer",
+                    "float",
+                    "float32",
+                    "float64",
+                    "uint32",
+                    "uint64",
+                } and isinstance(value, int | float):
+                    measurements.append(
+                        {**common, "provider_value_kind": value_kind, "value": value}
+                    )
                 elif value_kind == "string" and len(observations) < max_observations:
                     observations.append(
                         {
@@ -574,21 +596,44 @@ def _call_with_arg(
 
 
 def main() -> int:
-    def handle(request: dict[str, object], _request_path: Path) -> dict[str, object]:
-        return _extract(
-            Path(str(request["artifact_path"])),
-            interface_path=Path(str(request["interface_path"])),
-            max_ranges=int(str(request["max_ranges"])),
-            max_actions=int(str(request["max_actions"])),
-            max_metrics=int(str(request["max_metrics"])),
-            max_observations=int(str(request["max_observations"])),
+    def handle(
+        request: NsightComputeWorkerRequest,
+        _context: WorkerContext,
+    ) -> NsightComputeWorkerResult:
+        result = _extract(
+            Path(request.artifact_path),
+            interface_path=Path(request.interface_path),
+            max_ranges=request.max_ranges,
+            max_actions=request.max_actions,
+            max_metrics=request.max_metrics,
+            max_observations=request.max_observations,
+        )
+        return NsightComputeWorkerResult(
+            report_version=cast(str, result["report_version"]),
+            measurements=cast(
+                tuple[dict[str, JsonValue], ...],
+                tuple(cast(list[dict[str, object]], result["measurements"])),
+            ),
+            observations=cast(
+                tuple[dict[str, JsonValue], ...],
+                tuple(cast(list[dict[str, object]], result["observations"])),
+            ),
+            metric_ids=tuple(cast(list[str], result["metric_ids"])),
+            section_ids=tuple(cast(list[str], result["section_ids"])),
+            range_count=cast(int, result["range_count"]),
+            action_count=cast(int, result["action_count"]),
+            roofline_present=cast(bool, result["roofline_present"]),
+            limitations=tuple(cast(list[str], result["limitations"])),
         )
 
-    return run_worker(
-        handle,
-        invalid_code=ErrorCode.ARTIFACT_PARSE_FAILED,
-        invalid_message="Nsight Compute report extraction failed",
-        caught=(Exception,),
+    return run_typed_worker(
+        WorkerApplication(
+            definition=NSIGHT_COMPUTE_WORKER,
+            handler=handle,
+            invalid_failure=WorkerFailureKind.INPUT_MALFORMED,
+            invalid_message="Nsight Compute report extraction failed",
+            caught=(Exception,),
+        )
     )
 
 

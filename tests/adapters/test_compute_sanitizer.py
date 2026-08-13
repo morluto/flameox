@@ -17,6 +17,8 @@ from flameox.domain import (
 )
 from flameox.storage import Workspace
 
+pytestmark = pytest.mark.unit
+
 
 def _report(*records: str, extra: str = "") -> str:
     return (

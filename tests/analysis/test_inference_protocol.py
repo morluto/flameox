@@ -13,6 +13,8 @@ from flameox.analysis import (
 )
 from flameox.domain import ComparisonValidity, OracleStatus
 
+pytestmark = pytest.mark.unit
+
 _DIGEST = "sha256:" + "a" * 64
 
 

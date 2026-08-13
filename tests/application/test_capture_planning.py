@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from flameox.action_graph import ActionId, ToolAction
 from flameox.application import (
     AdapterOption,
     CapabilityList,
@@ -34,6 +35,8 @@ from flameox.execution import (
 )
 from flameox.storage import Workspace
 from tests.support.capture import write_workload
+
+pytestmark = pytest.mark.integration
 
 
 class _NvccProbeBroker(SubprocessBroker):
@@ -446,26 +449,28 @@ async def test_invalid_capture_adapter_reports_bounded_recovery_choices(
     assert isinstance(choices, list)
     assert len(choices) <= 64
     assert choices == sorted(choices)
-    assert refused.value.details["next_tool"] == "get_declared_workflow"
+    assert isinstance(refused.value.next_action, ToolAction)
+    assert refused.value.next_action.action is ActionId.GET_DECLARED_WORKFLOW
+    assert refused.value.next_action.arguments == {"kind": "workload", "name": "echo"}
 
 
 @pytest.mark.anyio
-async def test_missing_managed_adapter_points_to_setup_before_fallback(
+async def test_missing_workload_package_points_to_declared_environment(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    write_workload(tmp_path)
+    python = tmp_path / "workload-env" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\nprintf '{\"torch\":null}\\n'\n")
+    python.chmod(0o755)
+    (tmp_path / "flameox.toml").write_text(
+        f"""
+schema_version = 1
+[workloads.echo]
+argv = ["{python}", "-c", "print('candidate')"]
+"""
+    )
     service = CaptureService(workspace)
-    original_get = service.capabilities.get
-    missing = original_get("torch.profiler").model_copy(
-        update={"status": CapabilityStatus.UNAVAILABLE}
-    )
-    monkeypatch.setattr(
-        service.capabilities,
-        "get",
-        lambda adapter: missing if adapter == "torch.profiler" else original_get(adapter),
-    )
 
     with pytest.raises(DomainError) as refused:
         await service.plan(
@@ -474,9 +479,11 @@ async def test_missing_managed_adapter_points_to_setup_before_fallback(
             execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
         )
 
-    assert refused.value.details["next_tool"] == "start_capability_setup"
-    assert refused.value.details["setup_adapters"] == ["torch.profiler"]
+    assert isinstance(refused.value.next_action, ToolAction)
+    assert refused.value.next_action.action is ActionId.INSPECT_CAPABILITIES
+    assert refused.value.details["setup_adapters"] == []
     assert "command" in refused.value.details["fallback_adapters"]
+    assert any(str(python) in item for item in refused.value.remediation)
 
 
 @pytest.mark.anyio

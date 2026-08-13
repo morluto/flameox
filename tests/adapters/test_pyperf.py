@@ -11,6 +11,8 @@ from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import Workspace
 
+pytestmark = pytest.mark.unit
+
 
 def write_suite(path: Path) -> None:
     first = pyperf.Run(

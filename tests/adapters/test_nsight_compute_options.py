@@ -10,6 +10,8 @@ from flameox.adapters.nsight_compute import find_ncu_report_interface
 from flameox.adapters.options import bind_adapter_options
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 
+pytestmark = pytest.mark.unit
+
 
 def test_strict_options_build_only_documented_bounded_arguments(tmp_path: Path) -> None:
     selected = bind_adapter_options(

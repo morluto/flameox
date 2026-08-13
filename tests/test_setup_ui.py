@@ -9,6 +9,8 @@ from flameox import setup_ui
 from flameox.adapters.client_setup import SetupClient
 from flameox.application.setup import SetupInspection
 
+pytestmark = pytest.mark.unit
+
 
 class _CheckboxQuestion:
     def __init__(self, choices: list[Choice]) -> None:

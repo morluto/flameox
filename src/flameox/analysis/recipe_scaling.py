@@ -70,9 +70,6 @@ class ScalingRecipes(RecipeContext):
             ).fetchone()
             assert trial_row is not None
             rows = snapshot.execute(
-                "WITH latest_runs AS (SELECT *, row_number() OVER "
-                "(PARTITION BY run_id ORDER BY published_at DESC) AS revision_order "
-                "FROM runs) "
                 "SELECT t.trial_id, v.name, t.block_id, t.parameter_value_int, "
                 "t.parameter_value_float, r.environment_id, "
                 "coalesce(CAST(m.value_int AS DOUBLE), m.value_float), m.unit "
@@ -81,7 +78,7 @@ class ScalingRecipes(RecipeContext):
                 "parameter_value_float FROM trials) t "
                 "JOIN (SELECT DISTINCT variant_id, name FROM variants) v "
                 "ON v.variant_id = t.variant_id "
-                "JOIN latest_runs r ON r.run_id = t.run_id AND r.revision_order = 1 "
+                "JOIN current_runs r ON r.run_id = t.run_id "
                 "JOIN measurements m ON m.run_id = t.run_id "
                 "WHERE t.experiment_id = ? AND t.outcome = 'succeeded' "
                 "AND m.name = ? AND m.is_warmup = false "

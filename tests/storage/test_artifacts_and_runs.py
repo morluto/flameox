@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import UTC, datetime, timedelta
@@ -21,6 +22,8 @@ from flameox.domain import (
 from flameox.domain.models import ExecutionRunManifest, ImportRunManifest
 from flameox.filesystem import BoundedFileSystem
 from flameox.storage import ArtifactStore, RunStore, Workspace
+
+pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
 DIGEST = "sha256:" + ("a" * 64)
 
@@ -61,6 +64,43 @@ def test_identical_artifact_bytes_share_one_content_object(tmp_path: Path) -> No
     assert left.content.artifact_id == right.content.artifact_id
     assert left.payload_path == right.payload_path
     assert len(list(workspace.paths.artifacts.glob("*/*/artifact.json"))) == 1
+
+
+def test_deduplicating_import_reauthenticates_existing_cas_payload(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    first_source = tmp_path / "first.bin"
+    second_source = tmp_path / "second.bin"
+    first_source.write_bytes(b"trusted")
+    second_source.write_bytes(b"trusted")
+    store = ArtifactStore(workspace)
+    first = store.import_path(first_source, allowed_roots=(tmp_path,), max_bytes=100)
+    first.payload_path.write_bytes(b"corrupt")
+
+    with pytest.raises(DomainError) as caught:
+        store.import_path(second_source, allowed_roots=(tmp_path,), max_bytes=100)
+
+    assert caught.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+
+
+def test_artifact_import_rejects_bytes_that_do_not_match_the_expected_receipt(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source = tmp_path / "handoff.bin"
+    source.write_bytes(b"replacement")
+    expected = "sha256:" + hashlib.sha256(b"validated").hexdigest()
+
+    with pytest.raises(DomainError) as error:
+        ArtifactStore(workspace).import_path(
+            source,
+            allowed_roots=(tmp_path,),
+            max_bytes=100,
+            expected_artifact_id=expected,
+            expected_byte_length=len(b"validated"),
+        )
+
+    assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+    assert not list(workspace.paths.artifacts.glob("*/*/artifact.json"))
 
 
 def test_artifact_import_rejects_symlinks_and_hard_links(tmp_path: Path) -> None:

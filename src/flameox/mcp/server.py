@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
+import anyio
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp_types import (
@@ -20,14 +21,27 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     RootModel,
     SkipValidation,
     StrictBool,
     StrictFloat,
     StrictInt,
+    model_validator,
 )
+from pydantic.json_schema import GenerateJsonSchema, JsonSchemaMode
 
 from flameox import __version__
+from flameox.action_graph import (
+    ACTION_REGISTRY,
+    ActionId,
+    ExternalAction,
+    ManualAction,
+    ToolAction,
+    ToolName,
+    manual_action,
+    tool_action,
+)
 from flameox.adapters import (
     BenchmarkSamplesExtractionResult,
     BenchmarkSamplesExtractor,
@@ -73,6 +87,7 @@ from flameox.analysis import (
 )
 from flameox.application import (
     AdapterPreparationResult,
+    AgentRunProjection,
     AnalysisMaterializationService,
     ArtifactListResult,
     ArtifactMetadataResult,
@@ -139,6 +154,9 @@ from flameox.application import (
     InvestigationService,
     KernelBuildImportResult,
     KernelBuildImportService,
+    KernelValidationCompareRequest,
+    KernelValidationComparisonResult,
+    KernelValidationComparisonService,
     LifecycleEvidenceService,
     LifecycleQueryResult,
     MaterializeAnalysisRequest,
@@ -160,6 +178,7 @@ from flameox.application import (
     RunDiscoveryService,
     RunFilter,
     RunListResult,
+    RunProjectionService,
     RunSetService,
     Scalar,
     StackExamplesResult,
@@ -174,12 +193,16 @@ from flameox.application import (
     WorkloadRequirementsConfig,
     WorkloadService,
     WorkspaceStatus,
+    XctraceImportRequest,
+    XctraceImportResult,
+    XctraceService,
     parse_inference_scenario_config,
     parse_inference_server_config,
     workspace_status,
 )
 from flameox.application.async_work import run_atomic_thread
 from flameox.application.operations import OperationStatus
+from flameox.application.task_supervisor import TaskSupervisor
 from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,
@@ -197,7 +220,6 @@ from flameox.domain import (
     Investigation,
     LimitationDetail,
     PreflightMode,
-    RunManifest,
     RunSet,
     Sensitivity,
     TrialOutcome,
@@ -205,7 +227,7 @@ from flameox.domain import (
 )
 from flameox.mcp.resources import register_resources
 from flameox.models import ContractModel
-from flameox.storage import RunStore, Workspace
+from flameox.storage import Workspace
 
 READ_ONLY = ToolAnnotations(
     read_only_hint=True,
@@ -245,41 +267,28 @@ IDEMPOTENT_EXECUTE = ToolAnnotations(
 )
 
 
+def _action_tool[Handler: Callable[..., Any]](
+    server: MCPServer[Any],
+    action: ActionId,
+) -> Callable[[Handler], Handler]:
+    """Register a workflow action from its one authoritative descriptor."""
+
+    descriptor = ACTION_REGISTRY[action]
+    annotations = descriptor.annotations
+    return server.tool(
+        name=descriptor.tool_name.value,
+        annotations=ToolAnnotations(
+            read_only_hint=annotations.read_only,
+            destructive_hint=annotations.destructive,
+            idempotent_hint=annotations.idempotent,
+            open_world_hint=annotations.open_world,
+        ),
+    )
+
+
 class WorkspaceValidationMode(StrEnum):
     STANDARD = "standard"
     FULL = "full"
-
-
-class ConfigureWorkloadRecoveryContext(ContractModel):
-    """Typed arguments for the safe structured configuration recovery."""
-
-    kind: Literal["configure_workload"]
-    operation: Literal["create"] = "create"
-    config_path: Literal["flameox.toml"] = "flameox.toml"
-
-
-class ManualConfigurationRecoveryContext(ContractModel):
-    """Typed context for configuration that cannot be safely rewritten by MCP."""
-
-    kind: Literal["manual_configuration"]
-    config_path: Literal["flameox.toml"] = "flameox.toml"
-    diagnostic: str = Field(max_length=500)
-    verification_tool: Literal["workload_configuration_status"] = "workload_configuration_status"
-
-
-class ExtractPerfettoRecoveryContext(ContractModel):
-    kind: Literal["extract_perfetto"]
-    run_id: str = Field(min_length=1)
-
-
-class _NonRetryRecovery(ContractModel):
-    safe_to_repeat_same_call: Literal[False] = False
-    retry_after_ms: None = None
-
-
-class _SafeNextToolRecovery(ContractModel):
-    safe_to_repeat_same_call: Literal[True] = True
-    retry_after_ms: None = None
 
 
 class RepeatSameCallRecovery(ContractModel):
@@ -296,114 +305,95 @@ class WaitThenRepeatRecovery(ContractModel):
     next_tool: None = None
 
 
-class ReplanCaptureRecovery(_NonRetryRecovery):
-    kind: Literal["replan_capture"]
-    next_tool: Literal["plan_capture"]
+class RecoveryToolAction(ContractModel):
+    """Transport projection of a validated domain tool action."""
+
+    kind: Literal["tool"] = "tool"
+    action: ActionId
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def arguments_match_registered_action(self) -> RecoveryToolAction:
+        ACTION_REGISTRY[self.action].validate_arguments(self.arguments)
+        return self
+
+    @property
+    def tool_name(self) -> ToolName:
+        return ACTION_REGISTRY[self.action].tool_name
+
+    @classmethod
+    def from_domain(cls, action: ToolAction) -> RecoveryToolAction:
+        return cls(action=action.action, arguments=action.arguments)
 
 
-class InitializeWorkspaceRecovery(_NonRetryRecovery):
-    kind: Literal["initialize_workspace"]
-    next_tool: Literal["initialize_workspace"]
+class RecoveryManualAction(ContractModel):
+    kind: Literal["manual"] = "manual"
+    instruction: str = Field(min_length=1, max_length=500)
+    suggested_action: ActionId | None = None
+    missing_arguments: tuple[str, ...] = ()
+
+    @classmethod
+    def from_domain(cls, action: ManualAction) -> RecoveryManualAction:
+        return cls.model_validate(action.model_dump(mode="json"))
 
 
-class ConfigureWorkloadRecovery(_NonRetryRecovery):
-    kind: Literal["configure_workload"]
-    next_tool: Literal["configure_workload"]
-    context: ConfigureWorkloadRecoveryContext | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
+class RecoveryExternalAction(ContractModel):
+    kind: Literal["external"] = "external"
+    instruction: str = Field(min_length=1, max_length=500)
+    system: str = Field(min_length=1, max_length=100)
+
+    @classmethod
+    def from_domain(cls, action: ExternalAction) -> RecoveryExternalAction:
+        return cls.model_validate(action.model_dump(mode="json"))
 
 
-class InspectWorkloadConfigurationRecovery(_NonRetryRecovery):
-    kind: Literal["inspect_workload_configuration"]
-    next_tool: Literal["workload_configuration_status"]
+class ToolActionRecovery(ContractModel):
+    kind: Literal["tool_action"] = "tool_action"
+    safe_to_repeat_same_call: Literal[False] = False
+    retry_after_ms: None = None
+    action: RecoveryToolAction
+    next_tool: ToolName
+    next_arguments: dict[str, Any]
+
+    @model_validator(mode="after")
+    def projections_match_action(self) -> ToolActionRecovery:
+        if self.next_tool is not self.action.tool_name:
+            raise ValueError("recovery tool projection does not match action registry")
+        if self.next_arguments != self.action.arguments:
+            raise ValueError("recovery argument projection does not match validated action")
+        return self
+
+    @classmethod
+    def from_action(cls, action: ToolAction) -> ToolActionRecovery:
+        projected = RecoveryToolAction.from_domain(action)
+        return cls(
+            action=projected,
+            next_tool=projected.tool_name,
+            next_arguments=projected.arguments,
+        )
 
 
-class StartCapabilitySetupRecovery(_SafeNextToolRecovery):
-    kind: Literal["start_capability_setup"]
-    next_tool: Literal["start_capability_setup"]
-
-
-class PrepareAdapterRecovery(_SafeNextToolRecovery):
-    kind: Literal["prepare_adapter"]
-    next_tool: Literal["prepare_adapter"]
-
-
-class PrepareWorkloadDependenciesRecovery(_SafeNextToolRecovery):
-    kind: Literal["prepare_workload_dependencies"]
-    next_tool: Literal["prepare_workload_dependencies"]
-
-
-class InspectCapabilitiesRecovery(_NonRetryRecovery):
-    kind: Literal["inspect_capabilities"]
-    next_tool: Literal["list_capabilities"]
-
-
-class DiscoverWorkflowsRecovery(_NonRetryRecovery):
-    kind: Literal["discover_workflows"]
-    next_tool: Literal["list_declared_workflows", "get_declared_workflow"]
-
-
-class DiscoverRunsRecovery(_NonRetryRecovery):
-    kind: Literal["discover_runs"]
-    next_tool: Literal["list_runs"]
-
-
-class DiscoverArtifactsRecovery(_NonRetryRecovery):
-    kind: Literal["discover_artifacts"]
-    next_tool: Literal["list_artifacts"]
-
-
-class ImportArtifactRecovery(_NonRetryRecovery):
-    kind: Literal["import_artifact"]
-    next_tool: Literal["import_artifact"]
-
-
-class ExtractPerfettoRecovery(_SafeNextToolRecovery):
-    kind: Literal["extract_perfetto"]
-    next_tool: Literal["extract_perfetto"]
-    context: ExtractPerfettoRecoveryContext | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-
-
-class ConfigureInferenceRecovery(_NonRetryRecovery):
-    kind: Literal["configure_inference"]
-    next_tool: Literal["configure_inference_server", "list_inference_configurations"]
-
-
-class ReplanInferenceRecovery(_NonRetryRecovery):
-    kind: Literal["replan_inference"]
-    next_tool: Literal["plan_inference_scenario"]
-
-
-class ManualRecovery(_NonRetryRecovery):
+class ManualRecovery(ContractModel):
     kind: Literal["manual"]
+    safe_to_repeat_same_call: Literal[False] = False
+    retry_after_ms: None = None
     next_tool: None = None
-    context: ManualConfigurationRecoveryContext | None = Field(
+    action: RecoveryManualAction | RecoveryExternalAction | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+
+    @classmethod
+    def from_action(cls, action: ManualAction | ExternalAction) -> ManualRecovery:
+        projected: RecoveryManualAction | RecoveryExternalAction
+        if isinstance(action, ManualAction):
+            projected = RecoveryManualAction.from_domain(action)
+        else:
+            projected = RecoveryExternalAction.from_domain(action)
+        return cls(kind="manual", action=projected)
 
 
 type RecoveryAction = Annotated[
-    RepeatSameCallRecovery
-    | WaitThenRepeatRecovery
-    | ReplanCaptureRecovery
-    | InitializeWorkspaceRecovery
-    | ConfigureWorkloadRecovery
-    | InspectWorkloadConfigurationRecovery
-    | StartCapabilitySetupRecovery
-    | PrepareAdapterRecovery
-    | PrepareWorkloadDependenciesRecovery
-    | InspectCapabilitiesRecovery
-    | DiscoverWorkflowsRecovery
-    | DiscoverRunsRecovery
-    | DiscoverArtifactsRecovery
-    | ImportArtifactRecovery
-    | ExtractPerfettoRecovery
-    | ConfigureInferenceRecovery
-    | ReplanInferenceRecovery
-    | ManualRecovery,
+    RepeatSameCallRecovery | WaitThenRepeatRecovery | ToolActionRecovery | ManualRecovery,
     Field(discriminator="kind"),
 ]
 
@@ -442,7 +432,31 @@ class ToolPayload[T: BaseModel](
 ):
     """Success/failure union represented by the object schema required by MCP tools."""
 
-    model_config = ConfigDict(json_schema_extra={"type": "object"})
+    model_config = ConfigDict(
+        json_schema_extra={"type": "object"},
+        json_schema_mode_override="serialization",
+    )
+
+    @classmethod
+    def model_json_schema(
+        cls,
+        by_alias: bool = True,
+        ref_template: str = "#/$defs/{model}",
+        schema_generator: type[GenerateJsonSchema] = GenerateJsonSchema,
+        mode: JsonSchemaMode = "validation",
+        *,
+        union_format: Literal["any_of", "primitive_type_array"] = "any_of",
+    ) -> dict[str, Any]:
+        """Expose this response-only contract in serialization mode to the MCP SDK."""
+
+        del mode
+        return super().model_json_schema(
+            by_alias=by_alias,
+            ref_template=ref_template,
+            schema_generator=schema_generator,
+            mode="serialization",
+            union_format=union_format,
+        )
 
 
 class CaptureReceipt(ContractModel):
@@ -502,7 +516,9 @@ class AppContext:
     capabilities: CapabilityService
     capture_plans: CapturePlanRegistry
     experiment_plans: ExperimentPlanRegistry
+    task_supervisor: TaskSupervisor
     capture: CaptureService | None = None
+    reduction: ReductionService | None = None
     detached_captures: DetachedCaptureManager | None = None
     capability_setup: CapabilitySetupManager | None = None
 
@@ -534,19 +550,32 @@ class AppContext:
             plans=self.experiment_plans,
         )
 
+    def reduction_service(self) -> ReductionService:
+        if self.reduction is None:
+            self.reduction = ReductionService(
+                self.require_workspace(),
+                supervisor=self.task_supervisor,
+            )
+        return self.reduction
+
     def detached_service(self) -> DetachedCaptureManager:
         if self.detached_captures is None:
             workspace = self.require_workspace()
             self.detached_captures = DetachedCaptureManager(
                 workspace,
                 self.capture_service(),
+                supervisor=self.task_supervisor,
             )
         return self.detached_captures
 
     def capability_setup_service(self) -> CapabilitySetupManager:
         if self.capability_setup is None:
             workspace = self.require_workspace()
-            self.capability_setup = CapabilitySetupManager(workspace, self.capabilities)
+            self.capability_setup = CapabilitySetupManager(
+                workspace,
+                self.capabilities,
+                supervisor=self.task_supervisor,
+            )
         return self.capability_setup
 
 
@@ -621,7 +650,7 @@ def _invalid_arguments(
             details={"fields": list(fields)},
             remediation=remediation,
             run_id=None,
-            recovery=ManualRecovery(kind="manual"),
+            recovery=ManualRecovery.from_action(manual_action(remediation[0])),
         ),
     )
     return CallToolResult(
@@ -632,147 +661,25 @@ def _invalid_arguments(
 
 
 def _recovery_for(error: DomainError) -> RecoveryAction:
-    if error.details.get("invalid_configuration") is True:
-        if error.details.get("next_tool") == "configure_workload":
-            return ConfigureWorkloadRecovery(
-                kind="configure_workload",
-                safe_to_repeat_same_call=False,
-                next_tool="configure_workload",
-                context=ConfigureWorkloadRecoveryContext(kind="configure_workload"),
-            )
-        return ManualRecovery(
-            kind="manual",
-            safe_to_repeat_same_call=False,
-            context=ManualConfigurationRecoveryContext(
-                kind="manual_configuration",
-                diagnostic=str(error.details.get("diagnostic", error.message))[:500],
-            ),
-        )
+    if isinstance(error.next_action, ToolAction):
+        return ToolActionRecovery.from_action(error.next_action)
+    if isinstance(error.next_action, (ManualAction, ExternalAction)):
+        return ManualRecovery.from_action(error.next_action)
     if error.code is ErrorCode.RUN_NOT_FOUND or error.details.get("missing_entity") == "run":
-        return DiscoverRunsRecovery(
-            kind="discover_runs",
-            safe_to_repeat_same_call=False,
-            next_tool="list_runs",
-        )
+        return ToolActionRecovery.from_action(tool_action(ActionId.LIST_RUNS))
     if error.details.get("missing_entity") == "artifact":
-        return DiscoverArtifactsRecovery(
-            kind="discover_artifacts",
-            safe_to_repeat_same_call=False,
-            next_tool="list_artifacts",
-        )
-    if error.details.get("next_tool") == "list_declared_workflows":
-        return DiscoverWorkflowsRecovery(
-            kind="discover_workflows",
-            safe_to_repeat_same_call=False,
-            next_tool="list_declared_workflows",
-        )
-    if error.details.get("next_tool") == "configure_workload":
-        return ConfigureWorkloadRecovery(
-            kind="configure_workload",
-            safe_to_repeat_same_call=False,
-            next_tool="configure_workload",
-        )
-    if error.details.get("next_tool") == "workload_configuration_status":
-        return InspectWorkloadConfigurationRecovery(
-            kind="inspect_workload_configuration",
-            safe_to_repeat_same_call=False,
-            next_tool="workload_configuration_status",
-        )
-    if error.details.get("next_tool") == "start_capability_setup":
-        return StartCapabilitySetupRecovery(
-            kind="start_capability_setup",
-            safe_to_repeat_same_call=True,
-            next_tool="start_capability_setup",
-        )
-    if error.details.get("next_tool") == "prepare_adapter":
-        return PrepareAdapterRecovery(
-            kind="prepare_adapter",
-            safe_to_repeat_same_call=True,
-            next_tool="prepare_adapter",
-        )
-    if error.details.get("next_tool") == "prepare_workload_dependencies":
-        return PrepareWorkloadDependenciesRecovery(
-            kind="prepare_workload_dependencies",
-            safe_to_repeat_same_call=True,
-            next_tool="prepare_workload_dependencies",
-        )
-    if error.details.get("next_tool") == "get_declared_workflow":
-        return DiscoverWorkflowsRecovery(
-            kind="discover_workflows",
-            safe_to_repeat_same_call=False,
-            next_tool="get_declared_workflow",
-        )
-    if error.details.get("next_tool") == "plan_capture":
-        return ReplanCaptureRecovery(
-            kind="replan_capture",
-            safe_to_repeat_same_call=False,
-            next_tool="plan_capture",
-        )
-    if error.details.get("next_tool") == "import_artifact":
-        return ImportArtifactRecovery(
-            kind="import_artifact",
-            safe_to_repeat_same_call=False,
-            next_tool="import_artifact",
-        )
-    if error.details.get("next_tool") == "extract_perfetto":
-        run_id = error.details.get("run_id")
-        context = (
-            ExtractPerfettoRecoveryContext(kind="extract_perfetto", run_id=run_id)
-            if isinstance(run_id, str)
-            else None
-        )
-        return ExtractPerfettoRecovery(
-            kind="extract_perfetto",
-            safe_to_repeat_same_call=True,
-            next_tool="extract_perfetto",
-            context=context,
-        )
-    if error.details.get("next_tool") == "list_capabilities":
-        return InspectCapabilitiesRecovery(
-            kind="inspect_capabilities",
-            safe_to_repeat_same_call=False,
-            next_tool="list_capabilities",
-        )
-    if error.details.get("next_tool") == "configure_inference_server":
-        return ConfigureInferenceRecovery(
-            kind="configure_inference",
-            safe_to_repeat_same_call=False,
-            next_tool="configure_inference_server",
-        )
-    if error.details.get("next_tool") == "list_inference_configurations":
-        return ConfigureInferenceRecovery(
-            kind="configure_inference",
-            safe_to_repeat_same_call=False,
-            next_tool="list_inference_configurations",
-        )
-    if error.details.get("next_tool") == "plan_inference_scenario":
-        return ReplanInferenceRecovery(
-            kind="replan_inference",
-            safe_to_repeat_same_call=False,
-            next_tool="plan_inference_scenario",
-        )
-    if error.details.get("next_tool") == "manual":
-        return ManualRecovery(
-            kind="manual",
-            safe_to_repeat_same_call=False,
-        )
+        return ToolActionRecovery.from_action(tool_action(ActionId.LIST_ARTIFACTS))
     if error.code is ErrorCode.WORKSPACE_NOT_FOUND:
-        return InitializeWorkspaceRecovery(
-            kind="initialize_workspace",
-            safe_to_repeat_same_call=False,
-            next_tool="initialize_workspace",
-        )
+        return ToolActionRecovery.from_action(tool_action(ActionId.INITIALIZE_WORKSPACE))
     if error.code is ErrorCode.CAPABILITY_UNAVAILABLE:
-        return InspectCapabilitiesRecovery(
-            kind="inspect_capabilities",
-            safe_to_repeat_same_call=False,
-            next_tool="list_capabilities",
-        )
+        return ToolActionRecovery.from_action(tool_action(ActionId.INSPECT_CAPABILITIES))
     if error.code in {ErrorCode.INVALID_CAPTURE_PLAN, ErrorCode.PROCESS_TIMEOUT}:
-        return ReplanCaptureRecovery(
-            kind="replan_capture",
-            safe_to_repeat_same_call=False,
-            next_tool="plan_capture",
+        return ManualRecovery.from_action(
+            manual_action(
+                "Inspect the declared workload and supply a complete capture plan request.",
+                suggested_action=ActionId.PLAN_CAPTURE,
+                missing_arguments=("workload_name", "adapter", "parameters"),
+            )
         )
     if error.code is ErrorCode.WRITE_LOCK_TIMEOUT:
         return WaitThenRepeatRecovery(
@@ -786,9 +693,12 @@ def _recovery_for(error: DomainError) -> RecoveryAction:
             safe_to_repeat_same_call=True,
             retry_after_ms=250,
         )
-    return ManualRecovery(
-        kind="manual",
-        safe_to_repeat_same_call=False,
+    return ManualRecovery.from_action(
+        manual_action(
+            error.remediation[0]
+            if error.remediation
+            else "Inspect the failure details and choose a safe next step.",
+        )
     )
 
 
@@ -808,8 +718,12 @@ def _safe_import_path(
         raise DomainError(
             code=ErrorCode.EXECUTION_REFUSED,
             message="MCP artifact paths cannot contain NUL bytes.",
-            details={"next_tool": "import_artifact"},
             remediation=(f"Provide a regular file beneath source_root={source_root!r}.",),
+            next_action=manual_action(
+                "Provide a valid artifact path, kind, and sensitivity classification.",
+                suggested_action=ActionId.IMPORT_ARTIFACT,
+                missing_arguments=("path", "kind", "sensitivity"),
+            ),
         )
     try:
         candidate.parent.resolve().relative_to(root)
@@ -817,10 +731,15 @@ def _safe_import_path(
         raise DomainError(
             code=ErrorCode.EXECUTION_REFUSED,
             message="MCP artifact path is outside the selected local import root.",
-            details={"next_tool": "import_artifact", "source_root": source_root},
+            details={"source_root": source_root},
             remediation=(
                 f"Use a path beneath source_root={source_root!r}; project and temporary roots "
                 "are the only MCP import roots.",
+            ),
+            next_action=manual_action(
+                "Choose a path inside the reported source root before importing.",
+                suggested_action=ActionId.IMPORT_ARTIFACT,
+                missing_arguments=("path",),
             ),
         ) from exc
     return candidate
@@ -862,30 +781,35 @@ def create_server(
                 if workspace_root is not None:
                     raise
                 workspace = None
-        state = AppContext(
-            project_root=project_root,
-            workspace=workspace,
-            capabilities=CapabilityService(workspace),
-            capture_plans=CapturePlanRegistry(
-                max_parallel_captures=(
-                    workspace.config.capture.max_parallel_captures if workspace is not None else 2
-                )
-            ),
-            experiment_plans=ExperimentPlanRegistry(),
-        )
-        if workspace is not None:
-            state.detached_captures = DetachedCaptureManager(
-                workspace,
-                state.capture_service(),
+        async with anyio.create_task_group() as tasks:
+            supervisor = TaskSupervisor(tasks)
+            state = AppContext(
+                project_root=project_root,
+                workspace=workspace,
+                capabilities=CapabilityService(workspace),
+                capture_plans=CapturePlanRegistry(),
+                experiment_plans=ExperimentPlanRegistry(),
+                task_supervisor=supervisor,
             )
-            state.capability_setup = CapabilitySetupManager(workspace, state.capabilities)
-        try:
-            yield state
-        finally:
-            if state.detached_captures is not None:
-                await state.detached_captures.shutdown()
-            if state.capability_setup is not None:
-                await state.capability_setup.shutdown()
+            if workspace is not None:
+                state.detached_captures = DetachedCaptureManager(
+                    workspace,
+                    state.capture_service(),
+                    supervisor=supervisor,
+                )
+                state.capability_setup = CapabilitySetupManager(
+                    workspace,
+                    state.capabilities,
+                    supervisor=supervisor,
+                )
+            try:
+                yield state
+            finally:
+                if state.detached_captures is not None:
+                    await state.detached_captures.shutdown()
+                if state.capability_setup is not None:
+                    await state.capability_setup.shutdown()
+                tasks.cancel_scope.cancel()
 
     server = MCPServer(
         "flameox",
@@ -896,7 +820,8 @@ def create_server(
             "when source, environment, command, and artifact provenance must be reproducible. "
             "Do not provision hosts or install undeclared packages. If list_capabilities reports "
             "a managed setup action, call start_capability_setup; it installs only the declared "
-            "FlameOx optional providers into the active managed runtime, verifies them, and "
+            "FlameOx optional providers into version-addressed provider environments, verifies "
+            "their receipts and executables, leaves the active server runtime unchanged, and "
             "does not execute a workload. Host containment is not required for the agent path: "
             "plan_capture(capture_mode='auto') followed by execute_capture_plan runs the "
             "declared workload directly and records the execution limitation. Use "
@@ -915,8 +840,8 @@ def create_server(
             "start_capability_setup (when the scoped result names setup_adapters) → "
             "prepare_adapter "
             "(for an unapproved installed third-party "
-            "adapter) → prepare_workload_dependencies (when a named workload declares missing "
-            "Python distributions) → list_capabilities(adapter='<selected adapter>') → "
+            "adapter) → prepare_workload_dependencies (to inspect a named workload's Python "
+            "environment without changing it) → list_capabilities(adapter='<selected adapter>') → "
             "plan_capture(preflight_mode='auto', "
             "capture_mode='auto') "
             "→ execute_capture_plan "
@@ -943,7 +868,7 @@ def create_server(
         lifespan=lifespan,
     )
 
-    @server.tool(annotations=INITIALIZE)
+    @_action_tool(server, ActionId.INITIALIZE_WORKSPACE)
     async def initialize_workspace(
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[WorkspaceStatus]]:
@@ -958,19 +883,22 @@ def create_server(
                 state.project_root,
                 workspace_root=selected_workspace_root,
             )
-            capture_plans = CapturePlanRegistry(
-                max_parallel_captures=workspace.config.capture.max_parallel_captures
-            )
+            capture_plans = CapturePlanRegistry()
             detached_captures = DetachedCaptureManager(
                 workspace,
                 CaptureService(workspace, plans=capture_plans),
+                supervisor=state.task_supervisor,
             )
             state.workspace = workspace
             state.capabilities = CapabilityService(workspace)
             state.capture_plans = capture_plans
             state.experiment_plans = ExperimentPlanRegistry()
             state.detached_captures = detached_captures
-            state.capability_setup = CapabilitySetupManager(workspace, state.capabilities)
+            state.capability_setup = CapabilitySetupManager(
+                workspace,
+                state.capabilities,
+                supervisor=state.task_supervisor,
+            )
             result = workspace_status(workspace)
             return _success(result, f"Initialized workspace {result.workspace_id}.")
         except DomainError as error:
@@ -987,7 +915,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="workload_configuration_status", annotations=READ_ONLY)
+    @_action_tool(server, ActionId.INSPECT_WORKLOAD_CONFIGURATION)
     async def workload_configuration_status_tool(
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[WorkloadConfigurationStatus]]:
@@ -1004,7 +932,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="configure_workload", annotations=CONFIGURE)
+    @_action_tool(server, ActionId.CONFIGURE_WORKLOAD)
     async def configure_workload_tool(
         name: Annotated[
             str,
@@ -1074,12 +1002,12 @@ def create_server(
             ).configure(request)
             return _success(
                 result,
-                f"Workload {name!r} is {result.action}; call {result.next_tool} next.",
+                f"Workload {name!r} is {result.action}; follow the returned next_action.",
             )
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="configure_inference_server", annotations=CONFIGURE)
+    @_action_tool(server, ActionId.CONFIGURE_INFERENCE_SERVER)
     async def configure_inference_server_tool(
         name: Annotated[
             str,
@@ -1220,7 +1148,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="list_inference_configurations", annotations=READ_ONLY)
+    @_action_tool(server, ActionId.LIST_INFERENCE_CONFIGURATIONS)
     async def list_inference_configurations_tool(
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[InferenceConfigurationList]]:
@@ -1236,7 +1164,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="plan_inference_scenario", annotations=READ_ONLY)
+    @_action_tool(server, ActionId.PLAN_INFERENCE_SCENARIO)
     async def plan_inference_scenario_tool(
         scenario_name: Annotated[str, Field(min_length=1, max_length=100)],
         ctx: Context[AppContext],
@@ -1339,7 +1267,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="list_capabilities", annotations=READ_ONLY)
+    @_action_tool(server, ActionId.INSPECT_CAPABILITIES)
     async def list_capabilities_tool(
         ctx: Context[AppContext],
         mode: Literal["passive", "active_cached", "active_refresh"] = "passive",
@@ -1389,7 +1317,7 @@ def create_server(
             ),
         )
 
-    @server.tool(annotations=CONFIGURE)
+    @_action_tool(server, ActionId.START_CAPABILITY_SETUP)
     async def start_capability_setup(
         adapters: Annotated[
             tuple[
@@ -1437,7 +1365,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="get_capability_setup", annotations=READ_ONLY)
+    @_action_tool(server, ActionId.GET_CAPABILITY_SETUP)
     async def get_capability_setup(
         operation_id: Annotated[str, Field(min_length=4, max_length=100)],
         ctx: Context[AppContext],
@@ -1468,7 +1396,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="prepare_adapter", annotations=CONFIGURE)
+    @_action_tool(server, ActionId.PREPARE_ADAPTER)
     async def prepare_adapter_tool(
         adapter: Annotated[
             str,
@@ -1507,7 +1435,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="prepare_workload_dependencies", annotations=CONFIGURE)
+    @_action_tool(server, ActionId.PREPARE_WORKLOAD_DEPENDENCIES)
     async def prepare_workload_dependencies_tool(
         workload_name: Annotated[
             str,
@@ -1516,17 +1444,18 @@ def create_server(
                 max_length=100,
                 pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
                 description=(
-                    "Declared workload whose Python distribution requirements are installed."
+                    "Declared workload whose Python distribution requirements are inspected."
                 ),
             ),
         ],
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[WorkloadDependencySetupResult]]:
-        """Install declared workload Python distributions into the active managed runtime.
+        """Inspect declared workload Python distributions in its bound interpreter.
 
-        Only requirements already present in the named workload's flameox.toml definition are
-        installed. The tool never executes a workload. The result includes an active preflight and
-        tells the agent whether to plan or inspect a remaining host capability.
+        This operation never installs packages, mutates an environment, or executes the workload;
+        in other words, it never executes user code.
+        The result includes an active preflight and tells the agent whether to plan capture or fix
+        the declared environment outside Flameox.
         """
         try:
             result = await WorkloadDependencyService(
@@ -1535,13 +1464,12 @@ def create_server(
             ).prepare(workload_name)
             return _success(
                 result,
-                f"Prepared dependencies for {workload_name!r}; call "
-                f"{result.next_tool or 'list_capabilities'} next.",
+                f"Inspected dependencies for {workload_name!r}; follow the returned next_action.",
             )
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="list_declared_workflows", annotations=READ_ONLY)
+    @_action_tool(server, ActionId.LIST_DECLARED_WORKFLOWS)
     async def list_declared_workflows_tool(
         ctx: Context[AppContext],
         kind: DeclaredWorkflowKind = DeclaredWorkflowKind.WORKLOAD,
@@ -1568,7 +1496,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="get_declared_workflow", annotations=READ_ONLY)
+    @_action_tool(server, ActionId.GET_DECLARED_WORKFLOW)
     async def get_declared_workflow_tool(
         kind: DeclaredWorkflowKind,
         name: str,
@@ -1583,7 +1511,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="plan_capture", annotations=READ_ONLY)
+    @_action_tool(server, ActionId.PLAN_CAPTURE)
     async def plan_capture_tool(
         workload_name: Annotated[
             str,
@@ -1659,7 +1587,30 @@ def create_server(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 ErrorCode.EXECUTION_REFUSED,
             }:
-                error.details.update({"next_tool": "plan_capture", "capture_mode": "auto"})
+                error.details["capture_mode"] = "auto"
+                error.next_action = tool_action(
+                    ActionId.PLAN_CAPTURE,
+                    workload_name=workload_name,
+                    adapter=adapter,
+                    parameters=cast(JsonValue, parameters),
+                    preflight_mode=preflight_mode.value,
+                    capture_mode="auto",
+                    external_context=(
+                        external_context.model_dump(mode="json")
+                        if external_context is not None
+                        else None
+                    ),
+                    compute_sanitizer_options=(
+                        compute_sanitizer_options.model_dump(mode="json")
+                        if compute_sanitizer_options is not None
+                        else None
+                    ),
+                    torch_profiler_options=(
+                        torch_profiler_options.model_dump(mode="json")
+                        if torch_profiler_options is not None
+                        else None
+                    ),
+                )
                 error.remediation = (
                     "Re-plan with capture_mode='auto' to run directly and record the missing "
                     "containment as an execution limitation.",
@@ -1715,7 +1666,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="start_detached_capture", annotations=IDEMPOTENT_EXECUTE)
+    @_action_tool(server, ActionId.START_DETACHED_CAPTURE)
     async def start_detached_capture_tool(
         plan_token: str,
         idempotency_key: Annotated[
@@ -1737,7 +1688,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(annotations=READ_ONLY)
+    @_action_tool(server, ActionId.GET_DETACHED_CAPTURE)
     async def get_detached_capture(
         run_id: str,
         ctx: Context[AppContext],
@@ -2007,23 +1958,19 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[ReductionPlan]]:
         """Bind immutable input and approved reducer/predicate identities before execution."""
         try:
-            plan = ReductionService(ctx.request_context.lifespan_context.require_workspace()).plan(
-                request
-            )
+            plan = ctx.request_context.lifespan_context.reduction_service().plan(request)
             return _success(plan, f"Planned reduction {plan.plan_id}.")
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(annotations=EXECUTE)
+    @_action_tool(server, ActionId.EXECUTE_REDUCTION)
     async def execute_reduction(
         plan_id: str,
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[ReductionResult]]:
         """Execute one bound reducer lifecycle and independently revalidate its candidate."""
         try:
-            result = await ReductionService(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).execute(plan_id)
+            result = await ctx.request_context.lifespan_context.reduction_service().execute(plan_id)
             return _success(
                 result,
                 f"Reduction {result.reduction_id} is {result.disposition}.",
@@ -2031,16 +1978,14 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(annotations=READ_ONLY)
+    @_action_tool(server, ActionId.GET_REDUCTION)
     async def get_reduction(
         reduction_id: str,
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[ReductionResult]]:
         """Reconnect to one immutable terminal reduction result."""
         try:
-            result = ReductionService(ctx.request_context.lifespan_context.require_workspace()).get(
-                reduction_id
-            )
+            result = ctx.request_context.lifespan_context.reduction_service().get(reduction_id)
             return _success(
                 result,
                 f"Reduction {result.reduction_id} is {result.disposition}.",
@@ -2078,7 +2023,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="import_artifact", annotations=ADDITIVE)
+    @_action_tool(server, ActionId.IMPORT_ARTIFACT)
     async def import_artifact_tool(
         path: Annotated[
             str,
@@ -2190,6 +2135,52 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
+    @_action_tool(server, ActionId.IMPORT_XCTRACE)
+    async def import_xctrace_tool(
+        path: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=4_096,
+                description="Native Metal System Trace .trace bundle beneath source_root.",
+            ),
+        ],
+        ctx: Context[AppContext],
+        source_root: Literal["project", "temp"] = "project",
+        max_export_bytes: Annotated[StrictInt, Field(ge=1, le=16 * 1024 * 1024)] = 4 * 1024 * 1024,
+    ) -> Annotated[CallToolResult, ToolPayload[XctraceImportResult]]:
+        """Preserve a native Metal trace bundle and bounded xctrace TOC export."""
+        try:
+            state = ctx.request_context.lifespan_context
+            workspace = state.require_workspace()
+            result = await XctraceService(workspace).import_trace(
+                XctraceImportRequest(
+                    trace_path=_safe_import_path(state.project_root, path, source_root),
+                    allow_external_path=source_root == "temp",
+                    max_export_bytes=max_export_bytes,
+                )
+            )
+            return _success(
+                result,
+                f"Imported native Metal trace in run {result.run_id}.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Run {result.run_id}",
+                        uri=result.run_resource_uri,
+                        description="Authoritative xctrace import run.",
+                        mime_type="application/json",
+                    ),
+                    ResourceLink(
+                        name=f"Artifact {result.trace_artifact_id}",
+                        uri=result.trace_resource_uri,
+                        description="Sensitive packaged native .trace bundle.",
+                        mime_type="application/json",
+                    ),
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
     @server.tool(name="import_kernel_build", annotations=ADDITIVE)
     async def import_kernel_build_tool(
         path: Annotated[
@@ -2292,7 +2283,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(annotations=READ_ONLY)
+    @_action_tool(server, ActionId.LIST_RUNS)
     async def list_runs(
         limit: Annotated[StrictInt, Field(ge=1, le=1_000)],
         ctx: Context[AppContext],
@@ -2313,10 +2304,12 @@ def create_server(
     async def get_run(
         run_id: str,
         ctx: Context[AppContext],
-    ) -> Annotated[CallToolResult, ToolPayload[RunManifest]]:
+    ) -> Annotated[CallToolResult, ToolPayload[AgentRunProjection]]:
         """Hydrate a run selected by list_runs; use an analyze_* tool for bounded interpretation."""
         try:
-            result = RunStore(ctx.request_context.lifespan_context.require_workspace()).read(run_id)
+            result = RunProjectionService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).get(run_id)
             return _success(result, f"Run {run_id} is {result.capture_status.value}.")
         except DomainError as error:
             return _failure(error)
@@ -2407,7 +2400,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="list_artifacts", annotations=READ_ONLY)
+    @_action_tool(server, ActionId.LIST_ARTIFACTS)
     async def list_artifacts_tool(
         limit: Annotated[StrictInt, Field(ge=1, le=1_000)],
         ctx: Context[AppContext],
@@ -2637,6 +2630,63 @@ def create_server(
                         name=f"Comparison {comparison_id}",
                         uri=resource_uri,
                         description="Authoritative materialized comparison evidence.",
+                        mime_type="application/json",
+                    ),
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="compare_kernel_validation", annotations=READ_ONLY)
+    async def compare_kernel_validation_tool(
+        request: KernelValidationCompareRequest,
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[KernelValidationComparisonResult]]:
+        """Compare exact correctness metrics from two immutable run cohorts."""
+        try:
+            result = await run_atomic_thread(
+                lambda: KernelValidationComparisonService(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).compare(request)
+            )
+            return _success(
+                result,
+                f"Kernel-validation comparison is {result.comparison.decision.value} "
+                f"({result.comparison.validity.value}).",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="record_kernel_validation_comparison", annotations=ADDITIVE)
+    async def record_kernel_validation_comparison_tool(
+        request: KernelValidationCompareRequest,
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[EvidenceReceipt]]:
+        """Persist a correctness comparison and exact input provenance."""
+        try:
+            result = await run_atomic_thread(
+                lambda: KernelValidationComparisonService(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).record(request)
+            )
+            comparison_id = result.comparison.comparison_id
+            assert result.materialized_commit_id is not None
+            resource_uri = f"flameox://evidence/comparison/{comparison_id}"
+            receipt = EvidenceReceipt(
+                ref_type="comparison",
+                ref_id=comparison_id,
+                materialized_commit_id=result.materialized_commit_id,
+                evidence_ref_ids=tuple(item.ref_id for item in result.evidence),
+                resource_uri=resource_uri,
+            )
+            return _success(
+                receipt,
+                f"Recorded kernel-validation comparison {comparison_id}.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Kernel-validation comparison {comparison_id}",
+                        uri=resource_uri,
+                        description="Derived correctness comparison with exact input provenance.",
                         mime_type="application/json",
                     ),
                 ),
@@ -3568,7 +3618,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="extract_memray", annotations=ADDITIVE)
+    @_action_tool(server, ActionId.EXTRACT_MEMRAY)
     async def extract_memray_tool(
         run_id: str,
         ctx: Context[AppContext],
@@ -3588,7 +3638,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="extract_perfetto", annotations=ADDITIVE)
+    @_action_tool(server, ActionId.EXTRACT_PERFETTO)
     async def extract_perfetto_tool(
         run_id: Annotated[str, Field(min_length=1, max_length=200)],
         ctx: Context[AppContext],
@@ -3607,7 +3657,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="extract_nsight_systems", annotations=ADDITIVE)
+    @_action_tool(server, ActionId.EXTRACT_NSIGHT_SYSTEMS)
     async def extract_nsight_systems_tool(
         run_id: Annotated[str, Field(min_length=1, max_length=200)],
         ctx: Context[AppContext],

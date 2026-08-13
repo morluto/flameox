@@ -5,7 +5,7 @@ import math
 from collections.abc import Iterator
 from pathlib import Path
 from statistics import median
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, NamedTuple
 
 import ijson
 from ijson import IncompleteJSONError, JSONError
@@ -19,8 +19,11 @@ from pydantic import (
     model_validator,
 )
 
+from flameox.adapters.artifact_workers import IsolatedWorkerHarness
+from flameox.application.provider_runtime import ProviderRuntime, ProviderRuntimeManager
 from flameox.domain import (
     ArtifactKind,
+    CapabilityExtra,
     DomainError,
     ErrorCode,
     EvidenceLevel,
@@ -38,6 +41,12 @@ from flameox.evidence import (
 )
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
+from flameox.workers.aiperf_contract import (
+    AIPERF_WORKER,
+    AIPerfProjectionRow,
+    AIPerfWorkerRequest,
+    AIPerfWorkerResult,
+)
 
 # ---------------------------------------------------------------------------
 # Mooncake streaming JSONL request-trace validation
@@ -56,57 +65,6 @@ from flameox.storage import ArtifactStore, RunStore, Workspace
 # limitation rather than OOM. The caller bounds consumption via ``max_rows``.
 
 _REQUIRED_FIELDS = frozenset({"timestamp", "input_length", "output_length"})
-_SAFE_ERROR_CATEGORIES = {
-    "authentication",
-    "cancelled",
-    "connection",
-    "invalid_request",
-    "not_found",
-    "permission_denied",
-    "rate_limited",
-    "server_error",
-    "timeout",
-    "unavailable",
-}
-
-
-def _safe_error_category(value: Any) -> str:
-    """Reduce provider-owned error text to a fixed, non-sensitive category."""
-    if not isinstance(value, str):
-        return "provider_error"
-    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
-    if normalized in _SAFE_ERROR_CATEGORIES:
-        return normalized
-    checks = (
-        (("timeout", "timed_out", "deadline"), "timeout"),
-        (("cancel",), "cancelled"),
-        (("rate_limit", "throttl"), "rate_limited"),
-        (("unauthor", "authenticat"), "authentication"),
-        (("forbidden", "permission"), "permission_denied"),
-        (("connect", "network"), "connection"),
-        (("validation", "invalid", "bad_request"), "invalid_request"),
-        (("not_found",), "not_found"),
-        (("unavailable",), "unavailable"),
-        (("server", "internal"), "server_error"),
-    )
-    for needles, category in checks:
-        if any(needle in normalized for needle in needles):
-            return category
-    return "provider_error"
-
-
-def _safe_error_code(value: Any) -> str | None:
-    """Keep bounded numeric status codes; collapse all provider strings."""
-    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 999:
-        return str(value)
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped.isascii() and stripped.isdecimal() and len(stripped) <= 3:
-            numeric = int(stripped)
-            if 0 <= numeric <= 999:
-                return str(numeric)
-        return _safe_error_category(stripped)
-    return None
 
 
 class MooncakeRequestRow(ContractModel):
@@ -322,78 +280,69 @@ class AIPerfRequestRow(ContractModel):
 
 
 class AIPerfRecordParser:
-    """Stream AIPerf 0.12 record exports without retaining provider payloads."""
+    """Project native AIPerf records in the exact prepared provider environment."""
 
     max_line_bytes = 1024 * 1024
 
-    def __init__(self, max_rows: int = 1_000_000) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        runtime: ProviderRuntime,
+        max_rows: int = 1_000_000,
+    ) -> None:
         if max_rows <= 0:
             raise ValueError("max_rows must be positive")
+        self.workspace = workspace
+        self.runtime = runtime
         self.max_rows = max_rows
+        self.truncated = False
+        self.worker_result: AIPerfWorkerResult | None = None
 
     def iter_rows(
         self, path: Path, *, inputs_index: AIPerfInputsIndex | None = None
     ) -> Iterator[AIPerfRequestRow]:
-        self.truncated = False
-        self._inputs_index = inputs_index
         self._corr_matched = 0
         self._corr_missing_session = 0
         self._corr_turn_out_of_range = 0
         self._corr_no_id = 0
-        record_count = 0
-        try:
-            with path.open("rb") as stream:
-                line_index = 0
-                while raw := stream.readline(self.max_line_bytes + 1):
-                    if not raw.strip():
-                        line_index += 1
-                        continue
-                    if record_count >= self.max_rows:
-                        self.truncated = True
-                        break
-                    if len(raw) > self.max_line_bytes:
-                        raise ValueError(f"record line {line_index} exceeds the byte limit")
-                    payload = json.loads(raw)
-                    if not isinstance(payload, dict):
-                        raise ValueError(f"record line {line_index} is not an object")
-                    if inputs_index is not None:
-                        self._correlate(payload, inputs_index)
-                    yield self._normalize(payload, line_index)
-                    record_count += 1
-                    line_index += 1
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-            raise DomainError(
-                ErrorCode.ARTIFACT_PARSE_FAILED,
-                "The AIPerf profile export violates the supported 0.12 record schema.",
-            ) from exc
+        request = AIPerfWorkerRequest(
+            artifact_path=str(path),
+            max_rows=self.max_rows,
+            max_line_bytes=self.max_line_bytes,
+        )
+        harness = IsolatedWorkerHarness(self.workspace, python=self.runtime.python)
+        with harness.run_typed_sync_session(AIPERF_WORKER, request) as (result, job_root):
+            try:
+                projection = harness.validate_output_file(job_root, result.output)
+                rows = 0
+                with projection.open("rb") as stream:
+                    while raw := stream.readline(16 * 1024 + 1):
+                        if len(raw) > 16 * 1024:
+                            raise ValueError("projection row exceeds its byte limit")
+                        projected = AIPerfProjectionRow.model_validate_json(raw)
+                        if inputs_index is not None:
+                            self._correlate(projected, inputs_index)
+                        yield self._row(projected)
+                        rows += 1
+                if rows != result.row_count:
+                    raise ValueError("projection row count does not match its receipt")
+                self.truncated = result.truncated
+                self.worker_result = result
+            except (OSError, ValidationError, ValueError) as exc:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_PARSE_FAILED,
+                    "The AIPerf worker returned an invalid prompt-free projection.",
+                ) from exc
 
-    def _correlate(self, payload: dict[str, Any], index: AIPerfInputsIndex) -> None:
-        """Track correlation status against the inputs index without modifying the row.
-
-        Called before ``_normalize`` so the raw ``metadata`` is available for the
-        ``conversation_id`` / ``turn_index`` lookup. Counts are stored on the
-        parser instance and read by :meth:`correlation_summary`.
-        """
-        metadata = payload.get("metadata")
-        if not isinstance(metadata, dict):
+    def _correlate(self, row: AIPerfProjectionRow, index: AIPerfInputsIndex) -> None:
+        if row.conversation_id is None or row.turn_index is None:
             self._corr_no_id += 1
-            return
-        conversation_id = metadata.get("conversation_id")
-        turn_index = metadata.get("turn_index")
-        if (
-            not isinstance(conversation_id, str)
-            or not isinstance(turn_index, int)
-            or isinstance(turn_index, bool)
-        ):
-            self._corr_no_id += 1
-            return
-        if not index.has_session(conversation_id):
+        elif not index.has_session(row.conversation_id):
             self._corr_missing_session += 1
-            return
-        if not index.has_turn(conversation_id, turn_index):
+        elif not index.has_turn(row.conversation_id, row.turn_index):
             self._corr_turn_out_of_range += 1
-            return
-        self._corr_matched += 1
+        else:
+            self._corr_matched += 1
 
     def correlation_summary(self, inputs_index: AIPerfInputsIndex) -> AIPerfCorrelationSummary:
         """Build a typed correlation summary from the counts accumulated during iteration."""
@@ -421,112 +370,33 @@ class AIPerfRecordParser:
         )
 
     @staticmethod
-    def _metric(metrics: Any, name: str) -> tuple[float, str] | None:
-        if not isinstance(metrics, dict):
-            return None
-        item = metrics.get(name)
-        if not isinstance(item, dict):
-            return None
-        value, unit = item.get("value"), item.get("unit")
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int | float)
-            or not isinstance(unit, str)
-        ):
-            return None
-        if not math.isfinite(float(value)):
-            return None
-        return float(value), unit
-
-    @staticmethod
-    def _duration_ns(metric: tuple[float, str] | None) -> int | None:
-        if metric is None:
-            return None
-        value, unit = metric
-        factors = {"ns": 1.0, "us": 1_000.0, "µs": 1_000.0, "ms": 1_000_000.0, "s": 1e9}
-        factor = factors.get(unit)
-        return round(value * factor) if factor is not None and value >= 0 else None
-
-    @classmethod
-    def _normalize(cls, payload: dict[str, Any], line_index: int) -> AIPerfRequestRow:
-        metadata, metrics = payload.get("metadata"), payload.get("metrics")
-        if not isinstance(metadata, dict) or not isinstance(metrics, dict):
-            raise ValueError("metadata and metrics must be objects")
-
-        def integer(name: str, *, required: bool = False) -> int | None:
-            value = metadata.get(name)
-            if value is None and not required:
-                return None
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"metadata.{name} must be a non-negative integer")
-            return value
-
-        session_num = integer("session_num", required=True)
-        request_start_ns = integer("request_start_ns", required=True)
-        assert session_num is not None
-        assert request_start_ns is not None
-        input_metric = cls._metric(metrics, "input_sequence_length")
-        output_metric = cls._metric(metrics, "output_sequence_length")
-        if input_metric is None or output_metric is None:
-            raise ValueError("token count metrics are required")
-        input_tokens, output_tokens = round(input_metric[0]), round(output_metric[0])
-        if input_tokens < 0 or output_tokens < 0:
-            raise ValueError("token counts must be non-negative")
-        conversation_id = metadata.get("conversation_id")
-        turn_index = integer("turn_index")
-        source_request_id = (
-            f"{conversation_id}:{turn_index}"
-            if isinstance(conversation_id, str) and turn_index is not None
-            else str(session_num)
-        )
-        error = payload.get("error")
-        if error is not None and not isinstance(error, dict):
-            raise ValueError("error must be an object or null")
-        cancelled = metadata.get("was_cancelled", False)
-        if not isinstance(cancelled, bool):
-            raise ValueError("metadata.was_cancelled must be a boolean")
-        latency_ns = cls._duration_ns(cls._metric(metrics, "request_latency"))
-        ttft_ns = cls._duration_ns(cls._metric(metrics, "time_to_first_token"))
-        tpot_ns = (
-            round((latency_ns - ttft_ns) / (output_tokens - 1))
-            if latency_ns is not None
-            and ttft_ns is not None
-            and latency_ns >= ttft_ns
-            and output_tokens > 1
-            else None
-        )
-        error_type = _safe_error_category(error.get("type")) if isinstance(error, dict) else None
-        error_code = _safe_error_code(error.get("code")) if isinstance(error, dict) else None
+    def _row(projected: AIPerfProjectionRow) -> AIPerfRequestRow:
         outcome: ReportedInferenceRequestOutcome
-        if cancelled:
+        if projected.outcome == "cancelled":
             outcome = CancelledInferenceRequestOutcome(
-                error_type=error_type,
-                error_code=error_code,
+                error_type=projected.error_type,
+                error_code=projected.error_code,
             )
-        elif error is not None:
+        elif projected.outcome == "failed":
             outcome = FailedInferenceRequestOutcome(
-                error_type=error_type,
-                error_code=error_code,
+                error_type=projected.error_type,
+                error_code=projected.error_code,
             )
         else:
             outcome = SucceededInferenceRequestOutcome()
         return AIPerfRequestRow(
-            source_request_id=source_request_id,
-            provider_request_id=(
-                metadata.get("x_request_id")
-                if isinstance(metadata.get("x_request_id"), str)
-                else None
-            ),
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            scheduled_ns=integer("credit_issued_ns"),
-            observed_started_ns=request_start_ns,
-            ttft_ns=ttft_ns,
-            latency_ns=latency_ns,
-            tpot_ns=tpot_ns,
-            mean_itl_ns=cls._duration_ns(cls._metric(metrics, "inter_token_latency")),
+            source_request_id=projected.source_request_id,
+            provider_request_id=projected.provider_request_id,
+            input_tokens=projected.input_tokens,
+            output_tokens=projected.output_tokens,
+            scheduled_ns=projected.scheduled_ns,
+            observed_started_ns=projected.observed_started_ns,
+            ttft_ns=projected.ttft_ns,
+            latency_ns=projected.latency_ns,
+            tpot_ns=projected.tpot_ns,
+            mean_itl_ns=projected.mean_itl_ns,
             outcome=outcome,
-            line_index=line_index,
+            line_index=projected.line_index,
         )
 
 
@@ -1263,6 +1133,105 @@ class SglangResultDocument(ContractModel):
         return self
 
 
+class _SglangMetricDescriptor(NamedTuple):
+    evidence_name: str
+    unit: str
+    aggregation: str
+    semantic_type: str
+    dimensions: tuple[tuple[str, str], ...] = ()
+
+
+_SGLANG_RESULT_PROFILE = "sglang-0.5.16-bench-serving-aggregate-v1"
+_SGLANG_METRICS: dict[str, _SglangMetricDescriptor] = {
+    "duration": _SglangMetricDescriptor(
+        "sglang.duration",
+        "s",
+        "aggregate",
+        "duration",
+    ),
+    "completed": _SglangMetricDescriptor(
+        "sglang.completed",
+        "requests",
+        "count",
+        "request_count",
+    ),
+    "total_input_tokens": _SglangMetricDescriptor(
+        "sglang.total_input_tokens",
+        "tokens",
+        "sum",
+        "token_count",
+        (("token_role", "input"),),
+    ),
+    "total_output_tokens": _SglangMetricDescriptor(
+        "sglang.total_output_tokens",
+        "tokens",
+        "sum",
+        "token_count",
+        (("token_role", "output"),),
+    ),
+    "request_throughput": _SglangMetricDescriptor(
+        "sglang.request_throughput",
+        "requests/sec",
+        "rate",
+        "request_rate",
+    ),
+    "input_throughput": _SglangMetricDescriptor(
+        "sglang.input_throughput",
+        "tokens/sec",
+        "rate",
+        "token_rate",
+        (("token_role", "input"),),
+    ),
+    "output_throughput": _SglangMetricDescriptor(
+        "sglang.output_throughput",
+        "tokens/sec",
+        "rate",
+        "token_rate",
+        (("token_role", "output"),),
+    ),
+    "total_token_throughput": _SglangMetricDescriptor(
+        "sglang.total_token_throughput",
+        "tokens/sec",
+        "rate",
+        "token_rate",
+        (("token_role", "total"),),
+    ),
+    "accept_length": _SglangMetricDescriptor(
+        "sglang.accept_length",
+        "tokens",
+        "mean",
+        "speculative_accept_length",
+    ),
+    "concurrency": _SglangMetricDescriptor(
+        "sglang.concurrency",
+        "dimensionless",
+        "mean",
+        "concurrency",
+    ),
+}
+
+for _latency_family in ("e2e_latency", "ttft", "tpot", "itl"):
+    for _statistic, _aggregation in (
+        ("mean", "mean"),
+        ("median", "median"),
+        ("std", "std"),
+        ("p90", "percentile"),
+        ("p95", "percentile"),
+        ("p99", "percentile"),
+    ):
+        _field_name = f"{_statistic}_{_latency_family}_ms"
+        _dimensions: tuple[tuple[str, str], ...] = (("stat", _statistic),)
+        if _statistic.startswith("p"):
+            _dimensions = (("stat", "percentile"), ("percentile", _statistic[1:]))
+        _SGLANG_METRICS[_field_name] = _SglangMetricDescriptor(
+            evidence_name=f"sglang.{_field_name}",
+            unit="ms",
+            aggregation=_aggregation,
+            semantic_type="latency",
+            dimensions=_dimensions,
+        )
+
+
 class SglangResultParser:
     """Parse exactly one bounded, aggregate-only SGLang 0.5.16 JSONL record.
 
@@ -1271,9 +1240,6 @@ class SglangResultParser:
     """
 
     max_document_bytes = 1024 * 1024
-    _measurement_fields = tuple(
-        name for name in SglangResultDocument.model_fields if name not in {"num_prompts"}
-    )
 
     def parse(self, path: Path) -> tuple[SglangResultDocument, list[VllmMeasurementRow]]:
         try:
@@ -1290,46 +1256,32 @@ class SglangResultParser:
                 "The artifact is not a valid aggregate SGLang JSONL result.",
             ) from exc
         rows: list[VllmMeasurementRow] = []
-        for key in self._measurement_fields:
-            value = getattr(document, key)
+        for source_name, descriptor in _SGLANG_METRICS.items():
+            value = getattr(document, source_name)
             if value is None:
                 continue
             value = float(value)
-            unit = (
-                "ms"
-                if key.endswith("_ms")
-                else "tokens/sec"
-                if key.endswith("throughput")
-                else "s"
-                if key == "duration"
-                else "count"
-            )
             dimensions = {
                 "producer": "sglang.bench_serving",
+                "result_profile": _SGLANG_RESULT_PROFILE,
+                "semantic_type": descriptor.semantic_type,
                 "completed": str(document.completed),
+                **dict(descriptor.dimensions),
             }
-            aggregation = "aggregate"
-            if key.startswith("mean_"):
-                aggregation = "mean"
-                dimensions["stat"] = "mean"
-            elif key.startswith("median_"):
-                aggregation = "median"
-                dimensions["stat"] = "median"
-            elif key.startswith("std_"):
-                aggregation = "std"
-                dimensions["stat"] = "std"
-            elif key.startswith("p") and "_" in key:
-                percentile = key.split("_", 1)[0][1:]
-                if percentile.isdigit():
-                    aggregation = "percentile"
-                    dimensions.update({"stat": "percentile", "percentile": percentile})
             rows.append(
                 VllmMeasurementRow(
-                    measurement_id=digest_model({"name": f"sglang.{key}", "value": value}),
-                    name=f"sglang.{key}",
+                    measurement_id=digest_model(
+                        {
+                            "result_profile": _SGLANG_RESULT_PROFILE,
+                            "source_name": source_name,
+                            "descriptor": descriptor._asdict(),
+                            "value": value,
+                        }
+                    ),
+                    name=descriptor.evidence_name,
                     value_float=value,
-                    unit=unit,
-                    aggregation=aggregation,
+                    unit=descriptor.unit,
+                    aggregation=descriptor.aggregation,
                     dimensions=dimensions,
                 )
             )
@@ -1355,11 +1307,17 @@ class InferenceArtifactExtractor:
     version = "2"
     max_request_rows = 100_000
 
-    def __init__(self, workspace: Workspace) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        *,
+        aiperf_runtime: ProviderRuntime | None = None,
+    ) -> None:
         self.workspace = workspace
         self.runs = RunStore(workspace)
         self.artifacts = ArtifactStore(workspace)
         self.publisher = GenerationPublisher(workspace)
+        self._provided_aiperf_runtime = aiperf_runtime
 
     def _request_row_limit(self) -> int:
         """Bound materialized inference rows independently of storage quotas."""
@@ -1585,7 +1543,12 @@ class InferenceArtifactExtractor:
             inputs_run_id=inputs_run_id,
             inputs_artifact_id=inputs_artifact_id,
         )
-        parser = AIPerfRecordParser(max_rows=self._request_row_limit())
+        runtime = self._aiperf_runtime()
+        parser = AIPerfRecordParser(
+            self.workspace,
+            runtime,
+            max_rows=self._request_row_limit(),
+        )
         rows: list[dict[str, Any]] = []
         for record in parser.iter_rows(stored.payload_path, inputs_index=inputs_index):
             line_index = record.line_index
@@ -1629,6 +1592,12 @@ class InferenceArtifactExtractor:
             run_id=target_run,
             artifact_id=registration.artifact_id,
         )
+        worker_result = parser.worker_result
+        if worker_result is None:
+            raise DomainError(
+                ErrorCode.ARTIFACT_PARSE_FAILED,
+                "The AIPerf worker did not produce an extraction receipt.",
+            )
         published = self.publisher.publish_rows_idempotent(
             {"inference_requests": rows, "measurements": measurement_rows},
             publisher=self.name,
@@ -1639,6 +1608,12 @@ class InferenceArtifactExtractor:
                 "kind": "aiperf_0.12",
                 "parser_version": self.version,
                 "evidence_run_id": target_run,
+                "provider_environment_id": runtime.receipt.environment_id,
+                "provider_python_sha256": runtime.receipt.python_sha256,
+                "provider_executable_sha256": runtime.receipt.executable_sha256,
+                "aiperf_version": worker_result.aiperf_version,
+                "native_model": worker_result.native_model,
+                "projection_profile": worker_result.projection_profile,
             },
         )
         limitations: list[str] = []
@@ -1656,6 +1631,24 @@ class InferenceArtifactExtractor:
             corpus_commit_id=published.commit.commit_id,
             limitations=tuple(limitations),
         )
+
+    def _aiperf_runtime(self) -> ProviderRuntime:
+        if self._provided_aiperf_runtime is not None:
+            return self._provided_aiperf_runtime
+        runtime = ProviderRuntimeManager(self.workspace.paths.records / "provider-runtimes").find(
+            extra=CapabilityExtra.INFERENCE,
+            requirement="aiperf>=0.12,<0.13",
+        )
+        if runtime is None:
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "A verified AIPerf provider environment is required to parse this artifact.",
+                remediation=(
+                    "Call list_capabilities(adapter='aiperf'), then start_capability_setup "
+                    "for the reported managed provider.",
+                ),
+            )
+        return runtime
 
     @staticmethod
     def _aiperf_measurement_rows(

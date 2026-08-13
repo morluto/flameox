@@ -19,6 +19,8 @@ from flameox.evidence import GenerationPublisher, InferenceRequestItem
 from flameox.storage import Workspace
 from tests.support.analysis import run_row
 
+pytestmark = pytest.mark.integration
+
 
 def test_inference_request_projection_rejects_contradictory_outcomes() -> None:
     request = {
@@ -89,7 +91,7 @@ def test_measurement_query_uses_bounded_snapshot_cursors(tmp_path: Path) -> None
     )
     assert first.returned == 2
     assert first.total == 3
-    assert first.schema_version == 2
+    assert first.schema_version == 3
     assert all(
         item.value is not None and item.value.kind == "integer" for item in first.measurements
     )

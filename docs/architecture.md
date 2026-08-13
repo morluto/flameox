@@ -45,7 +45,9 @@ There are six authoritative boundaries:
    revisions, idempotency, and relationships.
 4. The subprocess broker owns child creation, environment construction,
    deadlines, output and resource budgets, observation, and cleanup. The
-   artifact-worker harness owns the one staged worker request/response protocol.
+   artifact-worker harness owns one versioned, typed, request-bound staged
+   worker protocol. Every ordinary artifact worker is registered against that
+   protocol; workers cannot introduce an ad hoc dictionary envelope.
 5. Native producer formats remain authoritative. Flameox adds schemas only for
    evidence semantics not owned by the producer.
 6. Every analysis acquires one `SnapshotHandle` before lookup and resolves all
@@ -126,6 +128,19 @@ Python worker through the broker, validates its bounded response, consumes
 declared files beneath the same trusted root, and removes the staging root.
 Workers do not define another launcher or transport.
 
+Heavy or mutually incompatible Python providers never enter the CLI/MCP control
+interpreter. Capability setup creates a version-addressed environment containing
+core Flameox plus exactly one declared provider requirement. Its receipt binds
+the installation profile, Python, complete environment-tree digest, provider
+distribution, and executable. This is dependency and failure isolation, not a
+sandbox against malicious provider code.
+
+Test-case reduction follows the same authority split. ShrinkRay 26.7.8.0 alone
+schedules candidates. Flameox binds its managed environment, offline profile,
+predicate, budgets, and bridge in the plan, records tri-state candidate
+receipts, and independently reruns the final predicate before publication.
+Tool completion never implies minimality.
+
 Application task lifetime is explicit. Scoped AnyIO task groups own paired work
 and cancellation watchers where structured cancellation is required. The
 execution substrate retains lower-level asyncio tasks and threads for stream
@@ -174,8 +189,11 @@ pyperf, SciPy, HTTPX, native profiler readers, and provider models. A custom
 format or parser belongs only when upstream cannot express Flameox-specific
 evidence, safety, or reproducibility semantics.
 
-Runtime dependencies and optional extras are declared in `pyproject.toml` and
-pinned in `uv.lock`; those files, not this prose, are the package inventory.
+Control-runtime dependencies and development extras are declared in
+`pyproject.toml` and pinned in `uv.lock`. Managed provider environments are
+separate by design: their exact provider requirement and full installed-tree
+identity live in the provider receipt, so incompatible providers need not be
+co-installable with one another or with the MCP server.
 System and privileged tools are detected but never silently installed. Explicit
 capability setup may install only allowlisted user-space providers into the
 managed runtime and records the result.

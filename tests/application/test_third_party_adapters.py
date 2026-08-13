@@ -28,6 +28,8 @@ from flameox.domain import (
 )
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
+
 _WRAPPER = """\
 import pathlib
 import subprocess
@@ -50,10 +52,15 @@ class FixtureAdapter:
         valid: bool = True,
         fail_plan: bool = False,
         fail_extract: bool = False,
+        replace_mutable_after_validation: bool = False,
+        after_validation: Callable[[], None] | None = None,
     ) -> None:
         self.valid = valid
         self.fail_plan = fail_plan
         self.fail_extract = fail_extract
+        self.replace_mutable_after_validation = replace_mutable_after_validation
+        self.after_validation = after_validation
+        self.mutable_artifact_path: Path | None = None
         self.phases: list[str] = []
 
     async def probe(self, context: AdapterProbeContext) -> AdapterProbeResult:
@@ -67,6 +74,7 @@ class FixtureAdapter:
         self.phases.append("plan")
         if self.fail_plan:
             raise RuntimeError("fixture plan failure")
+        self.mutable_artifact_path = Path(request.output_root) / "fixture.txt"
         return AdapterExecutionPlan(
             adapter=self.name,
             argv_prefix=(
@@ -86,6 +94,7 @@ class FixtureAdapter:
             permissions=("process_observation",),
             expected_overhead="Fixture wrapper overhead.",
             limitations=("Fixture evidence is intentionally minimal.",),
+            validator_version="validator-1",
             extractor_version="extractor-1",
         )
 
@@ -95,10 +104,17 @@ class FixtureAdapter:
         declaration: AdapterArtifactDeclaration,
     ) -> AdapterValidationResult:
         self.phases.append("validate")
-        return AdapterValidationResult(
+        result = AdapterValidationResult(
+            validator_version="validator-1",
             valid=self.valid and Path(artifact_path).read_text().startswith("samples="),
             limitations=(() if self.valid else ("invalid fixture",)),
         )
+        if self.replace_mutable_after_validation:
+            assert self.mutable_artifact_path is not None
+            self.mutable_artifact_path.write_text("samples=999\n")
+        if self.after_validation is not None:
+            self.after_validation()
+        return result
 
     async def extract(
         self,
@@ -199,11 +215,25 @@ async def test_approved_adapter_runs_full_lifecycle_and_publishes_linked_extract
         "workload"
     )
     with Catalog(workspace).open_snapshot() as snapshot:
+        validation = snapshot.execute(
+            "SELECT input_artifact_id, input_byte_length, adapter, "
+            "adapter_package_identity, validator_version, valid "
+            "FROM adapter_validations WHERE run_id = ?",
+            (result.run.run_id,),
+        ).fetchone()
         extraction = snapshot.execute(
             "SELECT input_artifact_id, adapter, adapter_package_identity, "
             "extractor_version, summary_json FROM adapter_extractions WHERE run_id = ?",
             (result.run.run_id,),
         ).fetchone()
+    assert validation == (
+        native.artifact_id,
+        len("samples=7\n"),
+        "fixture",
+        "sha256:" + "a" * 64,
+        "validator-1",
+        True,
+    )
     assert extraction == (
         native.artifact_id,
         "fixture",
@@ -211,6 +241,61 @@ async def test_approved_adapter_runs_full_lifecycle_and_publishes_linked_extract
         "extractor-1",
         '{"samples":7}',
     )
+
+
+@pytest.mark.anyio
+async def test_adapter_validation_and_extraction_use_the_same_immutable_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _workspace(tmp_path)
+    adapter = FixtureAdapter(replace_mutable_after_validation=True)
+    _install_fixture(monkeypatch, adapter)
+    service = CaptureService(workspace)
+    plan = await service.plan(
+        workload_name="fixture",
+        adapter="fixture",
+        execution_policy=ExecutionPolicy.APPROVED_AGENT,
+    )
+
+    result = await service.execute(plan.plan_token)
+
+    native = next(item for item in result.run.artifacts if item.role == "primary")
+    payload = ArtifactStore(workspace).get(native.artifact_id).payload_path
+    assert payload.read_text() == "samples=7\n"
+    with Catalog(workspace).open_snapshot() as snapshot:
+        summary = snapshot.execute(
+            "SELECT summary_json FROM adapter_extractions WHERE run_id = ?",
+            (result.run.run_id,),
+        ).fetchone()
+    assert summary == ('{"samples":7}',)
+
+
+@pytest.mark.anyio
+async def test_adapter_package_change_during_validation_refuses_extraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _workspace(tmp_path)
+    identity = {"value": "sha256:" + "a" * 64}
+
+    def change_identity() -> None:
+        identity["value"] = "sha256:" + "b" * 64
+
+    adapter = FixtureAdapter(after_validation=change_identity)
+    _install_fixture(monkeypatch, adapter, identity=identity)
+    service = CaptureService(workspace)
+    plan = await service.plan(
+        workload_name="fixture",
+        adapter="fixture",
+        execution_policy=ExecutionPolicy.APPROVED_AGENT,
+    )
+
+    with pytest.raises(DomainError) as changed:
+        await service.execute(plan.plan_token)
+
+    assert changed.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+    assert adapter.phases == ["probe", "plan", "validate"]
 
 
 @pytest.mark.anyio

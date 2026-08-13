@@ -4,11 +4,17 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Final, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, TypeAdapter, model_validator
 
+from flameox.domain import digest_model
 from flameox.models import ContractModel
 
-KERNEL_BUILD_SCHEMA_VERSION: Final[Literal["flameox.kernel-build.v1"]] = "flameox.kernel-build.v1"
+KERNEL_BUILD_SCHEMA_VERSION_V1: Final[Literal["flameox.kernel-build.v1"]] = (
+    "flameox.kernel-build.v1"
+)
+KERNEL_BUILD_SCHEMA_VERSION: Final[Literal["flameox.kernel-build.v2"]] = "flameox.kernel-build.v2"
+
+_Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 
 
 class KernelBuildProducer(StrEnum):
@@ -87,12 +93,49 @@ type KernelBuildStage = Annotated[
 ]
 
 
-class KernelBuildManifestV1(ContractModel):
-    schema_version: Literal["flameox.kernel-build.v1"] = KERNEL_BUILD_SCHEMA_VERSION
+class KernelBuildTarget(ContractModel):
+    """Compiler target selected for a managed build.
+
+    Triton exposes this shape as a backend, architecture, and warp size. Other
+    compiler adapters can use the same bounded vocabulary without claiming a
+    target when they cannot establish it.
+    """
+
+    backend: Annotated[str, Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")]
+    architecture: Annotated[
+        str,
+        Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.+-]+$"),
+    ]
+    warp_size: Annotated[int, Field(gt=0, le=1_024)] | None = None
+
+
+class KernelBuildContext(ContractModel):
+    """Exact identity claims about the input and protocol of one build."""
+
+    workload_definition_id: _Digest
+    workload_instance_id: _Digest
+    command_digest: _Digest
+    parameters_digest: _Digest
+    compiler_identity_id: _Digest
+    build_protocol_id: _Digest
+    target: KernelBuildTarget | None = None
+    target_identity_id: _Digest | None = None
+
+    @model_validator(mode="after")
+    def target_identity_matches_content(self) -> KernelBuildContext:
+        if self.target is None:
+            if self.target_identity_id is not None:
+                raise ValueError("target_identity_id requires a declared compiler target")
+            return self
+        expected = digest_model(self.target.model_dump(mode="json"))
+        if self.target_identity_id != expected:
+            raise ValueError("target identity must match the declared compiler target")
+        return self
+
+
+class _KernelBuildManifest(ContractModel):
     producer: Literal[KernelBuildProducer.TRITON, KernelBuildProducer.CUTE]
     producer_version: Annotated[str, Field(min_length=1, max_length=100)]
-    workload_identity: Annotated[str, Field(min_length=1, max_length=200)]
-    device_identity: Annotated[str, Field(min_length=1, max_length=500)] | None = None
     outcome: KernelBuildOutcome
     cache_status: KernelBuildCacheStatus = KernelBuildCacheStatus.UNKNOWN
     stages: Annotated[tuple[KernelBuildStage, ...], Field(min_length=1, max_length=100)]
@@ -110,7 +153,7 @@ class KernelBuildManifestV1(ContractModel):
     ] = ()
 
     @model_validator(mode="after")
-    def ordered_pipeline(self) -> KernelBuildManifestV1:
+    def ordered_pipeline(self) -> _KernelBuildManifest:
         if len(self.source_environment) > 20:
             raise ValueError("source_environment is limited to 20 entries")
         names = [stage.name for stage in self.stages]
@@ -146,5 +189,37 @@ class KernelBuildManifestV1(ContractModel):
         )
 
 
-def kernel_build_json_schema() -> dict[str, object]:
+class KernelBuildManifestV1(_KernelBuildManifest):
+    """Legacy provider manifest whose workload and device fields are labels only."""
+
+    schema_version: Literal["flameox.kernel-build.v1"] = KERNEL_BUILD_SCHEMA_VERSION_V1
+    workload_identity: Annotated[str, Field(min_length=1, max_length=200)]
+    device_identity: Annotated[str, Field(min_length=1, max_length=500)] | None = None
+
+
+class KernelBuildManifestV2(_KernelBuildManifest):
+    """Build manifest with an exact, independently verifiable input context."""
+
+    schema_version: Literal["flameox.kernel-build.v2"] = KERNEL_BUILD_SCHEMA_VERSION
+    workload_label: Annotated[str, Field(min_length=1, max_length=200)]
+    build_context: KernelBuildContext
+
+
+type KernelBuildManifest = Annotated[
+    KernelBuildManifestV1 | KernelBuildManifestV2,
+    Field(discriminator="schema_version"),
+]
+
+_KERNEL_BUILD_MANIFEST_ADAPTER: TypeAdapter[KernelBuildManifest] = TypeAdapter(KernelBuildManifest)
+
+
+def parse_kernel_build_manifest(value: object) -> KernelBuildManifest:
+    return _KERNEL_BUILD_MANIFEST_ADAPTER.validate_python(value)
+
+
+def kernel_build_v1_json_schema() -> dict[str, object]:
     return KernelBuildManifestV1.model_json_schema()
+
+
+def kernel_build_json_schema() -> dict[str, object]:
+    return KernelBuildManifestV2.model_json_schema()

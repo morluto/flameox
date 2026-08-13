@@ -236,7 +236,8 @@ class BenchmarkSamplesExtractor:
         registration_version: str | None,
         payload: BenchmarkSamplesV1,
     ) -> None:
-        if registration_producer not in {None, "flameox.import", payload.producer}:
+        transport_producers = {None, "flameox.import", "benchmark-samples"}
+        if registration_producer not in {*transport_producers, payload.producer}:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
                 "Benchmark producer identity conflicts with the artifact registration.",
@@ -246,7 +247,8 @@ class BenchmarkSamplesExtractor:
                 },
             )
         if (
-            registration_version is not None
+            registration_producer not in transport_producers
+            and registration_version is not None
             and payload.producer_version is not None
             and registration_version != payload.producer_version
         ):

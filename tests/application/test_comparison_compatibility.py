@@ -9,8 +9,11 @@ from flameox.application import (
     ComparisonService,
     EvidenceInput,
     EvidenceLookupService,
+    ExcludedFreezeRunSetMember,
     FindingService,
     FreezeRunIdsRequest,
+    FreezeRunMembersRequest,
+    IncludedFreezeRunSetMember,
     MeasurementCompareRunSetsRequest,
     RecordFindingRequest,
     RunSetService,
@@ -37,6 +40,7 @@ from flameox.domain import (
     FindingConfidence,
     IdentityQuality,
     MetricPolarity,
+    RunManifest,
     WorkloadExecutionIdentity,
     digest_model,
 )
@@ -46,6 +50,19 @@ from tests.support.comparisons import (
     imported_benchmark,
     measurement_row,
 )
+
+pytestmark = [pytest.mark.integration, pytest.mark.serial]
+
+
+def _revised_run(
+    workspace: Workspace,
+    run_id: str,
+    *,
+    revision_increment: int = 1,
+    **updates: object,
+) -> RunManifest:
+    current = RunStore(workspace).read(run_id)
+    return current.model_copy(update={"revision": current.revision + revision_increment, **updates})
 
 
 def test_frozen_run_set_comparison_and_evidence_linked_finding(
@@ -210,7 +227,9 @@ def test_frozen_run_set_comparison_and_evidence_linked_finding(
     )
 
     assert result.comparison.validity is ComparisonValidity.INVALID
-    assert result.comparison.complete_pair_n == 3
+    assert result.comparison.complete_pair_n is None
+    assert result.comparison.baseline_eligible_n == 1
+    assert result.comparison.independent_unit == "worker"
     with pytest.raises(DomainError) as invalid_proof:
         FindingService(workspace).record(request)
     assert invalid_proof.value.code is ErrorCode.COMPARISON_INVALID
@@ -219,6 +238,9 @@ def test_frozen_run_set_comparison_and_evidence_linked_finding(
             update={
                 "assessment": FindingAssessment.INCONCLUSIVE,
                 "confidence": "low",
+                "evidence": (
+                    request.evidence[0].model_copy(update={"relation": EvidenceRelation.CONTEXT}),
+                ),
             }
         )
     )
@@ -267,9 +289,41 @@ def test_comparison_reads_both_run_sets_from_one_pinned_corpus_commit(
         )
     )
 
+    assert baseline.corpus_commit_id == candidate.corpus_commit_id
+    assert result.corpus_commit_id == baseline.corpus_commit_id
+    assert result.comparison.complete_pair_n is None
+    assert result.comparison.baseline_eligible_n == 1
+
+
+def test_comparison_rejects_run_sets_frozen_from_different_snapshots(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    baseline_id = imported_benchmark(
+        workspace,
+        tmp_path / "baseline.json",
+        (0.010, 0.011, 0.012),
+    )
+    candidate_id = imported_benchmark(
+        workspace,
+        tmp_path / "candidate.json",
+        (0.005, 0.0055, 0.006),
+    )
+    baseline = RunSetService(workspace).freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
+    candidate = RunSetService(workspace).freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
     assert baseline.corpus_commit_id != candidate.corpus_commit_id
-    assert result.corpus_commit_id == workspace.corpus.read_head().commit_id
-    assert result.comparison.complete_pair_n == 4
+
+    with pytest.raises(DomainError) as error:
+        ComparisonService(workspace).compare(
+            MeasurementCompareRunSetsRequest(
+                baseline_run_set_id=baseline.run_set_id,
+                candidate_run_set_id=candidate.run_set_id,
+                metric="pyperf.scan",
+                unit="ns",
+                polarity=MetricPolarity.LOWER_IS_BETTER,
+                practical_threshold=0.05,
+            )
+        )
+
+    assert error.value.code is ErrorCode.COMPARISON_INVALID
 
 
 def test_comparison_rejects_different_or_partial_accelerator_identity(
@@ -286,9 +340,6 @@ def test_comparison_rejects_different_or_partial_accelerator_identity(
         tmp_path / "candidate-accelerator.json",
         (0.005, 0.0055, 0.006),
     )
-    run_sets = RunSetService(workspace)
-    baseline = run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
-
     candidate_environment = collect_environment(
         AcceleratorIdentityFacet(
             provider="cuda",
@@ -298,10 +349,10 @@ def test_comparison_rejects_different_or_partial_accelerator_identity(
             runtime_version="12.9",
         )
     )
-    candidate_run = (
-        RunStore(workspace)
-        .read(candidate_id)
-        .model_copy(update={"environment_id": candidate_environment.environment_id})
+    candidate_run = _revised_run(
+        workspace,
+        candidate_id,
+        environment_id=candidate_environment.environment_id,
     )
     GenerationPublisher(workspace).publish_rows(
         {
@@ -312,6 +363,8 @@ def test_comparison_rejects_different_or_partial_accelerator_identity(
         publisher_version="1",
         input_run_ids=(candidate_id,),
     )
+    run_sets = RunSetService(workspace)
+    baseline = run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
     candidate = run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
     request = MeasurementCompareRunSetsRequest(
         baseline_run_set_id=baseline.run_set_id,
@@ -339,9 +392,12 @@ def test_comparison_rejects_different_or_partial_accelerator_identity(
             "environments": [environment_row(partial_environment)],
             "runs": [
                 run_row(
-                    RunStore(workspace)
-                    .read(run_id)
-                    .model_copy(update={"environment_id": partial_environment.environment_id})
+                    _revised_run(
+                        workspace,
+                        run_id,
+                        revision_increment=2,
+                        environment_id=partial_environment.environment_id,
+                    )
                 )
                 for run_id in (baseline_id, candidate_id)
             ],
@@ -351,9 +407,94 @@ def test_comparison_rejects_different_or_partial_accelerator_identity(
         input_run_ids=(baseline_id, candidate_id),
     )
 
-    partial = ComparisonService(workspace).compare(request)
+    partial_run_sets = RunSetService(workspace)
+    partial_baseline = partial_run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
+    partial_candidate = partial_run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
+    partial = ComparisonService(workspace).compare(
+        request.validated_copy(
+            update={
+                "baseline_run_set_id": partial_baseline.run_set_id,
+                "candidate_run_set_id": partial_candidate.run_set_id,
+            }
+        )
+    )
 
     assert "environment identity is partial or unavailable" in partial.comparison.mismatches
+
+
+def test_excluded_member_is_coverage_evidence_not_a_compatibility_observation(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    baseline_id = imported_benchmark(
+        workspace,
+        tmp_path / "baseline-included.json",
+        (0.010, 0.011, 0.012),
+    )
+    candidate_id = imported_benchmark(
+        workspace,
+        tmp_path / "candidate-included.json",
+        (0.005, 0.0055, 0.006),
+    )
+    excluded_id = imported_benchmark(
+        workspace,
+        tmp_path / "baseline-excluded.json",
+        (0.050, 0.051, 0.052),
+    )
+    incompatible_environment = collect_environment(
+        AcceleratorIdentityFacet(
+            provider="cuda",
+            status=AcceleratorIdentityStatus.AVAILABLE,
+            identity_quality=IdentityQuality.EXACT,
+            driver_version="different",
+            runtime_version="different",
+        )
+    )
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "environments": [environment_row(incompatible_environment)],
+            "runs": [
+                run_row(
+                    _revised_run(
+                        workspace,
+                        excluded_id,
+                        environment_id=incompatible_environment.environment_id,
+                    )
+                )
+            ],
+        },
+        publisher="excluded-cohort-test",
+        publisher_version="1",
+        input_run_ids=(excluded_id,),
+    )
+    run_sets = RunSetService(workspace)
+    baseline = run_sets.freeze(
+        FreezeRunMembersRequest(
+            members=(
+                IncludedFreezeRunSetMember(run_id=baseline_id),
+                ExcludedFreezeRunSetMember(
+                    run_id=excluded_id,
+                    reason="predeclared unsupported host",
+                ),
+            )
+        )
+    )
+    candidate = run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
+
+    result = ComparisonService(workspace).compare(
+        MeasurementCompareRunSetsRequest(
+            baseline_run_set_id=baseline.run_set_id,
+            candidate_run_set_id=candidate.run_set_id,
+            metric="pyperf.scan",
+            unit="ns",
+            polarity=MetricPolarity.LOWER_IS_BETTER,
+            practical_threshold=0.05,
+        )
+    )
+
+    assert result.comparison.baseline_excluded_n == 1
+    assert result.comparison.baseline_eligible_n == 1
+    assert "environment_id differs across treatments" not in result.comparison.mismatches
 
 
 def test_comparison_reports_differing_declared_artifact_paths_and_digests(
@@ -396,9 +537,11 @@ def test_comparison_reports_differing_declared_artifact_paths_and_digests(
         {
             "runs": [
                 run_row(
-                    RunStore(workspace)
-                    .read(run_id)
-                    .model_copy(update={"execution_identity": identity(character)})
+                    _revised_run(
+                        workspace,
+                        run_id,
+                        execution_identity=identity(character),
+                    )
                 )
                 for run_id, character in ((baseline_id, "a"), (candidate_id, "b"))
             ]
@@ -461,9 +604,11 @@ def test_distinct_remote_leases_do_not_change_environment_compatibility(
         {
             "runs": [
                 run_row(
-                    RunStore(workspace)
-                    .read(run_id)
-                    .model_copy(update={"external_context": context(lease_id)})
+                    _revised_run(
+                        workspace,
+                        run_id,
+                        external_context=context(lease_id),
+                    )
                 )
                 for run_id, lease_id in (
                     (baseline_id, "lease-a"),

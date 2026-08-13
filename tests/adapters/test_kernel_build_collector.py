@@ -5,11 +5,25 @@ from pathlib import Path
 
 import pytest
 
+from flameox.adapters import KernelBuildContext
 from flameox.adapters.builtins import build_capture_invocation
 from flameox.adapters.options import bind_adapter_options
 from flameox.application import KernelBuildCaptureCollector
 from flameox.domain import DomainError, ErrorCode
 from flameox.storage import Workspace
+
+pytestmark = pytest.mark.unit
+
+
+def _build_context() -> KernelBuildContext:
+    return KernelBuildContext(
+        workload_definition_id=f"sha256:{'1' * 64}",
+        workload_instance_id=f"sha256:{'2' * 64}",
+        command_digest=f"sha256:{'3' * 64}",
+        parameters_digest=f"sha256:{'4' * 64}",
+        compiler_identity_id=f"sha256:{'5' * 64}",
+        build_protocol_id=f"sha256:{'6' * 64}",
+    )
 
 
 def test_triton_compiler_capture_invocation_sets_env_vars(tmp_path: Path) -> None:
@@ -94,7 +108,8 @@ def test_collector_rejects_symlink_in_dump_dir(tmp_path: Path) -> None:
         adapter="triton.compiler",
         dump_dir=dump_dir,
         output_root=tmp_path,
-        workload_name="compile",
+        workload_label="compile",
+        build_context=_build_context(),
         exit_code=0,
         producer_version="1",
         source_environment={},
@@ -114,7 +129,8 @@ def test_collector_ignores_non_allowlisted_extensions(tmp_path: Path) -> None:
         adapter="triton.compiler",
         dump_dir=dump_dir,
         output_root=tmp_path,
-        workload_name="compile",
+        workload_label="compile",
+        build_context=_build_context(),
         exit_code=0,
         producer_version="1",
         source_environment={},
@@ -146,7 +162,8 @@ def test_collector_records_empty_or_failed_compilation(
         adapter="triton.compiler",
         dump_dir=dump_dir,
         output_root=tmp_path,
-        workload_name="compile",
+        workload_label="compile",
+        build_context=_build_context(),
         exit_code=exit_code,
         producer_version="1",
         source_environment={},
@@ -170,7 +187,8 @@ def test_collector_cute_keep_allowlist_filters_extensions(tmp_path: Path) -> Non
         adapter="cute.compiler",
         dump_dir=dump_dir,
         output_root=tmp_path,
-        workload_name="compile",
+        workload_label="compile",
+        build_context=_build_context(),
         exit_code=0,
         producer_version="1",
         source_environment={},
@@ -191,7 +209,8 @@ def test_collector_maps_cute_ir_debug_allowlist_to_mlir(tmp_path: Path) -> None:
         adapter="cute.compiler",
         dump_dir=dump_dir,
         output_root=tmp_path,
-        workload_name="compile",
+        workload_label="compile",
+        build_context=_build_context(),
         exit_code=0,
         producer_version="1",
         source_environment={"CUTE_DSL_DUMP_DIR": str(dump_dir)},
@@ -216,7 +235,8 @@ def test_collector_hardlinks_rejected(tmp_path: Path) -> None:
         adapter="triton.compiler",
         dump_dir=dump_dir,
         output_root=tmp_path,
-        workload_name="compile",
+        workload_label="compile",
+        build_context=_build_context(),
         exit_code=0,
         producer_version="1",
         source_environment={},
@@ -236,7 +256,8 @@ def test_collector_inventories_amdgcn_and_hsaco_extensions(tmp_path: Path) -> No
         adapter="triton.compiler",
         dump_dir=dump_dir,
         output_root=tmp_path,
-        workload_name="compile",
+        workload_label="compile",
+        build_context=_build_context(),
         exit_code=0,
         producer_version="1",
         source_environment={},
@@ -261,7 +282,8 @@ def test_collector_inventories_reproducer_file_outside_dump_dir(tmp_path: Path) 
         adapter="triton.compiler",
         dump_dir=dump_dir,
         output_root=tmp_path,
-        workload_name="compile",
+        workload_label="compile",
+        build_context=_build_context(),
         exit_code=0,
         producer_version="1",
         source_environment={},
@@ -290,7 +312,8 @@ def test_collector_does_not_infer_predecessor_lineage_from_paths(tmp_path: Path)
         adapter="triton.compiler",
         dump_dir=dump_dir,
         output_root=tmp_path,
-        workload_name="compile",
+        workload_label="compile",
+        build_context=_build_context(),
         exit_code=0,
         producer_version="1",
         source_environment={},

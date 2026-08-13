@@ -59,16 +59,9 @@ class FailureRecipes(RecipeContext):
             applied.append("created_before")
         cohort_filter = "".join(f" AND {item}" for item in filters)
         query = f"""
-            WITH latest AS (
-                SELECT *,
-                    row_number() OVER (
-                        PARTITION BY run_id ORDER BY published_at DESC
-                    ) AS revision_order
-                FROM runs
-            ),
-            eligible AS (
-                SELECT * FROM latest
-                WHERE revision_order = 1
+            WITH eligible AS (
+                SELECT * FROM current_runs
+                WHERE 1 = 1
                   {cohort_filter}
             ),
             failed AS (
@@ -94,7 +87,7 @@ class FailureRecipes(RecipeContext):
         with self._open_snapshot(corpus_commit_id) as snapshot:
             population_row = snapshot.execute(
                 query + " SELECT "
-                "(SELECT count(*) FROM latest WHERE revision_order = 1), "
+                "(SELECT count(*) FROM current_runs), "
                 "(SELECT count(*) FROM eligible), "
                 "(SELECT count(*) FROM failed)",
                 tuple(parameters),

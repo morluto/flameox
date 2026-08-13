@@ -15,11 +15,13 @@ from flameox.application.recoverable_move import (
     resume_move,
     validate_manifest_id,
 )
+from flameox.application.staging_ownership import StagingOwnershipService
 from flameox.atomic import atomic_write_json, fsync_directory
 from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode, digest_model
 from flameox.models import ContractModel
-from flameox.storage import GenerationManifest, Workspace, tree_bytes
+from flameox.storage import GenerationManifest, RetentionIntentStore, Workspace, tree_bytes
+from flameox.storage.locks import RETENTION_EXCLUSIVE, WRITE_EXCLUSIVE
 
 
 class GarbageEntryKind(StrEnum):
@@ -34,6 +36,8 @@ class GarbageEntry(ContractModel):
     kind: GarbageEntryKind
     byte_length: int
     reason: str
+    identity_digest: str | None = None
+    staging_owner_digest: str | None = None
 
 
 class GarbagePlan(ContractModel):
@@ -168,6 +172,7 @@ class GarbageCollector:
         head = self.workspace.corpus.read_head()
         cutoff = datetime.now(UTC) - timedelta(hours=minimum_age_hours)
         root_commit_ids = {head.commit_id}
+        root_commit_ids.update(RetentionIntentStore(self.workspace).pending_commit_ids())
         referenced_generations: set[str] = set()
         referenced_artifacts: set[str] = set()
         catalog = Catalog(self.workspace)
@@ -214,16 +219,26 @@ class GarbageCollector:
                     ).fetchall()
                 )
         entries: list[GarbageEntry] = []
+        staging_ownership = StagingOwnershipService(self.workspace)
         for path in sorted(self.workspace.paths.staging.iterdir()):
             if path.name == "captures" and path.is_dir():
                 for capture_path in sorted(path.iterdir()):
+                    self._validate_staging_path(capture_path)
+                    ownership = staging_ownership.collectible(capture_path)
+                    if ownership is None:
+                        continue
                     self._candidate(
                         entries,
                         capture_path,
                         kind=GarbageEntryKind.STAGING,
                         reason=("Capture staging data is older than the recovery window."),
                         cutoff=cutoff,
+                        staging_owner_digest=ownership[1],
                     )
+                continue
+            self._validate_staging_path(path)
+            ownership = staging_ownership.collectible(path)
+            if ownership is None:
                 continue
             self._candidate(
                 entries,
@@ -231,6 +246,7 @@ class GarbageCollector:
                 kind=GarbageEntryKind.STAGING,
                 reason="Unpublished staging data older than the recovery window.",
                 cutoff=cutoff,
+                staging_owner_digest=ownership[1],
             )
         for path in sorted(self.workspace.paths.generations.iterdir()):
             if path.name not in referenced_generations:
@@ -311,10 +327,21 @@ class GarbageCollector:
             entries=plan.entries,
             moved_paths=(),
         )
-        with (
-            self.workspace.write_locked(),
-            self.workspace.retention_locked(shared=False),
+        with self.workspace.locked(
+            WRITE_EXCLUSIVE,
+            RETENTION_EXCLUSIVE,
+            phase="garbage collection apply",
         ):
+            newly_retained = set(RetentionIntentStore(self.workspace).pending_commit_ids()) - set(
+                plan.root_corpus_commit_ids
+            )
+            if newly_retained:
+                raise DomainError(
+                    ErrorCode.REVISION_CONFLICT,
+                    "A snapshot became retained after garbage collection was planned.",
+                    retryable=True,
+                    details={"corpus_commit_ids": sorted(newly_retained)},
+                )
             if self.workspace.corpus.read_head().commit_id != plan.corpus_commit_id:
                 raise DomainError(
                     ErrorCode.REVISION_CONFLICT,
@@ -322,10 +349,11 @@ class GarbageCollector:
                     retryable=True,
                 )
             for entry in plan.entries:
-                self._source(entry)
+                self._revalidate_entry(entry)
             self._write_manifest(trash_root, manifest)
             moved_paths: list[str] = []
             for entry in plan.entries:
+                self._revalidate_entry(entry)
                 source, relative = self._source(entry)
                 if not source.exists():
                     raise DomainError(
@@ -348,9 +376,10 @@ class GarbageCollector:
 
     def resume(self, trash_manifest_id: str) -> TrashManifest:
         """Finish an explicitly requested GC move interrupted by process death."""
-        with (
-            self.workspace.write_locked(),
-            self.workspace.retention_locked(shared=False),
+        with self.workspace.locked(
+            WRITE_EXCLUSIVE,
+            RETENTION_EXCLUSIVE,
+            phase="garbage collection resume",
         ):
             trash_root, manifest = self._read_manifest(trash_manifest_id)
             if isinstance(manifest, RestoringTrashManifest):
@@ -375,9 +404,10 @@ class GarbageCollector:
 
     def restore(self, trash_manifest_id: str) -> GarbageRestoreResult:
         """Restore one recoverable trash manifest without guessing its scope."""
-        with (
-            self.workspace.write_locked(),
-            self.workspace.retention_locked(shared=False),
+        with self.workspace.locked(
+            WRITE_EXCLUSIVE,
+            RETENTION_EXCLUSIVE,
+            phase="garbage collection restore",
         ):
             trash_root, manifest = self._read_manifest(trash_manifest_id)
             if not isinstance(manifest, RecoverableTrashManifest):
@@ -395,9 +425,10 @@ class GarbageCollector:
 
     def purge(self, trash_manifest_id: str) -> GarbagePurgeResult:
         """Permanently delete one expired, recoverable trash manifest."""
-        with (
-            self.workspace.write_locked(),
-            self.workspace.retention_locked(shared=False),
+        with self.workspace.locked(
+            WRITE_EXCLUSIVE,
+            RETENTION_EXCLUSIVE,
+            phase="garbage collection purge",
         ):
             trash_root, manifest = self._read_manifest(trash_manifest_id)
             if not isinstance(manifest, RecoverableTrashManifest):
@@ -427,6 +458,13 @@ class GarbageCollector:
                     retryable=True,
                     details={"trash_manifest_id": trash_manifest_id},
                 ) from exc
+            ownership = StagingOwnershipService(self.workspace).store
+            for entry in manifest.entries:
+                if entry.kind is not GarbageEntryKind.STAGING:
+                    continue
+                record = ownership.read(entry.path)
+                if record is not None:
+                    ownership.delete(record)
             fsync_directory(self.workspace.paths.trash)
             return GarbagePurgeResult(
                 trash_manifest_id=trash_manifest_id,
@@ -509,6 +547,7 @@ class GarbageCollector:
         kind: GarbageEntryKind,
         reason: str,
         cutoff: datetime,
+        staging_owner_digest: str | None = None,
     ) -> None:
         self._workspace_path(path.relative_to(self.workspace.paths.root).as_posix())
         modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
@@ -521,8 +560,64 @@ class GarbageCollector:
                 kind=kind,
                 byte_length=byte_length,
                 reason=reason,
+                identity_digest=self._tree_identity(path),
+                staging_owner_digest=staging_owner_digest,
             )
         )
+
+    def _revalidate_entry(self, entry: GarbageEntry) -> None:
+        source, _ = self._source(entry)
+        if not source.exists():
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                f"Garbage candidate disappeared: {entry.path}",
+            )
+        if entry.identity_digest is None or self._tree_identity(source) != entry.identity_digest:
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                f"Garbage candidate changed after planning: {entry.path}",
+                retryable=True,
+            )
+        if tree_bytes(source) != entry.byte_length:
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                f"Garbage candidate size changed after planning: {entry.path}",
+                retryable=True,
+            )
+        if entry.kind is GarbageEntryKind.STAGING:
+            ownership = StagingOwnershipService(self.workspace).collectible(source)
+            if ownership is None or ownership[1] != entry.staging_owner_digest:
+                raise DomainError(
+                    ErrorCode.REVISION_CONFLICT,
+                    f"Staging ownership changed after planning: {entry.path}",
+                    retryable=True,
+                )
+
+    @staticmethod
+    def _tree_identity(path: Path) -> str:
+        descendants = (path, *sorted(path.rglob("*"))) if path.is_dir() else (path,)
+        rows: list[dict[str, int | str]] = []
+        try:
+            for descendant in descendants:
+                metadata = descendant.lstat()
+                rows.append(
+                    {
+                        "path": descendant.relative_to(path).as_posix(),
+                        "device": metadata.st_dev,
+                        "inode": metadata.st_ino,
+                        "mode": metadata.st_mode,
+                        "size": metadata.st_size,
+                        "modified_ns": metadata.st_mtime_ns,
+                        "changed_ns": metadata.st_ctime_ns,
+                    }
+                )
+        except FileNotFoundError as exc:
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                "A garbage candidate changed while its identity was measured.",
+                retryable=True,
+            ) from exc
+        return digest_model(rows)
 
     def _workspace_path(self, value: str) -> tuple[Path, Path]:
         return lexical_path_beneath(
@@ -531,3 +626,6 @@ class GarbageCollector:
             subject="Garbage path",
             error_code=ErrorCode.ARTIFACT_INTEGRITY_FAILED,
         )
+
+    def _validate_staging_path(self, path: Path) -> None:
+        self._workspace_path(path.relative_to(self.workspace.paths.root).as_posix())

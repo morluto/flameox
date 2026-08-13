@@ -105,9 +105,7 @@ jobs:
           uv run ruff format --check src tests tools
           uv run mypy src tests tools
           uv run lint-imports
-          uv run python tools/test.py core
-          uv run python tools/test.py process
-          uv run python tools/test.py collection
+          uv run pytest -o addopts='' -ra -q -m 'not optional and not performance'
 
       - name: Verify npm bootstrap
         working-directory: npm

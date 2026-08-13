@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -15,8 +16,60 @@ from flameox.application import (
     ImportService,
     RunSetService,
 )
+from flameox.application.staging_ownership import StagingOwnershipService
 from flameox.domain import DomainError, ErrorCode
-from flameox.storage import Workspace
+from flameox.evidence import GenerationPublisher
+from flameox.storage import RetentionIntentStore, Workspace
+
+pytestmark = [pytest.mark.integration, pytest.mark.serial]
+
+
+def _release_staging_owner(workspace: Workspace, path: Path) -> None:
+    ownership = StagingOwnershipService(workspace).acquire(
+        path,
+        owner_kind="test",
+        owner_id=f"test-{path.name}",
+    )
+    ownership.release()
+
+
+def test_pending_retention_intent_roots_historical_snapshot_for_gc(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    historical_commit_id = workspace.corpus.read_head().commit_id
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "investigations": [
+                {
+                    "investigation_id": "investigation-1",
+                    "question": "advance HEAD?",
+                    "symptom": None,
+                    "project_root": str(tmp_path),
+                    "status": "open",
+                    "parent_investigation_id": None,
+                    "created_at": datetime.now(UTC),
+                }
+            ]
+        },
+        publisher="retention-test",
+        publisher_version="1",
+    )
+    store = RetentionIntentStore(workspace)
+    pending = store.acquire(
+        corpus_commit_id=historical_commit_id,
+        owner_kind="analysis",
+        owner_id="analysis-1",
+        operation_digest="operation-1",
+    )
+
+    retained = GarbageCollector(workspace).plan(minimum_age_hours=0)
+    assert historical_commit_id in retained.root_corpus_commit_ids
+
+    store.complete(
+        pending,
+        materialized_commit_id=workspace.corpus.read_head().commit_id,
+    )
+    released = GarbageCollector(workspace).plan(minimum_age_hours=0)
+    assert historical_commit_id not in released.root_corpus_commit_ids
 
 
 def test_gc_is_dry_run_first_and_moves_only_plan_to_recoverable_trash(
@@ -31,6 +84,7 @@ def test_gc_is_dry_run_first_and_moves_only_plan_to_recoverable_trash(
     (orphan / "partial.bin").write_bytes(b"recoverable")
     old = time.time() - 48 * 3600
     os.utime(orphan, (old, old))
+    _release_staging_owner(workspace, orphan)
 
     collector = GarbageCollector(workspace)
     plan = collector.plan(minimum_age_hours=24)
@@ -47,6 +101,41 @@ def test_gc_is_dry_run_first_and_moves_only_plan_to_recoverable_trash(
     assert (trash / "objects" / "staging" / "abandoned" / "partial.bin").read_bytes() == (
         b"recoverable"
     )
+
+
+def test_gc_preserves_old_staging_until_its_exact_owner_releases_it(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    staging = workspace.paths.staging / "live-operation"
+    staging.mkdir()
+    (staging / "partial.bin").write_bytes(b"still in use")
+    old = time.time() - 48 * 3600
+    os.utime(staging, (old, old))
+    ownership = StagingOwnershipService(workspace).acquire(
+        staging,
+        owner_kind="capture",
+        owner_id="live-capture",
+    )
+    collector = GarbageCollector(workspace)
+
+    while_live = collector.plan(minimum_age_hours=0)
+    assert "staging/live-operation" not in {entry.path for entry in while_live.entries}
+
+    ownership.release()
+    after_release = collector.plan(minimum_age_hours=0)
+    assert "staging/live-operation" in {entry.path for entry in after_release.entries}
+
+
+def test_gc_reclaims_old_staging_without_an_ownership_record(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    staging = workspace.paths.staging / "interrupted-unowned-publication"
+    staging.mkdir()
+    (staging / "partial.bin").write_bytes(b"abandoned")
+    old = time.time() - 48 * 3600
+    os.utime(staging, (old, old))
+
+    plan = GarbageCollector(workspace).plan(minimum_age_hours=24)
+
+    assert "staging/interrupted-unowned-publication" in {entry.path for entry in plan.entries}
 
 
 def test_gc_discovers_unreferenced_final_evidence_from_interrupted_publication(
@@ -108,6 +197,7 @@ def test_gc_apply_rejects_candidate_swapped_to_symlink_after_recheck(
     (candidate / "partial.bin").write_bytes(b"recoverable")
     old = time.time() - 48 * 3600
     os.utime(candidate, (old, old))
+    _release_staging_owner(workspace, candidate)
     victim = workspace.paths.root / "preserved"
     victim.mkdir(parents=True)
     payload = victim / "manifest.json"
@@ -172,6 +262,7 @@ def test_gc_manifest_can_resume_an_interrupted_multi_object_move(
         path.mkdir()
         (path / "partial.bin").write_bytes(name.encode())
         os.utime(path, (old, old))
+        _release_staging_owner(workspace, path)
     collector = GarbageCollector(workspace)
     plan = collector.plan(minimum_age_hours=24)
     real_replace = os.replace
@@ -212,6 +303,7 @@ def test_gc_restore_and_explicit_expired_purge_are_manifest_specific(
     (abandoned / "partial.bin").write_bytes(b"recoverable")
     old = time.time() - 48 * 3600
     os.utime(abandoned, (old, old))
+    _release_staging_owner(workspace, abandoned)
     collector = GarbageCollector(workspace)
     first = collector.apply(
         collector.plan(minimum_age_hours=24),
@@ -243,6 +335,7 @@ def test_gc_rejects_recoverability_that_disagrees_with_manifest_state(
     (abandoned / "partial.bin").write_bytes(b"recoverable")
     old = time.time() - 48 * 3600
     os.utime(abandoned, (old, old))
+    _release_staging_owner(workspace, abandoned)
     collector = GarbageCollector(workspace)
     applied = collector.apply(collector.plan(minimum_age_hours=24))
     manifest = collector.resume(applied.trash_manifest_id)
@@ -265,6 +358,7 @@ def test_gc_resume_completes_restore_interrupted_after_object_move(
     (abandoned / "partial.bin").write_bytes(b"recoverable")
     old = time.time() - 48 * 3600
     os.utime(abandoned, (old, old))
+    _release_staging_owner(workspace, abandoned)
     collector = GarbageCollector(workspace)
     applied = collector.apply(
         collector.plan(minimum_age_hours=24),

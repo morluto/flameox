@@ -262,6 +262,7 @@
     }
   },
   "additionalProperties": false,
+  "description": "Legacy provider manifest whose workload and device fields are labels only.",
   "properties": {
     "cache_status": {
       "$ref": "#/$defs/KernelBuildCacheStatus",
@@ -357,9 +358,9 @@
   "required": [
     "producer",
     "producer_version",
-    "workload_identity",
     "outcome",
-    "stages"
+    "stages",
+    "workload_identity"
   ],
   "title": "KernelBuildManifestV1",
   "type": "object"

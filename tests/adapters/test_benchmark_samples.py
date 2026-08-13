@@ -10,6 +10,8 @@ from flameox.application import EvidenceQueryService, ImportArtifactRequest, Imp
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import Workspace
 
+pytestmark = pytest.mark.unit
+
 
 def _write_samples(path: Path, *, synchronization: str = "event_synchronize") -> None:
     path.write_text(

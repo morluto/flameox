@@ -12,6 +12,8 @@ from flameox.catalog import Catalog
 from flameox.evidence import GenerationPublisher
 from flameox.storage import ArtifactStore, Workspace
 
+pytestmark = [pytest.mark.performance, pytest.mark.serial]
+
 
 def _run_row(index: int) -> dict[str, object]:
     return {

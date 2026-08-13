@@ -13,6 +13,7 @@ from typing import Literal, cast
 
 from pydantic import Field, JsonValue, TypeAdapter, computed_field
 
+from flameox.action_graph import ActionId, manual_action
 from flameox.adapters.toxiproxy import ToxiproxyApiError, ToxiproxyClient, ToxiproxyToolManager
 from flameox.application.async_work import run_atomic_thread
 from flameox.application.capture import CaptureService
@@ -30,6 +31,7 @@ from flameox.application.experiments import (
     ExperimentPlan,
     ExperimentService,
 )
+from flameox.application.progress import ProgressReporter
 from flameox.application.run_rows import run_row
 from flameox.application.source import collect_partial_source_state
 from flameox.application.workloads import (
@@ -79,7 +81,7 @@ _BASELINE = "baseline"
 
 
 class FaultExperimentPlan(ContractModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     plan_token: str
     plan_id: Digest
     workspace_id: str
@@ -95,6 +97,8 @@ class FaultExperimentPlan(ContractModel):
     tool_version: str
     tool_asset: str
     tool_digest: str
+    tool_executable_digest: str
+    tool_manifest_revision: str
     containment: Literal["managed_process_group"] = "managed_process_group"
     workload_containment: ExecutionPolicy = ExecutionPolicy.TRUSTED_LOCAL
     limitations: tuple[str, ...] = ()
@@ -215,10 +219,15 @@ class FaultExperimentService:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 "Managed Toxiproxy is not prepared for fault-experiment planning.",
-                details={"adapter": "toxiproxy", "next_tool": "start_capability_setup"},
+                details={"adapter": "toxiproxy"},
                 remediation=(
                     "Call list_capabilities(adapter='toxiproxy'), then start_capability_setup "
                     "with adapters=['toxiproxy'] before planning again.",
+                ),
+                next_action=manual_action(
+                    "Choose an idempotency key and start setup for the toxiproxy adapter.",
+                    suggested_action=ActionId.START_CAPABILITY_SETUP,
+                    missing_arguments=("idempotency_key",),
                 ),
             )
         treatments = (_BASELINE, *tuple(config.scenarios))
@@ -236,6 +245,14 @@ class FaultExperimentService:
             measurement_protocol_id=digest_model({"adapter": "command"}),
             validation_spec_id=definition.validation_spec_id,
             primary_metric=config.primary_metric,
+            metric_source=(
+                MetricSource.RUNTIME_RESOURCE
+                if config.primary_metric.startswith("runtime_resource.")
+                else MetricSource.MEASUREMENT
+            ),
+            primary_metric_unit=(
+                "bytes" if config.primary_metric.startswith("runtime_resource.") else None
+            ),
             polarity=config.polarity,
             estimand=config.estimand,
             practical_threshold=config.practical_threshold,
@@ -301,18 +318,18 @@ class FaultExperimentService:
             created_at=created,
             expires_at=created + timedelta(seconds=3600),
         )
+        tool_identity = {
+            "version": receipt.version,
+            "asset": receipt.asset,
+            "asset_sha256": receipt.sha256,
+            "executable_sha256": receipt.executable_sha256,
+            "manifest_revision": receipt.manifest_revision,
+        }
         bound = {
             "workspace_id": self.workspace.identity.workspace_id,
             "experiment": embedded.model_dump(mode="json"),
             "fault_config": config.model_dump(mode="json"),
-            "tool": receipt.__dict__
-            if hasattr(receipt, "__dict__")
-            else {
-                "version": receipt.version,
-                "asset": receipt.asset,
-                "sha256": receipt.sha256,
-                "executable": str(receipt.executable),
-            },
+            "tool": tool_identity,
         }
         plan = FaultExperimentPlan(
             plan_token=secrets.token_hex(32),
@@ -333,6 +350,8 @@ class FaultExperimentService:
             tool_version=receipt.version,
             tool_asset=receipt.asset,
             tool_digest=receipt.sha256,
+            tool_executable_digest=receipt.executable_sha256,
+            tool_manifest_revision=receipt.manifest_revision,
             workload_containment=execution_policy,
             limitations=(
                 "The sidecar is a controlled transport perturbation; it does not establish "
@@ -378,6 +397,8 @@ class FaultExperimentService:
             receipt.version != plan.tool_version
             or receipt.asset != plan.tool_asset
             or receipt.sha256 != plan.tool_digest
+            or receipt.executable_sha256 != plan.tool_executable_digest
+            or receipt.manifest_revision != plan.tool_manifest_revision
         ):
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN, "Managed Toxiproxy identity changed after planning."
@@ -401,9 +422,9 @@ class FaultExperimentService:
         trials: list[Trial] = []
         artifact_ids: dict[str, list[str]] = {}
         total = len(schedule)
+        reporter = ProgressReporter(progress)
         for index, (block, order, cell) in enumerate(schedule):
-            if progress is not None:
-                await progress(index, total, f"Running fault treatment {cell.treatment}")
+            await reporter.report(index, total, f"Running fault treatment {cell.treatment}")
             run: RunManifest | None = None
             capture_plan: CapturePlan | None = None
             failure_class = TrialFailureClass.INFRASTRUCTURE_FAILURE
@@ -422,9 +443,12 @@ class FaultExperimentService:
                 if cell.treatment != _BASELINE:
                     scenario = config.scenarios[cell.treatment]
                     if isinstance(scenario, ProxyFault):
-                        active_lease.update_proxy(proxy_name, enabled=scenario.enabled)
+                        await active_lease.update_proxy_async(
+                            proxy_name,
+                            enabled=scenario.enabled,
+                        )
                     else:
-                        active_lease.add_toxic(
+                        await active_lease.add_toxic_async(
                             proxy=proxy_name,
                             name="treatment",
                             toxic_type=scenario.type,
@@ -541,33 +565,23 @@ class FaultExperimentService:
     def _publish_fault_variants(
         self, plan: FaultExperimentPlan, trials: list[Trial]
     ) -> tuple[Variant, ...]:
+        helper = ExperimentService(self.workspace, captures=self.captures)
         variants: list[Variant] = []
         for name in plan.experiment_plan.variants:
-            cell = next(
-                cell
+            cell_ids = {
+                cell.trial_id
                 for block in plan.experiment_plan.blocks
                 for cell in block.cells
                 if cell.treatment == name
-            )
-            trial = next((item for item in trials if item.factors.get("scenario") == name), None)
-            run = RunStore(self.workspace).read(trial.run_id) if trial and trial.run_id else None
+            }
+            treatment_trials = [item for item in trials if item.trial_id in cell_ids]
             variants.append(
-                Variant(
-                    variant_id=digest_model(
-                        {
-                            "experiment_id": plan.experiment_plan.experiment.experiment_id,
-                            "name": name,
-                        }
-                    ),
-                    experiment_id=plan.experiment_plan.experiment.experiment_id,
-                    name=name,
-                    source_state_id=run.source_state_id if run is not None else None,
-                    workload_instance_id=run.workload_instance_id if run is not None else None,
-                    parameters=cell.factors,
-                    environment_requirements={},
+                helper._variant_for_treatment(
+                    plan.experiment_plan,
+                    name,
+                    treatment_trials,
                 )
             )
-        helper = ExperimentService(self.workspace, captures=self.captures)
         self.publisher.publish_rows(
             {"variants": [helper._variant_row(value) for value in variants]},
             publisher="flameox.faults",
@@ -597,7 +611,7 @@ class FaultExperimentService:
 
             async def readiness(client: ToxiproxyClient = client) -> bool:
                 try:
-                    version = await asyncio.to_thread(client.version)
+                    version = await client.version_async()
                 except ToxiproxyApiError:
                     return False
                 return version == plan.tool_version
@@ -612,7 +626,7 @@ class FaultExperimentService:
                     tool_receipt=receipt,
                 )
                 listen_port = _free_loopback_port()
-                lease.create_proxy(
+                await lease.create_proxy_async(
                     name=proxy_name,
                     listen=f"127.0.0.1:{listen_port}",
                     upstream=_format_endpoint(plan.upstream_host, plan.upstream_port),
@@ -672,6 +686,8 @@ class FaultExperimentService:
                 "version": plan.tool_version,
                 "asset": plan.tool_asset,
                 "sha256": plan.tool_digest,
+                "executable_sha256": plan.tool_executable_digest,
+                "manifest_revision": plan.tool_manifest_revision,
             },
             "observed": {
                 "admin_host": "127.0.0.1",

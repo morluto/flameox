@@ -5,6 +5,8 @@ import json
 import os
 import sys
 import threading
+import time
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,18 +17,32 @@ from flameox.application import (
     CaptureService,
     ExecutionPolicy,
 )
+from flameox.application.capture_admission import CaptureAdmissionService
+from flameox.application.proc import read_boot_id
 from flameox.catalog import Catalog
 from flameox.domain import (
+    CaptureLease,
     CaptureStatus,
     DomainError,
     ErrorCode,
     ExecutionStatus,
     ExternalExecutionContext,
+    ProjectionState,
     Sensitivity,
     ValidationStatus,
 )
-from flameox.storage import ArtifactStore, RunStore, Workspace
+from flameox.domain.models import utc_now
+from flameox.storage import (
+    ArtifactStore,
+    CaptureAdmissionRecord,
+    CaptureAdmissionStore,
+    ProjectionIntentStore,
+    RunStore,
+    Workspace,
+)
 from tests.support.capture import disable_containment, write_workload
+
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
 
 
 @pytest.mark.anyio
@@ -88,6 +104,31 @@ async def test_capture_plan_is_single_use_and_publishes_process_evidence(
     with pytest.raises(DomainError) as replay:
         await service.execute(plan.plan_token)
     assert replay.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+
+
+@pytest.mark.anyio
+@pytest.mark.process
+async def test_progress_delivery_failure_cannot_fail_a_healthy_capture(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    write_workload(tmp_path)
+    disable_containment(workspace)
+    service = CaptureService(workspace)
+    plan = await service.plan(
+        workload_name="echo",
+        adapter="command",
+        parameters={"message": "candidate"},
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    async def failed_notification(completed: float, total: float, message: str) -> None:
+        raise RuntimeError("progress transport closed")
+
+    result = await service.execute(plan.plan_token, progress=failed_notification)
+
+    assert result.run.execution_status is ExecutionStatus.SUCCEEDED
+    assert result.run.capture_status is CaptureStatus.REGISTERED
 
 
 @pytest.mark.anyio
@@ -260,6 +301,110 @@ async def test_concurrent_captures_execute_while_publications_serialize(
     assert len({result.run.run_id for result in results}) == 2
     with Catalog(workspace).open_snapshot() as snapshot:
         assert snapshot.execute("SELECT count(DISTINCT run_id) FROM runs").fetchone() == (2,)
+
+
+@pytest.mark.anyio
+@pytest.mark.process
+async def test_capture_admission_limit_is_shared_by_independent_services(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.wait]
+argv = ["python", "-c", "import time; time.sleep(0.75)"]
+cwd = "."
+timeout_seconds = 30
+"""
+    )
+    config = workspace.config.validated_copy(
+        update={
+            "capture": workspace.config.capture.validated_copy(update={"max_parallel_captures": 1}),
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            ),
+        }
+    )
+    workspace.paths.config.write_text(config.to_toml())
+    first_service = CaptureService(workspace)
+    second_service = CaptureService(workspace)
+    first_plan = await first_service.plan(
+        workload_name="wait",
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    second_plan = await second_service.plan(
+        workload_name="wait",
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    first_admitted = asyncio.Event()
+    active = 0
+    maximum_active = 0
+
+    async def observe(completed: float, total: float, message: str) -> None:
+        nonlocal active, maximum_active
+        if completed == 4:
+            active += 1
+            maximum_active = max(maximum_active, active)
+            first_admitted.set()
+        elif completed == 5:
+            active -= 1
+
+    first_task = asyncio.create_task(first_service.execute(first_plan.plan_token, progress=observe))
+    await asyncio.wait_for(first_admitted.wait(), timeout=5)
+    second_task = asyncio.create_task(
+        second_service.execute(second_plan.plan_token, progress=observe)
+    )
+    queued = None
+    for _ in range(200):
+        try:
+            queued = RunStore(workspace).read(second_plan.run_id)
+        except DomainError:
+            await asyncio.sleep(0.01)
+            continue
+        if queued.revision >= 1:
+            break
+        await asyncio.sleep(0.01)
+
+    assert queued is not None
+    assert queued.execution_status is ExecutionStatus.PLANNED
+    assert queued.capture_status is CaptureStatus.PENDING
+    results = await asyncio.gather(first_task, second_task)
+
+    assert maximum_active == 1
+    assert active == 0
+    assert all(result.run.execution_status is ExecutionStatus.SUCCEEDED for result in results)
+
+
+@pytest.mark.anyio
+async def test_capture_admission_reclaims_only_a_proven_dead_exact_owner(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    observed = utc_now()
+    dead = CaptureAdmissionRecord(
+        run_id="dead-run",
+        owner_id="dead-owner",
+        process_lease=CaptureLease(
+            process_id=2_000_000_000,
+            process_start_identity="dead-process-start",
+            boot_id=read_boot_id(),
+            heartbeat_monotonic_ns=time.monotonic_ns(),
+            observed_at=observed,
+            expires_at=observed + timedelta(seconds=60),
+        ),
+        acquired_at=observed,
+    )
+    store = CaptureAdmissionStore(workspace)
+    assert store.try_acquire(dead, limit=1)
+
+    admission = await CaptureAdmissionService(workspace, limit=1).acquire("replacement-run")
+    try:
+        assert [record.run_id for record in store.list()] == ["replacement-run"]
+    finally:
+        admission.release()
 
 
 @pytest.mark.anyio
@@ -453,7 +598,7 @@ async def test_artifact_registration_failure_is_terminal_and_cleans_staging(
 
 @pytest.mark.anyio
 @pytest.mark.process
-async def test_publication_failure_is_terminal_and_cleans_staging(
+async def test_publication_failure_preserves_succeeded_run_and_cleans_staging(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -466,7 +611,7 @@ async def test_publication_failure_is_terminal_and_cleans_staging(
         adapter="command",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
-    original = cast(Any, service.publisher.publish_rows)
+    original = cast(Any, service.projections.publisher.publish_rows_idempotent)
 
     def fail_evidence_publication(
         rows: dict[str, list[dict[str, object]]],
@@ -480,14 +625,25 @@ async def test_publication_failure_is_terminal_and_cleans_staging(
             )
         return original(rows, *args, **kwargs)
 
-    monkeypatch.setattr(service.publisher, "publish_rows", fail_evidence_publication)
+    monkeypatch.setattr(
+        service.projections.publisher,
+        "publish_rows_idempotent",
+        fail_evidence_publication,
+    )
 
     with pytest.raises(DomainError, match="simulated publication failure"):
         await service.execute(plan.plan_token)
 
     terminal = RunStore(workspace).read(plan.run_id)
-    assert terminal.execution_status is ExecutionStatus.FAILED
-    assert terminal.capture_status is CaptureStatus.FAILED
+    assert terminal.execution_status is ExecutionStatus.SUCCEEDED
+    assert terminal.capture_status is CaptureStatus.REGISTERED
+    intent = ProjectionIntentStore(workspace).latest(
+        domain_kind="run",
+        domain_id=plan.run_id,
+        projection_kind="run.core",
+    )
+    assert intent is not None
+    assert intent.state is ProjectionState.FAILED
     assert not any((workspace.paths.staging / "captures").iterdir())
 
 
@@ -514,7 +670,10 @@ async def test_capture_cancellation_at_awaited_phase_is_terminal(
         _message: str,
     ) -> None:
         if completed == cancel_at_phase:
-            raise asyncio.CancelledError
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()
+            await asyncio.sleep(0)
 
     with pytest.raises(asyncio.CancelledError):
         await service.execute(plan.plan_token, progress=cancel)

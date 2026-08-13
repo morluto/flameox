@@ -33,6 +33,13 @@ from flameox.domain import (
 )
 from flameox.storage import Workspace
 
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.optional,
+    pytest.mark.requires_memray,
+    pytest.mark.serial,
+]
+
 
 def _capture(path: Path, allocation_count: int) -> None:
     memray = pytest.importorskip("memray", reason="optional provider unavailable: install memray")

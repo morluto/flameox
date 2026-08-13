@@ -14,6 +14,8 @@ from flameox.domain.models import ExecutionRunManifest
 from flameox.evidence_scope import EvidenceScope
 from flameox.storage import RunStore, Workspace
 
+pytestmark = pytest.mark.unit
+
 
 def test_drilldown_rejects_run_absent_from_pinned_corpus(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)

@@ -3,17 +3,19 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from pydantic import Field, JsonValue
+from pydantic import Field
 
+from flameox.action_graph import ActionId, manual_action
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
     ArtifactKind,
     ArtifactRegistration,
-    CursorCodec,
+    CursorNamespace,
     DomainError,
     ErrorCode,
     digest_model,
@@ -24,6 +26,15 @@ from flameox.execution import SubprocessBroker
 from flameox.models import ContractModel
 from flameox.pagination import CursorPageContract
 from flameox.storage import ArtifactStore, RunStore, Workspace
+from flameox.workers.perfetto_contract import (
+    PERFETTO_WORKER,
+    PerfettoExtractRequest,
+    PerfettoExtractResult,
+    PerfettoWindowRequest,
+    PerfettoWindowResult,
+    PerfettoWorkerRequest,
+    PerfettoWorkerResult,
+)
 
 type _AggregateKey = tuple[str, str | None, str | None]
 
@@ -111,20 +122,20 @@ class PerfettoExtractor:
             )
         max_slices = (maximum - 1) // 6
         response = await self._run_worker(
-            {
-                "operation": "extract",
-                "artifact_path": str(artifact.payload_path),
-                "binary_path": str(binary),
-                "max_rows": max_slices,
-            }
+            PerfettoExtractRequest(
+                operation="extract",
+                artifact_path=str(artifact.payload_path),
+                binary_path=str(binary),
+                max_rows=max_slices,
+            )
         )
-        rows = response.get("rows")
-        if not isinstance(rows, list):
+        if not isinstance(response, PerfettoExtractResult):
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
-                "Perfetto worker returned no slice rows.",
+                "Perfetto worker returned another operation result.",
                 run_id=run_id,
             )
+        rows = [row.model_dump(mode="python") for row in response.rows]
         normalized_phase_by_id = self._normalized_phases(rows)
         frame_by_id: dict[str, dict[str, Any]] = {}
         aggregates: dict[_AggregateKey, tuple[int, int]] = {}
@@ -427,7 +438,7 @@ class PerfettoExtractor:
                     "query_version": self.query_version,
                     "trace_processor_sha256": trace_processor_sha256,
                     "normalized_slice_count": len(events),
-                    "truncated": response.get("truncated") is True,
+                    "truncated": response.truncated,
                 },
                 allow_nan=False,
                 separators=(",", ":"),
@@ -470,7 +481,7 @@ class PerfettoExtractor:
             call_edge_count=len(edge_rows),
             representative_stack_count=len(stack_rows),
             trace_event_count=len(trace_event_observation_rows),
-            truncated=response.get("truncated") is True,
+            truncated=response.truncated,
             corpus_commit_id=published.commit.commit_id,
             limitations=(
                 "Slice duration is inclusive and nested slices can overlap.",
@@ -481,7 +492,7 @@ class PerfettoExtractor:
                         "Normalized extraction reached the generation row budget; later slices "
                         "remain only in the native trace.",
                     )
-                    if response.get("truncated") is True
+                    if response.truncated
                     else ()
                 ),
             ),
@@ -516,13 +527,17 @@ class PerfettoExtractor:
             run_id=run_id,
             details={
                 "artifact_ids": available_artifact_ids,
-                "next_tool": "extract_perfetto",
             },
             remediation=("Pass one execution-trace artifact_id from the run artifact list.",),
+            next_action=manual_action(
+                "Choose one reported trace artifact before retrying extraction.",
+                suggested_action=ActionId.EXTRACT_PERFETTO,
+                missing_arguments=("artifact_id",),
+            ),
         )
 
     @staticmethod
-    def _normalized_phases(rows: list[object]) -> dict[int, str | None]:
+    def _normalized_phases(rows: Sequence[object]) -> dict[int, str | None]:
         row_by_id = {
             int(row["id"]): row
             for row in rows
@@ -581,41 +596,38 @@ class PerfettoExtractor:
         after_ts: int | None = None
         after_id: int | None = None
         if cursor is not None:
-            position = CursorCodec.decode(
-                cursor,
-                namespace="trace_window",
-                snapshot_id=artifact_id,
-                scope_digest=scope_digest,
+            position = cast(
+                tuple[int, int],
+                self.workspace.cursors.resolve(
+                    cursor,
+                    namespace=CursorNamespace.TRACE_WINDOW,
+                    snapshot_id=artifact_id,
+                    scope_digest=scope_digest,
+                ),
             )
-            if (
-                len(position) != 2
-                or not isinstance(position[0], int)
-                or not isinstance(position[1], int)
-            ):
-                raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.")
             timestamp_value, id_value = position
             assert isinstance(timestamp_value, int)
             assert isinstance(id_value, int)
             after_ts, after_id = timestamp_value, id_value
         response = await self._run_worker(
-            {
-                "operation": "window",
-                "artifact_path": str(artifact.payload_path),
-                "binary_path": str(binary),
-                "start_ns": start_ns,
-                "end_ns": end_ns,
-                "limit": limit,
-                "after_ts": after_ts,
-                "after_id": after_id,
-            }
+            PerfettoWindowRequest(
+                operation="window",
+                artifact_path=str(artifact.payload_path),
+                binary_path=str(binary),
+                start_ns=start_ns,
+                end_ns=end_ns,
+                limit=limit,
+                after_ts=after_ts,
+                after_id=after_id,
+            )
         )
-        total = int(response.get("total", 0))
-        rows = response.get("rows")
-        if not isinstance(rows, list):
+        if not isinstance(response, PerfettoWindowResult):
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
-                "Perfetto worker returned no trace-window rows.",
+                "Perfetto worker returned another operation result.",
             )
+        total = response.total
+        rows = [row.model_dump(mode="python") for row in response.rows]
         selected = rows[:limit]
         events = tuple(
             TraceEvent(
@@ -632,8 +644,8 @@ class PerfettoExtractor:
         )
         has_more = len(rows) > limit
         next_cursor = (
-            CursorCodec.encode(
-                namespace="trace_window",
+            self.workspace.cursors.issue(
+                namespace=CursorNamespace.TRACE_WINDOW,
                 snapshot_id=artifact_id,
                 scope_digest=scope_digest,
                 position=(events[-1].start_ns, events[-1].slice_id),
@@ -659,14 +671,11 @@ class PerfettoExtractor:
 
     async def _run_worker(
         self,
-        request: dict[str, JsonValue],
-    ) -> dict[str, Any]:
-        return await IsolatedWorkerHarness(self.workspace, broker=self.broker).run(
-            "flameox.workers.perfetto",
+        request: PerfettoWorkerRequest,
+    ) -> PerfettoWorkerResult:
+        return await IsolatedWorkerHarness(self.workspace, broker=self.broker).run_typed(
+            PERFETTO_WORKER,
             request,
-            name="Perfetto",
-            timeout_seconds=120,
-            consume=lambda response, _root: response,
         )
 
     def _trace_processor_path(self) -> Path:

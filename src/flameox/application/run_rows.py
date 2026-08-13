@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 
-from flameox.domain import ResourceAvailability, RunManifest
+from flameox.domain import ResourceAvailability, RunManifest, digest_model
 from flameox.storage.control_plane import canonical_json
 
 
 def run_row(manifest: RunManifest) -> dict[str, object]:
     return {
         "run_id": manifest.run_id,
+        "run_revision": manifest.revision,
+        "run_manifest_digest": digest_model(manifest.model_dump(mode="json")),
         "created_at": manifest.created_at,
         "run_type": manifest.run_type.value,
         "execution_status": manifest.execution_status.value,

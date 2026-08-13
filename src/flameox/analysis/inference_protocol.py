@@ -156,6 +156,8 @@ class InferenceProtocolIdentity(ContractModel):
     provider: _Identifier
     provider_version: _NonEmptyStr | None = None
     provider_executable_digest: _Digest | None = None
+    provider_environment_id: _Digest | None = None
+    provider_python_digest: _Digest | None = None
     trace: TraceIdentity
     schedule: ScheduleIdentity
     model: ModelIdentity
@@ -222,6 +224,14 @@ def _facets() -> tuple[_FacetGetter, ...]:
                 lambda p: p.provider_executable_digest,
                 lambda p: p.provider_executable_digest,
             ),
+        ),
+        (
+            "provider_environment_id",
+            (lambda p: p.provider_environment_id, lambda p: p.provider_environment_id),
+        ),
+        (
+            "provider_python_digest",
+            (lambda p: p.provider_python_digest, lambda p: p.provider_python_digest),
         ),
         ("trace.format", (lambda p: p.trace.format, lambda p: p.trace.format)),
         ("trace.producer", (lambda p: p.trace.producer, lambda p: p.trace.producer)),

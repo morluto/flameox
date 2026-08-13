@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
+import httpx
 import pytest
 
 from flameox.application.inference import InferenceReplayService
@@ -37,6 +38,7 @@ from flameox.domain import (
     process_termination_from_returncode,
 )
 from flameox.domain.models import ArtifactKind, ArtifactRegistration, utc_now
+from flameox.evidence import GenerationPublisher
 from flameox.execution import (
     ExecutionOutcome,
     ExecutionRequest,
@@ -45,8 +47,11 @@ from flameox.execution import (
     ProcessContainment,
     SubprocessBroker,
 )
+from flameox.http_transport import BoundedHttpClient
 from flameox.storage import RunStore, Workspace
 from tests.support.execution import executable_binding
+
+pytestmark = pytest.mark.unit
 
 
 def _workspace(tmp_path: Path, *, mode: str = "managed") -> Workspace:
@@ -144,7 +149,12 @@ class _ProfilingBroker(SubprocessBroker):
 def _patch_capture_dependencies(monkeypatch: pytest.MonkeyPatch, executable: Path) -> None:
     from flameox.application import inference as inference_module
 
-    def fake_discover(tool: InferenceTool) -> InferenceToolDiscovery:
+    def fake_discover(
+        tool: InferenceTool,
+        *,
+        provider_runtime: object | None = None,
+    ) -> InferenceToolDiscovery:
+        del provider_runtime
         return AvailableInferenceToolDiscovery(
             tool=tool,
             executable=executable,
@@ -174,8 +184,12 @@ def _patch_capture_dependencies(monkeypatch: pytest.MonkeyPatch, executable: Pat
         fake_environment,
     )
     monkeypatch.setattr(InferenceProfilingService, "_extract_preserved", fake_extract)
-    monkeypatch.setattr(VllmProfilerControlClient, "start", lambda _self: None)
-    monkeypatch.setattr(VllmProfilerControlClient, "stop", lambda _self: None)
+
+    async def control_noop(_self: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(VllmProfilerControlClient, "start_async", control_noop)
+    monkeypatch.setattr(VllmProfilerControlClient, "stop_async", control_noop)
 
 
 async def _seed_measurement_run(workspace: Workspace) -> str:
@@ -212,14 +226,13 @@ async def _seed_measurement_run(workspace: Workspace) -> str:
             "artifacts": (registration,),
         }
     )
-    replay.runs.append(finished, expected_revision=0)
-    replay._publish_run(
+    replay.projections.append_run(
         finished,
-        measurement_environment,
-        source_state,
-        (stored.content.artifact_id,),
+        expected_revision=0,
+        environment=measurement_environment,
+        source_state=source_state,
     )
-    replay.publisher.publish_rows(
+    GenerationPublisher(workspace).publish_rows(
         {
             "measurements": [
                 {
@@ -354,29 +367,20 @@ def test_existing_local_server_cannot_be_profiled(tmp_path: Path) -> None:
     assert caught.value.code is ErrorCode.EXECUTION_REFUSED
 
 
-def test_profiler_control_uses_only_start_and_stop_endpoints(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_profiler_control_uses_only_start_and_stop_endpoints() -> None:
     calls: list[tuple[str, str]] = []
 
-    class Response:
-        status = 200
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, str(request.url)))
+        return httpx.Response(204, stream=httpx.ByteStream(b""))
 
-        def __enter__(self) -> Response:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-    def fake_urlopen(request: object, *, timeout: float) -> Response:
-        del timeout
-        calls.append((request.method, request.full_url))  # type: ignore[attr-defined]
-        return Response()
-
-    monkeypatch.setattr("flameox.application.inference_profiling.urlopen", fake_urlopen)
-    client = VllmProfilerControlClient("http://127.0.0.1:8000")
-    client.start()
-    client.stop()
+    with BoundedHttpClient(sync_transport=httpx.MockTransport(handler)) as http_client:
+        client = VllmProfilerControlClient(
+            "http://127.0.0.1:8000",
+            http_client=http_client,
+        )
+        client.start()
+        client.stop()
 
     assert calls == [
         ("POST", "http://127.0.0.1:8000/start_profile"),
@@ -384,36 +388,25 @@ def test_profiler_control_uses_only_start_and_stop_endpoints(
     ]
 
 
-def test_sglang_profiler_control_posts_only_fixed_profile_payload(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_sglang_profiler_control_posts_only_fixed_profile_payload(tmp_path: Path) -> None:
     payloads: list[tuple[str, bytes]] = []
 
-    class Response:
-        status = 200
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append((str(request.url), request.content))
+        return httpx.Response(204, stream=httpx.ByteStream(b""))
 
-        def __enter__(self) -> Response:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-    def fake_urlopen(request: object, *, timeout: float) -> Response:
-        del timeout
-        payloads.append((request.full_url, request.data))  # type: ignore[attr-defined]
-        return Response()
-
-    monkeypatch.setattr("flameox.application.inference_profiling.urlopen", fake_urlopen)
-    client = InferenceProfilerControlClient(
-        "http://127.0.0.1:8000",
-        provider=InferenceServerProvider.SGLANG,
-    )
-    client.start(
-        output_dir=tmp_path / "traces",
-        profile_id="profile-id",
-        options=SglangProfileOptions(),
-    )
-    client.stop()
+    with BoundedHttpClient(sync_transport=httpx.MockTransport(handler)) as http_client:
+        client = InferenceProfilerControlClient(
+            "http://127.0.0.1:8000",
+            provider=InferenceServerProvider.SGLANG,
+            http_client=http_client,
+        )
+        client.start(
+            output_dir=tmp_path / "traces",
+            profile_id="profile-id",
+            options=SglangProfileOptions(),
+        )
+        client.stop()
 
     assert json.loads(payloads[0][1]) == {
         "output_dir": str(tmp_path / "traces"),
@@ -432,7 +425,7 @@ def test_torch_profile_preserves_compressed_trace_for_perfetto(tmp_path: Path) -
     workspace = _workspace(tmp_path)
     service = InferenceProfilingService(workspace)
     plan = service.plan("local", profiler="torch_profiler")
-    plan.output_path.mkdir(parents=True)
+    plan.output_path.mkdir(parents=True, exist_ok=True)
     (plan.output_path / "worker.pt.trace.json.gz").write_bytes(b"trace")
 
     _artifacts, run_ids, _limitations = service._preserve(plan)
@@ -450,7 +443,7 @@ async def test_torch_profile_feeds_preserved_trace_to_perfetto(
     workspace = _workspace(tmp_path)
     service = InferenceProfilingService(workspace)
     plan = service.plan("local", profiler="torch_profiler")
-    plan.output_path.mkdir(parents=True)
+    plan.output_path.mkdir(parents=True, exist_ok=True)
     (plan.output_path / "worker.pt.trace.json.gz").write_bytes(b"trace")
     _artifacts, run_ids, _limitations = service._preserve(plan)
     extracted: list[str] = []
@@ -485,7 +478,7 @@ async def test_nsight_profile_feeds_only_sqlite_export_to_existing_extractor(
     nsys.chmod(0o755)
     service = InferenceProfilingService(workspace)
     plan = service.plan("local", profiler="nsight_systems", nsys_executable=nsys)
-    plan.output_path.parent.mkdir(parents=True)
+    plan.output_path.parent.mkdir(parents=True, exist_ok=True)
     plan.output_path.write_bytes(b"native")
     plan.output_path.with_suffix(".sqlite").write_bytes(b"SQLite format 3\0")
     _artifacts, run_ids, _limitations = service._preserve(plan)
@@ -562,6 +555,36 @@ async def test_capture_publishes_canonical_diagnostic_run_linked_to_measurement_
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("target", ("profile", "replay"))
+async def test_capture_refuses_operation_directory_replaced_after_planning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    workspace = _workspace(tmp_path)
+    executable = tmp_path / "aiperf"
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(0o755)
+    _patch_capture_dependencies(monkeypatch, executable)
+    service = InferenceProfilingService(workspace)
+    plan, _measurement_run_id = await _authorized_profile(service, workspace)
+    assert plan.replay_plan is not None
+    selected = plan.output_root if target == "profile" else plan.replay_plan.output_root
+    operation_root = workspace.paths.staging.joinpath(*selected.parts())
+    parked = operation_root.with_name(f"{operation_root.name}-parked")
+    outside = tmp_path / f"outside-{target}"
+    outside.mkdir()
+    operation_root.rename(parked)
+    operation_root.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(DomainError) as caught:
+        await service.capture(plan.plan_token)
+
+    assert caught.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.anyio
 async def test_startup_failure_finalizes_run_and_preserves_partial_trace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -600,10 +623,10 @@ async def test_profiler_flush_failure_returns_partial_capture_and_failed_run(
     executable.chmod(0o755)
     _patch_capture_dependencies(monkeypatch, executable)
 
-    def fail_stop(_self: object) -> None:
+    async def fail_stop(_self: object, **_kwargs: object) -> None:
         raise DomainError(ErrorCode.PROCESS_FAILED, "profiler flush failed")
 
-    monkeypatch.setattr(VllmProfilerControlClient, "stop", fail_stop)
+    monkeypatch.setattr(VllmProfilerControlClient, "stop_async", fail_stop)
     service = InferenceProfilingService(workspace)
     plan, _measurement_run_id = await _authorized_profile(service, workspace)
     service.broker = _ProfilingBroker(plan.output_path / "worker.pt.trace.json")

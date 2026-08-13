@@ -17,8 +17,9 @@ from pydantic import (
     model_validator,
 )
 
+from flameox.action_graph import ManualAction, NextAction, ToolAction
 from flameox.domain.executables import ResolvedExecutable
-from flameox.domain.identity import digest_model
+from flameox.domain.identity import canonical_json_bytes, digest_model
 from flameox.domain.scalars import NumericValue
 from flameox.models import ContractModel
 
@@ -26,6 +27,35 @@ Identifier = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 VariantName = Annotated[str, StringConstraints(max_length=200)]
 Digest = Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
 ShortText = Annotated[str, StringConstraints(min_length=1, max_length=500)]
+MAX_RUN_SET_MEMBERS = 1_000
+MAX_RUN_SET_SELECTION_BYTES = 16 * 1024
+
+
+def validate_run_set_selection(value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    count = 0
+
+    def visit(item: JsonValue, depth: int) -> None:
+        nonlocal count
+        count += 1
+        if count > 256:
+            raise ValueError("run-set selection is limited to 256 JSON values")
+        if depth > 4:
+            raise ValueError("run-set selection is limited to 4 nested levels")
+        if isinstance(item, str) and len(item) > 500:
+            raise ValueError("run-set selection strings are limited to 500 characters")
+        if isinstance(item, list):
+            for child in item:
+                visit(child, depth + 1)
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                if len(key) > 100:
+                    raise ValueError("run-set selection keys are limited to 100 characters")
+                visit(child, depth + 1)
+
+    visit(value, 0)
+    if len(canonical_json_bytes(value)) > MAX_RUN_SET_SELECTION_BYTES:
+        raise ValueError("run-set selection exceeds its 16 KiB serialized budget")
+    return value
 
 
 class LimitationSource(StrEnum):
@@ -119,6 +149,7 @@ class ArtifactKind(StrEnum):
     INFERENCE_RESULT = "inference_result"
     KERNEL_BUILD = "kernel_build"
     KERNEL_PROFILE = "kernel_profile"
+    METAL_TRACE = "metal_trace"
 
 
 class RunType(StrEnum):
@@ -167,12 +198,11 @@ class GenerationStatus(StrEnum):
 
 class ExperimentOutcomeMethod(StrEnum):
     FIXED_ATTEMPTS_V1 = "fixed_attempts_v1"
+    ABSENCE_OF_FAILURE_FIXED_ATTEMPTS_V1 = "absence_of_failure_fixed_attempts_v1"
 
 
 class ExperimentOutcomeGoal(StrEnum):
-    EQUIVALENCE = "equivalence"
     ABSENCE_OF_FAILURE = "absence_of_failure"
-    BOUNDED_RATE = "bounded_rate"
 
 
 class ExperimentOutcomeDisposition(StrEnum):
@@ -393,12 +423,60 @@ class MetricPolarity(StrEnum):
 class MetricSource(StrEnum):
     MEASUREMENT = "measurement"
     RUNTIME_RESOURCE = "runtime_resource"
+    KERNEL_VALIDATION = "kernel_validation"
+
+
+class MetricValueDomain(StrEnum):
+    STRICTLY_POSITIVE = "strictly_positive"
+
+
+class MetricZeroPolicy(StrEnum):
+    REJECT = "reject"
+
+
+class MeasurementSeriesSelector(ContractModel):
+    """The semantic identity of one normalized measurement population."""
+
+    scope: Identifier
+    aggregation: Identifier
+    phase: Identifier | None = None
+    loop_count: Annotated[int, Field(ge=1)] | None = None
+    dimensions: dict[str, str] = Field(default_factory=dict, max_length=64)
+
+
+class ComparisonMetricContract(ContractModel):
+    """A closed contract for the population and transform used by a comparison."""
+
+    schema_version: Literal[1] = 1
+    source: MetricSource
+    metric: Identifier
+    unit: Identifier
+    polarity: MetricPolarity
+    estimand: Literal["median_paired_log_ratio", "difference_in_median_logs"]
+    value_domain: Literal[MetricValueDomain.STRICTLY_POSITIVE] = MetricValueDomain.STRICTLY_POSITIVE
+    zero_policy: Literal[MetricZeroPolicy.REJECT] = MetricZeroPolicy.REJECT
+    series: MeasurementSeriesSelector | None = None
+
+    @computed_field(return_type=str)  # type: ignore[prop-decorator]
+    @property
+    def contract_id(self) -> str:
+        payload = self.model_dump(mode="json", exclude={"contract_id"})
+        return digest_model(payload)
+
+    @model_validator(mode="after")
+    def source_semantics_are_coherent(self) -> ComparisonMetricContract:
+        if self.source is MetricSource.RUNTIME_RESOURCE:
+            if self.unit != "bytes":
+                raise ValueError("runtime-resource metric contracts require byte units")
+            if self.series is not None:
+                raise ValueError("runtime-resource metric contracts cannot select a series")
+        return self
 
 
 class ConfidenceInterval(ContractModel):
-    low: float
-    high: float
-    level: Annotated[float, Field(gt=0, lt=1)]
+    low: Annotated[float, Field(allow_inf_nan=False)]
+    high: Annotated[float, Field(allow_inf_nan=False)]
+    level: Annotated[float, Field(gt=0, lt=1, allow_inf_nan=False)]
 
     @model_validator(mode="after")
     def lower_bound_does_not_exceed_upper_bound(self) -> ConfidenceInterval:
@@ -575,9 +653,13 @@ class AcceleratorIdentityStatus(StrEnum):
 
 class AcceleratorDevice(ContractModel):
     index: Annotated[int, Field(ge=0)]
+    stable_id: str | None = None
+    pci_bus_id: str | None = None
     model: str | None = None
     compute_capability: str | None = None
+    memory_bytes: Annotated[int, Field(ge=0)] | None = None
     memory_mib: Annotated[int, Field(ge=0)] | None = None
+    gpu_core_count: Annotated[int, Field(gt=0)] | None = None
     mig_mode: AcceleratorMigMode = AcceleratorMigMode.UNKNOWN
 
 
@@ -589,11 +671,16 @@ class AcceleratorLink(ContractModel):
 
 
 class AcceleratorIdentityFacet(ContractModel):
-    provider: Literal["cuda"]
+    provider: Literal["cuda", "metal"]
     status: AcceleratorIdentityStatus
     identity_quality: IdentityQuality
     driver_version: str | None = None
     runtime_version: str | None = None
+    provider_version: str | None = None
+    metal_support: str | None = None
+    unified_memory_bytes: Annotated[int, Field(ge=0)] | None = None
+    macos_product_version: str | None = None
+    macos_build: str | None = None
     devices: tuple[AcceleratorDevice, ...] = ()
     links: tuple[AcceleratorLink, ...] = ()
     missing_fields: tuple[str, ...] = ()
@@ -726,6 +813,7 @@ class CapabilityProvisioning(StrEnum):
 
     BUNDLED = "bundled"
     MANAGED_RUNTIME = "managed_runtime"
+    WORKLOAD_ENVIRONMENT = "workload_environment"
     HOST = "host"
     THIRD_PARTY_APPROVAL = "third_party_approval"
     UNSUPPORTED = "unsupported"
@@ -734,7 +822,10 @@ class CapabilityProvisioning(StrEnum):
 class CapabilityExtra(StrEnum):
     CPU = "cpu"
     EXECUTION = "execution"
+    HARDWARE = "hardware"
+    INFERENCE = "inference"
     MEMORY = "memory"
+    REDUCTION = "reduction"
     TEST = "test"
     TRACE = "trace"
     TORCH = "torch"
@@ -765,22 +856,20 @@ def parse_managed_runtime_extras(value: object) -> tuple[CapabilityExtra, ...]:
 class CapabilitySetup(ContractModel):
     """The bounded setup action FlameOx can take for one capability."""
 
-    method: Literal["start_capability_setup"]
     extra: CapabilityExtra
     requirement: str | None = None
-    next_tool: Literal["start_capability_setup", "list_capabilities"]
-    verification_tool: Literal["list_capabilities"] = "list_capabilities"
+    next_action: ManualAction
+    verification_action: ToolAction
 
 
 class AdapterSetup(ContractModel):
     """The agent-owned setup action for an installed third-party adapter."""
 
-    method: Literal["prepare_adapter"]
     adapter: Identifier
     distribution: Identifier
     package_identity: str
-    next_tool: Literal["prepare_adapter", "list_capabilities"]
-    verification_tool: Literal["list_capabilities"] = "list_capabilities"
+    next_action: ToolAction
+    verification_action: ToolAction
 
 
 class CapabilityReport(ContractModel):
@@ -817,16 +906,7 @@ class RequirementResult(ContractModel):
     evidence: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     remediation: tuple[str, ...] = ()
-    next_tool: (
-        Literal[
-            "prepare_adapter",
-            "start_capability_setup",
-            "prepare_workload_dependencies",
-            "list_capabilities",
-            "plan_capture",
-        ]
-        | None
-    ) = None
+    next_action: NextAction | None = None
 
 
 class PreflightReport(ContractModel):
@@ -881,6 +961,13 @@ class ExecutionIdentityInputStatus(StrEnum):
     NOT_OBSERVED = "not_observed"
 
 
+class ExecutionIdentityBasis(StrEnum):
+    PROJECT_SOURCE = "project_source"
+    DISTRIBUTION_METADATA = "distribution_metadata"
+    INTERPRETER_STDLIB = "interpreter_stdlib"
+    EXPLICIT_FILE = "explicit_file"
+
+
 class ExecutionIdentityQuality(StrEnum):
     EXACT = "exact"
     PARTIAL = "partial"
@@ -891,6 +978,10 @@ class ExecutionIdentityQuality(StrEnum):
 class ExecutionIdentityInput(ContractModel):
     kind: ExecutionIdentityInputKind
     requested: str
+    identity_basis: ExecutionIdentityBasis | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     configured_path: str | None = None
     resolved_path: str | None = None
     loaded_path: str | None = None
@@ -1029,6 +1120,7 @@ class ProcessCancellationCause(StrEnum):
     OUTPUT_LIMIT = "output_limit"
     IO_FAILURE = "io_failure"
     STORAGE_RESERVE_EXCEEDED = "storage_reserve_exceeded"
+    WRITABLE_LIMIT_EXCEEDED = "writable_limit_exceeded"
     MEMORY_LIMIT_EXCEEDED = "memory_limit_exceeded"
     PROCESS_ERROR = "process_error"
     CRASH_RECOVERY = "crash_recovery"
@@ -1146,6 +1238,7 @@ class ProcessTerminationFields(ContractModel):
 
 type ResourcePolicyCancellationCause = Literal[
     ProcessCancellationCause.STORAGE_RESERVE_EXCEEDED,
+    ProcessCancellationCause.WRITABLE_LIMIT_EXCEEDED,
     ProcessCancellationCause.MEMORY_LIMIT_EXCEEDED,
 ]
 
@@ -1341,7 +1434,7 @@ class Hypothesis(ContractModel):
 
 
 class Experiment(ContractModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 2
     experiment_id: Identifier
     investigation_id: Identifier
     hypothesis_id: Identifier | None = None
@@ -1352,25 +1445,138 @@ class Experiment(ContractModel):
     measurement_protocol_id: Digest
     validation_spec_id: Digest | None = None
     primary_metric: Identifier
+    metric_source: MetricSource | None = None
+    primary_metric_unit: Identifier | None = None
+    measurement_series: MeasurementSeriesSelector | None = None
+    value_domain: MetricValueDomain | None = None
+    zero_policy: MetricZeroPolicy | None = None
     polarity: MetricPolarity
     estimand: Identifier
-    practical_threshold: Annotated[float, Field(ge=0)]
-    confidence_level: Annotated[float, Field(gt=0, lt=1)]
+    practical_threshold: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+    confidence_level: Annotated[float, Field(gt=0, lt=1, allow_inf_nan=False)]
     stopping_rule: dict[str, JsonValue]
     random_seed: Annotated[int, Field(ge=0)]
     role: ExperimentRole
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class VariantIdentityQuality(StrEnum):
+    EXACT_UNIFORM = "exact_uniform"
+    HETEROGENEOUS = "heterogeneous"
+    INCOMPLETE = "incomplete"
+    LEGACY_REPRESENTATIVE = "legacy_representative"
+
+
 class Variant(ContractModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 2
     variant_id: Identifier
     experiment_id: Identifier
     name: VariantName
+    treatment_factor: Identifier | None = None
+    treatment_value: JsonValue = None
+    treatment_identity_id: Digest | None = None
+    identity_quality: VariantIdentityQuality
     source_state_id: Digest | None = None
     workload_instance_id: Digest | None = None
+    environment_id: Digest | None = None
+    source_state_ids: Annotated[tuple[Digest, ...], Field(max_length=1_000)] = ()
+    workload_instance_ids: Annotated[tuple[Digest, ...], Field(max_length=1_000)] = ()
+    environment_ids: Annotated[tuple[Digest, ...], Field(max_length=1_000)] = ()
+    combination_ids: Annotated[tuple[Digest, ...], Field(max_length=10_000)] = ()
     environment_requirements: dict[str, JsonValue] = Field(default_factory=dict)
     parameters: dict[str, JsonValue] = Field(default_factory=dict)
+    varying_factors: dict[str, tuple[JsonValue, ...]] = Field(default_factory=dict)
+    limitations: tuple[str, ...] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_representative(cls, value: Any) -> Any:
+        if isinstance(value, Mapping) and value.get("schema_version", 2) == 1:
+            migrated = dict(value)
+            migrated.setdefault("identity_quality", VariantIdentityQuality.LEGACY_REPRESENTATIVE)
+            source_state_id = migrated.get("source_state_id")
+            workload_instance_id = migrated.get("workload_instance_id")
+            migrated.setdefault(
+                "source_state_ids", (source_state_id,) if source_state_id is not None else ()
+            )
+            migrated.setdefault(
+                "workload_instance_ids",
+                (workload_instance_id,) if workload_instance_id is not None else (),
+            )
+            migrated.setdefault(
+                "limitations",
+                (
+                    "schema-v1 variant identities are representative-only and do not prove "
+                    "cohort uniformity",
+                ),
+            )
+            return migrated
+        return value
+
+    @model_validator(mode="after")
+    def cohort_identity_is_coherent(self) -> Variant:
+        for field_name in (
+            "source_state_ids",
+            "workload_instance_ids",
+            "environment_ids",
+            "combination_ids",
+        ):
+            values = getattr(self, field_name)
+            if len(values) != len(set(values)):
+                raise ValueError(f"{field_name} must contain unique identities")
+        for singular_name, plural_name in (
+            ("source_state_id", "source_state_ids"),
+            ("workload_instance_id", "workload_instance_ids"),
+            ("environment_id", "environment_ids"),
+        ):
+            singular = getattr(self, singular_name)
+            plural = getattr(self, plural_name)
+            if singular is not None and plural != (singular,):
+                raise ValueError(
+                    f"singular {singular_name} requires exactly one matching cohort identity"
+                )
+        if self.treatment_factor is None:
+            if self.treatment_identity_id is not None:
+                raise ValueError("treatment identity requires a treatment factor")
+        else:
+            if not isinstance(self.treatment_value, str | int | float | bool):
+                raise ValueError("treatment values must be scalar JSON values")
+            value_type = (
+                "bool"
+                if type(self.treatment_value) is bool
+                else "int"
+                if type(self.treatment_value) is int
+                else "float"
+                if type(self.treatment_value) is float
+                else "string"
+            )
+            expected = digest_model(
+                {
+                    "factor": self.treatment_factor,
+                    "value_type": value_type,
+                    "value": self.treatment_value,
+                }
+            )
+            if self.treatment_identity_id != expected:
+                raise ValueError("treatment identity must match its typed factor value")
+        heterogeneous = bool(self.varying_factors) or any(
+            len(values) > 1
+            for values in (
+                self.source_state_ids,
+                self.workload_instance_ids,
+                self.environment_ids,
+            )
+        )
+        if self.identity_quality is VariantIdentityQuality.EXACT_UNIFORM and heterogeneous:
+            raise ValueError("an exact-uniform variant cannot contain heterogeneous identities")
+        if self.identity_quality is VariantIdentityQuality.HETEROGENEOUS and not heterogeneous:
+            raise ValueError("a heterogeneous variant must expose its varying cohort identity")
+        if self.identity_quality is VariantIdentityQuality.LEGACY_REPRESENTATIVE:
+            if self.schema_version != 1:
+                raise ValueError("legacy representative quality is reserved for schema v1")
+        elif self.schema_version != 2:
+            raise ValueError("schema-v1 variants must be marked legacy representative")
+        return self
 
 
 class _Trial(ContractModel):
@@ -1497,7 +1703,7 @@ class IncludedRunSetMember(_RunSetMember):
 
 class ExcludedRunSetMember(_RunSetMember):
     included: Literal[False] = False
-    reason: str
+    reason: ShortText
 
 
 type RunSetMember = Annotated[
@@ -1511,12 +1717,26 @@ class RunSet(ContractModel):
     run_set_id: Digest
     corpus_commit_id: Digest
     created_at: datetime = Field(default_factory=utc_now)
-    selection: dict[str, JsonValue]
-    members: tuple[RunSetMember, ...]
+    selection: Annotated[dict[str, JsonValue], Field(max_length=16)]
+    members: Annotated[
+        tuple[RunSetMember, ...],
+        Field(min_length=1, max_length=MAX_RUN_SET_MEMBERS),
+    ]
     membership_digest: Digest
+
+    @field_validator("selection")
+    @classmethod
+    def selection_is_bounded(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return validate_run_set_selection(value)
 
     @model_validator(mode="after")
     def identity_matches_membership(self) -> RunSet:
+        identities = [(member.run_id, member.trial_id) for member in self.members]
+        if len(set(identities)) != len(identities):
+            raise ValueError("run-set member identities must be unique")
+        run_ids = [member.run_id for member in self.members]
+        if len(set(run_ids)) != len(run_ids):
+            raise ValueError("a run can appear in a run set only once")
         membership = [member.model_dump(mode="json") for member in self.members]
         if self.membership_digest != digest_model(membership):
             raise ValueError("run-set membership digest must match its members")
@@ -1560,12 +1780,20 @@ class AnalysisRecord(ContractModel):
 
 
 class EvidenceReference(ContractModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     owner_type: Literal["analysis", "finding", "hypothesis"]
     owner_id: Identifier
+    owner_revision: Annotated[int, Field(ge=1)] | None = None
     ref_type: EvidenceReferenceType
     ref_id: Identifier
     relation: EvidenceRelation
+
+    @model_validator(mode="after")
+    def revisioned_owners_are_exact(self) -> EvidenceReference:
+        revisioned = self.owner_type in {"finding", "hypothesis"}
+        if revisioned != (self.owner_revision is not None):
+            raise ValueError("revisioned evidence owners require an exact owner revision")
+        return self
 
 
 class Comparison(ConfidenceIntervalFields):
@@ -1578,18 +1806,24 @@ class Comparison(ConfidenceIntervalFields):
     candidate_run_set_id: Digest
     metric: Identifier
     unit: Identifier
+    metric_source: MetricSource = MetricSource.MEASUREMENT
+    metric_contract_id: Digest
+    measurement_series_id: Digest | None = None
+    protocol_identity_id: Digest | None = None
+    value_domain: MetricValueDomain = MetricValueDomain.STRICTLY_POSITIVE
+    zero_policy: MetricZeroPolicy = MetricZeroPolicy.REJECT
     polarity: MetricPolarity
     estimand: Identifier
-    practical_threshold: Annotated[float, Field(ge=0)]
+    practical_threshold: Annotated[float, Field(ge=0, allow_inf_nan=False)]
     baseline_value: NumericValue | None = None
     candidate_value: NumericValue | None = None
     absolute_change: NumericValue | None = None
-    relative_change: float | None = None
+    relative_change: Annotated[float, Field(allow_inf_nan=False)] | None = None
     # ``effect_size`` holds the relative median effect (exp(median(log(
     # candidate/baseline))) - 1), a dimensionless ratio, not a standardized
     # mean difference such as Cohen's d. See ``estimand`` for the exact
     # quantity this value estimates.
-    effect_size: float | None = None
+    effect_size: Annotated[float, Field(allow_inf_nan=False)] | None = None
     method: Identifier
     random_seed: Annotated[int, Field(ge=0)] | None = None
     independent_unit: Identifier
@@ -1597,10 +1831,14 @@ class Comparison(ConfidenceIntervalFields):
     baseline_eligible_n: Annotated[int, Field(ge=0)]
     baseline_failed_n: Annotated[int, Field(ge=0)] = 0
     baseline_excluded_n: Annotated[int, Field(ge=0)] = 0
+    baseline_missing_n: Annotated[int, Field(ge=0)] = 0
+    baseline_out_of_domain_n: Annotated[int, Field(ge=0)] = 0
     candidate_attempted_n: Annotated[int, Field(ge=0)]
     candidate_eligible_n: Annotated[int, Field(ge=0)]
     candidate_failed_n: Annotated[int, Field(ge=0)] = 0
     candidate_excluded_n: Annotated[int, Field(ge=0)] = 0
+    candidate_missing_n: Annotated[int, Field(ge=0)] = 0
+    candidate_out_of_domain_n: Annotated[int, Field(ge=0)] = 0
     complete_pair_n: Annotated[int, Field(ge=0)] | None = None
     multiplicity: dict[str, JsonValue] | None = None
     decision: ComparisonDecision
@@ -1619,6 +1857,20 @@ class Comparison(ConfidenceIntervalFields):
             self.candidate_eligible_n,
         ):
             raise ValueError("complete pairs cannot exceed eligible samples")
+        if self.validity is ComparisonValidity.VALID:
+            if self.mismatches:
+                raise ValueError("valid comparisons cannot retain compatibility mismatches")
+            if self.confidence_interval is None:
+                raise ValueError("valid comparisons require a finite confidence interval")
+            if self.paired and self.complete_pair_n != self.baseline_eligible_n:
+                raise ValueError("valid paired comparisons require complete baseline coverage")
+            if self.paired and self.complete_pair_n != self.candidate_eligible_n:
+                raise ValueError("valid paired comparisons require complete candidate coverage")
+        elif self.decision not in {
+            ComparisonDecision.INCONCLUSIVE,
+            ComparisonDecision.DESCRIPTIVE_ONLY,
+        }:
+            raise ValueError("non-valid comparisons cannot make a confirmatory decision")
         return self
 
 

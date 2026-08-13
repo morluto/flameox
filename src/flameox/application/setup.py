@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 import stat
 from dataclasses import dataclass
@@ -12,18 +10,23 @@ from typing import Literal, Protocol
 import portalocker
 from packaging.version import InvalidVersion, Version
 from platformdirs import user_data_path
-from pydantic import ConfigDict, Field, computed_field
+from pydantic import ConfigDict, computed_field
 
 from flameox.adapters.client_setup import (
     ALL_SETUP_CLIENTS,
     ClientConfigEdit,
-    ClientConfigRegistry,
     ClientPlanAction,
     Launcher,
+    QualifiedClientConfigFallbacks,
     SetupClient,
 )
+from flameox.adapters.mcp_client_drivers import (
+    ClientCommandPlan,
+    ClientManagementMechanism,
+    OfficialCliDriver,
+)
 from flameox.adapters.setup_runtime import ManagedRuntime, RuntimeInstallation
-from flameox.atomic import atomic_write_bytes, atomic_write_json, fsync_directory
+from flameox.atomic import atomic_write_bytes
 from flameox.domain import DomainError, ErrorCode
 from flameox.execution import SubprocessBroker
 from flameox.models import ContractModel
@@ -48,6 +51,8 @@ class ClientSetupPlan(ContractModel):
     path: Path
     action: ClientPlanAction
     detected: bool
+    mechanism: ClientManagementMechanism = ClientManagementMechanism.QUALIFIED_CONFIG_FILE
+    client_version: str | None = None
 
 
 class SetupPlan(ContractModel):
@@ -91,33 +96,13 @@ class ResolvedSetupPlan:
     edits: tuple[ClientConfigEdit, ...]
     install_manifest_original: bytes | None
     install_manifest_mode: int
-
-
-@dataclass(frozen=True, slots=True)
-class _FileMutation:
-    path: Path
-    original: bytes | None
-    updated: bytes
-    mode: int
+    commands: tuple[ClientCommandPlan, ...] = ()
 
 
 class _InstallManifest(ContractModel):
     schema_version: Literal[1] = 1
     active_version: str
     executable: Path
-
-
-class _JournalMutation(ContractModel):
-    path: Path
-    original: str | None
-    original_sha256: str | None
-    updated_sha256: str
-    mode: int = Field(ge=0, le=0o777)
-
-
-class _SetupJournal(ContractModel):
-    schema_version: Literal[1] = 1
-    mutations: tuple[_JournalMutation, ...]
 
 
 class RuntimeManager(Protocol):
@@ -143,15 +128,25 @@ class SetupService:
         uv_executable: str = "uv",
         runtime: RuntimeManager | None = None,
         broker: SubprocessBroker | None = None,
+        prefer_official_clients: bool | None = None,
     ) -> None:
         resolved_home = home or Path.home()
         self.data_root = data_root or Path(user_data_path("flameox", appauthor=False))
         self.broker = broker or SubprocessBroker()
-        self.registry = ClientConfigRegistry(
+        self.registry = QualifiedClientConfigFallbacks(
             home=resolved_home,
             jsonc_helper=jsonc_helper,
             node_executable=node_executable,
             broker=self.broker,
+        )
+        use_official = home is None if prefer_official_clients is None else prefer_official_clients
+        self.official_drivers = (
+            {
+                client: OfficialCliDriver(client, broker=self.broker)
+                for client in (SetupClient.CLAUDE, SetupClient.CODEX, SetupClient.GEMINI)
+            }
+            if use_official
+            else {}
         )
         self.runtime = runtime or ManagedRuntime(
             self.data_root,
@@ -159,11 +154,9 @@ class SetupService:
             broker=self.broker,
         )
         self.install_manifest = self.data_root / "install.json"
-        self.journal_path = self.data_root / "setup-journal.json"
         self.lock_path = self.data_root / "setup.lock"
 
     def inspect(self) -> SetupInspection:
-        self._recover_interrupted()
         manifest = self._read_install_manifest()
         return SetupInspection(
             active_version=manifest.active_version if manifest else None,
@@ -180,7 +173,6 @@ class SetupService:
         clients: tuple[SetupClient, ...],
         version: str | None,
     ) -> ResolvedSetupPlan:
-        self._recover_interrupted()
         manifest_original, manifest_mode = self._snapshot_file(self.install_manifest)
         if operation is SetupOperation.VERIFY:
             manifest = self._read_install_manifest()
@@ -261,10 +253,14 @@ class SetupService:
                 RuntimeAction.REUSE if version in installed_versions else RuntimeAction.INSTALL
             )
 
-        edits = tuple(
-            self.registry.plan(client, launcher, remove=remove)
-            for client in _unique_clients(clients)
-        )
+        planned_edits: list[ClientConfigEdit] = []
+        commands: list[ClientCommandPlan] = []
+        for client in _unique_clients(clients):
+            driver = self.official_drivers.get(client)
+            if driver is not None:
+                commands.append(driver.plan(launcher, remove=remove))
+            else:
+                planned_edits.append(self.registry.plan(client, launcher, remove=remove))
         public = SetupPlan(
             operation=operation,
             version=version,
@@ -278,20 +274,33 @@ class SetupService:
                     action=edit.action,
                     detected=edit.detected,
                 )
-                for edit in edits
+                for edit in planned_edits
+            )
+            + tuple(
+                ClientSetupPlan(
+                    client=command.client,
+                    display_name=command.client.display_name,
+                    path=command.executable.canonical_target,
+                    action=command.action,
+                    detected=True,
+                    mechanism=command.mechanism,
+                    client_version=command.client_version,
+                )
+                for command in commands
             ),
             warnings=tuple(warnings)
             + (
                 ("Client detection is informational; only selected clients will change.",)
-                if any(not edit.detected for edit in edits)
+                if any(not edit.detected for edit in planned_edits)
                 else ()
             ),
         )
         return ResolvedSetupPlan(
             public,
-            edits,
+            tuple(planned_edits),
             manifest_original,
             manifest_mode,
+            tuple(commands),
         )
 
     async def apply(self, plan: ResolvedSetupPlan) -> SetupReport:
@@ -299,23 +308,7 @@ class SetupService:
         try:
             lock = portalocker.Lock(self.lock_path, mode="a", timeout=10)
             with lock:
-                self._recover_locked()
                 return await self._apply_locked(plan)
-        except portalocker.exceptions.LockException as exc:
-            raise DomainError(
-                ErrorCode.WRITE_LOCK_TIMEOUT,
-                "Another flameox setup operation holds the setup lock.",
-                retryable=True,
-            ) from exc
-
-    def _recover_interrupted(self) -> None:
-        if not self.journal_path.exists():
-            return
-        self.data_root.mkdir(parents=True, exist_ok=True)
-        try:
-            lock = portalocker.Lock(self.lock_path, mode="a", timeout=10)
-            with lock:
-                self._recover_locked()
         except portalocker.exceptions.LockException as exc:
             raise DomainError(
                 ErrorCode.WRITE_LOCK_TIMEOUT,
@@ -386,68 +379,69 @@ class SetupService:
             not in (ClientPlanAction.ALREADY_CURRENT, ClientPlanAction.NOT_CONFIGURED)
         )
         unchanged = tuple(edit.client for edit in plan.edits if edit not in changed)
+        command_changed = tuple(
+            command
+            for command in plan.commands
+            if command.action
+            not in (ClientPlanAction.ALREADY_CURRENT, ClientPlanAction.NOT_CONFIGURED)
+        )
+        command_unchanged = tuple(
+            command.client for command in plan.commands if command not in command_changed
+        )
         manifest_original = plan.install_manifest_original
         manifest_updated = (
             manifest_original
             if public.operation is SetupOperation.REMOVE
             else self._updated_install_manifest(public)
         )
-        mutations = [
-            _FileMutation(edit.path, edit.original, edit.updated, edit.mode)
-            for edit in changed
-            if edit.updated is not None
-        ]
-        if (
-            manifest_updated is not None
-            and manifest_updated != manifest_original
-            and (manifest_original is not None or public.operation is not SetupOperation.REMOVE)
-        ):
-            mutations.append(
-                _FileMutation(
-                    self.install_manifest,
-                    manifest_original,
-                    manifest_updated,
-                    plan.install_manifest_mode,
-                )
-            )
-        if not mutations:
+        if not changed and not command_changed and manifest_updated == manifest_original:
             return SetupReport(
                 operation=public.operation,
                 version=public.version,
                 runtime_installed=installation.installed if installation else False,
                 changed_clients=(),
-                unchanged_clients=unchanged,
+                unchanged_clients=unchanged + command_unchanged,
             )
 
-        self._write_journal(mutations)
-        try:
-            for mutation in mutations:
-                current = mutation.path.read_bytes() if mutation.path.exists() else None
-                if current != mutation.original:
-                    raise DomainError(
-                        ErrorCode.REVISION_CONFLICT,
-                        f"Configuration changed during setup: {mutation.path}",
-                        retryable=True,
-                        remediation=(
-                            "Review the file, then run `npx flameox@latest setup` again.",
-                        ),
-                    )
-                atomic_write_bytes(
-                    mutation.path,
-                    mutation.updated,
-                    mode=mutation.mode,
+        # Client applications are independent authorities. Apply and verify each
+        # selected mutation on its own; never fabricate a distributed rollback.
+        for edit in changed:
+            current = edit.path.read_bytes() if edit.path.exists() else None
+            if current != edit.original:
+                raise DomainError(
+                    ErrorCode.REVISION_CONFLICT,
+                    f"Configuration changed during setup: {edit.path}",
+                    retryable=True,
+                    remediation=("Review the file, then run `npx flameox@latest setup` again.",),
                 )
-        except BaseException:
-            self._restore_mutations(mutations)
-            self._remove_journal()
-            raise
-        self._remove_journal()
+            if edit.updated is not None:
+                atomic_write_bytes(edit.path, edit.updated, mode=edit.mode)
+        for command in command_changed:
+            driver = self.official_drivers.get(command.client)
+            if driver is None:
+                raise DomainError(
+                    ErrorCode.REVISION_CONFLICT,
+                    f"The planned {command.client.display_name} driver is no longer available.",
+                    retryable=True,
+                )
+            await driver.apply(command)
+        if (
+            manifest_updated is not None
+            and manifest_updated != manifest_original
+            and (manifest_original is not None or public.operation is not SetupOperation.REMOVE)
+        ):
+            atomic_write_bytes(
+                self.install_manifest,
+                manifest_updated,
+                mode=plan.install_manifest_mode,
+            )
         return SetupReport(
             operation=public.operation,
             version=public.version,
             runtime_installed=installation.installed if installation else False,
-            changed_clients=tuple(edit.client for edit in changed),
-            unchanged_clients=unchanged,
+            changed_clients=tuple(edit.client for edit in changed)
+            + tuple(command.client for command in command_changed),
+            unchanged_clients=unchanged + command_unchanged,
         )
 
     def _updated_install_manifest(
@@ -505,96 +499,6 @@ class SetupService:
                 details={"error": str(exc)},
             ) from exc
 
-    def _write_journal(self, edits: list[_FileMutation]) -> None:
-        journal = _SetupJournal(
-            mutations=tuple(
-                _JournalMutation(
-                    path=edit.path,
-                    original=(
-                        base64.b64encode(edit.original).decode()
-                        if edit.original is not None
-                        else None
-                    ),
-                    original_sha256=_digest(edit.original),
-                    updated_sha256=hashlib.sha256(edit.updated).hexdigest(),
-                    mode=edit.mode,
-                )
-                for edit in edits
-            )
-        )
-        atomic_write_json(self.journal_path, journal.model_dump(mode="json"))
-
-    def _recover_locked(self) -> None:
-        if not self.journal_path.exists():
-            return
-        try:
-            journal = _SetupJournal.model_validate_json(self.journal_path.read_text())
-            allowed_paths = {
-                *self.registry.allowed_config_paths(),
-                self.install_manifest,
-            }
-            decoded: dict[Path, bytes | None] = {}
-            for mutation in journal.mutations:
-                path = mutation.path
-                if path not in allowed_paths:
-                    raise ValueError(f"journal contains an unexpected path: {path}")
-                original = (
-                    base64.b64decode(mutation.original, validate=True)
-                    if mutation.original is not None
-                    else None
-                )
-                if _digest(original) != mutation.original_sha256:
-                    raise ValueError(f"journal digest mismatch: {path}")
-                decoded[path] = original
-            for mutation in reversed(journal.mutations):
-                path = mutation.path
-                current = path.read_bytes() if path.exists() else None
-                original_digest = mutation.original_sha256
-                current_digest = _digest(current)
-                if current_digest == original_digest:
-                    continue
-                if current_digest != mutation.updated_sha256:
-                    raise ValueError(f"configuration changed after interruption: {path}")
-                original = decoded[path]
-                if original is None:
-                    path.unlink(missing_ok=True)
-                else:
-                    atomic_write_bytes(path, original, mode=mutation.mode)
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-            raise DomainError(
-                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                "The interrupted setup journal could not be recovered safely.",
-                details={"path": str(self.journal_path), "error": str(exc)},
-                remediation=("Preserve the journal and repair the affected client configs.",),
-            ) from exc
-        self._remove_journal()
-
-    @staticmethod
-    def _restore_mutations(edits: list[_FileMutation]) -> None:
-        conflicts: list[Path] = []
-        for edit in reversed(edits):
-            current = edit.path.read_bytes() if edit.path.exists() else None
-            if current == edit.original:
-                continue
-            if current != edit.updated:
-                conflicts.append(edit.path)
-                continue
-            if edit.original is None:
-                edit.path.unlink(missing_ok=True)
-            else:
-                atomic_write_bytes(edit.path, edit.original, mode=edit.mode)
-        if conflicts:
-            raise DomainError(
-                ErrorCode.REVISION_CONFLICT,
-                "One or more configs changed during setup rollback.",
-                details={"paths": [str(path) for path in conflicts]},
-                remediation=("Preserve the setup journal and review the files manually.",),
-            )
-
-    def _remove_journal(self) -> None:
-        self.journal_path.unlink(missing_ok=True)
-        fsync_directory(self.journal_path.parent)
-
     def _read_install_manifest(self) -> _InstallManifest | None:
         if not self.install_manifest.exists():
             return None
@@ -628,7 +532,3 @@ def _is_older_version(candidate: str, current: str) -> bool:
         return Version(candidate) < Version(current)
     except InvalidVersion:
         return False
-
-
-def _digest(value: bytes | None) -> str | None:
-    return hashlib.sha256(value).hexdigest() if value is not None else None

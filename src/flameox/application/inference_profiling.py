@@ -4,42 +4,35 @@ import asyncio
 import json
 import os
 import secrets
-import shutil
 import time
 from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Literal
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
 
-from pydantic import Discriminator, Field, Tag, TypeAdapter
+from pydantic import Discriminator, Field, JsonValue, Tag, TypeAdapter
 
+from flameox.action_graph import ActionId, tool_action
 from flameox.analysis.inference_protocol import (
     AttachedProfilerState,
     InferenceProtocolIdentity,
     ProfilerKind,
 )
 from flameox.application.evidence_query import EvidenceQueryService
-from flameox.application.evidence_rows import (
-    artifact_registration_row,
-    environment_row,
-    source_state_row,
-)
-from flameox.application.imports import ImportArtifactRequest, ImportService
+from flameox.application.imports import ImportDescriptorRequest, ImportService
 from flameox.application.inference import InferenceReplayPlan, InferenceReplayService
 from flameox.application.inference_providers import (
     InferenceServerMode,
     InferenceServerProvider,
     _loopback_http_url,
     discover_sglang,
+    probe_existing_vllm_server_async,
 )
-from flameox.application.run_rows import run_row
+from flameox.application.projections import ProjectionCoordinator
 from flameox.application.source import collect_partial_source_state
 from flameox.application.workloads import WorkloadService, _ManagedInferenceServerConfig
-from flameox.atomic import atomic_write_bytes
 from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
     ArtifactKind,
@@ -60,8 +53,18 @@ from flameox.domain import (
 )
 from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.models import ExecutionRunManifest, utc_now
-from flameox.evidence import GenerationPublisher
 from flameox.execution import ExecutionRequest, SubprocessBroker
+from flameox.filesystem_authority import (
+    BoundDirectory,
+    BoundDirectoryReference,
+    TrustedRoot,
+)
+from flameox.http_transport import (
+    BoundedHttpClient,
+    BoundedHttpError,
+    HttpMethod,
+    LoopbackHttpRequest,
+)
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, AuthorizedPlanStore, RunStore, Workspace
 
@@ -92,7 +95,7 @@ class SglangProfileOptions(ContractModel):
 
 
 class _InferenceProfilingPlan(ContractModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     plan_id: str
     plan_token: str = ""
     scenario_name: str | None = None
@@ -107,6 +110,8 @@ class _InferenceProfilingPlan(ContractModel):
     server_cwd: Path
     environment_names: tuple[str, ...]
     environment_digest: str
+    output_root: BoundDirectoryReference
+    output_relative_path: str
     output_path: Path
     configuration_id: str
     server_executable_digest: str | None = None
@@ -171,7 +176,7 @@ def parse_inference_profiling_plan(value: Any) -> InferenceProfilingPlan:
 
 
 class InferenceProfilingResult(ContractModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     run_id: str
     plan_id: str
     measurement_protocol_id: str
@@ -196,14 +201,14 @@ class InferenceProfilingService:
         self.broker = broker or SubprocessBroker()
         self.artifacts = ArtifactStore(workspace)
         self.runs = RunStore(workspace)
-        self.publisher = GenerationPublisher(workspace)
+        self.projections = ProjectionCoordinator(workspace)
         self.plans = AuthorizedPlanStore(
             workspace,
             family="inference_profiling",
             model=_INFERENCE_PROFILING_PLAN,
         )
 
-    def plan(
+    def plan(  # noqa: C901 - one typed planner owns the mutually exclusive profiler cases
         self,
         server_name: str,
         *,
@@ -231,7 +236,8 @@ class InferenceProfilingService:
                 ErrorCode.WORKSPACE_INVALID,
                 f"Inference server {server_name!r} is not declared.",
                 remediation=("List or configure a managed inference server, then retry.",),
-                details={"server": server_name, "next_tool": "list_inference_configurations"},
+                details={"server": server_name},
+                next_action=tool_action(ActionId.LIST_INFERENCE_CONFIGURATIONS),
             ) from exc
         if server.mode is not InferenceServerMode.MANAGED or server.workload is None:
             raise DomainError(
@@ -259,7 +265,6 @@ class InferenceProfilingService:
         if sglang_discovery is not None:
             server_version = sglang_discovery.version
         native_argv = workload.command.argv
-        output_root = self.workspace.paths.staging / f"inference-profile-{server_name}" / new_id()
         environment = dict(workload.command.env_overrides)
         limitations: tuple[str, ...]
         nsys_binding = None
@@ -267,15 +272,12 @@ class InferenceProfilingService:
             selected_profiler is ProfilerKind.TORCH_PROFILER
             and server.provider is InferenceServerProvider.VLLM
         ):
-            output_path = output_root / "torch"
-            environment["VLLM_TORCH_PROFILER_DIR"] = str(output_path)
-            argv = native_argv
+            output_relative_path = "torch"
             limitations = (
                 "Diagnostic profile; measurements must come from a separate unprofiled run.",
             )
         elif selected_profiler is ProfilerKind.TORCH_PROFILER:
-            output_path = output_root / "torch"
-            argv = native_argv
+            output_relative_path = "torch"
             limitations = (
                 "Diagnostic profile; measurements must come from a separate unprofiled run.",
                 "SGLang captures separate prefill/decode traces; kernel dominance supports a "
@@ -296,20 +298,7 @@ class InferenceProfilingService:
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                     "Nsight Systems profiling requires an installed nsys executable.",
                 )
-            output_path = output_root / "capture.nsys-rep"
-            argv = (
-                str(nsys_executable.resolve()),
-                "profile",
-                "--trace-fork-before-exec=true",
-                "--cuda-graph-trace=node",
-                "--capture-range=cudaProfilerApi",
-                "--capture-range-end=repeat",
-                "--output",
-                str(output_path.with_suffix("")),
-                *native_argv,
-                "--profiler-config.profiler",
-                "cuda",
-            )
+            output_relative_path = "capture.nsys-rep"
             limitations = (
                 "Diagnostic profile; measurements must come from a separate unprofiled run.",
                 "The native .nsys-rep must be exported with official nsys export "
@@ -331,25 +320,63 @@ class InferenceProfilingService:
             environment_names.add("VLLM_TORCH_PROFILER_DIR")
         environment_digest = digest_model(workload.command.env_overrides)
         replay_plan = (
-            replay.plan(scenario_name, timeout_seconds=timeout_seconds)
+            replay.plan(scenario_name, timeout_seconds=timeout_seconds, _authorize=False)
             if scenario_name is not None and timeout_seconds is not None
             else None
         )
         if replay_plan is not None and (
             replay_plan.server_name != server_name or replay_plan.server_mode != "managed"
         ):
+            self._discard_planned_outputs(replay_plan.output_root)
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "Profiling scenario must target the planned managed server.",
             )
         if replay_plan is not None and not replay_plan.tool_available:
+            self._discard_planned_outputs(replay_plan.output_root)
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 "The inference workload provider is unavailable for the profiling window.",
                 remediation=replay_plan.tool_remediation,
             )
         if measurement_run_id is not None:
-            self.runs.read(measurement_run_id)
+            try:
+                self.runs.read(measurement_run_id)
+            except BaseException:
+                assert replay_plan is not None
+                self._discard_planned_outputs(replay_plan.output_root)
+                raise
+        try:
+            with (
+                TrustedRoot(self.workspace.paths.staging) as trusted_root,
+                trusted_root.allocate_directory(
+                    f"inference-profile/{secrets.token_hex(16)}"
+                ) as output,
+            ):
+                output_reference = output.reference
+                output_path = output.absolute_display_path(output_relative_path)
+                if selected_profiler is ProfilerKind.TORCH_PROFILER:
+                    output.ensure_directory(output_relative_path)
+                    argv = native_argv
+                else:
+                    assert nsys_executable is not None
+                    argv = (
+                        str(nsys_executable.resolve()),
+                        "profile",
+                        "--trace-fork-before-exec=true",
+                        "--cuda-graph-trace=node",
+                        "--capture-range=cudaProfilerApi",
+                        "--capture-range-end=repeat",
+                        "--output",
+                        str(output_path.with_suffix("")),
+                        *native_argv,
+                        "--profiler-config.profiler",
+                        "cuda",
+                    )
+        except BaseException:
+            if replay_plan is not None:
+                self._discard_planned_outputs(replay_plan.output_root)
+            raise
         identity = {
             "server": server.model_dump(mode="json"),
             "profiler": selected_profiler,
@@ -360,6 +387,7 @@ class InferenceProfilingService:
             ),
             "cwd": workload.command.cwd,
             "environment_digest": environment_digest,
+            "output_relative_path": output_relative_path,
             "nsys_executable": str(nsys_executable.resolve()) if nsys_executable else None,
             "nsys_executable_digest": (
                 nsys_binding.identity.sha256 if nsys_binding is not None else None
@@ -387,6 +415,10 @@ class InferenceProfilingService:
         }
         plan_id = digest_model(identity)
         if expected_plan_id is not None and expected_plan_id != plan_id:
+            references = (output_reference,) + (
+                (replay_plan.output_root,) if replay_plan is not None else ()
+            )
+            self._discard_planned_outputs(*references)
             raise DomainError(
                 ErrorCode.REVISION_CONFLICT,
                 "The inference profiling plan no longer matches the reviewed plan identity.",
@@ -411,6 +443,8 @@ class InferenceProfilingService:
                 "server_cwd": Path(workload.command.cwd),
                 "environment_names": tuple(sorted(environment_names)),
                 "environment_digest": environment_digest,
+                "output_root": output_reference,
+                "output_relative_path": output_relative_path,
                 "output_path": output_path,
                 "nsys_executable": nsys_executable,
                 "nsys_executable_binding": nsys_binding,
@@ -437,7 +471,57 @@ class InferenceProfilingService:
             )
         return plan
 
-    async def capture(  # noqa: C901 - one lifecycle boundary owns every terminal transition
+    def _discard_planned_outputs(self, *references: BoundDirectoryReference) -> None:
+        with TrustedRoot(self.workspace.paths.staging) as trusted_root:
+            for reference in references:
+                try:
+                    trusted_root.remove_directory(reference)
+                except DomainError:
+                    continue
+
+    @staticmethod
+    def _profile_runtime_argv(
+        plan: InferenceProfilingPlan,
+        output: BoundDirectory,
+    ) -> tuple[str, ...]:
+        display_output = str(plan.output_path)
+        display_stem = str(plan.output_path.with_suffix(""))
+        process_output = str(output.child_process_path(plan.output_relative_path))
+        process_stem = str(
+            output.child_process_path(str(Path(plan.output_relative_path).with_suffix("")))
+        )
+        return tuple(
+            process_output
+            if argument == display_output
+            else process_stem
+            if argument == display_stem
+            else argument
+            for argument in plan.server_argv
+        )
+
+    def _validate_output_authority(self, plan: InferenceProfilingPlan) -> None:
+        parts = plan.output_root.parts()
+        expected_relative = (
+            "torch" if plan.profiler is ProfilerKind.TORCH_PROFILER else "capture.nsys-rep"
+        )
+        expected_path = self.workspace.paths.staging.joinpath(
+            *parts,
+            plan.output_relative_path,
+        ).absolute()
+        if (
+            len(parts) != 2
+            or parts[0] != "inference-profile"
+            or len(parts[1]) != 32
+            or any(character not in "0123456789abcdef" for character in parts[1])
+            or plan.output_relative_path != expected_relative
+            or plan.output_path.absolute() != expected_path
+        ):
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                "Inference profiler output authority does not match its reviewed plan.",
+            )
+
+    async def capture(
         self,
         plan_token: str,
         *,
@@ -456,9 +540,32 @@ class InferenceProfilingService:
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "The profiling capability does not contain a complete execution intent.",
             )
+        self._validate_output_authority(plan)
+        with (
+            TrustedRoot(self.workspace.paths.staging) as trusted_root,
+            trusted_root.open_directory(plan.output_root) as profile_output,
+            trusted_root.open_directory(plan.replay_plan.output_root) as replay_output,
+        ):
+            return await self._capture_bound(
+                plan,
+                trusted_root,
+                profile_output,
+                replay_output,
+            )
+
+    async def _capture_bound(  # noqa: C901
+        self,
+        plan: InferenceProfilingPlan,
+        trusted_root: TrustedRoot,
+        profile_output: BoundDirectory,
+        replay_output: BoundDirectory,
+    ) -> InferenceProfilingResult:
         scenario_name = plan.scenario_name
         measurement_run_id = plan.measurement_run_id
         timeout_seconds = plan.timeout_seconds
+        assert scenario_name is not None
+        assert measurement_run_id is not None
+        assert timeout_seconds is not None
         replay = InferenceReplayService(self.workspace, broker=self.broker)
         project = self.workloads.load()
         if digest_model(project.model_dump(mode="json")) != plan.configuration_id:
@@ -486,7 +593,9 @@ class InferenceProfilingService:
             plan.profiler is ProfilerKind.TORCH_PROFILER
             and plan.server_provider is InferenceServerProvider.VLLM
         ):
-            server_environment["VLLM_TORCH_PROFILER_DIR"] = str(plan.output_path)
+            server_environment["VLLM_TORCH_PROFILER_DIR"] = str(
+                profile_output.child_process_path(plan.output_relative_path)
+            )
         server_digest, server_version = replay._server_tool_identity(server)
         if (
             server.provider is InferenceServerProvider.SGLANG
@@ -508,6 +617,8 @@ class InferenceProfilingService:
                 remediation=("Plan the inference profile again, then retry capture.",),
             )
         replay_plan = plan.replay_plan
+        assert replay_plan is not None
+        replay._validate_plan(replay_plan)
         if replay_plan.server_name != plan.server_name or replay_plan.server_mode != "managed":
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
@@ -522,29 +633,29 @@ class InferenceProfilingService:
         environment = await replay._managed_environment(replay_plan)
         measurement_protocol = replay._protocol_identity(replay_plan, environment=environment)
         measurement_protocol_id = digest_model(measurement_protocol.model_dump(mode="json"))
-        self._validate_measurement_run(measurement_run_id, measurement_protocol_id)
+        self._validate_measurement_run(
+            measurement_run_id,
+            measurement_protocol_id,
+            scenario_name=scenario_name,
+        )
         diagnostic_protocol = InferenceProtocolIdentity.model_validate(
             {
                 **measurement_protocol.model_dump(mode="python"),
                 "profiler": AttachedProfilerState(profiler=plan.profiler),
             }
         )
-        replay_output = Path(replay_plan.output_path or self.workspace.paths.staging)
-        replay_output.parent.mkdir(parents=True, exist_ok=True)
-        plan.output_path.parent.mkdir(parents=True, exist_ok=True)
         deadline_at = replay_plan.deadline_at
         parsed = urlsplit(plan.base_url)
         assert parsed.hostname is not None
         port = parsed.port or 80
+        http_client = BoundedHttpClient()
 
         async def readiness() -> bool:
-            from flameox.application.inference_providers import probe_existing_vllm_server
-
             try:
-                await asyncio.to_thread(
-                    probe_existing_vllm_server,
+                await probe_existing_vllm_server_async(
                     plan.base_url,
                     timeout_seconds=0.5,
+                    http_client=http_client,
                 )
             except DomainError:
                 return False
@@ -554,50 +665,60 @@ class InferenceProfilingService:
         if remaining <= 0:
             raise DomainError(ErrorCode.PROCESS_TIMEOUT, "Profiling startup deadline expired.")
         server_request = ExecutionRequest(
-            argv=plan.server_argv,
+            argv=self._profile_runtime_argv(plan, profile_output),
             executable_binding=plan.launch_executable_binding,
             cwd=plan.server_cwd,
             environment_allowlist=self.workspace.config.execution.child_environment_allowlist,
             environment_overrides=server_environment,
-            allowed_working_roots=(self.workspace.project_root, plan.output_path.parent),
+            allowed_working_roots=(self.workspace.project_root,),
             timeout_seconds=remaining,
             max_output_bytes=16 * 1024 * 1024,
+            inherited_directory_fds=profile_output.inherited_descriptors(),
         )
         run, source_state = self._start_run(
             plan,
             timeout_seconds=timeout_seconds,
+            server_argv=server_request.argv,
             environment=environment,
             source_protocol_id=measurement_protocol_id,
             diagnostic_protocol=diagnostic_protocol,
             measurement_run_id=measurement_run_id,
         )
         try:
-            lease = await self.broker.start_inference_server(
-                server_request,
-                host=parsed.hostname,
-                port=port,
-                readiness=readiness,
-                absolute_deadline=time.monotonic() + remaining,
-            )
+            try:
+                lease = await self.broker.start_inference_server(
+                    server_request,
+                    host=parsed.hostname,
+                    port=port,
+                    readiness=readiness,
+                    absolute_deadline=time.monotonic() + remaining,
+                )
+            except BaseException:
+                await http_client.aclose()
+                raise
             limitations = list(run.limitations)
             benchmark_exit_code: int | None = None
             benchmark_process = None
-            control = InferenceProfilerControlClient(plan.base_url, provider=plan.server_provider)
+            control = InferenceProfilerControlClient(
+                plan.base_url,
+                provider=plan.server_provider,
+                http_client=http_client,
+            )
             try:
                 try:
-                    control.timeout_seconds = min(
-                        control.timeout_seconds,
-                        max(0.01, (deadline_at - utc_now()).total_seconds()),
+                    control_deadline = time.monotonic() + max(
+                        0.01,
+                        (deadline_at - utc_now()).total_seconds(),
                     )
                     if plan.server_provider is InferenceServerProvider.SGLANG:
-                        await asyncio.to_thread(
-                            control.start,
-                            output_dir=plan.output_path,
+                        await control.start_async(
+                            output_dir=profile_output.child_process_path(plan.output_relative_path),
                             profile_id=plan.sglang_profile_id,
                             options=plan.sglang_profile_options,
+                            deadline_monotonic=control_deadline,
                         )
                     else:
-                        await asyncio.to_thread(control.start)
+                        await control.start_async(deadline_monotonic=control_deadline)
                     remaining = (deadline_at - utc_now()).total_seconds()
                     if remaining <= 0:
                         raise DomainError(ErrorCode.PROCESS_TIMEOUT, "Profiling deadline expired.")
@@ -609,20 +730,16 @@ class InferenceProfilingService:
                         )
                     outcome = await self.broker.run(
                         ExecutionRequest(
-                            argv=replay_plan.argv,
+                            argv=replay._runtime_argv(replay_plan, replay_output),
                             executable_binding=replay_binding,
                             cwd=self.workspace.project_root,
                             environment_allowlist=(
                                 self.workspace.config.execution.child_environment_allowlist
                             ),
-                            allowed_working_roots=(
-                                self.workspace.project_root,
-                                Path(
-                                    replay_plan.output_path or self.workspace.paths.staging
-                                ).parent,
-                            ),
+                            allowed_working_roots=(self.workspace.project_root,),
                             timeout_seconds=remaining,
                             max_output_bytes=16 * 1024 * 1024,
+                            inherited_directory_fds=replay_output.inherited_descriptors(),
                         )
                     )
                     benchmark_process = outcome.process
@@ -638,26 +755,37 @@ class InferenceProfilingService:
                 if stop_remaining <= 0:
                     limitations.append("No deadline remained for profiler flushing.")
                 else:
-                    control.timeout_seconds = min(5.0, stop_remaining)
                     try:
-                        await asyncio.to_thread(control.stop)
+                        await control.stop_async(
+                            deadline_monotonic=time.monotonic() + min(5.0, stop_remaining)
+                        )
                     except DomainError as error:
                         limitations.append(error.message)
-                server_outcome = await asyncio.shield(lease.close())
+                try:
+                    server_outcome = await asyncio.shield(lease.close())
+                finally:
+                    await http_client.aclose()
 
             if server_outcome.stdout:
-                atomic_write_bytes(plan.output_path.parent / "server.stdout", server_outcome.stdout)
+                profile_output.write_bytes("server.stdout", server_outcome.stdout)
             if server_outcome.stderr:
-                atomic_write_bytes(plan.output_path.parent / "server.stderr", server_outcome.stderr)
+                profile_output.write_bytes("server.stderr", server_outcome.stderr)
 
             if server_outcome.process.cleanup_complete is not True:
                 limitations.append("Managed server process cleanup was incomplete.")
 
-            if plan.profiler is ProfilerKind.NSIGHT_SYSTEMS and plan.output_path.is_file():
-                await self._export_nsight(plan, deadline_at, limitations)
-            artifacts, runs, preservation_limitations = self._preserve(plan)
+            if plan.profiler is ProfilerKind.NSIGHT_SYSTEMS:
+                await self._export_nsight(plan, profile_output, deadline_at, limitations)
+            artifacts, runs, preservation_limitations = self._preserve(plan, profile_output)
             limitations.extend(preservation_limitations)
             extracted_runs = await self._extract_preserved(plan, runs, deadline_at, limitations)
+            replay_cleanup_limitation = replay._cleanup_staging(
+                trusted_root,
+                replay_plan.output_root,
+                preservation_complete=True,
+            )
+            if replay_cleanup_limitation is not None:
+                limitations.append(replay_cleanup_limitation)
             if artifacts and not extracted_runs:
                 limitations.append(
                     "No recognized profiler trace was extracted from preserved artifacts."
@@ -683,7 +811,9 @@ class InferenceProfilingService:
                 limitations=tuple(limitations),
             )
             cleanup_limitation = self._cleanup_staging(
-                plan, preservation_complete=not preservation_limitations
+                trusted_root,
+                plan.output_root,
+                preservation_complete=not preservation_limitations,
             )
             if cleanup_limitation is not None:
                 limitations.append(cleanup_limitation)
@@ -691,7 +821,6 @@ class InferenceProfilingService:
                     finished,
                     environment,
                     source_state,
-                    artifacts,
                     cleanup_limitation,
                 )
             return InferenceProfilingResult(
@@ -710,11 +839,15 @@ class InferenceProfilingService:
                 limitations=tuple(limitations),
             )
         except asyncio.CancelledError:
-            artifacts, artifact_runs, _preservation_limitations = self._preserve(plan)
+            artifacts, artifact_runs, _preservation_limitations = self._preserve(
+                plan, profile_output
+            )
             self._finish_cancelled_run(run, environment, source_state, artifacts, artifact_runs)
             raise
         except DomainError as error:
-            artifacts, artifact_runs, _preservation_limitations = self._preserve(plan)
+            artifacts, artifact_runs, _preservation_limitations = self._preserve(
+                plan, profile_output
+            )
             self._finish_failed_run(run, environment, source_state, error, artifacts, artifact_runs)
             error.run_id = run.run_id
             if artifacts:
@@ -725,7 +858,9 @@ class InferenceProfilingService:
                 }
             raise
         except Exception as cause:
-            artifacts, artifact_runs, _preservation_limitations = self._preserve(plan)
+            artifacts, artifact_runs, _preservation_limitations = self._preserve(
+                plan, profile_output
+            )
             internal_error = DomainError(
                 ErrorCode.INTERNAL_ERROR,
                 "Unexpected inference profiling failure.",
@@ -741,6 +876,7 @@ class InferenceProfilingService:
         plan: InferenceProfilingPlan,
         *,
         timeout_seconds: float,
+        server_argv: tuple[str, ...],
         environment: EnvironmentRecord,
         source_protocol_id: str,
         diagnostic_protocol: InferenceProtocolIdentity,
@@ -748,7 +884,7 @@ class InferenceProfilingService:
     ) -> tuple[RunManifest, SourceState]:
         """Create the diagnostic run before server startup can mutate external state."""
 
-        executable = Path(plan.server_argv[0])
+        executable = Path(server_argv[0])
         if not executable.is_absolute():
             executable = plan.server_cwd / executable
         source_state = collect_partial_source_state(
@@ -776,7 +912,7 @@ class InferenceProfilingService:
             source_state_id=source_state.source_state_id,
             collector=plan.profiler,
             command=CommandSpec(
-                argv=plan.server_argv,
+                argv=server_argv,
                 cwd=str(plan.server_cwd),
                 env_overrides={name: "<redacted>" for name in plan.environment_names},
                 timeout_seconds=timeout_seconds,
@@ -788,12 +924,19 @@ class InferenceProfilingService:
                 f"Diagnostic profile linked to measurement run {measurement_run_id}.",
             ),
         )
-        self.runs.create(run)
-        self._publish_run(run, environment, source_state, ())
-        return run, source_state
+        projected = self.projections.create_run(
+            run,
+            environment=environment,
+            source_state=source_state,
+        )
+        return projected.run, source_state
 
     def _validate_measurement_run(
-        self, measurement_run_id: str, measurement_protocol_id: str
+        self,
+        measurement_run_id: str,
+        measurement_protocol_id: str,
+        *,
+        scenario_name: str,
     ) -> None:
         measurement_run = self.runs.read(measurement_run_id)
         if measurement_run.execution_status is not ExecutionStatus.SUCCEEDED:
@@ -801,7 +944,10 @@ class InferenceProfilingService:
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "The linked measurement run must have completed successfully.",
                 run_id=measurement_run_id,
-                details={"next_tool": "plan_inference_scenario"},
+                next_action=tool_action(
+                    ActionId.PLAN_INFERENCE_SCENARIO,
+                    scenario_name=scenario_name,
+                ),
             )
         if (
             measurement_run.capture_status is not CaptureStatus.REGISTERED
@@ -812,7 +958,10 @@ class InferenceProfilingService:
                 "The linked measurement run has no preserved provider evidence.",
                 run_id=measurement_run_id,
                 remediation=("Run the unprofiled inference scenario successfully, then retry.",),
-                details={"next_tool": "plan_inference_scenario"},
+                next_action=tool_action(
+                    ActionId.PLAN_INFERENCE_SCENARIO,
+                    scenario_name=scenario_name,
+                ),
             )
         if (
             EvidenceQueryService(self.workspace)
@@ -825,7 +974,10 @@ class InferenceProfilingService:
                 "The linked measurement run has no published measurements.",
                 run_id=measurement_run_id,
                 remediation=("Run the unprofiled inference scenario successfully, then retry.",),
-                details={"next_tool": "plan_inference_scenario"},
+                next_action=tool_action(
+                    ActionId.PLAN_INFERENCE_SCENARIO,
+                    scenario_name=scenario_name,
+                ),
             )
         if measurement_run.measurement_protocol_id != measurement_protocol_id:
             raise DomainError(
@@ -835,8 +987,11 @@ class InferenceProfilingService:
                 details={
                     "expected_measurement_protocol_id": measurement_protocol_id,
                     "actual_measurement_protocol_id": measurement_run.measurement_protocol_id,
-                    "next_tool": "plan_inference_scenario",
                 },
+                next_action=tool_action(
+                    ActionId.PLAN_INFERENCE_SCENARIO,
+                    scenario_name=scenario_name,
+                ),
             )
         try:
             identity = InferenceProtocolIdentity.model_validate_json(
@@ -847,14 +1002,20 @@ class InferenceProfilingService:
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "The linked run has no valid inference protocol identity.",
                 run_id=measurement_run_id,
-                details={"next_tool": "plan_inference_scenario"},
+                next_action=tool_action(
+                    ActionId.PLAN_INFERENCE_SCENARIO,
+                    scenario_name=scenario_name,
+                ),
             ) from exc
         if identity.profiler.attached:
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "The linked measurement run must be unprofiled.",
                 run_id=measurement_run_id,
-                details={"next_tool": "plan_inference_scenario"},
+                next_action=tool_action(
+                    ActionId.PLAN_INFERENCE_SCENARIO,
+                    scenario_name=scenario_name,
+                ),
             )
 
     def _finish_run(
@@ -894,9 +1055,12 @@ class InferenceProfilingService:
                 "limitations": tuple(dict.fromkeys(limitations)),
             }
         )
-        finished = self.runs.append(finished, expected_revision=0)
-        self._publish_run(finished, environment, source_state, artifact_ids)
-        return finished
+        return self.projections.append_run(
+            finished,
+            expected_revision=0,
+            environment=environment,
+            source_state=source_state,
+        ).run
 
     def _finish_cancelled_run(
         self,
@@ -921,9 +1085,12 @@ class InferenceProfilingService:
                 ),
             }
         )
-        finished = self.runs.append(finished, expected_revision=0)
-        self._publish_run(finished, environment, source_state, artifact_ids)
-        return finished
+        return self.projections.append_run(
+            finished,
+            expected_revision=0,
+            environment=environment,
+            source_state=source_state,
+        ).run
 
     def _finish_failed_run(
         self,
@@ -951,9 +1118,12 @@ class InferenceProfilingService:
                 "limitations": tuple(dict.fromkeys((*run.limitations, error.message))),
             }
         )
-        finished = self.runs.append(finished, expected_revision=0)
-        self._publish_run(finished, environment, source_state, artifact_ids)
-        return finished
+        return self.projections.append_run(
+            finished,
+            expected_revision=0,
+            environment=environment,
+            source_state=source_state,
+        ).run
 
     def _canonical_registrations(
         self, run_id: str, artifact_run_ids: tuple[str, ...]
@@ -978,7 +1148,6 @@ class InferenceProfilingService:
         run: RunManifest,
         environment: EnvironmentRecord,
         source_state: SourceState,
-        artifact_ids: tuple[str, ...],
         limitation: str,
     ) -> RunManifest:
         updated = run.validated_copy(
@@ -987,50 +1156,17 @@ class InferenceProfilingService:
                 "limitations": tuple(dict.fromkeys((*run.limitations, limitation))),
             }
         )
-        updated = self.runs.append(updated, expected_revision=run.revision)
-        self._publish_run(updated, environment, source_state, artifact_ids)
-        return updated
-
-    def _publish_run(
-        self,
-        run: RunManifest,
-        environment: EnvironmentRecord,
-        source_state: SourceState,
-        artifact_ids: tuple[str, ...],
-    ) -> None:
-        self.publisher.publish_rows(
-            {
-                "runs": [run_row(run)],
-                "artifact_registrations": [
-                    artifact_registration_row(
-                        registration,
-                        byte_length=self.artifacts.get(
-                            registration.artifact_id
-                        ).content.byte_length,
-                    )
-                    for registration in run.artifacts
-                ],
-                "environments": [environment_row(environment)],
-                "source_states": [source_state_row(source_state)],
-            },
-            publisher="flameox.inference_profiling",
-            publisher_version="1",
-            input_run_ids=tuple(
-                dict.fromkeys(
-                    (run.run_id,)
-                    + (
-                        (run.source_measurement_run_id,)
-                        if run.source_measurement_run_id is not None
-                        else ()
-                    )
-                )
-            ),
-            input_artifact_ids=artifact_ids,
-        )
+        return self.projections.append_run(
+            updated,
+            expected_revision=run.revision,
+            environment=environment,
+            source_state=source_state,
+        ).run
 
     async def _export_nsight(
         self,
         plan: InferenceProfilingPlan,
+        output: BoundDirectory,
         deadline_at: datetime,
         limitations: list[str],
     ) -> None:
@@ -1041,7 +1177,15 @@ class InferenceProfilingService:
         if remaining <= 0:
             limitations.append("No deadline remained for Nsight SQLite export.")
             return
-        sqlite_path = plan.output_path.with_suffix(".sqlite")
+        try:
+            with output.open_file(plan.output_relative_path):
+                pass
+        except DomainError:
+            limitations.append("Nsight did not emit its native report.")
+            return
+        sqlite_relative_path = str(Path(plan.output_relative_path).with_suffix(".sqlite"))
+        sqlite_path = output.child_process_path(sqlite_relative_path)
+        report_path = output.child_process_path(plan.output_relative_path)
         try:
             outcome = await self.broker.run(
                 ExecutionRequest(
@@ -1052,19 +1196,17 @@ class InferenceProfilingService:
                         "sqlite",
                         "--output",
                         str(sqlite_path),
-                        str(plan.output_path),
+                        str(report_path),
                     ),
                     executable_binding=plan.nsys_executable_binding,
                     cwd=self.workspace.project_root,
                     environment_allowlist=(
                         self.workspace.config.execution.child_environment_allowlist
                     ),
-                    allowed_working_roots=(
-                        self.workspace.project_root,
-                        plan.output_path.parent,
-                    ),
+                    allowed_working_roots=(self.workspace.project_root,),
                     timeout_seconds=remaining,
                     max_output_bytes=4 * 1024 * 1024,
+                    inherited_directory_fds=output.inherited_descriptors(),
                 )
             )
             if outcome.process.exit_code != 0:
@@ -1075,47 +1217,69 @@ class InferenceProfilingService:
             limitations.append(f"Nsight SQLite export failed: {error.message}")
 
     def _preserve(
-        self, plan: InferenceProfilingPlan
+        self,
+        plan: InferenceProfilingPlan,
+        output: BoundDirectory | None = None,
     ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-        root = plan.output_path if plan.output_path.is_dir() else plan.output_path.parent
-        if not root.is_dir():
-            return (), (), ()
-        candidates, discovery_limitations = InferenceReplayService._bounded_output_candidates(root)
+        if output is None:
+            with (
+                TrustedRoot(self.workspace.paths.staging) as trusted_root,
+                trusted_root.open_directory(plan.output_root) as reopened,
+            ):
+                return self._preserve(plan, reopened)
+        candidates = output.admitted_files(
+            frozenset(
+                {
+                    plan.output_relative_path,
+                    str(Path(plan.output_relative_path).with_suffix(".sqlite")),
+                    "server.stdout",
+                    "server.stderr",
+                }
+            ),
+            suffixes=(".pt.trace.json", ".pt.trace.json.gz", ".pftrace"),
+            max_depth=3,
+            max_entries=4_096,
+            max_files=64,
+        )
         artifacts: list[str] = []
         runs: list[str] = []
-        limitations = list(discovery_limitations)
+        limitations: list[str] = []
         importer = ImportService(self.workspace)
-        for path in candidates:
-            trace_file = path.name.endswith((".json", ".json.gz", ".pftrace", ".sqlite"))
-            server_output = path.name.startswith("server.")
+        for candidate in candidates:
+            display_name = Path(candidate.relative_path).name
+            trace_file = display_name.endswith((".json", ".json.gz", ".pftrace", ".sqlite"))
+            server_output = display_name.startswith("server.")
             try:
-                imported = importer.import_artifact(
-                    ImportArtifactRequest(
-                        path=path,
-                        kind=(
-                            ArtifactKind.EXECUTION_TRACE
-                            if trace_file
-                            else ArtifactKind.PROCESS_OUTPUT
-                            if server_output
-                            else ArtifactKind.COLLECTOR_METADATA
-                        ),
-                        sensitivity=(
-                            Sensitivity.SENSITIVE if server_output else Sensitivity.INTERNAL
-                        ),
-                        role=("inference_server_output" if server_output else "inference_profile"),
-                        producer=(
-                            "nsys"
-                            if plan.profiler is ProfilerKind.NSIGHT_SYSTEMS
-                            else "sglang.torch_profiler"
-                            if plan.server_provider is InferenceServerProvider.SGLANG
-                            else "torch_profiler"
-                        ),
-                        allow_external_path=True,
+                with output.open_file(candidate) as descriptor:
+                    imported = importer.import_descriptor(
+                        ImportDescriptorRequest(
+                            descriptor=descriptor,
+                            display_name=display_name,
+                            kind=(
+                                ArtifactKind.EXECUTION_TRACE
+                                if trace_file
+                                else ArtifactKind.PROCESS_OUTPUT
+                                if server_output
+                                else ArtifactKind.COLLECTOR_METADATA
+                            ),
+                            sensitivity=(
+                                Sensitivity.SENSITIVE if server_output else Sensitivity.INTERNAL
+                            ),
+                            role=(
+                                "inference_server_output" if server_output else "inference_profile"
+                            ),
+                            producer=(
+                                "nsys"
+                                if plan.profiler is ProfilerKind.NSIGHT_SYSTEMS
+                                else "sglang.torch_profiler"
+                                if plan.server_provider is InferenceServerProvider.SGLANG
+                                else "torch_profiler"
+                            ),
+                        )
                     )
-                )
             except DomainError as error:
                 limitations.append(
-                    f"Profiler artifact {path.name!r} could not be preserved: {error.message}"
+                    f"Profiler artifact {display_name!r} could not be preserved: {error.message}"
                 )
                 continue
             artifacts.append(imported.artifact_id)
@@ -1169,34 +1333,26 @@ class InferenceProfilingService:
                 extracted.append(run_id)
         return tuple(extracted)
 
+    @staticmethod
     def _cleanup_staging(
-        self, plan: InferenceProfilingPlan, *, preservation_complete: bool
+        trusted_root: TrustedRoot,
+        reference: BoundDirectoryReference,
+        *,
+        preservation_complete: bool,
     ) -> str | None:
         if not preservation_complete:
             return (
                 "Profiler staging was retained because native artifact preservation was incomplete."
             )
-        root = plan.output_path.parent.absolute()
-        staging = self.workspace.paths.staging.resolve()
-        if root.is_symlink():
-            return "Profiler staging cleanup was refused because the operation path is a symlink."
         try:
-            resolved_root = root.resolve(strict=True)
-        except FileNotFoundError:
-            return None
-        if resolved_root == staging or not resolved_root.is_relative_to(staging):
-            return "Profiler staging cleanup was refused because the path was not operation-owned."
-        try:
-            shutil.rmtree(root)
-        except FileNotFoundError:
-            return None
-        except OSError:
+            trusted_root.remove_directory(reference)
+        except DomainError:
             return "Profiler staging cleanup failed; immutable artifacts remain authoritative."
         return None
 
 
 class InferenceProfilerControlClient:
-    """Provider-aware bounded client for vLLM and SGLang profiler endpoints."""
+    """Provider protocol over Flameox's single bounded loopback transport."""
 
     def __init__(
         self,
@@ -1204,12 +1360,14 @@ class InferenceProfilerControlClient:
         *,
         provider: InferenceServerProvider = InferenceServerProvider.VLLM,
         timeout_seconds: float = 5.0,
+        http_client: BoundedHttpClient | None = None,
     ) -> None:
         self.base_url = _loopback_http_url(base_url)
         self.provider = provider
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         self.timeout_seconds = timeout_seconds
+        self._http_client = http_client
 
     def start(
         self,
@@ -1217,42 +1375,120 @@ class InferenceProfilerControlClient:
         output_dir: Path | None = None,
         profile_id: str | None = None,
         options: SglangProfileOptions | None = None,
+        deadline_monotonic: float | None = None,
     ) -> None:
-        payload: bytes = b""
-        if self.provider is InferenceServerProvider.SGLANG:
-            if output_dir is None or profile_id is None or options is None:
-                raise ValueError("SGLang profiling requires generated profile options")
-            payload = json.dumps(
-                {
-                    "output_dir": str(output_dir),
-                    "profile_id": profile_id,
-                    **options.model_dump(mode="json"),
-                },
-                separators=(",", ":"),
-            ).encode()
-        self._post("/start_profile", payload)
+        self._post(
+            "/start_profile",
+            self._start_payload(output_dir, profile_id, options),
+            deadline_monotonic=deadline_monotonic,
+        )
 
-    def stop(self) -> None:
-        self._post("/stop_profile", b"")
+    async def start_async(
+        self,
+        *,
+        output_dir: Path | None = None,
+        profile_id: str | None = None,
+        options: SglangProfileOptions | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> None:
+        await self._post_async(
+            "/start_profile",
+            self._start_payload(output_dir, profile_id, options),
+            deadline_monotonic=deadline_monotonic,
+        )
 
-    def _post(self, path: Literal["/start_profile", "/stop_profile"], payload: bytes) -> None:
+    def stop(self, *, deadline_monotonic: float | None = None) -> None:
+        self._post("/stop_profile", None, deadline_monotonic=deadline_monotonic)
+
+    async def stop_async(self, *, deadline_monotonic: float | None = None) -> None:
+        await self._post_async(
+            "/stop_profile",
+            None,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    def _post(
+        self,
+        path: Literal["/start_profile", "/stop_profile"],
+        payload: dict[str, JsonValue] | None,
+        *,
+        deadline_monotonic: float | None,
+    ) -> None:
+        client = self._http_client or BoundedHttpClient()
         try:
-            with urlopen(
-                Request(
-                    f"{self.base_url}{path}",
-                    data=payload,
-                    method="POST",
-                    headers={"Content-Type": "application/json"} if payload else {},
-                ),
-                timeout=self.timeout_seconds,
-            ) as response:
-                if not 200 <= response.status < 300:
-                    raise OSError(f"profiler control returned HTTP {response.status}")
-        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            client.request_loopback(
+                self._request(path, payload, deadline_monotonic=deadline_monotonic)
+            )
+        except BoundedHttpError as exc:
             raise DomainError(
                 ErrorCode.PROCESS_FAILED,
                 f"{self.provider} profiler control failed at {path}.",
             ) from exc
+        finally:
+            if self._http_client is None:
+                client.close()
+
+    async def _post_async(
+        self,
+        path: Literal["/start_profile", "/stop_profile"],
+        payload: dict[str, JsonValue] | None,
+        *,
+        deadline_monotonic: float | None,
+    ) -> None:
+        client = self._http_client or BoundedHttpClient()
+        try:
+            await client.request_loopback_async(
+                self._request(path, payload, deadline_monotonic=deadline_monotonic)
+            )
+        except BoundedHttpError as exc:
+            raise DomainError(
+                ErrorCode.PROCESS_FAILED,
+                f"{self.provider} profiler control failed at {path}.",
+            ) from exc
+        finally:
+            if self._http_client is None:
+                await client.aclose()
+
+    def _request(
+        self,
+        path: Literal["/start_profile", "/stop_profile"],
+        payload: dict[str, JsonValue] | None,
+        *,
+        deadline_monotonic: float | None,
+    ) -> LoopbackHttpRequest:
+        return LoopbackHttpRequest(
+            base_url=self.base_url,
+            method=HttpMethod.POST,
+            path=path,
+            deadline_monotonic=(
+                deadline_monotonic
+                if deadline_monotonic is not None
+                else time.monotonic() + self.timeout_seconds
+            ),
+            max_response_bytes=64 * 1024,
+            json_body=payload,
+        )
+
+    def _start_payload(
+        self,
+        output_dir: Path | None,
+        profile_id: str | None,
+        options: SglangProfileOptions | None,
+    ) -> dict[str, JsonValue] | None:
+        if self.provider is not InferenceServerProvider.SGLANG:
+            return None
+        if output_dir is None or profile_id is None or options is None:
+            raise ValueError("SGLang profiling requires generated profile options")
+        return {
+            "output_dir": str(output_dir),
+            "profile_id": profile_id,
+            "start_step": options.start_step,
+            "num_steps": options.num_steps,
+            "activities": list(options.activities),
+            "profile_by_stage": options.profile_by_stage,
+            "record_shapes": options.record_shapes,
+            "with_stack": options.with_stack,
+        }
 
 
 # Backwards-compatible import name for callers that only target vLLM.

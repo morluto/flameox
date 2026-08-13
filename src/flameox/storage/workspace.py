@@ -8,11 +8,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
+from functools import cached_property
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
-import portalocker
 from pydantic import Field
 
 from flameox import __version__
@@ -22,14 +22,31 @@ from flameox.domain.errors import DomainError, ErrorCode
 from flameox.domain.models import utc_now
 from flameox.models import ContractModel
 from flameox.storage.corpus import CorpusStore
+from flameox.storage.locks import (
+    CATALOG_EXCLUSIVE,
+    CATALOG_SHARED,
+    RETENTION_EXCLUSIVE,
+    RETENTION_SHARED,
+    WRITE_EXCLUSIVE,
+    WorkspaceLockIntent,
+    WorkspaceLockManager,
+    WorkspaceLockResource,
+)
+
+if TYPE_CHECKING:
+    from flameox.storage.cursors import CursorStore
 
 
 class WorkspaceIdentity(ContractModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     workspace_id: str = Field(min_length=1)
     created_at: datetime
     project_root: str
     flameox_version: str
+    identity_algorithm: Literal["rfc8785-sha256-v1"] = "rfc8785-sha256-v1"
+    identity_projection_registry: Literal["flameox.identity-projections/v1"] = (
+        "flameox.identity-projections/v1"
+    )
 
 
 def _workspace_initialization_error(error: OSError | ValueError) -> DomainError:
@@ -126,10 +143,6 @@ class WorkspacePaths:
         return self.logs / "operations.jsonl"
 
     @property
-    def operation_log_lock(self) -> Path:
-        return self.logs / "operations.lock"
-
-    @property
     def write_lock(self) -> Path:
         return self.root / "write.lock"
 
@@ -166,10 +179,24 @@ class Workspace:
     def __init__(self, root: Path) -> None:
         self.paths = WorkspacePaths(root.resolve())
         self.corpus = CorpusStore(self.paths.root)
+        self.lock_manager = WorkspaceLockManager(
+            self.paths.root,
+            {
+                WorkspaceLockResource.WRITE: self.paths.write_lock,
+                WorkspaceLockResource.RETENTION: self.paths.retention_lock,
+                WorkspaceLockResource.CATALOG: self.paths.catalog_lock,
+            },
+        )
 
     @property
     def project_root(self) -> Path:
         return (self.paths.root / self.identity.project_root).resolve()
+
+    @cached_property
+    def cursors(self) -> CursorStore:
+        from flameox.storage.cursors import CursorStore
+
+        return CursorStore(self)
 
     @property
     def identity(self) -> WorkspaceIdentity:
@@ -233,7 +260,6 @@ class Workspace:
             workspace.paths.write_lock,
             workspace.paths.catalog_lock,
             workspace.paths.retention_lock,
-            workspace.paths.operation_log_lock,
         ):
             lock_path.touch(mode=0o600, exist_ok=True)
 
@@ -320,7 +346,12 @@ class Workspace:
         *,
         timeout: float = 30,
     ) -> Iterator[object]:
-        yield from self._locked(self.paths.write_lock, timeout=timeout)
+        with self.locked(
+            WRITE_EXCLUSIVE,
+            timeout=timeout,
+            phase="workspace write",
+        ) as streams:
+            yield streams[0]
 
     @contextmanager
     def retention_locked(
@@ -329,12 +360,12 @@ class Workspace:
         shared: bool,
         timeout: float = 30,
     ) -> Iterator[object]:
-        flag = portalocker.LOCK_SH if shared else portalocker.LOCK_EX
-        yield from self._locked(
-            self.paths.retention_lock,
+        with self.locked(
+            RETENTION_SHARED if shared else RETENTION_EXCLUSIVE,
             timeout=timeout,
-            flags=flag | portalocker.LOCK_NB,
-        )
+            phase="workspace retention",
+        ) as streams:
+            yield streams[0]
 
     @contextmanager
     def catalog_locked(
@@ -343,40 +374,22 @@ class Workspace:
         shared: bool,
         timeout: float = 30,
     ) -> Iterator[object]:
-        flag = portalocker.LOCK_SH if shared else portalocker.LOCK_EX
-        yield from self._locked(
-            self.paths.catalog_lock,
+        with self.locked(
+            CATALOG_SHARED if shared else CATALOG_EXCLUSIVE,
             timeout=timeout,
-            flags=flag | portalocker.LOCK_NB,
-        )
+            phase="workspace catalog",
+        ) as streams:
+            yield streams[0]
 
-    def _locked(
+    @contextmanager
+    def locked(
         self,
-        path: Path,
-        *,
-        timeout: float,
-        flags: portalocker.LockFlags | None = None,
-    ) -> Iterator[object]:
-        lock = (
-            portalocker.Lock(path, mode="a", timeout=timeout)
-            if flags is None
-            else portalocker.Lock(
-                path,
-                mode="a",
-                timeout=timeout,
-                flags=flags,
-            )
-        )
-        try:
-            with lock as stream:
-                yield stream
-        except portalocker.exceptions.LockException as exc:
-            raise DomainError(
-                ErrorCode.WRITE_LOCK_TIMEOUT,
-                f"Timed out waiting for workspace lock {path.name!r}.",
-                retryable=True,
-                details={"lock": path.name, "timeout_seconds": timeout},
-            ) from exc
+        *intents: WorkspaceLockIntent,
+        timeout: float = 30,
+        phase: str = "workspace mutation",
+    ) -> Iterator[tuple[object, ...]]:
+        with self.lock_manager.acquire(*intents, timeout=timeout, phase=phase) as streams:
+            yield streams
 
     @staticmethod
     def _exclude_local_workspace(project_root: Path) -> None:

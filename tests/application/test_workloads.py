@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
+from flameox.action_graph import ActionId, ManualAction, ToolAction
 from flameox.application import (
     ConfigurationOperation,
     ConfigureWorkloadRequest,
@@ -22,6 +23,8 @@ from flameox.application import (
 )
 from flameox.domain import DomainError, ErrorCode
 from flameox.storage import Workspace
+
+pytestmark = pytest.mark.integration
 
 
 def _request(
@@ -52,19 +55,21 @@ def _request(
             "status": "missing",
             "configuration_id": "sha256:" + "1" * 64,
             "diagnostics": ["missing"],
-            "next_tool": "configure_workload",
         },
         {
             "status": "invalid",
             "diagnostics": [],
-            "next_tool": "configure_workload",
         },
         {
             "status": "valid",
             "configuration_id": "sha256:" + "1" * 64,
             "workload_names": [],
             "diagnostics": [],
-            "next_tool": "list_declared_workflows",
+            "next_action": {
+                "kind": "tool",
+                "action": "workflow.list",
+                "arguments": {"kind": "workload", "limit": 50},
+            },
         },
     ],
 )
@@ -96,6 +101,23 @@ def test_configuration_receipts_reject_changed_paths_that_contradict_the_action(
                 "configuration_id": digest,
                 "definition_id": digest,
                 "changed_paths": [],
+            }
+        )
+
+
+@pytest.mark.parametrize("name", ("../escape", "nested/name", ".", "name with space"))
+def test_inference_declaration_names_are_safe_identifiers(name: str) -> None:
+    with pytest.raises(ValidationError, match="inference declaration names"):
+        ProjectConfig.model_validate(
+            {
+                "inference_servers": {
+                    name: {
+                        "provider": "vllm",
+                        "mode": "existing_local",
+                        "base_url": "http://127.0.0.1:8000",
+                        "model": "model",
+                    }
+                }
             }
         )
 
@@ -267,7 +289,7 @@ def test_legacy_scaled_experiment_accepts_distinct_typed_scaling_values() -> Non
     "analysis",
     (
         {},
-        {"analysis": "outcome", "outcome_goal": "equivalence"},
+        {"analysis": "outcome", "outcome_goal": "absence_of_failure"},
     ),
 )
 def test_experiment_parser_round_trips_each_legal_case(
@@ -310,7 +332,7 @@ def test_experiment_parser_round_trips_each_legal_case(
         {
             "workload": "scan",
             "variants": ["baseline", "candidate"],
-            "outcome_goal": "equivalence",
+            "outcome_goal": "absence_of_failure",
         },
         {
             "workload": "scan",
@@ -322,6 +344,21 @@ def test_experiment_parser_round_trips_each_legal_case(
 def test_experiment_parser_rejects_cross_case_states(config: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         parse_experiment_config(config)
+
+
+@pytest.mark.parametrize("goal", ("equivalence", "bounded_rate"))
+def test_experiment_parser_rejects_outcome_goals_without_evaluable_contracts(
+    goal: str,
+) -> None:
+    with pytest.raises(ValueError):
+        parse_experiment_config(
+            {
+                "workload": "scan",
+                "variants": ["baseline", "candidate"],
+                "analysis": "outcome",
+                "outcome_goal": goal,
+            }
+        )
 
 
 def test_replace_requires_current_configuration_digest_and_preserves_unrelated_state(
@@ -351,7 +388,8 @@ mode = ["baseline", "candidate"]
     assert current.status == "valid"
     assert current.configuration_id is not None
     assert current.workload_names == ("alpha", "other")
-    assert current.next_tool == "list_declared_workflows"
+    assert isinstance(current.next_action, ToolAction)
+    assert current.next_action.action is ActionId.LIST_DECLARED_WORKFLOWS
     original = (tmp_path / "flameox.toml").read_text()
 
     with pytest.raises(DomainError) as stale:
@@ -407,7 +445,8 @@ mode = ["one", "two"]
     assert status.status == "invalid"
     assert status.config_path == "flameox.toml"
     assert status.configuration_id is None
-    assert status.next_tool == "configure_workload"
+    assert isinstance(status.next_action, ManualAction)
+    assert status.next_action.suggested_action is ActionId.CONFIGURE_WORKLOAD
     assert len(status.diagnostics) == 1
     assert len(status.diagnostics[0]) <= 512
 

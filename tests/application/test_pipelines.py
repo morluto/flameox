@@ -10,6 +10,7 @@ from flameox.application import (
     ImportArtifactRequest,
     ImportService,
     PipelineComparison,
+    PipelineExtractorProfile,
     PipelineStageComparison,
     PipelineStageDeclaration,
     PipelineStageStatus,
@@ -21,6 +22,8 @@ from flameox.application import (
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, Sensitivity, digest_model
 from flameox.storage import RunStore, Workspace
+
+pytestmark = pytest.mark.integration
 
 _STAGE_ADAPTER: TypeAdapter[PipelineStageDeclaration] = TypeAdapter(PipelineStageDeclaration)
 _STAGE_COMPARISON_ADAPTER: TypeAdapter[PipelineStageComparison] = TypeAdapter(
@@ -76,6 +79,23 @@ def test_pipeline_stage_rejects_registration_status_mismatch(
 ) -> None:
     with pytest.raises(ValidationError):
         _STAGE_ADAPTER.validate_python(payload)
+
+
+def test_pipeline_stage_rejects_caller_authored_structural_evidence() -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        RegisteredPipelineStageDeclaration.model_validate(
+            {
+                "name": "generated",
+                "ordinal": 1,
+                "status": "available",
+                "registration_id": "registration-1",
+                "format": "text",
+                "format_schema": "source-v1",
+                "extractor": "forged-extractor",
+                "extractor_version": "999",
+                "structural_summary": {"lines": 999},
+            }
+        )
 
 
 def test_pipeline_stage_comparison_requires_the_side_named_by_its_disposition() -> None:
@@ -174,6 +194,27 @@ def _add_registration(
     Catalog(workspace).rebuild()
 
 
+def _replace_registration_artifact(
+    workspace: Workspace,
+    run_id: str,
+    registration_id: str,
+    artifact_id: str,
+) -> None:
+    store = RunStore(workspace)
+    run = store.read(run_id)
+    registrations = tuple(
+        registration.model_copy(update={"artifact_id": artifact_id})
+        if registration.registration_id == registration_id
+        else registration
+        for registration in run.artifacts
+    )
+    store.append(
+        run.model_copy(update={"revision": run.revision + 1, "artifacts": registrations}),
+        expected_revision=run.revision,
+    )
+    Catalog(workspace).rebuild()
+
+
 def _pipeline(
     service: ArtifactPipelineService,
     workspace: Workspace,
@@ -182,7 +223,6 @@ def _pipeline(
     second_status: StageStatus = PipelineStageStatus.AVAILABLE,
     second_ordinal: int = 1,
     schema: str = "ir-v1",
-    generated_lines: int = 1,
     producer_version: str = "1.0",
     workload_identity: str | None = "workload",
     device_identity: str | None = "device",
@@ -197,9 +237,7 @@ def _pipeline(
             registration_id=registrations[1].registration_id,
             format="text",
             format_schema=schema,
-            extractor="line-summary",
-            extractor_version="1",
-            structural_summary={"lines": generated_lines},
+            extractor_profile=PipelineExtractorProfile.TEXT_LINES_V1,
         )
     else:
         second_stage = UnregisteredPipelineStageDeclaration(
@@ -226,9 +264,7 @@ def _pipeline(
                 registration_id=registrations[0].registration_id,
                 format="text",
                 format_schema="source-v1",
-                extractor="line-summary",
-                extractor_version="1",
-                structural_summary={"lines": 1},
+                extractor_profile=PipelineExtractorProfile.TEXT_LINES_V1,
             ),
             second_stage,
         ),
@@ -252,6 +288,10 @@ def test_identical_pipeline_short_circuits_content_addressed_artifacts(
 
     assert all(
         isinstance(stage, RegisteredPipelineStage)
+        for stage in service.pipelines.read(left_pipeline_id).stages
+    )
+    assert all(
+        stage.extraction_operation_id is not None
         for stage in service.pipelines.read(left_pipeline_id).stages
     )
     assert [stage.disposition for stage in comparison.stages] == ["identical", "identical"]
@@ -285,25 +325,41 @@ def test_pipeline_reports_late_difference_without_claiming_root_cause(
     )
     service = ArtifactPipelineService(workspace)
 
-    comparison = service.compare(
-        _pipeline(service, workspace, left_run),
-        _pipeline(service, workspace, right_run, generated_lines=2),
-    )
-
-    assert comparison.stages[0].disposition == "identical"
-    assert comparison.stages[1].disposition == "changed"
-    assert comparison.stages[1].artifact_length_change == 1
-    assert comparison.first_observed_divergent_stage == "generated"
-    assert any("not a root-cause" in item for item in comparison.limitations)
-
     same_structure = service.compare(
         _pipeline(service, workspace, left_run),
         _pipeline(service, workspace, right_run),
     )
+
     assert same_structure.stages[1].disposition == "content_changed"
+    assert same_structure.stages[1].baseline_summary == {
+        "line_count": 1,
+        "utf8_valid": True,
+    }
+    assert same_structure.stages[1].candidate_summary == {
+        "line_count": 1,
+        "utf8_valid": True,
+    }
+
+    multiline = _import(workspace, tmp_path / "multiline-generated.txt", "right\nsecond")
+    _replace_registration_artifact(
+        workspace,
+        right_run,
+        "right-generated",
+        RunStore(workspace).read(multiline).artifacts[0].artifact_id,
+    )
+    comparison = service.compare(
+        _pipeline(service, workspace, left_run),
+        _pipeline(service, workspace, right_run),
+    )
+
+    assert comparison.stages[0].disposition == "identical"
+    assert comparison.stages[1].disposition == "changed"
+    assert comparison.stages[1].artifact_length_change == 8
+    assert comparison.first_observed_divergent_stage is None
+    assert any("not a root-cause" in item for item in comparison.limitations)
 
 
-def test_pipeline_marks_skipped_and_incompatible_stages_explicitly(tmp_path: Path) -> None:
+def test_pipeline_marks_skipped_and_ignores_unverified_format_claims(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     left_run = _import(workspace, tmp_path / "left.txt", "same", sensitive=True)
     right_run = _import(workspace, tmp_path / "right.txt", "same", sensitive=True)
@@ -321,15 +377,15 @@ def test_pipeline_marks_skipped_and_incompatible_stages_explicitly(tmp_path: Pat
             second_status=PipelineStageStatus.SKIPPED,
         ),
     )
-    incompatible = service.compare(
+    forged_schema = service.compare(
         baseline,
         _pipeline(service, workspace, right_run, schema="ir-v2"),
     )
 
     assert skipped.stages[1].disposition == "uninspectable"
     assert skipped.first_observed_divergent_stage is None
-    assert incompatible.stages[1].disposition == "incompatible"
-    assert incompatible.first_observed_divergent_stage is None
+    assert all(stage.disposition == "identical" for stage in forged_schema.stages)
+    assert forged_schema.first_observed_divergent_stage is None
 
 
 def test_pipeline_identity_mismatch_invalidates_stage_comparison(tmp_path: Path) -> None:
@@ -398,7 +454,7 @@ def test_pipeline_missing_critical_identity_is_unknown_until_known_mismatch(
             device_identity=None,
         ),
     )
-    known_mismatch = service.compare(
+    forged_label_mismatch = service.compare(
         _pipeline(service, workspace, left_run, workload_identity="left"),
         _pipeline(service, workspace, right_run, workload_identity="right"),
     )
@@ -407,5 +463,5 @@ def test_pipeline_missing_critical_identity_is_unknown_until_known_mismatch(
     assert both_missing.identity_mismatches == ()
     assert known_vs_missing.compatibility == "unknown"
     assert known_vs_missing.identity_mismatches == ()
-    assert known_mismatch.compatibility == "incompatible"
-    assert known_mismatch.identity_mismatches == ("workload_identity",)
+    assert forged_label_mismatch.compatibility == "unknown"
+    assert forged_label_mismatch.identity_mismatches == ()

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
+import pyperf
 import pytest
 
 from flameox.adapters import PytestExtractor, PythonStartupExtractor
@@ -12,6 +12,8 @@ from flameox.application import CaptureService, ExecutionPolicy
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, ExecutionStatus
 from flameox.storage import ArtifactStore, Workspace
+
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
 
 
 def _workspace_without_containment(tmp_path: Path) -> Workspace:
@@ -29,11 +31,19 @@ def _workspace_without_containment(tmp_path: Path) -> Workspace:
 
 
 @pytest.mark.anyio
-async def test_python_startup_capture_preserves_raw_importtime_and_samples(
+async def test_python_startup_capture_preserves_native_pyperf_and_raw_importtime(
     tmp_path: Path,
 ) -> None:
     workspace = _workspace_without_containment(tmp_path)
-    (tmp_path / "startup_target.py").write_text("import json\nassert json.dumps({'ok': True})\n")
+    (tmp_path / "startup_target.py").write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "kind = 'import' if 'importtime' in sys._xoptions else 'wall'\n"
+        "with Path('startup-executions.txt').open('a') as stream:\n"
+        "    stream.write(kind + '\\n')\n"
+        "import json\n"
+        "assert json.dumps({'ok': True})\n"
+    )
     (tmp_path / "flameox.toml").write_text(
         f"""
 schema_version = 1
@@ -55,16 +65,27 @@ timeout_seconds = 30
 
     assert captured.run.execution_status is ExecutionStatus.SUCCEEDED
     assert extracted.sample_count == 5
-    registration = next(
-        item for item in captured.run.artifacts if item.kind is ArtifactKind.PYTHON_STARTUP
+    wall_registration = next(
+        item
+        for item in captured.run.artifacts
+        if item.kind is ArtifactKind.BENCHMARK_SAMPLES and item.role == "startup_wall"
     )
-    artifact = ArtifactStore(workspace).get(registration.artifact_id)
-    payload = json.loads(artifact.payload_path.read_text())
-    assert payload["samples"][0]["cache_semantics"] == "uncontrolled_initial"
-    assert payload["samples"][1]["cache_semantics"] == "warm_process_restart"
-    expected_rss_backend = "wait4_ru_maxrss" if hasattr(os, "wait4") else "psutil_polling"
-    assert payload["samples"][0]["peak_rss_backend"] == expected_rss_backend
-    assert "import time:" in payload["import_trace"]["raw_importtime"]
+    trace_registration = next(
+        item
+        for item in captured.run.artifacts
+        if item.kind is ArtifactKind.PYTHON_STARTUP and item.role == "import_trace"
+    )
+    artifacts = ArtifactStore(workspace)
+    wall_artifact = artifacts.get(wall_registration.artifact_id)
+    suite = pyperf.BenchmarkSuite.load(str(wall_artifact.payload_path))
+    benchmark = suite.get_benchmark("flameox.python_startup.wall_time")
+    assert benchmark.get_nrun() == 5
+    assert all(run.get_loops() == 1 and len(run.values) == 1 for run in benchmark.get_runs())
+    assert all(not run.warmups for run in benchmark.get_runs())
+    assert "import time:" in artifacts.get(trace_registration.artifact_id).payload_path.read_text()
+    executions = (tmp_path / "startup-executions.txt").read_text().splitlines()
+    assert executions.count("wall") == 5
+    assert executions.count("import") == 1
 
 
 @pytest.mark.anyio

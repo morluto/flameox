@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 from pydantic import Field
 
 from flameox.catalog import Catalog
-from flameox.domain import CursorCodec, DomainError, ErrorCode, digest_model
+from flameox.domain import CursorNamespace, DomainError, ErrorCode, digest_model
 from flameox.models import ContractModel
 from flameox.pagination import CursorPageContract
 from flameox.storage import Workspace
@@ -162,7 +162,7 @@ class LifecycleEvidenceService:
                 ErrorCode.QUERY_BUDGET_EXCEEDED, "end_ns must be greater than start_ns."
             )
         return self._query_spans(
-            operation="get_operation_window",
+            operation=CursorNamespace.GET_OPERATION_WINDOW,
             artifact_id=artifact_id,
             limit=bounded,
             cursor=cursor,
@@ -208,7 +208,12 @@ class LifecycleEvidenceService:
         head = self.workspace.corpus.read_head()
         scope = {"artifact_id": artifact_id, "trace_id": trace_id, "max_depth": max_depth}
         digest = digest_model(scope)
-        after = self._cursor(cursor, "operation_transitions", head.commit_id, digest)
+        after = self._cursor(
+            cursor,
+            CursorNamespace.OPERATION_TRANSITIONS,
+            head.commit_id,
+            digest,
+        )
         where = "s.artifact_id = ?"
         parameters: list[object] = [artifact_id]
         if trace_id is not None:
@@ -280,7 +285,7 @@ class LifecycleEvidenceService:
             len(rows),
             len(rows) > bounded,
             (items[-1].source_ordinal if len(rows) > bounded else None),
-            cursor_namespace="operation_transitions",
+            cursor_namespace=CursorNamespace.OPERATION_TRANSITIONS,
             digest=digest,
             limitations=("missing_parent_references_are_coverage_gaps",)
             if orphan_rows and orphan_rows[0]
@@ -306,7 +311,12 @@ class LifecycleEvidenceService:
             "limit": bounded,
         }
         digest = digest_model({"artifact_id": artifact_id, **bounds})
-        after = self._cursor(cursor, "find_repeated_operation_sequences", head.commit_id, digest)
+        after = self._cursor(
+            cursor,
+            CursorNamespace.FIND_REPEATED_OPERATION_SEQUENCES,
+            head.commit_id,
+            digest,
+        )
         cte = """
             WITH normalized AS (
                 SELECT s.*,
@@ -389,7 +399,7 @@ class LifecycleEvidenceService:
             int(total_row[0]) if total_row else 0,
             len(rows) > bounded,
             items[-1].source_ordinal if len(rows) > bounded and items else None,
-            cursor_namespace="find_repeated_operation_sequences",
+            cursor_namespace=CursorNamespace.FIND_REPEATED_OPERATION_SEQUENCES,
             digest=digest,
             limitations=("repetition_is_evidence_not_a_loop_verdict",),
         )
@@ -516,7 +526,7 @@ class LifecycleEvidenceService:
     def _query_spans(
         self,
         *,
-        operation: str,
+        operation: CursorNamespace,
         artifact_id: str,
         limit: int,
         cursor: str | None,
@@ -551,7 +561,7 @@ class LifecycleEvidenceService:
             rows = snapshot.execute(query, (*query_values, limit + 1)).fetchall()
         items = tuple(mapper(row) for row in rows[:limit])
         return self._result(
-            operation,
+            operation.value,
             head.commit_id,
             artifact_id,
             parameters,
@@ -575,13 +585,13 @@ class LifecycleEvidenceService:
         truncated: bool,
         position: int | None,
         *,
-        cursor_namespace: str | None = None,
+        cursor_namespace: CursorNamespace | None = None,
         digest: str | None = None,
         limitations: tuple[str, ...] = (),
     ) -> LifecycleQueryResult:
         next_cursor = None
         if truncated and position is not None and cursor_namespace and digest:
-            next_cursor = CursorCodec.encode(
+            next_cursor = self.workspace.cursors.issue(
                 namespace=cursor_namespace,
                 snapshot_id=commit,
                 scope_digest=digest,
@@ -600,14 +610,24 @@ class LifecycleEvidenceService:
             limitations=limitations,
         )
 
-    def _cursor(self, cursor: str | None, namespace: str, snapshot: str, digest: str) -> int | None:
+    def _cursor(
+        self,
+        cursor: str | None,
+        namespace: CursorNamespace,
+        snapshot: str,
+        digest: str,
+    ) -> int | None:
         if cursor is None:
             return None
-        values = CursorCodec.decode(
-            cursor, namespace=namespace, snapshot_id=snapshot, scope_digest=digest
+        values = cast(
+            tuple[int],
+            self.workspace.cursors.resolve(
+                cursor,
+                namespace=namespace,
+                snapshot_id=snapshot,
+                scope_digest=digest,
+            ),
         )
-        if len(values) != 1 or not isinstance(values[0], int):
-            raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.")
         return values[0]
 
     def _limit(self, value: int | None) -> int:

@@ -3,8 +3,23 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from flameox.domain import ErrorCode
-from flameox.workers.protocol import run_worker
+from flameox.domain import DomainError, ErrorCode
+from flameox.workers.perfetto_contract import (
+    PERFETTO_WORKER,
+    PerfettoExtractRequest,
+    PerfettoExtractResult,
+    PerfettoSliceRow,
+    PerfettoWindowRequest,
+    PerfettoWindowResult,
+    PerfettoWindowRow,
+    PerfettoWorkerRequest,
+    PerfettoWorkerResult,
+)
+from flameox.workers.protocol import (
+    WorkerApplication,
+    WorkerFailureKind,
+    run_typed_worker,
+)
 
 _SLICE_QUERY = """
     SELECT
@@ -63,78 +78,77 @@ def _row(row: Any, names: tuple[str, ...]) -> dict[str, object]:
     return {name: getattr(row, name) for name in names}
 
 
-def _query(request: dict[str, object]) -> dict[str, object]:
+def _query(request: PerfettoWorkerRequest) -> PerfettoWorkerResult:
     try:
         from perfetto.trace_processor import (
             TraceProcessor,
             TraceProcessorConfig,
             TraceProcessorException,
         )
-    except ImportError:
-        return {
-            "ok": False,
-            "code": "CAPABILITY_UNAVAILABLE",
-            "message": "Perfetto's Python package is not installed.",
-        }
+    except ImportError as exc:
+        raise DomainError(
+            ErrorCode.CAPABILITY_UNAVAILABLE,
+            "Perfetto's Python package is not installed.",
+        ) from exc
 
     processor: Any | None = None
     try:
         processor = TraceProcessor(
-            trace=str(request["artifact_path"]),
+            trace=request.artifact_path,
             config=TraceProcessorConfig(
-                bin_path=str(request["binary_path"]),
+                bin_path=request.binary_path,
                 fetch_latest_trace_processor=False,
                 load_timeout=30,
                 unique_port=True,
             ),
         )
-        operation = request["operation"]
-        if operation == "extract":
-            max_rows = int(str(request["max_rows"]))
+        if isinstance(request, PerfettoExtractRequest):
+            max_rows = request.max_rows
             rows = list(
                 processor.query(
                     f"SELECT * FROM ({_SLICE_QUERY}) AS bounded_slices LIMIT {max_rows + 1:d}"
                 )
             )
-            return {
-                "ok": True,
-                "truncated": len(rows) > max_rows,
-                "rows": [
-                    _row(
-                        row,
-                        (
-                            "id",
-                            "parent_id",
-                            "name",
-                            "ts",
-                            "dur",
-                            "track_id",
-                            "category",
-                            "thread_name",
-                            "process_name",
-                            "filename",
-                            "line",
-                            "input_shapes",
-                            "allocation_bytes",
-                            "phase",
-                            "correlation_id",
-                            "device",
-                            "stream",
-                        ),
+            return PerfettoExtractResult(
+                truncated=len(rows) > max_rows,
+                rows=tuple(
+                    PerfettoSliceRow.model_validate(
+                        _row(
+                            row,
+                            (
+                                "id",
+                                "parent_id",
+                                "name",
+                                "ts",
+                                "dur",
+                                "track_id",
+                                "category",
+                                "thread_name",
+                                "process_name",
+                                "filename",
+                                "line",
+                                "input_shapes",
+                                "allocation_bytes",
+                                "phase",
+                                "correlation_id",
+                                "device",
+                                "stream",
+                            ),
+                        )
                     )
                     for row in rows[:max_rows]
-                ],
-            }
-        if operation == "window":
-            start_ns = int(str(request["start_ns"]))
-            end_ns = int(str(request["end_ns"]))
-            limit = int(str(request["limit"]))
+                ),
+            )
+        if isinstance(request, PerfettoWindowRequest):
+            start_ns = request.start_ns
+            end_ns = request.end_ns
+            limit = request.limit
             predicate = f"ts < {end_ns:d} AND ts + dur > {start_ns:d} AND dur >= 0"
             count_rows = list(
                 processor.query(f"SELECT count(*) AS total FROM slice WHERE {predicate}")
             )
-            after_ts = request.get("after_ts")
-            after_id = request.get("after_id")
+            after_ts = request.after_ts
+            after_id = request.after_id
             page_predicate = predicate
             if after_ts is not None and after_id is not None:
                 page_predicate += (
@@ -149,39 +163,38 @@ def _query(request: dict[str, object]) -> dict[str, object]:
                     f"{page_predicate} ORDER BY ts, id LIMIT {limit + 1:d}"
                 )
             )
-            return {
-                "ok": True,
-                "total": int(count_rows[0].total) if count_rows else 0,
-                "rows": [
-                    _row(
-                        row,
-                        ("id", "parent_id", "name", "category", "ts", "dur", "track_id"),
+            return PerfettoWindowResult(
+                total=int(count_rows[0].total) if count_rows else 0,
+                rows=tuple(
+                    PerfettoWindowRow.model_validate(
+                        _row(
+                            row,
+                            ("id", "parent_id", "name", "category", "ts", "dur", "track_id"),
+                        )
                     )
                     for row in rows
-                ],
-            }
-        return {
-            "ok": False,
-            "code": "WORKSPACE_INVALID",
-            "message": "Unknown curated Perfetto worker operation.",
-        }
+                ),
+            )
+        raise AssertionError("unreachable validated Perfetto operation")
     except (TraceProcessorException, OSError, ValueError, RuntimeError) as exc:
-        return {
-            "ok": False,
-            "code": "ARTIFACT_PARSE_FAILED",
-            "message": f"Perfetto Trace Processor failed: {exc}",
-        }
+        raise DomainError(
+            ErrorCode.ARTIFACT_PARSE_FAILED,
+            f"Perfetto Trace Processor failed: {type(exc).__name__}",
+        ) from exc
     finally:
         if processor is not None:
             processor.close()
 
 
 def main() -> int:
-    return run_worker(
-        lambda request, _path: _query(request),
-        invalid_code=ErrorCode.WORKSPACE_INVALID,
-        invalid_message="Perfetto worker request is invalid",
-        caught=(OSError, ValueError, json.JSONDecodeError),
+    return run_typed_worker(
+        WorkerApplication(
+            definition=PERFETTO_WORKER,
+            handler=lambda request, _context: _query(request),
+            invalid_failure=WorkerFailureKind.INVALID_REQUEST,
+            invalid_message="Perfetto worker request is invalid",
+            caught=(OSError, ValueError, json.JSONDecodeError),
+        )
     )
 
 

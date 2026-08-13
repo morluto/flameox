@@ -12,6 +12,14 @@ from flameox.domain import ArtifactKind, CaptureStatus, ExecutionStatus
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
 
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.optional,
+    pytest.mark.process,
+    pytest.mark.serial,
+    pytest.mark.requires_triton,
+]
+
 
 def _write_triton_workload(project: Path, *, python: str, script: str) -> None:
     (project / "flameox.toml").write_text(

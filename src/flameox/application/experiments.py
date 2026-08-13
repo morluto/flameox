@@ -11,8 +11,14 @@ from itertools import product
 from typing import Any, Literal, cast
 
 from pydantic import ConfigDict, Field, JsonValue, TypeAdapter, computed_field, model_validator
+from scipy.stats import beta
 
-from flameox.adapters import PyPerfExtractor, PytestExtractor, PythonStartupExtractor
+from flameox.adapters import (
+    BenchmarkSamplesExtractor,
+    PyPerfExtractor,
+    PytestExtractor,
+    PythonStartupExtractor,
+)
 from flameox.application.async_work import run_atomic_thread
 from flameox.application.capture import CaptureService
 from flameox.application.comparisons import (
@@ -25,7 +31,9 @@ from flameox.application.comparisons import (
     RunSetService,
     parse_compare_run_sets_request,
 )
+from flameox.application.evidence_lookup import EvidenceLookupService, EvidenceSession
 from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.progress import ProgressReporter
 from flameox.application.workloads import (
     ExperimentConfig,
     Scalar,
@@ -35,13 +43,14 @@ from flameox.application.workloads import (
     _ScaledLegacyExperimentConfig,
     scalar_contains,
     scalar_equal,
+    scalar_identity,
     scalar_identity_set,
     scalar_subset,
 )
 from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,
-    CursorCodec,
+    CursorNamespace,
     DomainError,
     ErrorCode,
     ExecutionStatus,
@@ -61,6 +70,7 @@ from flameox.domain import (
     TrialOutcome,
     ValidationStatus,
     Variant,
+    VariantIdentityQuality,
     canonical_json,
     digest_model,
     new_id,
@@ -81,6 +91,8 @@ from flameox.storage import AuthorizedPlanStore, ControlRecordStore, RunStore, W
 def _extract_adapter_measurements(workspace: Workspace, adapter: str, run_id: str) -> None:
     if adapter == "pyperf":
         PyPerfExtractor(workspace).extract(run_id)
+    elif adapter == "benchmark-samples":
+        BenchmarkSamplesExtractor(workspace).extract(run_id)
     elif adapter == "python-startup":
         PythonStartupExtractor(workspace).extract(run_id)
     elif adapter == "pytest":
@@ -88,9 +100,17 @@ def _extract_adapter_measurements(workspace: Workspace, adapter: str, run_id: st
 
 
 def _has_extractable_artifact(run: RunManifest, adapter: str) -> bool:
+    if adapter == "python-startup":
+        return any(
+            item.kind is ArtifactKind.BENCHMARK_SAMPLES and item.role == "startup_wall"
+            for item in run.artifacts
+        ) and any(
+            item.kind is ArtifactKind.PYTHON_STARTUP and item.role == "import_trace"
+            for item in run.artifacts
+        )
     expected = {
+        "benchmark-samples": ArtifactKind.BENCHMARK_SAMPLES,
         "pyperf": ArtifactKind.BENCHMARK_SAMPLES,
-        "python-startup": ArtifactKind.PYTHON_STARTUP,
         "pytest": ArtifactKind.TEST_EXECUTION,
     }.get(adapter)
     return expected is not None and any(item.kind is expected for item in run.artifacts)
@@ -199,6 +219,7 @@ class OutcomeCount(ContractModel):
     oracle_receipt_error: int = 0
     pass_rate: float | None = None
     failure_rate: float | None = None
+    failure_rate_upper_bound: float | None = None
 
 
 class OutcomeFirstFailure(ContractModel):
@@ -246,8 +267,8 @@ class OutcomeExperimentResult(ContractModel):
 
     schema_version: Literal[1] = 1
     experiment_id: str
-    method: Literal[ExperimentOutcomeMethod.FIXED_ATTEMPTS_V1] = (
-        ExperimentOutcomeMethod.FIXED_ATTEMPTS_V1
+    method: Literal[ExperimentOutcomeMethod.ABSENCE_OF_FAILURE_FIXED_ATTEMPTS_V1] = (
+        ExperimentOutcomeMethod.ABSENCE_OF_FAILURE_FIXED_ATTEMPTS_V1
     )
     goal: ExperimentOutcomeGoal
     disposition: ExperimentOutcomeDisposition
@@ -370,17 +391,16 @@ class ExperimentService:
         scope_digest = digest_model({"experiment_id": experiment_id})
         offset = 0
         if cursor is not None:
-            position = CursorCodec.decode(
-                cursor,
-                namespace="experiment-trials",
-                snapshot_id=head.commit_id,
-                scope_digest=scope_digest,
+            position = cast(
+                tuple[int],
+                self.workspace.cursors.resolve(
+                    cursor,
+                    namespace=CursorNamespace.EXPERIMENT_TRIALS,
+                    snapshot_id=head.commit_id,
+                    scope_digest=scope_digest,
+                ),
             )
-            if len(position) != 1 or not isinstance(position[0], int):
-                raise DomainError(ErrorCode.STALE_CURSOR, "Trial cursor position is invalid.")
             offset = position[0]
-            if offset < 0:
-                raise DomainError(ErrorCode.STALE_CURSOR, "Trial cursor position is invalid.")
         catalog = Catalog(self.workspace)
         with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             rows = snapshot.execute(
@@ -392,8 +412,8 @@ class ExperimentService:
         truncated = len(rows) > limit
         trials = tuple(self._trial_from_row(row) for row in rows[:limit])
         next_cursor = (
-            CursorCodec.encode(
-                namespace="experiment-trials",
+            self.workspace.cursors.issue(
+                namespace=CursorNamespace.EXPERIMENT_TRIALS,
                 snapshot_id=head.commit_id,
                 scope_digest=scope_digest,
                 position=(offset + limit,),
@@ -554,23 +574,67 @@ class ExperimentService:
                 else MetricSource.MEASUREMENT
             ),
         }
+        metric_source = (
+            MetricSource.RUNTIME_RESOURCE
+            if config.primary_metric.startswith("runtime_resource.")
+            else MetricSource.MEASUREMENT
+        )
+        if isinstance(config, _OutcomeExperimentConfig):
+            primary_metric_unit = None
+            measurement_series = None
+            value_domain = None
+            zero_policy = None
+        else:
+            primary_metric_unit = (
+                "bytes"
+                if metric_source is MetricSource.RUNTIME_RESOURCE
+                else config.primary_metric_unit or "ns"
+            )
+            measurement_series = config.measurement_series
+            value_domain = config.value_domain
+            zero_policy = config.zero_policy
         experiment = Experiment(
             experiment_id=new_id(),
             investigation_id=investigation_id,
             hypothesis_id=hypothesis_id,
-            recipe=("categorical_outcomes" if config.analysis == "outcome" else "compare_run_sets"),
-            recipe_version="1",
+            recipe=(
+                "absence_of_failure_counts" if config.analysis == "outcome" else "compare_run_sets"
+            ),
+            recipe_version="2" if config.analysis == "outcome" else "1",
             workload_definition_id=definition.workload_definition_id,
             experiment_design_id=digest_model(design),
-            measurement_protocol_id=digest_model({"adapter": adapter}),
+            measurement_protocol_id=digest_model(
+                {
+                    "adapter": adapter,
+                    "metric_source": metric_source,
+                    "primary_metric": config.primary_metric,
+                    "primary_metric_unit": primary_metric_unit,
+                    "measurement_series": (
+                        measurement_series.model_dump(mode="json")
+                        if measurement_series is not None
+                        else None
+                    ),
+                    "value_domain": value_domain,
+                    "zero_policy": zero_policy,
+                }
+            ),
             validation_spec_id=definition.validation_spec_id,
             primary_metric=config.primary_metric,
+            metric_source=metric_source,
+            primary_metric_unit=primary_metric_unit,
+            measurement_series=measurement_series,
+            value_domain=value_domain,
+            zero_policy=zero_policy,
             polarity=config.polarity,
             estimand=config.estimand,
             practical_threshold=config.practical_threshold,
             confidence_level=config.confidence_level,
             stopping_rule={
-                "method": ExperimentOutcomeMethod.FIXED_ATTEMPTS_V1,
+                "method": (
+                    ExperimentOutcomeMethod.ABSENCE_OF_FAILURE_FIXED_ATTEMPTS_V1
+                    if isinstance(config, _OutcomeExperimentConfig)
+                    else ExperimentOutcomeMethod.FIXED_ATTEMPTS_V1
+                ),
                 "fixed_blocks": config.blocks,
                 "minimum_attempts": config.minimum_attempts or config.blocks,
                 "maximum_attempts": config.maximum_attempts or config.blocks,
@@ -692,10 +756,10 @@ class ExperimentService:
         trial_count = sum(len(block.cells) for block in plan.blocks)
         total_phases = trial_count + 4
         completed = 0
+        reporter = ProgressReporter(progress)
 
         async def report(message: str) -> None:
-            if progress is not None:
-                await progress(completed, total_phases, message)
+            await reporter.report(completed, total_phases, message)
 
         await report("Experiment plan consumed")
         config = self._validate_plan(plan)
@@ -705,7 +769,7 @@ class ExperimentService:
         # execution is interrupted, the investigation still records what was
         # intended rather than leaving an unattributed run population.
         self.experiments.create(plan.experiment)
-        published = await run_atomic_thread(
+        await run_atomic_thread(
             lambda: self.publisher.publish_rows(
                 {"experiments": [self._experiment_row(plan.experiment)]},
                 publisher="flameox.experiments",
@@ -716,7 +780,6 @@ class ExperimentService:
         await report("Experiment protocol published")
         trials: list[Trial] = []
         trials_by_variant: dict[str, list[Trial]] = {name: [] for name in plan.variants}
-        run_by_variant: dict[str, RunManifest] = {}
         schedule = tuple(
             (block, order, cell) for block in plan.blocks for order, cell in enumerate(block.cells)
         )
@@ -804,8 +867,6 @@ class ExperimentService:
                 else:
                     run = RunStore(self.workspace).read(error.run_id)
                     outcome, failure_class = self._classify_run(run)
-            if run is not None:
-                run_by_variant.setdefault(variant_name, run)
             trial = self._make_trial(
                 plan=plan,
                 cell=cell,
@@ -817,46 +878,15 @@ class ExperimentService:
             )
             trials.append(trial)
             trials_by_variant[variant_name].append(trial)
-            published = await run_atomic_thread(partial(self._publish_trial, trial))
+            await run_atomic_thread(partial(self._publish_trial, trial))
             completed += 1
             await report(
                 f"Trial {completed - 2}/{trial_count} published ({block.block_id}, {variant_name})"
             )
         variants: list[Variant] = []
         for name in plan.variants:
-            run = run_by_variant.get(name)
-            factor_values = next(
-                (
-                    cell.factors
-                    for block in plan.blocks
-                    for cell in block.cells
-                    if cell.treatment == name
-                ),
-                {
-                    plan.variant_parameter: next(
-                        value
-                        for value in plan.factors[plan.variant_parameter]
-                        if self._factor_label(cast(Scalar, value)) == name
-                    )
-                },
-            )
-            variants.append(
-                Variant(
-                    variant_id=digest_model(
-                        {
-                            "experiment_id": plan.experiment.experiment_id,
-                            "name": name,
-                        }
-                    ),
-                    experiment_id=plan.experiment.experiment_id,
-                    name=name,
-                    source_state_id=run.source_state_id if run is not None else None,
-                    workload_instance_id=(run.workload_instance_id if run is not None else None),
-                    parameters=factor_values,
-                    environment_requirements={},
-                )
-            )
-        published = await run_atomic_thread(
+            variants.append(self._variant_for_treatment(plan, name, trials_by_variant[name]))
+        await run_atomic_thread(
             lambda: self.publisher.publish_rows(
                 {
                     "variants": [self._variant_row(value) for value in variants],
@@ -866,25 +896,7 @@ class ExperimentService:
                 input_run_ids=tuple(trial.run_id for trial in trials if trial.run_id is not None),
             )
         )
-        run_sets = await run_atomic_thread(
-            lambda: tuple(
-                RunSetService(self.workspace).freeze(
-                    FreezeRunMembersRequest(
-                        members=tuple(
-                            _freeze_trial_member(trial)
-                            for trial in trials_by_variant[name]
-                            if trial.run_id is not None
-                        ),
-                        selection={
-                            "experiment_id": plan.experiment.experiment_id,
-                            "variant": name,
-                        },
-                    )
-                )
-                for name in plan.variants
-                if any(trial.run_id is not None for trial in trials_by_variant[name])
-            )
-        )
+        run_sets = await run_atomic_thread(partial(self._freeze_run_sets, plan, trials_by_variant))
         completed += 1
         await report("Variants and frozen run sets published")
         comparison: ComparisonResult | None = None
@@ -892,7 +904,7 @@ class ExperimentService:
         limitations: list[str] = []
         if isinstance(config, _OutcomeExperimentConfig):
             outcome_result = self._outcome_result(plan, config, trials)
-            published = await run_atomic_thread(
+            await run_atomic_thread(
                 lambda: self.publisher.publish_rows(
                     {"experiment_outcomes": [self._outcome_row(outcome_result)]},
                     publisher="flameox.experiments",
@@ -906,10 +918,6 @@ class ExperimentService:
         elif len(run_sets) != 2:
             limitations.append(
                 "Automatic paired comparison currently requires exactly two variants."
-            )
-        elif plan.metric_source is MetricSource.MEASUREMENT and plan.adapter != "pyperf":
-            limitations.append(
-                "Automatic experiment comparison currently requires pyperf measurements."
             )
         else:
             comparison_run_sets: tuple[RunSet, RunSet] | None = run_sets
@@ -947,13 +955,23 @@ class ExperimentService:
                                 "candidate_run_set_id": comparison_run_sets[1].run_set_id,
                                 "experiment_id": plan.experiment.experiment_id,
                                 "metric": plan.experiment.primary_metric,
-                                "unit": (
-                                    "bytes"
-                                    if plan.metric_source is MetricSource.RUNTIME_RESOURCE
-                                    else "ns"
-                                ),
+                                "unit": plan.experiment.primary_metric_unit,
                                 "metric_source": plan.metric_source,
                                 "polarity": plan.experiment.polarity,
+                                "estimand": plan.experiment.estimand,
+                                **(
+                                    {
+                                        "series": (
+                                            plan.experiment.measurement_series.model_dump(
+                                                mode="json"
+                                            )
+                                            if plan.experiment.measurement_series is not None
+                                            else None
+                                        )
+                                    }
+                                    if plan.metric_source is MetricSource.MEASUREMENT
+                                    else {}
+                                ),
                                 "practical_threshold": plan.experiment.practical_threshold,
                                 "confidence_level": plan.experiment.confidence_level,
                                 "random_seed": plan.experiment.random_seed,
@@ -961,9 +979,14 @@ class ExperimentService:
                         )
                     )
                 )
-        result_commit_id = published.commit.commit_id
-        if comparison is not None:
-            result_commit_id = comparison.materialized_commit_id or comparison.corpus_commit_id
+        result_commit_id = self._result_snapshot(
+            experiment=plan.experiment,
+            variants=tuple(variants),
+            trials=tuple(trials),
+            run_sets=run_sets,
+            comparison=comparison,
+            outcome=outcome_result,
+        )
         completed += 1
         await report("Experiment comparison and result complete")
         return ExperimentRunResult(
@@ -975,6 +998,135 @@ class ExperimentService:
             outcome=outcome_result,
             corpus_commit_id=result_commit_id,
             limitations=tuple(limitations),
+        )
+
+    def _result_snapshot(
+        self,
+        *,
+        experiment: Experiment,
+        variants: tuple[Variant, ...],
+        trials: tuple[Trial, ...],
+        run_sets: tuple[RunSet, ...],
+        comparison: ComparisonResult | None,
+        outcome: OutcomeExperimentResult | None,
+    ) -> str:
+        """Return one snapshot that contains every durable object in the result."""
+        with EvidenceLookupService(self.workspace).session() as session:
+            self._require_snapshot_ids(
+                session,
+                table="experiments",
+                identifier="experiment_id",
+                expected=(experiment.experiment_id,),
+            )
+            self._require_snapshot_ids(
+                session,
+                table="variants",
+                identifier="variant_id",
+                expected=tuple(value.variant_id for value in variants),
+            )
+            self._require_snapshot_ids(
+                session,
+                table="trials",
+                identifier="trial_id",
+                expected=tuple(value.trial_id for value in trials),
+            )
+            self._require_snapshot_ids(
+                session,
+                table="run_sets",
+                identifier="run_set_id",
+                expected=tuple(value.run_set_id for value in run_sets),
+            )
+            if comparison is not None:
+                self._require_snapshot_ids(
+                    session,
+                    table="comparisons",
+                    identifier="comparison_id",
+                    expected=(comparison.comparison.comparison_id,),
+                )
+            if outcome is not None:
+                self._require_snapshot_ids(
+                    session,
+                    table="experiment_outcomes",
+                    identifier="experiment_id",
+                    expected=(experiment.experiment_id,),
+                )
+            return session.commit_id
+
+    @staticmethod
+    def _require_snapshot_ids(
+        session: EvidenceSession,
+        *,
+        table: str,
+        identifier: str,
+        expected: tuple[str, ...],
+    ) -> None:
+        if not expected:
+            return
+        placeholders = ", ".join("?" for _ in expected)
+        rows = session.execute(
+            f'SELECT DISTINCT "{identifier}" FROM "{table}" '
+            f'WHERE "{identifier}" IN ({placeholders})',
+            tuple(expected),
+        ).fetchall()
+        observed = {str(row[0]) for row in rows}
+        missing = sorted(set(expected) - observed)
+        if missing:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "The experiment result snapshot does not contain every returned output.",
+                details={
+                    "corpus_commit_id": session.commit_id,
+                    "table": table,
+                    "missing_ids": missing,
+                },
+            )
+
+    def _freeze_run_sets(
+        self,
+        plan: ExperimentPlan,
+        trials_by_variant: dict[str, list[Trial]],
+    ) -> tuple[RunSet, ...]:
+        service = RunSetService(self.workspace)
+        return tuple(
+            service.freeze(
+                FreezeRunMembersRequest(
+                    members=tuple(
+                        _freeze_trial_member(trial)
+                        for trial in trials_by_variant[name]
+                        if trial.run_id is not None
+                    ),
+                    selection={
+                        "experiment_id": plan.experiment.experiment_id,
+                        "variant": name,
+                        "variant_id": self._variant_id(
+                            plan,
+                            next(
+                                cast(Scalar, value)
+                                for value in plan.factors[plan.variant_parameter]
+                                if self._factor_label(cast(Scalar, value)) == name
+                            ),
+                        ),
+                        "treatment_factor": plan.variant_parameter,
+                        "treatment_identity_id": self._treatment_identity_id(
+                            plan.variant_parameter,
+                            next(
+                                cast(Scalar, value)
+                                for value in plan.factors[plan.variant_parameter]
+                                if self._factor_label(cast(Scalar, value)) == name
+                            ),
+                        ),
+                        "experiment_design_id": plan.experiment.experiment_design_id,
+                        "combination_population_digest": digest_model(
+                            sorted({trial.combination_id for trial in trials_by_variant[name]})
+                        ),
+                        "combination_count": len(
+                            {trial.combination_id for trial in trials_by_variant[name]}
+                        ),
+                    },
+                )
+            )
+            for name in plan.variants
+            if any(trial.run_id is not None for trial in trials_by_variant[name])
         )
 
     async def _publish_unattempted(
@@ -1202,6 +1354,11 @@ class ExperimentService:
                     ),
                     pass_rate=passed / eligible if eligible else None,
                     failure_rate=failed / eligible if eligible else None,
+                    failure_rate_upper_bound=self._failure_rate_upper_bound(
+                        failed,
+                        eligible,
+                        config.confidence_level,
+                    ),
                 )
             )
         by_block: dict[str, list[Trial]] = {}
@@ -1234,8 +1391,8 @@ class ExperimentService:
         }
         minimum = config.minimum_attempts or config.blocks
         limitations: list[str] = [
-            "Clean trials bound only the declared fixed attempts; they do not prove "
-            "absence of rare failures or race freedom."
+            "Clean trials bound only the declared fixed attempts; the reported exact "
+            "one-sided failure-rate bound does not prove absence of rare failures or race freedom."
         ]
         if unmatched:
             limitations.append("One or more pairing coordinates lack every treatment.")
@@ -1289,6 +1446,18 @@ class ExperimentService:
         )
 
     @staticmethod
+    def _failure_rate_upper_bound(
+        failures: int,
+        attempts: int,
+        confidence_level: float,
+    ) -> float | None:
+        if attempts == 0:
+            return None
+        if failures == attempts:
+            return 1.0
+        return float(beta.ppf(confidence_level, failures + 1, attempts - failures))
+
+    @staticmethod
     def _outcome_row(value: OutcomeExperimentResult) -> dict[str, object]:
         return {
             "experiment_id": value.experiment_id,
@@ -1331,11 +1500,9 @@ class ExperimentService:
             {
                 "trial_id": cell.trial_id,
                 "experiment_id": plan.experiment.experiment_id,
-                "variant_id": digest_model(
-                    {
-                        "experiment_id": plan.experiment.experiment_id,
-                        "name": cell.treatment,
-                    }
+                "variant_id": self._variant_id(
+                    plan,
+                    cast(Scalar, cell.factors[plan.variant_parameter]),
                 ),
                 "run_id": run.run_id if run is not None else None,
                 "combination_id": cell.combination_id,
@@ -1430,6 +1597,18 @@ class ExperimentService:
         row.update(
             {
                 "polarity": value.polarity,
+                "metric_source": (
+                    value.metric_source.value if value.metric_source is not None else None
+                ),
+                "measurement_series_json": (
+                    canonical_json(value.measurement_series.model_dump(mode="json"))
+                    if value.measurement_series is not None
+                    else None
+                ),
+                "value_domain": (
+                    value.value_domain.value if value.value_domain is not None else None
+                ),
+                "zero_policy": value.zero_policy.value if value.zero_policy is not None else None,
                 "stopping_rule_json": json.dumps(
                     value.stopping_rule,
                     allow_nan=False,
@@ -1439,18 +1618,203 @@ class ExperimentService:
             }
         )
         row.pop("stopping_rule")
+        row.pop("measurement_series")
         row.pop("schema_version")
         return row
+
+    def _variant_for_treatment(
+        self,
+        plan: ExperimentPlan,
+        name: str,
+        trials: list[Trial],
+    ) -> Variant:
+        cells = tuple(
+            cell for block in plan.blocks for cell in block.cells if cell.treatment == name
+        )
+        if not cells:
+            treatment_value = next(
+                value
+                for value in plan.factors[plan.variant_parameter]
+                if self._factor_label(cast(Scalar, value)) == name
+            )
+            treatment_identity_id = self._treatment_identity_id(
+                plan.variant_parameter,
+                cast(Scalar, treatment_value),
+            )
+            return Variant(
+                variant_id=self._variant_id(plan, cast(Scalar, treatment_value)),
+                experiment_id=plan.experiment.experiment_id,
+                name=name,
+                treatment_factor=plan.variant_parameter,
+                treatment_value=treatment_value,
+                treatment_identity_id=treatment_identity_id,
+                identity_quality=VariantIdentityQuality.INCOMPLETE,
+                parameters={plan.variant_parameter: treatment_value},
+                limitations=("No materialized experiment cell uses this treatment value.",),
+            )
+        factor_names = tuple(sorted(cells[0].factors))
+        invariant_parameters: dict[str, JsonValue] = {}
+        varying_factors: dict[str, tuple[JsonValue, ...]] = {}
+        for factor_name in factor_names:
+            values = self._distinct_factor_values(
+                tuple(cast(Scalar, cell.factors[factor_name]) for cell in cells)
+            )
+            if len(values) == 1:
+                invariant_parameters[factor_name] = cast(JsonValue, values[0])
+            else:
+                varying_factors[factor_name] = tuple(cast(JsonValue, value) for value in values)
+        treatment_value = invariant_parameters.get(plan.variant_parameter)
+        if not isinstance(treatment_value, str | int | float | bool):
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                f"Treatment {name!r} does not have one exact typed treatment value.",
+            )
+        treatment_identity_id = self._treatment_identity_id(
+            plan.variant_parameter,
+            treatment_value,
+        )
+        runs = tuple(
+            RunStore(self.workspace).read(trial.run_id)
+            for trial in trials
+            if trial.run_id is not None
+        )
+        source_state_ids = tuple(
+            sorted({run.source_state_id for run in runs if run.source_state_id is not None})
+        )
+        workload_instance_ids = tuple(
+            sorted(
+                {run.workload_instance_id for run in runs if run.workload_instance_id is not None}
+            )
+        )
+        environment_ids = tuple(sorted({run.environment_id for run in runs}))
+        source_state_id = self._uniform_run_identity(
+            tuple(run.source_state_id for run in runs), source_state_ids
+        )
+        workload_instance_id = self._uniform_run_identity(
+            tuple(run.workload_instance_id for run in runs), workload_instance_ids
+        )
+        environment_id = self._uniform_run_identity(
+            tuple(run.environment_id for run in runs), environment_ids
+        )
+        incomplete = (
+            not runs
+            or len(runs) != len(trials)
+            or any(run.source_state_id is None for run in runs)
+            or any(run.workload_instance_id is None for run in runs)
+        )
+        if incomplete:
+            source_state_id = None
+            workload_instance_id = None
+            environment_id = None
+        heterogeneous = bool(varying_factors) or any(
+            len(values) > 1 for values in (source_state_ids, workload_instance_ids, environment_ids)
+        )
+        identity_quality = (
+            VariantIdentityQuality.INCOMPLETE
+            if incomplete
+            else VariantIdentityQuality.HETEROGENEOUS
+            if heterogeneous
+            else VariantIdentityQuality.EXACT_UNIFORM
+        )
+        limitations: list[str] = []
+        if varying_factors:
+            limitations.append(
+                "Treatment cohort varies across factors: " + ", ".join(sorted(varying_factors))
+            )
+        if len(runs) != len(trials):
+            limitations.append("One or more treatment trials have no execution run identity.")
+        if any(run.source_state_id is None for run in runs):
+            limitations.append("One or more treatment runs lack exact source-state identity.")
+        if any(run.workload_instance_id is None for run in runs):
+            limitations.append("One or more treatment runs lack exact workload-instance identity.")
+        return Variant(
+            variant_id=self._variant_id(plan, treatment_value),
+            experiment_id=plan.experiment.experiment_id,
+            name=name,
+            treatment_factor=plan.variant_parameter,
+            treatment_value=treatment_value,
+            treatment_identity_id=treatment_identity_id,
+            identity_quality=identity_quality,
+            source_state_id=source_state_id,
+            workload_instance_id=workload_instance_id,
+            environment_id=environment_id,
+            source_state_ids=source_state_ids,
+            workload_instance_ids=workload_instance_ids,
+            environment_ids=environment_ids,
+            combination_ids=tuple(dict.fromkeys(cell.combination_id for cell in cells)),
+            parameters=invariant_parameters,
+            varying_factors=varying_factors,
+            environment_requirements={},
+            limitations=tuple(limitations),
+        )
+
+    @staticmethod
+    def _distinct_factor_values(values: tuple[Scalar, ...]) -> tuple[Scalar, ...]:
+        result: list[Scalar] = []
+        seen: set[tuple[str, object]] = set()
+        for value in values:
+            identity = scalar_identity(value)
+            if identity not in seen:
+                seen.add(identity)
+                result.append(value)
+        return tuple(result)
+
+    @staticmethod
+    def _treatment_identity_id(factor: str, value: Scalar) -> str:
+        value_type, identity_value = scalar_identity(value)
+        return digest_model(
+            {
+                "factor": factor,
+                "value_type": value_type,
+                "value": identity_value,
+            }
+        )
+
+    @classmethod
+    def _variant_id(cls, plan: ExperimentPlan, treatment_value: Scalar) -> str:
+        return digest_model(
+            {
+                "experiment_id": plan.experiment.experiment_id,
+                "treatment_identity_id": cls._treatment_identity_id(
+                    plan.variant_parameter,
+                    treatment_value,
+                ),
+            }
+        )
+
+    @staticmethod
+    def _uniform_run_identity(
+        observed: tuple[str | None, ...],
+        identities: tuple[str, ...],
+    ) -> str | None:
+        if observed and all(value is not None for value in observed) and len(identities) == 1:
+            return identities[0]
+        return None
 
     def _variant_row(self, value: Variant) -> dict[str, object]:
         return {
             "variant_id": value.variant_id,
             "experiment_id": value.experiment_id,
             "name": value.name,
+            "treatment_factor": value.treatment_factor,
+            "treatment_value_json": (
+                canonical_json(value.treatment_value)
+                if value.treatment_factor is not None
+                else None
+            ),
+            "treatment_identity_id": value.treatment_identity_id,
+            "identity_quality": value.identity_quality.value,
             "source_state_id": value.source_state_id,
             "workload_instance_id": value.workload_instance_id,
+            "environment_id": value.environment_id,
+            "source_state_ids": list(value.source_state_ids),
+            "workload_instance_ids": list(value.workload_instance_ids),
+            "environment_ids": list(value.environment_ids),
+            "combination_ids": list(value.combination_ids),
             "environment_requirements_json": canonical_json(value.environment_requirements),
             "parameters_json": canonical_json(value.parameters),
+            "varying_factors_json": canonical_json(value.varying_factors),
+            "limitations": list(value.limitations),
         }
 
     def _trial_row(self, value: Trial) -> dict[str, object]:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -18,84 +17,68 @@ from flameox.domain import (
     AcceleratorLinkKind,
     AcceleratorMigMode,
     IdentityQuality,
-    ProcessResult,
-    process_termination_from_returncode,
 )
-from flameox.execution import ExecutionOutcome, ExecutionRequest, ProcessContainment
+from flameox.workers.nvml_contract import (
+    NvmlDeviceIdentity,
+    NvmlFieldFailure,
+    NvmlPeerLink,
+    NvmlSnapshot,
+)
 
-_INVENTORY = b"""\
-<?xml version="1.0"?>
-<nvidia_smi_log>
-  <driver_version>575.57.08</driver_version>
-  <cuda_version>12.9</cuda_version>
-  <gpu>
-    <product_name>NVIDIA H100 80GB HBM3</product_name>
-    <compute_cap>9.0</compute_cap>
-    <fb_memory_usage><total>81559 MiB</total></fb_memory_usage>
-    <mig_mode><current_mig>Disabled</current_mig></mig_mode>
-  </gpu>
-  <gpu>
-    <product_name>NVIDIA H100 80GB HBM3</product_name>
-    <compute_cap>9.0</compute_cap>
-    <fb_memory_usage><total>81559 MiB</total></fb_memory_usage>
-    <mig_mode><current_mig>Enabled</current_mig></mig_mode>
-  </gpu>
-</nvidia_smi_log>
-"""
-
-_TOPOLOGY = """\
-        GPU0    GPU1    CPU Affinity
-GPU0     X      NV18    0-47
-GPU1    NV18     X      0-47
-"""
+pytestmark = pytest.mark.integration
 
 
-class _Broker:
-    def __init__(self, inventory: bytes = _INVENTORY, topology: str = _TOPOLOGY) -> None:
-        self.inventory = inventory
-        self.topology = topology
-        self.requests: list[ExecutionRequest] = []
+class _Observer:
+    def __init__(self, snapshot: NvmlSnapshot) -> None:
+        self.snapshot = snapshot
+        self.include_topology: bool | None = None
 
-    async def run(self, request: ExecutionRequest, **_: object) -> ExecutionOutcome:
-        self.requests.append(request)
-        stdout = self.topology.encode() if request.argv[-2:] == ("topo", "-m") else self.inventory
-        return ExecutionOutcome(
-            process=ProcessResult(termination=process_termination_from_returncode(0)),
-            stdout=stdout,
-            stderr=b"",
-            resolved_executable=Path(request.argv[0]),
-            executable_binding=request.executable_binding,
-            containment=ProcessContainment.PROCESS_GROUP,
-        )
+    async def observe(self, *, include_topology: bool) -> NvmlSnapshot:
+        self.include_topology = include_topology
+        return self.snapshot
 
 
-class _FailedBroker:
-    def __init__(self, *, stderr: bytes = b"", permission_denied: bool = False) -> None:
-        self.stderr = stderr
-        self.permission_denied = permission_denied
-
-    async def run(self, request: ExecutionRequest, **_: object) -> ExecutionOutcome:
-        if self.permission_denied:
-            raise PermissionError(request.argv[0])
-        return ExecutionOutcome(
-            process=ProcessResult(termination=process_termination_from_returncode(1)),
-            stdout=b"",
-            stderr=self.stderr,
-            resolved_executable=Path(request.argv[0]),
-            executable_binding=request.executable_binding,
-            containment=ProcessContainment.PROCESS_GROUP,
-        )
+def _snapshot() -> NvmlSnapshot:
+    return NvmlSnapshot(
+        binding_version="13.610.43",
+        nvml_version="13.610.43",
+        driver_version="575.57.08",
+        cuda_driver_version="12.9",
+        devices=(
+            NvmlDeviceIdentity(
+                nvml_index=0,
+                uuid="GPU-aaaa",
+                pci_bus_id="0000:01:00.0",
+                name="NVIDIA H100 80GB HBM3",
+                total_memory_bytes=85_520_875_520,
+                compute_capability=(9, 0),
+                mig_mode="disabled",
+            ),
+            NvmlDeviceIdentity(
+                nvml_index=1,
+                uuid="GPU-bbbb",
+                pci_bus_id="0000:02:00.0",
+                name="NVIDIA H100 80GB HBM3",
+                total_memory_bytes=85_520_875_520,
+                compute_capability=(9, 0),
+                mig_mode="enabled",
+            ),
+        ),
+        peer_links=(
+            NvmlPeerLink(
+                left_uuid="GPU-aaaa",
+                right_uuid="GPU-bbbb",
+                common_ancestor="internal",
+            ),
+        ),
+    )
 
 
 @pytest.mark.anyio
 async def test_declared_accelerator_identity_is_structured_and_bounded(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    broker = _Broker()
-    monkeypatch.setattr(
-        "flameox.command_binding.shutil.which", lambda _name, path=None: sys.executable
-    )
+    observer = _Observer(_snapshot())
     required: tuple[AcceleratorIdentityRequirement, ...] = (
         "cuda.driver",
         "cuda.runtime",
@@ -103,7 +86,7 @@ async def test_declared_accelerator_identity_is_structured_and_bounded(
         "cuda.peer_topology",
     )
 
-    facet = await AcceleratorIdentityService(tmp_path, broker=broker).observe(required)
+    facet = await AcceleratorIdentityService(observer=observer).observe(required)
 
     assert facet is not None
     assert facet.identity_quality is IdentityQuality.EXACT
@@ -118,10 +101,12 @@ async def test_declared_accelerator_identity_is_structured_and_bounded(
         "left": 0,
         "right": 1,
         "kind": "nvlink",
-        "width": 18,
+        "width": None,
     }
-    assert [request.argv[1:] for request in broker.requests] == [("-q", "-x"), ("topo", "-m")]
-    assert all(request.allowed_working_roots == (tmp_path,) for request in broker.requests)
+    assert facet.devices[0].stable_id == "GPU-aaaa"
+    assert facet.devices[0].pci_bus_id == "0000:01:00.0"
+    assert facet.devices[0].memory_bytes == 85_520_875_520
+    assert observer.include_topology is True
 
     environment = collect_environment(facet)
     assert environment.identity_quality is IdentityQuality.EXACT
@@ -131,12 +116,10 @@ async def test_declared_accelerator_identity_is_structured_and_bounded(
 @pytest.mark.anyio
 async def test_missing_required_accelerator_is_partial_not_exact(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("flameox.command_binding.shutil.which", lambda _name, path=None: None)
     required: tuple[AcceleratorIdentityRequirement, ...] = ("cuda.driver", "cuda.devices")
 
-    facet = await AcceleratorIdentityService(tmp_path).observe(required)
+    facet = await AcceleratorIdentityService().observe(required)
 
     assert facet is not None
     assert facet.status == "missing"
@@ -148,25 +131,28 @@ async def test_missing_required_accelerator_is_partial_not_exact(
 
 
 @pytest.mark.parametrize(
-    ("broker", "expected"),
+    ("kind", "expected"),
     [
-        (_FailedBroker(permission_denied=True), "permission_denied"),
-        (_FailedBroker(stderr=b"Feature not supported"), "unsupported"),
-        (_FailedBroker(stderr=b"Driver communication failed"), "unknown"),
+        ("permission_denied", "permission_denied"),
+        ("not_supported", "unsupported"),
+        ("provider_failure", "unknown"),
     ],
 )
 @pytest.mark.anyio
 async def test_accelerator_probe_failure_states_remain_distinct(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    broker: _FailedBroker,
+    kind: str,
     expected: str,
 ) -> None:
-    monkeypatch.setattr(
-        "flameox.command_binding.shutil.which", lambda _name, path=None: sys.executable
+    snapshot = NvmlSnapshot(
+        binding_version="13.610.43",
+        unavailable_fields=(
+            NvmlFieldFailure(field="initialize", kind=kind, message="provider failed"),  # type: ignore[arg-type]
+        ),
     )
-
-    facet = await AcceleratorIdentityService(tmp_path, broker=broker).observe(("cuda.devices",))
+    facet = await AcceleratorIdentityService(observer=_Observer(snapshot)).observe(
+        ("cuda.devices",)
+    )
 
     assert facet is not None
     assert facet.status == expected
@@ -176,20 +162,13 @@ async def test_accelerator_probe_failure_states_remain_distinct(
 @pytest.mark.anyio
 async def test_unknown_inventory_fields_remain_distinct_and_partial(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "flameox.command_binding.shutil.which", lambda _name, path=None: sys.executable
-    )
-    broker = _Broker(
-        b"""<nvidia_smi_log><driver_version>N/A</driver_version><gpu>
-        <product_name>H100</product_name><compute_cap>N/A</compute_cap>
-        <fb_memory_usage><total>N/A</total></fb_memory_usage>
-        <mig_mode><current_mig>N/A</current_mig></mig_mode>
-        </gpu></nvidia_smi_log>"""
+    snapshot = NvmlSnapshot(
+        binding_version="13.610.43",
+        devices=(NvmlDeviceIdentity(nvml_index=0, uuid="GPU-aaaa", name="H100"),),
     )
 
-    facet = await AcceleratorIdentityService(tmp_path, broker=broker).observe(
+    facet = await AcceleratorIdentityService(observer=_Observer(snapshot)).observe(
         ("cuda.driver", "cuda.runtime", "cuda.devices")
     )
 

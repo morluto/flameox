@@ -46,6 +46,20 @@ a Toxiproxy or inference-server lease shares the workload namespace.
 Privileged collectors are disabled unless explicitly selected and available.
 Imported artifacts never authorize embedded commands.
 
+## Python environment ownership
+
+The Python process serving MCP is immutable after startup. Agent-facing setup never
+installs workload or profiler packages into that interpreter. Python package adapters
+that execute with a workload are inspected through the workload's bound interpreter.
+Flameox-owned provider packages are installed into version-addressed environments with
+an exact Flameox version, provider requirement, Python/platform identity, uv executable
+digest, interpreter digest, distribution versions, and optional provider-executable
+digest. Provider construction stages first and publishes a verified receipt atomically.
+
+This separation limits dependency conflicts and provider crash propagation. It is not
+a sandbox against a malicious provider; process, filesystem, network, and resource
+containment remain separate policies.
+
 ## Environment and process privacy
 
 The child environment and recorded environment have separate allowlists.
@@ -99,15 +113,19 @@ documented proof gap and must not claim equivalent race resistance.
 
 ## Artifact workers
 
-Native readers for Perfetto, OTLP, Nsight, Compute Sanitizer, and reductions use
-one isolated worker harness. The parent creates a unique staging root, writes a
-bounded request, launches a known module through the broker, validates a bounded
-success/error envelope, then validates any file handoff beneath that staging
-root. Child handlers use the shared protocol rather than their own argparse and
-response writers.
+Native readers for AIPerf, Perfetto, OTLP, Nsight, Compute Sanitizer, and
+reductions use one isolated worker harness. The parent creates a unique staging
+root, writes a typed request envelope bound to a request ID, operation, and
+implementation identity, launches a registered module through the broker, and
+requires the documented exit/envelope matrix. Every staged output declares its
+relative path, role, media type, size, and digest; the parent reopens it beneath
+the trusted root and verifies those facts before import.
 
 The harness is isolation from the application process, not a sandbox by itself.
 Its execution policy, environment, roots, and resource ceilings remain explicit.
+The broker can additionally cap aggregate writable-root growth while a process
+tree is alive. Reduction also performs a final file/byte-count check, closing
+the sampling gap for a short process that writes and exits between observations.
 
 ## Network boundary
 
@@ -126,6 +144,23 @@ These operations are visible, bounded, and separate from workload execution.
 Host packages, privileged tools, drivers, and permissions are never installed
 implicitly.
 
+All Flameox-owned HTTP crosses one reviewed policy transport. Loopback control
+clients and managed HTTPS downloads use explicit total deadlines and per-stage
+timeouts, ignore ambient proxy and certificate environment variables, disable
+automatic redirects, reject content encodings, and stream into fixed byte
+ceilings. Control clients decode bounded JSON into provider contracts. A managed
+download may follow only a short, operation-declared chain between exact HTTPS
+origins; the transport records its digest and the adapter applies its declared
+identity check before activation. Async readiness and cleanup use the native
+async transport rather than occupying worker threads with blocking sockets.
+
+Direct managed executables have a stricter rule: downloaded bytes cannot run
+until their size and digest match a checked-in upstream manifest identity. For
+archives, the selected executable has its own checked-in digest. Installation
+receipts record provenance but do not create authority; every reuse compares the
+current executable with the immutable manifest value. A missing, edited, or
+stale receipt causes restaging and is never accepted as self-attestation.
+
 Fault experiments are loopback-only. The broker owns the pinned Toxiproxy
 process, rejects remote upstreams and arbitrary toxic types, captures bounded
 diagnostics, deletes tracked proxies, and terminates the lease. This is not a
@@ -138,6 +173,15 @@ publication lock during long work. SQLite transactions own control-state
 atomicity. Corpus publication briefly serializes generation registration and
 the atomic `HEAD` advance. Readers pin a snapshot before lookup and hold the
 retention protection required by that snapshot.
+
+A required domain-to-corpus projection never relies on two unrelated writes.
+Its exact domain revision and pending projection intent commit in one SQLite
+transaction. Parquet staging and `HEAD` publication occur afterward under an
+idempotent operation identity, and a final short SQLite transaction records the
+generation and corpus commit. Process death at any boundary leaves a pending,
+published, or failed intent that `flameox recover` can inspect and reconcile.
+Recovery reconstructs projections from immutable domain revisions and native
+artifacts; it does not rerun the measured workload.
 
 DuckDB is read-only analytical state during queries. Each concurrent query uses
 its own snapshot-local connection. Cancellation interrupts and joins that

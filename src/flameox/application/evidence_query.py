@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import Field
 
 from flameox.catalog import Catalog
-from flameox.domain import CursorCodec, DomainError, ErrorCode, EvidenceLevel, digest_model
+from flameox.domain import CursorNamespace, DomainError, ErrorCode, EvidenceLevel, digest_model
 from flameox.domain.scalars import NumericValue
-from flameox.evidence import InferenceRequestItem, numeric_value_from_columns
+from flameox.evidence import InferenceRequestItem, tagged_numeric_value_from_columns
 from flameox.evidence_status import (
     EvidenceAvailability,
     available_availability,
@@ -70,7 +70,7 @@ class MeasurementItem(ContractModel):
 class MeasurementQueryResult(CursorPageContract):
     page_items_field = "measurements"
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     corpus_commit_id: str
     measurements: tuple[MeasurementItem, ...]
     total: int
@@ -118,17 +118,18 @@ class EvidenceQueryService:
             }
         )
         after = (
-            CursorCodec.decode(
-                cursor,
-                namespace="measurements",
-                snapshot_id=head.commit_id,
-                scope_digest=scope_digest,
+            cast(
+                tuple[str],
+                self.workspace.cursors.resolve(
+                    cursor,
+                    namespace=CursorNamespace.MEASUREMENTS,
+                    snapshot_id=head.commit_id,
+                    scope_digest=scope_digest,
+                ),
             )[0]
             if cursor
             else None
         )
-        if after is not None and not isinstance(after, str):
-            raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.")
         predicates: list[str] = ["1 = 1"]
         parameters: list[object] = []
         if run_id is not None:
@@ -165,7 +166,7 @@ class EvidenceQueryService:
                 page_parameters.append(after)
             rows = snapshot.execute(
                 "SELECT measurement_id, run_id, artifact_id, name, value_int, "
-                "value_float, unit, aggregation, scope, worker_id, "
+                "value_float, value_uint, value_kind, unit, aggregation, scope, worker_id, "
                 "worker_run_index, value_index, loop_count, is_warmup, block_id, "
                 "variant_id, order_in_block, phase, dimensions, evidence_level "
                 "FROM measurements WHERE " + page_where + " ORDER BY measurement_id LIMIT ?",
@@ -179,31 +180,33 @@ class EvidenceQueryService:
                 run_id=row[1],
                 artifact_id=row[2],
                 name=row[3],
-                value=numeric_value_from_columns(
+                value=tagged_numeric_value_from_columns(
                     row[4],
                     row[5],
+                    row[6],
+                    row[7],
                     field_name="measurement value",
                 ),
-                unit=row[6],
-                aggregation=row[7],
-                scope=row[8],
-                worker_id=row[9],
-                worker_run_index=row[10],
-                value_index=row[11],
-                loop_count=row[12],
-                is_warmup=row[13],
-                block_id=row[14],
-                variant_id=row[15],
-                order_in_block=row[16],
-                phase=row[17],
-                dimensions=dict(row[18] or {}),
-                evidence_level=row[19],
+                unit=row[8],
+                aggregation=row[9],
+                scope=row[10],
+                worker_id=row[11],
+                worker_run_index=row[12],
+                value_index=row[13],
+                loop_count=row[14],
+                is_warmup=row[15],
+                block_id=row[16],
+                variant_id=row[17],
+                order_in_block=row[18],
+                phase=row[19],
+                dimensions=dict(row[20] or {}),
+                evidence_level=row[21],
             )
             for row in selected
         )
         next_cursor = (
-            CursorCodec.encode(
-                namespace="measurements",
+            self.workspace.cursors.issue(
+                namespace=CursorNamespace.MEASUREMENTS,
                 snapshot_id=head.commit_id,
                 scope_digest=scope_digest,
                 position=(measurements[-1].measurement_id,),
@@ -244,17 +247,18 @@ class EvidenceQueryService:
         head = self.workspace.corpus.read_head()
         scope_digest = digest_model({"run_id": run_id})
         after = (
-            CursorCodec.decode(
-                cursor,
-                namespace="inference_requests",
-                snapshot_id=head.commit_id,
-                scope_digest=scope_digest,
+            cast(
+                tuple[str],
+                self.workspace.cursors.resolve(
+                    cursor,
+                    namespace=CursorNamespace.INFERENCE_REQUESTS,
+                    snapshot_id=head.commit_id,
+                    scope_digest=scope_digest,
+                ),
             )[0]
             if cursor
             else None
         )
-        if after is not None and not isinstance(after, str):
-            raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.")
         where = "run_id = ?"
         parameters: list[object] = [run_id]
         if after is not None:
@@ -288,8 +292,8 @@ class EvidenceQueryService:
             for row in rows[:bounded]
         )
         next_cursor = (
-            CursorCodec.encode(
-                namespace="inference_requests",
+            self.workspace.cursors.issue(
+                namespace=CursorNamespace.INFERENCE_REQUESTS,
                 snapshot_id=head.commit_id,
                 scope_digest=scope_digest,
                 position=(requests[-1].request_id,),

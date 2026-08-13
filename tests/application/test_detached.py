@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from flameox.action_graph import ActionId, ToolAction
 from flameox.application import (
     CapturePlanRegistry,
     CaptureService,
@@ -20,6 +22,8 @@ from flameox.application import (
 from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode, ExecutionStatus, digest_model
 from flameox.storage import Workspace
+
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
 
 
 def _workspace(tmp_path: Path, command: str, *, timeout: float = 30) -> Workspace:
@@ -161,7 +165,10 @@ async def test_detached_idempotency_creation_is_atomic_across_managers(
     )
 
     assert sum(isinstance(result, DomainError) for result in results) == 1
-    assert len(first_manager.records.list()) == 1
+    operations = first_manager.runner.store.records.list()
+    assert len(operations) == 1
+    assert operations[0].subject_id in {first_plan.run_id, second_plan.run_id}
+    assert first_manager.records.list() == ()
     winner = next(result for result in results if not isinstance(result, DomainError))
     assert isinstance(winner, DetachedCaptureStatus)
     assert winner.run_id in {first_plan.run_id, second_plan.run_id}
@@ -199,8 +206,9 @@ async def test_detached_startup_crash_returns_replan_recovery(
 
     assert status.state == "failed_to_start"
     assert status.recovery is not None
-    assert status.recovery.tool == "plan_capture"
-    assert status.recovery.arguments["workload_name"] == "detached"
+    assert isinstance(status.recovery.next_action, ToolAction)
+    assert status.recovery.next_action.action is ActionId.PLAN_CAPTURE
+    assert status.recovery.next_action.arguments["workload_name"] == "detached"
 
 
 @pytest.mark.anyio
@@ -239,7 +247,8 @@ async def test_detached_task_failure_never_reports_nonterminal_run_as_running(
     assert status.execution_status is ExecutionStatus.PLANNED
     assert status.failure_code == ErrorCode.INTERNAL_ERROR.value
     assert status.recovery is not None
-    assert status.recovery.tool == "plan_capture"
+    assert isinstance(status.recovery.next_action, ToolAction)
+    assert status.recovery.next_action.action is ActionId.PLAN_CAPTURE
 
 
 @pytest.mark.anyio
@@ -261,7 +270,7 @@ async def test_lost_start_caller_does_not_cancel_or_orphan_owned_capture(
         except DomainError:
             await asyncio.sleep(0.005)
     start_call.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    with suppress(asyncio.CancelledError):
         await start_call
 
     for _ in range(200):

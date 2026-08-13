@@ -7,6 +7,8 @@ import pytest
 
 from flameox.application.async_work import run_atomic_thread
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.anyio
 async def test_atomic_thread_settles_before_repeated_cancellation_returns() -> None:
@@ -35,3 +37,23 @@ async def test_atomic_thread_settles_before_repeated_cancellation_returns() -> N
     with pytest.raises(asyncio.CancelledError):
         await task
     assert completed.is_set()
+
+
+@pytest.mark.anyio
+async def test_atomic_thread_preserves_late_failure_after_cancellation() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def mutation() -> None:
+        started.set()
+        release.wait()
+        raise ValueError("late mutation failure")
+
+    task = asyncio.create_task(run_atomic_thread(mutation))
+    assert await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+
+    with pytest.raises(ValueError, match="late mutation failure"):
+        await task

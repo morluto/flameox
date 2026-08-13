@@ -10,6 +10,12 @@ from uuid import uuid4
 import anyio
 from pydantic import Field, TypeAdapter, computed_field, model_validator
 
+from flameox.action_graph import ActionId, NextAction, next_action_for_action
+from flameox.application.task_supervisor import (
+    TaskHandle,
+    TaskSupervisor,
+    start_local_task,
+)
 from flameox.domain import DomainError, ErrorCode, digest_model
 from flameox.domain.models import Digest, utc_now
 from flameox.models import ContractModel
@@ -50,6 +56,7 @@ class OperationRecoveryAction(StrEnum):
     INSPECT_CAPABILITIES = "inspect_capabilities"
     EXTRACT_REQUIRED_EVIDENCE = "extract_required_evidence"
     REREAD_SNAPSHOT = "reread_snapshot"
+    FOLLOW_NEXT_ACTION = "follow_next_action"
 
 
 class OperationProgress(ContractModel):
@@ -79,8 +86,19 @@ class OperationItemOutcome(ContractModel):
 
 class OperationRecovery(ContractModel):
     action: OperationRecoveryAction
-    tool: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
+    next_action: NextAction
+
+
+class OperationAdapter(ContractModel):
+    """Stable action bindings supplied to the durable lifecycle kernel."""
+
+    kind: str = Field(min_length=1, max_length=100)
+    start_action: ActionId
+    status_action: ActionId
+    status_identifier: Literal["operation_id", "run_id", "reduction_id"] = "operation_id"
+    retry_with_idempotency_key: bool = True
+    poll_after_ms: int = Field(default=1_000, ge=100, le=30_000)
+    recover_unmanaged: bool = False
 
 
 class OperationFailure(Exception):
@@ -97,6 +115,7 @@ class _OperationRecord(ContractModel):
     operation: str
     workspace_id: str
     request: dict[str, Any]
+    subject_id: str | None = None
     idempotency_digest: Digest
     phase: str = "starting"
     revision: int = Field(default=0, ge=0)
@@ -386,6 +405,22 @@ class UnmanagedOperationRecord(_OperationRecord):
     def cancellation_requested(self) -> bool:
         return self.cleanup_status is OperationCleanupStatus.PENDING
 
+    def recover(self, *, owner_id: str) -> ActiveOperationRecord:
+        return ActiveOperationRecord.model_validate(
+            {
+                **self._next_revision(),
+                "state": OperationState.STARTING,
+                "phase": "recovering",
+                "failure_code": None,
+                "failure_message": None,
+                "failure_details": None,
+                "terminal_receipt": None,
+                "recovery": None,
+                "owner_id": owner_id,
+                "owner_heartbeat_at": utc_now(),
+            }
+        )
+
 
 type OperationRecord = Annotated[
     ActiveOperationRecord
@@ -399,6 +434,74 @@ type OperationRecord = Annotated[
 _OPERATION_RECORD: TypeAdapter[OperationRecord] = TypeAdapter(OperationRecord)
 
 
+def _validate_operation_transition(
+    current: OperationRecord,
+    updated: OperationRecord,
+    *,
+    expected_revision: int,
+) -> None:
+    if current.revision != expected_revision or updated.revision != expected_revision + 1:
+        raise DomainError(
+            ErrorCode.REVISION_CONFLICT,
+            "The operation transition revision is not consecutive.",
+        )
+    immutable_fields = (
+        "operation",
+        "workspace_id",
+        "request",
+        "subject_id",
+        "idempotency_digest",
+        "created_at",
+    )
+    if any(getattr(current, field) != getattr(updated, field) for field in immutable_fields):
+        raise DomainError(
+            ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+            "An operation transition changed immutable identity or intent.",
+            details={"operation_id": current.operation_id},
+        )
+    if isinstance(current, (FailedOperationRecord, CancelledOperationRecord)) and isinstance(
+        updated,
+        ActiveOperationRecord,
+    ):
+        if updated.state is not OperationState.STARTING:
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                "A retried operation must transition through the starting state.",
+                details={"operation_id": current.operation_id},
+            )
+        return
+    if isinstance(current, UnmanagedOperationRecord) and isinstance(
+        updated,
+        ActiveOperationRecord,
+    ):
+        if updated.state is not OperationState.STARTING:
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                "An unmanaged operation can recover only through the starting state.",
+                details={"operation_id": current.operation_id},
+            )
+        return
+    if not isinstance(current, ActiveOperationRecord):
+        raise DomainError(
+            ErrorCode.REVISION_CONFLICT,
+            "A terminal or unmanaged operation cannot transition again.",
+            details={"operation_id": current.operation_id, "state": current.state.value},
+        )
+    if isinstance(updated, ActiveOperationRecord):
+        if current.owner_id != updated.owner_id:
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                "An active operation transition cannot replace its lease owner.",
+                details={"operation_id": current.operation_id},
+            )
+        if current.state is OperationState.RUNNING and updated.state is OperationState.STARTING:
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                "A running operation cannot transition back to starting.",
+                details={"operation_id": current.operation_id},
+            )
+
+
 class OperationStatus(ContractModel):
     schema_version: Literal[1] = 1
     operation_id: str
@@ -406,6 +509,7 @@ class OperationStatus(ContractModel):
     workspace_id: str
     request_digest: str
     request: dict[str, Any]
+    subject_id: str | None = None
     idempotency_digest: str
     revision: int
     state: OperationState
@@ -424,27 +528,29 @@ class OperationStatus(ContractModel):
     updated_at: datetime
 
     @classmethod
-    def from_record(cls, record: OperationRecord) -> OperationStatus:
+    def from_record(
+        cls,
+        record: OperationRecord,
+        *,
+        adapter: OperationAdapter | None = None,
+    ) -> OperationStatus:
         payload = record.model_dump(exclude={"owner_id", "owner_heartbeat_at"})
         payload["schema_version"] = 1
-        if record.operation == "capability.setup" and isinstance(record, ActiveOperationRecord):
-            payload["poll_after_ms"] = _capability_setup_poll_after_ms(record.phase)
+        if adapter is not None and adapter.kind != record.operation:
+            raise ValueError("operation adapter kind does not match the durable record")
+        if adapter is not None and isinstance(record, ActiveOperationRecord):
+            payload["poll_after_ms"] = adapter.poll_after_ms
             payload["recovery"] = OperationRecovery(
                 action=OperationRecoveryAction.POLL,
-                tool="get_capability_setup",
-                arguments={"operation_id": record.operation_id},
+                next_action=next_action_for_action(
+                    adapter.status_action,
+                    context={adapter.status_identifier: record.operation_id},
+                    instruction="Supply the operation identity required to inspect its status.",
+                ),
             ).model_dump()
         else:
             payload["poll_after_ms"] = None
         return cls.model_validate(payload)
-
-
-def _capability_setup_poll_after_ms(phase: str) -> int:
-    if phase == "validating_request":
-        return 250
-    if phase == "verifying":
-        return 500
-    return 1_000
 
 
 class _OperationRecords:
@@ -461,6 +567,7 @@ class _OperationRecords:
             idempotency_digest=canonical.idempotency_digest,
             intent_digest=canonical.request_digest,
             payload_json=canonical_json(canonical.model_dump(mode="json")),
+            run_id=canonical.subject_id,
         )
         return record
 
@@ -487,6 +594,12 @@ class _OperationRecords:
 
     def append(self, record: OperationRecord, *, expected_revision: int) -> OperationRecord:
         canonical = _OPERATION_RECORD.validate_python(record.model_dump(mode="python"))
+        current = self.read(canonical.operation_id)
+        _validate_operation_transition(
+            current,
+            canonical,
+            expected_revision=expected_revision,
+        )
         self.control_plane.append_operation(
             operation_id=canonical.operation_id,
             state=canonical.state,
@@ -508,6 +621,13 @@ class OperationStore:
         payload = self.records.control_plane.find_operation(
             kind=operation,
             idempotency_digest=idempotency_digest,
+        )
+        return _OPERATION_RECORD.validate_json(payload) if payload is not None else None
+
+    def find_subject(self, *, operation: str, subject_id: str) -> OperationRecord | None:
+        payload = self.records.control_plane.find_operation_by_run_id(
+            kind=operation,
+            run_id=subject_id,
         )
         return _OPERATION_RECORD.validate_json(payload) if payload is not None else None
 
@@ -535,11 +655,19 @@ class OperationRunner:
     _LEASE_TIMEOUT = timedelta(seconds=30)
     _LEASE_HEARTBEAT_INTERVAL = 5.0
 
-    def __init__(self, workspace: Workspace, operation: str) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        adapter: OperationAdapter,
+        *,
+        supervisor: TaskSupervisor | None = None,
+    ) -> None:
         self.workspace = workspace
-        self.operation = operation
+        self.adapter = adapter
+        self.operation = adapter.kind
         self.store = OperationStore(workspace)
-        self.tasks: dict[str, asyncio.Task[None]] = {}
+        self.supervisor = supervisor
+        self.tasks: dict[str, TaskHandle] = {}
         self.cancel_events: dict[str, asyncio.Event] = {}
         self.cancel_hooks: dict[str, Callable[[], None]] = {}
         self.owner_id = uuid4().hex
@@ -553,6 +681,7 @@ class OperationRunner:
         run: Callable[[str, Callable[..., Awaitable[None]]], Awaitable[dict[str, Any]]],
         *,
         items: tuple[str, ...] = (),
+        subject_id: str | None = None,
     ) -> OperationStatus:
         request_digest, idempotency_digest = operation_digests(
             self.workspace,
@@ -560,6 +689,7 @@ class OperationRunner:
             request,
             idempotency_key,
         )
+        started_event: anyio.Event | None = None
         async with self.lock:
             existing = self.store.find(
                 operation=self.operation,
@@ -572,52 +702,176 @@ class OperationRunner:
                         "The idempotency key is already bound to a different request.",
                         details={"operation_id": existing.operation_id},
                     )
+                if existing.subject_id != subject_id:
+                    raise DomainError(
+                        ErrorCode.REVISION_CONFLICT,
+                        "The idempotency key is already bound to a different operation subject.",
+                        details={"operation_id": existing.operation_id},
+                    )
                 if (
                     isinstance(existing, ActiveOperationRecord)
                     and existing.operation_id not in self.tasks
                     and not self._lease_is_active(existing)
                 ):
-                    existing = self._mark_unmanaged(existing)
-                    self.store.records.append(existing, expected_revision=existing.revision - 1)
-                return OperationStatus.from_record(existing)
+                    unmanaged = self._mark_unmanaged(existing)
+                    try:
+                        self.store.records.append(
+                            unmanaged,
+                            expected_revision=existing.revision,
+                        )
+                        existing = unmanaged
+                    except DomainError as error:
+                        if error.code is not ErrorCode.REVISION_CONFLICT:
+                            raise
+                        existing = self.store.read(existing.operation_id)
+                if (
+                    isinstance(existing, UnmanagedOperationRecord)
+                    and self.adapter.recover_unmanaged
+                ):
+                    recovered = existing.recover(owner_id=self.owner_id)
+                    try:
+                        self.store.records.append(
+                            recovered,
+                            expected_revision=existing.revision,
+                        )
+                    except DomainError as error:
+                        if error.code is not ErrorCode.REVISION_CONFLICT:
+                            raise
+                        return OperationStatus.from_record(
+                            self.store.read(existing.operation_id),
+                            adapter=self.adapter,
+                        )
+                    operation_id = recovered.operation_id
+                    started_event = self._schedule(operation_id, run)
+                else:
+                    return OperationStatus.from_record(existing, adapter=self.adapter)
 
-            # The digest-derived identity makes the create itself the cross-process
-            # idempotency gate. A process-local asyncio lock cannot protect two MCP
-            # server instances sharing one workspace.
-            record = ActiveOperationRecord(
-                operation=self.operation,
-                workspace_id=self.workspace.identity.workspace_id,
-                request=request,
-                idempotency_digest=idempotency_digest,
-                owner_id=self.owner_id,
-                owner_heartbeat_at=utc_now(),
-                item_outcomes=tuple(
-                    OperationItemOutcome(item=item, status=OperationItemStatus.PENDING)
-                    for item in items
-                ),
+            if started_event is None:
+                # The digest-derived identity makes the create itself the cross-process
+                # idempotency gate. A process-local asyncio lock cannot protect two MCP
+                # server instances sharing one workspace.
+                record = ActiveOperationRecord(
+                    operation=self.operation,
+                    workspace_id=self.workspace.identity.workspace_id,
+                    request=request,
+                    subject_id=subject_id,
+                    idempotency_digest=idempotency_digest,
+                    owner_id=self.owner_id,
+                    owner_heartbeat_at=utc_now(),
+                    item_outcomes=tuple(
+                        OperationItemOutcome(item=item, status=OperationItemStatus.PENDING)
+                        for item in items
+                    ),
+                )
+                operation_id = record.operation_id
+                try:
+                    self.store.records.create(record)
+                except DomainError as error:
+                    if error.code is not ErrorCode.REVISION_CONFLICT:
+                        raise
+                    existing = self.store.find(
+                        operation=self.operation,
+                        idempotency_digest=idempotency_digest,
+                    )
+                    if existing is None and subject_id is not None:
+                        existing = self.store.find_subject(
+                            operation=self.operation,
+                            subject_id=subject_id,
+                        )
+                    if existing is None:
+                        raise
+                    if existing.request_digest != request_digest:
+                        raise DomainError(
+                            ErrorCode.REVISION_CONFLICT,
+                            "The idempotency key is already bound to a different request.",
+                            details={"operation_id": existing.operation_id},
+                        ) from error
+                    if existing.subject_id != subject_id:
+                        raise DomainError(
+                            ErrorCode.REVISION_CONFLICT,
+                            "The operation subject is already bound to a different request.",
+                            details={"operation_id": existing.operation_id},
+                        ) from error
+                    return OperationStatus.from_record(existing, adapter=self.adapter)
+                started_event = self._schedule(operation_id, run)
+        assert started_event is not None
+        await started_event.wait()
+        return OperationStatus.from_record(
+            self.store.read(operation_id),
+            adapter=self.adapter,
+        )
+
+    async def retry_terminal(
+        self,
+        operation_id: str,
+        run: Callable[[str, Callable[..., Awaitable[None]]], Awaitable[dict[str, Any]]],
+    ) -> OperationStatus:
+        """Restart one failed or cancelled operation without changing its durable intent."""
+        started_event: anyio.Event | None = None
+        async with self.lock:
+            current = self.store.read(operation_id)
+            if isinstance(current, ActiveOperationRecord):
+                return OperationStatus.from_record(current, adapter=self.adapter)
+            if not isinstance(current, (FailedOperationRecord, CancelledOperationRecord)):
+                return OperationStatus.from_record(current, adapter=self.adapter)
+            retried = ActiveOperationRecord.model_validate(
+                {
+                    **current.model_dump(mode="python"),
+                    "state": OperationState.STARTING,
+                    "phase": "retrying",
+                    "revision": current.revision + 1,
+                    "updated_at": utc_now(),
+                    "item_outcomes": (),
+                    "failure_code": None,
+                    "failure_message": None,
+                    "failure_details": None,
+                    "cleanup_status": OperationCleanupStatus.NOT_REQUIRED,
+                    "terminal_receipt": None,
+                    "recovery": None,
+                    "owner_id": self.owner_id,
+                    "owner_heartbeat_at": utc_now(),
+                }
             )
-            operation_id = record.operation_id
             try:
-                self.store.records.create(record)
+                self.store.records.append(retried, expected_revision=current.revision)
             except DomainError as error:
                 if error.code is not ErrorCode.REVISION_CONFLICT:
                     raise
-                existing = self.store.read(operation_id)
-                if existing.request_digest != request_digest:
-                    raise DomainError(
-                        ErrorCode.REVISION_CONFLICT,
-                        "The idempotency key is already bound to a different request.",
-                        details={"operation_id": existing.operation_id},
-                    ) from error
-                return OperationStatus.from_record(existing)
-            cancel_event = asyncio.Event()
-            self.cancel_events[operation_id] = cancel_event
-            self.tasks[operation_id] = asyncio.create_task(
-                self._execute(operation_id, run, cancel_event),
-                name=f"flameox-operation-{operation_id}",
+                return OperationStatus.from_record(
+                    self.store.read(operation_id),
+                    adapter=self.adapter,
+                )
+            started_event = self._schedule(operation_id, run)
+        await started_event.wait()
+        return OperationStatus.from_record(
+            self.store.read(operation_id),
+            adapter=self.adapter,
+        )
+
+    def _schedule(
+        self,
+        operation_id: str,
+        run: Callable[[str, Callable[..., Awaitable[None]]], Awaitable[dict[str, Any]]],
+    ) -> anyio.Event:
+        cancel_event = asyncio.Event()
+        started_event = anyio.Event()
+        self.cancel_events[operation_id] = cancel_event
+        task_name = f"flameox-operation-{operation_id}"
+
+        async def function() -> None:
+            await self._execute(
+                operation_id,
+                run,
+                cancel_event,
+                started_event,
             )
-        await asyncio.sleep(0)
-        return OperationStatus.from_record(self.store.read(operation_id))
+
+        self.tasks[operation_id] = (
+            self.supervisor.start(function, name=task_name)
+            if self.supervisor is not None
+            else start_local_task(function, name=task_name)
+        )
+        return started_event
 
     async def status(self, operation_id: str) -> OperationStatus:
         record = self.store.read(operation_id)
@@ -626,9 +880,35 @@ class OperationRunner:
             and operation_id not in self.tasks
             and not self._lease_is_active(record)
         ):
-            record = self._mark_unmanaged(record)
-            self.store.records.append(record, expected_revision=record.revision - 1)
-        return OperationStatus.from_record(record)
+            unmanaged = self._mark_unmanaged(record)
+            try:
+                self.store.records.append(unmanaged, expected_revision=record.revision)
+                record = unmanaged
+            except DomainError as error:
+                if error.code is not ErrorCode.REVISION_CONFLICT:
+                    raise
+                record = self.store.read(operation_id)
+        return OperationStatus.from_record(record, adapter=self.adapter)
+
+    async def wait(
+        self,
+        operation_id: str,
+        *,
+        timeout_seconds: float,
+    ) -> OperationStatus:
+        task = self.tasks.get(operation_id)
+        if task is not None:
+            with anyio.move_on_after(timeout_seconds):
+                await task.wait()
+            return await self.status(operation_id)
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while True:
+            status = await self.status(operation_id)
+            if status.state not in {OperationState.STARTING, OperationState.RUNNING}:
+                return status
+            if asyncio.get_running_loop().time() >= deadline:
+                return status
+            await anyio.sleep(0.1)
 
     def set_cancel_hook(self, operation_id: str, hook: Callable[[], None]) -> None:
         self.cancel_hooks[operation_id] = hook
@@ -645,7 +925,7 @@ class OperationRunner:
             record,
             (CompletedOperationRecord, FailedOperationRecord, CancelledOperationRecord),
         ):
-            return OperationStatus.from_record(record)
+            return OperationStatus.from_record(record, adapter=self.adapter)
         event = self.cancel_events.get(operation_id)
         if event is None:
             raise DomainError(
@@ -657,72 +937,83 @@ class OperationRunner:
                 ),
             )
         event.set()
-        hook = self.cancel_hooks.get(operation_id)
-        if hook is not None:
-            hook()
         await self._append_active_transition(
             operation_id,
             lambda current: current.request_cancellation(),
         )
+        hook = self.cancel_hooks.get(operation_id)
+        if hook is not None:
+            hook()
         task = self.tasks.get(operation_id)
         if task is not None:
-            await asyncio.gather(task, return_exceptions=True)
-        return OperationStatus.from_record(self.store.read(operation_id))
+            await task.wait()
+        return OperationStatus.from_record(
+            self.store.read(operation_id),
+            adapter=self.adapter,
+        )
 
     async def shutdown(self) -> None:
         for event in self.cancel_events.values():
             event.set()
         for hook in self.cancel_hooks.values():
             hook()
-        tasks = [task for task in self.tasks.values() if not task.done()]
+        tasks = [task for task in self.tasks.values() if not task.done]
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*(task.wait() for task in tasks))
 
     async def _execute(
         self,
         operation_id: str,
         run: Callable[[str, Callable[..., Awaitable[None]]], Awaitable[dict[str, Any]]],
         cancel_event: asyncio.Event,
+        started_event: anyio.Event,
     ) -> None:
-        async with anyio.create_task_group() as lifetime:
-            lifetime.start_soon(
-                self._heartbeat,
-                operation_id,
-                name=f"flameox-operation-lease-{operation_id}",
-            )
-            try:
-                started = await self._append_active_transition(
+        try:
+            async with anyio.create_task_group() as lifetime:
+                lifetime.start_soon(
+                    self._heartbeat,
                     operation_id,
-                    lambda current: current.running(),
+                    name=f"flameox-operation-lease-{operation_id}",
                 )
-                if started is None:
-                    return
+                try:
+                    started = await self._append_active_transition(
+                        operation_id,
+                        lambda current: current.running(),
+                    )
+                    started_event.set()
+                    if started is None:
+                        return
 
-                async def progress(
-                    phase: str,
-                    completed: float | None = None,
-                    total: float | None = None,
-                    message: str = "Operation in progress.",
-                ) -> None:
-                    await self._progress(operation_id, phase, completed, total, message)
+                    async def progress(
+                        phase: str,
+                        completed: float | None = None,
+                        total: float | None = None,
+                        message: str = "Operation in progress.",
+                    ) -> None:
+                        await self._progress(operation_id, phase, completed, total, message)
 
-                receipt = await run(operation_id, progress)
-                await self._finish_success(operation_id, cancel_event, receipt)
-            except asyncio.CancelledError:
-                await self._finish_cancelled(operation_id)
-            except OperationFailure as failure:
-                await self._finish_domain_failure(
-                    operation_id,
-                    cancel_event,
-                    failure.error,
-                    completed_items=failure.completed_items,
-                )
-            except DomainError as error:
-                await self._finish_domain_failure(operation_id, cancel_event, error)
-            except Exception as error:
-                await self._finish_unexpected_failure(operation_id, error)
-            finally:
-                lifetime.cancel_scope.cancel()
+                    receipt = await run(operation_id, progress)
+                    await self._finish_success(operation_id, cancel_event, receipt)
+                except asyncio.CancelledError:
+                    await self._finish_cancelled(operation_id)
+                except OperationFailure as failure:
+                    await self._finish_domain_failure(
+                        operation_id,
+                        cancel_event,
+                        failure.error,
+                        completed_items=failure.completed_items,
+                    )
+                except DomainError as error:
+                    await self._finish_domain_failure(operation_id, cancel_event, error)
+                except Exception as error:
+                    await self._finish_unexpected_failure(operation_id, error)
+                finally:
+                    lifetime.cancel_scope.cancel()
+        finally:
+            started_event.set()
+            self.tasks.pop(operation_id, None)
+            self.cancel_events.pop(operation_id, None)
+            self.cancel_hooks.pop(operation_id, None)
 
     async def _finish_success(
         self,
@@ -799,9 +1090,23 @@ class OperationRunner:
                     self._retry_recovery(current)
                     if error.retryable
                     else OperationRecovery(
-                        action=OperationRecoveryAction.INSPECT_CAPABILITIES,
-                        tool=f"start_{self.operation.replace('.', '_')}",
-                        arguments=current.request,
+                        action=(
+                            OperationRecoveryAction.FOLLOW_NEXT_ACTION
+                            if error.next_action is not None
+                            else OperationRecoveryAction.RETRY_NEW_OPERATION
+                        ),
+                        next_action=(
+                            error.next_action
+                            if error.next_action is not None
+                            else next_action_for_action(
+                                self.adapter.start_action,
+                                context=current.request,
+                                instruction=(
+                                    "Supply the complete request required to start a replacement "
+                                    "operation."
+                                ),
+                            )
+                        ),
                     )
                 ),
             )
@@ -812,7 +1117,7 @@ class OperationRunner:
     def _failure_details(error: DomainError) -> dict[str, Any]:
         """Persist only bounded, recovery-relevant diagnostics from a domain failure."""
         details: dict[str, Any] = {}
-        for key in ("phase", "failure_category", "adapter", "next_tool"):
+        for key in ("phase", "failure_category", "adapter"):
             value = error.details.get(key)
             if isinstance(value, str) and value:
                 details[key] = value[:200]
@@ -894,6 +1199,8 @@ class OperationRunner:
             current = self.store.read(operation_id)
             if not isinstance(current, ActiveOperationRecord):
                 return None
+            if current.owner_id != self.owner_id:
+                return None
             updated = transition(current)
             if updated is None:
                 return None
@@ -919,13 +1226,18 @@ class OperationRunner:
         return record.unmanaged(recovery=self._retry_recovery(record))
 
     def _retry_recovery(self, record: _OperationRecord) -> OperationRecovery:
+        arguments = dict(record.request)
+        if self.adapter.retry_with_idempotency_key:
+            arguments["idempotency_key"] = f"{record.operation_id}:retry:{record.revision + 1}"
         return OperationRecovery(
             action=OperationRecoveryAction.RETRY_NEW_OPERATION,
-            tool=f"start_{self.operation.replace('.', '_')}",
-            arguments={
-                **record.request,
-                "idempotency_key": f"{record.operation_id}:retry:{record.revision + 1}",
-            },
+            next_action=next_action_for_action(
+                self.adapter.start_action,
+                context=arguments,
+                instruction=(
+                    "Supply the complete request required to start a replacement operation."
+                ),
+            ),
         )
 
     def _lease_is_active(self, record: ActiveOperationRecord) -> bool:

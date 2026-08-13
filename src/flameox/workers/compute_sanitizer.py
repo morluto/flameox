@@ -4,11 +4,22 @@ import json
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import cast
 
 from defusedxml.ElementTree import iterparse  # type: ignore[import-untyped]
+from pydantic import JsonValue
 
-from flameox.domain import ErrorCode
-from flameox.workers.protocol import run_worker
+from flameox.workers.compute_sanitizer_contract import (
+    COMPUTE_SANITIZER_WORKER,
+    ComputeSanitizerWorkerRequest,
+    ComputeSanitizerWorkerResult,
+)
+from flameox.workers.protocol import (
+    WorkerApplication,
+    WorkerContext,
+    WorkerFailureKind,
+    run_typed_worker,
+)
 
 _KNOWN_RECORD_FIELDS = {"kind", "level", "who", "what", "where", "hostStack"}
 
@@ -212,21 +223,36 @@ def _extract(
     }
 
 
-def _handle(request: dict[str, object], _request_path: Path) -> dict[str, object]:
-    return _extract(
-        Path(str(request["artifact_path"])),
-        project_root=Path(str(request["project_root"])).resolve(),
-        max_records=int(str(request["max_records"])),
-        max_frames=int(str(request["max_frames"])),
+def _handle(
+    request: ComputeSanitizerWorkerRequest,
+    _context: WorkerContext,
+) -> ComputeSanitizerWorkerResult:
+    result = _extract(
+        Path(request.artifact_path),
+        project_root=Path(request.project_root).resolve(),
+        max_records=request.max_records,
+        max_frames=request.max_frames,
+    )
+    return ComputeSanitizerWorkerResult(
+        records=cast(
+            tuple[dict[str, JsonValue], ...],
+            tuple(cast(list[dict[str, object]], result["records"])),
+        ),
+        classifications=cast(dict[str, int], result["classifications"]),
+        limitations=tuple(cast(list[str], result["limitations"])),
+        truncated=cast(bool, result["truncated"]),
     )
 
 
 def main() -> int:
-    return run_worker(
-        _handle,
-        invalid_code=ErrorCode.ARTIFACT_PARSE_FAILED,
-        invalid_message="Compute Sanitizer XML is unsupported or invalid",
-        caught=(OSError, ET.ParseError, ValueError, KeyError, TypeError, json.JSONDecodeError),
+    return run_typed_worker(
+        WorkerApplication(
+            definition=COMPUTE_SANITIZER_WORKER,
+            handler=_handle,
+            invalid_failure=WorkerFailureKind.INPUT_MALFORMED,
+            invalid_message="Compute Sanitizer XML is unsupported or invalid",
+            caught=(OSError, ET.ParseError, ValueError, KeyError, TypeError, json.JSONDecodeError),
+        )
     )
 
 

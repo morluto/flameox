@@ -32,6 +32,8 @@ from flameox.domain import (
 )
 from flameox.storage import Workspace
 
+pytestmark = [pytest.mark.integration, pytest.mark.serial]
+
 
 def git(project: Path, *arguments: str) -> None:
     subprocess.run(

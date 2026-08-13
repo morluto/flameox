@@ -14,6 +14,8 @@ from flameox.domain.executables import (
     ExecutableTrustPolicy,
 )
 
+pytestmark = pytest.mark.unit
+
 
 def test_path_search_is_bound_to_the_request_cwd_and_environment(tmp_path: Path) -> None:
     executable_name = "tool.exe" if os.name == "nt" else "tool"

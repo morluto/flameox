@@ -5,13 +5,15 @@ import json
 import sys
 import threading
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
 import pytest
 from pydantic import ValidationError
 
+from flameox import __version__
+from flameox.action_graph import ActionId, ManualAction, ToolAction, manual_action, tool_action
 from flameox.adapters import AdapterDiscoveryResult, AdapterRegistry
+from flameox.adapters.builtins import builtin_adapter
 from flameox.adapters.toxiproxy import ToxiproxyToolReceipt
 from flameox.application import CapabilityList, CapabilityService
 from flameox.application.capabilities import (
@@ -22,12 +24,14 @@ from flameox.application.capabilities import (
 from flameox.application.dependencies import WorkloadDependencyService
 from flameox.application.operations import (
     ActiveOperationRecord,
+    OperationAdapter,
     OperationState,
     OperationStatus,
     operation_digests,
 )
 from flameox.domain import (
     CapabilityExtra,
+    CapabilityProvisioning,
     CapabilityReport,
     CapabilitySetup,
     CapabilityStatus,
@@ -45,6 +49,8 @@ from flameox.execution import (
 )
 from flameox.storage import Workspace
 from tests.support.execution import executable_binding
+
+pytestmark = pytest.mark.integration
 
 
 class _ProbeBroker(SubprocessBroker):
@@ -70,6 +76,20 @@ class _ProbeBroker(SubprocessBroker):
             executable_binding=request.executable_binding,
             containment=ProcessContainment.PROCESS_GROUP,
         )
+
+
+def _outcome(request: ExecutionRequest, *, stdout: bytes = b"") -> ExecutionOutcome:
+    return ExecutionOutcome(
+        process=ProcessResult(
+            termination=process_termination_from_returncode(0),
+            cleanup_complete=True,
+        ),
+        stdout=stdout,
+        stderr=b"",
+        resolved_executable=Path(request.argv[0]),
+        executable_binding=request.executable_binding,
+        containment=ProcessContainment.PROCESS_GROUP,
+    )
 
 
 class _PerfProbeBroker(SubprocessBroker):
@@ -116,28 +136,48 @@ def _probe_outcome(
     )
 
 
+def _managed_setup(
+    extra: CapabilityExtra,
+    requirement: str | None,
+    *,
+    adapter: str = "torch.profiler",
+) -> CapabilitySetup:
+    return CapabilitySetup(
+        extra=extra,
+        requirement=requirement,
+        next_action=manual_action(
+            "Choose an idempotency key before starting capability setup.",
+            suggested_action=ActionId.START_CAPABILITY_SETUP,
+            missing_arguments=("idempotency_key",),
+        ),
+        verification_action=tool_action(
+            ActionId.INSPECT_CAPABILITIES,
+            adapter=adapter,
+        ),
+    )
+
+
 def test_capability_setup_fields_are_derived_from_authoritative_reports() -> None:
     report = CapabilityReport(
         adapter="torch.profiler",
         status=CapabilityStatus.UNAVAILABLE,
-        setup=CapabilitySetup(
-            extra=CapabilityExtra.TORCH,
-            method="start_capability_setup",
-            next_tool="start_capability_setup",
-            requirement="torch>=2.7",
-        ),
+        setup=_managed_setup(CapabilityExtra.TORCH, "torch>=2.7"),
     )
     capabilities = CapabilityList(
         capabilities=(report,),
         recommendation_scope=report.adapter,
+        next_action=report.setup.next_action if report.setup is not None else None,
     )
 
     assert capabilities.setup_adapters == (report.adapter,)
-    assert capabilities.next_tool == "start_capability_setup"
+    assert isinstance(capabilities.next_action, ManualAction)
+    assert capabilities.next_action.suggested_action is ActionId.START_CAPABILITY_SETUP
     assert capabilities.validated_copy() == capabilities
 
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        CapabilityList.model_validate({**capabilities.model_dump(), "next_tool": "prepare_adapter"})
+        CapabilityList.model_validate(
+            {**capabilities.model_dump(), "next_action": {"kind": "manual"}}
+        )
 
 
 def test_setup_verification_fields_form_one_partition() -> None:
@@ -182,11 +222,14 @@ async def test_active_capability_probe_is_brokered_cached_and_refreshable(
     assert broker.calls == 2
 
     pyperf_report = service.get("pyperf")
-    assert pyperf_report.import_location is not None
+    assert pyperf_report.status is CapabilityStatus.UNKNOWN
+    assert pyperf_report.provisioning == "workload_environment"
+    assert pyperf_report.import_location is None
     assert "raw_samples" in pyperf_report.features
     torch_report = service.get("torch.profiler")
-    assert isinstance(torch_report.setup, CapabilitySetup)
-    assert torch_report.setup.extra == "torch"
+    assert torch_report.status is CapabilityStatus.UNKNOWN
+    assert torch_report.provisioning == "workload_environment"
+    assert torch_report.setup is None
 
 
 def test_toxiproxy_setup_uses_dedicated_staging_phase(
@@ -200,6 +243,8 @@ def test_toxiproxy_setup_uses_dedicated_staging_phase(
         asset="toxiproxy_2.12.0_linux_amd64.tar.gz",
         sha256="a" * 64,
         executable=executable,
+        executable_sha256="b" * 64,
+        manifest_revision="test-manifest",
     )
 
     class _ToolManager:
@@ -444,8 +489,31 @@ def test_capability_setup_installs_only_declared_missing_providers(
             **kwargs: Any,
         ) -> ExecutionOutcome:
             nonlocal receipt_during_install
+            self.calls += 1
+            self.requests.append(request)
             receipt_during_install = json.loads((tmp_path / "capability-setup.json").read_text())
-            return await super().run(request, **kwargs)
+            if request.argv[1:] == ("--version",):
+                return _outcome(request, stdout=b"uv 0.9.0\n")
+            if request.argv[1] == "venv":
+                python = Path(request.argv[-1]) / "bin" / "python"
+                python.parent.mkdir(parents=True)
+                python.write_text("#!/bin/sh\nexit 0\n")
+                python.chmod(0o755)
+                return _outcome(request)
+            if request.argv[1:3] == ("pip", "install"):
+                return _outcome(request)
+            if request.argv[1:3] == ("-I", "-c"):
+                return _outcome(
+                    request,
+                    stdout=json.dumps(
+                        {
+                            "executable": request.argv[0],
+                            "prefix": str(Path(request.argv[0]).parent.parent),
+                            "versions": {"flameox": __version__, "torch": "2.7"},
+                        }
+                    ).encode(),
+                )
+            return _outcome(request, stdout=b"trace_processor_shell 99.1\n")
 
     broker = ObservingBroker()
     service = CapabilityService(
@@ -453,12 +521,7 @@ def test_capability_setup_installs_only_declared_missing_providers(
         broker=broker,
         capability_manifest=tmp_path / "capabilities.json",
     )
-    setup = CapabilitySetup(
-        extra=CapabilityExtra.TORCH,
-        method="start_capability_setup",
-        next_tool="start_capability_setup",
-        requirement="torch>=2.7",
-    )
+    setup = _managed_setup(CapabilityExtra.TORCH, "torch>=2.7")
     missing = CapabilityReport(
         adapter="torch.profiler",
         status=CapabilityStatus.UNAVAILABLE,
@@ -470,6 +533,7 @@ def test_capability_setup_installs_only_declared_missing_providers(
             CapabilityList(
                 capabilities=(missing,),
                 recommendation_scope="torch.profiler",
+                next_action=setup.next_action,
             ),
             CapabilityList(
                 capabilities=(available,),
@@ -493,30 +557,48 @@ def test_capability_setup_installs_only_declared_missing_providers(
     assert receipt | {"updated_at": None} == {
         "completed": ["torch.profiler"],
         "error": None,
-        "next_tool": "list_capabilities",
+        "next_action": {
+            "kind": "tool",
+            "action": "capabilities.inspect",
+            "arguments": {"mode": "passive"},
+        },
         "phase": "completed",
         "requested": ["torch.profiler"],
-        "schema_version": 1,
+        "schema_version": 2,
         "updated_at": None,
     }
     assert isinstance(receipt["updated_at"], str)
-    assert (tmp_path / "capabilities.json").read_text() == (
-        '{\n  "extras": [\n    "torch"\n  ],\n  "schema_version": 1\n}\n'
+    assert not (tmp_path / "capabilities.json").exists()
+    assert len(tuple((tmp_path / "provider-runtimes").glob("*/provider-runtime.json"))) == 1
+    install = next(
+        request for request in broker.requests if request.argv[1:3] == ("pip", "install")
     )
-    assert Path(broker.requests[0].argv[0]).name == "uv"
-    assert [list(request.argv[1:]) for request in broker.requests] == [
-        [
-            "pip",
-            "install",
-            "--python",
-            str(tmp_path / "bin" / "python"),
-            "torch>=2.7",
-        ]
-    ]
-    assert "HTTPS_PROXY" in broker.requests[0].environment_allowlist
-    assert "NO_PROXY" in broker.requests[0].environment_allowlist
-    assert "UV_INDEX_URL" in broker.requests[0].environment_allowlist
-    assert "SSL_CERT_FILE" in broker.requests[0].environment_allowlist
+    target = install.argv[install.argv.index("--python") + 1]
+    assert target.startswith(str(tmp_path / "provider-runtimes"))
+    assert target != str(tmp_path / "bin" / "python")
+    assert f"flameox=={__version__}" in install.argv
+    assert "torch>=2.7" in install.argv
+    assert "HTTPS_PROXY" in install.environment_allowlist
+    assert "NO_PROXY" in install.environment_allowlist
+    assert "UV_INDEX_URL" in install.environment_allowlist
+    assert "SSL_CERT_FILE" in install.environment_allowlist
+
+
+def test_reduction_provider_is_discoverable_without_becoming_a_capture_adapter(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    service = CapabilityService(workspace)
+
+    report = service.get("shrinkray")
+
+    assert report.status is CapabilityStatus.UNAVAILABLE
+    assert report.provisioning is CapabilityProvisioning.MANAGED_RUNTIME
+    assert report.setup is not None
+    assert isinstance(report.setup, CapabilitySetup)
+    assert report.setup.extra is CapabilityExtra.REDUCTION
+    assert report.setup.requirement == "shrinkray==26.7.8.0"
+    assert builtin_adapter("shrinkray") is None
 
 
 def test_capability_setup_rejects_unmanaged_provider(tmp_path: Path) -> None:
@@ -529,7 +611,8 @@ def test_capability_setup_rejects_unmanaged_provider(tmp_path: Path) -> None:
         service.prepare(("perf",))
 
     assert refused.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
-    assert refused.value.details["next_tool"] == "list_capabilities"
+    assert isinstance(refused.value.next_action, ToolAction)
+    assert refused.value.next_action.action is ActionId.INSPECT_CAPABILITIES
 
 
 def test_capability_setup_cancellation_cleans_up_brokered_install(
@@ -546,12 +629,7 @@ def test_capability_setup_cancellation_cleans_up_brokered_install(
     report = CapabilityReport(
         adapter="torch.profiler",
         status=CapabilityStatus.UNAVAILABLE,
-        setup=CapabilitySetup(
-            extra=CapabilityExtra.TORCH,
-            method="start_capability_setup",
-            next_tool="start_capability_setup",
-            requirement="torch>=2.7",
-        ),
+        setup=_managed_setup(CapabilityExtra.TORCH, "torch>=2.7"),
     )
     monkeypatch.setattr(service, "list", lambda: CapabilityList(capabilities=(report,)))
     monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
@@ -588,12 +666,7 @@ def test_capability_setup_records_failure_when_uv_is_missing(
     missing = CapabilityReport(
         adapter="torch.profiler",
         status=CapabilityStatus.UNAVAILABLE,
-        setup=CapabilitySetup(
-            extra=CapabilityExtra.TORCH,
-            method="start_capability_setup",
-            next_tool="start_capability_setup",
-            requirement="torch>=2.7",
-        ),
+        setup=_managed_setup(CapabilityExtra.TORCH, "torch>=2.7"),
     )
     monkeypatch.setattr(service, "list", lambda: CapabilityList(capabilities=(missing,)))
     monkeypatch.setattr("flameox.command_binding.shutil.which", lambda _name, path=None: None)
@@ -605,7 +678,7 @@ def test_capability_setup_records_failure_when_uv_is_missing(
     receipt = json.loads((tmp_path / "capability-setup.json").read_text())
     assert receipt["phase"] == "failed"
     assert receipt["completed"] == []
-    assert receipt["error"] == "uv is missing from PATH."
+    assert receipt["error"] == "Executable 'uv' was not found in the request PATH."
 
 
 def test_trace_processor_staging_preserves_phase_and_bounded_cause(
@@ -621,14 +694,14 @@ def test_trace_processor_staging_preserves_phase_and_bounded_cause(
     report = CapabilityReport(
         adapter="perfetto",
         status=CapabilityStatus.UNAVAILABLE,
-        setup=CapabilitySetup(
-            extra=CapabilityExtra.TRACE,
-            method="start_capability_setup",
-            next_tool="start_capability_setup",
-            requirement="perfetto>=0.57,<0.58",
+        setup=_managed_setup(
+            CapabilityExtra.TRACE,
+            "perfetto>=0.57,<0.58",
+            adapter="perfetto",
         ),
     )
     monkeypatch.setattr(service, "list", lambda: CapabilityList(capabilities=(report,)))
+    monkeypatch.setattr(service, "_prepare_provider", lambda *args, **kwargs: None)
 
     def fail_staging(*args: object, **kwargs: object) -> object:
         raise DomainError(
@@ -636,11 +709,15 @@ def test_trace_processor_staging_preserves_phase_and_bounded_cause(
             "FlameOx could not stage the managed Trace Processor.",
             retryable=True,
             details={
-                "next_tool": "start_capability_setup",
                 "adapter": "perfetto",
                 "failure_category": "network",
                 "failure_detail": "synthetic TLS failure",
             },
+            next_action=manual_action(
+                "Choose an idempotency key and retry perfetto setup.",
+                suggested_action=ActionId.START_CAPABILITY_SETUP,
+                missing_arguments=("idempotency_key",),
+            ),
         )
 
     monkeypatch.setattr("flameox.application.capabilities.install_trace_processor", fail_staging)
@@ -668,12 +745,7 @@ def test_capability_setup_is_idempotent_when_provider_is_available(
     report = CapabilityReport(
         adapter="torch.profiler",
         status=CapabilityStatus.AVAILABLE,
-        setup=CapabilitySetup(
-            extra=CapabilityExtra.TORCH,
-            method="start_capability_setup",
-            next_tool="start_capability_setup",
-            requirement="torch>=2.7",
-        ),
+        setup=_managed_setup(CapabilityExtra.TORCH, "torch>=2.7"),
     )
     monkeypatch.setattr(service, "list", lambda: CapabilityList(capabilities=(report,)))
     result = service.prepare(("torch.profiler", "torch.profiler"))
@@ -740,25 +812,18 @@ def test_capability_setup_receipt_rejects_contradictory_durable_states(
 
 def test_capability_recommendations_are_scoped_to_selected_adapter(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from importlib.metadata import PackageNotFoundError
-
-    def unavailable_distribution(_: str) -> str:
-        raise PackageNotFoundError
-
-    monkeypatch.setattr("flameox.application.capabilities.version", unavailable_distribution)
     service = CapabilityService(Workspace.initialize(tmp_path))
 
     inventory = service.list()
     selected = service.list_for_adapter("torch.profiler")
 
     assert inventory.setup_adapters == ()
-    assert "torch.profiler" in inventory.available_setup_adapters
-    assert inventory.next_tool is None
+    assert "torch.profiler" not in inventory.available_setup_adapters
+    assert inventory.next_action is None
     assert selected.recommendation_scope == "torch.profiler"
-    assert selected.setup_adapters == ("torch.profiler",)
-    assert selected.next_tool == "start_capability_setup"
+    assert selected.setup_adapters == ()
+    assert selected.next_action is None
 
 
 def test_running_capability_setup_status_contains_exact_poll_action(tmp_path: Path) -> None:
@@ -781,15 +846,24 @@ def test_running_capability_setup_status_contains_exact_poll_action(tmp_path: Pa
         owner_heartbeat_at=utc_now(),
     )
 
-    status = OperationStatus.from_record(record)
+    adapter = OperationAdapter(
+        kind="capability.setup",
+        start_action=ActionId.START_CAPABILITY_SETUP,
+        status_action=ActionId.GET_CAPABILITY_SETUP,
+    )
+    status = OperationStatus.from_record(record, adapter=adapter)
 
     assert status.poll_after_ms == 1_000
     assert status.recovery is not None
     assert status.recovery.action == "poll"
-    assert status.recovery.tool == "get_capability_setup"
-    assert status.recovery.arguments == {"operation_id": record.operation_id}
+    assert isinstance(status.recovery.next_action, ToolAction)
+    assert status.recovery.next_action.action is ActionId.GET_CAPABILITY_SETUP
+    assert status.recovery.next_action.arguments == {"operation_id": record.operation_id}
 
-    terminal = OperationStatus.from_record(record.completed(receipt={}, item_outcomes=()))
+    terminal = OperationStatus.from_record(
+        record.completed(receipt={}, item_outcomes=()),
+        adapter=adapter,
+    )
     assert terminal.poll_after_ms is None
     assert terminal.recovery is None
 
@@ -966,123 +1040,82 @@ def test_entry_point_approval_is_revoked_when_installed_content_changes(
 
 
 @pytest.mark.anyio
-async def test_prepare_workload_dependencies_installs_declared_spec_and_reruns_preflight(
+async def test_prepare_workload_dependencies_inspects_declared_interpreter_without_mutation(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
+    python = tmp_path / "workload-env" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text('#!/bin/sh\nprintf \'{"agent-fixture":"2.1"}\\n\'\n')
+    python.chmod(0o755)
     (tmp_path / "flameox.toml").write_text(
-        """
+        f"""
 schema_version = 1
 [workloads.probe]
-argv = ["python", "-c", "pass"]
+argv = ["{python}", "-c", "pass"]
 [workloads.probe.requirements]
 python_distributions = ["agent-fixture>=2"]
 """
     )
-    available = False
 
-    def lookup(_: str) -> SimpleNamespace:
-        if not available:
-            from importlib.metadata import PackageNotFoundError
+    class RecordingBroker(SubprocessBroker):
+        def __init__(self) -> None:
+            self.requests: list[ExecutionRequest] = []
 
-            raise PackageNotFoundError("agent-fixture")
-        return SimpleNamespace(metadata={"Name": "agent-fixture"}, version="2.1")
-
-    class InstallingBroker(_ProbeBroker):
         async def run(
             self,
             request: ExecutionRequest,
             **kwargs: Any,
         ) -> ExecutionOutcome:
-            nonlocal available
-            available = True
+            self.requests.append(request)
             return await super().run(request, **kwargs)
 
-    monkeypatch.setattr("flameox.application.dependencies.distribution", lookup)
-    monkeypatch.setattr("flameox.application.preflight.distribution", lookup)
-    python = tmp_path / "bin" / "python"
-    python.parent.mkdir()
-    uv = python.parent / "uv"
-    uv.write_text("#!/bin/sh\nexit 0\n")
-    uv.chmod(0o755)
-    monkeypatch.setattr("flameox.application.dependencies._uv_executable", lambda: str(uv))
-    monkeypatch.setattr(sys, "executable", str(python))
-    broker = InstallingBroker()
+    broker = RecordingBroker()
 
     result = await WorkloadDependencyService(workspace, broker=broker).prepare("probe")
 
-    assert result.installed == ("agent-fixture>=2",)
-    assert result.already_available == ()
+    assert result.installed == ()
+    assert result.environment_mutated is False
+    assert result.already_available == ("agent-fixture>=2",)
     assert result.status == "ready"
-    assert result.next_tool == "plan_capture"
+    assert isinstance(result.next_action, ManualAction)
+    assert result.next_action.suggested_action is ActionId.PLAN_CAPTURE
+    assert result.next_action.missing_arguments == ("adapter", "parameters")
     assert result.preflight.requirements[0].status == "available"
+    assert len(broker.requests) == 1
     request = broker.requests[0]
-    assert request.argv == (
-        str(uv),
-        "pip",
-        "install",
-        "--python",
-        str(python),
-        "agent-fixture>=2",
-    )
-    assert "HTTPS_PROXY" in request.environment_allowlist
-    assert "NO_PROXY" in request.environment_allowlist
-    assert "UV_INDEX_URL" in request.environment_allowlist
-    assert "SSL_CERT_FILE" in request.environment_allowlist
+    assert request.argv[:3] == (str(python), "-I", "-c")
+    assert request.argv[-1] == "agent-fixture"
+    assert request.environment_allowlist == ()
+    assert request.executable_binding.invocation_path == python
 
 
 @pytest.mark.anyio
-async def test_workload_install_wraps_broker_domain_errors_with_recovery_context(
+async def test_prepare_workload_dependencies_reports_missing_without_installing(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
+    python = tmp_path / "empty-env" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\nprintf '{\"agent-fixture\":null}\\n'\n")
+    python.chmod(0o755)
     (tmp_path / "flameox.toml").write_text(
-        """
+        f"""
 schema_version = 1
 [workloads.probe]
-argv = ["python", "-c", "pass"]
+argv = ["{python}", "-c", "pass"]
 [workloads.probe.requirements]
 python_distributions = ["agent-fixture>=2"]
 """
     )
 
-    from importlib.metadata import PackageNotFoundError
+    result = await WorkloadDependencyService(workspace).prepare("probe")
 
-    monkeypatch.setattr(
-        "flameox.application.dependencies.distribution",
-        lambda _: (_ for _ in ()).throw(PackageNotFoundError("agent-fixture")),
-    )
-    monkeypatch.setattr(
-        "flameox.application.preflight.distribution",
-        lambda _: (_ for _ in ()).throw(PackageNotFoundError("agent-fixture")),
-    )
-
-    class FailingBroker(SubprocessBroker):
-        async def run(self, request: ExecutionRequest, **_: Any) -> ExecutionOutcome:
-            raise DomainError(
-                ErrorCode.PROCESS_TIMEOUT,
-                "Process exceeded 1800 seconds.",
-                retryable=True,
-                details={"process": {"timed_out": True}, "argv": list(request.argv)},
-            )
-
-    python = tmp_path / "bin" / "python"
-    python.parent.mkdir()
-    uv = python.parent / "uv"
-    uv.write_text("#!/bin/sh\nexit 0\n")
-    uv.chmod(0o755)
-    monkeypatch.setattr("flameox.application.dependencies._uv_executable", lambda: str(uv))
-    monkeypatch.setattr(sys, "executable", str(python))
-
-    with pytest.raises(DomainError) as failure:
-        await WorkloadDependencyService(workspace, broker=FailingBroker()).prepare("probe")
-
-    assert failure.value.code is ErrorCode.PROCESS_TIMEOUT
-    assert failure.value.retryable is True
-    assert failure.value.details["workload_name"] == "probe"
-    assert failure.value.details["next_tool"] == "prepare_workload_dependencies"
-    assert failure.value.details["process"]["timed_out"] is True
-    assert failure.value.details["argv"][-1] == "agent-fixture>=2"
-    assert any("package-index access" in item for item in failure.value.remediation)
+    assert result.installed == ()
+    assert result.environment_mutated is False
+    assert result.already_available == ()
+    assert result.status == "blocked"
+    assert result.preflight.requirements[0].status == "absent"
+    assert isinstance(result.next_action, ManualAction)
+    assert result.next_action.suggested_action is ActionId.GET_DECLARED_WORKFLOW
+    assert "declared Python environment" in result.next_action.instruction

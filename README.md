@@ -223,13 +223,11 @@ manifest.
 
 ```console
 uv sync --extra dev
-uv run python tools/test.py list
-uv run python tools/test.py core
 uv run ruff check src tests tools
 uv run mypy src tests tools
 uv run pytest -q
 ```
 
-See [the testing guide](docs/testing.md) before changing suite ownership,
-provider lanes, or collection topology. Flameox is available under the
+See [the testing guide](docs/testing.md) for marker and provider commands.
+Flameox is available under the
 [MIT License](LICENSE).

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from pydantic import ConfigDict, Field, computed_field, model_validator
 
@@ -10,7 +10,7 @@ from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,
     CaptureStatus,
-    CursorCodec,
+    CursorNamespace,
     DomainError,
     ErrorCode,
     ExecutionStatus,
@@ -108,25 +108,22 @@ class RunDiscoveryService:
         after_created: datetime | None = None
         after_run_id: str | None = None
         if cursor is not None:
-            position = CursorCodec.decode(
-                cursor,
-                namespace="runs",
-                snapshot_id=head.commit_id,
-                scope_digest=scope_digest,
+            position = cast(
+                tuple[str, str],
+                self.workspace.cursors.resolve(
+                    cursor,
+                    namespace=CursorNamespace.RUNS,
+                    snapshot_id=head.commit_id,
+                    scope_digest=scope_digest,
+                ),
             )
-            if (
-                len(position) != 2
-                or not isinstance(position[0], str)
-                or not isinstance(position[1], str)
-            ):
-                raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.")
             try:
                 after_created = datetime.fromisoformat(position[0])
             except ValueError as exc:
                 raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.") from exc
             after_run_id = position[1]
 
-        predicates = ["revision_order = 1"]
+        predicates = ["1 = 1"]
         parameters: list[object] = []
         applied: list[str] = []
         for field in (
@@ -160,14 +157,10 @@ class RunDiscoveryService:
             parameters.append(filter.created_before)
             applied.append("created_before")
         where = " AND ".join(predicates)
-        latest = (
-            "WITH latest AS (SELECT *, row_number() OVER (PARTITION BY run_id "
-            "ORDER BY published_at DESC) AS revision_order FROM runs) "
-        )
         catalog = Catalog(self.workspace)
         with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
             count_row = snapshot.execute(
-                latest + "SELECT count(*) FROM latest WHERE " + where,
+                "SELECT count(*) FROM current_runs WHERE " + where,
                 tuple(parameters),
             ).fetchone()
             assert count_row is not None
@@ -177,17 +170,16 @@ class RunDiscoveryService:
                 page_where += " AND (created_at < ? OR (created_at = ? AND run_id > ?))"
                 page_parameters.extend((after_created, after_created, after_run_id))
             rows = snapshot.execute(
-                latest + "SELECT run_id, created_at, run_type, execution_status, capture_status, "
+                "SELECT run_id, created_at, run_type, execution_status, capture_status, "
                 "validation_status, source_state_id, environment_id, workload_definition_id "
                 ", orchestrator, provider, lease_id, worker_id, orchestration_run_id "
                 ", coalesce((SELECT list_sort(list_distinct(list(kind))) "
-                "FROM artifact_registrations WHERE run_id = latest.run_id), "
+                "FROM artifact_registrations WHERE run_id = current_runs.run_id), "
                 "CAST([] AS VARCHAR[])) AS artifact_kinds, "
-                "coalesce((SELECT resource_availability FROM runs resource_runs "
-                "WHERE resource_runs.run_id = latest.run_id "
-                "ORDER BY resource_runs.published_at DESC LIMIT 1), 'unavailable') "
-                "AS resource_availability "
-                "FROM latest WHERE " + page_where + " ORDER BY created_at DESC, run_id LIMIT ?",
+                "coalesce(resource_availability, 'unavailable') AS resource_availability "
+                "FROM current_runs WHERE "
+                + page_where
+                + " ORDER BY created_at DESC, run_id LIMIT ?",
                 (*page_parameters, limit + 1),
             ).fetchall()
         has_more = len(rows) > limit
@@ -213,8 +205,8 @@ class RunDiscoveryService:
             for row in rows[:limit]
         )
         next_cursor = (
-            CursorCodec.encode(
-                namespace="runs",
+            self.workspace.cursors.issue(
+                namespace=CursorNamespace.RUNS,
                 snapshot_id=head.commit_id,
                 scope_digest=scope_digest,
                 position=(runs[-1].created_at.isoformat(), runs[-1].run_id),

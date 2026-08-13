@@ -7,8 +7,7 @@ import shutil
 import sys
 import tempfile
 import threading
-import urllib.error
-import urllib.request
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,20 +16,26 @@ from mcp import Client, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from packaging.version import InvalidVersion, Version
 
+from flameox.action_graph import ActionId, NextAction, manual_action, tool_action
 from flameox.application.concurrency import race_with_cancellation
 from flameox.atomic import atomic_write_json, atomic_write_text
 from flameox.command_binding import ExecutableResolver
-from flameox.domain import (
-    CapabilityExtra,
-    DomainError,
-    ErrorCode,
-    parse_managed_runtime_extras,
-)
+from flameox.domain import DomainError, ErrorCode
 from flameox.execution import (
     INSTALLER_ENVIRONMENT_ALLOWLIST,
     ExecutionOutcome,
     ExecutionRequest,
     SubprocessBroker,
+)
+from flameox.http_transport import (
+    BoundedHttpClient,
+)
+from flameox.managed_tools import (
+    ManagedToolAsset,
+    build_managed_tool_receipt,
+    download_verified_asset,
+    read_verified_tool_receipt,
+    write_managed_tool_receipt,
 )
 from flameox.storage import Workspace
 
@@ -47,6 +52,17 @@ class TraceProcessorInstallation:
     version: str
     executable: Path
     installed: bool
+    asset_sha256: str
+    executable_sha256: str
+    manifest_revision: str
+
+
+def _trace_processor_setup_action() -> NextAction:
+    return manual_action(
+        "Choose an idempotency key and retry managed setup for the perfetto adapter.",
+        suggested_action=ActionId.START_CAPABILITY_SETUP,
+        missing_arguments=("idempotency_key",),
+    )
 
 
 class ManagedRuntime:
@@ -104,10 +120,6 @@ class ManagedRuntime:
         runtime_root = executable.parent.parent
         runtime_root.mkdir(parents=True, exist_ok=True)
         try:
-            extras = self._managed_extras()
-            distribution = (
-                f"{self.distribution}[{','.join(extras)}]" if extras else self.distribution
-            )
             outcome = await self.broker.run(
                 ExecutionRequest(
                     argv=(
@@ -121,7 +133,7 @@ class ManagedRuntime:
                         "allow",
                         "--python",
                         "3.12",
-                        f"{distribution}=={version}",
+                        f"{self.distribution}=={version}",
                     ),
                     executable_binding=ExecutableResolver().require_host_tool(
                         self.uv_executable, cwd=Path.cwd()
@@ -158,17 +170,6 @@ class ManagedRuntime:
             },
         )
         return RuntimeInstallation(version, executable, True)
-
-    def _managed_extras(self) -> tuple[CapabilityExtra, ...]:
-        """Carry agent-prepared providers into the next versioned runtime."""
-        path = self.root / "capabilities.json"
-        try:
-            payload = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return ()
-        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
-            return ()
-        return parse_managed_runtime_extras(payload.get("extras"))
 
     async def verify(self, executable: Path, version: str) -> None:
         try:
@@ -265,6 +266,77 @@ class ManagedRuntime:
 
 
 TRACE_PROCESSOR_VERSION = "v55.1"
+_PERFETTO_MANIFEST_REVISION = "aa3adf87c45f8b4f3ebec384f20525c169f52980"
+_TRACE_PROCESSOR_ORIGIN = ("https://commondatastorage.googleapis.com",)
+_TRACE_PROCESSOR_ASSETS: dict[tuple[str, str], ManagedToolAsset] = {
+    ("linux", "x86_64"): ManagedToolAsset(
+        manifest_revision=_PERFETTO_MANIFEST_REVISION,
+        tool="perfetto-trace-processor",
+        version=TRACE_PROCESSOR_VERSION,
+        platform="linux",
+        machine="x86_64",
+        asset_name="trace_processor_shell-linux-amd64",
+        url="https://commondatastorage.googleapis.com/perfetto-luci-artifacts/v55.1/"
+        "linux-amd64/trace_processor_shell",
+        allowed_origins=_TRACE_PROCESSOR_ORIGIN,
+        sha256="acff9ff4322eac13693390e516ddfe308223c467b56e43b0777295906ffd3110",
+        byte_length=13_695_552,
+        max_bytes=512 * 1024 * 1024,
+        executable_sha256=("acff9ff4322eac13693390e516ddfe308223c467b56e43b0777295906ffd3110"),
+    ),
+    ("linux", "aarch64"): ManagedToolAsset(
+        manifest_revision=_PERFETTO_MANIFEST_REVISION,
+        tool="perfetto-trace-processor",
+        version=TRACE_PROCESSOR_VERSION,
+        platform="linux",
+        machine="aarch64",
+        asset_name="trace_processor_shell-linux-arm64",
+        url="https://commondatastorage.googleapis.com/perfetto-luci-artifacts/v55.1/"
+        "linux-arm64/trace_processor_shell",
+        allowed_origins=_TRACE_PROCESSOR_ORIGIN,
+        sha256="0a3a6b6dba2ff6b0974636b005fc1a1f61d2bdc0bd4e162be793a4430dc277bd",
+        byte_length=13_056_072,
+        max_bytes=512 * 1024 * 1024,
+        executable_sha256=("0a3a6b6dba2ff6b0974636b005fc1a1f61d2bdc0bd4e162be793a4430dc277bd"),
+    ),
+    ("darwin", "x86_64"): ManagedToolAsset(
+        manifest_revision=_PERFETTO_MANIFEST_REVISION,
+        tool="perfetto-trace-processor",
+        version=TRACE_PROCESSOR_VERSION,
+        platform="darwin",
+        machine="x86_64",
+        asset_name="trace_processor_shell-mac-amd64",
+        url="https://commondatastorage.googleapis.com/perfetto-luci-artifacts/v55.1/"
+        "mac-amd64/trace_processor_shell",
+        allowed_origins=_TRACE_PROCESSOR_ORIGIN,
+        sha256="4cce377ab8568c7f38b3eeef02cc0ac881cedc1608caba3f4f26797c7a49061e",
+        byte_length=13_472_496,
+        max_bytes=512 * 1024 * 1024,
+        executable_sha256=("4cce377ab8568c7f38b3eeef02cc0ac881cedc1608caba3f4f26797c7a49061e"),
+    ),
+    ("darwin", "arm64"): ManagedToolAsset(
+        manifest_revision=_PERFETTO_MANIFEST_REVISION,
+        tool="perfetto-trace-processor",
+        version=TRACE_PROCESSOR_VERSION,
+        platform="darwin",
+        machine="arm64",
+        asset_name="trace_processor_shell-mac-arm64",
+        url="https://commondatastorage.googleapis.com/perfetto-luci-artifacts/v55.1/"
+        "mac-arm64/trace_processor_shell",
+        allowed_origins=_TRACE_PROCESSOR_ORIGIN,
+        sha256="c8a99fd617f42bee97849b71c144a6bb7b8681b68001e579d8616174da240f91",
+        byte_length=12_470_408,
+        max_bytes=512 * 1024 * 1024,
+        executable_sha256=("c8a99fd617f42bee97849b71c144a6bb7b8681b68001e579d8616174da240f91"),
+    ),
+}
+
+
+def _trace_processor_asset() -> ManagedToolAsset | None:
+    machine = _machine().lower()
+    if machine == "amd64":
+        machine = "x86_64"
+    return _TRACE_PROCESSOR_ASSETS.get((sys.platform, machine))
 
 
 def install_trace_processor(
@@ -272,38 +344,46 @@ def install_trace_processor(
     *,
     cancel_event: threading.Event | None = None,
     broker: SubprocessBroker | None = None,
+    http_client: BoundedHttpClient | None = None,
 ) -> TraceProcessorInstallation:
     """Stage the pinned user-space Trace Processor without requiring host privileges."""
     temporary: Path | None = None
     try:
-        platform_key = {
-            ("linux", "x86_64"): "linux-amd64",
-            ("linux", "amd64"): "linux-amd64",
-            ("linux", "aarch64"): "linux-arm64",
-            ("darwin", "x86_64"): "mac-amd64",
-            ("darwin", "arm64"): "mac-arm64",
-        }.get((sys.platform, _machine()))
-        if platform_key is None:
+        asset = _trace_processor_asset()
+        if asset is None:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 "FlameOx has no managed Trace Processor binary for this platform.",
-                details={"next_tool": "list_capabilities"},
                 remediation=(
                     "Install the official Perfetto Trace Processor for this platform or set "
                     "analysis.trace_processor_path in the workspace policy.",
                 ),
+                next_action=tool_action(
+                    ActionId.INSPECT_CAPABILITIES,
+                    adapter="perfetto",
+                ),
             )
 
         target = workspace.paths.root / "tools" / "trace_processor_shell"
-        if target.is_file() and os.access(target, os.X_OK):
+        receipt_path = workspace.paths.root / "tools" / "trace-processor-receipt.json"
+        receipt = read_verified_tool_receipt(
+            receipt_path,
+            target,
+            asset,
+            trusted_root=workspace.paths.root / "tools",
+        )
+        if receipt is not None and os.access(target, os.X_OK):
             _check_staging_cancelled(cancel_event)
             _verify_trace_processor(target, cancel_event=cancel_event, broker=broker)
-            return TraceProcessorInstallation(TRACE_PROCESSOR_VERSION, target, False)
+            return TraceProcessorInstallation(
+                TRACE_PROCESSOR_VERSION,
+                target,
+                False,
+                asset.sha256,
+                receipt.executable_sha256,
+                asset.manifest_revision,
+            )
 
-        url = (
-            "https://commondatastorage.googleapis.com/perfetto-luci-artifacts/"
-            f"{TRACE_PROCESSOR_VERSION}/{platform_key}/trace_processor_shell"
-        )
         staging = workspace.paths.staging
         staging.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
@@ -312,21 +392,27 @@ def install_trace_processor(
             delete=False,
         ) as stream:
             temporary = Path(stream.name)
-            with urllib.request.urlopen(url, timeout=120) as response:
-                total = 0
-                while chunk := response.read(1024 * 1024):
-                    _check_staging_cancelled(cancel_event)
-                    total += len(chunk)
-                    if total > 512 * 1024 * 1024:
-                        raise DomainError(
-                            ErrorCode.ARTIFACT_TOO_LARGE,
-                            "The managed Trace Processor download exceeded 512 MiB.",
-                            details={"next_tool": "start_capability_setup", "adapter": "perfetto"},
-                        )
-                    stream.write(chunk)
+            client = http_client or BoundedHttpClient()
+            try:
+                download_verified_asset(
+                    asset,
+                    stream,
+                    http_client=client,
+                    deadline_monotonic=time.monotonic() + 120,
+                    cancel_check=lambda: _check_staging_cancelled(cancel_event),
+                )
+            finally:
+                if http_client is None:
+                    client.close()
             stream.flush()
             os.fsync(stream.fileno())
         temporary.chmod(0o755)
+        authenticated_receipt = build_managed_tool_receipt(
+            asset,
+            temporary,
+            trusted_root=staging,
+            installed_name=target.name,
+        )
         _check_staging_cancelled(cancel_event)
         _verify_trace_processor(temporary, cancel_event=cancel_event, broker=broker)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -342,10 +428,11 @@ def install_trace_processor(
                 }
             )
             atomic_write_text(workspace.paths.config, updated.to_toml())
+            write_managed_tool_receipt(receipt_path, authenticated_receipt)
         temporary = None
     except DomainError as exc:
         raise _annotate_staging_error(exc) from exc
-    except (OSError, urllib.error.URLError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
         category = _staging_failure_category(exc)
         detail = _bounded_staging_detail(exc)
         raise DomainError(
@@ -353,7 +440,6 @@ def install_trace_processor(
             "FlameOx could not stage the managed Trace Processor.",
             retryable=True,
             details={
-                "next_tool": "start_capability_setup",
                 "adapter": "perfetto",
                 "failure_category": category,
                 "failure_detail": detail,
@@ -362,11 +448,19 @@ def install_trace_processor(
                 "Retry start_capability_setup; if the download remains unavailable, install "
                 "the official user-space binary or configure analysis.trace_processor_path.",
             ),
+            next_action=_trace_processor_setup_action(),
         ) from exc
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-    return TraceProcessorInstallation(TRACE_PROCESSOR_VERSION, target, True)
+    return TraceProcessorInstallation(
+        TRACE_PROCESSOR_VERSION,
+        target,
+        True,
+        asset.sha256,
+        authenticated_receipt.executable_sha256,
+        asset.manifest_revision,
+    )
 
 
 def _annotate_staging_error(error: DomainError) -> DomainError:
@@ -385,6 +479,7 @@ def _annotate_staging_error(error: DomainError) -> DomainError:
         details=details,
         remediation=error.remediation,
         run_id=error.run_id,
+        next_action=error.next_action,
     )
 
 
@@ -401,8 +496,6 @@ def _domain_failure_category(error: DomainError) -> str:
 
 
 def _staging_failure_category(error: BaseException) -> str:
-    if isinstance(error, urllib.error.URLError):
-        return "network"
     if isinstance(error, OSError):
         return "filesystem"
     return "verification"
@@ -436,7 +529,8 @@ def _verify_trace_processor(
             ),
             cancel_event=cancel_event,
             cancellation_message="Trace Processor staging was cancelled before publication.",
-            cancellation_details={"next_tool": "start_capability_setup", "adapter": "perfetto"},
+            cancellation_details={"adapter": "perfetto"},
+            cancellation_next_action=_trace_processor_setup_action(),
         )
     except (DomainError, OSError) as exc:
         if isinstance(exc, DomainError) and exc.code in {
@@ -447,7 +541,8 @@ def _verify_trace_processor(
         raise DomainError(
             ErrorCode.PROCESS_FAILED,
             "The staged Trace Processor failed its bounded version check.",
-            details={"next_tool": "start_capability_setup", "adapter": "perfetto"},
+            details={"adapter": "perfetto"},
+            next_action=_trace_processor_setup_action(),
         ) from exc
     _validate_trace_processor_result(
         outcome.process.exit_code,
@@ -463,6 +558,7 @@ async def _run_brokered(
     cancel_event: threading.Event | None,
     cancellation_message: str,
     cancellation_details: dict[str, str],
+    cancellation_next_action: NextAction,
 ) -> ExecutionOutcome:
     if cancel_event is None:
         return await broker.run(request)
@@ -474,6 +570,7 @@ async def _run_brokered(
             cancellation_message,
             retryable=True,
             details=cancellation_details,
+            next_action=cancellation_next_action,
         ),
     )
 
@@ -490,6 +587,7 @@ def _run_brokered_sync(
     cancel_event: threading.Event | None,
     cancellation_message: str,
     cancellation_details: dict[str, str],
+    cancellation_next_action: NextAction,
 ) -> ExecutionOutcome:
     coroutine = _run_brokered(
         broker,
@@ -497,6 +595,7 @@ def _run_brokered_sync(
         cancel_event=cancel_event,
         cancellation_message=cancellation_message,
         cancellation_details=cancellation_details,
+        cancellation_next_action=cancellation_next_action,
     )
     try:
         asyncio.get_running_loop()
@@ -537,8 +636,9 @@ def _validate_trace_processor_result(
         raise DomainError(
             ErrorCode.PROCESS_FAILED,
             "The staged Trace Processor failed its bounded version check.",
-            details={"next_tool": "start_capability_setup", "adapter": "perfetto"},
+            details={"adapter": "perfetto"},
             remediation=(stderr.strip()[:500] or "Retry the managed setup.",),
+            next_action=_trace_processor_setup_action(),
         )
 
 
@@ -548,7 +648,8 @@ def _check_staging_cancelled(cancel_event: threading.Event | None) -> None:
             ErrorCode.PROCESS_CANCELLED,
             "Trace Processor staging was cancelled before publication.",
             retryable=True,
-            details={"next_tool": "start_capability_setup", "adapter": "perfetto"},
+            details={"adapter": "perfetto"},
+            next_action=_trace_processor_setup_action(),
         )
 
 

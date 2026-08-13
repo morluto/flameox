@@ -4,18 +4,22 @@ import html
 import json
 import re
 from enum import StrEnum
+from pathlib import Path
 from typing import Annotated, Literal, TextIO, cast
 
 from pydantic import Field, JsonValue, model_validator
 
-from flameox.application.evidence_lookup import EvidenceLookupService
-from flameox.catalog import Catalog, Snapshot
+from flameox.application.evidence_lookup import EvidenceLookupService, EvidenceSession
+from flameox.application.evidence_relations import (
+    is_positive_relation,
+    qualify_evidence_relation,
+)
 from flameox.domain import (
     ArtifactKind,
     EvidenceLevel,
     EvidenceReferenceType,
+    EvidenceRelation,
     ExecutionStatus,
-    Finding,
     FindingAssessment,
     LimitationDetail,
     LimitationSource,
@@ -26,7 +30,7 @@ from flameox.domain import (
     digest_model,
 )
 from flameox.models import ContractModel
-from flameox.storage import ArtifactStore, ControlRecordStore, RunStore, Workspace
+from flameox.storage import Workspace
 
 _DISCARD_CHUNK_SIZE = 4096
 
@@ -71,16 +75,40 @@ class SummaryReferenceKind(StrEnum):
 
 
 class SummarySupportStatus(StrEnum):
-    AS_RECORDED = "as_recorded"
+    SUPPORTED_BY_EVIDENCE = "supported_by_evidence"
+    RECORDED_SUPPORT_MISSING = "recorded_support_missing"
+    CONTRADICTED = "contradicted"
+    MIXED_UNRESOLVED = "mixed_unresolved"
     NOT_SUPPORTING = "not_supporting"
-    CANDIDATE_ONLY = "candidate_only"
 
 
 class SummaryProofShape(StrEnum):
-    PAIRED_VALIDATION = "paired_validation"
-    CANDIDATE_ONLY_VALIDATION = "candidate_only_validation"
-    BASELINE_ONLY_OBSERVATION = "baseline_only_observation"
+    VALIDATED_PAIR = "validated_pair"
+    CANDIDATE_VALIDATED = "candidate_validated"
+    BASELINE_OBSERVATION = "baseline_observation"
+    INCOMPLETE = "incomplete"
     SELECTED_EVIDENCE = "selected_evidence"
+
+
+class SummarySelectionShape(StrEnum):
+    SINGLE_RUN = "single_run"
+    TWO_CLAIMED_RUNS = "two_claimed_runs"
+    MIXED_EVIDENCE = "mixed_evidence"
+
+
+class SummaryClaimedRole(ContractModel):
+    run_id: str
+    role: SummaryRunRole
+
+
+class SummaryProofAssessment(ContractModel):
+    shape: SummaryProofShape
+    binding_type: Literal["comparison", "run_validation"] | None = None
+    binding_id: str | None = None
+    verified_baseline_run_id: str | None = None
+    verified_candidate_run_id: str | None = None
+    satisfied_conditions: tuple[str, ...] = ()
+    missing_conditions: tuple[str, ...] = ()
 
 
 def _unique_limitation_details(
@@ -151,11 +179,13 @@ class SummaryAttempt(ContractModel):
 
 class SummaryRun(ContractModel):
     run_id: str
-    proof_role: SummaryRunRole
+    claimed_role: SummaryRunRole
     execution_status: ExecutionStatus
     validation_status: ValidationStatus
     workload_definition_id: str | None
     workload_instance_id: str | None
+    measurement_protocol_id: str | None
+    inference_protocol_identity_id: str | None
     argv: tuple[str, ...]
     source: dict[str, JsonValue]
     environment: dict[str, JsonValue]
@@ -185,10 +215,13 @@ class SummaryClaim(ContractModel):
 
 
 class EvidenceSummary(ContractModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     summary_digest: str
     corpus_commit_id: str
+    selection_shape: SummarySelectionShape
+    claimed_roles: tuple[SummaryClaimedRole, ...]
     proof_shape: SummaryProofShape
+    proof_assessment: SummaryProofAssessment
     runs: tuple[SummaryRun, ...]
     references: tuple[SummaryReference, ...]
     claims: tuple[SummaryClaim, ...]
@@ -198,7 +231,7 @@ class EvidenceSummary(ContractModel):
 
 
 class EvidenceSummaryBundle(ContractModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     summary: EvidenceSummary
     markdown: str
 
@@ -206,26 +239,15 @@ class EvidenceSummaryBundle(ContractModel):
 class EvidenceSummaryService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
-        self.runs = RunStore(workspace)
-        self.artifacts = ArtifactStore(workspace)
-        self.lookup = EvidenceLookupService(workspace)
-        self.findings = ControlRecordStore(
-            workspace,
-            kind="findings",
-            model=Finding,
-            id_field="finding_id",
-            revision_field="revision",
-        )
+        self.evidence = EvidenceLookupService(workspace)
 
     def summarize(self, request: EvidenceSummaryRequest) -> EvidenceSummaryBundle:
-        head = self.workspace.corpus.read_head()
         selected_runs = self._selected_runs(request)
         truncation: list[str] = []
-        catalog = Catalog(self.workspace)
-        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
+        with self.evidence.session() as evidence:
             runs = tuple(
                 self._run_summary(
-                    snapshot,
+                    evidence,
                     run_id,
                     role,
                     request=request,
@@ -240,7 +262,7 @@ class EvidenceSummaryService:
                         ref_id=ref_id,
                         data=self._compact_reference(
                             SummaryReferenceKind.COMPARISON,
-                            self.lookup.get(EvidenceReferenceType.COMPARISON, ref_id).data,
+                            evidence.get(EvidenceReferenceType.COMPARISON, ref_id).data,
                         ),
                     )
                     for ref_id in request.comparison_ids
@@ -251,20 +273,38 @@ class EvidenceSummaryService:
                         ref_id=ref_id,
                         data=self._compact_reference(
                             SummaryReferenceKind.ANALYSIS,
-                            self.lookup.get(EvidenceReferenceType.ANALYSIS, ref_id).data,
+                            evidence.get(EvidenceReferenceType.ANALYSIS, ref_id).data,
                         ),
                     )
                     for ref_id in request.analysis_ids
                 ]
             )
-            claims = tuple(
-                self._claim(snapshot, finding_id, request) for finding_id in request.finding_ids
+            claims = tuple(self._claim(evidence, finding_id) for finding_id in request.finding_ids)
+            proof_assessment = self._proof_assessment(
+                evidence,
+                request=request,
+                runs=runs,
+                references=references,
             )
-        limitations = self._limitations(request, runs, references, claims)
+            corpus_commit_id = evidence.commit_id
+        selection_shape = self._selection_shape(request)
+        claimed_roles = tuple(
+            SummaryClaimedRole(run_id=run_id, role=role) for run_id, role in selected_runs
+        )
+        limitations = self._limitations(
+            request,
+            runs,
+            references,
+            claims,
+            proof_assessment,
+        )
         limitation_details = _summary_limitation_details(runs)
         payload = {
-            "corpus_commit_id": head.commit_id,
-            "proof_shape": self._proof_shape(request),
+            "corpus_commit_id": corpus_commit_id,
+            "selection_shape": selection_shape,
+            "claimed_roles": [item.model_dump(mode="json") for item in claimed_roles],
+            "proof_shape": proof_assessment.shape,
+            "proof_assessment": proof_assessment.model_dump(mode="json"),
             "runs": [run.model_dump(mode="json") for run in runs],
             "references": [item.model_dump(mode="json") for item in references],
             "claims": [claim.model_dump(mode="json") for claim in claims],
@@ -274,8 +314,11 @@ class EvidenceSummaryService:
         }
         summary = EvidenceSummary(
             summary_digest=digest_model(payload),
-            corpus_commit_id=head.commit_id,
-            proof_shape=self._proof_shape(request),
+            corpus_commit_id=corpus_commit_id,
+            selection_shape=selection_shape,
+            claimed_roles=claimed_roles,
+            proof_shape=proof_assessment.shape,
+            proof_assessment=proof_assessment,
             runs=runs,
             references=references,
             claims=claims,
@@ -302,22 +345,22 @@ class EvidenceSummaryService:
 
     def _run_summary(
         self,
-        snapshot: Snapshot,
+        evidence: EvidenceSession,
         run_id: str,
         role: SummaryRunRole,
         *,
         request: EvidenceSummaryRequest,
         truncation: list[str],
     ) -> SummaryRun:
-        run = snapshot.run(run_id)
+        run = evidence.run(run_id)
         source = self._identity_row(
-            snapshot,
+            evidence,
             "source_states",
             "source_state_id",
             run.source_state_id,
         )
         environment = self._identity_row(
-            snapshot,
+            evidence,
             "environments",
             "environment_id",
             run.environment_id,
@@ -327,23 +370,26 @@ class EvidenceSummaryService:
         for registration in run.artifacts[:50]:
             excerpt: tuple[str, ...] = ()
             excerpt_truncated = False
+            effective_sensitivity = registration.sensitivity
             if (
                 request.output_excerpts is SummaryExcerptPolicy.INTERNAL
                 and registration.kind
                 in {ArtifactKind.PROCESS_OUTPUT, ArtifactKind.VALIDATION_OUTPUT}
                 and registration.sensitivity is not Sensitivity.SENSITIVE
             ):
-                if excerpted < 4:
-                    excerpt, excerpt_truncated = self._excerpt(registration.artifact_id)
+                artifact = evidence.artifact(registration.artifact_id)
+                effective_sensitivity = artifact.metadata.effective_sensitivity
+                if excerpted < 4 and effective_sensitivity is not Sensitivity.SENSITIVE:
+                    excerpt, excerpt_truncated = self._excerpt(artifact.payload_path)
                     excerpted += 1
-                else:
+                elif excerpted >= 4:
                     truncation.append(f"run:{run_id}:output_artifacts")
             artifacts.append(
                 SummaryArtifact(
                     artifact_id=registration.artifact_id,
                     kind=registration.kind,
                     role=registration.role,
-                    sensitivity=registration.sensitivity,
+                    sensitivity=effective_sensitivity,
                     producer=registration.producer,
                     producer_version=registration.producer_version,
                     excerpt=excerpt,
@@ -352,7 +398,7 @@ class EvidenceSummaryService:
             )
         if len(run.artifacts) > 50:
             truncation.append(f"run:{run_id}:artifacts")
-        attempts, attempts_truncated = self._attempts(snapshot, run_id)
+        attempts, attempts_truncated = self._attempts(evidence, run_id)
         if attempts_truncated:
             truncation.append(f"run:{run_id}:attempts")
         external_context = (
@@ -389,11 +435,13 @@ class EvidenceSummaryService:
             )
         return SummaryRun(
             run_id=run_id,
-            proof_role=role,
+            claimed_role=role,
             execution_status=run.execution_status,
             validation_status=run.validation_status,
             workload_definition_id=run.workload_definition_id,
             workload_instance_id=run.workload_instance_id,
+            measurement_protocol_id=run.measurement_protocol_id,
+            inference_protocol_identity_id=run.inference_protocol_identity_id,
             argv=argv,
             source=source,
             environment=environment,
@@ -411,14 +459,14 @@ class EvidenceSummaryService:
 
     @staticmethod
     def _identity_row(
-        snapshot: Snapshot,
+        evidence: EvidenceSession,
         table: str,
         identifier: str,
         value: str | None,
     ) -> dict[str, JsonValue]:
         if value is None:
             return {"identity": None, "identity_quality": "unknown"}
-        connection = snapshot.execute(
+        connection = evidence.execute(
             f'SELECT * FROM "{table}" WHERE "{identifier}" = ? ORDER BY published_at DESC LIMIT 1',
             (value,),
         )
@@ -440,10 +488,10 @@ class EvidenceSummaryService:
 
     @staticmethod
     def _attempts(
-        snapshot: Snapshot,
+        evidence: EvidenceSession,
         run_id: str,
     ) -> tuple[tuple[SummaryAttempt, ...], bool]:
-        rows = snapshot.execute(
+        rows = evidence.execute(
             "SELECT trial_id, outcome, failure_class, exclusion_reason, combination_id, "
             "factors_json FROM trials WHERE run_id = ? "
             "ORDER BY published_at DESC LIMIT 21",
@@ -472,48 +520,63 @@ class EvidenceSummaryService:
 
     def _claim(
         self,
-        snapshot: Snapshot,
+        evidence_session: EvidenceSession,
         finding_id: str,
-        request: EvidenceSummaryRequest,
     ) -> SummaryClaim:
-        finding = self.findings.read(finding_id)
-        rows = snapshot.execute(
-            "SELECT ref_type, ref_id, relation FROM evidence_references "
-            "WHERE owner_type = 'finding' AND owner_id = ? "
-            "ORDER BY ref_type, ref_id LIMIT 51",
-            (finding_id,),
-        ).fetchall()
-        evidence = tuple(
-            {
-                "ref_type": cast(JsonValue, str(row[0])),
-                "ref_id": cast(JsonValue, str(row[1])),
-                "relation": cast(JsonValue, str(row[2])),
-            }
-            for row in rows[:50]
+        finding = evidence_session.finding(finding_id)
+        references = evidence_session.references(
+            owner_type="finding",
+            owner_id=finding_id,
+            owner_revision=finding.revision,
         )
-        invalid_comparison = False
-        for item in evidence:
-            if item["ref_type"] == "comparison":
-                comparison = self.lookup.get(
-                    EvidenceReferenceType.COMPARISON,
-                    cast(str, item["ref_id"]),
-                ).data
-                invalid_comparison = invalid_comparison or comparison.get("validity") != "valid"
-        candidate_only = request.candidate_run_id is not None and request.baseline_run_id is None
+        assessed: list[tuple[EvidenceRelation, bool, str | None]] = []
+        evidence_rows: list[dict[str, JsonValue]] = []
+        for reference in references:
+            qualification = qualify_evidence_relation(
+                evidence_session,
+                ref_type=reference.ref_type,
+                ref_id=reference.ref_id,
+                relation=reference.relation,
+            )
+            assessed.append((reference.relation, qualification.qualified, qualification.reason))
+            evidence_rows.append(
+                {
+                    "ref_type": cast(JsonValue, reference.ref_type.value),
+                    "ref_id": cast(JsonValue, reference.ref_id),
+                    "relation": cast(JsonValue, reference.relation.value),
+                    "qualified": qualification.qualified,
+                    "qualification_reason": cast(JsonValue, qualification.reason),
+                }
+            )
+        evidence = tuple(evidence_rows)
+        qualified_positive = any(
+            qualified and is_positive_relation(relation)
+            for relation, qualified, _reason in assessed
+        )
+        qualified_contradiction = any(
+            qualified and relation is EvidenceRelation.CONTRADICTS
+            for relation, qualified, _reason in assessed
+        )
         status: SummarySupportStatus
         limitations = list(finding.limitations)
-        if len(rows) > 50:
-            limitations.append("Finding evidence references were truncated at 50 items.")
-        if invalid_comparison or finding.assessment is not FindingAssessment.SUPPORTED:
-            status = SummarySupportStatus.NOT_SUPPORTING
-        elif candidate_only:
-            status = SummarySupportStatus.CANDIDATE_ONLY
+        limitations.extend(
+            f"Evidence relation {relation.value} is unqualified: {reason}."
+            for relation, qualified, reason in assessed
+            if not qualified and reason is not None
+        )
+        if qualified_positive and qualified_contradiction:
+            status = SummarySupportStatus.MIXED_UNRESOLVED
+        elif qualified_contradiction:
+            status = SummarySupportStatus.CONTRADICTED
+        elif finding.assessment is FindingAssessment.SUPPORTED and qualified_positive:
+            status = SummarySupportStatus.SUPPORTED_BY_EVIDENCE
+        elif finding.assessment is FindingAssessment.SUPPORTED:
+            status = SummarySupportStatus.RECORDED_SUPPORT_MISSING
             limitations.append(
-                "Candidate-only validation does not establish that the behavior regressed "
-                "on the base revision."
+                "The recorded supported assessment has no qualified supports or validates edge."
             )
         else:
-            status = SummarySupportStatus.AS_RECORDED
+            status = SummarySupportStatus.NOT_SUPPORTING
         return SummaryClaim(
             finding_id=finding.finding_id,
             title=finding.title,
@@ -526,16 +589,239 @@ class EvidenceSummaryService:
         )
 
     @staticmethod
-    def _proof_shape(
+    def _selection_shape(request: EvidenceSummaryRequest) -> SummarySelectionShape:
+        selected_run_count = sum(
+            value is not None for value in (request.baseline_run_id, request.candidate_run_id)
+        ) + len(request.run_ids)
+        non_run_count = (
+            len(request.comparison_ids) + len(request.analysis_ids) + len(request.finding_ids)
+        )
+        if selected_run_count == 1 and non_run_count == 0:
+            return SummarySelectionShape.SINGLE_RUN
+        if (
+            request.baseline_run_id is not None
+            and request.candidate_run_id is not None
+            and not request.run_ids
+            and non_run_count == 0
+        ):
+            return SummarySelectionShape.TWO_CLAIMED_RUNS
+        return SummarySelectionShape.MIXED_EVIDENCE
+
+    def _proof_assessment(
+        self,
+        evidence: EvidenceSession,
+        *,
         request: EvidenceSummaryRequest,
-    ) -> SummaryProofShape:
-        if request.baseline_run_id is not None and request.candidate_run_id is not None:
-            return SummaryProofShape.PAIRED_VALIDATION
-        if request.candidate_run_id is not None:
-            return SummaryProofShape.CANDIDATE_ONLY_VALIDATION
-        if request.baseline_run_id is not None:
-            return SummaryProofShape.BASELINE_ONLY_OBSERVATION
-        return SummaryProofShape.SELECTED_EVIDENCE
+        runs: tuple[SummaryRun, ...],
+        references: tuple[SummaryReference, ...],
+    ) -> SummaryProofAssessment:
+        baseline = next(
+            (run for run in runs if run.claimed_role is SummaryRunRole.BASELINE),
+            None,
+        )
+        candidate = next(
+            (run for run in runs if run.claimed_role is SummaryRunRole.CANDIDATE),
+            None,
+        )
+        if baseline is None and candidate is None:
+            return SummaryProofAssessment(shape=SummaryProofShape.SELECTED_EVIDENCE)
+        if baseline is not None and candidate is None:
+            return SummaryProofAssessment(
+                shape=SummaryProofShape.BASELINE_OBSERVATION,
+                verified_baseline_run_id=baseline.run_id,
+                satisfied_conditions=("baseline_run_resolved",),
+            )
+        if baseline is None:
+            assert candidate is not None
+            satisfied, missing = self._semantic_validation_conditions(evidence, candidate)
+            if not missing:
+                return SummaryProofAssessment(
+                    shape=SummaryProofShape.CANDIDATE_VALIDATED,
+                    binding_type="run_validation",
+                    binding_id=candidate.run_id,
+                    verified_candidate_run_id=candidate.run_id,
+                    satisfied_conditions=satisfied,
+                )
+            return SummaryProofAssessment(
+                shape=SummaryProofShape.INCOMPLETE,
+                satisfied_conditions=satisfied,
+                missing_conditions=missing,
+            )
+
+        assert candidate is not None
+        baseline_satisfied, baseline_missing = self._semantic_validation_conditions(
+            evidence,
+            baseline,
+            prefix="baseline_",
+        )
+        candidate_satisfied, candidate_missing = self._semantic_validation_conditions(
+            evidence,
+            candidate,
+            prefix="candidate_",
+        )
+        pair_satisfied = [*baseline_satisfied, *candidate_satisfied]
+        pair_missing = [*baseline_missing, *candidate_missing]
+        for code, compatible in (
+            (
+                "workload_definition_compatible",
+                baseline.workload_definition_id is not None
+                and baseline.workload_definition_id == candidate.workload_definition_id,
+            ),
+            (
+                "measurement_protocol_compatible",
+                baseline.measurement_protocol_id is not None
+                and baseline.measurement_protocol_id == candidate.measurement_protocol_id,
+            ),
+            (
+                "environment_compatible",
+                self._environment_identity(baseline) is not None
+                and self._environment_identity(baseline) == self._environment_identity(candidate),
+            ),
+        ):
+            (pair_satisfied if compatible else pair_missing).append(code)
+
+        bindings = [
+            reference
+            for reference in references
+            if reference.ref_type is SummaryReferenceKind.COMPARISON
+            and self._comparison_binds_runs(
+                evidence,
+                reference,
+                baseline_run_id=baseline.run_id,
+                candidate_run_id=candidate.run_id,
+            )
+        ]
+        if len(bindings) == 1:
+            pair_satisfied.append("exact_valid_comparison_binding")
+        elif not bindings:
+            pair_missing.append("exact_valid_comparison_binding")
+        else:
+            pair_missing.append("unambiguous_comparison_binding")
+        if not pair_missing and len(bindings) == 1:
+            binding = bindings[0]
+            return SummaryProofAssessment(
+                shape=SummaryProofShape.VALIDATED_PAIR,
+                binding_type="comparison",
+                binding_id=binding.ref_id,
+                verified_baseline_run_id=baseline.run_id,
+                verified_candidate_run_id=candidate.run_id,
+                satisfied_conditions=tuple(pair_satisfied),
+            )
+        return SummaryProofAssessment(
+            shape=SummaryProofShape.INCOMPLETE,
+            satisfied_conditions=tuple(pair_satisfied),
+            missing_conditions=tuple(dict.fromkeys(pair_missing)),
+        )
+
+    @staticmethod
+    def _semantic_validation_conditions(
+        evidence: EvidenceSession,
+        run: SummaryRun,
+        *,
+        prefix: str = "",
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        manifest = evidence.run(run.run_id)
+        satisfied: list[str] = []
+        missing: list[str] = []
+        execution_eligible = manifest.execution_status in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.NOT_APPLICABLE,
+        }
+        (satisfied if execution_eligible else missing).append(f"{prefix}execution_eligible")
+        validation_passed = manifest.validation_status is ValidationStatus.PASSED
+        (satisfied if validation_passed else missing).append(f"{prefix}validation_passed")
+        receipt_passed = (
+            manifest.oracle_receipt is not None and manifest.oracle_receipt.receipt.status == "pass"
+        )
+        if not receipt_passed and manifest.inference_protocol_identity_json is not None:
+            try:
+                protocol = json.loads(manifest.inference_protocol_identity_json)
+                oracle_result = (
+                    protocol.get("oracle_result") if isinstance(protocol, dict) else None
+                )
+                receipt_passed = (
+                    isinstance(oracle_result, dict) and oracle_result.get("status") == "pass"
+                )
+            except (TypeError, ValueError):
+                receipt_passed = False
+        (satisfied if receipt_passed else missing).append(f"{prefix}semantic_validation_receipt")
+        return tuple(satisfied), tuple(missing)
+
+    @staticmethod
+    def _environment_identity(run: SummaryRun) -> str | None:
+        value = run.environment.get("environment_id") or run.environment.get("identity")
+        return value if isinstance(value, str) else None
+
+    @staticmethod
+    def _comparison_binds_runs(
+        evidence: EvidenceSession,
+        reference: SummaryReference,
+        *,
+        baseline_run_id: str,
+        candidate_run_id: str,
+    ) -> bool:
+        data = evidence.get(EvidenceReferenceType.COMPARISON, reference.ref_id).data
+        if data.get("validity") != "valid":
+            return False
+        if data.get("decision") in {None, "inconclusive", "descriptive_only"}:
+            return False
+        baseline_set_id = data.get("baseline_run_set_id")
+        candidate_set_id = data.get("candidate_run_set_id")
+        if not isinstance(baseline_set_id, str) or not isinstance(candidate_set_id, str):
+            return False
+        return EvidenceSummaryService._run_set_exactly_contains(
+            evidence,
+            baseline_set_id,
+            baseline_run_id,
+        ) and EvidenceSummaryService._run_set_exactly_contains(
+            evidence,
+            candidate_set_id,
+            candidate_run_id,
+        )
+
+    @staticmethod
+    def _run_set_exactly_contains(
+        evidence: EvidenceSession,
+        run_set_id: str,
+        run_id: str,
+    ) -> bool:
+        data = evidence.get(EvidenceReferenceType.RUN_SET, run_set_id).data
+        raw_members = data.get("members_json")
+        raw_selection = data.get("selection_json")
+        membership_digest = data.get("membership_digest")
+        corpus_commit_id = data.get("corpus_commit_id")
+        if (
+            not isinstance(raw_members, str)
+            or not isinstance(raw_selection, str)
+            or not isinstance(membership_digest, str)
+            or not isinstance(corpus_commit_id, str)
+        ):
+            return False
+        try:
+            members = json.loads(raw_members)
+            selection = json.loads(raw_selection)
+        except (TypeError, ValueError):
+            return False
+        if (
+            not isinstance(members, list)
+            or not isinstance(selection, dict)
+            or digest_model(members) != membership_digest
+            or digest_model(
+                {
+                    "corpus_commit_id": corpus_commit_id,
+                    "selection": selection,
+                    "members": members,
+                }
+            )
+            != run_set_id
+        ):
+            return False
+        included_run_ids = [
+            member.get("run_id")
+            for member in members
+            if isinstance(member, dict) and member.get("included") is True
+        ]
+        return included_run_ids == [run_id]
 
     @staticmethod
     def _limitations(
@@ -543,12 +829,17 @@ class EvidenceSummaryService:
         runs: tuple[SummaryRun, ...],
         references: tuple[SummaryReference, ...],
         claims: tuple[SummaryClaim, ...],
+        proof_assessment: SummaryProofAssessment,
     ) -> tuple[str, ...]:
         limitations = [limitation for run in runs for limitation in run.limitations]
         limitations.extend(limitation for claim in claims for limitation in claim.limitations)
-        if request.candidate_run_id is not None and request.baseline_run_id is None:
+        if (
+            request.candidate_run_id is not None
+            and request.baseline_run_id is None
+            and proof_assessment.shape is SummaryProofShape.CANDIDATE_VALIDATED
+        ):
             limitations.append(
-                "This selection contains candidate validation without a base observation."
+                "Candidate validation alone does not establish behavior relative to a baseline."
             )
         if (
             request.baseline_run_id is not None
@@ -571,10 +862,15 @@ class EvidenceSummaryService:
                     f"Comparison {reference.ref_id} is "
                     f"{reference.data.get('validity', 'unknown')} and is not supporting proof."
                 )
+        if proof_assessment.missing_conditions:
+            limitations.append(
+                "Proof remains incomplete; missing conditions: "
+                + ", ".join(proof_assessment.missing_conditions)
+                + "."
+            )
         return tuple(dict.fromkeys(limitations))
 
-    def _excerpt(self, artifact_id: str) -> tuple[tuple[str, ...], bool]:
-        path = self.artifacts.get(artifact_id).payload_path
+    def _excerpt(self, path: Path) -> tuple[tuple[str, ...], bool]:
         selected: list[str] = []
         truncated = False
         with path.open(encoding="utf-8", errors="replace") as stream:
@@ -631,13 +927,25 @@ def render_evidence_summary_markdown(summary: EvidenceSummary) -> str:
         "",
         f"- Summary digest: `{summary.summary_digest}`",
         f"- Corpus commit: `{summary.corpus_commit_id}`",
+        f"- Selection shape: `{summary.selection_shape}`",
         f"- Proof shape: `{summary.proof_shape}`",
     ]
+    if summary.proof_assessment.binding_id is not None:
+        lines.append(
+            f"- Proof binding: `{summary.proof_assessment.binding_type}:"
+            f"{summary.proof_assessment.binding_id}`"
+        )
+    if summary.proof_assessment.missing_conditions:
+        lines.append(
+            "- Missing proof conditions: `"
+            + ", ".join(summary.proof_assessment.missing_conditions)
+            + "`"
+        )
     for run in summary.runs:
         lines.extend(
             (
                 "",
-                f"## {_inline(run.proof_role.title())} run",
+                f"## Claimed {_inline(run.claimed_role.title())} run",
                 "",
                 f"- Run: `{run.run_id}`",
                 f"- Execution: `{run.execution_status}`",

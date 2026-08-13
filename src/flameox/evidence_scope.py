@@ -52,7 +52,7 @@ def resolve_evidence_scope(
             artifact_ids.add(input_id)
             continue
         present = snapshot.execute(
-            "SELECT 1 FROM runs WHERE run_id = ? LIMIT 1",
+            "SELECT 1 FROM current_runs WHERE run_id = ?",
             (input_id,),
         ).fetchone()
         if present is None:

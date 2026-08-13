@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import threading
-from io import BytesIO
 from pathlib import Path
 
+import httpx
 import pytest
 
+from flameox.action_graph import ActionId, manual_action, tool_action
 from flameox.adapters import ManagedRuntime, install_trace_processor
+from flameox.adapters import setup_runtime as _setup_runtime
 from flameox.application import CapabilityList
 from flameox.application.capabilities import CapabilityService
 from flameox.domain import (
@@ -27,7 +30,15 @@ from flameox.execution import (
     ProcessContainment,
     SubprocessBroker,
 )
+from flameox.http_transport import BoundedHttpClient
+from flameox.managed_tools import (
+    ManagedToolAsset,
+    build_managed_tool_receipt,
+    write_managed_tool_receipt,
+)
 from flameox.storage import Workspace
+
+pytestmark = pytest.mark.unit
 
 
 class RecordingRuntime(ManagedRuntime):
@@ -112,7 +123,7 @@ async def test_runtime_install_uses_an_exact_isolated_uv_tool_environment(
 
 
 @pytest.mark.anyio
-async def test_prepared_workspace_capability_is_carried_into_runtime_upgrade(
+async def test_runtime_upgrade_does_not_copy_provider_packages_into_control_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -125,9 +136,16 @@ async def test_prepared_workspace_capability_is_carried_into_runtime_upgrade(
 
     setup = CapabilitySetup(
         extra=CapabilityExtra.TORCH,
-        method="start_capability_setup",
-        next_tool="start_capability_setup",
         requirement="torch>=2.7",
+        next_action=manual_action(
+            "Choose an idempotency key and start setup for torch.profiler.",
+            suggested_action=ActionId.START_CAPABILITY_SETUP,
+            missing_arguments=("idempotency_key",),
+        ),
+        verification_action=tool_action(
+            ActionId.INSPECT_CAPABILITIES,
+            adapter="torch.profiler",
+        ),
     )
     available = CapabilityReport(
         adapter="torch.profiler",
@@ -147,7 +165,8 @@ async def test_prepared_workspace_capability_is_carried_into_runtime_upgrade(
 
     assert prepared.already_available == ("torch.profiler",)
     assert installed.installed is True
-    assert broker.requests[0].argv[-1] == "flameox[torch]==0.1.1"
+    assert broker.requests[0].argv[-1] == "flameox==0.1.1"
+    assert not (runtime_root / "capabilities.json").exists()
 
 
 def test_installed_version_discovery_ignores_unmanaged_directories(tmp_path: Path) -> None:
@@ -158,27 +177,49 @@ def test_installed_version_discovery_ignores_unmanaged_directories(tmp_path: Pat
     assert ManagedRuntime(tmp_path).installed_versions() == ()
 
 
+def _patch_trace_processor_asset(
+    monkeypatch: pytest.MonkeyPatch,
+    expected_payload: bytes,
+) -> ManagedToolAsset:
+    digest = hashlib.sha256(expected_payload).hexdigest()
+    asset = ManagedToolAsset(
+        manifest_revision="test-manifest",
+        tool="perfetto-trace-processor",
+        version="v55.1",
+        platform="linux",
+        machine="x86_64",
+        asset_name="trace_processor_shell-linux-amd64",
+        url="https://downloads.example.com/trace_processor_shell",
+        allowed_origins=("https://downloads.example.com",),
+        sha256=digest,
+        byte_length=len(expected_payload),
+        max_bytes=1024 * 1024,
+        executable_sha256=digest,
+    )
+    monkeypatch.setattr(_setup_runtime, "_trace_processor_asset", lambda: asset)
+    return asset
+
+
 def test_trace_processor_setup_stages_a_user_space_binary_and_updates_workspace_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    monkeypatch.setattr("flameox.adapters.setup_runtime.sys.platform", "linux")
-    monkeypatch.setattr("flameox.adapters.setup_runtime._machine", lambda: "x86_64")
+    payload = b"trace-processor-binary"
+    asset = _patch_trace_processor_asset(monkeypatch, payload)
 
-    class Response:
-        def __enter__(self) -> BytesIO:
-            return BytesIO(b"trace-processor-binary")
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-    monkeypatch.setattr(
-        "flameox.adapters.setup_runtime.urllib.request.urlopen", lambda *args, **kwargs: Response()
+    http_client = BoundedHttpClient(
+        sync_transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                stream=httpx.ByteStream(payload),
+            )
+        )
     )
     broker = RecordingBroker()
 
-    result = install_trace_processor(workspace, broker=broker)
+    with http_client:
+        result = install_trace_processor(workspace, broker=broker, http_client=http_client)
 
     assert result.installed is True
     assert result.executable.is_file()
@@ -186,16 +227,50 @@ def test_trace_processor_setup_stages_a_user_space_binary_and_updates_workspace_
     assert broker.requests[0].argv[1:] == ("--version",)
     assert Path(broker.requests[0].argv[0]).parent == workspace.paths.staging
     assert broker.requests[0].environment_allowlist == ()
+    assert result.asset_sha256 == asset.sha256
+    assert result.executable_sha256 == asset.executable_sha256
+
+
+def test_trace_processor_rejects_substituted_version_printer_before_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    substituted = b"#!/bin/sh\necho 55.1\n"
+    _patch_trace_processor_asset(monkeypatch, b"x" * len(substituted))
+    http_client = BoundedHttpClient(
+        sync_transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                stream=httpx.ByteStream(substituted),
+            )
+        )
+    )
+    broker = RecordingBroker()
+
+    with http_client, pytest.raises(DomainError) as caught:
+        install_trace_processor(workspace, broker=broker, http_client=http_client)
+
+    assert caught.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+    assert broker.requests == []
 
 
 def test_trace_processor_verification_cancellation_uses_broker_cleanup(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     target = workspace.paths.root / "tools" / "trace_processor_shell"
     target.parent.mkdir(parents=True)
     target.write_text("placeholder")
     target.chmod(0o755)
+    asset = _patch_trace_processor_asset(monkeypatch, b"placeholder")
+    receipt = build_managed_tool_receipt(
+        asset,
+        target,
+        trusted_root=target.parent,
+    )
+    write_managed_tool_receipt(target.parent / "trace-processor-receipt.json", receipt)
     broker = BlockingBroker()
     cancel_event = threading.Event()
     failures: list[BaseException] = []

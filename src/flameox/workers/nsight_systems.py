@@ -4,10 +4,23 @@ import hashlib
 import json
 import sqlite3
 from pathlib import Path
+from typing import cast
 from urllib.parse import quote
 
-from flameox.domain import ErrorCode
-from flameox.workers.protocol import run_worker
+from pydantic import JsonValue
+
+from flameox.domain import DomainError, ErrorCode
+from flameox.workers.nsight_systems_contract import (
+    NSIGHT_SYSTEMS_WORKER,
+    NsightSystemsWorkerRequest,
+    NsightSystemsWorkerResult,
+)
+from flameox.workers.protocol import (
+    WorkerApplication,
+    WorkerContext,
+    WorkerFailureKind,
+    run_typed_worker,
+)
 
 
 def _identifier(value: str) -> str:
@@ -449,19 +462,37 @@ def _extract(path: Path, *, limit: int) -> dict[str, object]:
         connection.close()
 
 
-def _handle(request: dict[str, object], _request_path: Path) -> dict[str, object]:
-    return _extract(
-        Path(str(request["artifact_path"])),
-        limit=int(str(request["max_rows_per_table"])),
+def _handle(
+    request: NsightSystemsWorkerRequest,
+    _context: WorkerContext,
+) -> NsightSystemsWorkerResult:
+    try:
+        result = _extract(Path(request.artifact_path), limit=request.max_rows_per_table)
+    except ValueError as exc:
+        if str(exc).startswith("Unsupported Nsight Systems schema:"):
+            raise DomainError(ErrorCode.ARTIFACT_PARSE_FAILED, str(exc)) from exc
+        raise
+    return NsightSystemsWorkerResult(
+        schema_fingerprint=cast(str, result["schema_fingerprint"]),
+        tables=tuple(cast(list[str], result["tables"])),
+        events=cast(
+            tuple[dict[str, JsonValue], ...],
+            tuple(cast(list[dict[str, object]], result["events"])),
+        ),
+        coverage=cast(dict[str, bool], result["coverage"]),
+        truncated_tables=tuple(cast(list[str], result["truncated_tables"])),
     )
 
 
 def main() -> int:
-    return run_worker(
-        _handle,
-        invalid_code=ErrorCode.ARTIFACT_PARSE_FAILED,
-        invalid_message="Nsight Systems structured export is unsupported or invalid",
-        caught=(OSError, sqlite3.DatabaseError, ValueError, KeyError, TypeError),
+    return run_typed_worker(
+        WorkerApplication(
+            definition=NSIGHT_SYSTEMS_WORKER,
+            handler=_handle,
+            invalid_failure=WorkerFailureKind.INPUT_MALFORMED,
+            invalid_message="Nsight Systems structured export is unsupported or invalid",
+            caught=(OSError, sqlite3.DatabaseError, ValueError, KeyError, TypeError),
+        )
     )
 
 

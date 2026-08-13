@@ -3,20 +3,15 @@ from __future__ import annotations
 import json
 import mimetypes
 import stat
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
 from pydantic import Field, StringConstraints
 
 from flameox.application.environment import collect_environment
-from flameox.application.evidence_rows import (
-    artifact_registration_row,
-    environment_row,
-    source_state_row,
-)
-from flameox.application.run_rows import run_row
+from flameox.application.projections import ProjectionCoordinator
 from flameox.application.source import collect_partial_source_state
 from flameox.domain.errors import DomainError, ErrorCode
 from flameox.domain.identity import new_id
@@ -29,7 +24,6 @@ from flameox.domain.models import (
     Sensitivity,
     ValidationStatus,
 )
-from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactSnapshot, ArtifactStore, RunStore, StoredArtifact, Workspace
 
@@ -39,34 +33,23 @@ if TYPE_CHECKING:
 _MAX_BUNDLE_MEMBERS = 100
 
 
-def _verify_declared_integrity(
-    member: BundleMember,
-    stored: StoredArtifact,
-) -> None:
-    """Verify imported content against provider-declared integrity.
-
-    Closes the TOCTOU gap between provider preflight and registration:
-    if the source changed between the provider's manifest declaration
-    and the actual import, the ``StoredArtifact`` digest/size will not
-    match and the bundle is rejected before any registration is
-    constructed or committed.
-    """
-    if member.expected_byte_length is not None:
-        actual = stored.content.byte_length
-        if actual != member.expected_byte_length:
-            raise DomainError(
-                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                f"Bundle member {member.path!s} byte length mismatch: "
-                f"expected {member.expected_byte_length}, got {actual}.",
-            )
+def _verify_declared_snapshot(member: BundleMember, snapshot: ArtifactSnapshot) -> None:
+    if (
+        member.expected_byte_length is not None
+        and snapshot.byte_length != member.expected_byte_length
+    ):
+        raise DomainError(
+            ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+            f"Bundle member {member.path!s} byte length mismatch: "
+            f"expected {member.expected_byte_length}, got {snapshot.byte_length}.",
+        )
     if member.expected_sha256 is not None:
         expected_hex = member.expected_sha256.removeprefix("sha256:").lower()
-        actual_hex = stored.content.integrity.sha256.lower()
-        if actual_hex != expected_hex:
+        if snapshot.sha256.lower() != expected_hex:
             raise DomainError(
                 ErrorCode.ARTIFACT_INTEGRITY_FAILED,
                 f"Bundle member {member.path!s} sha256 mismatch: "
-                f"expected {expected_hex}, got {actual_hex}.",
+                f"expected {expected_hex}, got {snapshot.sha256.lower()}.",
             )
 
 
@@ -79,6 +62,22 @@ class ImportArtifactRequest(ContractModel):
     producer: str | None = None
     producer_version: str | None = None
     allow_external_path: bool = False
+
+
+class ImportDescriptorRequest(ContractModel):
+    """Internal import intent for an exact file descriptor admitted by its producer."""
+
+    descriptor: Annotated[int, Field(ge=0, exclude=True)]
+    display_name: Annotated[
+        str,
+        StringConstraints(min_length=1, max_length=255, pattern=r"^[^/\\\x00\r\n]+$"),
+    ]
+    kind: ArtifactKind = ArtifactKind.COLLECTOR_METADATA
+    media_type: str | None = None
+    sensitivity: Sensitivity = Sensitivity.INTERNAL
+    role: str = "primary"
+    producer: str | None = None
+    producer_version: str | None = None
 
 
 class ImportResult(ContractModel):
@@ -145,7 +144,7 @@ class ImportService:
         self.workspace = workspace
         self.artifacts = ArtifactStore(workspace)
         self.runs = RunStore(workspace)
-        self.publisher = GenerationPublisher(workspace)
+        self.projections = ProjectionCoordinator(workspace)
 
     @contextmanager
     def _snapshot_provider_document(
@@ -172,22 +171,71 @@ class ImportService:
             yield snapshot
 
     def import_artifact(self, request: ImportArtifactRequest) -> ImportResult:
+        allowed_roots = [self.workspace.project_root]
+        if request.allow_external_path:
+            allowed_roots.append(request.path.absolute().parent)
+        return self._import_one(
+            kind=request.kind,
+            sensitivity=request.sensitivity,
+            display_name=request.path.name,
+            media_type=request.media_type,
+            role=request.role,
+            producer=request.producer,
+            producer_version=request.producer_version,
+            store=lambda: self.artifacts.import_path(
+                request.path,
+                allowed_roots=tuple(allowed_roots),
+                max_bytes=self.workspace.config.capture.max_artifact_bytes,
+            ),
+        )
+
+    def import_descriptor(self, request: ImportDescriptorRequest) -> ImportResult:
+        """Register content from an exact descriptor without resolving its source path again."""
+
+        return self._import_one(
+            kind=request.kind,
+            sensitivity=request.sensitivity,
+            display_name=request.display_name,
+            media_type=request.media_type,
+            role=request.role,
+            producer=request.producer,
+            producer_version=request.producer_version,
+            store=lambda: self.artifacts.import_descriptor(
+                request.descriptor,
+                display_name=request.display_name,
+                max_bytes=self.workspace.config.capture.max_artifact_bytes,
+            ),
+        )
+
+    def _import_one(
+        self,
+        *,
+        kind: ArtifactKind,
+        sensitivity: Sensitivity,
+        display_name: str,
+        media_type: str | None,
+        role: str,
+        producer: str | None,
+        producer_version: str | None,
+        store: Callable[[], StoredArtifact],
+    ) -> ImportResult:
         if (
-            request.kind
+            kind
             in {
                 ArtifactKind.CORE_DUMP,
                 ArtifactKind.SOURCE_SNAPSHOT,
                 ArtifactKind.INFERENCE_REQUEST_TRACE,
+                ArtifactKind.METAL_TRACE,
             }
-            and request.sensitivity is not Sensitivity.SENSITIVE
+            and sensitivity is not Sensitivity.SENSITIVE
         ) or (
-            request.kind is ArtifactKind.INFERENCE_RESULT
-            and request.producer == "aiperf"
-            and request.sensitivity is not Sensitivity.SENSITIVE
+            kind is ArtifactKind.INFERENCE_RESULT
+            and producer == "aiperf"
+            and sensitivity is not Sensitivity.SENSITIVE
         ):
             raise DomainError(
                 code=ErrorCode.SENSITIVE_ARTIFACT_REFUSED,
-                message=f"{request.kind.value} artifacts must be marked sensitive.",
+                message=f"{kind.value} artifacts must be marked sensitive.",
             )
         environment = collect_environment()
         source_state = collect_partial_source_state(self.workspace)
@@ -201,15 +249,8 @@ class ImportService:
             collector="import",
         )
         self.runs.create(initial)
-        allowed_roots = [self.workspace.project_root]
-        if request.allow_external_path:
-            allowed_roots.append(request.path.absolute().parent)
         try:
-            stored = self.artifacts.import_path(
-                request.path,
-                allowed_roots=tuple(allowed_roots),
-                max_bytes=self.workspace.config.capture.max_artifact_bytes,
-            )
+            stored = store()
         except DomainError as error:
             failed = initial.validated_copy(
                 update={
@@ -218,23 +259,34 @@ class ImportService:
                     "limitations": (error.message,),
                 }
             )
-            self.runs.append(failed, expected_revision=0)
+            try:
+                self.projections.append_run(
+                    failed,
+                    expected_revision=0,
+                    environment=environment,
+                    source_state=source_state,
+                )
+            except Exception as projection_error:
+                error.add_note(
+                    "The failed import run has a durable projection recovery record: "
+                    f"{type(projection_error).__name__}."
+                )
             error.run_id = run_id
             raise
 
-        media_type = request.media_type or mimetypes.guess_type(request.path.name)[0]
-        producer = request.producer or self._infer_producer(stored.payload_path, request.kind)
+        resolved_media_type = media_type or mimetypes.guess_type(display_name)[0]
+        resolved_producer = producer or self._infer_producer(stored.payload_path, kind)
         registration = ArtifactRegistration(
             registration_id=new_id(),
             run_id=run_id,
             artifact_id=stored.content.artifact_id,
-            display_name=request.path.name,
-            media_type=media_type or "application/octet-stream",
-            kind=request.kind,
-            role=request.role,
-            producer=producer,
-            producer_version=request.producer_version,
-            sensitivity=request.sensitivity,
+            display_name=display_name,
+            media_type=resolved_media_type or "application/octet-stream",
+            kind=kind,
+            role=role,
+            producer=resolved_producer,
+            producer_version=producer_version,
+            sensitivity=sensitivity,
         )
         registered = initial.validated_copy(
             update={
@@ -243,31 +295,19 @@ class ImportService:
                 "artifacts": (registration,),
             }
         )
-        registered = self.runs.append(registered, expected_revision=0)
-        published = self.publisher.publish_rows(
-            {
-                "runs": [run_row(registered)],
-                "artifact_registrations": [
-                    artifact_registration_row(
-                        registration,
-                        byte_length=stored.content.byte_length,
-                    )
-                ],
-                "environments": [environment_row(environment)],
-                "source_states": [source_state_row(source_state)],
-            },
-            publisher="flameox.import",
-            publisher_version="1",
-            input_run_ids=(run_id,),
-            input_artifact_ids=(stored.content.artifact_id,),
+        projected = self.projections.append_run(
+            registered,
+            expected_revision=0,
+            environment=environment,
+            source_state=source_state,
         )
         return ImportResult(
-            run=registered,
+            run=projected.run,
             artifact_id=stored.content.artifact_id,
-            corpus_commit_id=published.commit.commit_id,
+            corpus_commit_id=projected.publication.commit.commit_id,
         )
 
-    def _import_provider_bundle(self, request: ImportBundleRequest) -> ImportBundleResult:
+    def import_provider_bundle(self, request: ImportBundleRequest) -> ImportBundleResult:
         """Import a primary artifact and its bounded sidecars into a single run.
 
         Enforces a hard 100-member bundle cap independent of the generic
@@ -306,52 +346,79 @@ class ImportService:
 
         registrations: list[ArtifactRegistration] = []
         artifact_ids: list[str] = []
-        registration_rows: list[dict[str, object]] = []
         imported_total_bytes = 0
         try:
-            for member in members:
-                stored = self.artifacts.import_path(
-                    member.path,
-                    allowed_roots=tuple(allowed_roots),
-                    max_bytes=max_bytes,
-                )
-                artifact_ids.append(stored.content.artifact_id)
-                _verify_declared_integrity(member, stored)
-                imported_total_bytes += stored.content.byte_length
-                if imported_total_bytes > max_total_bytes:
-                    raise DomainError(
-                        ErrorCode.ARTIFACT_TOO_LARGE,
-                        "Imported provider bundle exceeds the configured total staging limit.",
+            with ExitStack() as snapshots:
+                verified: list[tuple[BundleMember, ArtifactSnapshot]] = []
+                for member in members:
+                    snapshot = snapshots.enter_context(
+                        self.artifacts.temporary_snapshot(
+                            member.path,
+                            allowed_roots=tuple(allowed_roots),
+                            max_bytes=max_bytes,
+                        )
                     )
-                media_type = member.media_type or mimetypes.guess_type(member.path.name)[0]
-                registration = ArtifactRegistration(
-                    registration_id=new_id(),
-                    run_id=run_id,
-                    artifact_id=stored.content.artifact_id,
-                    display_name=member.display_name or member.path.name,
-                    media_type=media_type or "application/octet-stream",
-                    kind=request.kind,
-                    role=member.role,
-                    producer=request.producer or "flameox.import",
-                    producer_version=request.producer_version,
-                    sensitivity=request.sensitivity,
-                )
-                registrations.append(registration)
-                registration_rows.append(
-                    artifact_registration_row(
-                        registration,
-                        byte_length=stored.content.byte_length,
+                    _verify_declared_snapshot(member, snapshot)
+                    imported_total_bytes += snapshot.byte_length
+                    if imported_total_bytes > max_total_bytes:
+                        raise DomainError(
+                            ErrorCode.ARTIFACT_TOO_LARGE,
+                            "Imported provider bundle exceeds the configured total staging limit.",
+                        )
+                    verified.append((member, snapshot))
+
+                for member, snapshot in verified:
+                    display_name = member.display_name or member.path.name
+                    stored = self.artifacts.import_snapshot(
+                        snapshot,
+                        display_name=display_name,
                     )
-                )
+                    artifact_ids.append(stored.content.artifact_id)
+                    media_type = member.media_type or mimetypes.guess_type(member.path.name)[0]
+                    registration = ArtifactRegistration(
+                        registration_id=new_id(),
+                        run_id=run_id,
+                        artifact_id=stored.content.artifact_id,
+                        display_name=display_name,
+                        media_type=media_type or "application/octet-stream",
+                        kind=request.kind,
+                        role=member.role,
+                        producer=request.producer or "flameox.import",
+                        producer_version=request.producer_version,
+                        sensitivity=request.sensitivity,
+                    )
+                    registrations.append(registration)
         except DomainError as error:
             failed = initial.validated_copy(
                 update={
                     "revision": 1,
-                    "capture_status": CaptureStatus.FAILED,
+                    "capture_status": (
+                        CaptureStatus.REGISTERED if registrations else CaptureStatus.FAILED
+                    ),
+                    "artifacts": tuple(registrations),
                     "limitations": (error.message,),
                 }
             )
-            self.runs.append(failed, expected_revision=0)
+            projection_error: Exception | None = None
+            try:
+                self.projections.append_run(
+                    failed,
+                    expected_revision=0,
+                    environment=environment,
+                    source_state=source_state,
+                )
+            except Exception as caught:
+                projection_error = caught
+            if registrations:
+                error.details = {
+                    **error.details,
+                    "partial_artifact_ids": tuple(artifact_ids),
+                }
+            if projection_error is not None:
+                error.add_note(
+                    "The failed bundle import has a durable projection recovery record: "
+                    f"{type(projection_error).__name__}."
+                )
             error.run_id = run_id
             raise
 
@@ -362,24 +429,17 @@ class ImportService:
                 "artifacts": tuple(registrations),
             }
         )
-        registered = self.runs.append(registered, expected_revision=0)
-        published = self.publisher.publish_rows(
-            {
-                "runs": [run_row(registered)],
-                "artifact_registrations": registration_rows,
-                "environments": [environment_row(environment)],
-                "source_states": [source_state_row(source_state)],
-            },
-            publisher="flameox.import",
-            publisher_version="1",
-            input_run_ids=(run_id,),
-            input_artifact_ids=tuple(artifact_ids),
+        projected = self.projections.append_run(
+            registered,
+            expected_revision=0,
+            environment=environment,
+            source_state=source_state,
         )
         return ImportBundleResult(
-            run=registered,
+            run=projected.run,
             primary_artifact_id=artifact_ids[0],
             sidecar_artifact_ids=tuple(artifact_ids[1:]),
-            corpus_commit_id=published.commit.commit_id,
+            corpus_commit_id=projected.publication.commit.commit_id,
         )
 
     @staticmethod

@@ -1,78 +1,97 @@
 from __future__ import annotations
 
-import base64
-import binascii
-import json
+from dataclasses import dataclass
+from enum import StrEnum
+from types import MappingProxyType
+from typing import Literal
 
 from flameox.domain.errors import DomainError, ErrorCode
-from flameox.domain.identity import digest_model
 
 type CursorValue = str | int
+type CursorPosition = tuple[CursorValue, ...]
+type CursorComponentKind = Literal["string", "integer"]
 
 
-class CursorCodec:
-    """Integrity-check and bind keyset positions to one immutable query scope."""
+class CursorNamespace(StrEnum):
+    """Closed set of query families that may issue continuation handles."""
 
-    @staticmethod
-    def encode(
-        *,
-        namespace: str,
-        snapshot_id: str,
-        scope_digest: str,
-        position: tuple[CursorValue, ...],
-    ) -> str:
-        content = {
-            "schema_version": 1,
-            "namespace": namespace,
-            "snapshot_id": snapshot_id,
-            "scope_digest": scope_digest,
-            "position": list(position),
-        }
-        envelope = {**content, "digest": digest_model(content)}
-        return base64.urlsafe_b64encode(
-            json.dumps(envelope, separators=(",", ":"), sort_keys=True).encode()
-        ).decode()
+    ARTIFACTS = "artifacts"
+    CALL_EDGES = "call_edges"
+    DECLARED_WORKFLOWS = "declared_workflows"
+    EXPERIMENT_TRIALS = "experiment-trials"
+    FINDINGS = "findings"
+    FIND_REPEATED_OPERATION_SEQUENCES = "find_repeated_operation_sequences"
+    GET_OPERATION_WINDOW = "get_operation_window"
+    INFERENCE_REQUESTS = "inference_requests"
+    INVESTIGATIONS = "investigations"
+    MEASUREMENTS = "measurements"
+    OPERATION_TRANSITIONS = "operation_transitions"
+    RUNS = "runs"
+    STACK_EXAMPLES = "stack_examples"
+    TRACE_WINDOW = "trace_window"
 
-    @staticmethod
-    def decode(
-        cursor: str,
-        *,
-        namespace: str,
-        snapshot_id: str,
-        scope_digest: str,
-    ) -> tuple[CursorValue, ...]:
-        try:
-            envelope = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
-            position = envelope["position"]
-            if not isinstance(position, list) or any(
-                not isinstance(value, (str, int)) or isinstance(value, bool) for value in position
-            ):
-                raise ValueError("cursor position is invalid")
-            content = {
-                "schema_version": envelope["schema_version"],
-                "namespace": envelope["namespace"],
-                "snapshot_id": envelope["snapshot_id"],
-                "scope_digest": envelope["scope_digest"],
-                "position": position,
-            }
-            if envelope["digest"] != digest_model(content):
-                raise ValueError("cursor digest mismatch")
-        except (
-            ValueError,
-            KeyError,
-            TypeError,
-            UnicodeDecodeError,
-            binascii.Error,
-            json.JSONDecodeError,
-        ) as exc:
-            raise DomainError(ErrorCode.STALE_CURSOR, "Cursor is invalid.") from exc
-        if (
-            content["namespace"] != namespace
-            or content["snapshot_id"] != snapshot_id
-            or content["scope_digest"] != scope_digest
+
+@dataclass(frozen=True, slots=True)
+class CursorPositionSpec:
+    components: tuple[CursorComponentKind, ...]
+    query_family: str
+    max_age_seconds: int = 900
+    replay_policy: Literal["replayable"] = "replayable"
+
+
+CURSOR_POSITION_SPECS = MappingProxyType(
+    {
+        CursorNamespace.ARTIFACTS: CursorPositionSpec(("string",), "artifact discovery"),
+        CursorNamespace.CALL_EDGES: CursorPositionSpec(("integer", "string"), "profile drill-down"),
+        CursorNamespace.DECLARED_WORKFLOWS: CursorPositionSpec(("integer",), "workload discovery"),
+        CursorNamespace.EXPERIMENT_TRIALS: CursorPositionSpec(("integer",), "experiment trials"),
+        CursorNamespace.FINDINGS: CursorPositionSpec(("integer",), "finding discovery"),
+        CursorNamespace.FIND_REPEATED_OPERATION_SEQUENCES: CursorPositionSpec(
+            ("integer",), "lifecycle evidence"
+        ),
+        CursorNamespace.GET_OPERATION_WINDOW: CursorPositionSpec(
+            ("integer",), "lifecycle evidence"
+        ),
+        CursorNamespace.INFERENCE_REQUESTS: CursorPositionSpec(("string",), "inference evidence"),
+        CursorNamespace.INVESTIGATIONS: CursorPositionSpec(("integer",), "investigation discovery"),
+        CursorNamespace.MEASUREMENTS: CursorPositionSpec(("string",), "measurement evidence"),
+        CursorNamespace.OPERATION_TRANSITIONS: CursorPositionSpec(
+            ("integer",), "lifecycle evidence"
+        ),
+        CursorNamespace.RUNS: CursorPositionSpec(("string", "string"), "run discovery"),
+        CursorNamespace.STACK_EXAMPLES: CursorPositionSpec(
+            ("integer", "string"), "profile drill-down"
+        ),
+        CursorNamespace.TRACE_WINDOW: CursorPositionSpec(("integer", "integer"), "trace evidence"),
+    }
+)
+
+
+def validate_cursor_position(
+    namespace: CursorNamespace,
+    position: object,
+) -> CursorPosition:
+    """Validate the complete position shape before it can influence a query."""
+
+    spec = CURSOR_POSITION_SPECS[namespace]
+    if not isinstance(position, (tuple, list)) or len(position) != len(spec.components):
+        raise _invalid_position(namespace)
+    validated: list[CursorValue] = []
+    for value, component in zip(position, spec.components, strict=True):
+        if component == "string":
+            if not isinstance(value, str) or not value or len(value) > 512:
+                raise _invalid_position(namespace)
+        elif (
+            not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > 2**63 - 1
         ):
-            raise DomainError(
-                ErrorCode.STALE_CURSOR,
-                "Cursor belongs to a different query or immutable snapshot.",
-            )
-        return tuple(position)
+            raise _invalid_position(namespace)
+        validated.append(value)
+    return tuple(validated)
+
+
+def _invalid_position(namespace: CursorNamespace) -> DomainError:
+    return DomainError(
+        ErrorCode.STALE_CURSOR,
+        "Cursor position is invalid.",
+        details={"namespace": namespace.value},
+    )

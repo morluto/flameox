@@ -12,6 +12,8 @@ from flameox.catalog import Catalog
 from flameox.mcp import create_server
 from flameox.storage import RunStore, Workspace
 
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
+
 
 @pytest.mark.anyio
 @pytest.mark.process
@@ -81,10 +83,18 @@ timeout_seconds = 5
     assert replayed.structured_content is not None
     assert replayed.structured_content["error"]["code"] == "INVALID_CAPTURE_PLAN"
     assert replayed.structured_content["error"]["recovery"] == {
-        "kind": "replan_capture",
+        "kind": "manual",
         "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
-        "next_tool": "plan_capture",
+        "next_tool": None,
+        "action": {
+            "kind": "manual",
+            "instruction": (
+                "Inspect the declared workload and supply a complete capture plan request."
+            ),
+            "suggested_action": "capture.plan",
+            "missing_arguments": ["workload_name", "adapter", "parameters"],
+        },
     }
     assert fetched.structured_content is not None
     assert fetched.structured_content["result"]["run_id"] == run_id
@@ -209,13 +219,21 @@ python_distributions = ["flameox-agent-fixture>=99"]
     assert result.structured_content is not None
     error = result.structured_content["error"]
     assert error["code"] == "CAPABILITY_UNAVAILABLE"
-    assert error["details"]["next_tool"] == "prepare_workload_dependencies"
     assert error["details"]["missing_python_distributions"] == ["flameox-agent-fixture>=99"]
     assert error["recovery"] == {
-        "kind": "prepare_workload_dependencies",
-        "safe_to_repeat_same_call": True,
+        "kind": "manual",
+        "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
-        "next_tool": "prepare_workload_dependencies",
+        "action": {
+            "kind": "manual",
+            "instruction": (
+                "Install the missing distributions in the workload's declared Python "
+                "environment or select another workload, then plan capture again."
+            ),
+            "suggested_action": "workflow.get",
+            "missing_arguments": [],
+        },
+        "next_tool": None,
     }
 
 

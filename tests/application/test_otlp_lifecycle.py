@@ -10,8 +10,8 @@ from pydantic import ValidationError
 from flameox.application import ImportArtifactRequest, ImportService, OtlpExtractionResult
 from flameox.application.lifecycle import LifecycleEvidenceService
 from flameox.catalog import Catalog
-from flameox.domain import ArtifactKind, DomainError, ErrorCode
-from flameox.storage import Workspace
+from flameox.domain import ArtifactKind, DomainError, ErrorCode, ProjectionState
+from flameox.storage import ProjectionIntentStore, Workspace
 
 json_format: Any = None
 ExportTraceServiceRequest: Any = Any
@@ -42,7 +42,10 @@ try:
 except ImportError:
     pass
 
-pytestmark = pytest.mark.skipif(json_format is None, reason="trace extra is not installed")
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(json_format is None, reason="trace extra is not installed"),
+]
 
 
 def _attribute(key: str, value: AnyValue) -> KeyValue:
@@ -165,6 +168,13 @@ def test_otlp_normalization_and_lifecycle_queries_preserve_evidence(
     repeated = ImportService(workspace).extract_otlp_trace(run_id, artifact_id)
 
     assert extracted.evidence_generation_id == repeated.evidence_generation_id
+    [intent] = [
+        item
+        for item in ProjectionIntentStore(workspace).list(state=ProjectionState.PUBLISHED)
+        if item.projection_kind == "extract.otlp"
+    ]
+    assert intent.generation_id == extracted.evidence_generation_id
+    assert intent.domain_kind == "artifact_registration"
     assert (extracted.resource_count, extracted.scope_count) == (1, 1)
     assert extracted.span_count == 9
     assert extracted.event_count == 2

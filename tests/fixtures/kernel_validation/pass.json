@@ -1,5 +1,5 @@
 {
-  "schema_version": "flameox.kernel-validation.v1",
+  "schema_version": "flameox.kernel-validation.v2",
   "producer": "kernel-tests",
   "producer_version": "1.2.3",
   "reference": {
@@ -35,7 +35,7 @@
           "metrics": [
             {
               "name": "max_abs_error",
-              "value": 0.0001,
+              "value": {"kind": "finite", "value": 0.0001},
               "comparator": "<=",
               "threshold": 0.001,
               "unit": "absolute",
@@ -43,7 +43,7 @@
             },
             {
               "name": "cosine_similarity",
-              "value": 0.9999,
+              "value": {"kind": "finite", "value": 0.9999},
               "comparator": ">=",
               "threshold": 0.999,
               "unit": "ratio",

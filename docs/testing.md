@@ -1,91 +1,68 @@
 # Testing
 
-Tests are owned by behavior, not by implementation file. `tests/ownership.toml`
-assigns each test module one semantic owner and primary lane. `tools/test.py` is
-the shared local and CI runner; markers describe process, provider, platform, or
-performance requirements without creating another ownership system.
-
-The suite contains:
-
-- property and conformance tests for central invariants;
-- behavior through application, CLI, and MCP seams;
-- representative SQLite, process, and provider integration;
-- a small set of end-to-end evidence investigations;
-- explicit live-provider, platform, and performance lanes.
-
-Provider families live in separate modules and share conformance behavior. A
-provider test file must not become an omnibus home for unrelated extraction,
-privacy, correlation, and publication tests.
+Pytest markers and test locations are the test contract. There is no separate
+ownership database or affected-test planner. Pull requests and merge groups run
+the complete deterministic suite; scheduled and manual workflows own optional
+providers and performance evidence.
 
 ## Commands
 
+Install the development environment and run the ordinary suite:
+
 ```console
 uv sync --extra dev
-uv run python tools/test.py list
-uv run python tools/test.py ownership
-uv run python tools/test.py collection
-uv run python tools/test.py core
-uv run python tools/test.py storage
-uv run python tools/test.py application
-uv run python tools/test.py analysis
-uv run python tools/test.py mcp
-uv run python tools/test.py process
-uv run python tools/test.py adapters
-uv run python tools/test.py cli
-uv run python tools/test.py security
-uv run python tools/test.py golden
+uv run pytest -q
+uv run pytest -o addopts='' -ra -q -m process
 ```
 
-Each lane prints its exact pytest command and writes JUnit, log, and command
-receipts under `.test-results/`. `pytest -q` uses the configured default marker
-selection; it is useful locally but is not a named ownership lane.
+The configured default excludes process, optional-provider, and performance
+tests for a fast local loop. CI runs all non-optional, non-performance tests,
+parallelizing tests not marked `serial` and then running the serial set in one
+process.
 
-Run `ownership` and `collection` before and after moving, splitting, or deleting
-tests. Update `tests/collection-baseline.toml` only when node-ID changes are
-intentional and every removed behavior is accounted for.
-
-## Optional and live evidence
+Static validation is direct:
 
 ```console
-uv run python tools/test.py providers
-uv run python tools/test.py capabilities
-uv run python tools/test.py optional
-uv run python tools/test.py performance
-uv run python tools/test.py full
+uv run ruff check src tests tools
+uv run ruff format --check src tests tools
+uv run mypy src tests tools
+uv run lint-imports
+uv run vulture src/flameox --min-confidence 80
+uv run deptry src --optional-dependencies-dev-groups dev,test
+uv run pip-audit
 ```
 
-An unavailable package, executable, permission, driver, or host facility is a
-classified skip. A skip is not provider evidence. Run the named `optional-*`
-lane on a qualified host for claims about that producer or platform.
+## Optional and performance evidence
 
-Performance tests are measurements with declared workloads and budgets. Enable
-the larger acceptance cases only in the scheduled/manual lane or an equivalent
-explicit local environment.
+Install the relevant extra and select its marker explicitly. For example:
 
-## CI
+```console
+uv sync --extra dev --extra trace
+uv run pytest -o addopts='' -ra -q -m 'optional and requires_perfetto'
+```
 
-Pull requests use the ownership-driven affected planner for early feedback and
-required lane selection. Source, dependency, test-topology, workflow, unknown,
-or missing-history changes conservatively select broader validation. The planner
-is CI routing metadata, not a product contract.
+The same pattern applies to `requires_coverage`, `requires_memray`,
+`requires_pyspy`, and `requires_torch`. GPU, system-tool, and platform markers
+remain explicit and require a qualified host. An unavailable prerequisite is a
+classified skip, not evidence that the provider works.
 
-Merge queues, scheduled runs, and manual full runs execute the deterministic
-full matrix. The stable `required` job validates the planner receipt and every
-selected result so branch protection does not depend on dynamic matrix names.
-Provider and platform jobs remain explicit and cannot masquerade as deterministic
-coverage when their prerequisite was absent.
+Performance tests require an intentional opt-in:
+
+```console
+FLAMEOX_RUN_PERFORMANCE=1 uv run pytest -o addopts='' -ra -q -m performance
+```
 
 ## Test design
 
+- Put tests beside their semantic owner and declare requirements with registered
+  module- or test-level markers.
 - Keep mutable workspaces, processes, and handles function-scoped.
-- Share a fixture only when it represents a real semantic boundary.
 - Assert observable behavior or stable artifacts, not private helper text.
 - Process tests prove cleanup and terminal state.
 - Storage tests prove transactions, conflicts, and immutable revision history.
 - Analysis tests pin one snapshot before lookup.
-- Adapter tests preserve the native format and prove explicit compatibility.
+- Adapter tests preserve native formats and prove explicit compatibility.
 - Security tests include hostile paths, bounds, identities, and cancellation.
-- Do not hide nondeterminism with retries or broad timeouts.
 
-A passing suite is not evidence for behavior it never exercises. State provider,
-platform, race, crash, or performance proof gaps explicitly.
+A passing suite proves only the exercised environments. Report missing provider,
+platform, race, crash, and performance evidence explicitly.

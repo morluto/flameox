@@ -32,6 +32,8 @@ from flameox.domain import (
 )
 from flameox.storage import Workspace
 
+pytestmark = [pytest.mark.integration, pytest.mark.serial]
+
 
 @pytest.mark.anyio
 async def test_configuration_interaction_is_visible_as_semantic_evidence(

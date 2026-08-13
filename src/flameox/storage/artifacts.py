@@ -10,7 +10,7 @@ import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from uuid import uuid4
 
 from flameox.atomic import atomic_write_json, fsync_directory
@@ -28,6 +28,7 @@ _SAFE_PAYLOAD_NAME = re.compile(r"^payload(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,15})?
 class StoredArtifact:
     content: ArtifactContent
     payload_path: Path
+    created: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +55,8 @@ class ArtifactStore:
         *,
         allowed_roots: tuple[Path, ...],
         max_bytes: int,
+        expected_artifact_id: str | None = None,
+        expected_byte_length: int | None = None,
     ) -> StoredArtifact:
         source = source.absolute()
         with self.temporary_snapshot(
@@ -61,43 +64,54 @@ class ArtifactStore:
             allowed_roots=allowed_roots,
             max_bytes=max_bytes,
         ) as snapshot:
-            hexadecimal = snapshot.sha256
-            artifact_id = f"sha256:{hexadecimal}"
-            extension = source.suffix if _SAFE_EXTENSION.fullmatch(source.suffix) else ""
-            payload_name = f"payload{extension}"
-            object_root = self.workspace.paths.artifacts / hexadecimal[:2] / hexadecimal
-            metadata_path = object_root / "artifact.json"
-            with self.workspace.write_locked():
-                StorageQuota(self.workspace).require_capacity(staging=True)
-                if metadata_path.exists():
-                    content = self._read_metadata(metadata_path)
-                    if (
-                        content.artifact_id != artifact_id
-                        or content.byte_length != snapshot.byte_length
-                    ):
-                        raise DomainError(
-                            ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                            "Existing content-addressed artifact metadata conflicts.",
-                        )
-                    payload_path = object_root / content.payload_name
-                    if not payload_path.is_file():
-                        raise DomainError(
-                            ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                            "Existing artifact payload is missing.",
-                        )
-                else:
-                    object_root.mkdir(parents=True, exist_ok=True)
-                    payload_path = object_root / payload_name
-                    os.replace(snapshot.payload_path, payload_path)
-                    fsync_directory(object_root)
-                    content = ArtifactContent(
-                        artifact_id=artifact_id,
-                        byte_length=snapshot.byte_length,
-                        payload_name=payload_name,
-                        integrity=Integrity(sha256=hexadecimal, hashed_at=utc_now()),
-                    )
-                    atomic_write_json(metadata_path, content.model_dump(mode="json"))
-        return StoredArtifact(content=content, payload_path=payload_path)
+            return self._commit_snapshot(
+                snapshot,
+                display_name=source.name,
+                expected_artifact_id=expected_artifact_id,
+                expected_byte_length=expected_byte_length,
+            )
+
+    def import_descriptor(
+        self,
+        source_descriptor: int,
+        *,
+        display_name: str,
+        max_bytes: int,
+        expected_artifact_id: str | None = None,
+        expected_byte_length: int | None = None,
+    ) -> StoredArtifact:
+        """Import the exact regular file already admitted by a caller-owned descriptor."""
+
+        if PurePath(display_name).name != display_name or "\x00" in display_name:
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "Descriptor imports require a simple display filename.",
+            )
+        with self.temporary_snapshot_descriptor(
+            source_descriptor,
+            max_bytes=max_bytes,
+        ) as snapshot:
+            return self._commit_snapshot(
+                snapshot,
+                display_name=display_name,
+                expected_artifact_id=expected_artifact_id,
+                expected_byte_length=expected_byte_length,
+            )
+
+    def import_snapshot(
+        self,
+        snapshot: ArtifactSnapshot,
+        *,
+        display_name: str,
+    ) -> StoredArtifact:
+        """Publish a caller-verified immutable snapshot into the content store."""
+
+        return self._commit_snapshot(
+            snapshot,
+            display_name=display_name,
+            expected_artifact_id=None,
+            expected_byte_length=None,
+        )
 
     @contextmanager
     def temporary_snapshot(
@@ -111,6 +125,29 @@ class ArtifactStore:
         source = source.absolute()
         self._require_allowed_parent(source, allowed_roots)
         source_fd = self._open_source(source, allowed_roots)
+        try:
+            with self.temporary_snapshot_descriptor(source_fd, max_bytes=max_bytes) as snapshot:
+                yield snapshot
+        finally:
+            os.close(source_fd)
+
+    @contextmanager
+    def temporary_snapshot_descriptor(
+        self,
+        source_descriptor: int,
+        *,
+        max_bytes: int,
+    ) -> Iterator[ArtifactSnapshot]:
+        """Yield a bounded immutable copy of an exact, already-open regular file."""
+
+        try:
+            source_fd = os.dup(source_descriptor)
+        except OSError as exc:
+            raise DomainError(
+                ErrorCode.EXECUTION_REFUSED,
+                "Artifact source descriptor is not open.",
+            ) from exc
+        os.lseek(source_fd, 0, os.SEEK_SET)
         staging_root = self.workspace.paths.staging / f"snapshot-{uuid4().hex}"
         staging_root.mkdir(parents=True, exist_ok=False)
         staged_path = staging_root / "payload"
@@ -180,6 +217,69 @@ class ArtifactStore:
             )
         finally:
             shutil.rmtree(staging_root, ignore_errors=True)
+
+    def _commit_snapshot(
+        self,
+        snapshot: ArtifactSnapshot,
+        *,
+        display_name: str,
+        expected_artifact_id: str | None,
+        expected_byte_length: int | None,
+    ) -> StoredArtifact:
+        hexadecimal = snapshot.sha256
+        artifact_id = f"sha256:{hexadecimal}"
+        if expected_artifact_id is not None and artifact_id != expected_artifact_id:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Artifact bytes do not match the expected content identity.",
+                details={
+                    "expected_artifact_id": expected_artifact_id,
+                    "actual_artifact_id": artifact_id,
+                },
+            )
+        if expected_byte_length is not None and snapshot.byte_length != expected_byte_length:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Artifact bytes do not match the expected byte length.",
+                details={
+                    "expected_byte_length": expected_byte_length,
+                    "actual_byte_length": snapshot.byte_length,
+                },
+            )
+        suffix = Path(display_name).suffix
+        extension = suffix if _SAFE_EXTENSION.fullmatch(suffix) else ""
+        payload_name = f"payload{extension}"
+        object_root = self.workspace.paths.artifacts / hexadecimal[:2] / hexadecimal
+        metadata_path = object_root / "artifact.json"
+        with self.workspace.write_locked():
+            StorageQuota(self.workspace).require_capacity(staging=True)
+            created = False
+            if metadata_path.exists():
+                verified = self.get(artifact_id)
+                content = verified.content
+                if (
+                    content.artifact_id != artifact_id
+                    or content.byte_length != snapshot.byte_length
+                ):
+                    raise DomainError(
+                        ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                        "Existing content-addressed artifact metadata conflicts.",
+                    )
+                payload_path = verified.payload_path
+            else:
+                object_root.mkdir(parents=True, exist_ok=True)
+                payload_path = object_root / payload_name
+                os.replace(snapshot.payload_path, payload_path)
+                fsync_directory(object_root)
+                content = ArtifactContent(
+                    artifact_id=artifact_id,
+                    byte_length=snapshot.byte_length,
+                    payload_name=payload_name,
+                    integrity=Integrity(sha256=hexadecimal, hashed_at=utc_now()),
+                )
+                atomic_write_json(metadata_path, content.model_dump(mode="json"))
+                created = True
+        return StoredArtifact(content=content, payload_path=payload_path, created=created)
 
     def _open_source(
         self,

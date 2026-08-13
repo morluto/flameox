@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
@@ -16,7 +16,13 @@ from flameox.application.inference_providers import (
     discover_sglang,
     parse_inference_tool_discovery,
     probe_existing_vllm_server,
+    probe_existing_vllm_server_async,
 )
+from flameox.application.provider_runtime import ProviderRuntime, ProviderRuntimeReceipt
+from flameox.domain import CapabilityExtra
+from flameox.http_transport import BoundedHttpClient
+
+pytestmark = pytest.mark.unit
 
 
 def test_aiperf_replay_argv_preserves_fixed_original_schedule(tmp_path: Path) -> None:
@@ -141,50 +147,78 @@ def test_sglang_bench_refuses_unsupported_non_streaming_mode(tmp_path: Path) -> 
         )
 
 
-def test_existing_server_probe_uses_only_read_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_existing_server_probe_uses_only_read_endpoints() -> None:
     calls: list[str] = []
 
-    class Response:
-        status = 200
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        body = b'{"data":[{"id":"model"}]}' if request.url.path == "/v1/models" else b""
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            stream=httpx.ByteStream(body),
+        )
 
-        def __init__(self) -> None:
-            self._read = False
+    with BoundedHttpClient(sync_transport=httpx.MockTransport(handler)) as client:
+        probe = probe_existing_vllm_server(
+            "http://127.0.0.1:8000",
+            http_client=client,
+        )
 
-        def __enter__(self) -> Response:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-        def read(self, *_args: object) -> bytes:
-            if self._read:
-                return b""
-            self._read = True
-            return json.dumps({"data": [{"id": "model"}]}).encode()
-
-    def fake_open_probe(request: object, timeout: float) -> Response:
-        calls.append(request.full_url)  # type: ignore[attr-defined]
-        return Response()
-
-    monkeypatch.setattr("flameox.application.inference_providers._open_probe", fake_open_probe)
-
-    assert probe_existing_vllm_server("http://127.0.0.1:8000").model_ids == ("model",)
+    assert probe.model_ids == ("model",)
     assert calls == ["http://127.0.0.1:8000/health", "http://127.0.0.1:8000/v1/models"]
 
 
+@pytest.mark.anyio
+async def test_existing_server_probe_has_native_async_transport() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = b'{"data":[{"id":"model"}]}' if request.url.path == "/v1/models" else b""
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            stream=httpx.ByteStream(body),
+        )
+
+    async with BoundedHttpClient(async_transport=httpx.MockTransport(handler)) as client:
+        probe = await probe_existing_vllm_server_async(
+            "http://127.0.0.1:8000",
+            http_client=client,
+        )
+
+    assert probe.model_ids == ("model",)
+
+
 def test_aiperf_discovery_rejects_unsupported_version(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    executable = tmp_path / "aiperf"
+    executable = tmp_path / "bin" / "aiperf"
+    executable.parent.mkdir()
     executable.write_bytes(b"executable")
     executable.chmod(0o755)
-    monkeypatch.setattr(
-        "flameox.command_binding.shutil.which",
-        lambda _tool, path=None: str(executable),
+    python = tmp_path / "bin" / "python"
+    python.write_bytes(b"python")
+    python.chmod(0o755)
+    runtime = ProviderRuntime(
+        tmp_path,
+        ProviderRuntimeReceipt(
+            environment_id="sha256:" + "b" * 64,
+            flameox_version="0.1.13",
+            extra=CapabilityExtra.INFERENCE,
+            requirement="aiperf>=0.12,<0.13",
+            python_requirement="3.12",
+            platform="linux",
+            architecture="x86_64",
+            uv_version="0.9.0",
+            uv_sha256="sha256:" + "c" * 64,
+            python_relative_path="bin/python",
+            python_sha256="sha256:" + "d" * 64,
+            distributions={"flameox": "0.1.13", "aiperf": "0.13.0"},
+            executable_relative_path="bin/aiperf",
+            executable_sha256="sha256:" + "e" * 64,
+        ),
     )
-    monkeypatch.setattr("flameox.application.inference_providers.version", lambda _tool: "0.13.0")
 
-    result = discover_inference_tool(InferenceTool.AIPERF)
+    result = discover_inference_tool(InferenceTool.AIPERF, provider_runtime=runtime)
 
     assert result.available is False
     assert result.compatible is False
@@ -216,7 +250,7 @@ def test_sglang_bench_uses_fixed_module_random_workload_and_safe_output(tmp_path
 
 
 def test_sglang_bench_rejects_base_url_paths(tmp_path: Path) -> None:
-    with pytest.raises(ValidationError, match="root base_url"):
+    with pytest.raises(ValidationError, match="without URL extras"):
         SglangBenchServingRequest(
             benchmark_python=Path("/opt/sglang/bin/python"),
             base_url="http://127.0.0.1:8000/api",

@@ -2,43 +2,52 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
+
+from pydantic import JsonValue
 
 from flameox.application.otlp import _OtlpRowLimitExceeded, _parse_otlp
-from flameox.domain import ErrorCode
-from flameox.workers.protocol import run_worker
+from flameox.workers.otlp_contract import OTLP_WORKER, OtlpWorkerRequest, OtlpWorkerResult
+from flameox.workers.protocol import (
+    WorkerApplication,
+    WorkerContext,
+    WorkerFailureKind,
+    run_typed_worker,
+)
 
 
-def _handle(request: dict[str, object], _request_path: Path) -> dict[str, object]:
+def _handle(request: OtlpWorkerRequest, _context: WorkerContext) -> OtlpWorkerResult:
     try:
         parsed = _parse_otlp(
-            Path(str(request["artifact_path"])),
-            str(request["media_type"]),
-            row_limit=int(str(request["row_limit"])),
+            Path(request.artifact_path),
+            request.media_type,
+            row_limit=request.row_limit,
         )
-        return {
-            "ok": True,
-            "resources": parsed.resources,
-            "scopes": parsed.scopes,
-            "spans": parsed.spans,
-            "events": parsed.events,
-            "links": parsed.links,
-            "limitations": list(parsed.limitations),
-        }
+        return OtlpWorkerResult(
+            resources=cast(tuple[dict[str, JsonValue], ...], tuple(parsed.resources)),
+            scopes=cast(tuple[dict[str, JsonValue], ...], tuple(parsed.scopes)),
+            spans=cast(tuple[dict[str, JsonValue], ...], tuple(parsed.spans)),
+            events=cast(tuple[dict[str, JsonValue], ...], tuple(parsed.events)),
+            links=cast(tuple[dict[str, JsonValue], ...], tuple(parsed.links)),
+            limitations=parsed.limitations,
+        )
     except _OtlpRowLimitExceeded as exc:
-        return {
-            "ok": True,
-            "row_limit_exceeded": True,
-            "counts": exc.counts,
-            "limitations": list(exc.limitations),
-        }
+        return OtlpWorkerResult(
+            row_limit_exceeded=True,
+            counts=exc.counts,  # type: ignore[arg-type]
+            limitations=exc.limitations,
+        )
 
 
 def main() -> int:
-    return run_worker(
-        _handle,
-        invalid_code=ErrorCode.ARTIFACT_PARSE_FAILED,
-        invalid_message="OTLP worker request is invalid",
-        caught=(KeyError, OSError, TypeError, ValueError, json.JSONDecodeError),
+    return run_typed_worker(
+        WorkerApplication(
+            definition=OTLP_WORKER,
+            handler=_handle,
+            invalid_failure=WorkerFailureKind.INPUT_MALFORMED,
+            invalid_message="OTLP artifact is invalid",
+            caught=(OSError, TypeError, ValueError, json.JSONDecodeError),
+        )
     )
 
 

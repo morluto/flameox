@@ -15,648 +15,173 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  plan:
-    name: Plan affected checks
-    runs-on: ubuntu-latest
-    outputs:
-      full: ${{ steps.plan.outputs.full }}
-      plan_valid: ${{ steps.plan.outputs.plan_valid }}
-      plan_json: ${{ steps.plan.outputs.plan_json }}
-      test_lanes: ${{ steps.plan.outputs.test_lanes }}
-      optional_lanes: ${{ steps.plan.outputs.optional_lanes }}
-      run_quality: ${{ steps.plan.outputs.run_quality }}
-      run_deep_checks: ${{ steps.plan.outputs.run_deep_checks }}
-      run_coverage: ${{ steps.plan.outputs.run_coverage }}
-      run_collection: ${{ steps.plan.outputs.run_collection }}
-      run_npm: ${{ steps.plan.outputs.run_npm }}
-      run_performance: ${{ steps.plan.outputs.run_performance }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - id: plan
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-        run: |
-          set -euo pipefail
-          echo "plan_valid=false" >> "${GITHUB_OUTPUT}"
-          if [[ -n "${BASE_SHA}" ]]; then
-            plan_json=$(python tools/test.py affected --base "${BASE_SHA}")
-          else
-            plan_json=$(python tools/test.py affected)
-          fi
-          echo "${plan_json}"
-          if ! jq -e '
-            def test_lanes: ["core", "storage", "application", "analysis", "mcp", "process", "adapters", "cli", "security", "golden"];
-            def performance_lanes: ["performance"];
-            def provider_lanes: ["optional-coverage", "optional-memray", "optional-perfetto", "optional-pyspy", "optional-torch", "optional-host"];
-            def allowed_strings($allowed):
-              type == "array" and all(.[]; . as $lane | type == "string" and ($allowed | index($lane)) != null) and
-              (length == (unique | length));
-            def decisions($allowed):
-              type == "array" and length <= ($allowed | length) and
-              all(.[]; . as $item |
-                (($item | keys | sort) == ["lane", "reason"]) and
-                ($item.lane | type == "string") and
-                ($item.reason | type == "string" and length > 0) and
-                ($allowed | index($item.lane)) != null) and
-              ([.[].lane] | unique | length) == length;
-            def matrix_lanes($allowed):
-              type == "array" and
-              all(.[]; . as $item |
-                (($item | keys | sort) == ["lane"]) and
-                ($item.lane | type == "string") and
-                ($allowed | index($item.lane)) != null) and
-              ([.[].lane] | unique | length) == length;
-            . as $plan | (test_lanes + performance_lanes + provider_lanes) as $all |
-            (keys | sort) == [
-              "base_available", "base_revision", "changed_paths", "contract", "event",
-              "fallback_reason", "full", "head_available", "head_revision", "lanes", "matrix",
-              "optional_lanes", "planner_digest", "planner_version", "provenance", "run_collection",
-              "run_coverage", "run_deep_checks", "run_npm", "run_performance", "run_quality", "schema_version",
-              "selected_lanes", "topology_digest", "unselected_lanes"
-            ] and
-            (.schema_version == 3) and (.contract == "flameox.affected-plan") and
-            (.planner_version == "affected-plan-v3") and
-            (.event | type == "string" and test("^(local|pull_request|merge_group|push|schedule|workflow_dispatch)$")) and
-            ((.base_revision == null) or (.base_revision | type == "string")) and
-            ((.head_revision == null) or (.head_revision | type == "string")) and
-            (.changed_paths | type == "array" and all(.[]; type == "string" and (startswith("/") | not) and (startswith("\\") | not) and (split("/") | all(. != "." and . != ".."))) and (. == (sort | unique))) and
-            ([.base_available, .head_available, .full, .run_quality, .run_deep_checks, .run_coverage, .run_collection, .run_npm, .run_performance] | all(type == "boolean")) and
-            (.planner_digest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
-            (.topology_digest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
-            (.fallback_reason | type == "string" and length > 0) and
-            (if .full then .fallback_reason != "none" else .fallback_reason == "none" end) and
-            (.lanes | allowed_strings(test_lanes)) and
-            (.optional_lanes | allowed_strings(provider_lanes)) and
-            (.selected_lanes | decisions($all)) and
-            (.unselected_lanes | decisions($all)) and
-            (([.selected_lanes[].lane] | sort) == ((.lanes + (if .run_performance then ["performance"] else [] end) + .optional_lanes) | sort)) and
-            (([.selected_lanes[].lane] + [.unselected_lanes[].lane] | unique | sort) == ($all | sort)) and
-            (.matrix | type == "object" and (keys | sort) == ["lanes", "optional_lanes"]) and
-            (.matrix.lanes | matrix_lanes(test_lanes)) and
-            (.matrix.optional_lanes | matrix_lanes(provider_lanes)) and
-            ([.matrix.lanes[].lane] == .lanes) and ([.matrix.optional_lanes[].lane] == .optional_lanes) and
-            (.run_deep_checks == .full) and
-            (.run_quality == (.full or (.lanes | length > 0))) and
-            (.run_coverage == (.full or (.lanes | length > 0))) and
-            (.run_collection == (.full or (.lanes | length > 0))) and
-            (.run_npm == .full) and
-            (([.selected_lanes[].lane] | index("performance") != null) == .run_performance) and
-            (.provenance | type == "object" and (keys | sort) == ["base_available", "base_revision", "base_source", "changed_paths", "event", "event_source", "fallback_reason", "head_available", "head_revision", "head_source", "planner_digest", "topology_digest"]) and
-            (.provenance.event == .event) and (.provenance.base_revision == .base_revision) and
-            (.provenance.head_revision == .head_revision) and (.provenance.base_available == .base_available) and
-            (.provenance.head_available == .head_available) and (.provenance.changed_paths == .changed_paths) and
-            (.provenance.planner_digest == .planner_digest) and (.provenance.topology_digest == .topology_digest) and
-            (.provenance.fallback_reason == .fallback_reason) and
-            (.provenance.event_source | type == "string" and length > 0) and
-            (.provenance.base_source | type == "string" and length > 0) and
-            (.provenance.head_source | type == "string" and length > 0)
-          ' <<<"${plan_json}" >/dev/null; then
-            echo "::error::Planner output failed the CI plan contract." >&2
-            exit 1
-          fi
-          echo "plan_valid=true" >> "${GITHUB_OUTPUT}"
-          echo "plan_json=$(jq -c . <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
-          echo "full=$(jq -r '.full' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
-          echo "test_lanes=$(jq -c '.lanes' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
-          echo "optional_lanes=$(jq -c '.optional_lanes' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
-          echo "run_quality=$(jq -r '.run_quality' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
-          echo "run_deep_checks=$(jq -r '.run_deep_checks' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
-          echo "run_coverage=$(jq -r '.run_coverage' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
-          echo "run_collection=$(jq -r '.run_collection' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
-          echo "run_npm=$(jq -r '.run_npm' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
-          echo "run_performance=$(jq -r '.run_performance' <<<"${plan_json}")" >> "${GITHUB_OUTPUT}"
-
-  lint:
-    name: Lint & Format
-    needs: plan
-    if: needs.plan.outputs.run_quality == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.12"
-          enable-cache: true
-          cache-suffix: full-extras
-      - run: uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu --extra torch
-      - run: uv run ruff check src tests tools
-      - run: uv run ruff format --check src tests tools
-
-  type-check:
-    name: Type Check
-    needs: plan
-    if: needs.plan.outputs.run_quality == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.12"
-          enable-cache: true
-          cache-suffix: full-extras
-      - run: uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu --extra torch
-      - run: uv run mypy src tests tools
-
-  test-lanes:
-    name: Test (${{ matrix.lane }})
-    needs: plan
-    if: needs.plan.outputs.test_lanes != '[]'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        lane: ${{ fromJSON(needs.plan.outputs.test_lanes) }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.12"
-          enable-cache: true
-          cache-suffix: test-lanes
-      - run: uv sync --extra dev
-      - name: Run lane with coverage fragment
-        if: needs.plan.outputs.run_coverage == 'true'
-        env:
-          COVERAGE_FILE: .coverage-${{ matrix.lane }}
-        run: uv run python tools/test.py ${{ matrix.lane }} --coverage
-      - name: Run lane
-        if: needs.plan.outputs.run_coverage != 'true'
-        run: uv run python tools/test.py ${{ matrix.lane }}
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: test-results-${{ matrix.lane }}
-          include-hidden-files: true
-          path: |
-            .test-results/
-            .coverage-*
-
-  optional-providers:
-    name: Optional provider (${{ matrix.provider }})
-    needs: plan
-    if: needs.plan.outputs.optional_lanes != '[]'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        provider: ${{ fromJSON(needs.plan.outputs.optional_lanes) }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.12"
-          enable-cache: true
-          cache-suffix: optional-${{ matrix.provider }}
-      - name: Install provider dependencies
-        run: |
-          set -euo pipefail
-          case "${{ matrix.provider }}" in
-            optional-coverage) extra=execution ;;
-            optional-memray) extra=memory ;;
-            optional-perfetto) extra=trace ;;
-            optional-pyspy) extra=cpu ;;
-            optional-torch) extra=torch ;;
-            optional-host) extra=dev ;;
-            *) echo "Unknown provider lane" >&2; exit 2 ;;
-          esac
-          uv sync --extra dev --extra "${extra}"
-      - run: uv run python tools/test.py ${{ matrix.provider }}
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: test-results-optional-${{ matrix.provider }}
-          include-hidden-files: true
-          path: .test-results/
-
-  coverage:
-    name: Combined coverage
-    needs:
-      - plan
-      - test-lanes
-    if: needs.plan.outputs.run_coverage == 'true' && needs.test-lanes.result == 'success'
+  quality:
+    name: Static quality
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           python-version: "3.12"
           enable-cache: true
-          cache-suffix: coverage
       - run: uv sync --extra dev
-      - uses: actions/download-artifact@v4
+      - run: uv run ruff check src tests tools
+      - run: uv run ruff format --check src tests tools
+      - run: uv run mypy src tests tools
+
+  tests:
+    name: Deterministic tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          pattern: test-results-*
-          merge-multiple: true
-      - run: uv run coverage combine .coverage-*
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --extra dev --extra inference
+      - name: Run parallel-safe tests
+        run: >-
+          uv run pytest -o addopts='' -ra -q -n auto
+          -m 'not optional and not performance and not serial'
+          --cov=flameox --cov-append --cov-report=
+      - name: Run serial tests
+        run: >-
+          uv run pytest -o addopts='' -ra -q
+          -m 'not optional and not performance and serial'
+          --cov=flameox --cov-append --cov-report=
       - run: uv run coverage report --fail-under=60
-      - run: mkdir -p .test-results && uv run coverage xml -o .test-results/coverage.xml
+      - run: uv run coverage xml -o coverage.xml
       - uses: codecov/codecov-action@v5
         if: github.event_name == 'pull_request'
         with:
-          files: .test-results/coverage.xml
-      - uses: actions/upload-artifact@v4
+          files: coverage.xml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: test-results-coverage
-          include-hidden-files: true
-          path: .test-results/
+          name: deterministic-test-evidence
+          if-no-files-found: error
+          retention-days: 14
+          path: coverage.xml
 
-  performance:
-    name: Performance acceptance
-    needs: plan
-    if: needs.plan.outputs.run_performance == 'true'
+  architecture:
+    name: Architecture and dependencies
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           python-version: "3.12"
           enable-cache: true
-          cache-suffix: performance
-      - run: uv sync --extra dev
-      - name: Run performance tests
-        env:
-          FLAMEOX_RUN_PERFORMANCE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '1' || '' }}
-        run: uv run python tools/test.py performance
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: test-results-performance
-          include-hidden-files: true
-          path: .test-results/
-
-  dead-code:
-    name: Dead Code
-    needs: plan
-    if: needs.plan.outputs.run_deep_checks == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.12"
-          enable-cache: true
-          cache-suffix: dev-only
-      - run: uv sync --extra dev
-      - run: uv run vulture src/flameox --min-confidence 80
-
-  import-boundaries:
-    name: Import Boundaries
-    needs: plan
-    if: needs.plan.outputs.run_deep_checks == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.12"
-          enable-cache: true
-          cache-suffix: dev-only
       - run: uv sync --extra dev
       - run: uv run lint-imports
-
-  unused-deps:
-    name: Unused Dependencies
-    needs: plan
-    if: needs.plan.outputs.run_deep_checks == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.12"
-          enable-cache: true
-          cache-suffix: dev-only
-      - run: uv sync --extra dev
-      - run: uv run deptry src --optional-dependencies-dev-groups dev,test --per-rule-ignores 'DEP002=aiperf|pytz|py-spy|pytest-reportlog|pytest-xdist'
-
-  security-audit:
-    name: Security Audit
-    needs: plan
-    if: needs.plan.outputs.run_deep_checks == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.12"
-          enable-cache: true
-          cache-suffix: dev-only
-      - run: uv sync --extra dev
+      - run: uv run vulture src/flameox --min-confidence 80
+      - run: >-
+          uv run deptry src
+          --optional-dependencies-dev-groups dev,test
+          --per-rule-ignores 'DEP002=aiperf|nvidia-ml-py|pytz|py-spy|pytest-reportlog|pytest-xdist'
       - run: uv run pip-audit
 
   npm:
-    name: npm (lint & test)
-    needs: plan
-    if: needs.plan.outputs.run_npm == 'true'
+    name: npm
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: npm
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          node-version: "20"
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.15.0"
           cache: npm
           cache-dependency-path: npm/package-lock.json
       - run: npm ci
-      - run: npx oxlint
-      - run: npx oxfmt --check .
+      - run: npm run lint
+      - run: npm run format:check
       - run: npm test
 
-  collection:
-    name: Collection & ownership
-    needs: plan
-    if: needs.plan.outputs.run_collection == 'true'
+  optional-providers:
+    name: Optional provider (${{ matrix.name }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: coverage
+            extra: execution
+            marker: requires_coverage
+          - name: memray
+            extra: memory
+            marker: requires_memray
+          - name: perfetto
+            extra: trace
+            marker: requires_perfetto
+          - name: py-spy
+            extra: cpu
+            marker: requires_pyspy
+          - name: torch
+            extra: torch
+            marker: requires_torch
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           python-version: "3.12"
           enable-cache: true
-          cache-suffix: collection
-      - run: uv sync --extra dev
-      - run: uv run flameox --help
-      - run: uv run python tools/test.py list
-      - run: uv run python tools/test.py ownership
-      - run: uv run python tools/test.py collection
-      - run: uv run python tools/test.py capabilities
-      - uses: actions/upload-artifact@v4
-        if: always()
+      - run: uv sync --extra dev --extra ${{ matrix.extra }}
+      - run: >-
+          uv run pytest -o addopts='' -ra -q
+          -m 'optional and ${{ matrix.marker }}'
+
+  performance:
+    name: Performance acceptance
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          name: test-results-collection
-          include-hidden-files: true
-          path: .test-results/
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --extra dev
+      - env:
+          FLAMEOX_RUN_PERFORMANCE: "1"
+        run: uv run pytest -o addopts='' -ra -q -m performance
 
   required:
     name: Required checks
-    needs:
-      - plan
-      - lint
-      - type-check
-      - test-lanes
-      - optional-providers
-      - coverage
-      - performance
-      - dead-code
-      - import-boundaries
-      - unused-deps
-      - security-audit
-      - npm
-      - collection
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Validate planner and required job results
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PLAN_RESULT: ${{ needs.plan.result }}
-          PLAN_VALID: ${{ needs.plan.outputs.plan_valid }}
-          PLAN_JSON: ${{ needs.plan.outputs.plan_json }}
-          LINT_RESULT: ${{ needs.lint.result }}
-          TYPE_CHECK_RESULT: ${{ needs.type-check.result }}
-          TEST_LANES_RESULT: ${{ needs.test-lanes.result }}
-          OPTIONAL_PROVIDERS_RESULT: ${{ needs.optional-providers.result }}
-          COVERAGE_RESULT: ${{ needs.coverage.result }}
-          PERFORMANCE_RESULT: ${{ needs.performance.result }}
-          DEAD_CODE_RESULT: ${{ needs.dead-code.result }}
-          IMPORT_BOUNDARIES_RESULT: ${{ needs.import-boundaries.result }}
-          UNUSED_DEPS_RESULT: ${{ needs.unused-deps.result }}
-          SECURITY_AUDIT_RESULT: ${{ needs.security-audit.result }}
-          NPM_RESULT: ${{ needs.npm.result }}
-          COLLECTION_RESULT: ${{ needs.collection.result }}
-        run: |
-          set -euo pipefail
-
-          failures=()
-          if [[ "${PLAN_RESULT}" != "success" || "${PLAN_VALID}" != "true" ]]; then
-            failures+=("planner result/contract is invalid (result=${PLAN_RESULT:-missing}, valid=${PLAN_VALID:-missing})")
-          fi
-          if [[ "${PLAN_JSON:-}" == "" ]]; then
-            failures+=("planner did not publish a plan receipt")
-          elif ! jq -e '
-            def test_lanes: ["core", "storage", "application", "analysis", "mcp", "process", "adapters", "cli", "security", "golden"];
-            def performance_lanes: ["performance"];
-            def provider_lanes: ["optional-coverage", "optional-memray", "optional-perfetto", "optional-pyspy", "optional-torch", "optional-host"];
-            def allowed_strings($allowed):
-              type == "array" and all(.[]; . as $lane | type == "string" and ($allowed | index($lane)) != null) and
-              (length == (unique | length));
-            def decisions($allowed):
-              type == "array" and length <= ($allowed | length) and
-              all(.[]; . as $item |
-                (($item | keys | sort) == ["lane", "reason"]) and
-                ($item.lane | type == "string") and ($item.reason | type == "string" and length > 0) and
-                ($allowed | index($item.lane)) != null) and
-              ([.[].lane] | unique | length) == length;
-            def matrix_lanes($allowed):
-              type == "array" and all(.[]; . as $item |
-                (($item | keys | sort) == ["lane"]) and ($item.lane | type == "string") and
-                ($allowed | index($item.lane)) != null) and
-              ([.[].lane] | unique | length) == length;
-            . as $plan | (test_lanes + performance_lanes + provider_lanes) as $all |
-            (keys | sort) == [
-              "base_available", "base_revision", "changed_paths", "contract", "event",
-              "fallback_reason", "full", "head_available", "head_revision", "lanes", "matrix",
-              "optional_lanes", "planner_digest", "planner_version", "provenance", "run_collection",
-              "run_coverage", "run_deep_checks", "run_npm", "run_performance", "run_quality", "schema_version",
-              "selected_lanes", "topology_digest", "unselected_lanes"
-            ] and .schema_version == 3 and .contract == "flameox.affected-plan" and
-            .planner_version == "affected-plan-v3" and
-            (.event | type == "string" and test("^(local|pull_request|merge_group|push|schedule|workflow_dispatch)$")) and
-            (.lanes | allowed_strings(test_lanes)) and (.optional_lanes | allowed_strings(provider_lanes)) and
-            (.selected_lanes | decisions($all)) and (.unselected_lanes | decisions($all)) and
-            ([.selected_lanes[].lane] | sort) == ((.lanes + (if .run_performance then ["performance"] else [] end) + .optional_lanes) | sort) and
-            ([.selected_lanes[].lane] + [.unselected_lanes[].lane] | unique | sort) == ($all | sort) and
-            (.matrix | type == "object" and (keys | sort) == ["lanes", "optional_lanes"]) and
-            (.matrix.lanes | matrix_lanes(test_lanes)) and (.matrix.optional_lanes | matrix_lanes(provider_lanes)) and
-            ([.matrix.lanes[].lane] == .lanes) and ([.matrix.optional_lanes[].lane] == .optional_lanes) and
-            ([.base_available, .head_available, .full, .run_quality, .run_deep_checks, .run_coverage, .run_collection, .run_npm, .run_performance] | all(type == "boolean")) and
-            (.run_deep_checks == .full) and (.run_quality == (.full or (.lanes | length > 0))) and
-            (.run_coverage == (.full or (.lanes | length > 0))) and (.run_collection == (.full or (.lanes | length > 0))) and
-            (.run_npm == .full) and
-            (([.selected_lanes[].lane] | index("performance") != null) == .run_performance) and
-            (.provenance | type == "object")
-          ' <<<"${PLAN_JSON}" >/dev/null; then
-            failures+=("planner receipt failed the required-check contract")
-          fi
-
-          if ((${#failures[@]})); then
-            printf '%s\n' "${failures[@]}" >&2
-            exit 1
-          fi
-
-          check_job() {
-            local label="$1"
-            local selected="$2"
-            local result="$3"
-            if [[ "${selected}" == "true" ]]; then
-              case "${result}" in
-                success)
-                  echo "${label}: selected and passed"
-                  ;;
-                failure)
-                  failures+=("${label}: selected but failed")
-                  ;;
-                cancelled)
-                  failures+=("${label}: selected but was cancelled or timed out")
-                  ;;
-                skipped)
-                  failures+=("${label}: selected but was unexpectedly skipped")
-                  ;;
-                "")
-                  failures+=("${label}: selected but produced no result")
-                  ;;
-                *)
-                  failures+=("${label}: selected but has unexpected result ${result}")
-                  ;;
-              esac
-            elif [[ "${result}" == "skipped" ]]; then
-              echo "${label}: intentionally unselected"
-            else
-              failures+=("${label}: planner unselected it but result is ${result:-missing}")
-            fi
-          }
-
-          quality_selected=$(jq -r '.run_quality' <<<"${PLAN_JSON}")
-          lanes_selected=$(jq -r '(.lanes | length) > 0' <<<"${PLAN_JSON}")
-          optional_selected=$(jq -r '(.optional_lanes | length) > 0' <<<"${PLAN_JSON}")
-          coverage_selected=$(jq -r '.run_coverage' <<<"${PLAN_JSON}")
-          deep_checks_selected=$(jq -r '.run_deep_checks' <<<"${PLAN_JSON}")
-          npm_selected=$(jq -r '.run_npm' <<<"${PLAN_JSON}")
-          collection_selected=$(jq -r '.run_collection' <<<"${PLAN_JSON}")
-
-          check_job "lint" "${quality_selected}" "${LINT_RESULT}"
-          check_job "type-check" "${quality_selected}" "${TYPE_CHECK_RESULT}"
-          check_job "test-lanes" "${lanes_selected}" "${TEST_LANES_RESULT}"
-          check_job "optional-providers" "${optional_selected}" "${OPTIONAL_PROVIDERS_RESULT}"
-
-          if [[ "${coverage_selected}" == "true" && "${TEST_LANES_RESULT}" != "success" && "${COVERAGE_RESULT}" == "skipped" ]]; then
-            echo "coverage: intentionally skipped because test-lanes did not pass"
-          else
-            check_job "coverage" "${coverage_selected}" "${COVERAGE_RESULT}"
-          fi
-
-          check_job "dead-code" "${deep_checks_selected}" "${DEAD_CODE_RESULT}"
-          check_job "import-boundaries" "${deep_checks_selected}" "${IMPORT_BOUNDARIES_RESULT}"
-          check_job "unused-deps" "${deep_checks_selected}" "${UNUSED_DEPS_RESULT}"
-          check_job "security-audit" "${deep_checks_selected}" "${SECURITY_AUDIT_RESULT}"
-          check_job "npm" "${npm_selected}" "${NPM_RESULT}"
-          check_job "collection" "${collection_selected}" "${COLLECTION_RESULT}"
-
-          performance_selected=$(jq -r '.run_performance' <<<"${PLAN_JSON}")
-          check_job "performance" "${performance_selected}" "${PERFORMANCE_RESULT}"
-
-          echo "## Required checks" >> "${GITHUB_STEP_SUMMARY}"
-          if ((${#failures[@]})); then
-            printf -- '- %s\n' "${failures[@]}" >> "${GITHUB_STEP_SUMMARY}"
-            printf '%s\n' "${failures[@]}" >&2
-            exit 1
-          fi
-          echo "All selected checks passed; all other checks were intentionally skipped." >> "${GITHUB_STEP_SUMMARY}"
-
-  build-summary:
-    name: Build Performance Summary
-    runs-on: ubuntu-latest
-    needs:
-      - plan
-      - lint
-      - type-check
-      - test-lanes
-      - coverage
-      - optional-providers
-      - performance
-      - dead-code
-      - import-boundaries
-      - unused-deps
-      - security-audit
-      - npm
-      - collection
     if: always()
+    needs: [quality, tests, architecture, npm]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Collect job durations
+      - name: Require every deterministic job
         env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.run_id }}
-          REPO: ${{ github.repository }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
           set -euo pipefail
-
-          echo "## Build Performance" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Job | Duration | Started | Completed |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| --- | --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
-
-          total_s=0
-          job_count=0
-
-          jobs_json=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" \
-            --jq '.jobs[] | {name: .name, started_at: .started_at, completed_at: .completed_at, conclusion: .conclusion}')
-
-          while IFS= read -r job; do
-            name=$(echo "$job" | jq -r '.name')
-            started=$(echo "$job" | jq -r '.started_at')
-            completed=$(echo "$job" | jq -r '.completed_at')
-            conclusion=$(echo "$job" | jq -r '.conclusion')
-
-            [[ "$name" == "Build Performance Summary" ]] && continue
-            [[ "$started" == "null" ]] && continue
-
-            if [[ "$completed" != "null" ]]; then
-              started_epoch=$(date -d "$started" +%s 2>/dev/null || echo 0)
-              completed_epoch=$(date -d "$completed" +%s 2>/dev/null || echo 0)
-              duration_s=$((completed_epoch - started_epoch))
-              total_s=$((total_s + duration_s))
-              job_count=$((job_count + 1))
-
-              minutes=$((duration_s / 60))
-              seconds=$((duration_s % 60))
-
-              case "$conclusion" in
-                success) status=":white_check_mark:" ;;
-                failure) status=":x:" ;;
-                skipped) status=":fast_forward:" ;;
-                cancelled) status=":stop_sign:" ;;
-                *) status=":grey_question:" ;;
-              esac
-
-              echo "| ${status} ${name} | ${minutes}m ${seconds}s | ${started} | ${completed} |" >> "$GITHUB_STEP_SUMMARY"
-            else
-              echo "| :hourglass: ${name} | — | — | — |" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          done < <(echo "$jobs_json" | jq -c '.')
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$job_count" -gt 0 ]]; then
-            total_min=$((total_s / 60))
-            total_sec=$((total_s % 60))
-            avg_s=$((total_s / job_count))
-            avg_min=$((avg_s / 60))
-            avg_sec=$((avg_s % 60))
-            echo "**Total CI wall-clock time:** ${total_min}m ${total_sec}s across ${job_count} jobs" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "**Average job duration:** ${avg_min}m ${avg_sec}s" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "No completed jobs to report." >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo ":package: **Cache strategy:** uv cache (full-extras / dev-only profiles), npm cache (package-lock.json)" >> "$GITHUB_STEP_SUMMARY"
+          for result in ${RESULTS}; do
+            test "${result}" = success
+          done

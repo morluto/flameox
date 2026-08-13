@@ -17,6 +17,8 @@ from flameox.cli import app
 from flameox.domain import RunManifest
 from flameox.storage import RunStore, Workspace
 
+pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
+
 
 @pytest.mark.anyio
 @pytest.mark.process
@@ -83,10 +85,16 @@ async def test_real_stdio_server_keeps_protocol_on_stdout(tmp_path: Path) -> Non
         "Call list_runs to choose an existing run."
     ]
     assert structured_error.structured_content["error"]["recovery"] == {
-        "kind": "discover_runs",
+        "kind": "tool_action",
         "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
+        "action": {
+            "kind": "tool",
+            "action": "run.list",
+            "arguments": {"limit": 50},
+        },
         "next_tool": "list_runs",
+        "next_arguments": {"limit": 50},
     }
 
 

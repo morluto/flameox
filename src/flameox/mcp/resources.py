@@ -6,7 +6,7 @@ from typing import Protocol, cast
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 
-from flameox.adapters.kernel_build import kernel_build_json_schema
+from flameox.adapters.kernel_build import kernel_build_json_schema, kernel_build_v1_json_schema
 from flameox.adapters.kernel_validation import kernel_validation_json_schema
 from flameox.application import (
     ArtifactPipelineService,
@@ -15,10 +15,11 @@ from flameox.application import (
     ExperimentService,
     FindingService,
     InvestigationService,
+    RunProjectionService,
     RunSetService,
 )
 from flameox.domain import DomainError, ErrorCode, EvidenceReferenceType
-from flameox.storage import RunStore, Workspace
+from flameox.storage import Workspace
 
 
 class WorkspaceContext(Protocol):
@@ -44,7 +45,7 @@ def register_resources[T: WorkspaceContext](server: MCPServer[T]) -> None:  # no
     async def run_resource(run_id: str, ctx: Context) -> str:
         try:
             workspace = _workspace(ctx)
-            return RunStore(workspace).read(run_id).model_dump_json(indent=2)
+            return RunProjectionService(workspace).get(run_id).model_dump_json(indent=2)
         except DomainError as error:
             return error_payload(error)
 
@@ -61,9 +62,9 @@ def register_resources[T: WorkspaceContext](server: MCPServer[T]) -> None:  # no
             return error_payload(error)
 
     @server.resource(
-        "flameox://schemas/kernel-validation/v1",
+        "flameox://schemas/kernel-validation/v2",
         mime_type="application/schema+json",
-        description="Published JSON Schema for flameox.kernel-validation.v1.",
+        description="Published JSON Schema for flameox.kernel-validation.v2.",
     )
     async def kernel_validation_schema_resource() -> str:
         return json.dumps(kernel_validation_json_schema(), indent=2, sort_keys=True)
@@ -74,6 +75,14 @@ def register_resources[T: WorkspaceContext](server: MCPServer[T]) -> None:  # no
         description="Published JSON Schema for flameox.kernel-build.v1.",
     )
     async def kernel_build_schema_resource() -> str:
+        return json.dumps(kernel_build_v1_json_schema(), indent=2, sort_keys=True)
+
+    @server.resource(
+        "flameox://schemas/kernel-build/v2",
+        mime_type="application/schema+json",
+        description="Published JSON Schema for flameox.kernel-build.v2.",
+    )
+    async def kernel_build_v2_schema_resource() -> str:
         return json.dumps(kernel_build_json_schema(), indent=2, sort_keys=True)
 
     @server.resource(

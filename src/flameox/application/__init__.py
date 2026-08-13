@@ -31,22 +31,26 @@ if TYPE_CHECKING:
     from flameox.application.inference_providers import *  # noqa: F403
     from flameox.application.integrity import *  # noqa: F403
     from flameox.application.kernel_builds import *  # noqa: F403
+    from flameox.application.kernel_validation_comparisons import *  # noqa: F403
     from flameox.application.lifecycle import *  # noqa: F403
-    from flameox.application.native_reducer import *  # noqa: F403
     from flameox.application.nvbench_imports import *  # noqa: F403
     from flameox.application.operations import *  # noqa: F403
     from flameox.application.otlp import *  # noqa: F403
     from flameox.application.pipelines import *  # noqa: F403
     from flameox.application.preflight import *  # noqa: F403
+    from flameox.application.projections import *  # noqa: F403
     from flameox.application.quarantine import *  # noqa: F403
     from flameox.application.records import *  # noqa: F403
     from flameox.application.recovery import *  # noqa: F403
+    from flameox.application.reduction_contracts import *  # noqa: F403
     from flameox.application.reductions import *  # noqa: F403
+    from flameox.application.run_projection import *  # noqa: F403
     from flameox.application.setup import *  # noqa: F403
     from flameox.application.status import *  # noqa: F403
     from flameox.application.summaries import *  # noqa: F403
     from flameox.application.viewers import *  # noqa: F403
     from flameox.application.workloads import *  # noqa: F403
+    from flameox.application.xctrace import *  # noqa: F403
 
 _MODULES = (
     "analysis_records",
@@ -70,24 +74,28 @@ _MODULES = (
     "inference",
     "inference_profiling",
     "lifecycle",
-    "native_reducer",
+    "reduction_contracts",
     "otlp",
     "integrity",
     "kernel_builds",
+    "kernel_validation_comparisons",
     "inference_providers",
     "nvbench_imports",
     "operations",
     "pipelines",
     "preflight",
+    "projections",
     "quarantine",
     "records",
     "recovery",
     "reductions",
+    "run_projection",
     "setup",
     "status",
     "summaries",
     "viewers",
     "workloads",
+    "xctrace",
 )
 
 
@@ -98,6 +106,8 @@ __all__ = [
     "AdapterOption",
     "AdapterPreparationResult",
     "AddedPipelineStageComparison",
+    "AgentRunProjection",
+    "AgentRunProjectionStatus",
     "AnalysisMaterializationService",
     "ArtifactListItem",
     "ArtifactListResult",
@@ -108,9 +118,6 @@ __all__ = [
     "ArtifactService",
     "AvailableInferenceToolDiscovery",
     "BandwidthFault",
-    "BinaryChunkPartitioning",
-    "BinaryChunkReductionPlan",
-    "BinaryChunkReductionRequest",
     "CallEdgeResult",
     "CapabilityList",
     "CapabilityService",
@@ -217,6 +224,20 @@ __all__ = [
     "KernelBuildCaptureCollector",
     "KernelBuildImportResult",
     "KernelBuildImportService",
+    "KernelMetricChangeKind",
+    "KernelMetricDirection",
+    "KernelValidationCompareRequest",
+    "KernelValidationComparison",
+    "KernelValidationComparisonProtocol",
+    "KernelValidationComparisonResult",
+    "KernelValidationComparisonService",
+    "KernelValidationCompatibilityMismatch",
+    "KernelValidationInputIdentity",
+    "KernelValidationMetricAggregate",
+    "KernelValidationMetricPair",
+    "KernelValidationMetricSelector",
+    "KernelValidationPsnrProfile",
+    "KernelValidationUnmatchedMetric",
     "LatencyFault",
     "LifecycleEvidenceService",
     "LifecycleItem",
@@ -229,16 +250,6 @@ __all__ = [
     "MeasurementQueryResult",
     "MemoryAnalysisRequest",
     "MissingPipelineStageComparison",
-    "NativeDdminReducer",
-    "NativePartitioning",
-    "NativePredicateClassification",
-    "NativeReductionAttempt",
-    "NativeReductionCacheStatus",
-    "NativeReductionDisposition",
-    "NativeReductionLimits",
-    "NativeReductionMinimality",
-    "NativeReductionPartitioner",
-    "NativeReductionResult",
     "NativeViewerLaunchResult",
     "NativeViewerPlan",
     "NativeViewerService",
@@ -260,16 +271,24 @@ __all__ = [
     "PairedPipelineStageComparison",
     "PipelineComparison",
     "PipelineCompatibility",
+    "PipelineExtractorProfile",
+    "PipelineIdentityQuality",
     "PipelineStage",
     "PipelineStageComparison",
     "PipelineStageDeclaration",
     "PipelineStageDisposition",
     "PipelineStageStatus",
     "PlanReductionRequest",
+    "PredicateClassification",
+    "PredicateObservation",
     "PreflightService",
     "ProfileChange",
     "ProjectConfig",
+    "ProjectionCoordinator",
+    "ProjectionReconciliationResult",
+    "ProjectionVisibilityState",
     "ProxyFault",
+    "PublishedRunProjection",
     "PyTorchAnalysisRequest",
     "QuarantineManifest",
     "QuarantineRestoreResult",
@@ -279,10 +298,15 @@ __all__ = [
     "RecoveryInspection",
     "RecoveryResult",
     "RecoveryService",
+    "ReductionAttemptReceipt",
     "ReductionAttemptSummary",
-    "ReductionDeterminism",
+    "ReductionDisposition",
+    "ReductionExecutionLimits",
+    "ReductionFormat",
     "ReductionLimits",
+    "ReductionMinimality",
     "ReductionPlan",
+    "ReductionRepeatabilityStatus",
     "ReductionResult",
     "ReductionService",
     "RegisterPipelineRequest",
@@ -294,6 +318,7 @@ __all__ = [
     "RunDiscoveryService",
     "RunFilter",
     "RunListResult",
+    "RunProjectionService",
     "RunSetService",
     "RunSummary",
     "RuntimeAction",
@@ -312,17 +337,17 @@ __all__ = [
     "SlowCloseFault",
     "StackExample",
     "StackExamplesResult",
-    "StructuredPartitioning",
-    "StructuredReductionPlan",
-    "StructuredReductionRequest",
     "SummaryArtifact",
     "SummaryClaim",
+    "SummaryClaimedRole",
     "SummaryExcerptPolicy",
+    "SummaryProofAssessment",
     "SummaryProofShape",
     "SummaryReference",
     "SummaryReferenceKind",
     "SummaryRun",
     "SummaryRunRole",
+    "SummarySelectionShape",
     "SummarySensitiveContextPolicy",
     "SummarySupportStatus",
     "SupportedInferenceProfiler",
@@ -346,8 +371,13 @@ __all__ = [
     "WorkloadRequirementsConfig",
     "WorkloadService",
     "WorkspaceStatus",
+    "XctraceCapability",
+    "XctraceImportRequest",
+    "XctraceImportResult",
+    "XctraceService",
     "discover_inference_tool",
     "kernel_build_pipeline_request",
+    "managed_kernel_build_context",
     "parse_compare_run_sets_request",
     "parse_experiment_config",
     "parse_inference_profiling_plan",
@@ -356,6 +386,7 @@ __all__ = [
     "parse_inference_server_config",
     "parse_inference_tool_discovery",
     "probe_existing_vllm_server",
+    "probe_existing_vllm_server_async",
     "render_evidence_summary_markdown",
     "scalar_contains",
     "scalar_equal",

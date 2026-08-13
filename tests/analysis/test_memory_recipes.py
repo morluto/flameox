@@ -15,6 +15,8 @@ from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
 from tests.support.analysis import run_row
 
+pytestmark = pytest.mark.integration
+
 
 def test_memory_reports_phase_correlated_growth(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)

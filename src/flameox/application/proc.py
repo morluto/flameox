@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import psutil
+
 PROC_ROOT = Path("/proc")
 MAX_STAT_BYTES = 8192
 
 
 def read_boot_id() -> str:
-    boot_id = (PROC_ROOT / "sys/kernel/random/boot_id").read_text().strip()
+    path = PROC_ROOT / "sys/kernel/random/boot_id"
+    if not path.exists() and Path("/proc") == PROC_ROOT:
+        return f"psutil:{psutil.boot_time():.6f}"
+    boot_id = path.read_text().strip()
     if not boot_id:
         raise ValueError("The kernel boot identifier is empty.")
     return boot_id
@@ -29,6 +34,11 @@ def parse_proc_stat_start_identity(stat_text: str) -> str:
 
 def read_proc_stat_start_identity(process_id: int) -> str:
     stat_path = PROC_ROOT / str(process_id) / "stat"
+    if not stat_path.exists() and Path("/proc") == PROC_ROOT:
+        try:
+            return f"psutil:{psutil.Process(process_id).create_time():.6f}"
+        except psutil.NoSuchProcess as exc:
+            raise FileNotFoundError(stat_path) from exc
     with stat_path.open("rb") as stream:
         stat_raw = stream.read(MAX_STAT_BYTES + 1)
     if len(stat_raw) > MAX_STAT_BYTES:

@@ -1,0 +1,697 @@
+{
+  "$defs": {
+    "EvaluatedKernelValidationMetric": {
+      "additionalProperties": false,
+      "properties": {
+        "comparator": {
+          "enum": [
+            "<=",
+            ">="
+          ],
+          "title": "Comparator",
+          "type": "string"
+        },
+        "limitation": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Limitation"
+        },
+        "name": {
+          "enum": [
+            "max_abs_error",
+            "max_rel_error",
+            "mse",
+            "rmse",
+            "psnr",
+            "cosine_similarity"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PsnrProfile"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "fail"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "threshold": {
+          "title": "Threshold",
+          "type": "number"
+        },
+        "unit": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Unit",
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/KernelMetricValue"
+        }
+      },
+      "required": [
+        "name",
+        "unit",
+        "value",
+        "comparator",
+        "threshold",
+        "status"
+      ],
+      "title": "EvaluatedKernelValidationMetric",
+      "type": "object"
+    },
+    "ExactPsnrProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "data_range": {
+          "exclusiveMinimum": 0,
+          "title": "Data Range",
+          "type": "number"
+        },
+        "identity_quality": {
+          "const": "exact",
+          "default": "exact",
+          "title": "Identity Quality",
+          "type": "string"
+        },
+        "log_base": {
+          "const": 10,
+          "default": 10,
+          "title": "Log Base",
+          "type": "integer"
+        },
+        "reduction": {
+          "const": "mean_squared_error",
+          "default": "mean_squared_error",
+          "title": "Reduction",
+          "type": "string"
+        },
+        "zero_mse_convention": {
+          "const": "positive_infinity",
+          "default": "positive_infinity",
+          "title": "Zero Mse Convention",
+          "type": "string"
+        }
+      },
+      "required": [
+        "data_range"
+      ],
+      "title": "ExactPsnrProfile",
+      "type": "object"
+    },
+    "FiniteKernelMetricValue": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "finite",
+          "default": "finite",
+          "title": "Kind",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "number"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "FiniteKernelMetricValue",
+      "type": "object"
+    },
+    "KernelMetricValue": {
+      "discriminator": {
+        "mapping": {
+          "finite": "#/$defs/FiniteKernelMetricValue",
+          "positive_infinity": "#/$defs/PositiveInfinityKernelMetricValue"
+        },
+        "propertyName": "kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/FiniteKernelMetricValue"
+        },
+        {
+          "$ref": "#/$defs/PositiveInfinityKernelMetricValue"
+        }
+      ]
+    },
+    "KernelValidationCase": {
+      "additionalProperties": false,
+      "properties": {
+        "case_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Case Id",
+          "type": "string"
+        },
+        "device": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Device",
+          "type": "string"
+        },
+        "dimensions": {
+          "maxProperties": 32,
+          "patternProperties": {
+            "^[A-Za-z0-9][A-Za-z0-9._:/-]*$": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            }
+          },
+          "propertyNames": {
+            "maxLength": 200,
+            "minLength": 1
+          },
+          "title": "Dimensions",
+          "type": "object"
+        },
+        "inputs": {
+          "maxProperties": 32,
+          "patternProperties": {
+            "^[A-Za-z0-9][A-Za-z0-9._:/-]*$": {
+              "$ref": "#/$defs/KernelValidationInput"
+            }
+          },
+          "propertyNames": {
+            "maxLength": 200,
+            "minLength": 1
+          },
+          "title": "Inputs",
+          "type": "object"
+        },
+        "limitations": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20,
+          "title": "Limitations",
+          "type": "array"
+        },
+        "outputs": {
+          "items": {
+            "$ref": "#/$defs/KernelValidationOutput"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Outputs",
+          "type": "array"
+        },
+        "seed": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": -9223372036854775808,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Seed"
+        },
+        "status": {
+          "$ref": "#/$defs/KernelValidationStatus"
+        }
+      },
+      "required": [
+        "case_id",
+        "device",
+        "status",
+        "outputs"
+      ],
+      "title": "KernelValidationCase",
+      "type": "object"
+    },
+    "KernelValidationFailure": {
+      "additionalProperties": false,
+      "properties": {
+        "absolute_error": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Absolute Error"
+        },
+        "actual": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Actual"
+        },
+        "coordinates": {
+          "default": [],
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 16,
+          "title": "Coordinates",
+          "type": "array"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "expected": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected"
+        },
+        "relative_error": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Relative Error"
+        }
+      },
+      "title": "KernelValidationFailure",
+      "type": "object"
+    },
+    "KernelValidationInput": {
+      "additionalProperties": false,
+      "properties": {
+        "dtype": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Dtype",
+          "type": "string"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
+        },
+        "shape": {
+          "items": {
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
+            "type": "integer"
+          },
+          "maxItems": 16,
+          "title": "Shape",
+          "type": "array"
+        }
+      },
+      "required": [
+        "dtype",
+        "shape"
+      ],
+      "title": "KernelValidationInput",
+      "type": "object"
+    },
+    "KernelValidationMetric": {
+      "discriminator": {
+        "mapping": {
+          "fail": "#/$defs/EvaluatedKernelValidationMetric",
+          "inconclusive": "#/$defs/UnavailableKernelValidationMetric",
+          "pass": "#/$defs/EvaluatedKernelValidationMetric",
+          "unsupported": "#/$defs/UnavailableKernelValidationMetric"
+        },
+        "propertyName": "status"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/EvaluatedKernelValidationMetric"
+        },
+        {
+          "$ref": "#/$defs/UnavailableKernelValidationMetric"
+        }
+      ]
+    },
+    "KernelValidationOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "dtype": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Dtype",
+          "type": "string"
+        },
+        "limitations": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20,
+          "title": "Limitations",
+          "type": "array"
+        },
+        "metrics": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/KernelValidationMetric"
+          },
+          "maxItems": 16,
+          "title": "Metrics",
+          "type": "array"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "representative_failures": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/KernelValidationFailure"
+          },
+          "maxItems": 8,
+          "title": "Representative Failures",
+          "type": "array"
+        },
+        "shape": {
+          "items": {
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
+            "type": "integer"
+          },
+          "maxItems": 16,
+          "title": "Shape",
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/KernelValidationStatus"
+        }
+      },
+      "required": [
+        "name",
+        "dtype",
+        "shape",
+        "status"
+      ],
+      "title": "KernelValidationOutput",
+      "type": "object"
+    },
+    "KernelValidationReference": {
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Identity",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "required": [
+        "name",
+        "identity"
+      ],
+      "title": "KernelValidationReference",
+      "type": "object"
+    },
+    "KernelValidationStatus": {
+      "enum": [
+        "pass",
+        "fail",
+        "inconclusive",
+        "unsupported"
+      ],
+      "title": "KernelValidationStatus",
+      "type": "string"
+    },
+    "LegacyPsnrProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "identity_quality": {
+          "const": "legacy_unqualified",
+          "default": "legacy_unqualified",
+          "title": "Identity Quality",
+          "type": "string"
+        },
+        "reason": {
+          "const": "v1_missing_profile",
+          "default": "v1_missing_profile",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "title": "LegacyPsnrProfile",
+      "type": "object"
+    },
+    "PositiveInfinityKernelMetricValue": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "positive_infinity",
+          "default": "positive_infinity",
+          "title": "Kind",
+          "type": "string"
+        },
+        "reason": {
+          "const": "zero_mse_exact_agreement",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "title": "PositiveInfinityKernelMetricValue",
+      "type": "object"
+    },
+    "PsnrProfile": {
+      "discriminator": {
+        "mapping": {
+          "exact": "#/$defs/ExactPsnrProfile",
+          "legacy_unqualified": "#/$defs/LegacyPsnrProfile"
+        },
+        "propertyName": "identity_quality"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ExactPsnrProfile"
+        },
+        {
+          "$ref": "#/$defs/LegacyPsnrProfile"
+        }
+      ]
+    },
+    "UnavailableKernelValidationMetric": {
+      "additionalProperties": false,
+      "properties": {
+        "comparator": {
+          "const": null,
+          "title": "Comparator",
+          "type": "null"
+        },
+        "limitation": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Limitation",
+          "type": "string"
+        },
+        "name": {
+          "enum": [
+            "max_abs_error",
+            "max_rel_error",
+            "mse",
+            "rmse",
+            "psnr",
+            "cosine_similarity"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "inconclusive",
+            "unsupported"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "threshold": {
+          "const": null,
+          "title": "Threshold",
+          "type": "null"
+        },
+        "unit": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Unit",
+          "type": "string"
+        },
+        "value": {
+          "const": null,
+          "title": "Value",
+          "type": "null"
+        }
+      },
+      "required": [
+        "name",
+        "unit",
+        "value",
+        "comparator",
+        "threshold",
+        "status",
+        "limitation"
+      ],
+      "title": "UnavailableKernelValidationMetric",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "cases": {
+      "items": {
+        "$ref": "#/$defs/KernelValidationCase"
+      },
+      "maxItems": 1000,
+      "minItems": 1,
+      "title": "Cases",
+      "type": "array"
+    },
+    "coverage_complete": {
+      "title": "Coverage Complete",
+      "type": "boolean"
+    },
+    "limitations": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 20,
+      "title": "Limitations",
+      "type": "array"
+    },
+    "producer": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+      "title": "Producer",
+      "type": "string"
+    },
+    "producer_version": {
+      "anyOf": [
+        {
+          "maxLength": 200,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Producer Version"
+    },
+    "reference": {
+      "$ref": "#/$defs/KernelValidationReference"
+    },
+    "schema_version": {
+      "const": "flameox.kernel-validation.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/KernelValidationStatus"
+    }
+  },
+  "required": [
+    "schema_version",
+    "producer",
+    "reference",
+    "status",
+    "coverage_complete",
+    "cases"
+  ],
+  "title": "KernelValidationV2",
+  "type": "object"
+}

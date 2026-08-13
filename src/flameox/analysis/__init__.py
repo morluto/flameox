@@ -1,4 +1,4 @@
-from flameox.analysis.comparison import compare_paired_samples
+from flameox.analysis.comparison import compare_paired_samples, compare_unpaired_samples
 from flameox.analysis.inference_protocol import (
     AttachedProfilerState,
     ExploratoryReason,
@@ -15,6 +15,10 @@ from flameox.analysis.inference_protocol import (
     ServerConfigIdentity,
     TraceIdentity,
     compare_inference_protocols,
+)
+from flameox.analysis.paired_differences import (
+    PairedDifferenceEstimate,
+    paired_median_difference,
 )
 from flameox.analysis.recipes import (
     AcceleratorLaunchAnalysisResult,
@@ -67,6 +71,7 @@ __all__ = [
     "OperatorSummary",
     "OracleIdentity",
     "OracleResult",
+    "PairedDifferenceEstimate",
     "ProfilerKind",
     "ProfilerState",
     "ProtocolMismatch",
@@ -82,4 +87,6 @@ __all__ = [
     "TraceIdentity",
     "compare_inference_protocols",
     "compare_paired_samples",
+    "compare_unpaired_samples",
+    "paired_median_difference",
 ]

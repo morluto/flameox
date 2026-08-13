@@ -17,6 +17,8 @@ from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode
 from flameox.storage import GenerationManifest, RunStore, Workspace
 
+pytestmark = pytest.mark.unit
+
 
 def _float32_bytes(values: list[float]) -> bytes:
     return struct.pack(f"<{len(values)}f", *values)
@@ -340,6 +342,7 @@ def test_nvbench_import_service_binds_expected_byte_length(tmp_path: Path) -> No
         NvbenchImportService(workspace).import_json(json_path, allow_external_path=True)
     assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
     assert "byte length mismatch" in error.value.message
+    assert tuple(workspace.paths.artifacts.rglob("artifact.json")) == ()
 
 
 def test_nvbench_rejects_unverified_json_schema_major_before_decoding(tmp_path: Path) -> None:

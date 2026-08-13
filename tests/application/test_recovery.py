@@ -13,11 +13,14 @@ from flameox.domain import (
     CaptureLease,
     CaptureStatus,
     ExecutionStatus,
+    ProjectionIntentSpec,
     RunManifest,
     ValidationStatus,
 )
 from flameox.domain.models import ExecutionRunManifest, utc_now
 from flameox.storage import RunStore, Workspace
+
+pytestmark = pytest.mark.integration
 
 DIGEST = "sha256:" + ("a" * 64)
 
@@ -122,13 +125,14 @@ def test_recovery_skips_a_run_that_changes_after_inspection(
     )
     RunStore(workspace).create(run)
     service = RecoveryService(workspace)
-    append = service.runs.append
+    append = service.projections.runs.append
     raced = False
 
     def append_after_concurrent_update(
         manifest: RunManifest,
         *,
         expected_revision: int,
+        projection_intent: ProjectionIntentSpec | None = None,
     ) -> RunManifest:
         nonlocal raced
         if not raced:
@@ -138,9 +142,13 @@ def test_recovery_skips_a_run_that_changes_after_inspection(
                 current.model_copy(update={"revision": current.revision + 1}),
                 expected_revision=current.revision,
             )
-        return append(manifest, expected_revision=expected_revision)
+        return append(
+            manifest,
+            expected_revision=expected_revision,
+            projection_intent=projection_intent,
+        )
 
-    monkeypatch.setattr(service.runs, "append", append_after_concurrent_update)
+    monkeypatch.setattr(service.projections.runs, "append", append_after_concurrent_update)
 
     result = service.recover()
 

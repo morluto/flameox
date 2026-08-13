@@ -14,6 +14,8 @@ from flameox.application import EvidenceQueryService, ImportArtifactRequest, Imp
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, Sensitivity
 from flameox.storage import Workspace
 
+pytestmark = pytest.mark.unit
+
 
 def _write_mooncake_trace(path: Path, lines: list[dict[str, object]]) -> None:
     path.write_text(

@@ -83,8 +83,15 @@ class _RemoveClientEntry:
 type _ClientEntryEdit = _SetClientEntry | _RemoveClientEntry
 
 
-class ClientConfigRegistry:
-    """Resolve narrow, source-preserving edits to supported MCP client configs."""
+FALLBACK_SETUP_CLIENTS = (
+    SetupClient.CURSOR,
+    SetupClient.OPENCODE,
+    SetupClient.ANTIGRAVITY,
+)
+
+
+class QualifiedClientConfigFallbacks:
+    """Documented, qualified file fallbacks for clients without usable management CLIs."""
 
     def __init__(
         self,
@@ -131,11 +138,13 @@ class ClientConfigRegistry:
         if client is SetupClient.GEMINI:
             path = self.home / ".gemini" / "settings.json"
             return _ClientDefinition(path, "json", "mcpServers", path.parent.exists())
-        path = self.home / ".gemini" / "config" / "mcp_config.json"
-        detected = (self.home / ".gemini" / "antigravity").exists() or (
-            self.home / ".agent"
-        ).exists()
-        return _ClientDefinition(path, "json", "mcpServers", detected)
+        if client is SetupClient.ANTIGRAVITY:
+            path = self.home / ".gemini" / "config" / "mcp_config.json"
+            detected = (self.home / ".gemini" / "antigravity").exists() or (
+                self.home / ".agent"
+            ).exists()
+            return _ClientDefinition(path, "json", "mcpServers", detected)
+        raise AssertionError(client)
 
     def detected_clients(self) -> tuple[SetupClient, ...]:
         return tuple(client for client in ALL_SETUP_CLIENTS if self.definition(client).detected)
@@ -263,23 +272,14 @@ class ClientConfigRegistry:
         text = self._read_text(definition.path) if text is None else text
         if definition.format == "toml":
             try:
-                toml_document = tomlkit.parse(text)
+                document = tomlkit.parse(text)
             except (ValueError, TypeError) as exc:
                 raise self._invalid_config(definition.path, exc) from exc
-            section = toml_document.get(definition.config_key)
+            section = document.get(definition.config_key)
             if section is None:
                 return None
-            try:
-                value = section.get("flameox")
-            except AttributeError as exc:
-                raise self._invalid_config(
-                    definition.path, f"{definition.config_key} is not a table"
-                ) from exc
-            plain = _plain_mapping(value)
-            if value is not None and plain is None:
-                raise self._invalid_config(definition.path, "the flameox entry is not a table")
-            return plain
-
+            value = section.get("flameox") if hasattr(section, "get") else None
+            return _plain_mapping(value)
         if definition.format == "jsonc" and self.jsonc_helper is None:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
@@ -341,7 +341,7 @@ class ClientConfigRegistry:
             section = tomlkit.table()
             document[definition.config_key] = section
         if not hasattr(section, "get") or not hasattr(section, "__setitem__"):
-            raise self._invalid_config(definition.path, f"{definition.config_key} is not a table")
+            raise self._invalid_config(definition.path, "MCP section is not a table")
         if isinstance(edit, _RemoveClientEntry):
             section.pop("flameox", None)
         else:
@@ -494,6 +494,9 @@ class ClientConfigRegistry:
             details={"error": str(error)},
             remediation=("Repair the configuration, then run `npx flameox@latest setup` again.",),
         )
+
+
+ClientConfigRegistry = QualifiedClientConfigFallbacks
 
 
 def _plain_mapping(value: Any) -> dict[str, Any] | None:

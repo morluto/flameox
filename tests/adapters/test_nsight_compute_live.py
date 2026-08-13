@@ -22,6 +22,14 @@ from flameox.domain import (
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
 
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.optional,
+    pytest.mark.process,
+    pytest.mark.serial,
+    pytest.mark.requires_ncu,
+]
+
 
 @pytest.mark.anyio
 @pytest.mark.optional

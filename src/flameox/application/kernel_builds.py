@@ -7,19 +7,23 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal, assert_never
 
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 
 from flameox.adapters.kernel_build import (
-    KERNEL_BUILD_SCHEMA_VERSION,
     ArtifactKernelBuildStage,
     ArtifactlessKernelBuildStage,
     KernelBuildArtifact,
     KernelBuildCacheStatus,
+    KernelBuildContext,
+    KernelBuildManifest,
     KernelBuildManifestV1,
+    KernelBuildManifestV2,
     KernelBuildOutcome,
     KernelBuildProducer,
     KernelBuildStage,
     KernelBuildStageStatus,
+    KernelBuildTarget,
+    parse_kernel_build_manifest,
 )
 from flameox.application.imports import (
     BundleMember,
@@ -35,7 +39,15 @@ from flameox.application.pipelines import (
     UnregisteredPipelineStageDeclaration,
 )
 from flameox.atomic import atomic_write_json
-from flameox.domain import ArtifactKind, DomainError, ErrorCode, RunManifest, Sensitivity
+from flameox.domain import (
+    ArtifactKind,
+    DomainError,
+    ErrorCode,
+    RunManifest,
+    Sensitivity,
+    WorkloadInstance,
+    digest_model,
+)
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
@@ -114,8 +126,45 @@ class KernelBuildInventory:
     dump_dir: Path | None
 
 
+def managed_kernel_build_context(
+    *,
+    workload_instance: WorkloadInstance,
+    adapter: str,
+    producer_version: str | None,
+    adapter_options: dict[str, JsonValue],
+) -> KernelBuildContext:
+    """Bind one compiler invocation to its exact managed workload and protocol inputs."""
+
+    raw_target = adapter_options.get("target")
+    target = KernelBuildTarget.model_validate(raw_target) if raw_target is not None else None
+    return KernelBuildContext(
+        workload_definition_id=workload_instance.workload_definition_id,
+        workload_instance_id=workload_instance.workload_instance_id,
+        command_digest=digest_model(workload_instance.command.model_dump(mode="json")),
+        parameters_digest=digest_model(workload_instance.parameters),
+        compiler_identity_id=digest_model(
+            {
+                "adapter": adapter,
+                "producer_version": producer_version or "unknown",
+            }
+        ),
+        build_protocol_id=digest_model(
+            {
+                "schema_version": "flameox.kernel-build-protocol.v1",
+                "adapter": adapter,
+                "producer_version": producer_version or "unknown",
+                "adapter_options": adapter_options,
+            }
+        ),
+        target=target,
+        target_identity_id=(
+            digest_model(target.model_dump(mode="json")) if target is not None else None
+        ),
+    )
+
+
 def kernel_build_pipeline_request(
-    manifest: KernelBuildManifestV1,
+    manifest: KernelBuildManifest,
     *,
     run_id: str,
     registration_ids_by_path: dict[str, str],
@@ -131,15 +180,21 @@ def kernel_build_pipeline_request(
             declarations.append(
                 RegisteredPipelineStageDeclaration.model_validate(
                     {
-                        **stage.model_dump(exclude={"artifact"}),
+                        **stage.model_dump(exclude={"artifact", "elapsed_ns"}),
                         "registration_id": registration_id,
+                        "extractor_profile": (
+                            "text-lines-v1"
+                            if stage.artifact.media_type.startswith("text/")
+                            or stage.artifact.media_type == "application/json"
+                            else None
+                        ),
                     }
                 )
             )
         elif isinstance(stage, ArtifactlessKernelBuildStage):
             declarations.append(
                 UnregisteredPipelineStageDeclaration.model_validate(
-                    stage.model_dump(exclude={"artifact"})
+                    stage.model_dump(exclude={"artifact", "elapsed_ns"})
                 )
             )
         else:
@@ -147,8 +202,21 @@ def kernel_build_pipeline_request(
     derived: list[str] = []
     if manifest.diagnostics:
         derived.append("compiler diagnostics are preserved in the kernel-build manifest")
-    if manifest.device_identity is None:
-        derived.append("device identity was not supplied by the producer")
+    if isinstance(manifest, KernelBuildManifestV1):
+        workload_label = manifest.workload_identity
+        device_label = manifest.device_identity
+        context: KernelBuildContext | None = None
+        if device_label is None:
+            derived.append("device identity was not supplied by the producer")
+    else:
+        workload_label = manifest.workload_label
+        context = manifest.build_context
+        if context.target is None:
+            device_label = None
+            derived.append("compiler target identity was not supplied by the producer")
+        else:
+            warp = f":warp{context.target.warp_size}" if context.target.warp_size else ""
+            device_label = f"{context.target.backend}:{context.target.architecture}{warp}"
     limitations = list(dict.fromkeys((*derived, *manifest.limitations)))
     if len(limitations) > 20:
         retained = 19 - len(derived)
@@ -160,11 +228,18 @@ def kernel_build_pipeline_request(
     return RegisterPipelineRequest(
         run_id=run_id,
         pipeline_name=f"{manifest.producer.value}.compiler",
-        pipeline_schema=KERNEL_BUILD_SCHEMA_VERSION,
+        pipeline_schema=manifest.schema_version,
         producer=manifest.producer,
         producer_version=manifest.producer_version,
-        workload_identity=manifest.workload_identity,
-        device_identity=manifest.device_identity,
+        workload_identity=workload_label,
+        device_identity=device_label,
+        workload_definition_id=(context.workload_definition_id if context is not None else None),
+        workload_instance_id=(context.workload_instance_id if context is not None else None),
+        command_digest=(context.command_digest if context is not None else None),
+        parameters_digest=(context.parameters_digest if context is not None else None),
+        compiler_identity_id=(context.compiler_identity_id if context is not None else None),
+        build_protocol_id=(context.build_protocol_id if context is not None else None),
+        target_identity_id=(context.target_identity_id if context is not None else None),
         stages=tuple(declarations),
         limitations=tuple(dict.fromkeys(limitations)),
     )
@@ -176,7 +251,7 @@ class KernelBuildCaptureCollector:
     This collector walks the dump directory produced by the compiler's env-var
     controls, filters to a fixed extension allowlist, enforces hard
     member/byte/containment/symlink bounds, preserves files unchanged, and
-    builds a ``flameox.kernel-build.v1`` manifest. It does not parse or rewrite
+    builds a ``flameox.kernel-build.v2`` manifest. It does not parse or rewrite
     compiler files.
     """
 
@@ -189,13 +264,14 @@ class KernelBuildCaptureCollector:
         adapter: str,
         dump_dir: Path,
         output_root: Path,
-        workload_name: str,
+        workload_label: str,
+        build_context: KernelBuildContext,
         exit_code: int,
         producer_version: str | None,
         source_environment: dict[str, str],
         cute_keep_allowlist: tuple[str, ...] | None = None,
         reproducer_path: Path | None = None,
-    ) -> tuple[KernelBuildManifestV1, Path, tuple[Path, ...]]:
+    ) -> tuple[KernelBuildManifestV2, Path, tuple[Path, ...]]:
         if adapter == "triton.compiler":
             extension_map = _TRITON_EXTENSION_MAP
         elif adapter == "cute.compiler":
@@ -256,14 +332,23 @@ class KernelBuildCaptureCollector:
             limitations.append(
                 "Compiler exited successfully but produced no allowlisted native artifacts."
             )
-        manifest = KernelBuildManifestV1(
+        if build_context.target is None:
+            limitations.append(
+                "Compiler target was not declared; exact compatibility cannot be established."
+            )
+        if producer_version is None or producer_version.casefold() == "unknown":
+            limitations.append(
+                "Compiler version was unavailable; exact compatibility cannot be established."
+            )
+        manifest = KernelBuildManifestV2(
             producer=(
                 KernelBuildProducer.TRITON
                 if adapter == "triton.compiler"
                 else KernelBuildProducer.CUTE
             ),
             producer_version=producer_version or "unknown",
-            workload_identity=workload_name,
+            workload_label=workload_label,
+            build_context=build_context,
             outcome=outcome,
             cache_status=KernelBuildCacheStatus.UNKNOWN,
             stages=stages,
@@ -571,7 +656,7 @@ class KernelBuildImportService:
                 ErrorCode.EXECUTION_REFUSED,
                 "Kernel-build manifest exceeds the 99 native-artifact bundle limit.",
             )
-        imported = importer._import_provider_bundle(
+        imported = importer.import_provider_bundle(
             ImportBundleRequest(
                 primary=BundleMember(
                     path=manifest_path,
@@ -596,7 +681,7 @@ class KernelBuildImportService:
             path: registration.registration_id
             for path, registration in zip(artifact_paths, registrations, strict=True)
         }
-        pipeline = ArtifactPipelineService(self.workspace).register(
+        pipeline = ArtifactPipelineService(self.workspace).register_imported(
             kernel_build_pipeline_request(
                 manifest,
                 run_id=imported.run.run_id,
@@ -610,7 +695,7 @@ class KernelBuildImportService:
             corpus_commit_id=imported.corpus_commit_id,
         )
 
-    def _load_manifest(self, path: Path) -> tuple[KernelBuildManifestV1, int, str]:
+    def _load_manifest(self, path: Path) -> tuple[KernelBuildManifest, int, str]:
         try:
             size = path.stat().st_size
             if size > _MAX_KERNEL_BUILD_MANIFEST_BYTES:
@@ -627,7 +712,7 @@ class KernelBuildImportService:
                 )
             payload = json.loads(raw.decode("utf-8"))
             return (
-                KernelBuildManifestV1.model_validate(payload),
+                parse_kernel_build_manifest(payload),
                 len(raw),
                 hashlib.sha256(raw).hexdigest(),
             )

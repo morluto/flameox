@@ -32,6 +32,8 @@ from flameox.execution import (
 )
 from flameox.storage import ArtifactStore, Workspace
 
+pytestmark = pytest.mark.integration
+
 
 def test_fault_configuration_rejects_non_discriminating_transport_definitions() -> None:
     with pytest.raises(ValueError, match="endpoint_template"):
@@ -111,7 +113,14 @@ def test_fault_configuration_rejects_escaped_endpoint_parameter() -> None:
 class _ToolManager(ToxiproxyToolManager):
     def __init__(self, executable: Path) -> None:
         super().__init__(executable.parent)
-        self.receipt = ToxiproxyToolReceipt("2.12.0", "test.tar.gz", "a" * 64, executable)
+        self.receipt = ToxiproxyToolReceipt(
+            "2.12.0",
+            "test.tar.gz",
+            "a" * 64,
+            executable,
+            "b" * 64,
+            "test-manifest",
+        )
         self.stage_calls = 0
 
     def stage(self) -> ToxiproxyToolReceipt:
@@ -139,11 +148,11 @@ class _FakeLease:
         self.treatments: list[dict[str, object]] = []
         self.outcome: ManagedSidecarOutcome | None = None
 
-    def add_toxic(self, **kwargs: object) -> dict[str, object]:
+    async def add_toxic_async(self, **kwargs: object) -> dict[str, object]:
         self.treatments.append(kwargs)
         return kwargs
 
-    def update_proxy(self, name: str, *, enabled: bool) -> dict[str, object]:
+    async def update_proxy_async(self, name: str, *, enabled: bool) -> dict[str, object]:
         treatment = {"proxy": name, "enabled": enabled}
         self.treatments.append(treatment)
         return treatment

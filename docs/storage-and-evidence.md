@@ -45,10 +45,9 @@ The durable layout is conceptually:
 second database. Configuration lives in project `flameox.toml`; secrets belong
 in the environment, not either file.
 
-The redesigned SQLite control plane does not migrate legacy control-file
-workspaces. Schema `0` initializes; the current exact schema opens; any other
-schema version is rejected with a new-workspace instruction. Native artifacts
-can still be imported into a new workspace through supported import operations.
+Schema `0` initializes; the current exact schema opens; any other schema version
+is rejected with a new-workspace instruction. Native artifacts can be imported
+through supported import operations.
 
 ## Control-plane authority
 
@@ -58,6 +57,7 @@ can still be imported into a new workspace through supported import operations.
 - operation current state and immutable revisions;
 - idempotency bindings;
 - run current state and immutable revisions;
+- projection intents that bind exact domain revisions to replayable corpus work;
 - investigations, hypotheses, experiments, findings, pipelines, and other typed
   control records;
 - typed relationships between those records.
@@ -157,6 +157,39 @@ Publication follows one commit protocol:
 6. write a corpus commit whose inventory names every reachable generation;
 7. atomically advance `corpus/HEAD`;
 8. record the control-plane publication receipt.
+
+Required domain projections use a domain-first transactional outbox. The same
+SQLite transaction that creates or appends a run revision inserts an immutable
+`projection_intents` row containing the workspace, domain kind and ID, exact
+revision and digest, projection schema, expected table set, operation digest,
+and a bounded replay recipe. It does not copy normalized result rows into the
+control plane.
+
+After that transaction commits, the projector builds Parquet without holding a
+SQLite transaction or workspace lock. Publication is idempotent by projection
+intent ID. Advancing `corpus/HEAD` and marking the intent published are separate
+durable steps, so a crash can leave one of three explicit states:
+
+- `pending`: the exact domain revision is durable and publication can be replayed;
+- `published`: a generation and corpus commit are linked to the intent;
+- `failed`: a bounded failure is recorded and the replay recipe remains available.
+
+Recovery first reconciles run projections. It validates the immutable source
+revision and digest, recognizes an already-published operation by its digest,
+and either finalizes the receipt or republishes from authoritative state. A
+feature-specific projector may retain a pending recipe—for example, an OTLP
+extraction replayable from its immutable native artifact—until that bounded
+projector is invoked. Missing application routing is not treated as evidence
+corruption.
+
+The core run projection contains the run row, all artifact registrations, and
+the available environment and source identities. Adapter measurements,
+extractor tables, and other producer evidence are independent immutable
+generations rather than additional copies of mutable run state. Run rows record
+`run_revision` and `run_manifest_digest`; agent-facing run reads also report the
+authoritative revision, projected revision, intent state, and whether the
+projection is current. Thus a pending or stale projection is never silently
+presented as current domain state.
 
 Readers see either the previous commit or the new complete commit. Parquet files
 are never edited in place. Compaction publishes replacement files and a new
