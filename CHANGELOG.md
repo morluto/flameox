@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to flameox are documented in this file.
+
+## [Unreleased]
+### Chores
+
+- Reconcile tracker state with the authority-centered refactor merged in #295.
+
 ## [0.1.13] - 2026-08-09
 ### Bug Fixes
 
