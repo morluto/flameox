@@ -25,8 +25,9 @@ evidence record. It preserves their native artifacts and provenance, then
 exposes bounded evidence to the agent. The agent states what it wants to test;
 Flameox captures the measurements and preserves the experiment record for review.
 
-Flameox is not a profiler, hosted observability service, arbitrary shell or SQL
-gateway, source-code editor, or automatic bug finder.
+It does not replace those tools. Flameox runs locally rather than as a hosted
+observability service, and its interfaces do not expose arbitrary shell or SQL,
+modify source code, or infer root causes automatically.
 
 ## Quick start
 
