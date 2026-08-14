@@ -25,10 +25,6 @@ evidence record. It preserves their native artifacts and provenance, then
 exposes bounded evidence to the agent. The agent states what it wants to test;
 Flameox captures the measurements and preserves the experiment record for review.
 
-It does not replace those tools. Flameox runs locally rather than as a hosted
-observability service, and its interfaces do not expose arbitrary shell or SQL,
-modify source code, or infer root causes automatically.
-
 ## Quick start
 
 Install the local runtime and connect a supported MCP client through the guided
