@@ -27,6 +27,8 @@ if TYPE_CHECKING:
     from flameox.adapters.setup_runtime import *  # noqa: F403
     from flameox.adapters.torch_profiler import *  # noqa: F403
     from flameox.adapters.toxiproxy import *  # noqa: F403
+    from flameox.adapters.v8_cpu_prof import *  # noqa: F403
+    from flameox.adapters.v8_heap_prof import *  # noqa: F403
 
 
 _MODULES = (
@@ -50,6 +52,8 @@ _MODULES = (
     "registry",
     "setup_runtime",
     "torch_profiler",
+    "v8_cpu_prof",
+    "v8_heap_prof",
     "toxiproxy",
 )
 
@@ -135,6 +139,10 @@ __all__ = [
     "TraceProcessorInstallation",
     "TraceWindowResult",
     "TritonCompilerOptions",
+    "V8CpuProfExtractionResult",
+    "V8CpuProfExtractor",
+    "V8HeapProfExtractionResult",
+    "V8HeapProfExtractor",
     "VllmAggregateMetrics",
     "VllmMeasurementRow",
     "VllmResultDocument",
