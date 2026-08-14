@@ -16,19 +16,22 @@
   <img src="https://img.shields.io/badge/Interfaces-CLI_%2B_MCP-7C3AED?style=flat" alt="CLI and MCP interfaces">
 </p>
 
+<p align="center"><strong>Language / 语言</strong>: English | <a href="README.zh-CN.md">简体中文</a></p>
+
 <!-- mcp-name: io.github.morluto/flameox -->
 
-Flameox coordinates maintained profilers, benchmark tools, and trace processors;
-preserves their native artifacts and provenance; and exposes bounded evidence to
-an agent. The agent forms the hypothesis. Flameox makes the measurements and
-experimental record inspectable.
+Flameox connects profilers, benchmark tools, and trace processors to a local
+evidence record. It preserves their native artifacts and provenance, then
+exposes bounded evidence to the agent. The agent states what it wants to test;
+Flameox captures the measurements and preserves the experiment record for review.
 
-It is not a profiler, hosted observability service, arbitrary shell or SQL
+Flameox is not a profiler, hosted observability service, arbitrary shell or SQL
 gateway, source-code editor, or automatic bug finder.
 
 ## Quick start
 
-Connect a supported MCP client through the guided setup:
+Install the local runtime and connect a supported MCP client through the guided
+setup:
 
 ```console
 npx flameox@latest setup
@@ -38,10 +41,10 @@ Restart the client, open the project you intend to inspect, and ask it to:
 
 > Initialize Flameox in this project and list the available profiling capabilities.
 
-Setup installs a versioned local runtime and changes only approved client
-configuration. Project initialization is separate and creates `.diagnostics/`
-only after the client calls the initialization workflow for its fixed project
-root.
+The setup command installs a versioned local runtime and changes only approved
+client configuration. Project initialization is separate and creates
+`.diagnostics/` only after the client calls the initialization workflow for its
+fixed project root.
 
 For source development:
 
@@ -60,15 +63,16 @@ symptom → capture or import → bounded evidence → hypothesis
         → discriminating experiment → supported, refuted, or inconclusive finding
 ```
 
-Typical evidence sources include pyperf, py-spy, pytest-reportlog, coverage.py,
-Memray, Perfetto, torch.profiler, Nsight Systems, Nsight Compute, ROCprofiler,
-Compute Sanitizer, NVBench, and typed inference-provider exports. Availability
-depends on the host, permissions, installed extras, and selected adapter. Flameox
-reports missing evidence instead of silently substituting a weaker source.
+Evidence sources include pyperf, py-spy, pytest-reportlog, coverage.py, Memray,
+Perfetto, torch.profiler, Nsight Systems, Nsight Compute, ROCprofiler, Compute
+Sanitizer, NVBench, and typed inference-provider exports. Availability depends
+on the host, permissions, installed extras, and selected adapter. Flameox reports
+missing evidence instead of silently substituting a weaker source.
 
-A profile is exploratory. A performance or correctness conclusion requires a
-representative workload, declared metric and estimand, compatible run identity,
-preserved samples, and an appropriate semantic oracle.
+A profile helps explore a problem; it does not establish a performance or
+correctness conclusion. That requires a representative workload, a declared
+metric and estimand, compatible run identity, preserved samples, and an
+appropriate semantic oracle.
 
 ## Named workloads
 
@@ -175,9 +179,9 @@ active containment denies it. The control process performs network I/O only for
 explicit setup, upgrade, approved provider acquisition, or explicitly enabled
 symbol services—not during ordinary capture or analysis.
 
-The trusted-local capture path records that descendant containment is not
-enforced. Projects that require managed containment can select it explicitly;
-planning refuses when the requested guarantee is unavailable.
+The trusted-local capture path does not enforce containment for child processes;
+it records that limitation. Projects that require managed containment can select
+it explicitly. Planning refuses when the requested guarantee is unavailable.
 
 ## CLI and MCP discovery
 
