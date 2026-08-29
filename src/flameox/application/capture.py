@@ -774,6 +774,16 @@ class CaptureService:
         adapter_version = adapter_binding.version
         self._require_memray_reader(adapter, adapter_version)
         semantics = build_run_semantics(adapter, adapter_version, bound_adapter_options)
+        workload_cwd = Path(instance.command.cwd).relative_to(
+            self.workspace.project_root
+        ).as_posix()
+        semantics = semantics.validated_copy(
+            update={
+                "scope": semantics.scope.validated_copy(
+                    update={"workload_cwd": workload_cwd or "."}
+                )
+            }
+        )
         if adapter_binding.implementation_id is not None:
             semantics = semantics.validated_copy(
                 update={

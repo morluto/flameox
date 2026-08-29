@@ -41,7 +41,7 @@ class MemrayExtractionResult(ContractModel):
 
 class MemrayExtractor:
     name = "memray"
-    version = "2"
+    version = "3"
 
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
@@ -124,10 +124,16 @@ class MemrayExtractor:
                         artifact_path=str(artifact.payload_path),
                         run_id=run_id,
                         artifact_id=registration.artifact_id,
-                        project_root=str(
-                            Path(run.command.cwd)
-                            if run.command is not None
-                            else self.workspace.project_root
+                        workload_cwd=(
+                            str(self.workspace.project_root / run.semantics.scope.workload_cwd)
+                            if run.semantics.scope.workload_cwd is not None
+                            else None
+                        ),
+                        project_root=str(self.workspace.project_root),
+                        source_state_id=(
+                            run.source_state_id
+                            if run.semantics.scope.workload_cwd is not None
+                            else None
                         ),
                         generation_id=generation_id,
                         published_at=published_at,

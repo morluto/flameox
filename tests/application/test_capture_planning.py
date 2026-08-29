@@ -117,6 +117,7 @@ argv = ["{workload_python}", "workload.py", "--size", "4"]
 
     assert plan.collector_argv[:3] == (str(workload_python), "-m", "memray")
     assert plan.collector_argv[-3:] == ("workload.py", "--size", "4")
+    assert plan.semantics.scope.workload_cwd == "."
 
 
 @pytest.mark.anyio

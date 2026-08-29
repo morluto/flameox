@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import os
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
@@ -22,21 +23,39 @@ from flameox.workers.protocol import (
 )
 
 
-def _normalize(filename: str, project_root: Path) -> str:
+def _normalize(
+    filename: str,
+    *,
+    workload_cwd: Path | None,
+    project_root: Path,
+    source_state_id: str | None,
+) -> tuple[str, str | None, str]:
     if filename.startswith("<") and filename.endswith(">"):
-        return filename
-    path = Path(filename).resolve()
+        return filename, None, "partial"
+    provider_path = Path(filename)
+    if provider_path.is_absolute():
+        candidate = provider_path
+    else:
+        if workload_cwd is None:
+            return provider_path.as_posix(), None, "partial"
+        candidate = workload_cwd / provider_path
+    path = Path(os.path.normpath(candidate))
+    if not provider_path.is_absolute() and not path.is_relative_to(project_root):
+        return provider_path.as_posix(), None, "partial"
     try:
-        return path.relative_to(project_root).as_posix()
+        normalized = path.relative_to(project_root).as_posix()
+        return normalized, source_state_id, "complete" if source_state_id else "partial"
     except ValueError:
-        return str(path)
+        return str(path), None, "partial"
 
 
 def _aggregate(
     records: Iterable[Any],
     *,
     metric: str,
+    workload_cwd: Path | None,
     project_root: Path,
+    source_state_id: str | None,
     artifact_id: str,
     frame_rows: dict[str, dict[str, Any]],
     frame_cache: dict[tuple[str, str, int], str],
@@ -51,7 +70,12 @@ def _aggregate(
             raw_frame = (str(function), str(filename), int(line))
             frame_id = frame_cache.get(raw_frame)
             if frame_id is None:
-                normalized = _normalize(raw_frame[1], project_root)
+                normalized, frame_source_state_id, symbolization = _normalize(
+                    raw_frame[1],
+                    workload_cwd=workload_cwd,
+                    project_root=project_root,
+                    source_state_id=source_state_id,
+                )
                 frame_id = digest_model(
                     {
                         "language": "Python",
@@ -73,10 +97,10 @@ def _aggregate(
                     "build_id": None,
                     "module_relative_address": None,
                     "inline_chain_id": None,
-                    "source_state_id": None,
+                    "source_state_id": frame_source_state_id,
                     "artifact_id": artifact_id,
                     "inlined": False,
-                    "symbolization": "complete",
+                    "symbolization": symbolization,
                 }
             values = aggregates[(metric, frame_id)]
             values["inclusive"] += size
@@ -135,7 +159,9 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
         _aggregate(
             reader.get_high_watermark_allocation_records(),
             metric="memory.high_watermark",
+            workload_cwd=Path(request.workload_cwd) if request.workload_cwd else None,
             project_root=Path(request.project_root),
+            source_state_id=request.source_state_id,
             artifact_id=request.artifact_id,
             frame_rows=frame_rows,
             frame_cache=frame_cache,
@@ -144,7 +170,9 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
         retained_end = _aggregate(
             reader.get_leaked_allocation_records(),
             metric="memory.retained_end",
+            workload_cwd=Path(request.workload_cwd) if request.workload_cwd else None,
             project_root=Path(request.project_root),
+            source_state_id=request.source_state_id,
             artifact_id=request.artifact_id,
             frame_rows=frame_rows,
             frame_cache=frame_cache,

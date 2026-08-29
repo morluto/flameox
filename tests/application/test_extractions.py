@@ -22,7 +22,7 @@ def _result(run_id: str) -> MemrayExtractionResult:
         producer_version="1.20.0",
         reader_version="1.20.0",
         reader_environment_id="sha256:" + "e" * 64,
-        extractor_profile="flameox.workers.memray/v2",
+        extractor_profile="flameox.workers.memray/v3",
         peak_memory_bytes=100,
         retained_end_bytes=40,
         total_allocations=3,

@@ -173,6 +173,13 @@ process and records producer version, reader version and environment, and the
 extractor profile separately. Native reader acceptance—not package-major
 comparison—is the format compatibility boundary.
 
+Memray frame paths are interpreted from preserved capture provenance. Relative
+provider filenames resolve lexically against the captured workload cwd, never
+the extractor process cwd. Paths contained by the workspace project root are
+stored project-relative and carry the run's source-state identity. Synthetic,
+external, or escaping relative paths remain partial and are not promoted to
+project source.
+
 ### Node/V8 CPU and sampling heap profiles
 
 The Node adapters invoke the declared Node executable with `--cpu-prof` or

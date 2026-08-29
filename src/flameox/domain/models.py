@@ -4,6 +4,7 @@ import math
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -1032,8 +1033,18 @@ class CaptureScope(ContractModel):
 
     mode: SemanticOption | None = None
     process_scope: SemanticOption | None = None
+    workload_cwd: str | None = Field(default=None, min_length=1, max_length=4_096)
     bounds: dict[Identifier, JsonValue] = Field(default_factory=dict, max_length=32)
     filters: dict[Identifier, JsonValue] = Field(default_factory=dict, max_length=32)
+
+    @model_validator(mode="after")
+    def workload_cwd_is_project_relative(self) -> CaptureScope:
+        if self.workload_cwd is None:
+            return self
+        path = PurePosixPath(self.workload_cwd)
+        if path.is_absolute() or ".." in path.parts or path.as_posix() != self.workload_cwd:
+            raise ValueError("capture workload cwd must be a normalized project-relative path")
+        return self
 
 
 class RunSemantics(ContractModel):
@@ -1108,6 +1119,7 @@ class RunSemanticsProjection(ContractModel):
     adapter_version: Annotated[str, StringConstraints(max_length=200)] | None = None
     mode: JsonValue | None = None
     process_scope: JsonValue | None = None
+    workload_cwd: str | None = None
     bounds: dict[Identifier, JsonValue] = Field(default_factory=dict, max_length=32)
     filters: dict[Identifier, JsonValue] = Field(default_factory=dict, max_length=32)
     unavailable_fields: Annotated[tuple[Identifier, ...], Field(max_length=32)] = ()
@@ -1123,6 +1135,7 @@ class RunSemanticsProjection(ContractModel):
             process_scope=(
                 semantics.scope.process_scope.value if semantics.scope.process_scope else None
             ),
+            workload_cwd=semantics.scope.workload_cwd,
             bounds=semantics.scope.bounds,
             filters=semantics.scope.filters,
             unavailable_fields=semantics.unavailable_fields,
