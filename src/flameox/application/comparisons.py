@@ -248,6 +248,7 @@ class _SampleSet:
     eligible: int
     failed: int
     excluded: int
+    evidence_digest: str
     nonpositive: int = 0
     nonfinite: int = 0
     missing: int = 0
@@ -274,7 +275,16 @@ class _MeasurementMemberSamples:
     missing: int = 0
     ambiguous: int = 0
     series_identity: str | None = None
+    evidence_digests: tuple[str, ...] = ()
     issues: tuple[str, ...] = ()
+
+
+def _evidence_digest(value: object) -> str:
+    if isinstance(value, float) and not math.isfinite(value):
+        if math.isnan(value):
+            return digest_model({"non_finite": "nan"})
+        return digest_model({"non_finite": "positive" if value > 0 else "negative"})
+    return digest_model(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -584,7 +594,6 @@ class ComparisonService:
             baseline,
             candidate,
             assessment,
-            corpus_commit_id,
         )
         return ComparisonResult(
             comparison=comparison,
@@ -660,15 +669,23 @@ class ComparisonService:
         baseline: _SampleSet,
         candidate: _SampleSet,
         assessment: _ComparisonAssessment,
-        corpus_commit_id: str,
     ) -> Comparison:
         comparison_id = digest_model(
             {
                 "recipe": "compare_run_sets.v1",
-                "request": request.model_dump(mode="json"),
+                "request": request.model_dump(
+                    mode="json",
+                    exclude={"baseline_run_set_id", "candidate_run_set_id"},
+                ),
                 "baseline_membership": baseline_set.membership_digest,
                 "candidate_membership": candidate_set.membership_digest,
-                "corpus_commit_id": corpus_commit_id,
+                "baseline_evidence": baseline.evidence_digest,
+                "candidate_evidence": candidate.evidence_digest,
+                "compatibility": {
+                    "invalidating": assessment.invalidating,
+                    "exploratory": assessment.exploratory,
+                    "paired": assessment.paired,
+                },
             }
         )
         measurement_series = (
@@ -1165,6 +1182,7 @@ class ComparisonService:
         ambiguous = 0
         series_identities: set[str] = set()
         issues: list[str] = []
+        evidence_digests: list[str] = []
         included = tuple(member for member in run_set.members if member.included)
         if len(included) > 1 and any(member.trial_id is None for member in included):
             raise DomainError(
@@ -1190,6 +1208,7 @@ class ComparisonService:
             ambiguous += collected.ambiguous
             if collected.series_identity is not None:
                 series_identities.add(collected.series_identity)
+            evidence_digests.extend(collected.evidence_digests)
             issues.extend(collected.issues)
         return _SampleSet(
             values=values,
@@ -1201,6 +1220,7 @@ class ComparisonService:
             nonfinite=nonfinite,
             missing=missing,
             ambiguous=ambiguous,
+            evidence_digest=digest_model(sorted(evidence_digests)),
             series_identities=frozenset(series_identities),
             issues=tuple(issues[:32]),
         )
@@ -1225,6 +1245,9 @@ class ComparisonService:
                 details={"trial_id": member.trial_id},
             )
         rows = self._selected_measurement_rows(snapshot, member.run_id, request)
+        selected_evidence_digests = tuple(
+            sorted(digest_model([_evidence_digest(value) for value in row]) for row in rows)
+        )
         by_series: dict[str, list[tuple[object, ...]]] = {}
         for row in rows:
             signature = self._measurement_series_signature(row)
@@ -1242,9 +1265,11 @@ class ComparisonService:
                 values={},
                 attempted=1,
                 ambiguous=1,
+                evidence_digests=selected_evidence_digests,
                 issues=(f"run {member.run_id} has {len(by_series)} matching measurement series",),
             )
         series_id, selected_rows = next(iter(by_series.items()))
+        evidence_digests = selected_evidence_digests
         if self._measurement_series_signature(selected_rows[0])["numeric_kind"] == (
             "unsigned_integer"
         ):
@@ -1253,14 +1278,19 @@ class ComparisonService:
                 attempted=1,
                 missing=1,
                 series_identity=series_id,
+                evidence_digests=evidence_digests,
                 issues=(
                     f"run {member.run_id} uses exact uint64 measurements; "
                     "confirmatory floating-point comparison is unsupported",
                 ),
             )
         if block_key is not None:
-            return self._paired_measurement_member(block_key, series_id, selected_rows)
-        return self._unpaired_measurement_member(member.run_id, series_id, selected_rows)
+            return self._paired_measurement_member(
+                block_key, series_id, selected_rows, evidence_digests=evidence_digests
+            )
+        return self._unpaired_measurement_member(
+            member.run_id, series_id, selected_rows, evidence_digests=evidence_digests
+        )
 
     def _selected_measurement_rows(
         self,
@@ -1271,7 +1301,7 @@ class ComparisonService:
         rows = snapshot.execute(
             "SELECT value_int, value_float, value_uint, value_kind, block_id, worker_id, "
             "worker_run_index, value_index, aggregation, scope, loop_count, "
-            "phase, dimensions, evidence_level, artifact_id "
+            "phase, dimensions, evidence_level, artifact_id, measurement_id "
             "FROM measurements WHERE run_id = ? AND name = ? AND unit = ? "
             "AND is_warmup = false ORDER BY measurement_id",
             (run_id, request.metric, request.unit),
@@ -1293,6 +1323,8 @@ class ComparisonService:
         block_key: str,
         series_id: str,
         rows: list[tuple[object, ...]],
+        *,
+        evidence_digests: tuple[str, ...],
     ) -> _MeasurementMemberSamples:
         valid, missing, nonfinite, nonpositive = cls._classify_measurement_rows(rows)
         values = {block_key: statistics.median(valid)} if len(valid) == len(rows) else {}
@@ -1303,6 +1335,7 @@ class ComparisonService:
             nonfinite=nonfinite,
             missing=int(bool(missing)),
             series_identity=series_id,
+            evidence_digests=evidence_digests,
         )
 
     @classmethod
@@ -1311,6 +1344,8 @@ class ComparisonService:
         run_id: str,
         series_id: str,
         rows: list[tuple[object, ...]],
+        *,
+        evidence_digests: tuple[str, ...],
     ) -> _MeasurementMemberSamples:
         by_worker: dict[str, list[tuple[object, ...]]] = {}
         for row in rows:
@@ -1336,6 +1371,7 @@ class ComparisonService:
             nonfinite=nonfinite,
             nonpositive=nonpositive,
             series_identity=series_id,
+            evidence_digests=evidence_digests,
         )
 
     @classmethod
@@ -1459,6 +1495,7 @@ class ComparisonService:
         nonpositive = 0
         nonfinite = 0
         missing = 0
+        evidence_rows: list[object] = []
         included = tuple(member for member in run_set.members if member.included)
         if len(included) > 1 and any(member.trial_id is None for member in included):
             raise DomainError(
@@ -1483,7 +1520,8 @@ class ComparisonService:
                     )
                 block_key = trial.block_id
             rows = snapshot.execute(
-                f"SELECT {column}, unavailable_metrics FROM runtime_resource_summaries "
+                f"SELECT {column}, unavailable_metrics, sampling_interval_ms, peak_rss_backend "
+                "FROM runtime_resource_summaries "
                 "WHERE run_id = ?",
                 (member.run_id,),
             ).fetchall()
@@ -1496,7 +1534,8 @@ class ComparisonService:
             if not rows:
                 missing += 1
                 continue
-            value, unavailable_metrics = rows[0]
+            evidence_rows.append((member.run_id, rows[0]))
+            value, unavailable_metrics, _, _ = rows[0]
             if value is None or definition.unavailable_key in set(unavailable_metrics or []):
                 missing += 1
                 continue
@@ -1523,6 +1562,7 @@ class ComparisonService:
             nonpositive=nonpositive,
             nonfinite=nonfinite,
             missing=missing,
+            evidence_digest=digest_model(evidence_rows),
         )
 
     def _runtime_resource_compatibility_mismatches(

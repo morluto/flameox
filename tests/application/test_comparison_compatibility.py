@@ -202,6 +202,38 @@ def test_frozen_run_set_comparison_and_evidence_linked_finding(
     assert result.analysis is not None
     assert result.materialized_commit_id == workspace.corpus.read_head().commit_id
     assert result.materialized_commit_id != head_before
+    Catalog(workspace).rebuild()
+    run_sets = RunSetService(workspace)
+    later_baseline = run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
+    later_candidate = run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
+    after_unrelated_publication = service.compare(
+        comparison_request.model_copy(
+            update={
+                "baseline_run_set_id": later_baseline.run_set_id,
+                "candidate_run_set_id": later_candidate.run_set_id,
+            }
+        )
+    )
+    assert after_unrelated_publication.corpus_commit_id != preview.corpus_commit_id
+    assert after_unrelated_publication.comparison.comparison_id == preview.comparison.comparison_id
+    GenerationPublisher(workspace).publish_rows(
+        {"measurements": [measurement_row(baseline_id, 13_000_000)]},
+        publisher="new-comparison-input",
+        publisher_version="1",
+    )
+    Catalog(workspace).rebuild()
+    changed_run_sets = RunSetService(workspace)
+    changed_baseline = changed_run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
+    changed_candidate = changed_run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
+    changed = service.compare(
+        comparison_request.model_copy(
+            update={
+                "baseline_run_set_id": changed_baseline.run_set_id,
+                "candidate_run_set_id": changed_candidate.run_set_id,
+            }
+        )
+    )
+    assert changed.comparison.comparison_id != preview.comparison.comparison_id
     persisted = EvidenceLookupService(workspace).get(
         EvidenceReferenceType.COMPARISON,
         result.comparison.comparison_id,
@@ -420,6 +452,7 @@ def test_comparison_rejects_different_or_partial_accelerator_identity(
     )
 
     assert "environment identity is partial or unavailable" in partial.comparison.mismatches
+    assert partial.comparison.comparison_id != different.comparison.comparison_id
 
 
 def test_excluded_member_is_coverage_evidence_not_a_compatibility_observation(
