@@ -149,7 +149,11 @@ def main() -> None:
         ) as profile:
             phase = "workload_execution"
             _write_diagnostic(diagnostic_path, phase=phase, status="running")
-            _run_target(target_case, target_name)
+            try:
+                _run_target(target_case, target_name)
+            except SystemExit as exc:
+                if exc.code not in {None, 0}:
+                    raise
             phase = "profiler_finalization"
             _write_diagnostic(diagnostic_path, phase=phase, status="running")
         phase = "trace_finalization"

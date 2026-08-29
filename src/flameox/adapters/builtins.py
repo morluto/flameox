@@ -793,9 +793,9 @@ def _torch_capture_invocation(
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "The Python module name is missing.",
             )
-        launcher_target = ("--module", target[1], *target[2:])
+        launcher_target = ("--module", target[1], "--", *target[2:])
     else:
-        launcher_target = ("--script", target[0], *target[1:])
+        launcher_target = ("--script", target[0], "--", *target[1:])
     return CaptureInvocation(
         argv=(
             python,

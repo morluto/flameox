@@ -77,6 +77,7 @@ def test_torch_capture_launcher_does_not_require_flameox_in_workload_venv(
     assert invocation.argv[6:] == (
         "--module",
         "benchmarks.benchmark_kda_decode",
+        "--",
         "--repeats",
         "1",
     )
@@ -170,7 +171,11 @@ def test_torch_capture_launcher_runs_script_with_sibling_imports(tmp_path: Path)
     (tmp_path / "benchmarks").mkdir()
     (tmp_path / "benchmarks" / "helper.py").write_text("MESSAGE = 'workload ran'\n")
     (tmp_path / "benchmarks" / "benchmark_demo.py").write_text(
-        "from helper import MESSAGE\nprint(MESSAGE)\n"
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "from helper import MESSAGE\n"
+        "Path('args.json').write_text(json.dumps(sys.argv[1:]))\n"
+        "print(MESSAGE)\n"
     )
     (tmp_path / "benchmarks" / "torch.py").write_text(
         "from pathlib import Path\n"
@@ -191,7 +196,7 @@ def test_torch_capture_launcher_runs_script_with_sibling_imports(tmp_path: Path)
     )
     invocation = build_capture_invocation(
         "torch.profiler",
-        (sys.executable, "benchmarks/benchmark_demo.py"),
+        (sys.executable, "benchmarks/benchmark_demo.py", "--size", "4"),
         tmp_path,
         executable=None,
     )
@@ -205,6 +210,7 @@ def test_torch_capture_launcher_runs_script_with_sibling_imports(tmp_path: Path)
     )
 
     assert completed.returncode == 0, completed.stderr
+    assert json.loads((tmp_path / "args.json").read_text()) == ["--size", "4"]
     assert (tmp_path / "torch-trace.json").read_text() == "trace"
 
 
