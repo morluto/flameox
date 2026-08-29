@@ -99,6 +99,7 @@ from flameox.application import (
     SetupService,
     SummaryExcerptPolicy,
     SummarySensitiveContextPolicy,
+    TraceWindowService,
     WorkloadService,
     XctraceImportRequest,
     XctraceService,
@@ -2267,6 +2268,7 @@ def trace_window(
     end_ns: Annotated[int, typer.Option("--end", min=1)],
     limit: Annotated[int, typer.Option(min=1, max=1_000)] = 100,
     cursor: Annotated[str | None, typer.Option("--cursor")] = None,
+    run_id: Annotated[str | None, typer.Option("--run-id")] = None,
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
@@ -2274,12 +2276,13 @@ def trace_window(
     try:
 
         async def run() -> BaseModel:
-            return await PerfettoExtractor(_workspace(workspace)).trace_window(
+            return await TraceWindowService(_workspace(workspace)).get(
                 artifact_id,
                 start_ns=start_ns,
                 end_ns=end_ns,
                 limit=limit,
                 cursor=cursor,
+                run_id=run_id,
             )
 
         result = _run_async(run)

@@ -21,6 +21,12 @@ class NsightSystemsWorkerResult(ContractModel):
     events: tuple[dict[str, JsonValue], ...]
     coverage: dict[str, bool] = Field(max_length=64)
     truncated_tables: tuple[str, ...] = Field(max_length=1_024)
+    product_name: str | None = Field(default=None, max_length=200)
+    product_version: str | None = Field(default=None, max_length=200)
+    export_schema_version: str | None = Field(default=None, max_length=100)
+    export_schema_checksum: str | None = Field(default=None, max_length=200)
+    export_settings: dict[str, JsonValue] = Field(default_factory=dict, max_length=16)
+    limitations: tuple[str, ...] = Field(default=(), max_length=100)
 
 
 NSIGHT_SYSTEMS_WORKER = WorkerDefinition(

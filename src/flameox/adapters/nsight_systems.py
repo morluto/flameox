@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import heapq
 import json
+import re
 from typing import cast
+
+from pydantic import JsonValue
 
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.domain import (
@@ -27,6 +30,15 @@ def _integer(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int | str | bytes | bytearray):
         raise ValueError(f"expected an integer-compatible event value, got {type(value).__name__}")
     return int(value)
+
+
+def _version_release(value: str | None) -> tuple[int, ...] | None:
+    if value is None:
+        return None
+    match = re.search(r"(?<!\d)(\d+(?:\.\d+){1,3})(?!\d)", value)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
 
 
 def _range_assignments(
@@ -114,10 +126,14 @@ def _nvtx_phase_assignments(
 
 
 class NsightSystemsExtractionResult(ContractModel):
-    schema_version: int = 1
     run_id: str
     artifact_id: str
-    producer_version: str | None
+    asserted_producer_version: str | None
+    observed_product_name: str | None
+    observed_product_version: str | None
+    export_schema_version: str | None
+    export_schema_checksum: str | None
+    export_settings: dict[str, JsonValue]
     export_format: str
     compatibility_family: str
     query_version: str
@@ -216,6 +232,43 @@ class NsightSystemsExtractor:
                 max_rows_per_table=max_rows_per_table,
             )
         )
+        if response.product_name not in {None, "NVIDIA Nsight Systems"}:
+            raise DomainError(
+                ErrorCode.ARTIFACT_PARSE_FAILED,
+                "The structured export identifies another product.",
+                details={"observed_product_name": response.product_name},
+            )
+        if (
+            response.export_schema_version is not None
+            and re.fullmatch(r"3\.\d+\.\d+", response.export_schema_version) is None
+        ):
+            raise DomainError(
+                ErrorCode.ADAPTER_INCOMPATIBLE,
+                "The Nsight Systems export schema major is unsupported.",
+                details={"observed_export_schema_version": response.export_schema_version},
+                remediation=("Re-export with a supported Nsight Systems release.",),
+            )
+        asserted_release = _version_release(registration.producer_version)
+        observed_release = _version_release(response.product_version)
+        releases_match = (
+            asserted_release is None
+            or observed_release is None
+            or asserted_release
+            == observed_release[: len(asserted_release)]
+        )
+        if not releases_match:
+            raise DomainError(
+                ErrorCode.ADAPTER_INCOMPATIBLE,
+                "The asserted Nsight Systems version conflicts with the export metadata.",
+                details={
+                    "asserted_producer_version": registration.producer_version,
+                    "observed_product_version": response.product_version,
+                },
+                remediation=(
+                    "Import the export without a producer-version claim or provide the observed "
+                    "Nsight Systems product version.",
+                ),
+            )
         raw_events = response.events
         raw_coverage = response.coverage
         raw_tables = response.tables
@@ -251,6 +304,7 @@ class NsightSystemsExtractor:
                             "artifact_id": registration.artifact_id,
                             "event_index": index,
                             "kind": "trace.event",
+                            "run_id": run_id,
                         }
                     ),
                     "run_id": run_id,
@@ -280,6 +334,7 @@ class NsightSystemsExtractor:
                         "artifact_id": registration.artifact_id,
                         "kind": "trace.extraction",
                         "query_version": self.query_version,
+                        "run_id": run_id,
                         "schema_fingerprint": schema_fingerprint,
                     }
                 ),
@@ -291,7 +346,13 @@ class NsightSystemsExtractor:
                     {
                         "compatibility_family": self.compatibility_family,
                         "coverage": coverage,
-                        "producer_version": registration.producer_version,
+                        "asserted_producer_version": registration.producer_version,
+                        "observed_product_name": response.product_name,
+                        "observed_product_version": response.product_version,
+                        "export_schema_version": response.export_schema_version,
+                        "export_schema_checksum": response.export_schema_checksum,
+                        "export_settings": response.export_settings,
+                        "truncated_tables": list(response.truncated_tables),
                         "query_version": self.query_version,
                         "schema_fingerprint": schema_fingerprint,
                     },
@@ -313,7 +374,13 @@ class NsightSystemsExtractor:
             "NVTX containment is a derived temporal association and does not prove causality.",
             "Timestamps use the Nsight Systems export clock; cross-profiler clock alignment is "
             "unknown.",
+            *response.limitations,
         ]
+        if response.product_version is None or response.export_schema_version is None:
+            limitations.append(
+                "Provider-declared product or export-schema identity is unavailable; "
+                "compatibility is limited to the observed table fingerprint."
+            )
         for capability, present in coverage.items():
             if not present:
                 limitations.append(
@@ -334,7 +401,10 @@ class NsightSystemsExtractor:
             operation_identity={
                 "compatibility_family": self.compatibility_family,
                 "max_rows_per_table": max_rows_per_table,
-                "producer_version": registration.producer_version,
+                "asserted_producer_version": registration.producer_version,
+                "observed_product_version": response.product_version,
+                "export_schema_version": response.export_schema_version,
+                "export_schema_checksum": response.export_schema_checksum,
                 "query_version": self.query_version,
                 "schema_fingerprint": schema_fingerprint,
             },
@@ -353,7 +423,12 @@ class NsightSystemsExtractor:
         return NsightSystemsExtractionResult(
             run_id=run_id,
             artifact_id=registration.artifact_id,
-            producer_version=registration.producer_version,
+            asserted_producer_version=registration.producer_version,
+            observed_product_name=response.product_name,
+            observed_product_version=response.product_version,
+            export_schema_version=response.export_schema_version,
+            export_schema_checksum=response.export_schema_checksum,
+            export_settings=dict(response.export_settings),
             export_format="sqlite",
             compatibility_family=self.compatibility_family,
             query_version=self.query_version,

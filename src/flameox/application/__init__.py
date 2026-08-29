@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from flameox.application.setup import *  # noqa: F403
     from flameox.application.status import *  # noqa: F403
     from flameox.application.summaries import *  # noqa: F403
+    from flameox.application.trace_windows import *  # noqa: F403
     from flameox.application.viewers import *  # noqa: F403
     from flameox.application.workloads import *  # noqa: F403
     from flameox.application.xctrace import *  # noqa: F403
@@ -95,6 +96,7 @@ _MODULES = (
     "setup",
     "status",
     "summaries",
+    "trace_windows",
     "viewers",
     "workloads",
     "xctrace",
@@ -364,6 +366,9 @@ __all__ = [
     "SummarySupportStatus",
     "SupportedInferenceProfiler",
     "TimeoutFault",
+    "TraceEvent",
+    "TraceWindowResult",
+    "TraceWindowService",
     "TrashManifest",
     "UnavailableInferenceToolDiscovery",
     "UnregisteredPipelineStage",

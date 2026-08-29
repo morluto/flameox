@@ -201,15 +201,15 @@ class AcceleratorRecipes(RecipeContext):
             parameters,
         ).fetchall()
         if not rows:
-            producer_rows = (
-                snapshot.execute(
-                    "SELECT DISTINCT producer FROM artifact_registrations "
-                    "WHERE artifact_id IN (" + ", ".join("?" for _ in scope.artifact_ids) + ")",
-                    scope.artifact_ids,
-                ).fetchall()
-                if scope.artifact_ids
-                else ()
+            registration_where, registration_parameters = scope.predicate(
+                run_column="run_id",
+                artifact_column="artifact_id",
             )
+            producer_rows = snapshot.execute(
+                "SELECT DISTINCT producer FROM artifact_registrations WHERE "
+                + registration_where,
+                registration_parameters,
+            ).fetchall()
             producers = {str(row[0]).casefold() for row in producer_rows if row[0] is not None}
             next_action_id = (
                 ActionId.EXTRACT_NSIGHT_SYSTEMS

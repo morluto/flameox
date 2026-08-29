@@ -22,6 +22,17 @@ from flameox.workers.protocol import (
     run_typed_worker,
 )
 
+_EXPORT_METADATA_KEYS = {
+    "EXPORT_PRODUCT_NAME": "product_name",
+    "EXPORT_PRODUCT_VERSION": "product_version",
+    "EXPORT_SCHEMA_VERSION": "export_schema_version",
+    "EXPORT_SCHEMA_VERSION_CKSUM": "export_schema_checksum",
+    "EXPORT_PARAM_LAZY": "lazy_tables",
+    "EXPORT_PARAM_TIME_NORMALIZE": "time_normalized",
+    "EXPORT_CONFIG_TIME_SHIFT": "configured_time_shift",
+    "EXPORT_PARAM_TIME_SHIFT": "time_shift",
+}
+
 
 def _identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
@@ -79,6 +90,34 @@ def _integer(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int | str | bytes | bytearray):
         raise ValueError(f"expected an integer-compatible SQLite value, got {type(value).__name__}")
     return int(value)
+
+
+def _export_metadata(
+    connection: sqlite3.Connection,
+    tables: dict[str, str],
+) -> dict[str, str]:
+    table = tables.get("meta_data_export") or tables.get("export_meta_data")
+    if table is None:
+        return {}
+    columns = _table_columns(connection, table)
+    name_column = _required_column(table, columns, "name")
+    value_column = _required_column(table, columns, "value")
+    placeholders = ",".join("?" for _ in _EXPORT_METADATA_KEYS)
+    rows = connection.execute(
+        f"SELECT {_identifier(name_column)}, {_identifier(value_column)} "
+        f"FROM {_identifier(table)} WHERE {_identifier(name_column)} IN ({placeholders})",
+        tuple(_EXPORT_METADATA_KEYS),
+    ).fetchall()
+    metadata: dict[str, str] = {}
+    for raw_name, raw_value in rows:
+        if raw_name is None or raw_value is None:
+            continue
+        name = str(raw_name)
+        value = str(raw_value)
+        if len(value) > 500:
+            raise ValueError(f"Unsupported Nsight Systems schema: {table}.{name} exceeds 500 chars")
+        metadata[_EXPORT_METADATA_KEYS[name]] = value
+    return metadata
 
 
 def _string_values(
@@ -241,6 +280,83 @@ def _graph_launch_events(
     return events, truncated
 
 
+def _nvtx_events(
+    connection: sqlite3.Connection,
+    table: str,
+    strings: dict[int, str],
+    *,
+    limit: int,
+) -> tuple[list[dict[str, object]], bool, bool, list[str]]:
+    columns = _table_columns(connection, table)
+    start_column = _column(columns, "start")
+    end_column = _column(columns, "end")
+    text_column = _column(columns, "text", "name")
+    text_id_column = _column(columns, "textId")
+    if (
+        start_column is None
+        or end_column is None
+        or (text_column is None and text_id_column is None)
+    ):
+        return [], False, False, []
+    rows, truncated = _rows(
+        connection,
+        table,
+        {
+            "start": start_column,
+            "end": end_column,
+            "name_text": text_column,
+            "name_id": text_id_column,
+            "event_type": _column(columns, "eventType"),
+            "thread": _column(columns, "globalTid"),
+            "process": _column(columns, "processId", "pid"),
+        },
+        limit=limit,
+    )
+    events: list[dict[str, object]] = []
+    limitations: list[str] = []
+    for row in rows:
+        start = _integer(row["start"])
+        raw_event_type = row.get("event_type")
+        event_type = _integer(raw_event_type) if raw_event_type is not None else None
+        raw_end = row.get("end")
+        end = _integer(raw_end) if raw_end is not None else None
+        if event_type in {59, 60}:
+            event_kind = "range" if end is not None else "incomplete_range"
+        elif event_type == 34:
+            event_kind = "mark"
+        elif event_type in {33, 39, 75, 76}:
+            event_kind = "metadata"
+        elif event_type is not None:
+            event_kind = "point" if end is None else "interval"
+        else:
+            event_kind = "point" if end is None else "interval"
+        if event_kind == "incomplete_range":
+            limitations.append(
+                f"{table}.end is null for incomplete range event type {event_type}; "
+                "its end remains unknown."
+            )
+        events.append(
+            {
+                "name": _name(
+                    row.get("name_text")
+                    if row.get("name_text") not in {None, ""}
+                    else row.get("name_id"),
+                    strings,
+                    "nvtx",
+                ),
+                "category": "nvtx",
+                "event_kind": event_kind,
+                "event_type": event_type,
+                "start_ns": start,
+                "end_ns": end,
+                "duration_ns": max(0, end - start) if end is not None else 0,
+                "thread": row.get("thread"),
+                "process": row.get("process"),
+            }
+        )
+    return events, truncated, True, limitations
+
+
 def _extract(path: Path, *, limit: int) -> dict[str, object]:
     uri = f"file:{quote(str(path.resolve()))}?mode=ro&immutable=1"
     connection = sqlite3.connect(uri, uri=True)
@@ -259,10 +375,15 @@ def _extract(path: Path, *, limit: int) -> dict[str, object]:
             table: sorted(_table_columns(connection, table).values())
             for table in sorted(tables.values())
         }
+        metadata = _export_metadata(connection, tables)
         schema_fingerprint = (
             "sha256:"
             + hashlib.sha256(
-                json.dumps(schema, separators=(",", ":"), sort_keys=True).encode()
+                json.dumps(
+                    {"schema": schema, "export_identity": metadata},
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode()
             ).hexdigest()
         )
 
@@ -369,53 +490,20 @@ def _extract(path: Path, *, limit: int) -> dict[str, object]:
             "thread_identity": any(event.get("thread") is not None for event in events),
             "process_identity": any(event.get("process") is not None for event in events),
         }
+        limitations: list[str] = []
         nvtx_table = tables.get("nvtx_events")
         if nvtx_table is not None:
-            columns = _table_columns(connection, nvtx_table)
-            start_column = _column(columns, "start")
-            end_column = _column(columns, "end")
-            text_column = _column(columns, "text", "name")
-            text_id_column = _column(columns, "textId")
-            if (
-                start_column is not None
-                and end_column is not None
-                and (text_column is not None or text_id_column is not None)
-            ):
-                nvtx_rows, truncated = _rows(
-                    connection,
-                    nvtx_table,
-                    {
-                        "start": start_column,
-                        "end": end_column,
-                        "name_text": text_column,
-                        "name_id": text_id_column,
-                        "thread": _column(columns, "globalTid"),
-                        "process": _column(columns, "processId", "pid"),
-                    },
-                    limit=limit,
-                )
-                if truncated:
-                    truncated_tables.append(nvtx_table)
-                for row in nvtx_rows:
-                    start = _integer(row["start"])
-                    end = _integer(row["end"])
-                    events.append(
-                        {
-                            "name": _name(
-                                row.get("name_text")
-                                if row.get("name_text") not in {None, ""}
-                                else row.get("name_id"),
-                                strings,
-                                "nvtx",
-                            ),
-                            "category": "nvtx",
-                            "start_ns": start,
-                            "duration_ns": max(0, end - start),
-                            "thread": row.get("thread"),
-                            "process": row.get("process"),
-                        }
-                    )
-                coverage["nvtx"] = True
+            nvtx_events, truncated, supported, nvtx_limitations = _nvtx_events(
+                connection,
+                nvtx_table,
+                strings,
+                limit=limit,
+            )
+            events.extend(nvtx_events)
+            limitations.extend(nvtx_limitations)
+            if truncated:
+                truncated_tables.append(nvtx_table)
+            coverage["nvtx"] = supported
 
         memcpy_table = tables.get("cupti_activity_kind_memcpy")
         if memcpy_table is not None:
@@ -457,6 +545,8 @@ def _extract(path: Path, *, limit: int) -> dict[str, object]:
             ),
             "coverage": coverage,
             "truncated_tables": sorted(set(truncated_tables)),
+            "metadata": metadata,
+            "limitations": list(dict.fromkeys(limitations)),
         }
     finally:
         connection.close()
@@ -481,6 +571,26 @@ def _handle(
         ),
         coverage=cast(dict[str, bool], result["coverage"]),
         truncated_tables=tuple(cast(list[str], result["truncated_tables"])),
+        product_name=cast(dict[str, str], result["metadata"]).get("product_name"),
+        product_version=cast(dict[str, str], result["metadata"]).get("product_version"),
+        export_schema_version=cast(dict[str, str], result["metadata"]).get(
+            "export_schema_version"
+        ),
+        export_schema_checksum=cast(dict[str, str], result["metadata"]).get(
+            "export_schema_checksum"
+        ),
+        export_settings={
+            key: value
+            for key, value in cast(dict[str, str], result["metadata"]).items()
+            if key
+            in {
+                "lazy_tables",
+                "time_normalized",
+                "configured_time_shift",
+                "time_shift",
+            }
+        },
+        limitations=tuple(cast(list[str], result["limitations"])),
     )
 
 

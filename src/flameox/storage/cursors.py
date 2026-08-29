@@ -15,7 +15,7 @@ from flameox.domain.cursors import (
 )
 from flameox.domain.errors import DomainError, ErrorCode
 from flameox.domain.models import utc_now
-from flameox.storage.control_plane import ControlPlane
+from flameox.storage.control_plane import ControlPlane, CursorControlRecord
 from flameox.storage.workspace import Workspace
 
 _CURSOR_HANDLE = re.compile(r"[A-Za-z0-9_-]{43}", re.ASCII)
@@ -97,8 +97,34 @@ class CursorStore:
         snapshot_id: str,
         scope_digest: str,
     ) -> CursorPosition:
-        self._require_handle(cursor)
         self._validate_binding(snapshot_id=snapshot_id, scope_digest=scope_digest)
+        record = self._active_record(cursor)
+        if record.namespace != namespace.value:
+            raise DomainError(
+                ErrorCode.STALE_CURSOR,
+                "Cursor belongs to a different query or immutable snapshot.",
+            )
+        if record.snapshot_id != snapshot_id or record.scope_digest != scope_digest:
+            raise DomainError(
+                ErrorCode.STALE_CURSOR,
+                "Cursor belongs to a different query or immutable snapshot.",
+            )
+        try:
+            payload = json.loads(record.position_json)
+        except (json.JSONDecodeError, TypeError, ValueError) as error:
+            raise self._unavailable() from error
+        return validate_cursor_position(namespace, payload)
+
+    def namespace(self, cursor: str) -> CursorNamespace:
+        """Return routing identity for one active opaque cursor."""
+        record = self._active_record(cursor)
+        try:
+            return CursorNamespace(record.namespace)
+        except ValueError as error:
+            raise self._unavailable() from error
+
+    def _active_record(self, cursor: str) -> CursorControlRecord:
+        self._require_handle(cursor)
         record = self.control.read_cursor(
             cursor_digest=self._digest(cursor),
             workspace_id=self.workspace.identity.workspace_id,
@@ -112,20 +138,7 @@ class CursorStore:
             or record.expires_at <= observed_at
         ):
             raise self._unavailable()
-        if (
-            record.namespace != namespace.value
-            or record.snapshot_id != snapshot_id
-            or record.scope_digest != scope_digest
-        ):
-            raise DomainError(
-                ErrorCode.STALE_CURSOR,
-                "Cursor belongs to a different query or immutable snapshot.",
-            )
-        try:
-            payload = json.loads(record.position_json)
-        except (json.JSONDecodeError, TypeError, ValueError) as error:
-            raise self._unavailable() from error
-        return validate_cursor_position(namespace, payload)
+        return record
 
     def revoke(self, cursor: str) -> bool:
         self._require_handle(cursor)

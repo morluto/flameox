@@ -17,6 +17,7 @@ from flameox.application import (
     ImportProfile,
     ImportService,
     NativeViewerService,
+    TraceWindowService,
 )
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, EvidenceReferenceType
@@ -78,6 +79,20 @@ async def test_perfetto_extractor_uses_local_binary_and_curated_query(
         )
     )
 
+    window = await TraceWindowService(workspace).get(
+        imported.run.artifacts[0].artifact_id,
+        start_ns=0,
+        end_ns=2_000_000,
+        limit=2,
+    )
+    assert window.next_cursor is not None
+    second_page = await TraceWindowService(workspace).get(
+        imported.run.artifacts[0].artifact_id,
+        start_ns=0,
+        end_ns=2_000_000,
+        limit=2,
+        cursor=window.next_cursor,
+    )
     result = await PerfettoExtractor(workspace).extract(imported.run.run_id)
     hotspots = RecipeService(workspace).hotspots(imported.run.run_id)
     materialized = AnalysisMaterializationService(workspace).record(
@@ -96,12 +111,6 @@ async def test_perfetto_extractor_uses_local_binary_and_curated_query(
     examples = drilldown.examples(
         imported.run.run_id,
         hotspot_by_name["reverse_scan"].frame_id,
-    )
-    window = await PerfettoExtractor(workspace).trace_window(
-        imported.run.artifacts[0].artifact_id,
-        start_ns=0,
-        end_ns=2_000_000,
-        limit=2,
     )
     first_callees = drilldown.callees(
         imported.run.run_id,
@@ -142,13 +151,6 @@ async def test_perfetto_extractor_uses_local_binary_and_curated_query(
     assert window.returned == 2
     assert window.truncated
     assert window.next_cursor is not None
-    second_page = await PerfettoExtractor(workspace).trace_window(
-        imported.run.artifacts[0].artifact_id,
-        start_ns=0,
-        end_ns=2_000_000,
-        limit=2,
-        cursor=window.next_cursor,
-    )
     assert second_page.returned == 1
     assert second_page.next_cursor is None
     assert provenance.data["corpus_commit_id"] == hotspots.corpus_commit_id

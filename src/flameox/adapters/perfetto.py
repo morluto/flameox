@@ -7,10 +7,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
-from pydantic import Field
-
 from flameox.action_graph import ActionId, manual_action, tool_action
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
+from flameox.application.trace_windows import TraceEvent, TraceWindowResult
 from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
     ArtifactKind,
@@ -22,10 +21,9 @@ from flameox.domain import (
     missing_artifact_input,
 )
 from flameox.evidence import GenerationPublisher
-from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
+from flameox.evidence_status import available_availability, empty_availability
 from flameox.execution import SubprocessBroker
 from flameox.models import ContractModel
-from flameox.pagination import CursorPageContract
 from flameox.storage import ArtifactStore, RunStore, Workspace
 from flameox.workers.perfetto_contract import (
     PERFETTO_WORKER,
@@ -55,33 +53,6 @@ class PerfettoExtractionResult(ContractModel):
     truncated: bool = False
     corpus_commit_id: str
     limitations: tuple[str, ...]
-
-
-class TraceEvent(ContractModel):
-    slice_id: int
-    parent_id: int | None
-    name: str
-    category: str | None
-    start_ns: int
-    duration_ns: int
-    track_id: int
-
-
-class TraceWindowResult(CursorPageContract):
-    page_items_field = "events"
-
-    schema_version: int = 1
-    artifact_id: str
-    start_ns: int
-    end_ns: int
-    events: tuple[TraceEvent, ...]
-    total: int
-    coverage: float
-    trace_processor_path: str
-    limitations: tuple[str, ...] = (
-        "The window includes slices that overlap the requested interval.",
-    )
-    evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
 
 class PerfettoExtractor:
@@ -620,7 +591,7 @@ class PerfettoExtractor:
         after_id: int | None = None
         if cursor is not None:
             position = cast(
-                tuple[int, int],
+                tuple[int, str],
                 self.workspace.cursors.resolve(
                     cursor,
                     namespace=CursorNamespace.TRACE_WINDOW,
@@ -630,8 +601,8 @@ class PerfettoExtractor:
             )
             timestamp_value, id_value = position
             assert isinstance(timestamp_value, int)
-            assert isinstance(id_value, int)
-            after_ts, after_id = timestamp_value, id_value
+            assert isinstance(id_value, str)
+            after_ts, after_id = timestamp_value, int(id_value)
         response = await self._run_worker(
             PerfettoWindowRequest(
                 operation="window",
@@ -654,12 +625,13 @@ class PerfettoExtractor:
         selected = rows[:limit]
         events = tuple(
             TraceEvent(
-                slice_id=int(row["id"]),
-                parent_id=(int(row["parent_id"]) if row["parent_id"] is not None else None),
+                event_id=str(row["id"]),
+                parent_id=(str(row["parent_id"]) if row["parent_id"] is not None else None),
                 name=str(row["name"]),
                 category=(str(row["category"]) if row["category"] is not None else None),
                 start_ns=int(row["ts"]),
                 duration_ns=int(row["dur"]),
+                provider="perfetto",
                 track_id=int(row["track_id"]),
             )
             for row in selected
@@ -671,7 +643,7 @@ class PerfettoExtractor:
                 namespace=CursorNamespace.TRACE_WINDOW,
                 snapshot_id=artifact_id,
                 scope_digest=scope_digest,
-                position=(events[-1].start_ns, events[-1].slice_id),
+                position=(events[-1].start_ns, events[-1].event_id),
             )
             if has_more and events
             else None
@@ -683,8 +655,9 @@ class PerfettoExtractor:
             events=events,
             total=total,
             coverage=(len(events) / total if total else 0.0),
+            provider="perfetto",
+            limitations=("The window includes slices that overlap the requested interval.",),
             next_cursor=next_cursor,
-            trace_processor_path=str(binary),
             evidence=(
                 empty_availability("no_events_in_window")
                 if not events

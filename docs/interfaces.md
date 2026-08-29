@@ -253,6 +253,10 @@ exports stay local as artifacts.
 List operations are bounded and cursor-paginated. A cursor binds the query,
 ordering, and snapshot; it cannot be reused for a different request. Analysis
 and evidence resolution pin one corpus snapshot before the first lookup.
+`get_trace_window` is provider-neutral: it reads normalized temporal evidence
+when available and uses a native Perfetto reader only as a fallback. Its inline
+events carry the provider and interpretation fields needed for the window;
+native traces and full normalized generations remain referenced evidence.
 
 MCP resources are bounded JSON projections, not alternate authorities. Current
 templates cover runs, artifacts, pipelines, investigations, hypotheses,

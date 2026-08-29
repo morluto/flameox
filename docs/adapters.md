@@ -168,9 +168,12 @@ Unresolved or synthetic frames remain partial symbolization.
 
 ### Perfetto and OTLP
 
-Perfetto-compatible traces are queried through Trace Processor with versioned,
-parameterized SQL and row/time/string budgets. Flameox publishes only evidence
-needed by supported recipes rather than copying an entire trace into Parquet.
+Temporal windows have one provider-neutral application contract. They query
+normalized trace events first, so an extracted trace does not require its native
+reader for each bounded drill-down. Perfetto-compatible artifacts that have not
+been normalized fall back to Trace Processor with versioned, parameterized SQL
+and row/time/string budgets. Flameox publishes only evidence needed by supported
+recipes rather than copying an entire trace into Parquet.
 
 OTLP JSON or protobuf is an import-first producer format. Resource, scope, span,
 event, and link rows retain typed attributes and parentage. Operation-window
@@ -194,6 +197,13 @@ The maintained import path accepts NVIDIA's official SQLite export from
 unknown required schemas fail. The source SQLite stays authoritative and
 normalized rows preserve CUDA runtime, graph, kernel, stream, correlation, and
 timing identity.
+
+Export product and schema identity are observed from the export metadata and
+checked against any asserted producer version. Only an explicit metadata
+allowlist is published; host, user, command, and path metadata remain in the
+native export. NVTX marks, ranges, and domain metadata preserve their event type,
+including valid rows whose end timestamp is null. Bounded trace windows expose
+these normalized events without requiring `nsys` or Trace Processor.
 
 The repository contains one vendor-produced qualification fixture at
 `tests/fixtures/nsight_systems/nsight-2025.5.2.sqlite`; its adjacent README binds

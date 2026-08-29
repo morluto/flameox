@@ -76,7 +76,6 @@ from flameox.adapters import (
     PythonStartupExtractionResult,
     PythonStartupExtractor,
     TorchProfilerCaptureOptions,
-    TraceWindowResult,
     V8CpuProfExtractionResult,
     V8CpuProfExtractor,
     V8HeapProfExtractionResult,
@@ -199,6 +198,8 @@ from flameox.application import (
     Scalar,
     StackExamplesResult,
     SupportedInferenceProfiler,
+    TraceWindowResult,
+    TraceWindowService,
     WorkloadConfig,
     WorkloadConfigurationResult,
     WorkloadConfigurationStatus,
@@ -3366,6 +3367,10 @@ def create_server(
         ],
         ctx: Context[AppContext],
         cursor: str | None = None,
+        run_id: Annotated[
+            str | None,
+            Field(description="Run owning normalized trace semantics when bytes are shared."),
+        ] = None,
     ) -> Annotated[CallToolResult, ToolPayload[TraceWindowResult]]:
         """Return bounded trace slices overlapping a declared time window."""
         try:
@@ -3380,14 +3385,15 @@ def create_server(
                         },
                     ),
                 )
-            result = await PerfettoExtractor(
+            result = await TraceWindowService(
                 ctx.request_context.lifespan_context.require_workspace()
-            ).trace_window(
+            ).get(
                 artifact_id,
                 start_ns=start_ns,
                 end_ns=end_ns,
                 limit=limit,
                 cursor=cursor,
+                run_id=run_id,
             )
             return _success(result, f"Returned {result.returned} trace events.")
         except DomainError as error:
