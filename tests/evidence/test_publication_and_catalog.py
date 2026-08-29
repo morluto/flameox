@@ -15,7 +15,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from flameox.application import CompactionService
+from flameox.application import CompactionService, IntegrityLevel, IntegrityService
 from flameox.atomic import atomic_write_json
 from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode
@@ -525,6 +525,7 @@ def test_compaction_replaces_reachable_small_generations(
     assert result.reachable_file_count_before == 3
     assert result.reachable_file_count_after == 1
     assert len(workspace.corpus.read_head().generation_manifests) == 1
+    assert IntegrityService(workspace).validate(IntegrityLevel.QUICK).valid
     with Catalog(workspace).open_snapshot() as snapshot:
         assert snapshot.execute("SELECT count(*) FROM runs").fetchone() == (3,)
         assert (
@@ -534,6 +535,15 @@ def test_compaction_replaces_reachable_small_generations(
             ).fetchall()
             == provenance_before
         )
+
+
+def test_noop_compaction_preserves_catalog_and_corpus(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+
+    result = CompactionService(workspace).compact()
+
+    assert result.output_corpus_commit_id == result.input_corpus_commit_id
 
 
 def test_generation_row_quota_is_enforced_before_staging(tmp_path: Path) -> None:

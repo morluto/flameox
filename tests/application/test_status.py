@@ -5,15 +5,18 @@ from pathlib import Path
 import pytest
 
 from flameox import __version__
+from flameox.action_graph import ActionId
 from flameox.application import (
     ImportArtifactRequest,
     ImportService,
     QuarantineService,
     workspace_status,
 )
+from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind
 from flameox.observability import OperationLogger
 from flameox.storage import Workspace
+from flameox.storage.corpus import build_commit
 
 pytestmark = pytest.mark.integration
 
@@ -77,3 +80,23 @@ def test_status_reports_corrupt_rebuildable_catalog_without_crashing(
     assert result.workspace_valid
     assert result.catalog_valid is False
     assert any("catalog" in warning.lower() for warning in result.warnings)
+    assert result.next_action is not None
+    assert result.next_action.action is ActionId.REBUILD_CATALOG
+
+
+def test_status_does_not_treat_a_new_corpus_head_as_stale_catalog_state(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+    head = workspace.corpus.read_head()
+    newer = build_commit(
+        parent_commit_id=head.commit_id,
+        generation_manifests=head.generation_manifests,
+    )
+    workspace.corpus.write_commit(newer)
+    workspace.corpus.publish_head(newer.commit_id)
+
+    result = workspace_status(workspace)
+
+    assert result.catalog_valid is True
+    assert result.corpus_commit_id == newer.commit_id
+    assert result.next_action is None

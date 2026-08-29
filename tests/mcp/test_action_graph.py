@@ -73,6 +73,7 @@ def _representative_actions() -> dict[ActionId, ToolAction]:
             ActionId.GET_DETACHED_CAPTURE,
             run_id="run-1",
         ),
+        ActionId.REBUILD_CATALOG: tool_action(ActionId.REBUILD_CATALOG),
         ActionId.LIST_RUNS: tool_action(ActionId.LIST_RUNS),
         ActionId.LIST_ARTIFACTS: tool_action(ActionId.LIST_ARTIFACTS),
         ActionId.PREVIEW_ARTIFACT: tool_action(

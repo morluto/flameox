@@ -300,6 +300,10 @@ inventory. It does not own runs, revisions, plans, relationships, or evidence.
 
 Existing readers continue on their open snapshot. Corrupt DuckDB state is
 rebuildable; corrupt artifacts, SQLite revisions, manifests, or Parquet are not.
+Compaction changes the authoritative corpus inventory. It does not require a
+catalog rebuild because each read constructs transient views from its pinned
+corpus commit. Catalog metadata records only when the disposable shell was
+built; it does not duplicate corpus HEAD or maintain a freshness sentinel.
 
 Public interfaces expose curated parameterized queries, never raw SQL. Internal
 connections deny arbitrary extensions, attachments, secrets, and unapproved

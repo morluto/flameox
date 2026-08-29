@@ -22,6 +22,27 @@ pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
 
 @pytest.mark.anyio
+async def test_mcp_status_rebuilds_an_unreadable_catalog_through_its_typed_action(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    workspace.paths.catalog.write_bytes(b"not duckdb")
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        unavailable = await client.call_tool("workspace_status", {})
+        rebuilt = await client.call_tool("rebuild_catalog", {})
+
+    assert unavailable.structured_content is not None
+    unavailable_result = unavailable.structured_content["result"]
+    assert unavailable_result["catalog_valid"] is False
+    assert unavailable_result["next_action"]["action"] == "catalog.rebuild"
+    assert rebuilt.structured_content is not None
+    rebuilt_result = rebuilt.structured_content["result"]
+    assert rebuilt_result["catalog_valid"] is True
+    assert rebuilt_result["next_action"] is None
+
+
+@pytest.mark.anyio
 async def test_unknown_declared_workflow_routes_back_to_discovery(tmp_path: Path) -> None:
     Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text("schema_version = 1\n")

@@ -7,6 +7,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 from pydantic import ConfigDict, computed_field
 
+from flameox.action_graph import ActionId, ToolAction, tool_action
 from flameox.catalog import Catalog
 from flameox.domain import DomainError
 from flameox.evidence.schemas import schema_for
@@ -29,12 +30,12 @@ class IntegrityIssue(ContractModel):
     code: str
     path: str | None = None
     message: str
+    next_action: ToolAction | None = None
 
 
 class IntegrityResult(ContractModel):
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
-    schema_version: int = 1
     level: IntegrityLevel
     corpus_commit_id: str
     checked_artifacts: int
@@ -176,21 +177,14 @@ class IntegrityService:
                 )
             )
         try:
-            catalog = Catalog(self.workspace).status()
-            if not catalog["fresh"]:
-                issues.append(
-                    IntegrityIssue(
-                        severity=IntegritySeverity.WARNING,
-                        code="STALE_CATALOG",
-                        message="The rebuildable catalog does not match corpus HEAD.",
-                    )
-                )
+            Catalog(self.workspace).status()
         except DomainError as exc:
             issues.append(
                 IntegrityIssue(
                     severity=IntegritySeverity.WARNING,
                     code="CATALOG_UNAVAILABLE",
                     message=exc.message,
+                    next_action=tool_action(ActionId.REBUILD_CATALOG),
                 )
             )
         return IntegrityResult(

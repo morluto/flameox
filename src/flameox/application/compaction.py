@@ -16,7 +16,6 @@ _COMPACTION_BATCH_ROWS = 65_536
 
 
 class CompactionResult(ContractModel):
-    schema_version: int = 1
     input_corpus_commit_id: str
     output_corpus_commit_id: str
     superseded_generation_count: int

@@ -16,6 +16,7 @@ from flameox.application import (
 )
 from flameox.catalog import Catalog
 from flameox.storage import ArtifactStore, Workspace
+from flameox.storage.corpus import build_commit
 
 pytestmark = pytest.mark.integration
 
@@ -63,3 +64,19 @@ def test_integrity_validity_is_derived_from_issue_severity() -> None:
     contradictory = {**result.model_dump(), "valid": False}
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         IntegrityResult.model_validate(contradictory)
+
+
+def test_integrity_uses_pinned_corpus_without_stale_catalog_bookkeeping(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+    head = workspace.corpus.read_head()
+    newer = build_commit(
+        parent_commit_id=head.commit_id,
+        generation_manifests=head.generation_manifests,
+    )
+    workspace.corpus.write_commit(newer)
+    workspace.corpus.publish_head(newer.commit_id)
+
+    result = IntegrityService(workspace).validate(IntegrityLevel.QUICK)
+    assert result.corpus_commit_id == newer.commit_id
+    assert all(issue.code != "STALE_CATALOG" for issue in result.issues)

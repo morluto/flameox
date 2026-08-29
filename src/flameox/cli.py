@@ -1679,7 +1679,7 @@ def catalog_status(
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
-    """Show catalog version and freshness."""
+    """Show disposable catalog metadata."""
     try:
         result = Catalog(_workspace(workspace)).status()
     except DomainError as error:
@@ -1692,12 +1692,11 @@ def catalog_validate(
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
-    """Validate catalog freshness and corpus inventory schemas."""
+    """Validate the catalog shell and authoritative corpus inventory."""
     try:
         selected = _workspace(workspace)
         integrity = IntegrityService(selected).validate(IntegrityLevel.QUICK)
         result = {
-            "schema_version": 1,
             "catalog": Catalog(selected).status(),
             "integrity": integrity.model_dump(mode="json"),
         }

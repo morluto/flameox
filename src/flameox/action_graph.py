@@ -30,6 +30,7 @@ class ActionId(StrEnum):
     PLAN_CAPTURE = "capture.plan"
     START_DETACHED_CAPTURE = "capture.detached.start"
     GET_DETACHED_CAPTURE = "capture.detached.status"
+    REBUILD_CATALOG = "catalog.rebuild"
     LIST_RUNS = "run.list"
     LIST_ARTIFACTS = "artifact.list"
     PREVIEW_ARTIFACT = "artifact.preview"
@@ -59,6 +60,7 @@ class ToolName(StrEnum):
     PLAN_CAPTURE = "plan_capture"
     START_DETACHED_CAPTURE = "start_detached_capture"
     GET_DETACHED_CAPTURE = "get_detached_capture"
+    REBUILD_CATALOG = "rebuild_catalog"
     LIST_RUNS = "list_runs"
     LIST_ARTIFACTS = "list_artifacts"
     PREVIEW_ARTIFACT = "preview_artifact"
@@ -374,6 +376,13 @@ ACTION_REGISTRY = MappingProxyType(
                 _RunIdArguments,
                 READ_ONLY_ACTION,
                 ActionLifecycle.STATUS,
+            ),
+            _descriptor(
+                ActionId.REBUILD_CATALOG,
+                ToolName.REBUILD_CATALOG,
+                _EmptyArguments,
+                CONFIGURE_ACTION,
+                ActionLifecycle.CONFIGURE,
             ),
             _descriptor(
                 ActionId.LIST_RUNS,

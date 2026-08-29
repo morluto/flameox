@@ -928,6 +928,19 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
+    @_action_tool(server, ActionId.REBUILD_CATALOG)
+    async def rebuild_catalog_tool(
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[WorkspaceStatus]]:
+        """Rebuild only the disposable catalog from immutable corpus evidence."""
+        try:
+            workspace = ctx.request_context.lifespan_context.require_workspace()
+            await run_atomic_thread(lambda: Catalog(workspace).rebuild())
+            result = workspace_status(workspace)
+            return _success(result, f"Rebuilt catalog at {result.corpus_commit_id}.")
+        except DomainError as error:
+            return _failure(error)
+
     @_action_tool(server, ActionId.INSPECT_WORKLOAD_CONFIGURATION)
     async def workload_configuration_status_tool(
         ctx: Context[AppContext],

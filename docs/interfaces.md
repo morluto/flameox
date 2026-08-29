@@ -246,6 +246,10 @@ possible.
 An empty result and unavailable evidence are different states. Results carry
 coverage, limitation, or recovery information when the requested evidence was
 not extracted, not supported, outside the snapshot, or truncated by a budget.
+Workspace status and validation return the typed `catalog.rebuild` action when
+the disposable catalog is missing or unreadable. MCP exposes that action as
+`rebuild_catalog`. A new corpus HEAD does not make the catalog stale: each read
+constructs transient views from its exact pinned immutable corpus inventory.
 
 ## Progress and cancellation
 

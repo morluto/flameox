@@ -150,8 +150,6 @@ class _CancelledBeforeQuery(Exception):
 
 
 class Catalog:
-    FORMAT_VERSION = 1
-
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
 
@@ -166,23 +164,13 @@ class Catalog:
             connection.execute(
                 """
                 CREATE TABLE flameox_catalog_metadata (
-                    format_version INTEGER NOT NULL,
-                    schema_major INTEGER NOT NULL,
-                    schema_minor INTEGER NOT NULL,
-                    built_at VARCHAR NOT NULL,
-                    validated_commit_id VARCHAR NOT NULL
+                    built_at VARCHAR NOT NULL
                 )
                 """
             )
             connection.execute(
-                "INSERT INTO flameox_catalog_metadata VALUES (?, ?, ?, ?, ?)",
-                (
-                    self.FORMAT_VERSION,
-                    SCHEMA_MAJOR,
-                    SCHEMA_MINOR,
-                    datetime.now(UTC).isoformat(),
-                    head.commit_id,
-                ),
+                "INSERT INTO flameox_catalog_metadata VALUES (?)",
+                (datetime.now(UTC).isoformat(),),
             )
             connection.execute(
                 """
@@ -592,8 +580,7 @@ class Catalog:
             connection = duckdb.connect(str(self.workspace.paths.catalog), read_only=True)
             try:
                 row = connection.execute(
-                    "SELECT format_version, schema_major, schema_minor, "
-                    "built_at, validated_commit_id FROM flameox_catalog_metadata"
+                    "SELECT built_at FROM flameox_catalog_metadata"
                 ).fetchone()
             finally:
                 connection.close()
@@ -605,16 +592,7 @@ class Catalog:
             ) from exc
         if row is None:
             raise DomainError(ErrorCode.WORKSPACE_INVALID, "Catalog metadata is missing.")
-        return {
-            "format_version": row[0],
-            "schema_major": row[1],
-            "schema_minor": row[2],
-            "built_at": row[3],
-            "validated_commit_id": row[4],
-        }
+        return {"built_at": row[0]}
 
     def status(self) -> dict[str, object]:
-        metadata = self._validated_metadata()
-        metadata["current_commit_id"] = self.workspace.corpus.read_head().commit_id
-        metadata["fresh"] = metadata["validated_commit_id"] == metadata["current_commit_id"]
-        return metadata
+        return self._validated_metadata()

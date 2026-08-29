@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from flameox import __version__
+from flameox.action_graph import ActionId, ToolAction, tool_action
 from flameox.adapters import (
     CoverageExtractor,
     MemrayExtractor,
@@ -28,7 +29,6 @@ class WorkspaceStatus(ContractModel):
     catalog_exists: bool
     workspace_valid: bool
     catalog_valid: bool
-    catalog_fresh: bool | None
     last_catalog_rebuild_at: str | None
     run_count: int
     artifact_object_count: int
@@ -40,18 +40,17 @@ class WorkspaceStatus(ContractModel):
     extractor_versions: dict[str, str]
     capability_warnings: tuple[str, ...]
     warnings: tuple[str, ...]
+    next_action: ToolAction | None = None
 
 
 def workspace_status(workspace: Workspace) -> WorkspaceStatus:
     catalog_exists = workspace.paths.catalog.is_file()
-    catalog_fresh: bool | None = None
     catalog_valid = False
     last_rebuild: str | None = None
     storage_by_kind: dict[str, int] = {}
     if catalog_exists:
         try:
             catalog_status = Catalog(workspace).status()
-            catalog_fresh = bool(catalog_status["fresh"])
             catalog_valid = True
             last_rebuild = str(catalog_status["built_at"])
             catalog = Catalog(workspace)
@@ -73,8 +72,6 @@ def workspace_status(workspace: Workspace) -> WorkspaceStatus:
         if run.execution_status is ExecutionStatus.RUNNING:
             active += 1
     storage_bytes = tree_bytes(workspace.paths.root)
-    if catalog_fresh is False:
-        warnings.append("The rebuildable catalog is stale.")
     integrity = IntegrityService(workspace).validate(IntegrityLevel.QUICK)
     warnings.extend(issue.message for issue in integrity.issues)
     recovery = RecoveryService(workspace).inspect()
@@ -103,7 +100,6 @@ def workspace_status(workspace: Workspace) -> WorkspaceStatus:
         catalog_exists=catalog_exists,
         workspace_valid=integrity.valid,
         catalog_valid=catalog_valid,
-        catalog_fresh=catalog_fresh,
         last_catalog_rebuild_at=last_rebuild,
         run_count=len(runs),
         artifact_object_count=sum(1 for _ in workspace.paths.artifacts.glob("*/*/artifact.json")),
@@ -131,4 +127,9 @@ def workspace_status(workspace: Workspace) -> WorkspaceStatus:
         },
         capability_warnings=capability_warnings,
         warnings=tuple(warnings),
+        next_action=(
+            tool_action(ActionId.REBUILD_CATALOG)
+            if not catalog_valid
+            else None
+        ),
     )
