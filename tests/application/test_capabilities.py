@@ -233,8 +233,8 @@ async def test_active_capability_probe_is_brokered_cached_and_refreshable(
     assert "raw_samples" in pyperf_report.features
     torch_report = service.get("torch.profiler")
     assert torch_report.status is CapabilityStatus.UNKNOWN
-    assert torch_report.provisioning == "workload_environment"
-    assert torch_report.setup is None
+    assert torch_report.provisioning == "managed_runtime"
+    assert isinstance(torch_report.setup, CapabilitySetup)
 
 
 def test_toxiproxy_setup_uses_dedicated_staging_phase(
@@ -889,11 +889,12 @@ def test_capability_recommendations_are_scoped_to_selected_adapter(
     selected = service.list_for_adapter("torch.profiler")
 
     assert inventory.setup_adapters == ()
-    assert "torch.profiler" not in inventory.available_setup_adapters
+    assert "torch.profiler" in inventory.available_setup_adapters
     assert inventory.next_action is None
     assert selected.recommendation_scope == "torch.profiler"
-    assert selected.setup_adapters == ()
-    assert selected.next_action is None
+    assert selected.setup_adapters == ("torch.profiler",)
+    assert isinstance(selected.next_action, ManualAction)
+    assert selected.next_action.suggested_action is ActionId.START_CAPABILITY_SETUP
 
 
 def test_managed_setup_vocabulary_is_derived_from_capability_ownership() -> None:
@@ -907,6 +908,14 @@ def test_managed_setup_vocabulary_is_derived_from_capability_ownership() -> None
         managed_builtins | set(MANAGED_PROVIDERS) | {"toxiproxy"}
     )
     assert "aiperf" in managed_builtins
+
+
+def test_managed_package_reader_is_exposed_as_setup_capability(tmp_path: Path) -> None:
+    report = CapabilityService(Workspace.initialize(tmp_path)).get("memray")
+
+    assert report.provisioning is CapabilityProvisioning.MANAGED_RUNTIME
+    assert isinstance(report.setup, CapabilitySetup)
+    assert report.setup.extra is CapabilityExtra.MEMORY
 
 
 def test_aiperf_discovery_returns_the_managed_setup_action(

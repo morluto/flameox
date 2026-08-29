@@ -44,7 +44,9 @@ Mutating commands make mutation explicit. In particular:
 - `capture execute` consumes one previously reviewed plan token and may require its
   public plan identity; it accepts no replacement execution fields;
 - `capture run` plans then consumes one server-owned plan;
-- `open` prints a viewer plan unless `--launch` is supplied;
+- `open` prints a viewer plan unless `--launch` is supplied. Memray plans require a
+  verified producer-compatible provider and report its environment identity; pyperf plans use the
+  Flameox control interpreter rather than requiring a second host-global command;
 - `validate` never repairs;
 - `gc` is a dry run unless `--apply` is supplied;
 - permanent purge names one expired trash manifest;

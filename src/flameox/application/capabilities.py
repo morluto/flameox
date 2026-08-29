@@ -493,19 +493,33 @@ class CapabilityService:
                     ErrorCode.INTERNAL_ERROR,
                     "Builtin adapter is missing its dependency declaration.",
                 )
+            managed = adapter.managed_extra is not None and adapter.managed_requirement is not None
             reports.append(
                 CapabilityReport(
                     adapter=adapter.name,
                     status=CapabilityStatus.UNKNOWN,
-                    provisioning=CapabilityProvisioning.WORKLOAD_ENVIRONMENT,
+                    provisioning=(
+                        CapabilityProvisioning.MANAGED_RUNTIME
+                        if managed
+                        else CapabilityProvisioning.WORKLOAD_ENVIRONMENT
+                    ),
                     platform=system,
                     architecture=architecture,
                     features=adapter.features,
                     remediation=(
-                        "Select a declared workload and plan capture so Flameox can inspect this "
-                        "package through that workload's exact Python interpreter.",
+                        ("Call start_capability_setup to install the managed provider reader.",)
+                        if managed
+                        else (
+                            "Select a declared workload and plan capture so Flameox can inspect "
+                            "this package through that workload's exact Python interpreter.",
+                        )
                     ),
-                    setup_verification=CapabilitySetupVerification.NOT_REQUIRED,
+                    setup=self._setup(adapter),
+                    setup_verification=(
+                        CapabilitySetupVerification.PENDING
+                        if managed
+                        else CapabilitySetupVerification.NOT_REQUIRED
+                    ),
                     limitations=(
                         "Python package capabilities are workload-scoped and cannot be determined "
                         "from the Flameox control interpreter.",
