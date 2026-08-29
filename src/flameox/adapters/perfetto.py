@@ -9,7 +9,7 @@ from typing import Any, cast
 
 from pydantic import Field
 
-from flameox.action_graph import ActionId, manual_action
+from flameox.action_graph import ActionId, manual_action, tool_action
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
@@ -111,7 +111,7 @@ class PerfettoExtractor:
 
         artifact = ArtifactStore(self.workspace).get(registration.artifact_id)
 
-        binary = self._trace_processor_path()
+        binary = self._trace_processor_path(setup_subject=run_id)
         with binary.open("rb") as stream:
             trace_processor_sha256 = "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
         maximum = self.workspace.config.storage.max_rows_per_generation
@@ -585,7 +585,7 @@ class PerfettoExtractor:
                 f"Limit must be between 1 and {maximum}.",
             )
         artifact = ArtifactStore(self.workspace).get(artifact_id)
-        binary = self._trace_processor_path()
+        binary = self._trace_processor_path(setup_subject=artifact_id)
         scope_digest = digest_model(
             {
                 "artifact_id": artifact_id,
@@ -678,7 +678,7 @@ class PerfettoExtractor:
             request,
         )
 
-    def _trace_processor_path(self) -> Path:
+    def _trace_processor_path(self, *, setup_subject: str) -> Path:
         configured = self.workspace.config.analysis.trace_processor_path
         candidate: str | None
         if configured is not None:
@@ -693,8 +693,12 @@ class PerfettoExtractor:
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 "A local Perfetto Trace Processor binary is required.",
                 remediation=(
-                    "Install trace_processor_shell on PATH or set "
-                    "analysis.trace_processor_path in workspace policy.",
+                    "Run the returned managed Perfetto setup action, then repeat extraction.",
+                ),
+                next_action=tool_action(
+                    ActionId.START_CAPABILITY_SETUP,
+                    adapters=["perfetto"],
+                    idempotency_key=f"perfetto:{setup_subject}",
                 ),
             )
         path = Path(candidate).absolute()
@@ -702,5 +706,10 @@ class PerfettoExtractor:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 f"Trace Processor is not executable: {path}",
+                next_action=tool_action(
+                    ActionId.START_CAPABILITY_SETUP,
+                    adapters=["perfetto"],
+                    idempotency_key=f"perfetto:{setup_subject}",
+                ),
             )
         return path

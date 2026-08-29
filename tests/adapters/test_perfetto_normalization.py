@@ -34,7 +34,7 @@ async def test_perfetto_normalization_inherits_trace_visible_sdk_phase(
         )
     )
     extractor = PerfettoExtractor(workspace)
-    monkeypatch.setattr(extractor, "_trace_processor_path", lambda: trace)
+    monkeypatch.setattr(extractor, "_trace_processor_path", lambda **_: trace)
 
     async def worker(_request: PerfettoExtractRequest) -> PerfettoExtractResult:
         def row(

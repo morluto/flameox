@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from flameox.action_graph import ActionId, ToolAction
-from flameox.adapters import PyPerfExtractor
+from flameox.adapters import PerfettoExtractor, PyPerfExtractor
 from flameox.adapters.builtins import build_capture_invocation
 from flameox.analysis import RecipeService
 from flameox.application import (
@@ -280,6 +280,34 @@ def test_imported_torch_trace_requires_perfetto_extraction_before_analysis(
     assert unavailable.value.next_action.action is ActionId.EXTRACT_PERFETTO
     assert unavailable.value.next_action.arguments == {"run_id": imported.run.run_id}
     assert "extract_perfetto" in unavailable.value.remediation[0]
+
+
+@pytest.mark.anyio
+async def test_perfetto_extraction_routes_missing_provider_to_exact_setup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trace = tmp_path / "torch-trace.json"
+    trace.write_text('{"traceEvents": []}')
+    workspace = Workspace.initialize(tmp_path)
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(path=trace, kind=ArtifactKind.EXECUTION_TRACE)
+    )
+    monkeypatch.setattr(
+        "flameox.adapters.perfetto.ExecutableResolver.resolve_host_tool",
+        lambda *_: None,
+    )
+
+    with pytest.raises(DomainError) as unavailable:
+        await PerfettoExtractor(workspace).extract(imported.run.run_id)
+
+    assert unavailable.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
+    assert isinstance(unavailable.value.next_action, ToolAction)
+    assert unavailable.value.next_action.action is ActionId.START_CAPABILITY_SETUP
+    assert unavailable.value.next_action.arguments == {
+        "adapters": ["perfetto"],
+        "idempotency_key": f"perfetto:{imported.run.run_id}",
+    }
 
 
 @pytest.mark.anyio
