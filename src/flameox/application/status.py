@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from flameox import __version__
 from flameox.adapters import (
     CoverageExtractor,
     MemrayExtractor,
@@ -18,6 +19,8 @@ from flameox.storage import RunStore, Workspace, tree_bytes
 
 
 class WorkspaceStatus(ContractModel):
+    server_version: str
+    workspace_created_with_version: str
     workspace_id: str
     project_root: str
     workspace_root: str
@@ -91,6 +94,8 @@ def workspace_status(workspace: Workspace) -> WorkspaceStatus:
         if item.status is not CapabilityStatus.AVAILABLE or item.limitations or item.remediation
     )
     return WorkspaceStatus(
+        server_version=__version__,
+        workspace_created_with_version=workspace.identity.flameox_version,
         workspace_id=workspace.identity.workspace_id,
         project_root=str(workspace.project_root),
         workspace_root=str(workspace.paths.root),

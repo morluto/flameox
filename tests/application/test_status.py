@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from flameox import __version__
 from flameox.application import (
     ImportArtifactRequest,
     ImportService,
@@ -39,6 +40,9 @@ def test_status_reports_integrity_storage_recovery_and_capabilities(
     )
 
     result = workspace_status(workspace)
+
+    assert result.server_version == __version__
+    assert result.workspace_created_with_version == workspace.identity.flameox_version
 
     assert result.workspace_valid
     assert result.catalog_valid
