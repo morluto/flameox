@@ -8,14 +8,21 @@ from typing import Any
 import pytest
 
 from flameox import __version__
+from flameox.application import CapabilityService
 from flameox.application.provider_runtime import ProviderRuntimeManager
-from flameox.domain import CapabilityExtra, ProcessResult, process_termination_from_returncode
+from flameox.domain import (
+    CapabilityExtra,
+    CapabilityStatus,
+    ProcessResult,
+    process_termination_from_returncode,
+)
 from flameox.execution import (
     ExecutionOutcome,
     ExecutionRequest,
     ProcessContainment,
     SubprocessBroker,
 )
+from flameox.storage import Workspace
 
 pytestmark = pytest.mark.unit
 
@@ -103,6 +110,28 @@ def test_provider_setup_publishes_verified_environment_without_mutating_control_
     assert not any(value.startswith("flameox[") for value in install.argv)
     create = next(request for request in broker.requests if request.argv[1] == "venv")
     assert "--relocatable" in create.argv
+
+
+def test_managed_py_spy_is_discoverable_after_verified_setup(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    uv = tmp_path / "uv"
+    uv.write_text("#!/bin/sh\nexit 0\n")
+    uv.chmod(0o755)
+    ProviderRuntimeManager(
+        workspace.paths.records / "provider-runtimes",
+        broker=_ProviderBroker(),
+        uv_executable=str(uv),
+    ).prepare(
+        extra=CapabilityExtra.CPU,
+        requirement="py-spy>=0.4.2,<0.5",
+        executable_name="py-spy",
+    )
+
+    report = CapabilityService(workspace).get("py-spy")
+
+    assert report.status is CapabilityStatus.AVAILABLE
+    assert report.executable is not None
+    assert Path(report.executable).name == "py-spy"
 
 
 def test_provider_discovery_is_passive_and_rejects_changed_executable(tmp_path: Path) -> None:
