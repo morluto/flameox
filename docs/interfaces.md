@@ -158,7 +158,10 @@ plan_capture
   ├─ execute_capture_plan          short operation
   └─ start_detached_capture        long operation
        └─ get_detached_capture
-get_run → extract/analyze → get_evidence → record_analysis/record_finding
+get_run
+  ├─ extract_memray → get_extraction      durable long extraction
+  └─ bounded extract/analyze
+       └─ get_evidence → record_analysis/record_finding
 
 V8 profile imports use `extract_node_cpu_prof` or `extract_node_heap_prof` after
 the corresponding native artifact has been preserved.
@@ -302,6 +305,12 @@ Client cancellation propagates into the owning application operation. A cancella
 tool durably records the request and waits up to 250 milliseconds for immediate cleanup;
 if cleanup is still active, it returns the pollable `cancelling` state instead of blocking.
 Detached operations can be inspected after client disconnect.
+
+`extract_memray` is a durable start operation because provider parsing and aggregation can
+outlive an MCP request. It requires an idempotency key and returns an operation ID. Use
+`get_extraction` for bounded progress and the terminal extraction receipt, or
+`cancel_extraction` for scoped cooperative cancellation. Native profile artifacts remain
+immutable; normalized evidence is published only as a complete generation.
 
 ## Errors
 

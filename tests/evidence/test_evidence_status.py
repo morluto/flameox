@@ -41,7 +41,11 @@ def test_evidence_availability_rejects_incoherent_recovery(payload: dict[str, ob
 def test_recoverable_unavailable_evidence_round_trips_with_one_complete_action() -> None:
     evidence = recoverable_unavailable_evidence(
         "not_extracted",
-        next_action=tool_action(ActionId.EXTRACT_MEMRAY, run_id="run-1"),
+        next_action=tool_action(
+            ActionId.EXTRACT_MEMRAY,
+            run_id="run-1",
+            idempotency_key="extract-run-1",
+        ),
     )
 
     assert parse_evidence_availability(evidence.model_dump(mode="python")) == evidence
@@ -51,6 +55,6 @@ def test_recoverable_unavailable_evidence_round_trips_with_one_complete_action()
         "next_action": {
             "kind": "tool",
             "action": "artifact.extract.memray",
-            "arguments": {"run_id": "run-1"},
+            "arguments": {"run_id": "run-1", "idempotency_key": "extract-run-1"},
         },
     }

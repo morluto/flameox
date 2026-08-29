@@ -82,6 +82,9 @@ resource. Cleanup is shielded only for the bounded phase needed to reach a
 truthful terminal state, after which the original cancellation is re-raised.
 Cancellation control calls wait at most 250 milliseconds for that terminal transition;
 longer cleanup remains owned by the operation and is observed through status polling.
+Long Memray extraction uses the same durable operation owner. Cancellation is checked while
+records are aggregated and before generation publication; reconnecting clients read progress,
+failure, cleanup, and the terminal commit receipt from the control plane.
 
 The broker's internal asyncio tasks and synchronous worker bridges are part of
 the execution substrate. They must be cancelled or joined before their owner

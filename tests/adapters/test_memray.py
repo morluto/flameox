@@ -41,13 +41,23 @@ def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
             kind=ArtifactKind.MEMORY_PROFILE,
         )
     )
-    result = MemrayExtractor(workspace).extract(imported.run.run_id)
+    progress: list[tuple[str, int, int | None]] = []
+    result = MemrayExtractor(workspace).extract(
+        imported.run.run_id,
+        progress=lambda phase, completed, total: progress.append((phase, completed, total)),
+    )
 
     assert result.peak_memory_bytes >= 100_000
     assert result.retained_end_bytes >= 100_000
     assert result.total_allocations >= 1
     assert result.frame_count >= 1
     assert any("compatibility could not be verified" in item for item in result.limitations)
+    assert {phase for phase, _completed, _total in progress} == {
+        "reading_high_watermark",
+        "reading_retained_end",
+        "aggregating_high_watermark",
+        "aggregating_retained_end",
+    }
     with Catalog(workspace).open_snapshot() as snapshot:
         measurements = snapshot.execute(
             "SELECT name, value_int, unit FROM measurements ORDER BY name"
@@ -142,3 +152,32 @@ def test_memray_rejects_empty_and_truncated_captures(
         MemrayExtractor(workspace).extract(imported.run.run_id)
 
     assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
+
+
+def test_memray_cancellation_before_publication_preserves_the_corpus_head(
+    tmp_path: Path,
+) -> None:
+    memray = _memray_module()
+    capture = tmp_path / "memory.bin"
+    with memray.Tracker(str(capture)):
+        retained = bytearray(100_000)
+    assert retained
+
+    workspace = Workspace.initialize(tmp_path)
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(path=capture, kind=ArtifactKind.MEMORY_PROFILE)
+    )
+    head_before = workspace.corpus.read_head().commit_id
+    checks = 0
+
+    def cancel() -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 4:
+            raise DomainError(ErrorCode.PROCESS_CANCELLED, "cancelled")
+
+    with pytest.raises(DomainError) as cancelled:
+        MemrayExtractor(workspace).extract(imported.run.run_id, cancel_check=cancel)
+
+    assert cancelled.value.code is ErrorCode.PROCESS_CANCELLED
+    assert workspace.corpus.read_head().commit_id == head_before

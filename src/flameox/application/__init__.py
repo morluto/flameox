@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from flameox.application.execution_identity import *  # noqa: F403
     from flameox.application.execution_policy import *  # noqa: F403
     from flameox.application.experiments import *  # noqa: F403
+    from flameox.application.extractions import *  # noqa: F403
     from flameox.application.faults import *  # noqa: F403
     from flameox.application.gc import *  # noqa: F403
     from flameox.application.imports import *  # noqa: F403
@@ -70,6 +71,7 @@ _MODULES = (
     "execution_identity",
     "execution_policy",
     "experiments",
+    "extractions",
     "faults",
     "gc",
     "imports",
@@ -175,6 +177,7 @@ __all__ = [
     "ExperimentRunResult",
     "ExperimentService",
     "ExperimentTrialCollection",
+    "ExtractionManager",
     "FailureAnalysisRequest",
     "FaultExperimentConfig",
     "FaultExperimentPlan",

@@ -100,6 +100,11 @@ def _representative_actions() -> dict[ActionId, ToolAction]:
         ActionId.EXTRACT_MEMRAY: tool_action(
             ActionId.EXTRACT_MEMRAY,
             run_id="run-1",
+            idempotency_key="extract-run-1",
+        ),
+        ActionId.GET_EXTRACTION: tool_action(
+            ActionId.GET_EXTRACTION,
+            operation_id="op-extraction",
         ),
         ActionId.EXTRACT_NSIGHT_SYSTEMS: tool_action(
             ActionId.EXTRACT_NSIGHT_SYSTEMS,

@@ -38,6 +38,7 @@ class ActionId(StrEnum):
     IMPORT_XCTRACE = "artifact.import.xctrace"
     EXTRACT_PERFETTO = "artifact.extract.perfetto"
     EXTRACT_MEMRAY = "artifact.extract.memray"
+    GET_EXTRACTION = "artifact.extract.status"
     EXTRACT_NSIGHT_SYSTEMS = "artifact.extract.nsight_systems"
     CONFIGURE_INFERENCE_SERVER = "inference.server.configure"
     LIST_INFERENCE_CONFIGURATIONS = "inference.configuration.list"
@@ -68,6 +69,7 @@ class ToolName(StrEnum):
     IMPORT_XCTRACE = "import_xctrace"
     EXTRACT_PERFETTO = "extract_perfetto"
     EXTRACT_MEMRAY = "extract_memray"
+    GET_EXTRACTION = "get_extraction"
     EXTRACT_NSIGHT_SYSTEMS = "extract_nsight_systems"
     CONFIGURE_INFERENCE_SERVER = "configure_inference_server"
     LIST_INFERENCE_CONFIGURATIONS = "list_inference_configurations"
@@ -228,6 +230,10 @@ class _ImportXctraceArguments(ContractModel):
 
 class _ExtractPerfettoArguments(_RunIdArguments):
     artifact_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class _StartExtractionArguments(_RunIdArguments):
+    idempotency_key: str = Field(min_length=1, max_length=200)
 
 
 class _ConfigureInferenceServerArguments(ContractModel):
@@ -429,9 +435,16 @@ ACTION_REGISTRY = MappingProxyType(
             _descriptor(
                 ActionId.EXTRACT_MEMRAY,
                 ToolName.EXTRACT_MEMRAY,
-                _RunIdArguments,
-                ADDITIVE_ACTION,
-                ActionLifecycle.EXECUTE,
+                _StartExtractionArguments,
+                CONFIGURE_ACTION,
+                ActionLifecycle.START,
+            ),
+            _descriptor(
+                ActionId.GET_EXTRACTION,
+                ToolName.GET_EXTRACTION,
+                _OperationIdArguments,
+                READ_ONLY_ACTION,
+                ActionLifecycle.STATUS,
             ),
             _descriptor(
                 ActionId.EXTRACT_NSIGHT_SYSTEMS,

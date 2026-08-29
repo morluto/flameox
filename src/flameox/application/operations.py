@@ -113,7 +113,6 @@ class OperationFailure(Exception):
 
 
 class _OperationRecord(ContractModel):
-    schema_version: Literal[2] = 2
     operation: str
     workspace_id: str
     request: dict[str, Any]
@@ -505,14 +504,12 @@ def _validate_operation_transition(
 
 
 class OperationStatus(ContractModel):
-    schema_version: Literal[1] = 1
     operation_id: str
     operation: str
     workspace_id: str
     request_digest: str
     request: dict[str, Any]
     subject_id: str | None = None
-    idempotency_digest: str
     revision: int
     state: OperationState
     phase: str
@@ -536,8 +533,9 @@ class OperationStatus(ContractModel):
         *,
         adapter: OperationAdapter | None = None,
     ) -> OperationStatus:
-        payload = record.model_dump(exclude={"owner_id", "owner_heartbeat_at"})
-        payload["schema_version"] = 1
+        payload = record.model_dump(
+            exclude={"idempotency_digest", "owner_id", "owner_heartbeat_at"}
+        )
         if adapter is not None and adapter.kind != record.operation:
             raise ValueError("operation adapter kind does not match the durable record")
         if adapter is not None and isinstance(record, ActiveOperationRecord):
@@ -1006,7 +1004,7 @@ class OperationRunner:
                         await self._progress(operation_id, phase, completed, total, message)
 
                     receipt = await run(operation_id, progress)
-                    await self._finish_success(operation_id, cancel_event, receipt)
+                    await self._finish_success(operation_id, receipt)
                 except asyncio.CancelledError:
                     await self._finish_cancelled(operation_id)
                 except OperationFailure as failure:
@@ -1031,22 +1029,15 @@ class OperationRunner:
     async def _finish_success(
         self,
         operation_id: str,
-        cancel_event: asyncio.Event,
         receipt: dict[str, Any],
     ) -> None:
-        def transition(current: ActiveOperationRecord) -> OperationRecord:
-            if cancel_event.is_set() or current.cancellation_requested:
-                return current.cancelled(
-                    recovery=self._retry_recovery(current),
-                    item_outcomes=self._items(current, OperationItemStatus.PENDING),
-                    receipt=receipt,
-                )
-            return current.completed(
+        await self._append_active_transition(
+            operation_id,
+            lambda current: current.completed(
                 receipt=receipt,
                 item_outcomes=self._items(current, OperationItemStatus.COMPLETE),
-            )
-
-        await self._append_active_transition(operation_id, transition)
+            ),
+        )
 
     async def _finish_cancelled(self, operation_id: str) -> None:
         await self._append_active_transition(

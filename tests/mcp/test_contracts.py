@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import errno
 import sys
 from pathlib import Path
@@ -535,6 +536,56 @@ async def test_extractors_name_missing_artifact_and_require_state_change(tmp_pat
     assert selection_error["details"]["available_artifact_ids"] == [otlp_artifact_id]
     assert selection_error["recovery"]["safe_to_repeat_same_call"] is False
     assert selection_error["recovery"]["action"]["missing_arguments"] == ["artifact_id"]
+
+
+@pytest.mark.anyio
+async def test_memray_extraction_exposes_durable_start_and_status_over_mcp(
+    tmp_path: Path,
+) -> None:
+    Workspace.initialize(tmp_path)
+    (tmp_path / "unrelated.log").write_text("not memray input\n")
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        imported = await client.call_tool(
+            "import_artifact",
+            {
+                "path": "unrelated.log",
+                "kind": "process_output",
+                "sensitivity": "normal",
+            },
+        )
+        assert imported.structured_content is not None
+        run_id = imported.structured_content["result"]["run_id"]
+        started = await client.call_tool(
+            "extract_memray",
+            {"run_id": run_id, "idempotency_key": "missing-memray-proof"},
+        )
+        assert started.structured_content is not None
+        operation_id = started.structured_content["result"]["operation_id"]
+
+        status = started
+        for _ in range(100):
+            status = await client.call_tool(
+                "get_extraction",
+                {"operation_id": operation_id},
+            )
+            assert status.structured_content is not None
+            if status.structured_content["result"]["state"] == "failed":
+                break
+            await asyncio.sleep(0.01)
+
+        replay = await client.call_tool(
+            "extract_memray",
+            {"run_id": run_id, "idempotency_key": "missing-memray-proof"},
+        )
+
+    assert status.structured_content is not None
+    terminal = status.structured_content["result"]
+    assert terminal["state"] == "failed"
+    assert terminal["failure_code"] == "ARTIFACT_NOT_FOUND"
+    assert terminal["item_outcomes"][0]["item"] == run_id
+    assert replay.structured_content is not None
+    assert replay.structured_content["result"]["operation_id"] == operation_id
 
 
 @pytest.mark.anyio

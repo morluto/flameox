@@ -95,39 +95,6 @@ def test_operation_store_rejects_terminal_state_without_a_receipt(tmp_path: Path
     assert error.value.code is ErrorCode.WORKSPACE_INVALID
 
 
-def test_operation_store_rejects_version_one_records(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    request = {"value": 1}
-    _, idempotency_digest = operation_digests(
-        workspace,
-        "test.operation",
-        request,
-        "version-one-test",
-    )
-    record = ActiveOperationRecord(
-        operation="test.operation",
-        workspace_id=workspace.identity.workspace_id,
-        request=request,
-        idempotency_digest=idempotency_digest,
-        owner_id="test-owner",
-        owner_heartbeat_at=utc_now(),
-    )
-    store = OperationStore(workspace)
-    store.records.create(record)
-    serialized = record.model_dump(mode="json")
-    serialized["schema_version"] = 1
-    with sqlite3.connect(workspace.paths.control_plane) as connection:
-        connection.execute(
-            "UPDATE operations SET payload_json = ? WHERE operation_id = ?",
-            (json.dumps(serialized), record.operation_id),
-        )
-
-    with pytest.raises(DomainError) as error:
-        store.read(record.operation_id)
-
-    assert error.value.code is ErrorCode.WORKSPACE_INVALID
-
-
 def test_operation_record_rejects_contradictory_identity_projections(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     request = {"value": 1}
@@ -367,7 +334,7 @@ async def test_operation_runner_cancellation_persists_cleanup_and_is_replayable(
         await report("waiting", None, None, "Waiting for cancellation")
         await cancel_event.wait()
         stopped.set()
-        return {"cleanup": "complete"}
+        raise DomainError(ErrorCode.PROCESS_CANCELLED, "cancelled")
 
     started = await runner.start({"value": 1}, "cancel-key", run, items=("item",))
     cancelled = await runner.cancel(started.operation_id)
@@ -412,7 +379,7 @@ async def test_operation_runner_cancellation_preserves_failure_details(tmp_path:
 
 
 @pytest.mark.anyio
-async def test_operation_runner_cancellation_returns_before_blocked_cleanup(
+async def test_operation_runner_committed_completion_wins_after_cancellation_request(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
@@ -427,7 +394,12 @@ async def test_operation_runner_cancellation_returns_before_blocked_cleanup(
         await release_cleanup.wait()
         return {"cleanup": "complete"}
 
-    started = await runner.start({"value": 1}, "bounded-cancel-key", run)
+    started = await runner.start(
+        {"value": 1},
+        "bounded-cancel-key",
+        run,
+        items=("item",),
+    )
     before = asyncio.get_running_loop().time()
     cancelling = await runner.cancel(started.operation_id)
 
@@ -439,8 +411,11 @@ async def test_operation_runner_cancellation_returns_before_blocked_cleanup(
 
     release_cleanup.set()
     terminal = await runner.wait(started.operation_id, timeout_seconds=1)
-    assert terminal.state == "cancelled"
+    assert terminal.state == "terminal"
     assert terminal.cleanup_status == "complete"
+    assert terminal.cancellation_requested is False
+    assert terminal.terminal_receipt == {"cleanup": "complete"}
+    assert terminal.item_outcomes[0].status == "complete"
 
 
 @pytest.mark.anyio

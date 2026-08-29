@@ -57,8 +57,6 @@ from flameox.adapters import (
     InferenceExtractionResult,
     KernelValidationExtractionResult,
     KernelValidationExtractor,
-    MemrayExtractionResult,
-    MemrayExtractor,
     NsightComputeExtractionResult,
     NsightComputeExtractor,
     NsightSystemsExtractionResult,
@@ -132,6 +130,7 @@ from flameox.application import (
     ExperimentPlanRegistry,
     ExperimentService,
     ExperimentTrialCollection,
+    ExtractionManager,
     FaultExperimentPlan,
     FaultExperimentResult,
     FaultExperimentService,
@@ -543,6 +542,7 @@ class AppContext:
     reduction: ReductionService | None = None
     detached_captures: DetachedCaptureManager | None = None
     capability_setup: CapabilitySetupManager | None = None
+    extractions: ExtractionManager | None = None
 
     def require_workspace(self) -> Workspace:
         if self.workspace is None:
@@ -599,6 +599,14 @@ class AppContext:
                 supervisor=self.task_supervisor,
             )
         return self.capability_setup
+
+    def extraction_service(self) -> ExtractionManager:
+        if self.extractions is None:
+            self.extractions = ExtractionManager(
+                self.require_workspace(),
+                supervisor=self.task_supervisor,
+            )
+        return self.extractions
 
 
 def _success[T: BaseModel](
@@ -834,6 +842,8 @@ def create_server(
                     await state.detached_captures.shutdown()
                 if state.capability_setup is not None:
                     await state.capability_setup.shutdown()
+                if state.extractions is not None:
+                    await state.extractions.shutdown()
                 tasks.cancel_scope.cancel()
 
     server = MCPServer(
@@ -876,7 +886,9 @@ def create_server(
             "extract_pyperf and query_measurements for benchmark_samples, "
             "extract_python_startup for Python startup/import evidence, extract_pytest for "
             "test phases, fixtures, workers, and failure latency, analyze_memory for "
-            "memory profiles, analyze_execution for coverage, and the other analyze_* tools "
+            "memory profiles; extract_memray starts durable normalization and get_extraction "
+            "polls its progress and terminal receipt. Use analyze_execution for coverage, "
+            "and the other analyze_* tools "
             "only for their documented artifact kinds. Imported Torch traces require "
             "extract_perfetto before analyze_pytorch; absent normalized rows are recovery, not "
             "an empty operator report. Then use get_evidence, record_analysis, "
@@ -3954,21 +3966,51 @@ def create_server(
 
     @_action_tool(server, ActionId.EXTRACT_MEMRAY)
     async def extract_memray_tool(
-        run_id: str,
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        idempotency_key: Annotated[str, Field(min_length=1, max_length=200)],
         ctx: Context[AppContext],
-    ) -> Annotated[CallToolResult, ToolPayload[MemrayExtractionResult]]:
-        """Extract supported memory concepts through Memray's public FileReader."""
+    ) -> Annotated[CallToolResult, ToolPayload[OperationStatus]]:
+        """Start durable Memray extraction; poll get_extraction with the operation ID."""
         try:
-            result = await run_atomic_thread(
-                lambda: MemrayExtractor(
-                    ctx.request_context.lifespan_context.require_workspace()
-                ).extract(run_id)
+            result = await ctx.request_context.lifespan_context.extraction_service().start_memray(
+                run_id,
+                idempotency_key,
             )
             return _success(
                 result,
-                f"Peak memory was {result.peak_memory_bytes} bytes; "
-                f"{result.retained_end_bytes} bytes remained at end.",
+                f"Memray extraction {result.operation_id} is {result.state} ({result.phase}).",
             )
+        except DomainError as error:
+            return _failure(error)
+
+    @_action_tool(server, ActionId.GET_EXTRACTION)
+    async def get_extraction(
+        operation_id: Annotated[str, Field(min_length=4, max_length=100)],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[OperationStatus]]:
+        """Read durable extraction progress, outcome, and recovery after disconnect."""
+        try:
+            result = await ctx.request_context.lifespan_context.extraction_service().status(
+                operation_id
+            )
+            return _success(
+                result,
+                f"Extraction {operation_id} is {result.state} ({result.phase}).",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="cancel_extraction", annotations=CONFIGURE)
+    async def cancel_extraction(
+        operation_id: Annotated[str, Field(min_length=4, max_length=100)],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[OperationStatus]]:
+        """Request cancellation of one server-owned extraction and return bounded cleanup state."""
+        try:
+            result = await ctx.request_context.lifespan_context.extraction_service().cancel(
+                operation_id
+            )
+            return _success(result, f"Extraction {operation_id} is {result.state}.")
         except DomainError as error:
             return _failure(error)
 

@@ -14,7 +14,7 @@ from flameox.analysis.recipe_models import (
     parse_writable_root_observation,
 )
 from flameox.catalog import Snapshot
-from flameox.domain import ProcessCancellationCause
+from flameox.domain import ProcessCancellationCause, digest_model
 from flameox.evidence import numeric_value_from_columns
 from flameox.evidence_scope import EvidenceScope, resolve_evidence_scope
 from flameox.evidence_status import (
@@ -251,7 +251,13 @@ class HotspotRecipes(RecipeContext):
         elif has_memory_profile and memory_run_id is not None:
             evidence = recoverable_unavailable_evidence(
                 "memory_profile_not_extracted",
-                next_action=tool_action(ActionId.EXTRACT_MEMRAY, run_id=memory_run_id),
+                next_action=tool_action(
+                    ActionId.EXTRACT_MEMRAY,
+                    run_id=memory_run_id,
+                    idempotency_key=digest_model(
+                        {"action": ActionId.EXTRACT_MEMRAY, "run_id": memory_run_id}
+                    ),
+                ),
             )
         else:
             evidence = unavailable_availability(
