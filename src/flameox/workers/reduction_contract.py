@@ -7,7 +7,6 @@ from pydantic import Field, TypeAdapter
 from flameox.application.reduction_contracts import (
     PredicateClassification,
     ReductionDisposition,
-    ReductionFormat,
     ReductionMinimality,
 )
 from flameox.domain.executables import ResolvedExecutable
@@ -51,7 +50,6 @@ class ShrinkRayWorkerRequest(ContractModel):
     predicate_bridge_executable: str = Field(min_length=1, max_length=4_096)
     predicate_bridge_binding: ResolvedExecutable
     predicate_config: ReductionPredicateConfig
-    input_format: ReductionFormat
     seed: int = 0
     parallelism: Literal[1] = 1
     wall_time_seconds: Annotated[float, Field(gt=0, le=86_400)]

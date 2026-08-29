@@ -25,15 +25,6 @@ class ReductionMinimality(StrEnum):
     NOT_CLAIMED = "not_claimed"
 
 
-class ReductionFormat(StrEnum):
-    TEXT = "text"
-    BINARY = "binary"
-    JSON = "json"
-    JSONL = "jsonl"
-    OTLP = "otlp"
-    CHROME_TRACE = "chrome_trace"
-
-
 class PredicateObservation(ContractModel):
     repetition: int = Field(ge=0, le=19)
     classification: PredicateClassification

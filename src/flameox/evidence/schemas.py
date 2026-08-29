@@ -4,7 +4,7 @@ from typing import Any
 
 import pyarrow as pa
 
-SCHEMA_MAJOR = 3
+SCHEMA_MAJOR = 4
 SCHEMA_MINOR = 0
 UTC_TIMESTAMP = pa.timestamp("us", tz="UTC")
 
@@ -325,8 +325,11 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("reduction_id", pa.string(), nullable=False),
             pa.field("plan_id", pa.string(), nullable=False),
             pa.field("disposition", pa.string(), nullable=False),
+            pa.field("source_run_id", pa.string(), nullable=False),
+            pa.field("source_registration_id", pa.string(), nullable=False),
             pa.field("original_artifact_id", pa.string(), nullable=False),
             pa.field("final_artifact_id", pa.string()),
+            pa.field("reduced_registration_id", pa.string()),
             pa.field("predicate_definition_id", pa.string(), nullable=False),
             pa.field("predicate_instance_id", pa.string(), nullable=False),
             pa.field("attempts_json", pa.string(), nullable=False),
@@ -340,7 +343,6 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("limitations", pa.list_(pa.string()), nullable=False),
             pa.field("finished_at", UTC_TIMESTAMP, nullable=False),
             pa.field("engine", pa.string()),
-            pa.field("input_format", pa.string()),
             pa.field("provider_environment_id", pa.string()),
             pa.field("provider_python_digest", pa.string()),
             pa.field("shrinkray_version", pa.string()),

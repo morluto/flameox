@@ -238,7 +238,7 @@ def test_catalog_rejects_an_older_evidence_schema_major(tmp_path: Path) -> None:
     assert raised.value.details == {
         "table": "frames",
         "observed_schema_major": 2,
-        "supported_schema_major": 3,
+        "supported_schema_major": 4,
     }
 
 

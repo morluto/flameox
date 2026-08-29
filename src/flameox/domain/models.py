@@ -151,6 +151,7 @@ class ArtifactKind(StrEnum):
     KERNEL_BUILD = "kernel_build"
     KERNEL_PROFILE = "kernel_profile"
     METAL_TRACE = "metal_trace"
+    REDUCED_CANDIDATE = "reduced_candidate"
 
 
 class RunType(StrEnum):

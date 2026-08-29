@@ -15,13 +15,13 @@ from pydantic import Field, computed_field, model_validator
 from flameox.action_graph import ActionId
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.application.operations import OperationAdapter, OperationRunner, OperationState
+from flameox.application.projections import ProjectionCoordinator
 from flameox.application.provider_runtime import ProviderRuntime, ProviderRuntimeManager
 from flameox.application.reduction_contracts import (
     PredicateClassification,
     PredicateObservation,
     ReductionAttemptReceipt,
     ReductionDisposition,
-    ReductionFormat,
     ReductionMinimality,
     collapse_predicate_observations,
 )
@@ -30,14 +30,22 @@ from flameox.application.task_supervisor import TaskSupervisor
 from flameox.application.workloads import WorkloadService
 from flameox.atomic import atomic_write_bytes
 from flameox.command_binding import ExecutableResolver
-from flameox.domain import CapabilityExtra, DomainError, ErrorCode, digest_model
+from flameox.domain import (
+    ArtifactKind,
+    ArtifactRegistration,
+    CapabilityExtra,
+    DomainError,
+    ErrorCode,
+    RunManifest,
+    digest_model,
+)
 from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.models import CommandSpec, Digest, utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
 from flameox.filesystem import BoundedFileSystem
 from flameox.models import ContractModel
-from flameox.storage import ArtifactStore, ControlRecordStore, StorageQuota, Workspace
+from flameox.storage import ArtifactStore, ControlRecordStore, RunStore, StorageQuota, Workspace
 from flameox.workers.reduction_contract import (
     SHRINKRAY_PROFILE,
     SHRINKRAY_REQUIREMENT,
@@ -74,9 +82,9 @@ class ReductionExecutionLimits(ReductionLimits):
 
 
 class PlanReductionRequest(ContractModel):
-    original_artifact_id: str
+    source_run_id: str
+    source_registration_id: str
     predicate_workload: str
-    input_format: ReductionFormat = ReductionFormat.BINARY
     predicate_parameters: dict[str, str | int | float | bool] = Field(
         default_factory=dict,
         max_length=128,
@@ -85,12 +93,12 @@ class PlanReductionRequest(ContractModel):
 
 
 class ReductionPlan(ContractModel):
-    schema_version: Literal[5] = 5
     plan_id: Digest
     workspace_id: str
+    source_run_id: str
+    source_registration_id: str
     original_artifact_id: str
     engine: Literal["shrinkray"] = "shrinkray"
-    input_format: ReductionFormat
     predicate_workload: str
     predicate_definition_id: str
     predicate_instance_id: str
@@ -131,13 +139,15 @@ class ReductionRepeatabilityStatus(StrEnum):
 
 
 class ReductionResult(ContractModel):
-    schema_version: Literal[4] = 4
     reduction_id: str
     plan_id: str
     disposition: ReductionDisposition
+    source_run_id: str
+    source_registration_id: str
     original_artifact_id: str
     final_artifact_id: str | None = None
     best_known_artifact_id: str | None = None
+    reduced_registration_id: str | None = None
     predicate_definition_id: str
     predicate_instance_id: str
     attempts: ReductionAttemptSummary
@@ -150,7 +160,6 @@ class ReductionResult(ContractModel):
     cleanup_complete: bool
     limitations: tuple[str, ...] = ()
     engine: Literal["shrinkray"] = "shrinkray"
-    input_format: ReductionFormat
     provider_environment_id: str
     provider_python_digest: str
     shrinkray_version: Literal["26.7.8.0"] = SHRINKRAY_VERSION
@@ -206,6 +215,8 @@ class ReductionService:
     ) -> None:
         self.workspace = workspace
         self.artifacts = ArtifactStore(workspace)
+        self.runs = RunStore(workspace)
+        self.projections = ProjectionCoordinator(workspace)
         self.workloads = WorkloadService(workspace)
         self.broker = SubprocessBroker()
         self.provider_runtimes = ProviderRuntimeManager(
@@ -229,7 +240,9 @@ class ReductionService:
         self.runner = OperationRunner(workspace, self._OPERATION, supervisor=supervisor)
 
     def plan(self, request: PlanReductionRequest) -> ReductionPlan:
-        original = self.artifacts.get(request.original_artifact_id)
+        source_run = self.runs.read(request.source_run_id)
+        source = self._source_registration(source_run, request.source_registration_id)
+        original = self.artifacts.get(source.artifact_id)
         limits = self._bind_limits(request.limits, original_size=original.content.byte_length)
         predicate = self.workloads.resolve(
             request.predicate_workload,
@@ -237,9 +250,9 @@ class ReductionService:
         )
         runtime, shrinkray, bridge = self._runtime_bindings()
         bound = {
-            "schema_version": 5,
             "workspace_id": self.workspace.identity.workspace_id,
             **request.model_dump(mode="json", exclude={"limits"}),
+            "original_artifact_id": source.artifact_id,
             "limits": limits.model_dump(mode="json"),
             "predicate_definition_id": predicate.workload_definition_id,
             "predicate_instance_id": predicate.workload_instance_id,
@@ -255,8 +268,9 @@ class ReductionService:
         plan = ReductionPlan(
             plan_id=digest_model(bound),
             workspace_id=self.workspace.identity.workspace_id,
-            original_artifact_id=request.original_artifact_id,
-            input_format=request.input_format,
+            source_run_id=request.source_run_id,
+            source_registration_id=request.source_registration_id,
+            original_artifact_id=source.artifact_id,
             predicate_workload=request.predicate_workload,
             predicate_definition_id=predicate.workload_definition_id,
             predicate_instance_id=predicate.workload_instance_id,
@@ -281,13 +295,13 @@ class ReductionService:
 
     async def execute(self, plan_id: str) -> ReductionResult:
         plan = self.plans.read(plan_id)
-        runtime = self._revalidate(plan)
-        reduction_id = digest_model({"plan_id": plan.plan_id, "contract": "reduction-v4"})
+        reduction_id = digest_model({"operation": "reduction", "plan_id": plan.plan_id})
         try:
-            return self.results.read(reduction_id)
+            return self._reconcile_result(plan, self.results.read(reduction_id))
         except DomainError as error:
             if error.code is not ErrorCode.WORKSPACE_INVALID:
                 raise
+        runtime = self._revalidate(plan)
 
         async def run(operation_id: str, progress: object) -> dict[str, object]:
             del progress
@@ -400,7 +414,6 @@ class ReductionService:
                 ),
                 max_observed_files=(self.workspace.config.execution.max_resource_observed_files),
             ),
-            input_format=plan.input_format,
             wall_time_seconds=plan.limits.wall_time_seconds,
             max_staging_bytes=plan.limits.max_staging_bytes,
             max_staging_files=plan.limits.max_staging_files,
@@ -465,13 +478,13 @@ class ReductionService:
         classification, observations, predicate_stdout, predicate_stderr = self._evaluate_candidate(
             plan, final_path
         )
-        best = self.artifacts.import_path(
+        best = self._import_candidate(
+            plan,
             final_path,
-            allowed_roots=(root,),
-            max_bytes=plan.limits.max_retained_candidate_bytes,
+            root=root,
             expected_artifact_id=worker.final_candidate.sha256,
             expected_byte_length=worker.final_candidate.byte_length,
-        ).content.artifact_id
+        )
         final_id = (
             best
             if classification is PredicateClassification.INTERESTING and worker.tool_completed
@@ -524,6 +537,43 @@ class ReductionService:
             predicate_stdout_artifact_id=predicate_stdout_id,
             predicate_stderr_artifact_id=predicate_stderr_id,
         )
+
+    def _import_candidate(
+        self,
+        plan: ReductionPlan,
+        path: Path,
+        *,
+        root: Path,
+        expected_artifact_id: str,
+        expected_byte_length: int,
+    ) -> str:
+        source_run = self.runs.read(plan.source_run_id)
+        source = self._source_registration(source_run, plan.source_registration_id)
+        with self.artifacts.temporary_snapshot(
+            path,
+            allowed_roots=(root,),
+            max_bytes=plan.limits.max_retained_candidate_bytes,
+        ) as snapshot:
+            if (
+                f"sha256:{snapshot.sha256}" != expected_artifact_id
+                or snapshot.byte_length != expected_byte_length
+            ):
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                    "Reduced candidate changed before artifact publication.",
+                )
+            stored = self.artifacts.import_snapshot(
+                snapshot,
+                display_name=self._reduced_display_name(source.display_name),
+            )
+        return stored.content.artifact_id
+
+    @staticmethod
+    def _reduced_display_name(source_name: str) -> str:
+        path = Path(source_name)
+        suffix = "".join(path.suffixes)
+        stem = source_name[: -len(suffix)] if suffix else source_name
+        return f"{stem}.reduced{suffix}"
 
     def _evaluate_candidate(
         self,
@@ -594,6 +644,100 @@ class ReductionService:
             stderr,
         )
 
+    def _register_candidate(
+        self,
+        plan: ReductionPlan,
+        *,
+        registration_id: str,
+        artifact_id: str,
+        final: bool,
+    ) -> None:
+        run = self.runs.read(plan.source_run_id)
+        source = self._source_registration(run, plan.source_registration_id)
+        existing = next(
+            (item for item in run.artifacts if item.registration_id == registration_id),
+            None,
+        )
+        if existing is not None:
+            if existing.artifact_id != artifact_id:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                    "Reduced-artifact registration conflicts with durable run state.",
+                )
+            spec = self.projections.run_projection_spec(
+                run,
+                environment=None,
+                source_state=None,
+            )
+            self.projections.reconcile_intent(spec.intent_id)
+            return
+
+        kind, media_type, _limitation = self._candidate_format(source, artifact_id)
+        registration = ArtifactRegistration(
+            registration_id=registration_id,
+            run_id=run.run_id,
+            artifact_id=artifact_id,
+            display_name=self._reduced_display_name(source.display_name),
+            media_type=media_type,
+            kind=kind,
+            role="reduction_final" if final else "reduction_best_known",
+            producer="shrinkray",
+            producer_version=SHRINKRAY_VERSION,
+            sensitivity=source.sensitivity,
+        )
+        updated = run.validated_copy(
+            update={
+                "revision": run.revision + 1,
+                "artifacts": (*run.artifacts, registration),
+            }
+        )
+        self.projections.append_run(
+            updated,
+            expected_revision=run.revision,
+            environment=None,
+            source_state=None,
+        )
+
+    @staticmethod
+    def _candidate_registration_id(
+        reduction_id: str,
+        artifact_id: str,
+        *,
+        final: bool,
+    ) -> str:
+        return digest_model(
+            {
+                "reduction_id": reduction_id,
+                "artifact_id": artifact_id,
+                "role": "final" if final else "best_known",
+            }
+        )
+
+    def _candidate_format(
+        self,
+        source: ArtifactRegistration,
+        artifact_id: str,
+    ) -> tuple[ArtifactKind, str, str | None]:
+        stored = self.artifacts.get(artifact_id)
+        if source.kind is ArtifactKind.PROCESS_OUTPUT and (
+            source.media_type.startswith("text/") or source.media_type == "application/json"
+        ):
+            try:
+                payload = stored.payload_path.read_bytes()
+                payload.decode("utf-8", errors="strict")
+                if source.media_type == "application/json":
+                    json.loads(payload)
+            except (UnicodeDecodeError, ValueError):
+                pass
+            else:
+                return source.kind, source.media_type, None
+        return (
+            ArtifactKind.REDUCED_CANDIDATE,
+            "application/octet-stream",
+            "The reduced candidate was not requalified for its source provider format; "
+            "downstream extraction requires an explicit qualification step.",
+        )
+
     def _publish_result(
         self,
         plan: ReductionPlan,
@@ -628,13 +772,31 @@ class ReductionService:
         limitations = list(worker.limitations)
         if classification is not PredicateClassification.INTERESTING:
             limitations.append("Independent final predicate revalidation was not conclusive.")
+        candidate_artifact_id = consumed.final_artifact_id or consumed.best_known_artifact_id
+        reduced_registration_id: str | None = None
+        if candidate_artifact_id != plan.original_artifact_id:
+            reduced_registration_id = self._candidate_registration_id(
+                reduction_id,
+                candidate_artifact_id,
+                final=consumed.final_artifact_id is not None,
+            )
+            source_run = self.runs.read(plan.source_run_id)
+            source = self._source_registration(source_run, plan.source_registration_id)
+            _kind, _media_type, registration_limitation = self._candidate_format(
+                source, candidate_artifact_id
+            )
+            if registration_limitation is not None:
+                limitations.append(registration_limitation)
         result = ReductionResult(
             reduction_id=reduction_id,
             plan_id=plan.plan_id,
             disposition=disposition,
+            source_run_id=plan.source_run_id,
+            source_registration_id=plan.source_registration_id,
             original_artifact_id=plan.original_artifact_id,
             final_artifact_id=consumed.final_artifact_id,
             best_known_artifact_id=consumed.best_known_artifact_id,
+            reduced_registration_id=reduced_registration_id,
             predicate_definition_id=plan.predicate_definition_id,
             predicate_instance_id=plan.predicate_instance_id,
             attempts=attempts,
@@ -646,7 +808,6 @@ class ReductionService:
             final_predicate_stderr_artifact_id=consumed.predicate_stderr_artifact_id,
             cleanup_complete=cleanup_complete,
             limitations=tuple(dict.fromkeys(limitations)),
-            input_format=plan.input_format,
             provider_environment_id=plan.provider_environment_id,
             provider_python_digest=plan.provider_python_digest,
             shrinkray_executable_digest=plan.shrinkray_executable_digest,
@@ -672,10 +833,74 @@ class ReductionService:
             created = self.results.create(result)
         except DomainError as error:
             if error.code is ErrorCode.REVISION_CONFLICT:
-                return self.results.read(reduction_id)
-            raise
-        self._publish_rows(created, consumed.attempts)
-        return created
+                created = self.results.read(reduction_id)
+            else:
+                raise
+        return self._reconcile_result(plan, created, attempts=consumed.attempts)
+
+    def _reconcile_result(
+        self,
+        plan: ReductionPlan,
+        result: ReductionResult,
+        *,
+        attempts: tuple[ReductionAttemptReceipt, ...] | None = None,
+    ) -> ReductionResult:
+        if (
+            result.plan_id != plan.plan_id
+            or result.source_run_id != plan.source_run_id
+            or result.source_registration_id != plan.source_registration_id
+            or result.original_artifact_id != plan.original_artifact_id
+        ):
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "The durable reduction result does not match its bound plan.",
+            )
+        candidate_artifact_id = result.final_artifact_id or result.best_known_artifact_id
+        if result.reduced_registration_id is not None:
+            if candidate_artifact_id is None:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                    "A reduced-artifact registration has no candidate artifact.",
+                )
+            final = result.final_artifact_id is not None
+            expected_registration_id = self._candidate_registration_id(
+                result.reduction_id,
+                candidate_artifact_id,
+                final=final,
+            )
+            if result.reduced_registration_id != expected_registration_id:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                    "The reduced-artifact registration identity is invalid.",
+                )
+            self._register_candidate(
+                plan,
+                registration_id=result.reduced_registration_id,
+                artifact_id=candidate_artifact_id,
+                final=final,
+            )
+        published_attempts = attempts if attempts is not None else self._load_attempts(result)
+        self._publish_rows(result, published_attempts)
+        return result
+
+    def _load_attempts(
+        self,
+        result: ReductionResult,
+    ) -> tuple[ReductionAttemptReceipt, ...]:
+        if result.attempt_receipts_artifact_id is None:
+            return ()
+        stored = self.artifacts.get(result.attempt_receipts_artifact_id)
+        try:
+            return tuple(
+                ReductionAttemptReceipt.model_validate_json(line)
+                for line in stored.payload_path.read_bytes().splitlines()
+                if line
+            )
+        except ValueError as error:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "The durable reduction attempt receipts are invalid.",
+            ) from error
 
     def _publish_rows(
         self,
@@ -688,8 +913,11 @@ class ReductionService:
                     "reduction_id": result.reduction_id,
                     "plan_id": result.plan_id,
                     "disposition": result.disposition,
+                    "source_run_id": result.source_run_id,
+                    "source_registration_id": result.source_registration_id,
                     "original_artifact_id": result.original_artifact_id,
                     "final_artifact_id": result.final_artifact_id,
+                    "reduced_registration_id": result.reduced_registration_id,
                     "predicate_definition_id": result.predicate_definition_id,
                     "predicate_instance_id": result.predicate_instance_id,
                     "attempts_json": result.attempts.model_dump_json(),
@@ -707,7 +935,6 @@ class ReductionService:
                     "limitations": list(result.limitations),
                     "finished_at": result.finished_at,
                     "engine": result.engine,
-                    "input_format": result.input_format,
                     "provider_environment_id": result.provider_environment_id,
                     "provider_python_digest": result.provider_python_digest,
                     "shrinkray_version": result.shrinkray_version,
@@ -745,10 +972,12 @@ class ReductionService:
                 for attempt in attempts
             ],
         }
-        self.publisher.publish_rows(
+        self.publisher.publish_rows_idempotent(
             rows,
             publisher="flameox.reductions",
-            publisher_version="3",
+            publisher_version="4",
+            operation_identity={"reduction_id": result.reduction_id},
+            input_run_ids=(result.source_run_id,),
             input_artifact_ids=tuple(
                 artifact_id
                 for artifact_id in (
@@ -795,13 +1024,38 @@ class ReductionService:
             )
         return runtime, shrinkray, bridge
 
+    @staticmethod
+    def _source_registration(
+        run: RunManifest,
+        registration_id: str,
+    ) -> ArtifactRegistration:
+        registration = next(
+            (item for item in run.artifacts if item.registration_id == registration_id),
+            None,
+        )
+        if registration is None:
+            raise DomainError(
+                ErrorCode.ARTIFACT_NOT_FOUND,
+                "The reduction source registration is not attached to the selected run.",
+                run_id=run.run_id,
+                details={"registration_id": registration_id},
+            )
+        return registration
+
     def _revalidate(self, plan: ReductionPlan) -> ProviderRuntime:
         if plan.workspace_id != self.workspace.identity.workspace_id:
             raise DomainError(
                 ErrorCode.EXECUTION_REFUSED,
                 "Reduction plan is for another workspace.",
             )
-        self.artifacts.get(plan.original_artifact_id)
+        source_run = self.runs.read(plan.source_run_id)
+        source = self._source_registration(source_run, plan.source_registration_id)
+        if source.artifact_id != plan.original_artifact_id:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "The reduction source registration changed after planning.",
+            )
+        self.artifacts.get(source.artifact_id)
         predicate = self.workloads.resolve(plan.predicate_workload, plan.predicate_parameters)
         runtime = (
             self._provided_runtime

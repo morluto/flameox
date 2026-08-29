@@ -36,12 +36,24 @@ class ArtifactRegistrationSummary(ContractModel):
     registered_at: datetime
 
 
+class ArtifactReductionProvenance(ContractModel):
+    reduction_id: str
+    source_run_id: str
+    source_registration_id: str
+    original_artifact_id: str
+    disposition: str
+    role: str
+
+
 class ArtifactMetadataResult(ContractModel):
     schema_version: int = 1
     content: ArtifactContent
     resource_uri: str
     registrations: tuple[ArtifactRegistrationSummary, ...]
     total_registrations: int
+    reduction_provenance: tuple[ArtifactReductionProvenance, ...]
+    total_reductions: int
+    reduction_provenance_next_cursor: str | None = None
     effective_sensitivity: Sensitivity
 
 
@@ -59,6 +71,15 @@ class ArtifactListResult(CursorPageContract):
     schema_version: int = 1
     corpus_commit_id: str
     artifacts: tuple[ArtifactListItem, ...]
+    total: int
+
+
+class ArtifactReductionListResult(CursorPageContract):
+    page_items_field = "reductions"
+
+    corpus_commit_id: str
+    artifact_id: str
+    reductions: tuple[ArtifactReductionProvenance, ...]
     total: int
 
 
@@ -250,11 +271,47 @@ class ArtifactService:
             )
             for row in rows
         )
+        reduction_rows = snapshot.execute(
+            "SELECT reduction_id, source_run_id, source_registration_id, "
+            "original_artifact_id, disposition, final_artifact_id "
+            "FROM reduction_results "
+            "WHERE final_artifact_id = ? OR best_known_artifact_id = ? "
+            "ORDER BY reduction_id LIMIT ?",
+            (artifact_id, artifact_id, limit + 1),
+        ).fetchall()
+        reduction_count = snapshot.execute(
+            "SELECT count(*) FROM reduction_results "
+            "WHERE final_artifact_id = ? OR best_known_artifact_id = ?",
+            (artifact_id, artifact_id),
+        ).fetchone()
+        assert reduction_count is not None
         metadata = ArtifactMetadataResult(
             content=stored.content,
             resource_uri=f"flameox://artifacts/{artifact_id}",
             registrations=registrations,
             total_registrations=int(count_row[0]),
+            reduction_provenance=tuple(
+                ArtifactReductionProvenance(
+                    reduction_id=str(row[0]),
+                    source_run_id=str(row[1]),
+                    source_registration_id=str(row[2]),
+                    original_artifact_id=str(row[3]),
+                    disposition=str(row[4]),
+                    role="final" if row[5] == artifact_id else "best_known",
+                )
+                for row in reduction_rows[:limit]
+            ),
+            total_reductions=int(reduction_count[0]),
+            reduction_provenance_next_cursor=(
+                self.workspace.cursors.issue(
+                    namespace=CursorNamespace.ARTIFACT_REDUCTIONS,
+                    snapshot_id=snapshot.handle.commit_id,
+                    scope_digest=artifact_id,
+                    position=(str(reduction_rows[limit - 1][0]),),
+                )
+                if len(reduction_rows) > limit
+                else None
+            ),
             effective_sensitivity={
                 None: Sensitivity.NORMAL,
                 0: Sensitivity.NORMAL,
@@ -263,6 +320,95 @@ class ArtifactService:
             }[count_row[1]],
         )
         return SnapshotArtifact(metadata=metadata, payload_path=stored.payload_path)
+
+    def list_reductions(
+        self,
+        artifact_id: str,
+        *,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> ArtifactReductionListResult:
+        head = self.workspace.corpus.read_head()
+        after = (
+            cast(
+                tuple[str],
+                self.workspace.cursors.resolve(
+                    cursor,
+                    namespace=CursorNamespace.ARTIFACT_REDUCTIONS,
+                    snapshot_id=head.commit_id,
+                    scope_digest=artifact_id,
+                ),
+            )[0]
+            if cursor is not None
+            else None
+        )
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
+            registered = snapshot.execute(
+                "SELECT 1 FROM artifact_registrations WHERE artifact_id = ? LIMIT 1",
+                (artifact_id,),
+            ).fetchone()
+            if registered is None:
+                raise DomainError(
+                    ErrorCode.WORKSPACE_INVALID,
+                    f"Artifact {artifact_id!r} is absent from the pinned corpus snapshot.",
+                    details={
+                        "missing_entity": EvidenceReferenceType.ARTIFACT.value,
+                        "corpus_commit_id": snapshot.handle.commit_id,
+                    },
+                )
+            count_row = snapshot.execute(
+                "SELECT count(*) FROM reduction_results "
+                "WHERE final_artifact_id = ? OR best_known_artifact_id = ?",
+                (artifact_id, artifact_id),
+            ).fetchone()
+            assert count_row is not None
+            predicate = (
+                "AND reduction_id > ? " if after is not None else ""
+            )
+            parameters: tuple[object, ...] = (
+                (artifact_id, artifact_id, after, limit + 1)
+                if after is not None
+                else (artifact_id, artifact_id, limit + 1)
+            )
+            rows = snapshot.execute(
+                "SELECT reduction_id, source_run_id, source_registration_id, "
+                "original_artifact_id, disposition, final_artifact_id "
+                "FROM reduction_results "
+                "WHERE (final_artifact_id = ? OR best_known_artifact_id = ?) "
+                + predicate
+                + "ORDER BY reduction_id LIMIT ?",
+                parameters,
+            ).fetchall()
+            commit_id = snapshot.handle.commit_id
+        has_more = len(rows) > limit
+        reductions = tuple(
+            ArtifactReductionProvenance(
+                reduction_id=str(row[0]),
+                source_run_id=str(row[1]),
+                source_registration_id=str(row[2]),
+                original_artifact_id=str(row[3]),
+                disposition=str(row[4]),
+                role="final" if row[5] == artifact_id else "best_known",
+            )
+            for row in rows[:limit]
+        )
+        return ArtifactReductionListResult(
+            corpus_commit_id=commit_id,
+            artifact_id=artifact_id,
+            reductions=reductions,
+            total=int(count_row[0]),
+            next_cursor=(
+                self.workspace.cursors.issue(
+                    namespace=CursorNamespace.ARTIFACT_REDUCTIONS,
+                    snapshot_id=commit_id,
+                    scope_digest=artifact_id,
+                    position=(reductions[-1].reduction_id,),
+                )
+                if has_more and reductions
+                else None
+            ),
+        )
 
     def list(self, *, limit: int = 100, cursor: str | None = None) -> ArtifactListResult:
         head = self.workspace.corpus.read_head()

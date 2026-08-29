@@ -13,12 +13,13 @@ from flameox.application import (
     ImportArtifactRequest,
     ImportService,
     PlanReductionRequest,
-    ReductionFormat,
     ReductionLimits,
     ReductionMinimality,
     ReductionResult,
     ReductionService,
 )
+from flameox.application.artifacts import ArtifactService
+from flameox.application.projections import ProjectionCoordinator
 from flameox.application.provider_runtime import (
     ProviderRuntime,
     ProviderRuntimeReceipt,
@@ -111,13 +112,20 @@ timeout_seconds = 30
     )
 
 
-def _original(workspace: Workspace, path: Path, content: bytes) -> str:
+def _original(
+    workspace: Workspace,
+    path: Path,
+    content: bytes,
+    *,
+    kind: ArtifactKind = ArtifactKind.COLLECTOR_METADATA,
+    media_type: str | None = None,
+) -> tuple[str, str, str]:
     path.write_bytes(content)
-    return (
-        ImportService(workspace)
-        .import_artifact(ImportArtifactRequest(path=path, kind=ArtifactKind.COLLECTOR_METADATA))
-        .artifact_id
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(path=path, kind=kind, media_type=media_type)
     )
+    registration = imported.run.artifacts[0]
+    return imported.artifact_id, imported.run.run_id, registration.registration_id
 
 
 def _service(tmp_path: Path, predicate_code: str) -> tuple[Workspace, ReductionService]:
@@ -134,18 +142,39 @@ def test_reduction_contract_rejects_parallel_candidate_execution() -> None:
 def test_planning_requires_an_exact_managed_shrinkray_provider(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     _configure(tmp_path, "raise SystemExit(0)")
-    artifact_id = _original(workspace, tmp_path / "input", b"KEEP\n")
+    _artifact_id, source_run_id, source_registration_id = _original(
+        workspace, tmp_path / "input", b"KEEP\n"
+    )
 
     with pytest.raises(DomainError) as failure:
         ReductionService(workspace).plan(
             PlanReductionRequest(
-                original_artifact_id=artifact_id,
+                source_run_id=source_run_id,
+                source_registration_id=source_registration_id,
                 predicate_workload="predicate",
             )
         )
 
     assert failure.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
     assert "start_capability_setup" in " ".join(failure.value.remediation)
+
+
+def test_planning_rejects_a_registration_not_owned_by_the_source_run(tmp_path: Path) -> None:
+    workspace, service = _service(tmp_path, "raise SystemExit(0)")
+    _artifact_id, source_run_id, _registration_id = _original(
+        workspace, tmp_path / "input", b"KEEP\n"
+    )
+
+    with pytest.raises(DomainError) as failure:
+        service.plan(
+            PlanReductionRequest(
+                source_run_id=source_run_id,
+                source_registration_id="forged-registration",
+                predicate_workload="predicate",
+            )
+        )
+
+    assert failure.value.code is ErrorCode.ARTIFACT_NOT_FOUND
 
 
 @pytest.mark.anyio
@@ -157,16 +186,18 @@ async def test_shrinkray_reduction_preserves_receipts_and_revalidates_final_cand
         "import os,pathlib; raise SystemExit(0 if b'KEEP' in "
         "pathlib.Path(os.environ['FLAMEOX_REDUCTION_CANDIDATE']).read_bytes() else 1)",
     )
-    original_id = _original(
+    original_id, source_run_id, source_registration_id = _original(
         workspace,
         tmp_path / "original.data",
         b"discard\nKEEP\ndiscard\n",
+        kind=ArtifactKind.PROCESS_OUTPUT,
+        media_type="text/plain",
     )
     plan = service.plan(
         PlanReductionRequest(
-            original_artifact_id=original_id,
+            source_run_id=source_run_id,
+            source_registration_id=source_registration_id,
             predicate_workload="predicate",
-            input_format=ReductionFormat.TEXT,
             limits=ReductionLimits(
                 max_attempts=16,
                 max_staging_files=64,
@@ -177,13 +208,15 @@ async def test_shrinkray_reduction_preserves_receipts_and_revalidates_final_cand
 
     result = await service.execute(plan.plan_id)
 
-    assert plan.schema_version == 5
     assert plan.engine == "shrinkray"
     assert plan.shrinkray_version == "26.7.8.0"
     assert result.disposition == "succeeded"
     assert result.final_revalidation_status == "interesting"
     assert result.minimality is ReductionMinimality.NOT_CLAIMED
     assert result.final_artifact_id is not None
+    assert result.source_run_id == source_run_id
+    assert result.source_registration_id == source_registration_id
+    assert result.reduced_registration_id is not None
     assert result.attempt_receipts_artifact_id is not None
     assert result.shrinkray_history_artifact_id is not None
     assert result.reducer_stdout_artifact_id is not None
@@ -192,6 +225,31 @@ async def test_shrinkray_reduction_preserves_receipts_and_revalidates_final_cand
     assert result.cleanup_complete is True
     final = ArtifactStore(workspace).get(result.final_artifact_id)
     assert final.payload_path.read_bytes() == b"KEEP\n"
+    assert final.content.payload_name.endswith(".data")
+    metadata = ArtifactService(workspace).get(result.final_artifact_id)
+    reduced_registration = next(
+        item
+        for item in metadata.registrations
+        if item.registration_id == result.reduced_registration_id
+    )
+    assert reduced_registration.run_id == source_run_id
+    assert reduced_registration.display_name == "original.reduced.data"
+    assert reduced_registration.kind is ArtifactKind.PROCESS_OUTPUT
+    assert reduced_registration.media_type == "text/plain"
+    assert reduced_registration.role == "reduction_final"
+    assert reduced_registration.producer == "shrinkray"
+    assert metadata.reduction_provenance[0].reduction_id == result.reduction_id
+    assert metadata.reduction_provenance[0].original_artifact_id == original_id
+    assert metadata.reduction_provenance[0].role == "final"
+    assert metadata.total_reductions == 1
+    assert metadata.reduction_provenance_next_cursor is None
+    preview = ArtifactService(workspace).preview_text(
+        result.final_artifact_id,
+        offset=0,
+        max_bytes=64,
+        max_lines=10,
+    )
+    assert preview.text == "KEEP\n"
     receipts = ArtifactStore(workspace).get(result.attempt_receipts_artifact_id)
     parsed = [json.loads(line) for line in receipts.payload_path.read_text().splitlines()]
     assert [item["attempt_id"] for item in parsed] == [
@@ -199,6 +257,13 @@ async def test_shrinkray_reduction_preserves_receipts_and_revalidates_final_cand
     ]
     assert all(item["classification"] != "unresolved" for item in parsed)
     assert service.get(result.reduction_id) == result
+    head_before_reuse = workspace.corpus.read_head().commit_id
+    assert await service.execute(plan.plan_id) == result
+    assert workspace.corpus.read_head().commit_id == head_before_reuse
+    assert sum(
+        item.registration_id == result.reduced_registration_id
+        for item in service.runs.read(source_run_id).artifacts
+    ) == 1
 
 
 @pytest.mark.anyio
@@ -207,10 +272,13 @@ async def test_failed_reduction_operation_can_be_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace, service = _service(tmp_path, "raise SystemExit(0)")
-    original_id = _original(workspace, tmp_path / "retry.data", b"KEEP\n")
+    _original_id, source_run_id, source_registration_id = _original(
+        workspace, tmp_path / "retry.data", b"KEEP\n"
+    )
     plan = service.plan(
         PlanReductionRequest(
-            original_artifact_id=original_id,
+            source_run_id=source_run_id,
+            source_registration_id=source_registration_id,
             predicate_workload="predicate",
             limits=ReductionLimits(max_attempts=16, max_staging_files=64),
         )
@@ -234,9 +302,212 @@ async def test_failed_reduction_operation_can_be_retried(
     result = await service.execute(plan.plan_id)
 
     assert result.reduction_id == digest_model(
-        {"plan_id": plan.plan_id, "contract": "reduction-v4"}
+        {"operation": "reduction", "plan_id": plan.plan_id}
     )
     assert attempts == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failed_projection", ["_register_candidate", "_publish_rows"])
+async def test_completed_reduction_reconciles_projection_failures_without_rerunning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_projection: str,
+) -> None:
+    workspace, service = _service(
+        tmp_path,
+        "import os,pathlib; raise SystemExit(0 if b'KEEP' in "
+        "pathlib.Path(os.environ['FLAMEOX_REDUCTION_CANDIDATE']).read_bytes() else 1)",
+    )
+    _original_id, source_run_id, source_registration_id = _original(
+        workspace,
+        tmp_path / "reconcile.data",
+        b"discard\nKEEP\ndiscard\n",
+        kind=ArtifactKind.PROCESS_OUTPUT,
+        media_type="text/plain",
+    )
+    plan = service.plan(
+        PlanReductionRequest(
+            source_run_id=source_run_id,
+            source_registration_id=source_registration_id,
+            predicate_workload="predicate",
+            limits=ReductionLimits(max_attempts=16, max_staging_files=64),
+        )
+    )
+    execute = service._execute_shrinkray
+    provider_calls = 0
+
+    async def count_provider_calls(*args: object, **kwargs: object) -> object:
+        nonlocal provider_calls
+        provider_calls += 1
+        return await execute(*args, **kwargs)  # type: ignore[arg-type]
+
+    projection = getattr(service, failed_projection)
+    projection_calls = 0
+
+    def fail_projection_once(*args: object, **kwargs: object) -> object:
+        nonlocal projection_calls
+        projection_calls += 1
+        if projection_calls == 1:
+            raise DomainError(ErrorCode.INTERNAL_ERROR, "injected projection failure")
+        return projection(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_execute_shrinkray", count_provider_calls)
+    monkeypatch.setattr(service, failed_projection, fail_projection_once)
+
+    with pytest.raises(DomainError):
+        await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_id)
+
+    assert provider_calls == 1
+    assert result.reduced_registration_id is not None
+    assert sum(
+        item.registration_id == result.reduced_registration_id
+        for item in service.runs.read(source_run_id).artifacts
+    ) == 1
+    assert result.final_artifact_id is not None
+    metadata = ArtifactService(workspace).get(result.final_artifact_id)
+    assert metadata.total_reductions == 1
+
+
+@pytest.mark.anyio
+async def test_completed_reduction_reconciles_a_run_projection_after_domain_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, service = _service(
+        tmp_path,
+        "import os,pathlib; raise SystemExit(0 if b'KEEP' in "
+        "pathlib.Path(os.environ['FLAMEOX_REDUCTION_CANDIDATE']).read_bytes() else 1)",
+    )
+    _original_id, source_run_id, source_registration_id = _original(
+        workspace,
+        tmp_path / "projection.data",
+        b"discard\nKEEP\ndiscard\n",
+        kind=ArtifactKind.PROCESS_OUTPUT,
+        media_type="text/plain",
+    )
+    plan = service.plan(
+        PlanReductionRequest(
+            source_run_id=source_run_id,
+            source_registration_id=source_registration_id,
+            predicate_workload="predicate",
+            limits=ReductionLimits(max_attempts=16, max_staging_files=64),
+        )
+    )
+    execute = service._execute_shrinkray
+    provider_calls = 0
+    injected = False
+
+    async def count_provider_calls(*args: object, **kwargs: object) -> object:
+        nonlocal provider_calls
+        provider_calls += 1
+        return await execute(*args, **kwargs)  # type: ignore[arg-type]
+
+    def fail_after_domain_commit(phase: object, _intent: object) -> None:
+        nonlocal injected
+        if phase == "after_domain_commit" and not injected:
+            injected = True
+            raise DomainError(ErrorCode.INTERNAL_ERROR, "injected projection failure")
+
+    service.projections = ProjectionCoordinator(
+        workspace,
+        fault_injector=fail_after_domain_commit,
+    )
+    monkeypatch.setattr(service, "_execute_shrinkray", count_provider_calls)
+
+    with pytest.raises(DomainError):
+        await service.execute(plan.plan_id)
+    result = await service.execute(plan.plan_id)
+
+    assert provider_calls == 1
+    assert result.final_artifact_id is not None
+    metadata = ArtifactService(workspace).get(result.final_artifact_id)
+    assert any(
+        item.registration_id == result.reduced_registration_id
+        for item in metadata.registrations
+    )
+
+
+@pytest.mark.anyio
+async def test_reduction_marks_an_unqualified_binary_candidate_explicitly(
+    tmp_path: Path,
+) -> None:
+    workspace, service = _service(
+        tmp_path,
+        "import os,pathlib; raise SystemExit(0 if b'KEEP' in "
+        "pathlib.Path(os.environ['FLAMEOX_REDUCTION_CANDIDATE']).read_bytes() else 1)",
+    )
+    _original_id, source_run_id, source_registration_id = _original(
+        workspace,
+        tmp_path / "opaque.bin",
+        b"discard\nKEEP\ndiscard\n",
+    )
+    plan = service.plan(
+        PlanReductionRequest(
+            source_run_id=source_run_id,
+            source_registration_id=source_registration_id,
+            predicate_workload="predicate",
+            limits=ReductionLimits(max_attempts=16, max_staging_files=64),
+        )
+    )
+
+    result = await service.execute(plan.plan_id)
+
+    assert result.final_artifact_id is not None
+    metadata = ArtifactService(workspace).get(result.final_artifact_id)
+    assert metadata.registrations[0].kind is ArtifactKind.REDUCED_CANDIDATE
+    assert metadata.registrations[0].media_type == "application/octet-stream"
+    assert any("not requalified" in item for item in result.limitations)
+
+
+@pytest.mark.anyio
+async def test_artifact_reduction_lineage_is_cursor_paginated(tmp_path: Path) -> None:
+    workspace, service = _service(
+        tmp_path,
+        "import os,pathlib; raise SystemExit(0 if b'KEEP' in "
+        "pathlib.Path(os.environ['FLAMEOX_REDUCTION_CANDIDATE']).read_bytes() else 1)",
+    )
+    _original_id, source_run_id, source_registration_id = _original(
+        workspace,
+        tmp_path / "lineage.data",
+        b"discard\nKEEP\ndiscard\n",
+        kind=ArtifactKind.PROCESS_OUTPUT,
+        media_type="text/plain",
+    )
+    results = []
+    for max_attempts in (16, 17):
+        plan = service.plan(
+            PlanReductionRequest(
+                source_run_id=source_run_id,
+                source_registration_id=source_registration_id,
+                predicate_workload="predicate",
+                limits=ReductionLimits(
+                    max_attempts=max_attempts,
+                    max_staging_files=64,
+                ),
+            )
+        )
+        results.append(await service.execute(plan.plan_id))
+
+    artifact_id = results[0].final_artifact_id
+    assert artifact_id is not None
+    assert results[1].final_artifact_id == artifact_id
+    artifacts = ArtifactService(workspace)
+    metadata = artifacts.get(artifact_id, limit=1)
+
+    assert metadata.total_reductions == 2
+    assert metadata.reduction_provenance_next_cursor is not None
+    continuation = artifacts.list_reductions(
+        artifact_id,
+        limit=1,
+        cursor=metadata.reduction_provenance_next_cursor,
+    )
+    assert continuation.next_cursor is None
+    assert {
+        metadata.reduction_provenance[0].reduction_id,
+        continuation.reductions[0].reduction_id,
+    } == {result.reduction_id for result in results}
 
 
 @pytest.mark.anyio
@@ -248,14 +519,15 @@ async def test_unresolved_candidate_is_recorded_but_never_adopted(tmp_path: Path
         "time.sleep(0 if b'KEEP' in data and b'discard' in data else 1); "
         "raise SystemExit(0 if b'KEEP' in data and b'discard' in data else 1)",
     )
-    original_id = _original(
+    original_id, source_run_id, source_registration_id = _original(
         workspace,
         tmp_path / "unresolved.data",
         b"discard\nKEEP\n",
     )
     plan = service.plan(
         PlanReductionRequest(
-            original_artifact_id=original_id,
+            source_run_id=source_run_id,
+            source_registration_id=source_registration_id,
             predicate_workload="predicate",
             limits=ReductionLimits(
                 max_attempts=16,
@@ -275,10 +547,13 @@ async def test_unresolved_candidate_is_recorded_but_never_adopted(tmp_path: Path
 @pytest.mark.anyio
 async def test_execution_refuses_changed_provider_bytes(tmp_path: Path) -> None:
     workspace, service = _service(tmp_path, "raise SystemExit(0)")
-    original_id = _original(workspace, tmp_path / "changed.data", b"KEEP\n")
+    _original_id, source_run_id, source_registration_id = _original(
+        workspace, tmp_path / "changed.data", b"KEEP\n"
+    )
     plan = service.plan(
         PlanReductionRequest(
-            original_artifact_id=original_id,
+            source_run_id=source_run_id,
+            source_registration_id=source_registration_id,
             predicate_workload="predicate",
             limits=ReductionLimits(max_attempts=16, max_staging_files=64),
         )
@@ -291,13 +566,6 @@ async def test_execution_refuses_changed_provider_bytes(tmp_path: Path) -> None:
     assert failure.value.code is ErrorCode.EXECUTION_REFUSED
 
 
-def test_reduction_id_is_bound_to_the_new_contract() -> None:
-    plan_id = "sha256:" + "1" * 64
-    assert digest_model({"plan_id": plan_id, "contract": "reduction-v4"}) != digest_model(
-        {"plan_id": plan_id, "contract": "reduction-v3"}
-    )
-
-
 def test_result_rejects_a_minimality_claim_from_tool_completion() -> None:
     with pytest.raises(ValidationError):
         ReductionResult.model_validate(
@@ -305,6 +573,8 @@ def test_result_rejects_a_minimality_claim_from_tool_completion() -> None:
                 "reduction_id": "r",
                 "plan_id": "p",
                 "disposition": "unchanged",
+                "source_run_id": "run",
+                "source_registration_id": "registration",
                 "original_artifact_id": "sha256:" + "0" * 64,
                 "predicate_definition_id": "d",
                 "predicate_instance_id": "i",
@@ -317,7 +587,6 @@ def test_result_rejects_a_minimality_claim_from_tool_completion() -> None:
                     "timed_out": 0,
                 },
                 "cleanup_complete": True,
-                "input_format": "binary",
                 "provider_environment_id": "provider",
                 "provider_python_digest": "python",
                 "shrinkray_executable_digest": "tool",

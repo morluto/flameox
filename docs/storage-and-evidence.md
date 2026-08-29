@@ -139,7 +139,7 @@ those disjoint fields rather than stored a second time. Run semantics are
 immutable across lifecycle revisions and have a content digest that normalized
 generation manifests bind alongside their input run identifiers.
 
-This contract starts evidence schema 3.0. Flameox does not reinterpret older
+This contract starts evidence schema 4.0. Flameox does not reinterpret older
 evidence generations through fallback columns; create a new workspace and
 re-import native evidence when adopting this clean break.
 
@@ -203,6 +203,16 @@ Artifact metadata includes kind, media type, producer and version, size, digest,
 sensitivity, run relationship, and extraction state. An artifact may be
 structurally valid yet unsupported by the installed extractor; that state is
 not equivalent to an empty extraction.
+
+Reduced candidates follow the same ownership rule. Their immutable bytes remain
+content-addressed artifacts, their run attachment carries only registration
+metadata, and the reduction result remains authoritative for the reduction ID,
+source registration, original artifact, predicate outcome, coverage, and
+limitations. Artifact reads project that lineage inline. They do not duplicate
+reduction provenance into another artifact-specific record. The durable
+reduction result is the completion boundary; run registration and normalized
+evidence publication are idempotent projections reconciled from that result
+after interruption, so recovery does not rerun ShrinkRay.
 
 Sensitive native artifacts are not exposed as MCP binary resources. Agent-facing
 artifact resources return bounded metadata and typed evidence references. The

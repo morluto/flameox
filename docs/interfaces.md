@@ -199,15 +199,20 @@ Reduction is a separate task-shaped workflow:
 ```text
 list_capabilities(adapter="shrinkray")
   └─ start_capability_setup, when unavailable
-plan_reduction(original_artifact_id, predicate_workload, input_format, limits)
+plan_reduction(source_run_id, source_registration_id, predicate_workload, limits)
 execute_reduction(plan_id)
 get_reduction(reduction_id)
 ```
 
 The MCP request schema describes this stable capability; it does not expose
 ShrinkRay flags or arbitrary predicate commands. Planning resolves the named
-predicate workload and exact managed provider, and execution refuses changed
-provider, bridge, predicate, or artifact identity.
+predicate workload, exact source registration, and managed provider. Execution
+refuses changed provider, bridge, predicate, registration, or artifact identity.
+The terminal result returns the reduced registration ID. Artifact reads inline
+the bounded reduction lineage from the authoritative reduction result rather
+than copying provenance fields into the registration. When that inline page is
+truncated, its cursor continues through `list_artifact_reductions` against the
+same pinned corpus commit.
 
 `capture_mode="auto"` uses trusted-local execution and records the containment
 limitation. `capture_mode="managed"` requests the stronger project policy and

@@ -100,6 +100,7 @@ from flameox.application import (
     ArtifactMetadataResult,
     ArtifactPipeline,
     ArtifactPipelineService,
+    ArtifactReductionListResult,
     ArtifactService,
     ArtifactTextPreview,
     CallEdgeResult,
@@ -2557,6 +2558,25 @@ def create_server(
                         mime_type="application/json",
                     ),
                 ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="list_artifact_reductions", annotations=READ_ONLY)
+    async def list_artifact_reductions_tool(
+        artifact_id: str,
+        limit: Annotated[StrictInt, Field(ge=1, le=1_000)],
+        ctx: Context[AppContext],
+        cursor: str | None = None,
+    ) -> Annotated[CallToolResult, ToolPayload[ArtifactReductionListResult]]:
+        """Page every reduction that produced an artifact selected by get_artifact."""
+        try:
+            result = ArtifactService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).list_reductions(artifact_id, limit=limit, cursor=cursor)
+            return _success(
+                result,
+                f"Returned {result.returned} of {result.total} artifact reductions.",
             )
         except DomainError as error:
             return _failure(error)

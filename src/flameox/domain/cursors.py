@@ -16,6 +16,7 @@ class CursorNamespace(StrEnum):
     """Closed set of query families that may issue continuation handles."""
 
     ARTIFACTS = "artifacts"
+    ARTIFACT_REDUCTIONS = "artifact_reductions"
     CALL_EDGES = "call_edges"
     DECLARED_WORKFLOWS = "declared_workflows"
     EXPERIMENT_TRIALS = "experiment-trials"
@@ -45,6 +46,9 @@ class CursorPositionSpec:
 CURSOR_POSITION_SPECS = MappingProxyType(
     {
         CursorNamespace.ARTIFACTS: CursorPositionSpec(("string",), "artifact discovery"),
+        CursorNamespace.ARTIFACT_REDUCTIONS: CursorPositionSpec(
+            ("string",), "artifact reduction lineage"
+        ),
         CursorNamespace.CALL_EDGES: CursorPositionSpec(
             ("integer", "string", "string", "string"), "profile drill-down"
         ),

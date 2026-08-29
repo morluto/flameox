@@ -115,7 +115,13 @@ returns, the worker rechecks the actual staged final file and the application
 rechecks it independently before registering a final result.
 
 Results preserve native history, candidate receipts, bounded logs, provider
-identity, sizes, and limitations. Minimality is always `not_claimed`.
+identity, sizes, and limitations. Minimality is always `not_claimed`. Planning
+binds one exact run registration rather than accepting a duplicate artifact/run
+identity pair. A changed final or best-known candidate is registered back onto
+that run with ShrinkRay producer identity and inherited sensitivity. UTF-8
+process output retains its text or JSON media type only after validation;
+everything else uses the explicit `reduced_candidate` kind and reports that the
+source provider format has not been requalified.
 
 Managed binary adapters keep tool-specific extraction and compatibility probes,
 but they do not own download or attestation policy. A checked-in immutable asset
