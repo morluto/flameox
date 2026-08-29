@@ -120,6 +120,14 @@ def _representative_actions() -> dict[ActionId, ToolAction]:
             ActionId.EXTRACT_NSIGHT_SYSTEMS,
             run_id="run-1",
         ),
+        ActionId.EXTRACT_NSIGHT_COMPUTE: tool_action(
+            ActionId.EXTRACT_NSIGHT_COMPUTE,
+            run_id="run-1",
+        ),
+        ActionId.EXTRACT_COMPUTE_SANITIZER: tool_action(
+            ActionId.EXTRACT_COMPUTE_SANITIZER,
+            run_id="run-1",
+        ),
         ActionId.CONFIGURE_INFERENCE_SERVER: tool_action(
             ActionId.CONFIGURE_INFERENCE_SERVER,
             name="local",

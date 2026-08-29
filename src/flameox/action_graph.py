@@ -42,6 +42,8 @@ class ActionId(StrEnum):
     EXTRACT_MEMRAY = "artifact.extract.memray"
     GET_EXTRACTION = "artifact.extract.status"
     EXTRACT_NSIGHT_SYSTEMS = "artifact.extract.nsight_systems"
+    EXTRACT_NSIGHT_COMPUTE = "artifact.extract.nsight_compute"
+    EXTRACT_COMPUTE_SANITIZER = "artifact.extract.compute_sanitizer"
     CONFIGURE_INFERENCE_SERVER = "inference.server.configure"
     LIST_INFERENCE_CONFIGURATIONS = "inference.configuration.list"
     PLAN_INFERENCE_SCENARIO = "inference.scenario.plan"
@@ -75,6 +77,8 @@ class ToolName(StrEnum):
     EXTRACT_MEMRAY = "extract_memray"
     GET_EXTRACTION = "get_extraction"
     EXTRACT_NSIGHT_SYSTEMS = "extract_nsight_systems"
+    EXTRACT_NSIGHT_COMPUTE = "extract_nsight_compute"
+    EXTRACT_COMPUTE_SANITIZER = "extract_compute_sanitizer"
     CONFIGURE_INFERENCE_SERVER = "configure_inference_server"
     LIST_INFERENCE_CONFIGURATIONS = "list_inference_configurations"
     PLAN_INFERENCE_SCENARIO = "plan_inference_scenario"
@@ -479,6 +483,20 @@ ACTION_REGISTRY = MappingProxyType(
             _descriptor(
                 ActionId.EXTRACT_NSIGHT_SYSTEMS,
                 ToolName.EXTRACT_NSIGHT_SYSTEMS,
+                _RunIdArguments,
+                ADDITIVE_ACTION,
+                ActionLifecycle.EXECUTE,
+            ),
+            _descriptor(
+                ActionId.EXTRACT_NSIGHT_COMPUTE,
+                ToolName.EXTRACT_NSIGHT_COMPUTE,
+                _RunIdArguments,
+                ADDITIVE_ACTION,
+                ActionLifecycle.EXECUTE,
+            ),
+            _descriptor(
+                ActionId.EXTRACT_COMPUTE_SANITIZER,
+                ToolName.EXTRACT_COMPUTE_SANITIZER,
                 _RunIdArguments,
                 ADDITIVE_ACTION,
                 ActionLifecycle.EXECUTE,

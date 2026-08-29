@@ -3838,7 +3838,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="extract_compute_sanitizer", annotations=ADDITIVE)
+    @_action_tool(server, ActionId.EXTRACT_COMPUTE_SANITIZER)
     async def extract_compute_sanitizer_tool(
         run_id: Annotated[str, Field(min_length=1, max_length=200)],
         ctx: Context[AppContext],
@@ -3916,7 +3916,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="extract_nsight_compute", annotations=ADDITIVE)
+    @_action_tool(server, ActionId.EXTRACT_NSIGHT_COMPUTE)
     async def extract_nsight_compute_tool(
         run_id: Annotated[str, Field(min_length=1, max_length=200)],
         ctx: Context[AppContext],

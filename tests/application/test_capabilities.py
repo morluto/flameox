@@ -790,9 +790,7 @@ def test_trace_processor_staging_preserves_phase_and_bounded_cause(
     phases: list[str] = []
 
     with pytest.raises(DomainError):
-        service.prepare(
-            ("perfetto",), phase_callback=lambda phase, _download: phases.append(phase)
-        )
+        service.prepare(("perfetto",), phase_callback=lambda phase, _download: phases.append(phase))
 
     receipt = json.loads((tmp_path / "capability-setup.json").read_text())
     assert phases == ["staging_trace_processor"]
@@ -895,6 +893,19 @@ def test_capability_recommendations_are_scoped_to_selected_adapter(
     assert selected.setup_adapters == ("torch.profiler",)
     assert isinstance(selected.next_action, ManualAction)
     assert selected.next_action.suggested_action is ActionId.START_CAPABILITY_SETUP
+
+
+def test_every_builtin_adapter_has_a_discoverable_capability_state(tmp_path: Path) -> None:
+    service = CapabilityService(Workspace.initialize(tmp_path))
+
+    inventory = service.list()
+    reports = {report.adapter: report for report in inventory.capabilities}
+
+    assert set(reports) >= set(BUILTIN_ADAPTERS)
+    for adapter in ("nsight.compute", "compute-sanitizer", "triton.compiler", "cute.compiler"):
+        selected = service.list_for_adapter(adapter)
+        assert selected.recommendation_scope == adapter
+        assert any(report.adapter == adapter for report in selected.capabilities)
 
 
 def test_managed_setup_vocabulary_is_derived_from_capability_ownership() -> None:
@@ -1134,9 +1145,7 @@ def test_capability_setup_provisions_exact_memray_reader_requirement(
         lambda: CapabilityList(capabilities=(report,)),
     )
     prepared: list[str] = []
-    runtime = SimpleNamespace(
-        receipt=SimpleNamespace(environment_id="sha256:" + "e" * 64)
-    )
+    runtime = SimpleNamespace(receipt=SimpleNamespace(environment_id="sha256:" + "e" * 64))
 
     def find_distribution(**_kwargs: object) -> object | None:
         return runtime if prepared else None
