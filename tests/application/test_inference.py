@@ -67,6 +67,7 @@ def _test_aiperf_runtime() -> ProviderRuntime:
         ProviderRuntimeReceipt(
             environment_id="sha256:" + "3" * 64,
             flameox_version=importlib.metadata.version("flameox"),
+            flameox_package_source="index",
             extra=CapabilityExtra.INFERENCE,
             requirement="aiperf<0.13,>=0.12",
             python_requirement=f"{sys.version_info.major}.{sys.version_info.minor}",

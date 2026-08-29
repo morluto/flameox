@@ -29,6 +29,7 @@ from flameox.application.operations import (
     OperationStatus,
     operation_digests,
 )
+from flameox.application.provider_runtime import ProviderRuntimeManager
 from flameox.domain import (
     CapabilityExtra,
     CapabilityProvisioning,
@@ -480,6 +481,7 @@ def test_capability_setup_installs_only_declared_missing_providers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
+    monkeypatch.setattr(ProviderRuntimeManager, "_active_source_root", lambda _self: None)
     receipt_during_install: dict[str, object] | None = None
 
     class ObservingBroker(_ProbeBroker):
@@ -499,6 +501,13 @@ def test_capability_setup_installs_only_declared_missing_providers(
                 python.parent.mkdir(parents=True)
                 python.write_text("#!/bin/sh\nexit 0\n")
                 python.chmod(0o755)
+                return _outcome(request)
+            if request.argv[1:3] == ("pip", "compile"):
+                lock = Path(request.argv[request.argv.index("--output-file") + 1])
+                lock.write_text(
+                    "flameox==0.1.14 --hash=sha256:" + "a" * 64 + "\n"
+                    "torch==2.7 --hash=sha256:" + "b" * 64 + "\n"
+                )
                 return _outcome(request)
             if request.argv[1:3] == ("pip", "install"):
                 return _outcome(request)
@@ -576,8 +585,9 @@ def test_capability_setup_installs_only_declared_missing_providers(
     target = install.argv[install.argv.index("--python") + 1]
     assert target.startswith(str(tmp_path / "provider-runtimes"))
     assert target != str(tmp_path / "bin" / "python")
-    assert f"flameox=={__version__}" in install.argv
-    assert "torch>=2.7" in install.argv
+    assert "--require-hashes" in install.argv
+    assert "-r" in install.argv
+    assert any(request.argv[1:3] == ("pip", "compile") for request in broker.requests)
     assert "HTTPS_PROXY" in install.environment_allowlist
     assert "NO_PROXY" in install.environment_allowlist
     assert "UV_INDEX_URL" in install.environment_allowlist

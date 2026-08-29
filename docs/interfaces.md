@@ -169,7 +169,13 @@ Setup installs only allowlisted managed providers into version-addressed provide
 environments; it never adds packages to the running MCP server. Provider setup
 installs core Flameox plus that provider—not a Flameox “all extras” environment—
 so mutually incompatible profilers and reducers remain usable. Third-party entry
-points need an exact package-identity approval. Workload dependency preparation is deliberately
+points need an exact package-identity approval. From an editable Flameox checkout,
+setup builds one wheel into workspace-owned content-addressed storage and binds its
+wheel digest, bounded source-tree identity, revision, and dirty state in the provider
+receipt. Released installations resolve Flameox and the provider into a preserved,
+content-addressed requirements lock and require artifact hashes during installation;
+setup never points a provider environment at a mutable checkout. Workload dependency
+preparation is deliberately
 inspection-only: it queries the exact Python interpreter bound to the workload and
 reports missing distributions without changing that environment or Flameox's own
 runtime. None of these steps runs the workload.

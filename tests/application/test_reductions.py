@@ -82,6 +82,7 @@ raise SystemExit(0)
     receipt = ProviderRuntimeReceipt(
         environment_id="sha256:" + "a" * 64,
         flameox_version=__version__,
+        flameox_package_source="index",
         extra=CapabilityExtra.REDUCTION,
         requirement="shrinkray==26.7.8.0",
         python_requirement=f"{sys.version_info.major}.{sys.version_info.minor}",

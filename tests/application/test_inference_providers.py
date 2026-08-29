@@ -203,6 +203,7 @@ def test_aiperf_discovery_rejects_unsupported_version(
         ProviderRuntimeReceipt(
             environment_id="sha256:" + "b" * 64,
             flameox_version="0.1.13",
+            flameox_package_source="index",
             extra=CapabilityExtra.INFERENCE,
             requirement="aiperf>=0.12,<0.13",
             python_requirement="3.12",
