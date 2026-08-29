@@ -20,11 +20,15 @@ body:
           required: true
         - label: I have removed credentials, tokens, private paths, and other sensitive data.
           required: true
+        - label: I separated the desired outcome from the possible implementation direction.
+          required: true
 
   - type: dropdown
     id: area
     attributes:
       label: Area
+      description: Select every contract or workflow area materially affected.
+      multiple: true
       options:
         - Adapters and providers
         - Storage and evidence
@@ -54,10 +58,19 @@ body:
       required: true
 
   - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and current workaround
+      description: State what was actually observed, measured, or read from source. Describe the current workaround and why it is insufficient; label untested ideas explicitly.
+      placeholder: Include bounded measurements, artifact or run identity, provider behavior, or source references when they materially support the request.
+    validations:
+      required: true
+
+  - type: textarea
     id: desired-outcome
     attributes:
       label: Desired outcome and success criteria
-      description: Describe observable behavior that would make this useful. Include evidence, compatibility, or performance criteria when they matter.
+      description: Describe observable behavior that would make this useful. Include boundedness, recovery, provenance, compatibility, or performance criteria when they matter.
     validations:
       required: true
 
@@ -65,13 +78,13 @@ body:
     id: constraints
     attributes:
       label: Constraints and non-goals
-      description: Call out authority boundaries, supported platforms, persistence or compatibility concerns, and what should remain out of scope.
+      description: Call out authority boundaries, supported platforms, persistence or compatibility concerns, privacy constraints, and what should remain out of scope.
 
   - type: textarea
     id: alternatives
     attributes:
       label: Alternatives considered
-      description: What other approaches, existing tools, or workarounds did you consider? Include why they do not meet the need.
+      description: What maintained upstream tools, existing Flameox helpers, or workflow changes did you consider? Include why they do not meet the need.
 
   - type: textarea
     id: possible-direction

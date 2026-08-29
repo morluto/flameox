@@ -20,6 +20,23 @@ body:
           required: true
         - label: I have removed credentials, tokens, private paths, and other sensitive data.
           required: true
+        - label: I ran the reproduction below, or clearly marked it as source-derived or proposed.
+          required: true
+
+  - type: dropdown
+    id: evidence-basis
+    attributes:
+      label: Evidence basis
+      description: Select every kind of evidence used in this report. Do not select runtime reproduction for a proposed command that was not run.
+      multiple: true
+      options:
+        - Runtime reproduction
+        - Imported or preserved artifact
+        - Source or test analysis
+        - Documentation or contract mismatch
+        - Proposed reproduction only
+    validations:
+      required: true
 
   - type: textarea
     id: observed-behavior
@@ -34,7 +51,7 @@ body:
     id: reproduction
     attributes:
       label: Reproduction
-      description: Give the smallest realistic commands, configuration, input, or event sequence that demonstrates the problem.
+      description: Give the smallest realistic commands, configuration, input, or event sequence. State which steps actually ran and identify the first incorrect observable result.
       placeholder: |
         1. Initialize or configure ...
         2. Run ...
@@ -61,9 +78,9 @@ body:
   - type: input
     id: flameox-version
     attributes:
-      label: flameox version
-      description: Use `flameox --version`, package metadata, or the source revision.
-      placeholder: 0.1.0 or git revision
+      label: flameox version or source revision
+      description: Use `flameox --version`, package metadata, or the exact source revision exercised.
+      placeholder: 0.1.0 or commit SHA
     validations:
       required: true
 
@@ -87,7 +104,9 @@ body:
   - type: dropdown
     id: interface
     attributes:
-      label: Interface
+      label: Affected interface
+      description: Select every interface through which the behavior was observed.
+      multiple: true
       options:
         - CLI
         - MCP
@@ -132,14 +151,14 @@ body:
     id: relevant-output
     attributes:
       label: Relevant output or evidence
-      description: Paste the smallest useful CLI output, error, MCP response, trace, or evidence excerpt. Redact sensitive values.
+      description: Paste the smallest useful exact CLI output, error, MCP response, trace, or evidence excerpt. Include stable evidence IDs when safe; redact sensitive values and host paths.
       render: text
 
   - type: textarea
     id: analysis
     attributes:
       label: Analysis or suspected cause
-      description: Optional. Clearly label source-derived reasoning or a hypothesis; do not present an unverified cause as fact.
+      description: Optional. Separate confirmed source behavior from hypotheses, and name the semantic owner only when verified.
 
   - type: textarea
     id: additional-context

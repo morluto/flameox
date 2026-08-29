@@ -20,6 +20,42 @@ body:
           required: true
         - label: I have removed credentials, tokens, private paths, and other sensitive data.
           required: true
+        - label: I separated confirmed constraints from preferences and implementation hypotheses.
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Select every contract or authority boundary the decision may change.
+      multiple: true
+      options:
+        - Adapters and providers
+        - Storage and evidence
+        - Investigations and comparisons
+        - CLI
+        - MCP
+        - Runtime safety
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: evidence-basis
+    attributes:
+      label: Evidence basis
+      description: Select every kind of evidence informing the decision.
+      multiple: true
+      options:
+        - Runtime reproduction or measurement
+        - Imported or preserved artifact
+        - Source or test analysis
+        - Public contract or documentation
+        - External standard or maintained upstream tool
+        - Design hypothesis only
+    validations:
+      required: true
 
   - type: textarea
     id: decision
@@ -34,7 +70,7 @@ body:
     id: context
     attributes:
       label: Context and evidence
-      description: Explain why this decision is needed now. Separate observed behavior, derived evidence, and inference.
+      description: Explain why this decision is needed now. Identify what actually ran or was inspected, and separate observed behavior, derived evidence, and inference.
     validations:
       required: true
 
@@ -47,16 +83,22 @@ body:
       required: true
 
   - type: textarea
+    id: recommendation
+    attributes:
+      label: Current recommendation
+      description: Optional. State the preferred option and why, while leaving room for maintainers to choose a different tradeoff.
+
+  - type: textarea
     id: constraints
     attributes:
       label: Constraints and non-goals
-      description: Identify authority boundaries, supported platforms, migration concerns, and intentionally excluded work.
+      description: Identify authority boundaries, supported platforms, migration and rollback concerns, persisted-contract effects, and intentionally excluded work.
 
   - type: textarea
     id: success-criteria
     attributes:
       label: Success criteria and open questions
-      description: What facts or outcomes would settle the decision? List only unanswered questions that could change the choice.
+      description: What facts, prototype results, compatibility checks, or outcomes would settle the decision? List only unanswered questions that could change the choice.
     validations:
       required: true
 
