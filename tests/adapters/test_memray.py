@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+import mmap
 import sys
 from contextlib import nullcontext
 from pathlib import Path
@@ -53,6 +55,29 @@ def _extractor(
     return extractor
 
 
+def _exercise_allocator_case(case: str) -> None:
+    libc = ctypes.CDLL(None)
+    libc.malloc.argtypes = [ctypes.c_size_t]
+    libc.malloc.restype = ctypes.c_void_p
+    libc.realloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    libc.realloc.restype = ctypes.c_void_p
+    libc.free.argtypes = [ctypes.c_void_p]
+    if case == "malloc_free":
+        for _ in range(10):
+            pointer = libc.malloc(4_096)
+            libc.free(pointer)
+    elif case == "realloc":
+        pointer = libc.malloc(1_024)
+        pointer = libc.realloc(pointer, 8_192)
+        libc.free(pointer)
+    elif case == "mmap_munmap":
+        mapping = mmap.mmap(-1, 4_096)
+        mapping.close()
+    else:
+        allocations = [bytearray(64) for _ in range(100)]
+        del allocations
+
+
 def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -62,6 +87,9 @@ def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
     with memray.Tracker(str(capture)):
         retained = bytearray(100_000)
     assert len(retained) == 100_000
+    from memray._memray import compute_statistics
+
+    provider_stats = compute_statistics(str(capture), report_progress=False, num_largest=1)
 
     workspace = Workspace.initialize(tmp_path)
     Catalog(workspace).rebuild()
@@ -81,7 +109,9 @@ def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
 
     assert result.peak_memory_bytes >= 100_000
     assert result.retained_end_bytes >= 100_000
-    assert result.total_allocations >= 1
+    assert result.allocation_operations == provider_stats.total_num_allocations
+    assert result.total_allocated_bytes == provider_stats.total_memory_allocated
+    assert result.capture_records >= result.allocation_operations
     assert result.frame_count >= 1
     assert result.producer_version == memray.__version__
     assert result.reader_version == memray.__version__
@@ -100,6 +130,17 @@ def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
         ).fetchall()
     assert ("memory.peak", result.peak_memory_bytes, "bytes") in measurements
     assert ("memory.retained_end", result.retained_end_bytes, "bytes") in measurements
+    assert (
+        "memory.allocation_operations",
+        provider_stats.total_num_allocations,
+        "count",
+    ) in measurements
+    assert (
+        "memory.allocated_bytes",
+        provider_stats.total_memory_allocated,
+        "bytes",
+    ) in measurements
+    assert ("memory.capture_records", result.capture_records, "count") in measurements
     assert {row[0] for row in frames} == {
         "memory.high_watermark",
         "memory.retained_end",
@@ -157,12 +198,60 @@ def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
     )
     assert analysis.corpus_commit_id == pinned_commit_id
     assert {item.name for item in analysis.measurements} == {
+        "memory.allocated_bytes",
+        "memory.allocation_operations",
+        "memory.capture_records",
         "memory.peak",
         "memory.retained_end",
-        "memory.total_allocations",
     }
     assert analysis.hotspots
     assert all(item.frame_id != "later-frame" for item in analysis.hotspots)
+
+
+@pytest.mark.parametrize(
+    ("case", "trace_python_allocators"),
+    (
+        ("malloc_free", False),
+        ("realloc", False),
+        ("mmap_munmap", False),
+        ("python_allocators", True),
+    ),
+)
+def test_memray_allocation_operations_match_provider_stats_and_exclude_deallocations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    trace_python_allocators: bool,
+) -> None:
+    memray = _memray_module()
+    from memray._memray import compute_statistics
+
+    capture = tmp_path / "memory.bin"
+    with memray.Tracker(
+        str(capture),
+        trace_python_allocators=trace_python_allocators,
+    ):
+        _exercise_allocator_case(case)
+    provider_stats = compute_statistics(str(capture), report_progress=False, num_largest=1)
+    provider_records = memray.FileReader(str(capture)).metadata.total_allocations
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(
+            path=capture,
+            kind=ArtifactKind.MEMORY_PROFILE,
+            producer="memray",
+            producer_version=memray.__version__,
+        )
+    )
+
+    result = _extractor(workspace, memray.__version__, monkeypatch).extract(imported.run.run_id)
+
+    assert result.allocation_operations == provider_stats.total_num_allocations
+    assert result.total_allocated_bytes == provider_stats.total_memory_allocated
+    assert result.capture_records == provider_records
+    assert result.allocation_operations is not None
+    assert result.capture_records > result.allocation_operations
 
 
 def test_memray_extraction_rejects_a_reader_that_disagrees_with_its_receipt(
@@ -191,6 +280,39 @@ def test_memray_extraction_rejects_a_reader_that_disagrees_with_its_receipt(
     assert raised.value.code is ErrorCode.ADAPTER_INCOMPATIBLE
     assert raised.value.details["reader_version"] == "0.0"
     assert workspace.corpus.read_head().commit_id == original_head
+
+
+def test_memray_aggregated_capture_does_not_invent_allocation_statistics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memray = _memray_module()
+    capture = tmp_path / "memory.bin"
+    with memray.Tracker(
+        str(capture),
+        file_format=memray.FileFormat.AGGREGATED_ALLOCATIONS,
+    ):
+        bytearray(1_000)
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(
+            path=capture,
+            kind=ArtifactKind.MEMORY_PROFILE,
+            producer="memray",
+            producer_version=memray.__version__,
+        )
+    )
+
+    result = _extractor(workspace, memray.__version__, monkeypatch).extract(imported.run.run_id)
+
+    assert result.allocation_operations is None
+    assert result.total_allocated_bytes is None
+    assert result.capture_records >= 1
+    assert any(
+        "structured allocation statistics are unavailable" in item
+        for item in result.limitations
+    )
 
 
 @pytest.mark.parametrize("payload", (b"", b"truncated"))

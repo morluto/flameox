@@ -22,14 +22,16 @@ class MemrayWorkerRequest(ContractModel):
     generation_id: str = Field(min_length=1, max_length=200)
     published_at: datetime
     extractor_name: Literal["memray"] = "memray"
-    extractor_version: Literal["3"] = "3"
+    extractor_version: Literal["4"] = "4"
 
 
 class MemrayWorkerResult(ContractModel):
     reader_version: str = Field(min_length=1, max_length=100)
     peak_memory_bytes: int = Field(ge=0)
     retained_end_bytes: int = Field(ge=0)
-    total_allocations: int = Field(ge=0)
+    allocation_operations: int | None = Field(default=None, ge=0)
+    total_allocated_bytes: int | None = Field(default=None, ge=0)
+    capture_records: int = Field(ge=0)
     frame_count: int = Field(ge=0)
     has_native_traces: bool
     files: tuple[WorkerOutputFile, ...] = Field(min_length=3, max_length=3)
@@ -41,6 +43,6 @@ MEMRAY_WORKER = WorkerDefinition(
     request=TypeAdapter(MemrayWorkerRequest),
     response=TypeAdapter(MemrayWorkerResult),
     name="Memray",
-    implementation="flameox.workers.memray/v3",
+    implementation="flameox.workers.memray/v4",
     timeout_seconds=300,
 )

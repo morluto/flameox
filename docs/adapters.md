@@ -180,6 +180,14 @@ stored project-relative and carry the run's source-state identity. Synthetic,
 external, or escaping relative paths remain partial and are not promoted to
 project source.
 
+Memray count metrics keep provider concepts separate. `memory.allocation_operations`
+and `memory.allocated_bytes` come from the version-qualified structured stats
+computation used by Memray's stats reporter; deallocation events are therefore
+not counted as allocations. `memory.capture_records` preserves the distinct raw
+header record count. Pre-aggregated captures, for which Memray does not support
+stats computation, publish the raw record count without inventing allocation or
+total-volume values.
+
 ### Node/V8 CPU and sampling heap profiles
 
 The Node adapters invoke the declared Node executable with `--cpu-prof` or

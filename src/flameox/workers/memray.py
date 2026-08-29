@@ -143,6 +143,7 @@ def _write_table(
 def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorkerResult:
     try:
         import memray
+        from memray._memray import compute_statistics
     except ImportError as error:
         raise DomainError(
             ErrorCode.CAPABILITY_UNAVAILABLE,
@@ -151,6 +152,14 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
     try:
         reader = memray.FileReader(request.artifact_path)
         metadata = reader.metadata
+        try:
+            stats = compute_statistics(
+                request.artifact_path,
+                report_progress=False,
+                num_largest=1,
+            )
+        except NotImplementedError:
+            stats = None
         frame_rows: dict[str, dict[str, Any]] = {}
         frame_cache: dict[tuple[str, str, int], str] = {}
         aggregates: dict[tuple[str, str], dict[str, int]] = defaultdict(
@@ -189,6 +198,23 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
             f"Memray reader rejected the capture: {diagnostic}",
         ) from error
 
+    metrics = [
+        ("memory.peak", int(metadata.peak_memory), "bytes", "peak"),
+        ("memory.retained_end", retained_end, "bytes", "total"),
+        ("memory.capture_records", int(metadata.total_allocations), "count", "total"),
+    ]
+    if stats is not None:
+        metrics.extend(
+            (
+                (
+                    "memory.allocation_operations",
+                    int(stats.total_num_allocations),
+                    "count",
+                    "total",
+                ),
+                ("memory.allocated_bytes", int(stats.total_memory_allocated), "bytes", "total"),
+            )
+        )
     measurement_rows: list[dict[str, Any]] = [
         {
             "measurement_id": digest_model(
@@ -215,11 +241,7 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
             "dimensions": {},
             "evidence_level": "observed",
         }
-        for name, value, unit, aggregation in (
-            ("memory.peak", int(metadata.peak_memory), "bytes", "peak"),
-            ("memory.retained_end", retained_end, "bytes", "total"),
-            ("memory.total_allocations", int(metadata.total_allocations), "count", "total"),
-        )
+        for name, value, unit, aggregation in metrics
     ]
     frame_measurements = [
         {
@@ -249,7 +271,9 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
         reader_version=importlib.metadata.version("memray"),
         peak_memory_bytes=int(metadata.peak_memory),
         retained_end_bytes=retained_end,
-        total_allocations=int(metadata.total_allocations),
+        allocation_operations=(int(stats.total_num_allocations) if stats is not None else None),
+        total_allocated_bytes=(int(stats.total_memory_allocated) if stats is not None else None),
+        capture_records=int(metadata.total_allocations),
         frame_count=len(frame_rows),
         has_native_traces=bool(metadata.has_native_traces),
         files=files,

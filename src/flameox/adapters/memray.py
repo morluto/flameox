@@ -33,7 +33,9 @@ class MemrayExtractionResult(ContractModel):
     extractor_profile: str
     peak_memory_bytes: int
     retained_end_bytes: int
-    total_allocations: int
+    allocation_operations: int | None
+    total_allocated_bytes: int | None
+    capture_records: int
     frame_count: int
     corpus_commit_id: str
     limitations: tuple[str, ...] = ()
@@ -41,7 +43,7 @@ class MemrayExtractionResult(ContractModel):
 
 class MemrayExtractor:
     name = "memray"
-    version = "3"
+    version = "4"
 
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
@@ -205,6 +207,11 @@ class MemrayExtractor:
         ]
         if not worker.has_native_traces:
             limitations.append("The capture does not contain native stack traces.")
+        if worker.allocation_operations is None:
+            limitations.append(
+                "Memray structured allocation statistics are unavailable for this capture format; "
+                "only the raw capture-record count is published."
+            )
         return MemrayExtractionResult(
             run_id=run_id,
             artifact_id=registration.artifact_id,
@@ -214,7 +221,9 @@ class MemrayExtractor:
             extractor_profile=MEMRAY_WORKER.implementation,
             peak_memory_bytes=worker.peak_memory_bytes,
             retained_end_bytes=worker.retained_end_bytes,
-            total_allocations=worker.total_allocations,
+            allocation_operations=worker.allocation_operations,
+            total_allocated_bytes=worker.total_allocated_bytes,
+            capture_records=worker.capture_records,
             frame_count=worker.frame_count,
             corpus_commit_id=published.commit.commit_id,
             limitations=tuple(limitations),
