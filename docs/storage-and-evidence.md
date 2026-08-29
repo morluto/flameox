@@ -148,6 +148,13 @@ validation status. The operation requires the reviewed run revision and derives
 producer, workload, environment, source, and execution identity from authoritative
 state; callers cannot submit copied identity fields or create a surrogate import
 run. Generic imports remain appropriate for genuinely external validation evidence.
+If the producing run owns an artifact pipeline, validation creates a new immutable
+pipeline generation that appends the registered evidence; it does not mutate the
+provider artifact or duplicate pipeline state in the run manifest. The run manifest
+remains authoritative for execution and validation semantics, while the pipeline
+records ordered evidence lineage. Capture results return only bounded pipeline
+references, and list/show projections provide discovery without copying pipeline
+records into transport-specific storage.
 
 Running, failed, cancelled, timed-out, and completed attempts are all evidence.
 Failure finalization does not discard partial artifacts that pass integrity and

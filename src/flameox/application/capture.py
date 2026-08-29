@@ -211,9 +211,9 @@ def _preflight_limitation_details(preflight: PreflightReport) -> tuple[Limitatio
 
 
 class CaptureResult(ContractModel):
-    schema_version: int = 1
     plan: CapturePlan
     run: RunManifest
+    pipeline_ids: tuple[str, ...] = ()
     corpus_commit_id: str
 
 
@@ -2012,6 +2012,7 @@ class CaptureService:
             raise
         terminal = projected.run
         capture.run = terminal
+        pipeline_ids: tuple[str, ...] = ()
         if kernel_build_manifest is not None:
             registration_ids_by_path = {
                 registration.display_name: registration.registration_id
@@ -2020,7 +2021,7 @@ class CaptureService:
                 and registration.role != "kernel_build_manifest"
             }
             try:
-                await run_atomic_thread(
+                pipeline = await run_atomic_thread(
                     lambda: ArtifactPipelineService(self.workspace).register_managed(
                         kernel_build_pipeline_request(
                             kernel_build_manifest,
@@ -2030,6 +2031,7 @@ class CaptureService:
                         workload_instance=plan.workload_instance,
                     )
                 )
+                pipeline_ids = (pipeline.pipeline_id,)
             except DomainError as error:
                 pipeline_failed = terminal.validated_copy(
                     update={
@@ -2147,6 +2149,7 @@ class CaptureService:
         return CaptureResult(
             plan=plan,
             run=terminal,
+            pipeline_ids=pipeline_ids,
             corpus_commit_id=published.commit.commit_id,
         )
 

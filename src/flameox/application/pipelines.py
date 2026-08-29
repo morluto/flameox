@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any, Literal, assert_never
+from typing import Annotated, Any, Literal, assert_never, cast
 
 from pydantic import (
     ConfigDict,
@@ -20,6 +20,7 @@ from pydantic import (
 )
 
 from flameox.domain import (
+    CursorNamespace,
     DomainError,
     ErrorCode,
     Sensitivity,
@@ -30,6 +31,7 @@ from flameox.domain import (
 from flameox.domain.models import utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
+from flameox.pagination import CursorPageContract
 from flameox.storage import ArtifactStore, ControlRecordStore, RunStore, Workspace
 
 
@@ -217,6 +219,44 @@ class ArtifactPipeline(ContractModel):
     stages: tuple[PipelineStage, ...]
     limitations: Annotated[tuple[str, ...], Field(max_length=20)]
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class PipelineFilter(ContractModel):
+    run_id: str | None = None
+    pipeline_name: str | None = None
+    pipeline_schema: str | None = None
+    producer: str | None = None
+    source_artifact_id: str | None = None
+
+
+class PipelineSummary(ContractModel):
+    pipeline_id: str
+    run_id: str
+    pipeline_name: str
+    pipeline_schema: str
+    producer: str
+    producer_version: str
+    identity_quality: PipelineIdentityQuality
+    stage_count: int
+    artifact_ids: Annotated[tuple[str, ...], Field(max_length=100)]
+    limitation_count: int
+    created_at: datetime
+
+
+class PipelineListResult(CursorPageContract):
+    page_items_field = "pipelines"
+
+    corpus_commit_id: str
+    pipelines: tuple[PipelineSummary, ...]
+    total: int
+    next_cursor: str | None = None
+
+
+class PipelineDetail(ContractModel):
+    pipeline: ArtifactPipeline
+    compatible_pipeline_ids: Annotated[tuple[str, ...], Field(max_length=20)]
+    compatible_pipeline_count: int
+    candidates_truncated: bool
 
 
 class _PipelineStageComparison(ContractModel):
@@ -514,6 +554,235 @@ class ArtifactPipelineService:
         )
         self.publisher = GenerationPublisher(workspace)
 
+    @staticmethod
+    def _summary(pipeline: ArtifactPipeline) -> PipelineSummary:
+        return PipelineSummary(
+            pipeline_id=pipeline.pipeline_id,
+            run_id=pipeline.run_id,
+            pipeline_name=pipeline.pipeline_name,
+            pipeline_schema=pipeline.pipeline_schema,
+            producer=pipeline.producer,
+            producer_version=pipeline.producer_version,
+            identity_quality=pipeline.identity_quality,
+            stage_count=len(pipeline.stages),
+            artifact_ids=tuple(
+                dict.fromkeys(
+                    stage.artifact_id
+                    for stage in pipeline.stages
+                    if stage.artifact_id is not None
+                )
+            ),
+            limitation_count=len(pipeline.limitations),
+            created_at=pipeline.created_at,
+        )
+
+    def list(
+        self,
+        *,
+        filter: PipelineFilter,
+        limit: int,
+        cursor: str | None = None,
+    ) -> PipelineListResult:
+        if not 1 <= limit <= 1_000:
+            raise DomainError(ErrorCode.INVALID_ARGUMENTS, "Pipeline list limit must be 1-1000.")
+        head = self.workspace.corpus.read_head()
+        scope_digest = digest_model(filter)
+        after: tuple[datetime, str] | None = None
+        if cursor is not None:
+            position = cast(
+                tuple[str, str],
+                self.workspace.cursors.resolve(
+                    cursor,
+                    namespace=CursorNamespace.PIPELINES,
+                    snapshot_id=head.commit_id,
+                    scope_digest=scope_digest,
+                ),
+            )
+            try:
+                after = (datetime.fromisoformat(position[0]), position[1])
+            except ValueError as exc:
+                raise DomainError(ErrorCode.STALE_CURSOR, "Cursor position is invalid.") from exc
+
+        def selected(pipeline: ArtifactPipeline) -> bool:
+            return all(
+                value is None or getattr(pipeline, name) == value
+                for name, value in (
+                    ("run_id", filter.run_id),
+                    ("pipeline_name", filter.pipeline_name),
+                    ("pipeline_schema", filter.pipeline_schema),
+                    ("producer", filter.producer),
+                )
+            ) and (
+                filter.source_artifact_id is None
+                or any(
+                    stage.artifact_id == filter.source_artifact_id for stage in pipeline.stages
+                )
+            )
+
+        pipelines = sorted(
+            (pipeline for pipeline in self.pipelines.list() if selected(pipeline)),
+            key=lambda item: (item.created_at, item.pipeline_id),
+            reverse=True,
+        )
+        total = len(pipelines)
+        if after is not None:
+            pipelines = [
+                item for item in pipelines if (item.created_at, item.pipeline_id) < after
+            ]
+        page = pipelines[: limit + 1]
+        items = tuple(self._summary(item) for item in page[:limit])
+        return PipelineListResult(
+            corpus_commit_id=head.commit_id,
+            pipelines=items,
+            total=total,
+            next_cursor=(
+                self.workspace.cursors.issue(
+                    namespace=CursorNamespace.PIPELINES,
+                    snapshot_id=head.commit_id,
+                    scope_digest=scope_digest,
+                    position=(items[-1].created_at.isoformat(), items[-1].pipeline_id),
+                )
+                if len(page) > limit and items
+                else None
+            ),
+        )
+
+    def get(self, pipeline_id: str, *, candidate_limit: int = 20) -> PipelineDetail:
+        if not 0 <= candidate_limit <= 20:
+            raise DomainError(
+                ErrorCode.INVALID_ARGUMENTS,
+                "Pipeline candidate limit must be 0-20.",
+            )
+        pipeline = self.pipelines.read(pipeline_id)
+        compatible = tuple(
+            item.pipeline_id
+            for item in sorted(
+                self.pipelines.list(),
+                key=lambda item: (item.created_at, item.pipeline_id),
+                reverse=True,
+            )
+            if item.pipeline_id != pipeline.pipeline_id
+            and _pipeline_identity_compatibility(pipeline, item)[0]
+            is not PipelineCompatibility.INCOMPATIBLE
+        )
+        return PipelineDetail(
+            pipeline=pipeline,
+            compatible_pipeline_ids=compatible[:candidate_limit],
+            compatible_pipeline_count=len(compatible),
+            candidates_truncated=len(compatible) > candidate_limit,
+        )
+
+    def resolve_reference(self, reference: str) -> ArtifactPipeline:
+        pipelines = self.pipelines.list()
+        direct = next((item for item in pipelines if item.pipeline_id == reference), None)
+        if direct is not None:
+            return direct
+        matches = tuple(item for item in pipelines if item.run_id == reference)
+        if len(matches) == 1:
+            return matches[0]
+        raise DomainError(
+            ErrorCode.INVALID_ARGUMENTS,
+            "Pipeline reference must be a pipeline ID or a run with exactly one pipeline.",
+            details={
+                "reference": reference,
+                "matching_pipeline_ids": tuple(item.pipeline_id for item in matches[:20]),
+                "matching_pipeline_count": len(matches),
+            },
+        )
+
+    def extend_with_registration(
+        self,
+        pipeline_id: str,
+        registration_id: str,
+        *,
+        stage_name: str,
+        format_schema: str,
+    ) -> ArtifactPipeline:
+        pipeline = self.pipelines.read(pipeline_id)
+        run = self.runs.read(pipeline.run_id)
+        registration = next(
+            (item for item in run.artifacts if item.registration_id == registration_id),
+            None,
+        )
+        if registration is None:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Pipeline extension registration is not attached to the pipeline run.",
+            )
+        if any(stage.name == stage_name for stage in pipeline.stages):
+            raise DomainError(
+                ErrorCode.INVALID_ARGUMENTS,
+                f"Pipeline already contains stage {stage_name!r}.",
+            )
+        if len(pipeline.stages) == 100:
+            raise DomainError(
+                ErrorCode.INVALID_ARGUMENTS,
+                "Pipeline cannot be extended beyond 100 stages.",
+            )
+        declarations: list[PipelineStageDeclaration] = []
+        for stage in pipeline.stages:
+            if isinstance(stage, RegisteredPipelineStage):
+                declarations.append(
+                    RegisteredPipelineStageDeclaration(
+                        name=stage.name,
+                        ordinal=stage.ordinal,
+                        predecessor=stage.predecessor,
+                        status=stage.status,
+                        registration_id=stage.registration_id,
+                        format=stage.format,
+                        format_schema=stage.format_schema,
+                        extractor_profile=stage.extractor_profile,
+                        limitations=stage.limitations,
+                    )
+                )
+            else:
+                declarations.append(
+                    UnregisteredPipelineStageDeclaration(
+                        name=stage.name,
+                        ordinal=stage.ordinal,
+                        predecessor=stage.predecessor,
+                        status=stage.status,
+                        format=stage.format,
+                        format_schema=stage.format_schema,
+                        limitations=stage.limitations,
+                    )
+                )
+        last = pipeline.stages[-1]
+        declarations.append(
+            RegisteredPipelineStageDeclaration(
+                name=stage_name,
+                ordinal=last.ordinal + 1,
+                predecessor=last.name,
+                status=PipelineStageStatus.AVAILABLE,
+                registration_id=registration.registration_id,
+                format=registration.media_type,
+                format_schema=format_schema,
+            )
+        )
+        request = RegisterPipelineRequest(
+            run_id=pipeline.run_id,
+            pipeline_name=pipeline.pipeline_name,
+            pipeline_schema=pipeline.pipeline_schema,
+            producer=pipeline.producer,
+            producer_version=pipeline.producer_version,
+            workload_identity=pipeline.workload_identity,
+            device_identity=pipeline.device_identity,
+            workload_definition_id=pipeline.workload_definition_id,
+            workload_instance_id=pipeline.workload_instance_id,
+            command_digest=pipeline.command_digest,
+            parameters_digest=pipeline.parameters_digest,
+            compiler_identity_id=pipeline.compiler_identity_id,
+            build_protocol_id=pipeline.build_protocol_id,
+            target_identity_id=pipeline.target_identity_id,
+            stages=tuple(declarations),
+            limitations=pipeline.limitations,
+        )
+        return self._register(
+            request,
+            identity_quality=pipeline.identity_quality,
+            derived_from=pipeline,
+        )
+
     def register(self, request: RegisterPipelineRequest) -> ArtifactPipeline:
         """Register locally declared pipeline identity without external provenance."""
 
@@ -600,6 +869,7 @@ class ArtifactPipelineService:
         *,
         identity_quality: PipelineIdentityQuality,
         additional_limitations: tuple[str, ...] = (),
+        derived_from: ArtifactPipeline | None = None,
     ) -> ArtifactPipeline:
         run = self.runs.read(request.run_id)
         registrations = {item.registration_id: item for item in run.artifacts}
@@ -660,7 +930,10 @@ class ArtifactPipelineService:
             else:
                 assert_never(declaration)
             stages.append(stage)
-        locally_declared = identity_quality is PipelineIdentityQuality.LOCAL_DECLARED
+        locally_declared = (
+            identity_quality is PipelineIdentityQuality.LOCAL_DECLARED
+            and derived_from is None
+        )
         registered_provenance = {
             (stage.producer, stage.producer_version)
             for stage in stages
@@ -674,6 +947,11 @@ class ArtifactPipelineService:
             producer, producer_version = request.producer, request.producer_version
         workload_identity = None if locally_declared else request.workload_identity
         device_identity = None if locally_declared else request.device_identity
+        if derived_from is not None:
+            producer = derived_from.producer
+            producer_version = derived_from.producer_version
+            workload_identity = derived_from.workload_identity
+            device_identity = derived_from.device_identity
         limitations = _merge_pipeline_limitations(request.limitations, additional_limitations)
         identity = {
             "run_id": request.run_id,

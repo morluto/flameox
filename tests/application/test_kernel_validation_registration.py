@@ -9,12 +9,16 @@ from typer.testing import CliRunner
 
 from flameox.adapters import KernelValidationExtractor
 from flameox.application import (
+    ArtifactPipelineService,
     CaptureService,
     ExecutionPolicy,
     ImportArtifactRequest,
     ImportService,
     KernelValidationRegistrationService,
+    PipelineStageStatus,
+    RegisteredPipelineStageDeclaration,
     RegisterKernelValidationRequest,
+    RegisterPipelineRequest,
 )
 from flameox.catalog import Catalog
 from flameox.cli import app
@@ -45,6 +49,27 @@ async def _capture(workspace: Workspace) -> tuple[str, int]:
 async def test_register_kernel_validation_updates_the_producing_run(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     run_id, revision = await _capture(workspace)
+    run_before = RunStore(workspace).read(run_id)
+    source_registration = run_before.artifacts[0]
+    source_pipeline = ArtifactPipelineService(workspace).register(
+        RegisterPipelineRequest(
+            run_id=run_id,
+            pipeline_name="validation-target",
+            pipeline_schema="validation-target.v1",
+            producer="fixture",
+            producer_version="1",
+            stages=(
+                RegisteredPipelineStageDeclaration(
+                    name="execution_output",
+                    ordinal=0,
+                    status=PipelineStageStatus.AVAILABLE,
+                    registration_id=source_registration.registration_id,
+                    format=source_registration.media_type,
+                    format_schema="raw",
+                ),
+            ),
+        )
+    )
     validation_path = tmp_path / "validation.json"
     shutil.copy2(FIXTURE, validation_path)
 
@@ -67,6 +92,20 @@ async def test_register_kernel_validation_updates_the_producing_run(tmp_path: Pa
     assert registered.workload_instance_id == run.workload_instance_id
     assert run.execution_identity is not None
     assert registered.execution_identity_id == run.execution_identity.identity_id
+    assert len(registered.pipeline_ids) == 1
+    derived_pipeline = ArtifactPipelineService(workspace).pipelines.read(
+        registered.pipeline_ids[0]
+    )
+    assert derived_pipeline.pipeline_id != source_pipeline.pipeline_id
+    assert derived_pipeline.run_id == run_id
+    assert [stage.name for stage in derived_pipeline.stages] == [
+        "execution_output",
+        "kernel_validation",
+    ]
+    assert derived_pipeline.environment_id == source_pipeline.environment_id
+    assert derived_pipeline.source_state_id == source_pipeline.source_state_id
+    assert derived_pipeline.producer == source_pipeline.producer
+    assert derived_pipeline.producer_version == source_pipeline.producer_version
     assert run.validation_status is ValidationStatus.PASSED
     linked_artifacts = [
         (item.role, item.artifact_id)

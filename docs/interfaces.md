@@ -89,8 +89,12 @@ they are never the sole carrier of run meaning.
 `register_kernel_validation` is the explicit post-run handoff for correctness
 evidence produced by a workload. It requires a succeeded run and its exact
 reviewed revision, returns the linked run and artifact identities inline, and
-links to both resources. `extract_kernel_validation` remains idempotent and
-normalizes the registered document without moving run semantics into its bytes.
+links to both resources. When the run has one artifact pipeline, registration
+also derives and links a new immutable pipeline generation containing the
+validation stage. Runs with multiple pipelines require an explicit pipeline ID;
+Flameox never guesses which lineage owns the evidence. `extract_kernel_validation`
+remains idempotent and normalizes the registered document without moving run
+semantics into its bytes.
 
 Inline fields are response projections, not an alternate persistence model.
 Property-defining execution semantics remain authoritative in the run manifest,
@@ -100,7 +104,12 @@ agent usability without duplicating or replacing that state.
 
 MCP capture receipts inline the safe semantic projection—semantic identity,
 adapter identity, mode, process scope, bounds, filters, and explicit unavailable
-fields—and link to the bounded run resource. Typed MCP output schemas version
+fields—and link to the bounded run resource and any automatically registered
+artifact pipelines. `list_artifact_pipelines` provides cursor-paginated discovery
+by run, producer, schema, or source artifact; `get_artifact_pipeline` returns one
+pipeline plus bounded compatible candidates. Pipeline comparison accepts a
+pipeline ID or a run ID only when that run resolves to exactly one pipeline.
+Typed MCP output schemas version
 these response contracts; individual success envelopes and receipts do not add
 an ornamental schema-version field.
 

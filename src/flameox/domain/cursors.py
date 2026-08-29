@@ -26,6 +26,7 @@ class CursorNamespace(StrEnum):
     INVESTIGATIONS = "investigations"
     MEASUREMENTS = "measurements"
     OPERATION_TRANSITIONS = "operation_transitions"
+    PIPELINES = "pipelines"
     RUNS = "runs"
     STACK_EXAMPLES = "stack_examples"
     TRACE_WINDOW = "trace_window"
@@ -57,6 +58,9 @@ CURSOR_POSITION_SPECS = MappingProxyType(
         CursorNamespace.MEASUREMENTS: CursorPositionSpec(("string",), "measurement evidence"),
         CursorNamespace.OPERATION_TRANSITIONS: CursorPositionSpec(
             ("integer",), "lifecycle evidence"
+        ),
+        CursorNamespace.PIPELINES: CursorPositionSpec(
+            ("string", "string"), "artifact pipeline discovery"
         ),
         CursorNamespace.RUNS: CursorPositionSpec(("string", "string"), "run discovery"),
         CursorNamespace.STACK_EXAMPLES: CursorPositionSpec(

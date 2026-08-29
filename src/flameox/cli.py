@@ -83,6 +83,7 @@ from flameox.application import (
     NativeViewerService,
     NvbenchImportService,
     OtlpTraceService,
+    PipelineFilter,
     QuarantineService,
     RecordFindingRequest,
     RecordHypothesisRequest,
@@ -849,6 +850,7 @@ def register_kernel_validation(
         Sensitivity,
         typer.Option("--sensitivity", case_sensitive=False),
     ] = Sensitivity.INTERNAL,
+    pipeline_id: Annotated[str | None, typer.Option("--pipeline-id")] = None,
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
@@ -861,6 +863,7 @@ def register_kernel_validation(
                 path=path,
                 sensitivity=sensitivity,
                 allow_external_path=True,
+                pipeline_id=pipeline_id,
             )
         )
     except DomainError as error:
@@ -935,6 +938,54 @@ def import_nvbench(
     _emit(result, as_json=json_output)
 
 
+@pipelines_app.command("list")
+def pipeline_list(
+    run_id: Annotated[str | None, typer.Option("--run-id")] = None,
+    pipeline_name: Annotated[str | None, typer.Option("--pipeline-name")] = None,
+    pipeline_schema: Annotated[str | None, typer.Option("--pipeline-schema")] = None,
+    producer: Annotated[str | None, typer.Option("--producer")] = None,
+    source_artifact_id: Annotated[str | None, typer.Option("--source-artifact-id")] = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, max=1_000)] = 20,
+    cursor: Annotated[str | None, typer.Option("--cursor")] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Discover bounded immutable artifact pipelines."""
+    try:
+        result = ArtifactPipelineService(_workspace(workspace)).list(
+            filter=PipelineFilter(
+                run_id=run_id,
+                pipeline_name=pipeline_name,
+                pipeline_schema=pipeline_schema,
+                producer=producer,
+                source_artifact_id=source_artifact_id,
+            ),
+            limit=limit,
+            cursor=cursor,
+        )
+    except DomainError as error:
+        _fail(error, as_json=json_output)
+    _emit(result, as_json=json_output)
+
+
+@pipelines_app.command("show")
+def pipeline_show(
+    pipeline_id: Annotated[str, typer.Argument()],
+    candidate_limit: Annotated[int, typer.Option("--candidate-limit", min=0, max=20)] = 20,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Inspect one pipeline and compatible comparison candidates."""
+    try:
+        result = ArtifactPipelineService(_workspace(workspace)).get(
+            pipeline_id,
+            candidate_limit=candidate_limit,
+        )
+    except DomainError as error:
+        _fail(error, as_json=json_output)
+    _emit(result, as_json=json_output)
+
+
 @pipelines_app.command("register")
 def pipeline_register(
     request_path: Annotated[
@@ -972,10 +1023,10 @@ def pipeline_compare(
 ) -> None:
     """Compare two compatible ordered artifact pipelines."""
     try:
-        result = ArtifactPipelineService(_workspace(workspace)).compare(
-            baseline_pipeline_id,
-            candidate_pipeline_id,
-        )
+        service = ArtifactPipelineService(_workspace(workspace))
+        baseline = service.resolve_reference(baseline_pipeline_id)
+        candidate = service.resolve_reference(candidate_pipeline_id)
+        result = service.compare(baseline.pipeline_id, candidate.pipeline_id)
     except DomainError as error:
         _fail(error, as_json=json_output)
     _emit(result, as_json=json_output)

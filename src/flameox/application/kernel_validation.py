@@ -10,6 +10,7 @@ from flameox.adapters.kernel_validation import (
     load_kernel_validation_document,
 )
 from flameox.application.evidence_lookup import EvidenceLookupService
+from flameox.application.pipelines import ArtifactPipelineService
 from flameox.application.projections import ProjectionCoordinator
 from flameox.domain import DomainError, ErrorCode, new_id
 from flameox.domain.models import (
@@ -30,6 +31,7 @@ class RegisterKernelValidationRequest(ContractModel):
     path: Path
     sensitivity: Sensitivity = Sensitivity.INTERNAL
     allow_external_path: bool = False
+    pipeline_id: str | None = None
 
 
 class RegisterKernelValidationResult(ContractModel):
@@ -43,6 +45,7 @@ class RegisterKernelValidationResult(ContractModel):
     environment_id: str
     source_state_id: str | None
     execution_identity_id: str
+    pipeline_ids: tuple[str, ...] = ()
     corpus_commit_id: str
 
 
@@ -103,6 +106,43 @@ class KernelValidationRegistrationService:
                 details={"run_id": run.run_id},
             )
 
+        pipeline_service = ArtifactPipelineService(self.workspace)
+        run_pipelines = tuple(
+            pipeline
+            for pipeline in pipeline_service.pipelines.list()
+            if pipeline.run_id == run.run_id
+        )
+        source_pipeline_id = request.pipeline_id
+        if source_pipeline_id is not None:
+            source_pipeline = pipeline_service.pipelines.read(source_pipeline_id)
+            if source_pipeline.run_id != run.run_id:
+                raise DomainError(
+                    ErrorCode.INVALID_ARGUMENTS,
+                    "The selected pipeline does not belong to the producing run.",
+                    details={"run_id": run.run_id, "pipeline_id": source_pipeline_id},
+                )
+        elif len(run_pipelines) == 1:
+            source_pipeline_id = run_pipelines[0].pipeline_id
+        elif len(run_pipelines) > 1:
+            raise DomainError(
+                ErrorCode.INVALID_ARGUMENTS,
+                "The run has multiple pipelines; select the pipeline that produced "
+                "this validation.",
+                details={
+                    "run_id": run.run_id,
+                    "pipeline_ids": tuple(item.pipeline_id for item in run_pipelines[:20]),
+                },
+            )
+        if source_pipeline_id is not None and any(
+            stage.name == "kernel_validation"
+            for stage in pipeline_service.pipelines.read(source_pipeline_id).stages
+        ):
+            raise DomainError(
+                ErrorCode.INVALID_ARGUMENTS,
+                "The selected pipeline already contains kernel-validation evidence.",
+                details={"pipeline_id": source_pipeline_id},
+            )
+
         allowed_roots = [self.workspace.project_root]
         if request.allow_external_path:
             allowed_roots.append(request.path.absolute().parent)
@@ -159,6 +199,15 @@ class KernelValidationRegistrationService:
             environment=environment,
             source_state=source_state,
         )
+        pipeline_ids: tuple[str, ...] = ()
+        if source_pipeline_id is not None:
+            extended = pipeline_service.extend_with_registration(
+                source_pipeline_id,
+                registration.registration_id,
+                stage_name="kernel_validation",
+                format_schema="flameox.kernel-validation.v2",
+            )
+            pipeline_ids = (extended.pipeline_id,)
         return RegisterKernelValidationResult(
             run_id=updated.run_id,
             run_revision=updated.revision,
@@ -170,5 +219,10 @@ class KernelValidationRegistrationService:
             environment_id=updated.environment_id,
             source_state_id=updated.source_state_id,
             execution_identity_id=execution_identity_id,
-            corpus_commit_id=projected.publication.commit.commit_id,
+            pipeline_ids=pipeline_ids,
+            corpus_commit_id=(
+                self.workspace.corpus.read_head().commit_id
+                if pipeline_ids
+                else projected.publication.commit.commit_id
+            ),
         )

@@ -183,6 +183,7 @@ async def test_triton_compiler_capture_emits_manifest_with_native_artifacts(
     }
     pipelines = ArtifactPipelineService(workspace).pipelines.list()
     assert len(pipelines) == 1
+    assert result.pipeline_ids == (pipelines[0].pipeline_id,)
     assert pipelines[0].run_id == result.run.run_id
     assert pipelines[0].identity_quality == "managed_exact"
     assert pipelines[0].workload_definition_id == result.run.workload_definition_id

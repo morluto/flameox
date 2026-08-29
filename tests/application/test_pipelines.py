@@ -11,6 +11,7 @@ from flameox.application import (
     ImportService,
     PipelineComparison,
     PipelineExtractorProfile,
+    PipelineFilter,
     PipelineStageComparison,
     PipelineStageDeclaration,
     PipelineStageStatus,
@@ -301,6 +302,34 @@ def test_identical_pipeline_short_circuits_content_addressed_artifacts(
     with Catalog(workspace).open_snapshot() as snapshot:
         assert snapshot.execute("SELECT count(*) FROM artifact_pipelines").fetchone() == (2,)
         assert snapshot.execute("SELECT count(*) FROM pipeline_comparisons").fetchone() == (1,)
+
+
+def test_pipeline_discovery_is_bounded_filterable_and_resolves_unique_runs(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    left_run = _import(workspace, tmp_path / "left.txt", "same")
+    right_run = _import(workspace, tmp_path / "right.txt", "same")
+    _add_registration(workspace, left_run, "left-generated")
+    _add_registration(workspace, right_run, "right-generated")
+    service = ArtifactPipelineService(workspace)
+    left_pipeline_id = _pipeline(service, workspace, left_run)
+    right_pipeline_id = _pipeline(service, workspace, right_run)
+
+    first = service.list(filter=PipelineFilter(), limit=1)
+    second = service.list(filter=PipelineFilter(), limit=1, cursor=first.next_cursor)
+    by_run = service.list(filter=PipelineFilter(run_id=left_run), limit=20)
+    detail = service.get(left_pipeline_id)
+
+    assert first.total == 2
+    assert first.next_cursor is not None
+    assert {first.pipelines[0].pipeline_id, second.pipelines[0].pipeline_id} == {
+        left_pipeline_id,
+        right_pipeline_id,
+    }
+    assert [item.pipeline_id for item in by_run.pipelines] == [left_pipeline_id]
+    assert service.resolve_reference(left_run).pipeline_id == left_pipeline_id
+    assert detail.compatible_pipeline_ids == (right_pipeline_id,)
 
 
 def test_pipeline_reports_late_difference_without_claiming_root_cause(

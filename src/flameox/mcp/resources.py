@@ -93,11 +93,7 @@ def register_resources[T: WorkspaceContext](server: MCPServer[T]) -> None:  # no
     async def pipeline_resource(pipeline_id: str, ctx: Context) -> str:
         try:
             workspace = _workspace(ctx)
-            return (
-                ArtifactPipelineService(workspace)
-                .pipelines.read(pipeline_id)
-                .model_dump_json(indent=2)
-            )
+            return ArtifactPipelineService(workspace).get(pipeline_id).model_dump_json(indent=2)
         except DomainError as error:
             return error_payload(error)
 

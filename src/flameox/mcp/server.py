@@ -176,6 +176,9 @@ from flameox.application import (
     OtlpExtractionResult,
     OtlpTraceService,
     PipelineComparison,
+    PipelineDetail,
+    PipelineFilter,
+    PipelineListResult,
     PlanReductionRequest,
     RecordFindingRequest,
     RecordHypothesisRequest,
@@ -481,6 +484,7 @@ class CaptureReceipt(ContractModel):
     artifact_ids: Annotated[tuple[str, ...], Field(max_length=100)]
     artifact_count: Annotated[int, Field(ge=0)]
     artifacts_truncated: bool
+    pipeline_ids: Annotated[tuple[str, ...], Field(max_length=20)]
     limitations: Annotated[tuple[str, ...], Field(max_length=20)]
     limitation_details: Annotated[tuple[LimitationDetail, ...], Field(max_length=20)] = ()
     limitation_count: Annotated[int, Field(ge=0)]
@@ -1662,6 +1666,7 @@ def create_server(
                 artifact_ids=artifact_ids[:100],
                 artifact_count=len(artifact_ids),
                 artifacts_truncated=len(artifact_ids) > 100,
+                pipeline_ids=result.pipeline_ids[:20],
                 limitations=result.run.limitations[:20],
                 limitation_details=result.run.limitation_details[:20],
                 limitation_count=limitation_count,
@@ -1681,6 +1686,15 @@ def create_server(
                         uri=resource_uri,
                         description="Authoritative run manifest and provenance.",
                         mime_type="application/json",
+                    ),
+                    *(
+                        ResourceLink(
+                            name=f"Pipeline {pipeline_id}",
+                            uri=f"flameox://pipelines/{pipeline_id}",
+                            description="Immutable artifact pipeline produced by this capture.",
+                            mime_type="application/json",
+                        )
+                        for pipeline_id in result.pipeline_ids[:20]
                     ),
                 ),
             )
@@ -2177,6 +2191,7 @@ def create_server(
         sensitivity: Sensitivity,
         ctx: Context[AppContext],
         source_root: Literal["project", "temp"] = "project",
+        pipeline_id: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[RegisterKernelValidationResult]]:
         """Attach validated immutable correctness evidence to its exact producing run."""
         try:
@@ -2190,6 +2205,7 @@ def create_server(
                         path=_safe_import_path(state.project_root, path, source_root),
                         sensitivity=sensitivity,
                         allow_external_path=source_root == "temp",
+                        pipeline_id=pipeline_id,
                     )
                 )
             )
@@ -2204,6 +2220,15 @@ def create_server(
                         uri=run_uri,
                         description="Producing run with authoritative validation semantics.",
                         mime_type="application/json",
+                    ),
+                    *(
+                        ResourceLink(
+                            name=f"Pipeline {pipeline_id}",
+                            uri=f"flameox://pipelines/{pipeline_id}",
+                            description="Derived pipeline including validation evidence.",
+                            mime_type="application/json",
+                        )
+                        for pipeline_id in result.pipeline_ids
                     ),
                     ResourceLink(
                         name=f"Artifact {result.artifact_id}",
@@ -2472,6 +2497,75 @@ def create_server(
             return _failure(error)
 
     @server.tool(annotations=READ_ONLY)
+    async def list_artifact_pipelines(
+        ctx: Context[AppContext],
+        run_id: str | None = None,
+        pipeline_name: str | None = None,
+        pipeline_schema: str | None = None,
+        producer: str | None = None,
+        source_artifact_id: str | None = None,
+        limit: Annotated[StrictInt, Field(ge=1, le=100)] = 20,
+        cursor: str | None = None,
+    ) -> Annotated[CallToolResult, ToolPayload[PipelineListResult]]:
+        """Discover bounded immutable pipelines by run, producer, schema, or artifact."""
+        try:
+            result = ArtifactPipelineService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).list(
+                filter=PipelineFilter(
+                    run_id=run_id,
+                    pipeline_name=pipeline_name,
+                    pipeline_schema=pipeline_schema,
+                    producer=producer,
+                    source_artifact_id=source_artifact_id,
+                ),
+                limit=limit,
+                cursor=cursor,
+            )
+            return _success(
+                result,
+                f"Found {result.total} matching artifact pipelines.",
+                resource_links=tuple(
+                    ResourceLink(
+                        name=f"Pipeline {item.pipeline_id}",
+                        uri=f"flameox://pipelines/{item.pipeline_id}",
+                        description="Immutable artifact pipeline detail.",
+                        mime_type="application/json",
+                    )
+                    for item in result.pipelines
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(annotations=READ_ONLY)
+    async def get_artifact_pipeline(
+        pipeline_id: str,
+        ctx: Context[AppContext],
+        candidate_limit: Annotated[StrictInt, Field(ge=0, le=20)] = 20,
+    ) -> Annotated[CallToolResult, ToolPayload[PipelineDetail]]:
+        """Read one pipeline and bounded compatible comparison candidates."""
+        try:
+            detail = ArtifactPipelineService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).get(pipeline_id, candidate_limit=candidate_limit)
+            return _success(
+                detail,
+                f"Read artifact pipeline {pipeline_id}.",
+                resource_links=tuple(
+                    ResourceLink(
+                        name=f"Compatible pipeline {candidate_id}",
+                        uri=f"flameox://pipelines/{candidate_id}",
+                        description="Compatible or compatibility-unknown comparison candidate.",
+                        mime_type="application/json",
+                    )
+                    for candidate_id in detail.compatible_pipeline_ids
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(annotations=READ_ONLY)
     async def compare_artifact_pipelines(
         baseline_pipeline_id: str,
         candidate_pipeline_id: str,
@@ -2479,9 +2573,12 @@ def create_server(
     ) -> Annotated[CallToolResult, ToolPayload[PipelineComparison]]:
         """Compare compatible ordered stages without returning native artifact content."""
         try:
-            comparison = ArtifactPipelineService(
+            service = ArtifactPipelineService(
                 ctx.request_context.lifespan_context.require_workspace()
-            ).compare(baseline_pipeline_id, candidate_pipeline_id)
+            )
+            baseline = service.resolve_reference(baseline_pipeline_id)
+            candidate = service.resolve_reference(candidate_pipeline_id)
+            comparison = service.compare(baseline.pipeline_id, candidate.pipeline_id)
             return _success(
                 comparison,
                 f"Compared artifact pipelines as {comparison.result_digest}.",
