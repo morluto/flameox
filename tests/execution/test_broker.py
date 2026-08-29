@@ -53,6 +53,131 @@ def _process_is_alive(pid: int) -> bool:
         return False
 
 
+def test_managed_sidecars_settle_transports_before_runner_shutdown(tmp_path: Path) -> None:
+    executable = tmp_path / "toxiproxy-server"
+    executable.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
+    executable.chmod(0o755)
+    noisy_root = tmp_path / "noisy"
+    noisy_root.mkdir()
+    noisy_executable = noisy_root / "toxiproxy-server"
+    noisy_executable.write_text(
+        f"#!{sys.executable}\nimport sys, time\n"
+        "sys.stdout.write('x' * (3 * 1024 * 1024))\nsys.stdout.flush()\ntime.sleep(60)\n"
+    )
+    noisy_executable.chmod(0o755)
+    code = """
+import asyncio
+import gc
+import socket
+import sys
+from pathlib import Path
+
+from flameox.adapters.toxiproxy import ToxiproxyToolReceipt
+from flameox.cli import _run_async
+from flameox.domain import DomainError
+from flameox.execution import SubprocessBroker
+
+
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def receipt(executable):
+    return ToxiproxyToolReceipt(
+        "2.12.0",
+        "fixture",
+        "sha256:" + "a" * 64,
+        executable,
+        "sha256:" + "b" * 64,
+        "fixture",
+    )
+
+
+async def start(executable, readiness, timeout=1):
+    return await SubprocessBroker().start_toxiproxy(
+        executable,
+        admin_host="127.0.0.1",
+        admin_port=free_port(),
+        readiness=readiness,
+        tool_receipt=receipt(executable),
+        readiness_timeout_seconds=timeout,
+    )
+
+
+async def run():
+    executable = Path(sys.argv[1])
+    noisy_executable = Path(sys.argv[2])
+    for _ in range(3):
+        lease = await start(executable, lambda: asyncio.sleep(0, result=True))
+        try:
+            await lease.create_proxy_async(
+                name="invalid:name",
+                listen=f"127.0.0.1:{free_port()}",
+                upstream=f"127.0.0.1:{free_port()}",
+            )
+        except ValueError:
+            pass
+        finally:
+            outcome = await asyncio.shield(lease.close())
+            assert outcome.process.cleanup_complete is True
+
+    try:
+        await start(executable, lambda: asyncio.sleep(0, result=False), timeout=0.05)
+    except DomainError:
+        pass
+    else:
+        raise AssertionError("readiness failure did not close the sidecar")
+
+    pending = asyncio.create_task(
+        start(executable, lambda: asyncio.sleep(0, result=False), timeout=5)
+    )
+    await asyncio.sleep(0.05)
+    pending.cancel()
+    try:
+        await pending
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("sidecar startup did not propagate cancellation")
+
+    noisy = await start(noisy_executable, lambda: asyncio.sleep(0.1, result=True))
+    noisy_outcome = await noisy.close()
+    assert noisy_outcome.process.cleanup_complete is True
+    assert len(noisy_outcome.stdout) == 2 * 1024 * 1024, len(noisy_outcome.stdout)
+    assert b"output exceeded" in noisy_outcome.stderr, noisy_outcome.stderr
+
+
+_run_async(run)
+gc.collect()
+print("sidecar shutdown clean")
+"""
+    environment = os.environ.copy()
+    environment.update({"PYTHONASYNCIODEBUG": "1", "PYTHONWARNINGS": "default"})
+
+    completed = subprocess.run(
+        (sys.executable, "-c", code, str(executable), str(noisy_executable)),
+        cwd=Path.cwd(),
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "sidecar shutdown clean\n"
+    forbidden = (
+        "BaseSubprocessTransport",
+        "Event loop is closed",
+        "Exception ignored in",
+        "Task was destroyed",
+        "ResourceWarning",
+    )
+    assert not any(marker in completed.stderr for marker in forbidden), completed.stderr
+
+
 @pytest.mark.anyio
 async def test_cancellation_preserves_raw_output_without_waiting_for_inherited_pipes(
     tmp_path: Path,
