@@ -13,8 +13,10 @@ from mcp_types import TextContent
 
 from flameox.catalog import Catalog
 from flameox.domain import ErrorCode
+from flameox.evidence import GenerationPublisher
 from flameox.mcp import create_server
 from flameox.storage import Workspace
+from tests.support.analysis import run_row
 
 pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
@@ -160,6 +162,12 @@ async def test_every_mcp_tool_uses_sdk_generated_schemas_and_annotations(
     assert execution_result["properties"]["returned"]["readOnly"] is True
     assert execution_result["properties"]["truncated"]["readOnly"] is True
     assert {"returned", "truncated"} <= set(execution_result["required"])
+    assert {"collection", "filters", "items", "totals", "next_cursor"} <= set(
+        execution_result["properties"]
+    )
+    assert not {"observations", "added", "removed", "changed"} & set(
+        execution_result["properties"]
+    )
 
 
 @pytest.mark.anyio
@@ -186,6 +194,85 @@ async def test_mcp_nested_models_only_advertise_intentional_flexible_object_maps
         "record_comparison",  # bounded measurement-series dimensions
         "record_kernel_validation_comparison",  # bounded named case dimensions and inputs
     }
+
+
+@pytest.mark.anyio
+async def test_execution_analysis_pages_a_filtered_comparison_collection(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+
+    def observation(run_id: str, observation_id: str, name: str, line: int) -> dict[str, object]:
+        return {
+            "observation_id": observation_id,
+            "run_id": run_id,
+            "artifact_id": None,
+            "kind": "line",
+            "name": name,
+            "value_json": "true",
+            "file": "src/agent.py",
+            "line_from": line,
+            "line_to": line,
+            "context": None,
+            "evidence_level": "observed",
+        }
+
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "runs": [run_row("baseline"), run_row("candidate")],
+            "observations": [
+                observation("baseline", "shared-before", "shared", 1),
+                observation("candidate", "shared-after", "shared", 1),
+                observation("candidate", "added-a", "added_a", 2),
+                observation("candidate", "added-b", "added_b", 3),
+            ],
+        },
+        publisher="execution-mcp-fixture",
+        publisher_version="1",
+    )
+    arguments: dict[str, object] = {
+        "run_or_artifact": "baseline",
+        "comparison_run_or_artifact": "candidate",
+        "collection": "added",
+        "filters": {"file_prefix": "src/", "kind": "line"},
+        "limit": 1,
+    }
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        first = await client.call_tool("analyze_execution", arguments)
+        assert first.structured_content is not None
+        first_result = first.structured_content["result"]
+        GenerationPublisher(workspace).publish_rows(
+            {
+                "observations": [
+                    observation("candidate", "added-later", "added_later", 4),
+                ]
+            },
+            publisher="later-execution-mcp-fixture",
+            publisher_version="1",
+        )
+        second = await client.call_tool(
+            "analyze_execution",
+            {**arguments, "cursor": first_result["next_cursor"]},
+        )
+
+    assert second.structured_content is not None
+    second_result = second.structured_content["result"]
+    assert first_result["collection"] == "added"
+    assert first_result["total"] == 2
+    assert first_result["totals"] == {
+        "observations": 1,
+        "added": 2,
+        "removed": 0,
+        "changed": 0,
+    }
+    assert first_result["truncated"] is True
+    assert [item["name"] for item in first_result["items"] + second_result["items"]] == [
+        "added_a",
+        "added_b",
+    ]
+    assert second_result["next_cursor"] is None
+    assert second_result["truncated"] is False
 
 
 @pytest.mark.anyio

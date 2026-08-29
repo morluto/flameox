@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from flameox.analysis import FailureAnalysisResult, RecipeService
+from flameox.analysis import ExecutionAnalysisResult, FailureAnalysisResult, RecipeService
 from flameox.application import (
     AcceleratorLaunchAnalysisRequest,
     AnalysisMaterializationService,
@@ -23,6 +23,7 @@ from flameox.catalog import Catalog, Snapshot
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import RetentionIntentStore, Workspace
+from tests.support.analysis import run_row
 
 pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
@@ -90,6 +91,55 @@ def test_materialized_analysis_retry_reuses_exact_persisted_provenance(
     assert first.analysis.corpus_commit_id == source_commit_id
     assert "corpus_commit_id" not in first.analysis.parameters
     assert RetentionIntentStore(workspace).pending() == ()
+    with Catalog(workspace).open_snapshot() as snapshot:
+        assert snapshot.execute("SELECT count(*) FROM analyses").fetchone() == (1,)
+
+
+def test_execution_continuation_token_does_not_own_durable_analysis_identity(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "runs": [run_row("run-1")],
+            "observations": [
+                {
+                    "observation_id": f"observation-{index}",
+                    "run_id": "run-1",
+                    "artifact_id": None,
+                    "kind": "line",
+                    "name": f"line-{index}",
+                    "value_json": "true",
+                    "file": "agent.py",
+                    "line_from": index,
+                    "line_to": index,
+                    "context": None,
+                    "evidence_level": "observed",
+                }
+                for index in (1, 2)
+            ],
+        },
+        publisher="execution-analysis-fixture",
+        publisher_version="1",
+    )
+    source_commit_id = workspace.corpus.read_head().commit_id
+    request = ExecutionAnalysisRequest(
+        recipe="execution",
+        input_id="run-1",
+        limit=1,
+        corpus_commit_id=source_commit_id,
+    )
+    service = AnalysisMaterializationService(workspace)
+
+    first = service.record(request)
+    second = service.record(request)
+
+    assert isinstance(first.result, ExecutionAnalysisResult)
+    assert isinstance(second.result, ExecutionAnalysisResult)
+    assert first.result.next_cursor is not None
+    assert second.result.next_cursor is not None
+    assert first.result.next_cursor != second.result.next_cursor
+    assert first.analysis == second.analysis
     with Catalog(workspace).open_snapshot() as snapshot:
         assert snapshot.execute("SELECT count(*) FROM analyses").fetchone() == (1,)
 

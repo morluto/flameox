@@ -82,6 +82,8 @@ from flameox.adapters import (
 from flameox.analysis import (
     AcceleratorLaunchAnalysisResult,
     ExecutionAnalysisResult,
+    ExecutionCollection,
+    ExecutionObservationFilter,
     FailureAnalysisResult,
     HotspotResult,
     MemoryAnalysisResult,
@@ -89,6 +91,7 @@ from flameox.analysis import (
     RecipeService,
     ScalingAnalysisResult,
 )
+from flameox.analysis.recipe_execution import execution_query_scope_digest
 from flameox.application import (
     AdapterPreparationResult,
     AgentRunProjection,
@@ -224,6 +227,7 @@ from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,
     CapturePlan,
+    CursorNamespace,
     DomainError,
     ErrorCode,
     EvidenceReferenceType,
@@ -3131,28 +3135,60 @@ def create_server(
             str | None,
             Field(description="Optional second run or artifact ID for a compatible comparison."),
         ] = None,
+        collection: Annotated[
+            ExecutionCollection,
+            Field(description="Execution evidence collection to page."),
+        ] = "observations",
+        filters: Annotated[
+            ExecutionObservationFilter | None,
+            Field(description="Optional exact/path/line filters applied before comparison."),
+        ] = None,
+        cursor: Annotated[
+            str | None,
+            Field(max_length=64, description="Opaque next_cursor from the same filtered query."),
+        ] = None,
     ) -> Annotated[CallToolResult, ToolPayload[ExecutionAnalysisResult]]:
-        """Inspect execution-coverage runs or a compatible pair read-only; use
-        record_analysis to preserve it."""
+        """Inspect one bounded execution-evidence collection. When next_cursor is
+        present, repeat the same query with that cursor; use record_analysis to
+        preserve a result."""
         try:
             workspace = ctx.request_context.lifespan_context.require_workspace()
+            selected_filters = filters or ExecutionObservationFilter()
+            catalog = Catalog(workspace)
+            handle = None
+            if cursor is not None:
+                cursor_commit_id, _ = workspace.cursors.resolve_bound(
+                    cursor,
+                    namespace=CursorNamespace.EXECUTION_ANALYSIS,
+                    scope_digest=execution_query_scope_digest(
+                        run_or_artifact,
+                        comparison_run_or_artifact,
+                        collection,
+                        selected_filters,
+                    ),
+                )
+                handle = catalog.pin(cursor_commit_id)
             await ctx.report_progress(0, 2, "Execution snapshot pinned")
-            result = await Catalog(workspace).run_interruptible(
+            result = await catalog.run_interruptible(
                 lambda snapshot: RecipeService(
                     workspace,
                     snapshot=snapshot,
                 ).execution(
                     run_or_artifact,
                     comparison_input_id=comparison_run_or_artifact,
+                    collection=collection,
+                    filters=selected_filters,
                     limit=limit,
+                    cursor=cursor,
                 ),
+                handle=handle,
                 query_name="analyze_execution",
             )
             await ctx.report_progress(1, 2, "Execution query complete")
             await ctx.report_progress(2, 2, "Execution result ready")
             return _success(
                 result,
-                f"Returned {result.returned} of {result.total} observations.",
+                f"Returned {result.returned} of {result.total} {result.collection} items.",
             )
         except DomainError as error:
             return _failure(error)

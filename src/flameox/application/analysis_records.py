@@ -10,6 +10,8 @@ from pydantic import Field, JsonValue
 from flameox.analysis import (
     AcceleratorLaunchAnalysisResult,
     ExecutionAnalysisResult,
+    ExecutionCollection,
+    ExecutionObservationFilter,
     FailureAnalysisResult,
     HotspotResult,
     MemoryAnalysisResult,
@@ -77,6 +79,8 @@ class MemoryAnalysisRequest(_InputAnalysisRequest):
 class ExecutionAnalysisRequest(_InputAnalysisRequest):
     recipe: Literal["execution"]
     comparison_input_id: str | None = None
+    collection: ExecutionCollection = "observations"
+    filters: ExecutionObservationFilter = Field(default_factory=ExecutionObservationFilter)
 
 
 class PyTorchAnalysisRequest(_InputAnalysisRequest):
@@ -190,6 +194,9 @@ class AnalysisMaterializationService:
             if isinstance(limitations_value, tuple)
             else ()
         )
+        durable_result = result.model_dump(mode="json")
+        if isinstance(result, ExecutionAnalysisResult):
+            durable_result.pop("next_cursor", None)
         provenance = build_analysis_provenance(
             AnalysisProvenanceInput(
                 recipe=request.recipe,
@@ -198,7 +205,7 @@ class AnalysisMaterializationService:
                 input_generation_ids=generation_ids,
                 input_run_ids=run_ids,
                 input_artifact_ids=artifact_ids,
-                result_digest=digest_model(result.model_dump(mode="json")),
+                result_digest=digest_model(durable_result),
                 coverage=coverage,
                 limitations=limitations,
                 started_at=started,
@@ -324,6 +331,8 @@ class AnalysisMaterializationService:
             return recipes.execution(
                 request.input_id,
                 comparison_input_id=request.comparison_input_id,
+                collection=request.collection,
+                filters=request.filters,
                 limit=request.limit,
             )
         if isinstance(request, PyTorchAnalysisRequest):

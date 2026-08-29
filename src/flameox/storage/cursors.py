@@ -5,6 +5,7 @@ import json
 import re
 import secrets
 from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 
 from flameox.domain.cursors import (
@@ -16,6 +17,7 @@ from flameox.domain.cursors import (
 from flameox.domain.errors import DomainError, ErrorCode
 from flameox.domain.models import utc_now
 from flameox.storage.control_plane import ControlPlane, CursorControlRecord
+from flameox.storage.locks import RETENTION_SHARED, WorkspaceLockResource
 from flameox.storage.workspace import Workspace
 
 _CURSOR_HANDLE = re.compile(r"[A-Za-z0-9_-]{43}", re.ASCII)
@@ -69,16 +71,25 @@ class CursorStore:
                     "The cursor handle generator returned an invalid token.",
                 )
             try:
-                self.control.issue_cursor(
-                    cursor_digest=self._digest(token),
-                    workspace_id=workspace_id,
-                    namespace=namespace.value,
-                    snapshot_id=snapshot_id,
-                    scope_digest=scope_digest,
-                    position_json=position_json,
-                    created_at=created_at,
-                    expires_at=expires_at,
+                retention = (
+                    nullcontext()
+                    if self.workspace.lock_manager.holds(WorkspaceLockResource.RETENTION)
+                    else self.workspace.locked(
+                        RETENTION_SHARED,
+                        phase="cursor snapshot retention",
+                    )
                 )
+                with retention:
+                    self.control.issue_cursor(
+                        cursor_digest=self._digest(token),
+                        workspace_id=workspace_id,
+                        namespace=namespace.value,
+                        snapshot_id=snapshot_id,
+                        scope_digest=scope_digest,
+                        position_json=position_json,
+                        created_at=created_at,
+                        expires_at=expires_at,
+                    )
             except DomainError as error:
                 if error.code is ErrorCode.REVISION_CONFLICT:
                     continue
@@ -87,6 +98,13 @@ class CursorStore:
         raise DomainError(
             ErrorCode.INTERNAL_ERROR,
             "Unable to allocate a unique cursor handle.",
+        )
+
+    def retained_corpus_commit_ids(self) -> tuple[str, ...]:
+        return self.control.active_cursor_snapshot_ids(
+            workspace_id=self.workspace.identity.workspace_id,
+            namespace=CursorNamespace.EXECUTION_ANALYSIS.value,
+            observed_at=self._clock(),
         )
 
     def resolve(
@@ -98,13 +116,39 @@ class CursorStore:
         scope_digest: str,
     ) -> CursorPosition:
         self._validate_binding(snapshot_id=snapshot_id, scope_digest=scope_digest)
-        record = self._active_record(cursor)
-        if record.namespace != namespace.value:
+        record, position = self._resolve_binding(
+            cursor, namespace=namespace, scope_digest=scope_digest
+        )
+        if record.snapshot_id != snapshot_id:
             raise DomainError(
                 ErrorCode.STALE_CURSOR,
                 "Cursor belongs to a different query or immutable snapshot.",
             )
-        if record.snapshot_id != snapshot_id or record.scope_digest != scope_digest:
+        return position
+
+    def resolve_bound(
+        self,
+        cursor: str,
+        *,
+        namespace: CursorNamespace,
+        scope_digest: str,
+    ) -> tuple[str, CursorPosition]:
+        """Resolve an opaque cursor together with its immutable snapshot binding."""
+
+        record, position = self._resolve_binding(
+            cursor, namespace=namespace, scope_digest=scope_digest
+        )
+        return record.snapshot_id, position
+
+    def _resolve_binding(
+        self,
+        cursor: str,
+        *,
+        namespace: CursorNamespace,
+        scope_digest: str,
+    ) -> tuple[CursorControlRecord, CursorPosition]:
+        record = self._active_record(cursor)
+        if record.namespace != namespace.value or record.scope_digest != scope_digest:
             raise DomainError(
                 ErrorCode.STALE_CURSOR,
                 "Cursor belongs to a different query or immutable snapshot.",
@@ -113,7 +157,7 @@ class CursorStore:
             payload = json.loads(record.position_json)
         except (json.JSONDecodeError, TypeError, ValueError) as error:
             raise self._unavailable() from error
-        return validate_cursor_position(namespace, payload)
+        return record, validate_cursor_position(namespace, payload)
 
     def namespace(self, cursor: str) -> CursorNamespace:
         """Return routing identity for one active opaque cursor."""

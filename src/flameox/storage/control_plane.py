@@ -569,6 +569,26 @@ class ControlPlane:
             ),
         )
 
+    def active_cursor_snapshot_ids(
+        self,
+        *,
+        workspace_id: str,
+        namespace: str,
+        observed_at: datetime,
+    ) -> tuple[str, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT snapshot_id
+                FROM cursors
+                WHERE workspace_id = ? AND namespace = ?
+                  AND revoked_at IS NULL AND expires_at > ?
+                ORDER BY snapshot_id
+                """,
+                (workspace_id, namespace, observed_at.isoformat()),
+            ).fetchall()
+        return tuple(str(row["snapshot_id"]) for row in rows)
+
     def revoke_cursor(
         self,
         *,

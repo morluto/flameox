@@ -25,6 +25,7 @@ class CursorNamespace(StrEnum):
     INFERENCE_REQUESTS = "inference_requests"
     INVESTIGATIONS = "investigations"
     MEASUREMENTS = "measurements"
+    EXECUTION_ANALYSIS = "execution_analysis"
     NORMALIZED_TRACE_WINDOW = "normalized_trace_window"
     OPERATION_TRANSITIONS = "operation_transitions"
     PIPELINES = "pipelines"
@@ -57,6 +58,9 @@ CURSOR_POSITION_SPECS = MappingProxyType(
         CursorNamespace.INFERENCE_REQUESTS: CursorPositionSpec(("string",), "inference evidence"),
         CursorNamespace.INVESTIGATIONS: CursorPositionSpec(("integer",), "investigation discovery"),
         CursorNamespace.MEASUREMENTS: CursorPositionSpec(("string",), "measurement evidence"),
+        CursorNamespace.EXECUTION_ANALYSIS: CursorPositionSpec(
+            ("integer",), "execution analysis evidence"
+        ),
         CursorNamespace.NORMALIZED_TRACE_WINDOW: CursorPositionSpec(
             ("string", "string", "integer", "string"), "normalized trace evidence"
         ),

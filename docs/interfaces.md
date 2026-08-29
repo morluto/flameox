@@ -268,6 +268,14 @@ exports stay local as artifacts.
 List operations are bounded and cursor-paginated. A cursor binds the query,
 ordering, and snapshot; it cannot be reused for a different request. Analysis
 and evidence resolution pin one corpus snapshot before the first lookup.
+`analyze_execution` returns one selected collection (`observations`, `added`,
+`removed`, or `changed`) rather than copying every comparison set into one
+response. Its filters are applied before comparison, `totals` reports each
+collection independently, and `items` contains only the requested page. When
+`next_cursor` is present, call `analyze_execution` again with the same inputs,
+collection, and filters plus that cursor. The opaque cursor retains the original
+immutable corpus commit even if the workspace publishes a newer HEAD; changing
+the query rejects it as stale.
 `get_trace_window` is provider-neutral: it reads normalized temporal evidence
 when available and uses a native Perfetto reader only as a fallback. Its inline
 events carry the provider and interpretation fields needed for the window;

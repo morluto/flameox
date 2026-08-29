@@ -21,7 +21,7 @@ from flameox.evidence_status import (
     available_availability,
 )
 from flameox.models import ContractModel
-from flameox.pagination import BoundedCollectionContract
+from flameox.pagination import BoundedCollectionContract, CursorPageContract
 
 
 class Hotspot(ContractModel):
@@ -197,18 +197,46 @@ class ExecutionObservation(ContractModel):
     evidence_level: EvidenceLevel
 
 
-class ExecutionAnalysisResult(BoundedCollectionContract):
-    page_items_field: ClassVar[str] = "observations"
+class ExecutionObservationFilter(ContractModel):
+    file_prefix: str | None = Field(default=None, max_length=1_000)
+    kind: str | None = Field(default=None, max_length=200)
+    name: str | None = Field(default=None, max_length=200)
+    line_from: int | None = Field(default=None, ge=1)
+    line_to: int | None = Field(default=None, ge=1)
 
-    schema_version: int = 1
+    @model_validator(mode="after")
+    def valid_line_range(self) -> ExecutionObservationFilter:
+        if (
+            self.line_from is not None
+            and self.line_to is not None
+            and self.line_to < self.line_from
+        ):
+            raise ValueError("execution observation line_to must not precede line_from")
+        return self
+
+
+class ExecutionCollectionTotals(ContractModel):
+    observations: int = Field(ge=0)
+    added: int = Field(ge=0)
+    removed: int = Field(ge=0)
+    changed: int = Field(ge=0)
+
+
+type ExecutionCollection = Literal["observations", "added", "removed", "changed"]
+
+
+class ExecutionAnalysisResult(CursorPageContract):
+    page_items_field: ClassVar[str] = "items"
+
     corpus_commit_id: str
     input_id: str
-    observations: tuple[ExecutionObservation, ...]
     comparison_input_id: str | None = None
-    added: tuple[ExecutionObservation, ...] = ()
-    removed: tuple[ExecutionObservation, ...] = ()
-    changed: tuple[ExecutionObservationChange, ...] = ()
+    collection: ExecutionCollection
+    filters: ExecutionObservationFilter
+    items: tuple[ExecutionObservation | ExecutionObservationChange, ...]
     total: int
+    totals: ExecutionCollectionTotals
+    next_cursor: str | None = None
     limitations: tuple[str, ...]
     evidence: EvidenceAvailability = Field(default_factory=available_availability)
 

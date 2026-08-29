@@ -173,6 +173,7 @@ class GarbageCollector:
         cutoff = datetime.now(UTC) - timedelta(hours=minimum_age_hours)
         root_commit_ids = {head.commit_id}
         root_commit_ids.update(RetentionIntentStore(self.workspace).pending_commit_ids())
+        root_commit_ids.update(self.workspace.cursors.retained_corpus_commit_ids())
         referenced_generations: set[str] = set()
         referenced_artifacts: set[str] = set()
         catalog = Catalog(self.workspace)
@@ -332,9 +333,9 @@ class GarbageCollector:
             RETENTION_EXCLUSIVE,
             phase="garbage collection apply",
         ):
-            newly_retained = set(RetentionIntentStore(self.workspace).pending_commit_ids()) - set(
-                plan.root_corpus_commit_ids
-            )
+            retained_now = set(RetentionIntentStore(self.workspace).pending_commit_ids())
+            retained_now.update(self.workspace.cursors.retained_corpus_commit_ids())
+            newly_retained = retained_now - set(plan.root_corpus_commit_ids)
             if newly_retained:
                 raise DomainError(
                     ErrorCode.REVISION_CONFLICT,

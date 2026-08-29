@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from flameox.adapters import ObservationExtractor
-from flameox.analysis import RecipeService
+from flameox.analysis import ExecutionObservation, RecipeService
 from flameox.application import (
     AnalysisMaterializationService,
     CaptureService,
@@ -101,11 +101,19 @@ mode = ["bad", "fixed"]
         runs[mode] = result.run
         analyses[mode] = RecipeService(workspace).execution(result.run.run_id)
 
-    by_name = {item.name: item for item in analyses["bad"].observations}
+    by_name = {
+        item.name: item
+        for item in analyses["bad"].items
+        if isinstance(item, ExecutionObservation)
+    }
     assert by_name["policy.old_log_prob_source"].value_json == ('{"source":"current_policy"}')
     assert by_name["policy.clipping_enabled"].value_json == '{"value":false}'
     assert by_name["policy.clipping_enabled"].context == "ppo_epoch"
-    fixed_by_name = {item.name: item for item in analyses["fixed"].observations}
+    fixed_by_name = {
+        item.name: item
+        for item in analyses["fixed"].items
+        if isinstance(item, ExecutionObservation)
+    }
     assert fixed_by_name["policy.clipping_enabled"].value_json == '{"value":true}'
     recorded_execution = AnalysisMaterializationService(workspace).record(
         ExecutionAnalysisRequest(

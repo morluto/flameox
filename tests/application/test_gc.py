@@ -17,7 +17,7 @@ from flameox.application import (
     RunSetService,
 )
 from flameox.application.staging_ownership import StagingOwnershipService
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import CursorNamespace, DomainError, ErrorCode, digest_model
 from flameox.evidence import GenerationPublisher
 from flameox.storage import RetentionIntentStore, Workspace
 
@@ -70,6 +70,45 @@ def test_pending_retention_intent_roots_historical_snapshot_for_gc(tmp_path: Pat
     )
     released = GarbageCollector(workspace).plan(minimum_age_hours=0)
     assert historical_commit_id not in released.root_corpus_commit_ids
+
+
+def test_active_cursor_roots_its_historical_snapshot_for_gc(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    historical_commit_id = workspace.corpus.read_head().commit_id
+    with workspace.retention_locked(shared=True):
+        workspace.cursors.issue(
+            namespace=CursorNamespace.EXECUTION_ANALYSIS,
+            snapshot_id=historical_commit_id,
+            scope_digest=digest_model({"query": "execution"}),
+            position=(1,),
+        )
+        workspace.cursors.issue(
+            namespace=CursorNamespace.TRACE_WINDOW,
+            snapshot_id="sha256:" + "a" * 64,
+            scope_digest=digest_model({"query": "trace"}),
+            position=(1, "track"),
+        )
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "investigations": [
+                {
+                    "investigation_id": "investigation-1",
+                    "question": "advance HEAD?",
+                    "symptom": None,
+                    "project_root": str(tmp_path),
+                    "status": "open",
+                    "parent_investigation_id": None,
+                    "created_at": datetime.now(UTC),
+                }
+            ]
+        },
+        publisher="cursor-retention-test",
+        publisher_version="1",
+    )
+
+    plan = GarbageCollector(workspace).plan(minimum_age_hours=0)
+
+    assert historical_commit_id in plan.root_corpus_commit_ids
 
 
 def test_gc_is_dry_run_first_and_moves_only_plan_to_recoverable_trash(

@@ -79,6 +79,12 @@ class WorkspaceLockManager:
         self.workspace_root = workspace_root.resolve()
         self.paths = paths
 
+    def holds(self, resource: WorkspaceLockResource) -> bool:
+        return any(
+            item.workspace_root == self.workspace_root and item.intent.resource is resource
+            for item in _HELD_LOCKS.get()
+        )
+
     @contextmanager
     def acquire(
         self,
