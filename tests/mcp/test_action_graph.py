@@ -148,6 +148,11 @@ def _representative_actions() -> dict[ActionId, ToolAction]:
             ActionId.GET_REDUCTION,
             reduction_id="reduction-1",
         ),
+        ActionId.ANALYZE_MEMORY: tool_action(
+            ActionId.ANALYZE_MEMORY,
+            run_or_artifact="run-1",
+            limit=30,
+        ),
     }
 
 

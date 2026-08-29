@@ -189,7 +189,19 @@ visits those largest provider aggregates first, so frame and aggregate limits
 retain contributors from the highest-value records rather than an arbitrary
 prefix. This is a bounded projection, not a replacement for the native profile.
 Direct caller/callee edges and representative stacks are normalized as bounded
-navigation evidence for both `memory.high_watermark` and `memory.retained_end`.
+navigation evidence for `memory.high_watermark`, `memory.retained_end`,
+`memory.allocated`, and `memory.temporary`. The views retain Memray's provider
+meanings: high-watermark records contributed to the allocation peak, retained-end
+records were still allocated when tracking ended, allocation-volume records cover
+all positive allocation events, and temporary records were allocated and freed
+with at most the configured number of other allocations between those events.
+The extraction default is Memray's threshold of one; zero means that no other
+allocation may intervene. The threshold is an allocation-event distance, not a
+duration or byte-size cutoff, and is recorded with the extracted temporary-byte
+total.
+Aggregated Memray captures do not expose allocation-volume or temporary record
+streams. Flameox publishes their peak and retained evidence with those optional
+views explicitly unavailable instead of rejecting the capture.
 Memray reports stacks leaf-first; Flameox stores them root-to-leaf, preserves
 repeated and recursive frames, and weights edges and stacks in bytes with the
 provider allocation count alongside that weight. It does not invent native

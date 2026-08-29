@@ -79,7 +79,12 @@ def test_memray_frame_identity_is_computed_once_across_metrics(
     records = [_AllocationRecord(size=5, n_allocations=1, stack=stack) for _ in range(100)]
     state = _state(tmp_path)
 
-    for metric in ("memory.high_watermark", "memory.retained_end"):
+    for metric in (
+        "memory.high_watermark",
+        "memory.retained_end",
+        "memory.allocated",
+        "memory.temporary",
+    ):
         memray_worker._aggregate(
             records,
             metric=metric,
@@ -90,7 +95,7 @@ def test_memray_frame_identity_is_computed_once_across_metrics(
     state.close()
     assert normalized == ["agent.py", "runner.py"]
     assert len(projection.frame_rows) == 2
-    assert len(projection.aggregates) == 4
+    assert len(projection.aggregates) == 8
 
 
 @pytest.mark.performance
@@ -190,6 +195,7 @@ def test_memray_aggregation_reports_record_frame_and_depth_coverage(tmp_path: Pa
 
     assert total == 60
     assert coverage.model_dump() == {
+        "status": "available",
         "records_seen": 3,
         "records_selected": 2,
         "record_bytes_seen": 60,

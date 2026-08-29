@@ -89,6 +89,7 @@ from flameox.analysis import (
     FailureAnalysisResult,
     HotspotResult,
     MemoryAnalysisResult,
+    MemoryFrameQuery,
     PyTorchAnalysisResult,
     RecipeService,
     ScalingAnalysisResult,
@@ -258,6 +259,7 @@ from flameox.models import ContractModel
 from flameox.storage import Workspace
 
 _MANAGED_SETUP_ADAPTERS = managed_setup_adapter_names()
+_DEFAULT_MEMORY_QUERY = MemoryFrameQuery()
 
 
 def _managed_setup_adapter(value: str) -> str:
@@ -3119,7 +3121,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="analyze_memory", annotations=READ_ONLY)
+    @_action_tool(server, ActionId.ANALYZE_MEMORY)
     async def analyze_memory_tool(
         run_or_artifact: Annotated[
             str,
@@ -3133,6 +3135,7 @@ def create_server(
             Field(ge=1, le=1_000, description="Maximum memory observations to return (1-1000)."),
         ],
         ctx: Context[AppContext],
+        query: MemoryFrameQuery = _DEFAULT_MEMORY_QUERY,
     ) -> Annotated[CallToolResult, ToolPayload[MemoryAnalysisResult]]:
         """Analyze memory-profile runs or artifacts for peak, retained-end, and
         allocation evidence."""
@@ -3143,7 +3146,7 @@ def create_server(
                 lambda snapshot: RecipeService(
                     workspace,
                     snapshot=snapshot,
-                ).memory(run_or_artifact, limit=limit),
+                ).memory(run_or_artifact, limit=limit, query=query),
                 query_name="analyze_memory",
             )
             await ctx.report_progress(1, 2, "Memory query complete")
@@ -4058,12 +4061,14 @@ def create_server(
         run_id: Annotated[str, Field(min_length=1, max_length=200)],
         idempotency_key: Annotated[str, Field(min_length=1, max_length=200)],
         ctx: Context[AppContext],
+        temporary_allocation_threshold: Annotated[StrictInt, Field(ge=0, le=1_000)] = 1,
     ) -> Annotated[CallToolResult, ToolPayload[OperationStatus]]:
         """Start durable Memray extraction; poll get_extraction with the operation ID."""
         try:
             result = await ctx.request_context.lifespan_context.extraction_service().start_memray(
                 run_id,
                 idempotency_key,
+                temporary_allocation_threshold=temporary_allocation_threshold,
             )
             return _success(
                 result,

@@ -9,7 +9,7 @@ from flameox.models import ContractModel
 from flameox.workers.protocol import WorkerDefinition, WorkerOperationId, WorkerOutputFile
 
 MEMRAY_EXTRACTOR_NAME = "memray"
-MEMRAY_EXTRACTOR_VERSION = "6"
+MEMRAY_EXTRACTOR_VERSION = "7"
 
 
 class MemrayExtractionLimits(ContractModel):
@@ -23,9 +23,11 @@ class MemrayExtractionLimits(ContractModel):
     max_output_bytes: Annotated[int, Field(gt=0, le=1 << 40)]
     wall_time_seconds: Annotated[float, Field(gt=0, le=86_400)]
     max_worker_memory_bytes: Annotated[int, Field(gt=0, le=1 << 50)]
+    temporary_allocation_threshold: Annotated[int, Field(ge=0, le=1_000)] = 1
 
 
 class MemrayMetricCoverage(ContractModel):
+    status: Literal["available"] = "available"
     records_seen: int = Field(ge=0)
     records_selected: int = Field(ge=0)
     record_bytes_seen: int = Field(ge=0)
@@ -47,9 +49,26 @@ class MemrayMetricCoverage(ContractModel):
         return self.records_seen == self.records_selected and self.dropped_stack_frames == 0
 
 
+class MemrayMetricUnavailable(ContractModel):
+    status: Literal["unavailable"] = "unavailable"
+    reason: Literal["unsupported_capture_format"] = "unsupported_capture_format"
+
+    @property
+    def complete(self) -> bool:
+        return True
+
+
+type MemrayMetricCoverageState = Annotated[
+    MemrayMetricCoverage | MemrayMetricUnavailable,
+    Field(discriminator="status"),
+]
+
+
 class MemrayExtractionCoverage(ContractModel):
     high_watermark: MemrayMetricCoverage
     retained_end: MemrayMetricCoverage
+    allocation_volume: MemrayMetricCoverageState
+    temporary: MemrayMetricCoverageState
     frames_published: int = Field(ge=0)
     aggregate_rows_published: int = Field(ge=0)
     frame_contributions_dropped: int = Field(ge=0)
@@ -69,6 +88,8 @@ class MemrayExtractionCoverage(ContractModel):
         return (
             self.high_watermark.complete
             and self.retained_end.complete
+            and self.allocation_volume.complete
+            and self.temporary.complete
             and self.frame_contributions_dropped == 0
             and self.aggregate_rows_dropped == 0
             and self.edge_rows_dropped == 0
@@ -81,6 +102,8 @@ class MemrayWorkerProgress(ContractModel):
         "computing_statistics",
         "normalizing_high_watermark",
         "normalizing_retained_end",
+        "normalizing_allocation_volume",
+        "normalizing_temporary",
         "writing_evidence",
     ]
     records_seen: int = Field(ge=0)
@@ -107,6 +130,8 @@ class MemrayWorkerResult(ContractModel):
     reader_version: str = Field(min_length=1, max_length=100)
     peak_memory_bytes: int = Field(ge=0)
     retained_end_bytes: int = Field(ge=0)
+    temporary_allocated_bytes: int | None = Field(default=None, ge=0)
+    temporary_allocation_threshold: int = Field(ge=0, le=1_000)
     allocation_operations: int | None = Field(default=None, ge=0)
     total_allocated_bytes: int | None = Field(default=None, ge=0)
     capture_records: int = Field(ge=0)

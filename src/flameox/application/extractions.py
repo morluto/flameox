@@ -45,8 +45,16 @@ class ExtractionManager:
         self.memray_factory = memray_factory
         self.runner = OperationRunner(workspace, self._OPERATION, supervisor=supervisor)
 
-    async def start_memray(self, run_id: str, idempotency_key: str) -> OperationStatus:
-        limits = memray_extraction_limits(self.workspace)
+    async def start_memray(
+        self,
+        run_id: str,
+        idempotency_key: str,
+        *,
+        temporary_allocation_threshold: int = 1,
+    ) -> OperationStatus:
+        limits = memray_extraction_limits(self.workspace).validated_copy(
+            update={"temporary_allocation_threshold": temporary_allocation_threshold}
+        )
         return await self.runner.start(
             {
                 "run_id": run_id,

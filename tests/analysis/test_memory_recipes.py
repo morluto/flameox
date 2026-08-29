@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from flameox.analysis import RecipeService
+from flameox.action_graph import ActionId, ToolAction
+from flameox.analysis import MemoryAllocationView, MemoryFrameQuery, RecipeService
 from flameox.analysis.recipe_models import (
     HotspotResult,
     MemoryAnalysisResult,
@@ -57,7 +58,7 @@ def test_memory_reports_phase_correlated_growth(tmp_path: Path) -> None:
 
     result = RecipeService(workspace).memory("memory-run")
 
-    assert result.schema_version == 2
+    assert result.query.view == "high_watermark"
     assert [
         item.value.value if item.value is not None else None for item in result.measurements
     ] == [
@@ -72,6 +73,8 @@ def test_memory_reports_phase_correlated_growth(tmp_path: Path) -> None:
     ]
     assert [point.delta for point in result.phase_growth] == [None, 140.0, 20.0]
     assert result.truncated is result.runtime_resources_truncated
+    assert result.hotspot_evidence.status == "unavailable"
+    assert result.hotspot_evidence.next_action is None
     assert result.validated_copy() == result
 
     contradictory = result.model_dump()
@@ -178,6 +181,116 @@ def test_hotspots_join_frames_within_the_measurement_artifact(tmp_path: Path) ->
     assert result.total == 1
     assert result.coverage["completely_symbolized"] == 1
     assert [(item.function, item.line) for item in result.hotspots] == [("candidate_function", 20)]
+
+
+def test_memory_filters_and_ranks_before_applying_the_bound(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    artifact_id = "sha256:" + "c" * 64
+    frames = (
+        ("framework", "importlib.py", None),
+        ("project-large", "src/app.py", "sha256:" + "d" * 64),
+        ("project-small", "src/helper.py", "sha256:" + "d" * 64),
+    )
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "runs": [run_row("memory-run")],
+            "frames": [
+                {
+                    "frame_id": frame_id,
+                    "language": "Python",
+                    "function": frame_id,
+                    "module": None,
+                    "file": file,
+                    "line": 1,
+                    "column": None,
+                    "address": None,
+                    "build_id": None,
+                    "module_relative_address": None,
+                    "inline_chain_id": None,
+                    "source_state_id": source_state_id,
+                    "artifact_id": artifact_id,
+                    "inlined": False,
+                    "symbolization": "complete",
+                }
+                for frame_id, file, source_state_id in frames
+            ],
+            "frame_measurements": [
+                {
+                    "run_id": "memory-run",
+                    "artifact_id": artifact_id,
+                    "frame_id": frame_id,
+                    "metric": metric,
+                    "self_value": value,
+                    "inclusive_value": inclusive,
+                    "unit": "bytes",
+                    "sample_count": 1,
+                    "thread_name": None,
+                    "process_name": None,
+                    "phase": None,
+                }
+                for frame_id, metric, value, inclusive in (
+                    ("framework", "memory.retained_end", 0, 10_000),
+                    ("project-large", "memory.retained_end", 200, 300),
+                    ("project-small", "memory.retained_end", 100, 150),
+                    ("project-large", "memory.allocated", 700, 800),
+                    ("project-small", "memory.temporary", 500, 500),
+                )
+            ],
+        },
+        publisher="memory-filter-fixture",
+        publisher_version="1",
+    )
+
+    project = RecipeService(workspace).memory(
+        "memory-run",
+        limit=1,
+        query=MemoryFrameQuery(view=MemoryAllocationView.RETAINED_END, project_only=True),
+    )
+
+    assert [item.frame_id for item in project.hotspots] == ["project-large"]
+    assert project.hotspot_total == 2
+    assert project.hotspots_truncated is True
+    assert project.truncated is True
+
+    temporary = RecipeService(workspace).memory(
+        "memory-run",
+        limit=10,
+        query=MemoryFrameQuery(view=MemoryAllocationView.TEMPORARY, project_only=True),
+    )
+    assert [item.frame_id for item in temporary.hotspots] == ["project-small"]
+
+    allocation_volume = RecipeService(workspace).memory(
+        "memory-run",
+        limit=10,
+        query=MemoryFrameQuery(
+            view=MemoryAllocationView.ALLOCATION_VOLUME,
+            project_only=True,
+        ),
+    )
+    assert [item.frame_id for item in allocation_volume.hotspots] == ["project-large"]
+
+    module_filtered = RecipeService(workspace).memory(
+        "memory-run",
+        limit=10,
+        query=MemoryFrameQuery(
+            view=MemoryAllocationView.RETAINED_END,
+            include_module_prefixes=("src.app", "does.not.match"),
+        ),
+    )
+    assert [item.frame_id for item in module_filtered.hotspots] == ["project-large"]
+
+    empty = RecipeService(workspace).memory(
+        "memory-run",
+        limit=10,
+        query=MemoryFrameQuery(
+            view=MemoryAllocationView.RETAINED_END,
+            include_file_prefixes=("missing/",),
+        ),
+    )
+    assert empty.hotspot_evidence.status == "empty"
+    assert isinstance(empty.hotspot_evidence.next_action, ToolAction)
+    assert empty.hotspot_evidence.next_action.action is ActionId.ANALYZE_MEMORY
+    assert empty.hotspot_evidence.next_action.arguments["query"]["include_file_prefixes"] == []
 
 
 def test_writable_root_observation_derives_availability_from_growth() -> None:

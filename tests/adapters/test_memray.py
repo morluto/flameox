@@ -19,7 +19,7 @@ from flameox.application import DrilldownService, ImportArtifactRequest, ImportS
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.evidence import GenerationPublisher
-from flameox.storage import ArtifactStore, Workspace
+from flameox.storage import ArtifactStore, GenerationManifest, Workspace
 
 pytestmark = [pytest.mark.integration, pytest.mark.optional, pytest.mark.requires_memray]
 
@@ -122,6 +122,7 @@ async def test_memray_extractor_preserves_native_capture_and_names_memory_concep
         )
     )
     progress: list[tuple[str, int, int | None]] = []
+
     async def record_progress(phase: str, completed: int, total: int | None) -> None:
         progress.append((phase, completed, total))
 
@@ -147,6 +148,8 @@ async def test_memray_extractor_preserves_native_capture_and_names_memory_concep
         "computing_statistics",
         "normalizing_high_watermark",
         "normalizing_retained_end",
+        "normalizing_allocation_volume",
+        "normalizing_temporary",
         "writing_evidence",
         "publishing_evidence",
     }
@@ -182,15 +185,19 @@ async def test_memray_extractor_preserves_native_capture_and_names_memory_concep
     ) in measurements
     assert ("memory.capture_records", result.capture_records, "count") in measurements
     assert {row[0] for row in frames} == {
+        "memory.allocated",
         "memory.high_watermark",
         "memory.retained_end",
     }
+    assert result.coverage.allocation_volume.status == "available"
+    assert result.coverage.temporary.status == "available"
+    assert result.temporary_allocation_threshold == 1
     assert edge is not None
     assert stack is not None
-    assert edge[2] in {"memory.high_watermark", "memory.retained_end"}
+    assert edge[2] in {"memory.allocated", "memory.high_watermark", "memory.retained_end"}
     assert edge[3] > 0
     assert edge[4] == "bytes"
-    assert stack[1] in {"memory.high_watermark", "memory.retained_end"}
+    assert stack[1] in {"memory.allocated", "memory.high_watermark", "memory.retained_end"}
     assert stack[2] > 0
     assert stack[3] == "bytes"
     assert stack[4][-1] == stack[0]
@@ -283,9 +290,10 @@ async def test_memray_extractor_preserves_native_capture_and_names_memory_concep
         "memory.allocated_bytes",
         "memory.allocation_operations",
         "memory.capture_records",
-        "memory.peak",
-        "memory.retained_end",
-    }
+            "memory.peak",
+            "memory.retained_end",
+            "memory.temporary",
+        }
     assert analysis.hotspots
     assert all(item.frame_id != "later-frame" for item in analysis.hotspots)
 
@@ -399,11 +407,14 @@ async def test_memray_aggregated_capture_does_not_invent_allocation_statistics(
 
     assert result.allocation_operations is None
     assert result.total_allocated_bytes is None
+    assert result.temporary_allocated_bytes is None
+    assert result.coverage.allocation_volume.status == "unavailable"
+    assert result.coverage.temporary.status == "unavailable"
     assert result.capture_records >= 1
     assert any(
-        "structured allocation statistics are unavailable" in item
-        for item in result.limitations
+        "structured allocation statistics are unavailable" in item for item in result.limitations
     )
+    assert any("temporary-allocation record stream" in item for item in result.limitations)
 
 
 @pytest.mark.anyio
@@ -449,6 +460,24 @@ async def test_memray_limits_report_bounded_coverage(
         ActionId.GET_NATIVE_VIEWER_PLAN,
         artifact_id=imported.artifact_id,
     )
+    analysis = RecipeService(workspace).memory(imported.run.run_id)
+    if not analysis.hotspots:
+        assert analysis.hotspot_evidence.status == "unavailable"
+        assert analysis.hotspot_evidence.next_action is not None
+        assert analysis.hotspot_evidence.next_action.action is ActionId.EXTRACT_MEMRAY
+    second = await extractor.extract(
+        imported.run.run_id,
+        limits=memray_extraction_limits(workspace),
+    )
+    active_generations = [
+        GenerationManifest.model_validate_json(
+            (workspace.paths.root / relative_path).read_text()
+        )
+        for relative_path in workspace.corpus.read_head().generation_manifests
+    ]
+    assert [item.generation_id for item in active_generations if item.publisher == "memray"] == [
+        second.evidence_generation_id
+    ]
     preserved = ArtifactStore(workspace).get(imported.artifact_id).payload_path
     assert capture.read_bytes() == preserved.read_bytes()
 

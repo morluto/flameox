@@ -15,6 +15,7 @@ from flameox.analysis import (
     FailureAnalysisResult,
     HotspotResult,
     MemoryAnalysisResult,
+    MemoryFrameQuery,
     PyTorchAnalysisResult,
     RecipeService,
     ScalingAnalysisResult,
@@ -74,6 +75,7 @@ class HotspotAnalysisRequest(_InputAnalysisRequest):
 
 class MemoryAnalysisRequest(_InputAnalysisRequest):
     recipe: Literal["memory"]
+    query: MemoryFrameQuery = Field(default_factory=MemoryFrameQuery)
 
 
 class ExecutionAnalysisRequest(_InputAnalysisRequest):
@@ -326,6 +328,7 @@ class AnalysisMaterializationService:
             return recipes.memory(
                 request.input_id,
                 limit=request.limit,
+                query=request.query,
             )
         if isinstance(request, ExecutionAnalysisRequest):
             return recipes.execution(

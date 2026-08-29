@@ -128,9 +128,21 @@ removed regions remain visible; analysis does not silently intersect them away.
 
 ### Memory growth
 
-Keeps allocation, retained/high-water, RSS, and other memory concepts separate.
-Series identity and chronological phase order are preserved before computing
-growth.
+Keeps allocation, retained/high-water, temporary churn, RSS, and other memory
+concepts separate. `high_watermark` attributes allocations contributing at the
+allocation peak, `retained_end` attributes allocations still live when tracking
+ended, `allocation_volume` attributes positive allocation events by stack, and
+`temporary` attributes allocations freed within the recorded Memray
+allocation-distance threshold. None of these is interchangeable with process
+peak RSS or total allocation volume. Series identity and chronological phase
+order are preserved before computing growth.
+
+Memory frame analysis can rank direct allocating-frame (`self`) bytes or
+call-stack (`inclusive`) bytes. Project scope is established by captured
+source-state identity; normalized file- and module-prefix predicates provide
+narrower or broader source selection. The exact post-filter row total and truncation state
+remain visible. An empty filtered view carries a typed broader query rather than
+being interpreted as proof that the workload made no allocations.
 
 ### Execution path
 

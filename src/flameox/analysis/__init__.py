@@ -49,6 +49,7 @@ from flameox.analysis.recipes import (
     ScalingPoint,
     ScalingTrialSummary,
 )
+from flameox.memory_query import MemoryAllocationView, MemoryFrameQuery, MemoryRanking
 
 __all__ = [
     "AcceleratorLaunchAnalysisResult",
@@ -73,8 +74,11 @@ __all__ = [
     "InferenceProtocolIdentity",
     "KernelNameCount",
     "MeasurementSummary",
+    "MemoryAllocationView",
     "MemoryAnalysisResult",
+    "MemoryFrameQuery",
     "MemoryPhaseGrowth",
+    "MemoryRanking",
     "ModelIdentity",
     "OperatorSummary",
     "OracleIdentity",

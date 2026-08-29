@@ -55,6 +55,22 @@ def _result(
             dropped_stack_frames=0,
             dropped_stack_frame_bytes=0,
         ),
+        allocation_volume=MemrayMetricCoverage(
+            records_seen=1,
+            records_selected=1,
+            record_bytes_seen=120,
+            record_bytes_selected=120,
+            dropped_stack_frames=0,
+            dropped_stack_frame_bytes=0,
+        ),
+        temporary=MemrayMetricCoverage(
+            records_seen=1,
+            records_selected=1,
+            record_bytes_seen=20,
+            record_bytes_selected=20,
+            dropped_stack_frames=0,
+            dropped_stack_frame_bytes=0,
+        ),
         frames_published=2,
         aggregate_rows_published=2,
         frame_contributions_dropped=0,
@@ -78,6 +94,8 @@ def _result(
         extractor_profile=MEMRAY_WORKER.implementation,
         peak_memory_bytes=100,
         retained_end_bytes=40,
+        temporary_allocated_bytes=20,
+        temporary_allocation_threshold=1,
         allocation_operations=3,
         total_allocated_bytes=120,
         capture_records=5,
@@ -138,6 +156,7 @@ async def test_memray_extraction_is_durable_reconnectable_and_idempotent(tmp_pat
             "max_output_bytes",
             "wall_time_seconds",
             "max_worker_memory_bytes",
+            "temporary_allocation_threshold",
         }
         replay = await manager.start_memray("run-fixture", "stable-request")
         assert replay.operation_id == started.operation_id

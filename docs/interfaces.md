@@ -304,6 +304,26 @@ artifact for deeper inspection. Large result sets and native evidence are not
 repeated in every tool response merely because an inline representation is
 possible.
 
+`analyze_memory` selects one normalized allocation view: `high_watermark`,
+`retained_end`, `allocation_volume`, or `temporary`. It ranks matching frames by `self` bytes from the
+allocating frame or by `inclusive` bytes including descendant allocations. Zero
+self-byte frames are excluded by default even for inclusive ranking; callers can
+include them explicitly. `project_only` uses preserved source-state identity,
+not a filename guess. Include and exclude filters match prefixes of the
+normalized frame file or derived module path. A frame may match any supplied
+include prefix, while any matching exclude prefix removes it. Filtering and ranking happen
+before the response limit.
+
+The result returns the effective query, the exact number of matching normalized
+frame rows as `hotspot_total`, and `hotspots_truncated` when the returned list is
+shorter. The aggregate `truncated` flag also covers the independently bounded
+runtime-resource projection. If filtering produces no frame rows,
+`hotspot_evidence` is typed `empty` with an executable `analyze_memory` action.
+That action preserves the input, limit, allocation view, and ranking while
+removing project and file-prefix restrictions and allowing zero-self frames; it
+does not silently change the completed response or claim that the broader query
+will contain evidence.
+
 An empty result and unavailable evidence are different states. Results carry
 coverage, limitation, or recovery information when the requested evidence was
 not extracted, not supported, outside the snapshot, or truncated by a budget.

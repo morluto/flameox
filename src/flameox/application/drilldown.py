@@ -138,9 +138,7 @@ class DrilldownService:
     ) -> StackExamplesResult:
         limit = self._limit(limit)
         head = self.workspace.corpus.read_head()
-        scope_digest = digest_model(
-            {"input_id": input_id, "frame_id": frame_id, "metric": metric}
-        )
+        scope_digest = digest_model({"input_id": input_id, "frame_id": frame_id, "metric": metric})
         after_weight: int | None = None
         after_metric: str | None = None
         after_unit: str | None = None
@@ -227,7 +225,12 @@ class DrilldownService:
                 )
             total = int(count_row[0])
             selected = rows[:limit]
-            recovery = self._native_viewer_recovery(snapshot, scope) if not selected else None
+            recovery = (
+                self._memory_analysis_recovery(input_id, metric, limit)
+                or self._native_viewer_recovery(snapshot, scope)
+                if not selected
+                else None
+            )
             frame_ids = {str(item) for row in selected for item in row[7]}
             frames = self._frames(snapshot, frame_ids)
             self._require_frames(frames, frame_ids)
@@ -368,10 +371,7 @@ class DrilldownService:
             base = (
                 "SELECT DISTINCT run_id, artifact_id, parent_frame_id, "
                 "child_frame_id, metric, weight_value, unit, sample_count "
-                "FROM call_edges WHERE "
-                + where
-                + f" AND {match_column} = ?"
-                + metric_where
+                "FROM call_edges WHERE " + where + f" AND {match_column} = ?" + metric_where
             )
             base_parameters = (*parameters, frame_id, *((metric,) if metric is not None else ()))
             rows = snapshot.execute(
@@ -392,7 +392,12 @@ class DrilldownService:
                 )
             total = int(count_row[0])
             selected = rows[:limit]
-            recovery = self._native_viewer_recovery(snapshot, scope) if not selected else None
+            recovery = (
+                self._memory_analysis_recovery(input_id, metric, limit)
+                or self._native_viewer_recovery(snapshot, scope)
+                if not selected
+                else None
+            )
             metadata = self._frames(
                 snapshot,
                 {str(row[0]) for row in selected},
@@ -443,6 +448,29 @@ class DrilldownService:
             ),
             recovery=recovery,
             next_cursor=next_cursor,
+        )
+
+    @staticmethod
+    def _memory_analysis_recovery(
+        input_id: str,
+        metric: str | None,
+        limit: int,
+    ) -> ToolAction | None:
+        if metric is None:
+            return None
+        view = {
+            "memory.high_watermark": "high_watermark",
+            "memory.retained_end": "retained_end",
+            "memory.allocated": "allocation_volume",
+            "memory.temporary": "temporary",
+        }.get(metric)
+        if view is None:
+            return None
+        return tool_action(
+            ActionId.ANALYZE_MEMORY,
+            run_or_artifact=input_id,
+            limit=limit,
+            query={"view": view, "ranking": "inclusive", "project_only": True},
         )
 
     @staticmethod

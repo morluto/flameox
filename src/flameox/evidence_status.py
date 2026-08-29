@@ -35,6 +35,11 @@ class EmptyEvidence(_EvidenceWithoutRecovery):
     status: Literal[EvidenceStatus.EMPTY] = EvidenceStatus.EMPTY
 
 
+class RecoverableEmptyEvidence(_EvidenceAvailability):
+    status: Literal[EvidenceStatus.EMPTY] = EvidenceStatus.EMPTY
+    next_action: ToolAction
+
+
 class PartialEvidence(_EvidenceWithoutRecovery):
     status: Literal[EvidenceStatus.PARTIAL] = EvidenceStatus.PARTIAL
 
@@ -55,6 +60,7 @@ class RecoverableUnavailableEvidence(_EvidenceAvailability):
 type EvidenceAvailability = (
     AvailableEvidence
     | EmptyEvidence
+    | RecoverableEmptyEvidence
     | PartialEvidence
     | UnknownEvidence
     | RecoverableUnavailableEvidence
@@ -76,6 +82,14 @@ def available_availability(reason: str = "evidence_present") -> EvidenceAvailabi
 
 def empty_availability(reason: str = "no_matching_evidence") -> EvidenceAvailability:
     return EmptyEvidence(reason=reason)
+
+
+def recoverable_empty_evidence(
+    reason: str,
+    *,
+    next_action: ToolAction,
+) -> EvidenceAvailability:
+    return RecoverableEmptyEvidence(reason=reason, next_action=next_action)
 
 
 def partial_availability(reason: str) -> EvidenceAvailability:

@@ -21,9 +21,11 @@ from flameox.evidence_status import (
     available_availability,
     empty_availability,
     partial_availability,
+    recoverable_empty_evidence,
     recoverable_unavailable_evidence,
     unavailable_availability,
 )
+from flameox.memory_query import MemoryFrameQuery, MemoryRanking
 
 
 class HotspotRecipes(RecipeContext):
@@ -146,10 +148,12 @@ class HotspotRecipes(RecipeContext):
         input_id: str,
         *,
         limit: int | None = None,
+        query: MemoryFrameQuery | None = None,
         corpus_commit_id: str | None = None,
     ) -> MemoryAnalysisResult:
         corpus_commit_id = self._pinned_commit_id(corpus_commit_id)
         bounded = self._limit(limit)
+        query = query or MemoryFrameQuery()
         with self._open_snapshot(corpus_commit_id) as snapshot:
             scope = resolve_evidence_scope(snapshot, input_id)
             where, parameters = scope.predicate(
@@ -160,7 +164,8 @@ class HotspotRecipes(RecipeContext):
                 "SELECT name, value_int, value_float, unit, aggregation, scope "
                 "FROM measurements WHERE "
                 + where
-                + " AND name LIKE 'memory.%' ORDER BY name LIMIT ?",
+                + " AND name LIKE 'memory.%' "
+                "AND name NOT LIKE 'memory.frame_coverage.%' ORDER BY name LIMIT ?",
                 (*parameters, bounded),
             ).fetchall()
             phase_rows = snapshot.execute(
@@ -183,13 +188,16 @@ class HotspotRecipes(RecipeContext):
             ).fetchone()
             assert profile_row is not None
             has_memory_profile = int(profile_row[0]) > 0
-            hotspot_result = HotspotRecipes(
-                self.workspace,
-                snapshot=snapshot,
-            ).hotspots(
-                input_id,
-                limit=bounded,
-                corpus_commit_id=corpus_commit_id,
+            (
+                memory_hotspots,
+                memory_hotspot_total,
+                memory_view_available,
+                memory_view_incomplete,
+            ) = self._memory_hotspots(
+                snapshot,
+                scope,
+                query,
+                bounded,
             )
             resource_rows, resource_total = self._runtime_resources(
                 snapshot,
@@ -231,9 +239,45 @@ class HotspotRecipes(RecipeContext):
                 "Runtime resource summary was not published for this evidence generation."
             )
         memory_run_id = scope.run_ids[0] if len(scope.run_ids) == 1 else None
-        memory_hotspots = tuple(
-            item for item in hotspot_result.hotspots if item.metric.startswith("memory.")
-        )
+        broadened_query = query.broadened()
+        if memory_hotspots:
+            hotspot_evidence = available_availability()
+        elif memory_view_incomplete:
+            recovery = (
+                tool_action(ActionId.GET_NATIVE_VIEWER_PLAN, artifact_id=scope.artifact_ids[0])
+                if scope.artifact_ids
+                else tool_action(
+                    ActionId.EXTRACT_MEMRAY,
+                    run_id=scope.run_ids[0],
+                    idempotency_key=digest_model(
+                        {"action": ActionId.EXTRACT_MEMRAY, "run_id": scope.run_ids[0]}
+                    ),
+                )
+            )
+            hotspot_evidence = recoverable_unavailable_evidence(
+                "memory_view_extraction_incomplete",
+                next_action=recovery,
+            )
+            limitations.append(
+                f"The selected {query.view.value} frame view was truncated during extraction."
+            )
+        elif not memory_view_available:
+            hotspot_evidence = unavailable_availability("memory_view_not_extracted")
+            limitations.append(
+                f"The selected {query.view.value} frame view is unavailable in normalized evidence."
+            )
+        elif broadened_query != query:
+            hotspot_evidence = recoverable_empty_evidence(
+                "no_matching_memory_frames",
+                next_action=tool_action(
+                    ActionId.ANALYZE_MEMORY,
+                    run_or_artifact=input_id,
+                    limit=bounded,
+                    query=broadened_query.model_dump(mode="json"),
+                ),
+            )
+        else:
+            hotspot_evidence = empty_availability("no_memory_frames_in_selected_view")
         has_runtime_evidence = bool(
             resource_rows
             or writable_rows
@@ -268,6 +312,7 @@ class HotspotRecipes(RecipeContext):
         return MemoryAnalysisResult(
             corpus_commit_id=snapshot.commit.commit_id,
             input_id=input_id,
+            query=query,
             measurements=tuple(
                 MeasurementSummary(
                     name=row[0],
@@ -283,12 +328,134 @@ class HotspotRecipes(RecipeContext):
                 for row in rows
             ),
             hotspots=memory_hotspots,
+            hotspot_total=memory_hotspot_total,
+            hotspot_evidence=hotspot_evidence,
             phase_growth=tuple(phase_growth),
             limitations=tuple(limitations),
             runtime_resources=resource_rows,
             runtime_resource_totals=resource_total,
             writable_root_observations=writable_rows,
             evidence=evidence,
+        )
+
+    @staticmethod
+    def _memory_hotspots(
+        snapshot: Snapshot,
+        scope: EvidenceScope,
+        query: MemoryFrameQuery,
+        limit: int,
+    ) -> tuple[tuple[Hotspot, ...], int, bool, bool]:
+        where, parameters = scope.predicate(
+            run_column="fm.run_id",
+            artifact_column="fm.artifact_id",
+        )
+        base_predicate = f"({where}) AND fm.metric = ?"
+        base_values = (*parameters, query.view.metric)
+        metric_count_row = snapshot.execute(
+            "SELECT count(*) FROM frame_measurements fm WHERE " + base_predicate,
+            base_values,
+        ).fetchone()
+        assert metric_count_row is not None
+        measurement_name = {
+            "high_watermark": "memory.peak",
+            "retained_end": "memory.retained_end",
+            "allocation_volume": "memory.allocated_bytes",
+            "temporary": "memory.temporary",
+        }[query.view.value]
+        measurement_where, measurement_parameters = scope.predicate(
+            run_column="m.run_id",
+            artifact_column="m.artifact_id",
+        )
+        measurement_count_row = snapshot.execute(
+            "SELECT count(*) FROM measurements m WHERE " + measurement_where + " AND m.name = ?",
+            (*measurement_parameters, measurement_name),
+        ).fetchone()
+        assert measurement_count_row is not None
+        coverage_name = f"memory.frame_coverage.{query.view.value}.complete"
+        coverage_row = snapshot.execute(
+            "SELECT count(*), min(coalesce(value_int, 0)) FROM measurements m WHERE "
+            + measurement_where
+            + " AND m.name = ?",
+            (*measurement_parameters, coverage_name),
+        ).fetchone()
+        assert coverage_row is not None
+        has_coverage = int(coverage_row[0]) > 0
+        coverage_complete = has_coverage and int(coverage_row[1]) == 1
+        predicates = [base_predicate]
+        values: list[object] = [*parameters, query.view.metric]
+        if query.project_only:
+            predicates.append("f.source_state_id IS NOT NULL")
+        if query.exclude_zero_self:
+            predicates.append("coalesce(fm.self_value, 0) > 0")
+        if query.include_file_prefixes:
+            predicates.append(
+                "("
+                + " OR ".join(
+                    "starts_with(coalesce(f.file, ''), ?)"
+                    for _prefix in query.include_file_prefixes
+                )
+                + ")"
+            )
+            values.extend(query.include_file_prefixes)
+        for prefix in query.exclude_file_prefixes:
+            predicates.append("NOT starts_with(coalesce(f.file, ''), ?)")
+            values.append(prefix)
+        module_identity = (
+            "coalesce(f.module, replace(regexp_replace(coalesce(f.file, ''), "
+            "'\\.py$', ''), '/', '.'))"
+        )
+        if query.include_module_prefixes:
+            predicates.append(
+                "("
+                + " OR ".join(
+                    f"starts_with({module_identity}, ?)"
+                    for _prefix in query.include_module_prefixes
+                )
+                + ")"
+            )
+            values.extend(query.include_module_prefixes)
+        for prefix in query.exclude_module_prefixes:
+            predicates.append(f"NOT starts_with({module_identity}, ?)")
+            values.append(prefix)
+        predicate = " AND ".join(f"({item})" for item in predicates)
+        joined = (
+            " FROM frame_measurements fm LEFT JOIN frames f "
+            "ON f.frame_id = fm.frame_id AND f.artifact_id = fm.artifact_id WHERE " + predicate
+        )
+        count_row = snapshot.execute("SELECT count(*)" + joined, tuple(values)).fetchone()
+        assert count_row is not None
+        ranking = (
+            "coalesce(fm.self_value, 0)"
+            if query.ranking is MemoryRanking.SELF
+            else "coalesce(fm.inclusive_value, fm.self_value, 0)"
+        )
+        rows = snapshot.execute(
+            "SELECT fm.frame_id, f.function, f.file, f.line, fm.metric, "
+            "fm.self_value, fm.inclusive_value, fm.unit, fm.sample_count"
+            + joined
+            + f" ORDER BY {ranking} DESC, fm.frame_id LIMIT ?",
+            (*values, limit),
+        ).fetchall()
+        return (
+            tuple(
+                Hotspot(
+                    frame_id=row[0],
+                    function=row[1],
+                    file=row[2],
+                    line=row[3],
+                    metric=row[4],
+                    self_value=row[5],
+                    inclusive_value=row[6],
+                    unit=row[7],
+                    sample_count=row[8],
+                )
+                for row in rows
+            ),
+            int(count_row[0]),
+            int(metric_count_row[0]) > 0
+            or coverage_complete
+            or (not has_coverage and int(measurement_count_row[0]) > 0),
+            has_coverage and not coverage_complete,
         )
 
     @staticmethod

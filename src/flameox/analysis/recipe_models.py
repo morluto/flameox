@@ -20,6 +20,7 @@ from flameox.evidence_status import (
     EvidenceStatus,
     available_availability,
 )
+from flameox.memory_query import MemoryFrameQuery
 from flameox.models import ContractModel
 from flameox.pagination import BoundedCollectionContract, CursorPageContract
 
@@ -70,11 +71,13 @@ class MeasurementSummary(ContractModel):
 class MemoryAnalysisResult(ContractModel):
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
-    schema_version: Literal[2] = 2
     corpus_commit_id: str
     input_id: str
+    query: MemoryFrameQuery
     measurements: tuple[MeasurementSummary, ...]
     hotspots: tuple[Hotspot, ...]
+    hotspot_total: int = Field(ge=0)
+    hotspot_evidence: EvidenceAvailability = Field(default_factory=available_availability)
     phase_growth: tuple[MemoryPhaseGrowth, ...] = ()
     limitations: tuple[str, ...]
     runtime_resources: tuple[RuntimeResourceObservation, ...] = ()
@@ -89,7 +92,14 @@ class MemoryAnalysisResult(ContractModel):
             and self.runtime_resource_totals.run_count < len(self.runtime_resources)
         ):
             raise ValueError("runtime-resource total cannot be smaller than returned resources")
+        if self.hotspot_total < len(self.hotspots):
+            raise ValueError("hotspot total cannot be smaller than returned hotspots")
         return self
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def hotspots_truncated(self) -> bool:
+        return self.hotspot_total > len(self.hotspots)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -102,7 +112,7 @@ class MemoryAnalysisResult(ContractModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def truncated(self) -> bool:
-        return self.runtime_resources_truncated
+        return self.runtime_resources_truncated or self.hotspots_truncated
 
     @computed_field  # type: ignore[prop-decorator]
     @property

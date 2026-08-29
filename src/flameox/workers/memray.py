@@ -25,6 +25,8 @@ from flameox.workers.memray_contract import (
     MemrayExtractionCoverage,
     MemrayExtractionLimits,
     MemrayMetricCoverage,
+    MemrayMetricCoverageState,
+    MemrayMetricUnavailable,
     MemrayWorkerProgress,
     MemrayWorkerRequest,
     MemrayWorkerResult,
@@ -394,6 +396,18 @@ class _AggregationState:
                 """
             )
         ]
+        selected_edges = self.connection.execute(
+            """
+            SELECT e.metric, e.parent_frame_id, e.child_frame_id,
+                   e.weight_value, e.samples
+            FROM edges AS e
+            JOIN selected_edges AS s
+              ON s.metric = e.metric
+             AND s.parent_frame_id = e.parent_frame_id
+             AND s.child_frame_id = e.child_frame_id
+            ORDER BY e.metric, e.parent_frame_id, e.child_frame_id
+            """
+        )
         edge_rows = [
             {
                 "run_id": self.run_id,
@@ -405,20 +419,16 @@ class _AggregationState:
                 "unit": "bytes",
                 "sample_count": int(samples),
             }
-            for metric, parent_frame_id, child_frame_id, weight_value, samples
-            in self.connection.execute(
-                """
-                SELECT e.metric, e.parent_frame_id, e.child_frame_id,
-                       e.weight_value, e.samples
-                FROM edges AS e
-                JOIN selected_edges AS s
-                  ON s.metric = e.metric
-                 AND s.parent_frame_id = e.parent_frame_id
-                 AND s.child_frame_id = e.child_frame_id
-                ORDER BY e.metric, e.parent_frame_id, e.child_frame_id
-                """
-            )
+            for metric, parent_frame_id, child_frame_id, weight_value, samples in selected_edges
         ]
+        selected_stacks = self.connection.execute(
+            """
+            SELECT s.stack_id, s.metric, s.frame_ids_json, s.leaf_frame_id,
+                   s.weight_value, s.samples
+            FROM stacks AS s JOIN selected_stacks AS selected USING (stack_id)
+            ORDER BY s.metric, s.stack_id
+            """
+        )
         stack_rows = [
             {
                 "stack_id": str(stack_id),
@@ -433,15 +443,14 @@ class _AggregationState:
                 "start_ns": None,
                 "track_id": None,
             }
-            for stack_id, metric, frame_ids_json, leaf_frame_id, weight_value, samples
-            in self.connection.execute(
-                """
-                SELECT s.stack_id, s.metric, s.frame_ids_json, s.leaf_frame_id,
-                       s.weight_value, s.samples
-                FROM stacks AS s JOIN selected_stacks AS selected USING (stack_id)
-                ORDER BY s.metric, s.stack_id
-                """
-            )
+            for (
+                stack_id,
+                metric,
+                frame_ids_json,
+                leaf_frame_id,
+                weight_value,
+                samples,
+            ) in selected_stacks
         ]
         referenced = {frame_id for _metric, frame_id, *_values in aggregate_rows}
         for edge in edge_rows:
@@ -449,6 +458,10 @@ class _AggregationState:
             referenced.add(cast(str, edge["child_frame_id"]))
         for stack in stack_rows:
             referenced.update(cast(tuple[str, ...], stack["frame_ids"]))
+        selected_frames = self.connection.execute(
+            "SELECT frame_id, function, file, line, source_state_id, symbolization "
+            "FROM frames ORDER BY frame_id"
+        )
         frame_rows = [
             {
                 "frame_id": str(frame_id),
@@ -467,11 +480,7 @@ class _AggregationState:
                 "inlined": False,
                 "symbolization": str(symbolization),
             }
-            for frame_id, function, file, line, source_state_id, symbolization
-            in self.connection.execute(
-                "SELECT frame_id, function, file, line, source_state_id, symbolization "
-                "FROM frames ORDER BY frame_id"
-            )
+            for frame_id, function, file, line, source_state_id, symbolization in selected_frames
             if frame_id in referenced
         ]
         return _AggregationProjection(
@@ -505,7 +514,12 @@ class _AggregationState:
 def _aggregate(
     records: Iterable[Any],
     *,
-    metric: Literal["memory.high_watermark", "memory.retained_end"],
+    metric: Literal[
+        "memory.high_watermark",
+        "memory.retained_end",
+        "memory.allocated",
+        "memory.temporary",
+    ],
     state: _AggregationState,
     progress: Callable[[MemrayWorkerProgress], None] | None = None,
 ) -> tuple[int, MemrayMetricCoverage]:
@@ -515,11 +529,20 @@ def _aggregate(
     record_bytes_selected = 0
     dropped_stack_frames = 0
     dropped_stack_frame_bytes = 0
-    phase: Literal["normalizing_high_watermark", "normalizing_retained_end"] = (
-        "normalizing_high_watermark"
-        if metric == "memory.high_watermark"
-        else "normalizing_retained_end"
-    )
+    phase: Literal[
+        "normalizing_high_watermark",
+        "normalizing_retained_end",
+        "normalizing_allocation_volume",
+        "normalizing_temporary",
+    ]
+    if metric == "memory.high_watermark":
+        phase = "normalizing_high_watermark"
+    elif metric == "memory.retained_end":
+        phase = "normalizing_retained_end"
+    elif metric == "memory.allocated":
+        phase = "normalizing_allocation_volume"
+    else:
+        phase = "normalizing_temporary"
 
     def emit_progress() -> None:
         if progress is not None:
@@ -581,6 +604,12 @@ def _aggregate(
         dropped_stack_frames=dropped_stack_frames,
         dropped_stack_frame_bytes=dropped_stack_frame_bytes,
     )
+
+
+def _coverage_progress(coverage: MemrayMetricCoverageState) -> tuple[int, int, int]:
+    if isinstance(coverage, MemrayMetricUnavailable):
+        return 0, 0, 0
+    return coverage.records_seen, coverage.records_selected, coverage.record_bytes_seen
 
 
 def _write_table(
@@ -684,6 +713,29 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
                 state=state,
                 progress=report,
             )
+            allocation_coverage: MemrayMetricCoverageState
+            try:
+                _allocated_bytes, allocation_coverage = _aggregate(
+                    (record for record in reader.get_allocation_records() if int(record.size) > 0),
+                    metric="memory.allocated",
+                    state=state,
+                    progress=report,
+                )
+            except NotImplementedError:
+                allocation_coverage = MemrayMetricUnavailable()
+            temporary_coverage: MemrayMetricCoverageState
+            try:
+                temporary_allocated, temporary_coverage = _aggregate(
+                    reader.get_temporary_allocation_records(
+                        threshold=request.limits.temporary_allocation_threshold
+                    ),
+                    metric="memory.temporary",
+                    state=state,
+                    progress=report,
+                )
+            except NotImplementedError:
+                temporary_allocated = None
+                temporary_coverage = MemrayMetricUnavailable()
             projection = state.finalize()
         finally:
             state.close()
@@ -703,6 +755,8 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
         ("memory.retained_end", retained_end, "bytes", "total"),
         ("memory.capture_records", int(metadata.total_allocations), "count", "total"),
     ]
+    if temporary_allocated is not None:
+        metrics.append(("memory.temporary", temporary_allocated, "bytes", "total"))
     if stats is not None:
         metrics.extend(
             (
@@ -743,6 +797,32 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
         }
         for name, value, unit, aggregation in metrics
     ]
+    aggregate_projection_complete = projection.aggregate_rows_dropped == 0
+    for view, coverage in (
+        ("high_watermark", high_water_coverage),
+        ("retained_end", retained_coverage),
+        ("allocation_volume", allocation_coverage),
+        ("temporary", temporary_coverage),
+    ):
+        if isinstance(coverage, MemrayMetricUnavailable):
+            continue
+        complete = coverage.complete and aggregate_projection_complete
+        measurement_rows.append(
+            {
+                **measurement_rows[0],
+                "measurement_id": digest_model(
+                    {
+                        "run_id": request.run_id,
+                        "artifact_id": request.artifact_id,
+                        "name": f"memory.frame_coverage.{view}.complete",
+                    }
+                ),
+                "name": f"memory.frame_coverage.{view}.complete",
+                "value_int": int(complete),
+                "unit": "boolean",
+                "aggregation": "status",
+            }
+        )
     frame_measurements = [
         {
             "run_id": request.run_id,
@@ -760,16 +840,28 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
         for metric, frame_id, self_value, inclusive_value, samples in projection.aggregates
     ]
     frame_rows = projection.frame_rows
+    allocation_progress = _coverage_progress(allocation_coverage)
+    temporary_progress = _coverage_progress(temporary_coverage)
     report(
         MemrayWorkerProgress(
             phase="writing_evidence",
-            records_seen=(high_water_coverage.records_seen + retained_coverage.records_seen),
+            records_seen=(
+                high_water_coverage.records_seen
+                + retained_coverage.records_seen
+                + allocation_progress[0]
+                + temporary_progress[0]
+            ),
             records_selected=(
-                high_water_coverage.records_selected + retained_coverage.records_selected
+                high_water_coverage.records_selected
+                + retained_coverage.records_selected
+                + allocation_progress[1]
+                + temporary_progress[1]
             ),
             record_bytes_seen=(
                 high_water_coverage.record_bytes_seen
                 + retained_coverage.record_bytes_seen
+                + allocation_progress[2]
+                + temporary_progress[2]
             ),
         )
     )
@@ -794,6 +886,8 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
         reader_version=importlib.metadata.version("memray"),
         peak_memory_bytes=int(metadata.peak_memory),
         retained_end_bytes=retained_end,
+        temporary_allocated_bytes=temporary_allocated,
+        temporary_allocation_threshold=request.limits.temporary_allocation_threshold,
         allocation_operations=(int(stats.total_num_allocations) if stats is not None else None),
         total_allocated_bytes=(int(stats.total_memory_allocated) if stats is not None else None),
         capture_records=int(metadata.total_allocations),
@@ -801,16 +895,14 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
         coverage=MemrayExtractionCoverage(
             high_watermark=high_water_coverage,
             retained_end=retained_coverage,
+            allocation_volume=allocation_coverage,
+            temporary=temporary_coverage,
             frames_published=len(frame_rows),
             aggregate_rows_published=len(projection.aggregates),
             frame_contributions_dropped=projection.frame_contributions_dropped,
-            frame_contribution_bytes_dropped=(
-                projection.frame_contribution_bytes_dropped
-            ),
+            frame_contribution_bytes_dropped=(projection.frame_contribution_bytes_dropped),
             aggregate_rows_dropped=projection.aggregate_rows_dropped,
-            aggregate_inclusive_bytes_dropped=(
-                projection.aggregate_inclusive_bytes_dropped
-            ),
+            aggregate_inclusive_bytes_dropped=(projection.aggregate_inclusive_bytes_dropped),
             edge_rows_published=len(projection.edge_rows),
             edge_rows_dropped=projection.edge_rows_dropped,
             edge_weight_bytes_dropped=projection.edge_weight_bytes_dropped,

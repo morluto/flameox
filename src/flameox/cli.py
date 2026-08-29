@@ -39,7 +39,7 @@ from flameox.adapters import (
     V8HeapProfExtractor,
 )
 from flameox.adapters.memray import memray_extraction_limits
-from flameox.analysis import RecipeService
+from flameox.analysis import MemoryAllocationView, MemoryFrameQuery, MemoryRanking, RecipeService
 from flameox.application import (
     AnalysisMaterializationService,
     ArtifactPipelineService,
@@ -2141,12 +2141,33 @@ def analyze_hotspots(
 def analyze_memory(
     input_id: Annotated[str, typer.Argument(help="Run or artifact identifier.")],
     limit: Annotated[int | None, typer.Option(min=1)] = None,
+    view: Annotated[MemoryAllocationView, typer.Option()] = MemoryAllocationView.HIGH_WATERMARK,
+    ranking: Annotated[MemoryRanking, typer.Option()] = MemoryRanking.SELF,
+    project_only: Annotated[bool, typer.Option()] = False,
+    include_file_prefix: Annotated[list[str] | None, typer.Option()] = None,
+    exclude_file_prefix: Annotated[list[str] | None, typer.Option()] = None,
+    include_module_prefix: Annotated[list[str] | None, typer.Option()] = None,
+    exclude_module_prefix: Annotated[list[str] | None, typer.Option()] = None,
+    include_zero_self: Annotated[bool, typer.Option()] = False,
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
     """Summarize explicit memory concepts and allocation frames."""
     try:
-        result = RecipeService(_workspace(workspace)).memory(input_id, limit=limit)
+        result = RecipeService(_workspace(workspace)).memory(
+            input_id,
+            limit=limit,
+            query=MemoryFrameQuery(
+                view=view,
+                ranking=ranking,
+                project_only=project_only,
+                include_file_prefixes=tuple(include_file_prefix or ()),
+                exclude_file_prefixes=tuple(exclude_file_prefix or ()),
+                include_module_prefixes=tuple(include_module_prefix or ()),
+                exclude_module_prefixes=tuple(exclude_module_prefix or ()),
+                exclude_zero_self=not include_zero_self,
+            ),
+        )
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -2730,6 +2751,7 @@ def extract_coverage(
 @extract_app.command("memray")
 def extract_memray(
     run_id: Annotated[str, typer.Argument(help="Import run containing Memray data.")],
+    temporary_allocation_threshold: Annotated[int, typer.Option(min=0, max=1_000)] = 1,
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
@@ -2739,7 +2761,9 @@ def extract_memray(
         result = asyncio.run(
             MemrayExtractor(selected_workspace).extract(
                 run_id,
-                limits=memray_extraction_limits(selected_workspace),
+                limits=memray_extraction_limits(selected_workspace).validated_copy(
+                    update={"temporary_allocation_threshold": temporary_allocation_threshold}
+                ),
             )
         )
     except DomainError as error:

@@ -91,6 +91,8 @@ class MemrayExtractionResult(ContractModel):
     extractor_profile: str
     peak_memory_bytes: int
     retained_end_bytes: int
+    temporary_allocated_bytes: int | None
+    temporary_allocation_threshold: int
     allocation_operations: int | None
     total_allocated_bytes: int | None
     capture_records: int
@@ -254,6 +256,7 @@ class MemrayExtractor:
                 input_run_ids=(run_id,),
                 input_artifact_ids=(registration.artifact_id,),
                 operation_digest=operation_digest,
+                supersede_matching=True,
             )
         except DomainError as error:
             if error.code not in {ErrorCode.ADAPTER_INCOMPATIBLE, ErrorCode.ARTIFACT_PARSE_FAILED}:
@@ -293,6 +296,14 @@ class MemrayExtractor:
                 "Memray structured allocation statistics are unavailable for this capture format; "
                 "only the raw capture-record count is published."
             )
+        for view, coverage in (
+            ("allocation-volume", worker.coverage.allocation_volume),
+            ("temporary-allocation", worker.coverage.temporary),
+        ):
+            if coverage.status == "unavailable":
+                limitations.append(
+                    f"The Memray capture format does not expose the {view} record stream."
+                )
         if not worker.coverage.complete:
             limitations.append(
                 "Memray normalized evidence reached an extraction limit; coverage reports the "
@@ -308,6 +319,8 @@ class MemrayExtractor:
             extractor_profile=MEMRAY_WORKER.implementation,
             peak_memory_bytes=worker.peak_memory_bytes,
             retained_end_bytes=worker.retained_end_bytes,
+            temporary_allocated_bytes=worker.temporary_allocated_bytes,
+            temporary_allocation_threshold=worker.temporary_allocation_threshold,
             allocation_operations=worker.allocation_operations,
             total_allocated_bytes=worker.total_allocated_bytes,
             capture_records=worker.capture_records,
@@ -336,8 +349,7 @@ class MemrayExtractor:
             coverage.frames_published > limits.max_frames
             or coverage.aggregate_rows_published > limits.max_aggregate_rows
             or coverage.edge_rows_published > limits.max_unique_edges
-            or coverage.representative_stacks_published
-            > limits.max_representative_stacks
+            or coverage.representative_stacks_published > limits.max_representative_stacks
             or coverage.output_bytes > limits.max_output_bytes
             or coverage.output_bytes != sum(output.byte_length for output in result.files)
         ):

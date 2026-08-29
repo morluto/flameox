@@ -203,6 +203,7 @@ class GenerationPublisher:
         input_artifact_ids: tuple[str, ...] = (),
         operation_digest: str | None = None,
         supersedes: tuple[str, ...] = (),
+        supersede_matching: bool = False,
         expected_head: str | None = None,
     ) -> PublishedGeneration:
         """Publish prepared Parquet with one async atomic-visibility state machine."""
@@ -221,6 +222,18 @@ class GenerationPublisher:
                         retryable=True,
                     )
                 published_at = utc_now()
+                effective_supersedes = set(supersedes)
+                if supersede_matching:
+                    for relative_path in initial_head.generation_manifests:
+                        manifest = GenerationManifest.model_validate_json(
+                            (self.workspace.paths.root / relative_path).read_text()
+                        )
+                        if (
+                            manifest.publisher == publisher
+                            and manifest.input_run_ids == input_run_ids
+                            and manifest.input_artifact_ids == input_artifact_ids
+                        ):
+                            effective_supersedes.add(manifest.generation_id)
                 staging_root.mkdir(parents=True, exist_ok=False)
                 prepared = prepare(staging_root, generation_id, published_at)
                 staged = await prepared if isawaitable(prepared) else prepared
@@ -234,7 +247,7 @@ class GenerationPublisher:
                     input_run_ids=input_run_ids,
                     input_artifact_ids=input_artifact_ids,
                     operation_digest=operation_digest,
-                    supersedes=supersedes,
+                    supersedes=tuple(sorted(effective_supersedes)),
                     expected_row_counts=None,
                 )
             except BaseException as error:

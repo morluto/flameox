@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import ConfigDict, Field, JsonValue, StrictInt, ValidationError, model_validator
 
+from flameox.memory_query import MemoryFrameQuery
 from flameox.models import ContractModel
 
 ARTIFACT_PREVIEW_MAX_BYTES = 64 * 1024
@@ -49,6 +50,7 @@ class ActionId(StrEnum):
     PLAN_INFERENCE_SCENARIO = "inference.scenario.plan"
     EXECUTE_REDUCTION = "reduction.execute"
     GET_REDUCTION = "reduction.status"
+    ANALYZE_MEMORY = "analysis.memory"
 
 
 class ToolName(StrEnum):
@@ -84,6 +86,7 @@ class ToolName(StrEnum):
     PLAN_INFERENCE_SCENARIO = "plan_inference_scenario"
     EXECUTE_REDUCTION = "execute_reduction"
     GET_REDUCTION = "get_reduction"
+    ANALYZE_MEMORY = "analyze_memory"
 
 
 class ActionLifecycle(StrEnum):
@@ -252,8 +255,9 @@ class _ExtractPerfettoArguments(_RunIdArguments):
     artifact_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
-class _StartExtractionArguments(_RunIdArguments):
+class _StartMemrayExtractionArguments(_RunIdArguments):
     idempotency_key: str = Field(min_length=1, max_length=200)
+    temporary_allocation_threshold: StrictInt = Field(default=1, ge=0, le=1_000)
 
 
 class _ConfigureInferenceServerArguments(ContractModel):
@@ -283,6 +287,12 @@ class _ReductionPlanArguments(ContractModel):
 
 class _ReductionIdArguments(ContractModel):
     reduction_id: str = Field(min_length=1, max_length=200)
+
+
+class _AnalyzeMemoryArguments(ContractModel):
+    run_or_artifact: str = Field(min_length=1, max_length=200)
+    limit: StrictInt = Field(ge=1, le=1_000)
+    query: MemoryFrameQuery = Field(default_factory=MemoryFrameQuery)
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,7 +479,7 @@ ACTION_REGISTRY = MappingProxyType(
             _descriptor(
                 ActionId.EXTRACT_MEMRAY,
                 ToolName.EXTRACT_MEMRAY,
-                _StartExtractionArguments,
+                _StartMemrayExtractionArguments,
                 CONFIGURE_ACTION,
                 ActionLifecycle.START,
             ),
@@ -535,6 +545,13 @@ ACTION_REGISTRY = MappingProxyType(
                 _ReductionIdArguments,
                 READ_ONLY_ACTION,
                 ActionLifecycle.STATUS,
+            ),
+            _descriptor(
+                ActionId.ANALYZE_MEMORY,
+                ToolName.ANALYZE_MEMORY,
+                _AnalyzeMemoryArguments,
+                READ_ONLY_ACTION,
+                ActionLifecycle.READ,
             ),
         )
     }

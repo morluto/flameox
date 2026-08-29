@@ -55,6 +55,10 @@ def test_recoverable_unavailable_evidence_round_trips_with_one_complete_action()
         "next_action": {
             "kind": "tool",
             "action": "artifact.extract.memray",
-            "arguments": {"run_id": "run-1", "idempotency_key": "extract-run-1"},
+                "arguments": {
+                    "run_id": "run-1",
+                    "idempotency_key": "extract-run-1",
+                    "temporary_allocation_threshold": 1,
+                },
         },
     }
