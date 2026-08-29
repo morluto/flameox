@@ -10,7 +10,7 @@ import pytest
 from flameox.adapters import PytestExtractor, PythonStartupExtractor
 from flameox.application import CaptureService, ExecutionPolicy
 from flameox.catalog import Catalog
-from flameox.domain import ArtifactKind, ExecutionStatus
+from flameox.domain import ArtifactKind, DomainError, ExecutionStatus
 from flameox.storage import ArtifactStore, Workspace
 
 pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
@@ -33,6 +33,7 @@ def _workspace_without_containment(tmp_path: Path) -> Workspace:
 @pytest.mark.anyio
 async def test_python_startup_capture_preserves_native_pyperf_and_raw_importtime(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = _workspace_without_containment(tmp_path)
     (tmp_path / "startup_target.py").write_text(
@@ -64,6 +65,7 @@ timeout_seconds = 30
     extracted = PythonStartupExtractor(workspace).extract(captured.run.run_id)
 
     assert captured.run.execution_status is ExecutionStatus.SUCCEEDED
+    assert captured.run.semantics.configuration["collector_implementation_id"]
     assert extracted.sample_count == 5
     wall_registration = next(
         item
@@ -87,11 +89,32 @@ timeout_seconds = 30
     assert executions.count("wall") == 5
     assert executions.count("import") == 1
 
+    drifted = await service.plan(
+        workload_name="startup",
+        adapter="python-startup",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    monkeypatch.setattr(
+        "flameox.application.capture.collector_implementation_id",
+        lambda _adapter: "sha256:" + "0" * 64,
+    )
+    with pytest.raises(DomainError, match="internal collector changed"):
+        await service.execute(drifted.plan_token)
+
 
 @pytest.mark.anyio
 async def test_pytest_xdist_capture_attributes_repeated_fixture_cost_and_failure_latency(
     tmp_path: Path,
 ) -> None:
+    hostile_plugin = tmp_path / "_flameox_bound_pytest_plugin.py"
+    hostile_plugin.write_text("raise RuntimeError('stale collector loaded')\n")
+    (tmp_path / "sitecustomize.py").write_text(
+        "from pathlib import Path\n"
+        "for candidate in Path('.diagnostics').rglob('_flameox_bound_pytest_*.py'):\n"
+        "    Path('collector-mutated.txt').write_text(str(candidate))\n"
+        "    candidate.chmod(0o600)\n"
+        "    candidate.write_text(\"raise RuntimeError('collector mutated')\\n\")\n"
+    )
     workspace = _workspace_without_containment(tmp_path)
     (tmp_path / "test_example.py").write_text(
         "import time\n"
@@ -124,9 +147,11 @@ timeout_seconds = 30
     extracted = PytestExtractor(workspace).extract(captured.run.run_id)
 
     assert captured.run.execution_status is ExecutionStatus.FAILED
+    assert captured.run.semantics.configuration["collector_implementation_id"]
     assert extracted.complete is True
     assert extracted.failed_count == 1
     assert extracted.fixture_setup_count >= 2
+    assert not (tmp_path / "collector-mutated.txt").exists()
     assert extracted.fixture_setup_ns >= 20_000_000
     assert extracted.first_failure_observed_ns is not None
     assert extracted.first_failure_reported_ns is not None

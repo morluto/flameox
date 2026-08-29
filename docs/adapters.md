@@ -36,6 +36,14 @@ Passive discovery reports candidates. It is not execution authorization.
 Planning binds the selected candidate through `ExecutableResolver` under the
 same contract used by execution.
 
+Internal workload-side collectors execute authorization-bound source directly,
+never `python -m flameox.collectors...` from the workload environment or a
+mutable staged launcher. Their content identity is part of the reviewed plan
+and durable run semantics and is rechecked before execution. The workload
+interpreter still owns workload packages such as pyperf, pytest, and
+pytest-reportlog; an absent or older workload-side Flameox package cannot
+replace collector code.
+
 Capture and extraction results may project a bounded subset of these run
 semantics alongside status, limitations, and artifact references. The projection
 is for immediate interpretation; the run remains authoritative after the result

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -60,6 +61,7 @@ class CaptureInvocation:
     expected_overhead: str
     limitations: tuple[str, ...]
     environment: dict[str, str]
+    implementation_id: str | None = None
 
 
 def node_version_is_supported(value: str | None) -> bool:
@@ -560,6 +562,7 @@ def build_capture_invocation(  # noqa: C901 - provider routing is intentionally 
         )
     output = str(output_root / adapter.output_filename)
     environment: dict[str, str] = {}
+    implementation_id: str | None = None
     limitations = adapter.capture_limitations
     if adapter_name == "command":
         argv = workload_argv
@@ -703,10 +706,11 @@ def build_capture_invocation(  # noqa: C901 - provider routing is intentionally 
         )
     elif adapter_name == "python-startup":
         python, _ = _python_target(workload_argv)
+        launcher, implementation_id = _collector_source(adapter_name)
         argv = (
             python,
-            "-m",
-            "flameox.collectors.python_startup",
+            "-c",
+            launcher,
             "--benchmark-output",
             str(output_root / PYTHON_STARTUP_PROFILE.wall_output_name),
             "--import-trace-output",
@@ -717,10 +721,11 @@ def build_capture_invocation(  # noqa: C901 - provider routing is intentionally 
             *workload_argv,
         )
     elif adapter_name == "pytest":
+        launcher, implementation_id = _collector_source(adapter_name)
         argv = (
             _python_executable_for_launcher(workload_argv),
-            "-m",
-            "flameox.collectors.pytest_launcher",
+            "-c",
+            launcher,
             "--output",
             output,
             "--",
@@ -737,6 +742,7 @@ def build_capture_invocation(  # noqa: C901 - provider routing is intentionally 
         expected_overhead=adapter.expected_overhead,
         limitations=limitations,
         environment=environment,
+        implementation_id=implementation_id,
     )
 
 
@@ -1322,3 +1328,36 @@ def _python_executable_for_launcher(workload_argv: tuple[str, ...]) -> str:
 def _launcher_path(name: str) -> str:
     """Return a standalone launcher path usable by an unrelated workload venv."""
     return str((Path(__file__).parent.parent / "collectors" / name).resolve())
+
+
+_COLLECTOR_FILES = {
+    "python-startup": ("python_startup.py",),
+    "pytest": (
+        "pytest_launcher.py",
+        "pytest_plugin.py",
+    ),
+}
+
+
+def collector_implementation_id(adapter: str) -> str | None:
+    files = _COLLECTOR_FILES.get(adapter)
+    if files is None:
+        return None
+    digest = hashlib.sha256()
+    for name in files:
+        digest.update(name.encode())
+        digest.update(b"\x00")
+        digest.update(Path(_launcher_path(name)).read_bytes())
+        digest.update(b"\x00")
+    return "sha256:" + digest.hexdigest()
+
+
+def _collector_source(adapter: str) -> tuple[str, str]:
+    launcher_name = _COLLECTOR_FILES[adapter][0]
+    launcher = Path(_launcher_path(launcher_name)).read_text(encoding="utf-8")
+    if adapter == "pytest":
+        plugin = Path(_launcher_path("pytest_plugin.py")).read_text(encoding="utf-8")
+        launcher = launcher.replace('"__FLAMEOX_PLUGIN_SOURCE__"', repr(plugin))
+    implementation_id = collector_implementation_id(adapter)
+    assert implementation_id is not None
+    return launcher, implementation_id

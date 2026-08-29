@@ -27,6 +27,7 @@ from flameox.adapters.builtins import (
     AdapterDependencyKind,
     build_capture_invocation,
     builtin_adapter,
+    collector_implementation_id,
     node_version_is_supported,
     replace_compute_sanitizer_suppression,
 )
@@ -269,6 +270,7 @@ class _AdapterBinding:
     version: str | None
     execution_plan: AdapterExecutionPlan | None = None
     package_identity: str | None = None
+    implementation_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -764,6 +766,15 @@ class CaptureService:
         )
         adapter_version = adapter_binding.version
         semantics = build_run_semantics(adapter, adapter_version, bound_adapter_options)
+        if adapter_binding.implementation_id is not None:
+            semantics = semantics.validated_copy(
+                update={
+                    "configuration": {
+                        **semantics.configuration,
+                        "collector_implementation_id": adapter_binding.implementation_id,
+                    }
+                }
+            )
         use_containment = execution_policy is not ExecutionPolicy.TRUSTED_LOCAL
         containment, network_contained, systemd_scope_unit, collector_argv = await self._contain(
             collector_argv,
@@ -878,6 +889,7 @@ class CaptureService:
                 "execution_policy": execution_policy.value,
                 "collector_argv": collector_argv,
                 "collector_executable_binding": collector_executable_binding,
+                "collector_implementation_id": adapter_binding.implementation_id,
                 "collector_environment": collector_environment,
                 "oracle_argv": oracle_argv,
                 "oracle_executable_binding": oracle_executable_binding,
@@ -3030,6 +3042,7 @@ class CaptureService:
                 ),
                 permissions=adapter_definition.permissions,
                 version=version,
+                implementation_id=invocation.implementation_id,
             )
 
         registry = AdapterRegistry(self.workspace)
@@ -3313,6 +3326,16 @@ class CaptureService:
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "Capture plan contents changed after authorization.",
+            )
+        try:
+            observed_collector_id = collector_implementation_id(plan.adapter)
+        except OSError:
+            observed_collector_id = None
+        if plan.collector_implementation_id != observed_collector_id:
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "The active internal collector changed after planning.",
+                remediation=("Create and review a new capture plan.",),
             )
         if plan.adapter_capability is not None and plan.adapter_capability.probe_kind == "active":
             current_capability = await self.capabilities.probe(plan.adapter, refresh=True)

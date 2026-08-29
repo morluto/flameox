@@ -1159,6 +1159,7 @@ class _CapturePlan(ContractModel):
     adapter_execution_plan: dict[str, JsonValue] | None = None
     collector_argv: tuple[str, ...]
     collector_executable_binding: ResolvedExecutable
+    collector_implementation_id: Digest | None = None
     oracle_argv: tuple[str, ...] | None = None
     oracle_executable_binding: ResolvedExecutable | None = None
     oracle_launch_executable_binding: ResolvedExecutable | None = None

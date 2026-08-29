@@ -34,6 +34,10 @@ def test_python_startup_invocation_uses_declared_workload_timeout(tmp_path: Path
     )
 
     timeout_index = invocation.argv.index("--timeout-seconds")
+    assert invocation.argv[1] == "-c"
+    assert "def main()" in invocation.argv[2]
+    assert "flameox.collectors.python_startup" not in invocation.argv
+    assert invocation.implementation_id is not None
     assert invocation.argv[timeout_index + 1] == "7.5"
     assert invocation.argv[invocation.argv.index("--benchmark-output") + 1] == str(
         tmp_path / "startup-wall.pyperf.json"
@@ -55,6 +59,20 @@ def test_pytest_capture_plan_rejects_non_pytest_workload(tmp_path: Path) -> None
 
     assert failure.value.code is ErrorCode.INVALID_CAPTURE_PLAN
     assert "pytest" in failure.value.message
+
+
+def test_pytest_capture_uses_the_active_source_bound_launcher(tmp_path: Path) -> None:
+    invocation = build_capture_invocation(
+        "pytest",
+        (sys.executable, "-m", "pytest", "-q"),
+        tmp_path,
+        executable=None,
+    )
+
+    assert invocation.argv[1] == "-c"
+    assert "_flameox_bound_pytest_" in invocation.argv[2]
+    assert "flameox.collectors.pytest_launcher" not in invocation.argv
+    assert invocation.implementation_id is not None
 
 
 def test_torch_capture_launcher_does_not_require_flameox_in_workload_venv(

@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import signal
+import subprocess
 import sys
-import time
 from pathlib import Path
-
-from flameox.atomic import atomic_write_bytes
-from flameox.command_binding import ExecutableResolver
-from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
-from flameox.startup_profile import PYTHON_STARTUP_PROFILE
 
 
 def _handle_termination(signum: int, _frame: object) -> None:
@@ -33,40 +29,24 @@ def _arguments() -> argparse.Namespace:
     return arguments
 
 
-def _execute(command: tuple[str, ...], *, timeout_seconds: float) -> ExecutionOutcome:
-    cwd = Path.cwd().resolve()
-    return SubprocessBroker().run_sync(
-        ExecutionRequest(
-            argv=command,
-            executable_binding=ExecutableResolver().require_host_tool(command[0], cwd=cwd),
-            cwd=cwd,
-            allowed_working_roots=(cwd,),
-            environment_allowlist=tuple(os.environ),
-            timeout_seconds=timeout_seconds,
-        )
+def _execute(
+    command: tuple[str, ...],
+    *,
+    stdout: int | None = None,
+    stderr: int | None = None,
+) -> int:
+    process = subprocess.Popen(
+        command,
+        cwd=Path.cwd(),
+        env=os.environ.copy(),
+        stdout=stdout,
+        stderr=stderr,
     )
+    return process.wait()
 
 
-def _exit_code(outcome: ExecutionOutcome) -> int:
-    if outcome.process.exit_code is not None:
-        return outcome.process.exit_code
-    if outcome.process.terminating_signal is not None:
-        return 128 + outcome.process.terminating_signal
-    raise RuntimeError("child process did not report an exit status")
-
-
-def _replay(outcome: ExecutionOutcome) -> None:
-    if outcome.stdout:
-        sys.stdout.buffer.write(outcome.stdout)
-    if outcome.stderr:
-        sys.stderr.buffer.write(outcome.stderr)
-
-
-def _remaining(deadline: float) -> float:
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        raise TimeoutError("Python startup capture exhausted its operation deadline")
-    return remaining
+def _exit_code(returncode: int) -> int:
+    return returncode if returncode >= 0 else 128 - returncode
 
 
 def main() -> int:
@@ -77,36 +57,49 @@ def main() -> int:
     if not Path(workload[0]).name.startswith("python"):
         raise SystemExit("python-startup requires a Python script or module workload")
 
-    deadline = time.monotonic() + arguments.timeout_seconds
     benchmark = _execute(
-        PYTHON_STARTUP_PROFILE.pyperf_argv(
-            python=sys.executable,
-            output=arguments.benchmark_output,
-            timeout_seconds=arguments.timeout_seconds,
-            workload=workload,
+        (
+            sys.executable,
+            "-m",
+            "pyperf",
+            "command",
+            "--output",
+            str(arguments.benchmark_output),
+            "--processes",
+            "5",
+            "--values",
+            "1",
+            "--loops",
+            "1",
+            "--warmups",
+            "0",
+            "--timeout",
+            str(math.ceil(arguments.timeout_seconds)),
+            "--copy-env",
+            "--name",
+            "flameox.python_startup.wall_time",
+            "--",
+            *workload,
         ),
-        timeout_seconds=_remaining(deadline),
     )
-    _replay(benchmark)
     benchmark_exit = _exit_code(benchmark)
     if benchmark_exit:
         # pyperf intentionally suppresses command output. Reproduce a failure once as
         # explicitly non-measured diagnostic evidence for the outer broker to preserve.
-        diagnostic = _execute(workload, timeout_seconds=_remaining(deadline))
-        _replay(diagnostic)
+        _execute(workload)
         return benchmark_exit
 
     import_command = (workload[0], "-X", "importtime", *workload[1:])
-    import_trace = _execute(import_command, timeout_seconds=_remaining(deadline))
-    atomic_write_bytes(arguments.import_trace_output, import_trace.stderr)
-    if import_trace.stdout:
-        sys.stdout.buffer.write(import_trace.stdout)
-    non_import_stderr = b"\n".join(
-        line for line in import_trace.stderr.splitlines() if not line.startswith(b"import time:")
-    )
-    if non_import_stderr:
-        sys.stderr.buffer.write(non_import_stderr + b"\n")
-    return _exit_code(import_trace)
+    with arguments.import_trace_output.open("wb") as trace_stream:
+        import_returncode = _execute(
+            import_command,
+            stderr=trace_stream.fileno(),
+        )
+    with arguments.import_trace_output.open("rb") as trace_stream:
+        for line in trace_stream:
+            if not line.startswith(b"import time:"):
+                sys.stderr.buffer.write(line)
+    return _exit_code(import_returncode)
 
 
 if __name__ == "__main__":
