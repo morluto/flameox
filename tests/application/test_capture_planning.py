@@ -85,6 +85,31 @@ class _PathReportingNvccProbeBroker(SubprocessBroker):
         )
 
 
+@pytest.mark.anyio
+async def test_memray_plan_binds_the_profiled_workload_interpreter(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    workload_python = tmp_path / "workload-env" / "bin" / "python"
+    workload_python.parent.mkdir(parents=True)
+    workload_python.write_text('#!/bin/sh\nprintf \'{"memray":"1.20.0"}\\n\'\n')
+    workload_python.chmod(0o755)
+    (tmp_path / "flameox.toml").write_text(
+        f"""
+schema_version = 1
+[workloads.profile]
+argv = ["{workload_python}", "workload.py", "--size", "4"]
+"""
+    )
+
+    plan = await CaptureService(workspace).plan(
+        workload_name="profile",
+        adapter="memray",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    assert plan.collector_argv[:3] == (str(workload_python), "-m", "memray")
+    assert plan.collector_argv[-3:] == ("workload.py", "--size", "4")
+
+
 def test_current_workload_definition_is_active_and_bound_to_plans(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     write_workload(tmp_path)
