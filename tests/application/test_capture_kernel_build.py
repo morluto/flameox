@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 from flameox.application import (
     ArtifactPipeline,
@@ -15,6 +16,7 @@ from flameox.application import (
     CaptureService,
     ExecutionPolicy,
 )
+from flameox.cli import app
 from flameox.domain import (
     ArtifactKind,
     CapabilityReport,
@@ -221,6 +223,75 @@ async def test_triton_compiler_capture_emits_manifest_with_native_artifacts(
         assert declaration["sha256"] == hashlib.sha256(payload).hexdigest()
     ttir_stage = next(stage for stage in manifest["stages"] if stage["name"] == "ttir")
     assert ttir_stage["format_schema"] == "triton-ttir"
+
+
+def test_cli_capture_show_and_compare_uses_returned_pipeline_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    script = tmp_path / "compile.py"
+    _dump_script(script)
+    _write_workload(tmp_path, script=str(script))
+    disable_containment(workspace)
+    monkeypatch.setattr(
+        "flameox.cli.CaptureService",
+        lambda selected: CaptureService(
+            selected,
+            capabilities=_VersionedCompilerCapabilities(selected),
+        ),
+    )
+    runner = CliRunner()
+    capture_args = [
+        "capture",
+        "run",
+        "triton.compiler",
+        "--workload",
+        "compile",
+        "--workspace",
+        str(workspace.paths.root),
+        "--json",
+    ]
+
+    baseline = runner.invoke(app, capture_args)
+    candidate = runner.invoke(app, capture_args)
+
+    assert baseline.exit_code == 0, baseline.output
+    assert candidate.exit_code == 0, candidate.output
+    baseline_payload = json.loads(baseline.stdout)
+    candidate_payload = json.loads(candidate.stdout)
+    baseline_pipeline_id = baseline_payload["pipeline_ids"][0]
+    candidate_pipeline_id = candidate_payload["pipeline_ids"][0]
+    shown = runner.invoke(
+        app,
+        [
+            "pipelines",
+            "show",
+            baseline_pipeline_id,
+            "--workspace",
+            str(workspace.paths.root),
+            "--json",
+        ],
+    )
+    compared = runner.invoke(
+        app,
+        [
+            "pipelines",
+            "compare",
+            baseline_payload["run"]["run_id"],
+            candidate_payload["run"]["run_id"],
+            "--workspace",
+            str(workspace.paths.root),
+            "--json",
+        ],
+    )
+
+    assert shown.exit_code == 0, shown.output
+    assert compared.exit_code == 0, compared.output
+    assert json.loads(shown.stdout)["compatible_pipeline_ids"] == [candidate_pipeline_id]
+    comparison = json.loads(compared.stdout)
+    assert comparison["baseline_pipeline_id"] == baseline_pipeline_id
+    assert comparison["candidate_pipeline_id"] == candidate_pipeline_id
 
 
 @pytest.mark.anyio
