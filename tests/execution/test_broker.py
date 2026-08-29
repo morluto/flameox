@@ -18,7 +18,13 @@ import pytest
 
 from flameox.command_binding import ExecutableResolver
 from flameox.domain import DomainError, ErrorCode
-from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
+from flameox.execution import (
+    ExecutionRequest,
+    ProcessCancelledError,
+    ProcessExecutionError,
+    ResourcePolicy,
+    SubprocessBroker,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
 
@@ -45,6 +51,38 @@ def _process_is_alive(pid: int) -> bool:
         return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
     except psutil.Error:
         return False
+
+
+@pytest.mark.anyio
+async def test_cancellation_preserves_raw_output_without_waiting_for_inherited_pipes(
+    tmp_path: Path,
+) -> None:
+    child_pid_path = tmp_path / "child.pid"
+    code = (
+        "import pathlib, subprocess, sys, time; "
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+        "sys.stdout.buffer.write(b'\\xffbefore cancel'); sys.stdout.flush(); time.sleep(60)"
+    )
+    task = asyncio.create_task(
+        SubprocessBroker().run(request(tmp_path, "-c", code, str(child_pid_path)))
+    )
+    for _ in range(100):
+        if child_pid_path.exists():
+            break
+        await asyncio.sleep(0.01)
+    child_pid = int(child_pid_path.read_text())
+
+    task.cancel()
+    try:
+        with pytest.raises(ProcessCancelledError) as cancelled:
+            await asyncio.wait_for(task, timeout=2)
+        assert cancelled.value.stdout == b"\xffbefore cancel"
+        assert cancelled.value.process.cleanup_complete is True
+        assert not _process_is_alive(child_pid)
+    finally:
+        if _process_is_alive(child_pid):
+            os.kill(child_pid, signal.SIGKILL)
 
 
 @pytest.mark.anyio
@@ -284,7 +322,7 @@ def test_observed_run_preserves_streams_exit_status_and_peak_rss(tmp_path: Path)
 
 
 def test_observed_output_budget_terminates_the_process(tmp_path: Path) -> None:
-    with pytest.raises(DomainError) as error:
+    with pytest.raises(ProcessExecutionError) as error:
         SubprocessBroker().run_sync(
             request(
                 tmp_path,
@@ -299,6 +337,8 @@ def test_observed_output_budget_terminates_the_process(tmp_path: Path) -> None:
     assert isinstance(error.value.details["process"], dict)
     assert error.value.details["process"]["cancellation_cause"] == "output_limit"
     assert error.value.details["process_observations"]
+    assert error.value.stdout == b"x" * 1_000
+    assert error.value.stderr == b""
 
 
 def test_observed_output_budget_stops_a_burst_before_it_completes(tmp_path: Path) -> None:

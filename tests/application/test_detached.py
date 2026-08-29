@@ -21,7 +21,7 @@ from flameox.application import (
 )
 from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode, ExecutionStatus, digest_model
-from flameox.storage import Workspace
+from flameox.storage import ArtifactStore, RunStore, Workspace
 
 pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
 
@@ -341,6 +341,9 @@ async def test_detached_output_limit_failure_remains_inspectable(tmp_path: Path)
     assert status.execution_status is ExecutionStatus.FAILED
     assert status.failure_code == ErrorCode.QUERY_BUDGET_EXCEEDED.value
     assert "output exceeded" in (status.failure_message or "").lower()
+    run = RunStore(workspace).read(plan.run_id)
+    stdout = next(item for item in run.artifacts if item.role == "stdout")
+    assert ArtifactStore(workspace).get(stdout.artifact_id).payload_path.read_bytes() == b"x" * 100
 
 
 @pytest.mark.anyio

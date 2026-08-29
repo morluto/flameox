@@ -137,6 +137,7 @@ from flameox.evidence import GenerationPublisher
 from flameox.execution import (
     ExecutionOutcome,
     ExecutionRequest,
+    ProcessCancelledError,
     ProcessContainment,
     ProcessExecutionError,
     ProcessObservation,
@@ -290,6 +291,10 @@ class _CaptureExecution:
         message: str,
         phase: str,
         cleanup_complete: bool | None = None,
+        process: ProcessResult | None = None,
+        process_observations: tuple[ProcessObservation, ...] = (),
+        stdout: bytes | None = None,
+        stderr: bytes | None = None,
     ) -> None:
         """Persist cancellation without allowing finalization failures to mask it."""
 
@@ -301,6 +306,10 @@ class _CaptureExecution:
                     phase=phase,
                     error_code="cancelled",
                     cleanup_complete=cleanup_complete,
+                    process=process,
+                    process_observations=process_observations,
+                    stdout=stdout,
+                    stderr=stderr,
                 )
             )
         except Exception as terminate_error:
@@ -319,6 +328,8 @@ class _CaptureExecution:
         cleanup_complete: bool | None = None,
         process: ProcessResult | None = None,
         process_observations: tuple[ProcessObservation, ...] = (),
+        stdout: bytes | None = None,
+        stderr: bytes | None = None,
         limitation_details: tuple[LimitationDetail, ...] = (),
         artifacts: tuple[ArtifactRegistration, ...] = (),
     ) -> RunManifest:
@@ -335,6 +346,43 @@ class _CaptureExecution:
         )
         current = self.run
         snapshot_rows: tuple[list[dict[str, object]], list[dict[str, object]]] = ([], [])
+        if process is not None:
+            for name, payload, role in (
+                (
+                    "stdout.bin",
+                    stdout if stdout is not None else (process.stdout or "").encode(),
+                    "stdout",
+                ),
+                (
+                    "stderr.bin",
+                    stderr if stderr is not None else (process.stderr or "").encode(),
+                    "stderr",
+                ),
+            ):
+                if not payload:
+                    continue
+                try:
+                    path = self.output_root / name
+                    atomic_write_bytes(path, payload)
+                    registration, _ = await self.service._register_path_async(
+                        self.plan.run_id,
+                        path,
+                        kind=ArtifactKind.PROCESS_OUTPUT,
+                        role=role,
+                        media_type="application/octet-stream",
+                        producer=self.plan.adapter,
+                        producer_version=self.plan.adapter_version,
+                    )
+                    artifacts = (*artifacts, registration)
+                except (DomainError, OSError) as output_error:
+                    limitation_details = (
+                        *limitation_details,
+                        _limitation(
+                            LimitationSource.COLLECTOR,
+                            "process_output_unavailable",
+                            f"Bounded {role} could not be retained: {output_error}",
+                        ),
+                    )
         try:
             snapshot_path = self.output_root / "process-snapshot.json"
             snapshot_path.write_text(
@@ -1122,13 +1170,21 @@ class CaptureService:
             capture.cleanup_complete = outcome.process.cleanup_complete
             StorageQuota(self.workspace).require_capacity(staging=True)
             await capture.report(5, "Collector execution complete")
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
+            process = error.process if isinstance(error, ProcessCancelledError) else None
+            process_observations = (
+                error.process_observations if isinstance(error, ProcessCancelledError) else ()
+            )
             await capture.terminate_cancelled(
                 message="Capture cancelled by caller after bounded cleanup.",
                 phase="capture cancelled during collector execution",
                 cleanup_complete=(
                     capture.cleanup_complete if capture.cleanup_complete is not None else True
                 ),
+                process=process,
+                process_observations=process_observations,
+                stdout=error.stdout if isinstance(error, ProcessCancelledError) else None,
+                stderr=error.stderr if isinstance(error, ProcessCancelledError) else None,
             )
             raise
         except DomainError as error:
@@ -1160,8 +1216,16 @@ class CaptureService:
             ):
                 outcome = ExecutionOutcome(
                     process=partial_process,
-                    stdout=(partial_process.stdout or "").encode(),
-                    stderr=(partial_process.stderr or "").encode(),
+                    stdout=(
+                        error.stdout
+                        if isinstance(error, ProcessExecutionError) and error.stdout is not None
+                        else (partial_process.stdout or "").encode()
+                    ),
+                    stderr=(
+                        error.stderr
+                        if isinstance(error, ProcessExecutionError) and error.stderr is not None
+                        else (partial_process.stderr or "").encode()
+                    ),
                     resolved_executable=Path(plan.collector_argv[0]).resolve(),
                     executable_binding=plan.collector_executable_binding,
                     containment=(
@@ -1258,6 +1322,8 @@ class CaptureService:
                     error_code=error.code.value,
                     process=partial_process,
                     process_observations=process_observations,
+                    stdout=(error.stdout if isinstance(error, ProcessExecutionError) else None),
+                    stderr=(error.stderr if isinstance(error, ProcessExecutionError) else None),
                     limitation_details=tuple(
                         [
                             _limitation(

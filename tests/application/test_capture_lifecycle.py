@@ -417,7 +417,7 @@ async def test_capture_cancellation_leaves_terminal_run_revision(
         """
 schema_version = 1
 [workloads.wait]
-argv = ["python", "-c", "import time; time.sleep(10)"]
+argv = ["python", "-c", "import os,time;os.write(1,bytes([255])+b'x');time.sleep(10)"]
 cwd = "."
 timeout_seconds = 30
 """
@@ -446,6 +446,7 @@ timeout_seconds = 30
 
     task = asyncio.create_task(service.execute(plan.plan_token, progress=record_progress))
     await asyncio.wait_for(collector_started.wait(), timeout=5)
+    await asyncio.sleep(0.2)
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
@@ -457,6 +458,15 @@ timeout_seconds = 30
     assert terminal.capture_status is CaptureStatus.CANCELLED
     assert terminal.finished_at is not None
     assert terminal.external_context == context
+    stdout = next(item for item in terminal.artifacts if item.role == "stdout")
+    assert ArtifactStore(workspace).get(stdout.artifact_id).payload_path.read_bytes() == (b"\xffx")
+    with Catalog(workspace).open_snapshot() as snapshot:
+        registered = snapshot.execute(
+            "SELECT artifact_id FROM artifact_registrations "
+            "WHERE run_id = ? AND kind = 'process_output' AND role = 'stdout'",
+            (terminal.run_id,),
+        ).fetchall()
+    assert registered == [(stdout.artifact_id,)]
 
 
 @pytest.mark.anyio

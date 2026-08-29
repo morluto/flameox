@@ -260,10 +260,14 @@ class ProcessExecutionError(DomainError):
         *,
         process: ProcessResult,
         process_observations: tuple[ProcessObservation, ...],
+        stdout: bytes | None = None,
+        stderr: bytes | None = None,
         retryable: bool = False,
     ) -> None:
         self.process = process
         self.process_observations = process_observations
+        self.stdout = stdout
+        self.stderr = stderr
         super().__init__(
             code,
             message,
@@ -275,6 +279,24 @@ class ProcessExecutionError(DomainError):
             },
             retryable=retryable,
         )
+
+
+class ProcessCancelledError(asyncio.CancelledError):
+    """Cancellation carrying bounded evidence collected before process cleanup."""
+
+    def __init__(
+        self,
+        *,
+        process: ProcessResult,
+        process_observations: tuple[ProcessObservation, ...],
+        stdout: bytes,
+        stderr: bytes,
+    ) -> None:
+        super().__init__("process execution cancelled")
+        self.process = process
+        self.process_observations = process_observations
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 class _OutputLimitExceeded(Exception):
@@ -580,9 +602,15 @@ class SubprocessBroker:
         assert process.stderr is not None
 
         output_budget = _OutputBudget(request.max_output_bytes)
+        stdout_buffer = bytearray()
+        stderr_buffer = bytearray()
         tracked_descendants: dict[int, float | None] = {}
-        stdout_task = asyncio.create_task(self._read_bounded(process.stdout, output_budget))
-        stderr_task = asyncio.create_task(self._read_bounded(process.stderr, output_budget))
+        stdout_task = asyncio.create_task(
+            self._read_bounded(process.stdout, output_budget, output=stdout_buffer)
+        )
+        stderr_task = asyncio.create_task(
+            self._read_bounded(process.stderr, output_budget, output=stderr_buffer)
+        )
         resource_task = asyncio.create_task(
             self._observe_resources(process, request.resource_policy, tracked_descendants)
         )
@@ -628,10 +656,8 @@ class SubprocessBroker:
                 on_cleanup,
                 tracked_descendants,
             )
-            partial_stdout, partial_stderr = await self._collect_readers(
-                stdout_task,
-                stderr_task,
-            )
+            await self._settle_readers(stdout_task, stderr_task)
+            partial_stdout, partial_stderr = bytes(stdout_buffer), bytes(stderr_buffer)
             if request.resource_policy is None:
                 await self._settle_resource(resource_task)
                 resources = None
@@ -653,6 +679,8 @@ class SubprocessBroker:
                 f"Process exceeded {request.timeout_seconds} seconds.",
                 process=timeout_process,
                 process_observations=tuple(process_observations),
+                stdout=partial_stdout,
+                stderr=partial_stderr,
                 retryable=True,
             ) from exc
         except _OutputLimitExceeded as exc:
@@ -664,6 +692,7 @@ class SubprocessBroker:
                 tracked_descendants,
             )
             await self._settle_readers(stdout_task, stderr_task)
+            partial_stdout, partial_stderr = bytes(stdout_buffer), bytes(stderr_buffer)
             await self._settle_resource(resource_task)
             await self._settle_task(stdin_task)
             output_process = ProcessResult(
@@ -671,12 +700,16 @@ class SubprocessBroker:
                 wall_time_ns=time.monotonic_ns() - started,
                 cancellation_cause=ProcessCancellationCause.OUTPUT_LIMIT,
                 cleanup_complete=cleanup_complete,
+                stdout=partial_stdout.decode(errors="replace"),
+                stderr=partial_stderr.decode(errors="replace"),
             )
             raise ProcessExecutionError(
                 ErrorCode.QUERY_BUDGET_EXCEEDED,
                 f"Process output exceeded {request.max_output_bytes} bytes.",
                 process=output_process,
                 process_observations=tuple(process_observations),
+                stdout=partial_stdout,
+                stderr=partial_stderr,
             ) from exc
         except _ResourcePolicyExceeded as exc:
             cleanup_complete = await self._terminate_with_observation(
@@ -686,10 +719,8 @@ class SubprocessBroker:
                 on_cleanup,
                 tracked_descendants,
             )
-            partial_stdout, partial_stderr = await self._collect_readers(
-                stdout_task,
-                stderr_task,
-            )
+            await self._settle_readers(stdout_task, stderr_task)
+            partial_stdout, partial_stderr = bytes(stdout_buffer), bytes(stderr_buffer)
             await self._settle_task(stdin_task)
             storage_cause = exc.cause in {
                 ProcessCancellationCause.STORAGE_RESERVE_EXCEEDED,
@@ -718,6 +749,8 @@ class SubprocessBroker:
                 message,
                 process=policy_process,
                 process_observations=tuple(process_observations),
+                stdout=partial_stdout,
+                stderr=partial_stderr,
             ) from exc
         except asyncio.CancelledError:
             cleanup_complete = await self._terminate_with_observation(
@@ -728,9 +761,24 @@ class SubprocessBroker:
                 tracked_descendants,
             )
             await self._settle_readers(stdout_task, stderr_task)
-            await self._settle_resource(resource_task)
+            partial_stdout, partial_stderr = bytes(stdout_buffer), bytes(stderr_buffer)
+            resources = await self._collect_resource(resource_task)
             await self._settle_task(stdin_task)
-            raise
+            raise ProcessCancelledError(
+                process=ProcessResult(
+                    termination=process_termination_from_returncode(process.returncode),
+                    wall_time_ns=time.monotonic_ns() - started,
+                    cancellation_cause=ProcessCancellationCause.CALLER_CANCELLED,
+                    cleanup_complete=cleanup_complete,
+                    peak_rss_bytes=resources.peak_rss_bytes if resources is not None else None,
+                    resources=resources,
+                    stdout=partial_stdout.decode(errors="replace"),
+                    stderr=partial_stderr.decode(errors="replace"),
+                ),
+                process_observations=tuple(process_observations),
+                stdout=partial_stdout,
+                stderr=partial_stderr,
+            ) from None
         except BaseException:
             await self._terminate_with_observation(
                 process,
@@ -1168,12 +1216,16 @@ class SubprocessBroker:
                 wall_time_ns=finished - started,
                 cancellation_cause=ProcessCancellationCause.OUTPUT_LIMIT,
                 cleanup_complete=cleanup_complete,
+                stdout=stdout.decode(errors="replace"),
+                stderr=stderr.decode(errors="replace"),
             )
             raise ProcessExecutionError(
                 ErrorCode.QUERY_BUDGET_EXCEEDED,
                 f"Process output exceeded {request.max_output_bytes} bytes.",
                 process=output_process,
                 process_observations=tuple(process_observations),
+                stdout=stdout,
+                stderr=stderr,
             )
         if observed.cancellation_cause is ProcessCancellationCause.TIMEOUT:
             timeout_process = ProcessResult(
@@ -1594,9 +1646,12 @@ class SubprocessBroker:
         budget: _OutputBudget,
         *,
         drain_on_limit: bool = False,
+        output: bytearray | None = None,
     ) -> bytes:
-        output = bytearray()
+        output = output if output is not None else bytearray()
         while chunk := await stream.read(64 * 1024):
+            retained = min(len(chunk), max(budget.remaining, 0))
+            output.extend(chunk[:retained])
             try:
                 budget.consume(len(chunk))
             except _OutputLimitExceeded:
@@ -1605,7 +1660,6 @@ class SubprocessBroker:
                 while await stream.read(64 * 1024):
                     pass
                 break
-            output.extend(chunk)
         return bytes(output)
 
     async def _terminate(
