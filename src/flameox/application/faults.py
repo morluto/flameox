@@ -133,6 +133,12 @@ def _format_endpoint(host: str, port: int) -> str:
     return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
 
+def _proxy_name(plan_id: Digest, trial_index: int) -> str:
+    """Derive a Toxiproxy-safe name from an algorithm-qualified plan digest."""
+    digest = plan_id.partition(":")[2]
+    return f"flameox-{digest[:12]}-{trial_index:04d}"
+
+
 def _scenario_attributes(scenario: FaultScenario) -> dict[str, int]:
     if isinstance(scenario, LatencyFault):
         return {"latency": scenario.latency_ms, "jitter": scenario.jitter_ms}
@@ -433,7 +439,7 @@ class FaultExperimentService:
             sidecar_ids: tuple[str, ...] = ()
             cancellation: asyncio.CancelledError | None = None
             try:
-                proxy_name = f"flameox-{plan.plan_id[:12]}-{index:04d}"
+                proxy_name = _proxy_name(plan.plan_id, index)
                 active_lease, admin_port, listen_port = await self._start_sidecar(
                     receipt.executable,
                     receipt,

@@ -304,6 +304,7 @@ latency_ms = 10
         tool_manager=tool_manager,
     )
     leases: list[_FakeLease] = []
+    proxy_names: list[str] = []
 
     async def fake_start(
         executable: Path,
@@ -311,6 +312,7 @@ latency_ms = 10
         plan: object,
         proxy_name: str,
     ) -> tuple[_FakeLease, int, int]:
+        proxy_names.append(proxy_name)
         lease = _FakeLease()
         leases.append(lease)
         return lease, 48000 + len(leases), upstream.server_port
@@ -331,6 +333,9 @@ latency_ms = 10
     assert len(result.trials) == 2
     assert all(trial.run_id is not None for trial in result.trials)
     assert len(leases) == 2
+    assert len(set(proxy_names)) == 2
+    assert all(name.startswith("flameox-") and ":" not in name for name in proxy_names)
+    assert all(len(name) <= 100 for name in proxy_names)
     assert result.treatment_order is None
     assert result.block_treatment_orders == tuple(
         block.order for block in plan.experiment_plan.blocks
