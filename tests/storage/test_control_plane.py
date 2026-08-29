@@ -15,7 +15,7 @@ from flameox.storage import (
     RetentionIntentStore,
     Workspace,
 )
-from flameox.storage.control_plane import ControlPlane, ControlRelationship
+from flameox.storage.control_plane import ControlPlane
 
 pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
@@ -116,92 +116,74 @@ def test_plan_capability_is_not_stored_inside_authorized_intent(tmp_path: Path) 
     assert plans.inspect(intent.plan_token) == intent
 
 
-def test_control_plane_refuses_unknown_future_schema(tmp_path: Path) -> None:
+def test_control_plane_uses_one_durable_format_sentinel(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     with sqlite3.connect(workspace.paths.control_plane) as connection:
-        connection.execute(
-            "UPDATE control_plane_metadata SET value = '999' WHERE key = 'schema_version'"
-        )
+        assert connection.execute("SELECT format FROM control_plane_format").fetchall() == [
+            (ControlPlane.FORMAT,)
+        ]
+
+
+def test_control_plane_refuses_an_incompatible_durable_format(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    with sqlite3.connect(workspace.paths.control_plane) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute("UPDATE control_plane_format SET format = 'other.control-plane'")
 
     with pytest.raises(DomainError) as error:
         ControlPlane(workspace).initialize()
 
     assert error.value.code is ErrorCode.WORKSPACE_INVALID
+    assert error.value.details == {
+        "required_format": ControlPlane.FORMAT,
+        "stored_format": "other.control-plane",
+    }
 
 
-def test_control_plane_refuses_older_schema_instead_of_migrating_it(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    with sqlite3.connect(workspace.paths.control_plane) as connection:
-        connection.execute(
-            "UPDATE control_plane_metadata SET value = '1' WHERE key = 'schema_version'"
-        )
-
-    with pytest.raises(DomainError) as error:
-        ControlPlane(workspace).initialize()
-
-    assert error.value.code is ErrorCode.WORKSPACE_INVALID
-
-
-def test_control_plane_migrates_v2_relationships_without_guessing_history(
+def test_control_plane_rejects_preexisting_tables_without_the_current_sentinel(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    control = ControlPlane(workspace)
-    control.create_record(
-        kind="findings",
-        record_id="finding-1",
-        revision=1,
-        payload_json='{"revision":1}',
-        relationships=(
-            ControlRelationship(
-                relationship="supports",
-                target_kind="analysis",
-                target_id="analysis-1",
-            ),
-        ),
-    )
     with sqlite3.connect(workspace.paths.control_plane) as connection:
         connection.executescript(
             """
-            DROP TABLE record_revision_relationships;
-            DROP TABLE record_revision_relationship_sets;
-            ALTER TABLE relationships RENAME TO relationships_v3;
-            CREATE TABLE relationships (
-                source_kind TEXT NOT NULL,
-                source_id TEXT NOT NULL,
-                relationship TEXT NOT NULL,
-                target_kind TEXT NOT NULL,
-                target_id TEXT NOT NULL,
-                payload_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (source_kind, source_id, relationship, target_kind, target_id)
-            ) STRICT;
-            INSERT INTO relationships(
-                source_kind, source_id, relationship, target_kind, target_id,
-                payload_json, created_at
-            )
-            SELECT source_kind, source_id, relationship, target_kind, target_id,
-                   payload_json, created_at
-            FROM relationships_v3;
-            DROP TABLE relationships_v3;
-            UPDATE control_plane_metadata SET value = '2' WHERE key = 'schema_version';
+            DROP TABLE control_plane_format;
+            CREATE TABLE control_plane_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+            INSERT INTO control_plane_metadata(key, value) VALUES('schema_version', '5');
             """
         )
 
-    ControlPlane(workspace).initialize()
+    with pytest.raises(DomainError) as error:
+        ControlPlane(workspace).initialize()
 
-    current = control.list_relationships(
-        source_kind="findings",
-        source_id="finding-1",
-    )
-    assert current[0].ownership_quality == "legacy_current_only"
-    with pytest.raises(DomainError) as ambiguous:
-        control.list_revision_relationships(
-            source_kind="findings",
-            source_id="finding-1",
-            source_revision=1,
-        )
-    assert ambiguous.value.details["ownership_quality"] == "legacy_current_only"
+    assert error.value.code is ErrorCode.WORKSPACE_INVALID
+    assert error.value.details == {"required_format": ControlPlane.FORMAT}
+
+
+def test_control_plane_has_no_table_local_version_or_legacy_ownership_columns(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    with sqlite3.connect(workspace.paths.control_plane) as connection:
+        table_columns = {
+            table: {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+            for table in (
+                "cursors",
+                "projection_intents",
+                "relationships",
+                "record_revision_relationships",
+                "record_revision_relationship_sets",
+            )
+        }
+
+    assert "schema_version" not in table_columns["cursors"]
+    assert "projection_schema_version" not in table_columns["projection_intents"]
+    for columns in (
+        table_columns["relationships"],
+        table_columns["record_revision_relationships"],
+        table_columns["record_revision_relationship_sets"],
+    ):
+        assert "ownership_quality" not in columns
 
 
 def test_retention_intent_durably_bridges_snapshot_to_materialization(tmp_path: Path) -> None:

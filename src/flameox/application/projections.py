@@ -31,7 +31,6 @@ from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, ProjectionIntentStore, RunStore, Workspace
 
 RUN_PROJECTION_KIND = "run.core"
-RUN_PROJECTION_SCHEMA_VERSION = 1
 RUN_PROJECTION_PUBLISHER = "flameox.run_projection"
 RUN_PROJECTION_PUBLISHER_VERSION = "1"
 _RUN_PROJECTION_BASE_TABLES = ("runs", "artifact_registrations")
@@ -60,7 +59,6 @@ class ProjectionReconciliationResult(ContractModel):
     inspected: int
     published: int
     failed: int
-    already_terminal: int
     deferred: int = 0
     intent_ids: tuple[str, ...]
 
@@ -188,7 +186,6 @@ class ProjectionCoordinator:
             domain_id=run.run_id,
             domain_revision=run.revision,
             projection_kind=RUN_PROJECTION_KIND,
-            projection_schema_version=RUN_PROJECTION_SCHEMA_VERSION,
         )
         operation_identity = {"projection_intent_id": intent_id}
         return ProjectionIntentSpec(
@@ -199,7 +196,6 @@ class ProjectionCoordinator:
             domain_revision=run.revision,
             domain_digest=digest_model(run.model_dump(mode="json")),
             projection_kind=RUN_PROJECTION_KIND,
-            projection_schema_version=RUN_PROJECTION_SCHEMA_VERSION,
             publisher=RUN_PROJECTION_PUBLISHER,
             publisher_version=RUN_PROJECTION_PUBLISHER_VERSION,
             input_run_ids=(run.run_id,),
@@ -245,7 +241,6 @@ class ProjectionCoordinator:
         published = 0
         failed = 0
         deferred = 0
-        already_terminal = 0
         intent_ids: list[str] = []
         for candidate in candidates:
             intent_ids.append(candidate.intent_id)
@@ -265,7 +260,6 @@ class ProjectionCoordinator:
             published=published,
             failed=failed,
             deferred=deferred,
-            already_terminal=already_terminal,
             intent_ids=tuple(intent_ids),
         )
 

@@ -29,7 +29,6 @@ from flameox.workers.otlp_contract import OTLP_WORKER, OtlpWorkerRequest, OtlpWo
 class OtlpExtractionResult(ContractModel):
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
-    schema_version: int = 1
     run_id: str
     artifact_id: str
     evidence_generation_id: str | None = None
@@ -194,7 +193,6 @@ class OtlpTraceService:
             domain_id=registration.registration_id,
             domain_revision=run.revision,
             projection_kind="extract.otlp",
-            projection_schema_version=1,
         )
         operation_identity = {"projection_intent_id": intent_id}
         intent = self.projections.stage(
@@ -211,7 +209,6 @@ class OtlpTraceService:
                     }
                 ),
                 projection_kind="extract.otlp",
-                projection_schema_version=1,
                 publisher="flameox.otlp",
                 publisher_version=self.extractor_version,
                 input_run_ids=(run_id,),

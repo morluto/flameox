@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import Field, JsonValue, StringConstraints, model_validator
 
@@ -24,7 +24,6 @@ class ProjectionState(StrEnum):
 class ProjectionIntentSpec(ContractModel):
     """Immutable identity and replay recipe for one domain projection."""
 
-    schema_version: Literal[1] = 1
     intent_id: str
     workspace_id: str
     domain_kind: ProjectionName
@@ -32,7 +31,6 @@ class ProjectionIntentSpec(ContractModel):
     domain_revision: Annotated[int, Field(ge=0)]
     domain_digest: str
     projection_kind: ProjectionName
-    projection_schema_version: Annotated[int, Field(ge=1)]
     publisher: ProjectionName
     publisher_version: Annotated[str, StringConstraints(min_length=1, max_length=100)]
     input_run_ids: Annotated[tuple[str, ...], Field(max_length=100)] = ()
@@ -49,7 +47,6 @@ class ProjectionIntentSpec(ContractModel):
             domain_id=self.domain_id,
             domain_revision=self.domain_revision,
             projection_kind=self.projection_kind,
-            projection_schema_version=self.projection_schema_version,
         )
         if self.intent_id != expected:
             raise ValueError("projection intent id must match its domain projection identity")
@@ -95,7 +92,6 @@ def projection_intent_id(
     domain_id: str,
     domain_revision: int,
     projection_kind: str,
-    projection_schema_version: int,
 ) -> str:
     return digest_model(
         {
@@ -104,6 +100,5 @@ def projection_intent_id(
             "domain_id": domain_id,
             "domain_revision": domain_revision,
             "projection_kind": projection_kind,
-            "projection_schema_version": projection_schema_version,
         }
     )

@@ -28,7 +28,6 @@ class CursorStore:
 
     MAX_ENCODED_LENGTH = 64
     MAX_POSITION_BYTES = 2_048
-    SCHEMA_VERSION = 1
 
     def __init__(
         self,
@@ -176,7 +175,6 @@ class CursorStore:
         observed_at = self._clock()
         if (
             record is None
-            or record.schema_version != self.SCHEMA_VERSION
             or record.revoked_at is not None
             or record.created_at >= record.expires_at
             or record.expires_at <= observed_at

@@ -16,8 +16,6 @@ from flameox.domain.projections import ProjectionIntent, ProjectionIntentSpec, P
 if TYPE_CHECKING:
     from flameox.storage.workspace import Workspace
 
-type RelationshipOwnershipQuality = Literal["exact", "legacy_current_only"]
-
 
 @dataclass(frozen=True, slots=True)
 class ControlRelationship:
@@ -25,12 +23,10 @@ class ControlRelationship:
     target_kind: str
     target_id: str
     payload_json: str = "{}"
-    ownership_quality: RelationshipOwnershipQuality = "exact"
 
 
 @dataclass(frozen=True, slots=True)
 class CursorControlRecord:
-    schema_version: int
     workspace_id: str
     namespace: str
     snapshot_id: str
@@ -43,9 +39,8 @@ class CursorControlRecord:
 
 _SCHEMA = (
     """
-    CREATE TABLE IF NOT EXISTS control_plane_metadata (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
+    CREATE TABLE control_plane_format (
+        format TEXT PRIMARY KEY CHECK (format = 'flameox.control-plane')
     ) STRICT
     """,
     """
@@ -66,7 +61,6 @@ _SCHEMA = (
     """
     CREATE TABLE IF NOT EXISTS cursors (
         cursor_digest TEXT PRIMARY KEY,
-        schema_version INTEGER NOT NULL CHECK (schema_version = 1),
         workspace_id TEXT NOT NULL,
         namespace TEXT NOT NULL,
         snapshot_id TEXT NOT NULL,
@@ -180,7 +174,6 @@ _SCHEMA = (
         domain_revision INTEGER NOT NULL CHECK (domain_revision >= 0),
         domain_digest TEXT NOT NULL,
         projection_kind TEXT NOT NULL,
-        projection_schema_version INTEGER NOT NULL CHECK (projection_schema_version >= 1),
         operation_digest TEXT NOT NULL UNIQUE,
         spec_json TEXT NOT NULL,
         state TEXT NOT NULL CHECK (state IN ('pending', 'published', 'failed')),
@@ -192,7 +185,7 @@ _SCHEMA = (
         updated_at TEXT NOT NULL,
         UNIQUE (
             domain_kind, domain_id, domain_revision,
-            projection_kind, projection_schema_version
+            projection_kind
         ),
         CHECK (
             (state = 'pending' AND generation_id IS NULL AND corpus_commit_id IS NULL
@@ -244,8 +237,6 @@ _SCHEMA = (
         target_kind TEXT NOT NULL,
         target_id TEXT NOT NULL,
         payload_json TEXT NOT NULL DEFAULT '{}',
-        ownership_quality TEXT NOT NULL DEFAULT 'exact'
-            CHECK (ownership_quality IN ('exact', 'legacy_current_only')),
         created_at TEXT NOT NULL,
         PRIMARY KEY (source_kind, source_id, relationship, target_kind, target_id)
     ) STRICT
@@ -259,8 +250,6 @@ _SCHEMA = (
         target_kind TEXT NOT NULL,
         target_id TEXT NOT NULL,
         payload_json TEXT NOT NULL DEFAULT '{}',
-        ownership_quality TEXT NOT NULL
-            CHECK (ownership_quality IN ('exact', 'legacy_current_only')),
         created_at TEXT NOT NULL,
         PRIMARY KEY (
             source_kind, source_id, source_revision, relationship, target_kind, target_id
@@ -274,8 +263,6 @@ _SCHEMA = (
         source_kind TEXT NOT NULL,
         source_id TEXT NOT NULL,
         source_revision INTEGER NOT NULL CHECK (source_revision >= 0),
-        ownership_quality TEXT NOT NULL
-            CHECK (ownership_quality IN ('exact', 'legacy_current_only')),
         created_at TEXT NOT NULL,
         PRIMARY KEY (source_kind, source_id, source_revision),
         FOREIGN KEY (source_kind, source_id, source_revision)
@@ -288,7 +275,7 @@ _SCHEMA = (
 class ControlPlane:
     """The transactional authority for mutable workspace control state."""
 
-    SCHEMA_VERSION = 5
+    FORMAT = "flameox.control-plane"
     MAX_OPERATION_REVISIONS = 64
     MAX_PROJECTION_SPEC_BYTES = 256 * 1024
 
@@ -301,30 +288,18 @@ class ControlPlane:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("BEGIN IMMEDIATE")
             try:
-                current_version = self._current_schema_version(connection)
-                if current_version not in {0, 2, 3, 4, self.SCHEMA_VERSION}:
-                    raise DomainError(
-                        ErrorCode.WORKSPACE_INVALID,
-                        "The SQLite control plane uses an incompatible schema. Create a new "
-                        "workspace for this redesigned control plane.",
-                        details={
-                            "stored_schema_version": current_version,
-                            "supported_schema_version": self.SCHEMA_VERSION,
-                        },
+                stored_format = self._stored_format(connection)
+                if stored_format is None:
+                    if self._has_user_tables(connection):
+                        self._raise_incompatible_format(stored_format)
+                    for statement in _SCHEMA:
+                        connection.execute(statement)
+                    connection.execute(
+                        "INSERT INTO control_plane_format(format) VALUES (?)",
+                        (self.FORMAT,),
                     )
-                if current_version == 2:
-                    self._prepare_v2_relationship_migration(connection)
-                for statement in _SCHEMA:
-                    connection.execute(statement)
-                if current_version == 2:
-                    self._backfill_v2_relationships(connection)
-                connection.execute(
-                    """
-                    INSERT INTO control_plane_metadata(key, value) VALUES('schema_version', ?)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                    """,
-                    (str(self.SCHEMA_VERSION),),
-                )
+                elif stored_format != self.FORMAT:
+                    self._raise_incompatible_format(stored_format)
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -333,72 +308,44 @@ class ControlPlane:
             os.chmod(self.path, 0o600)
 
     @staticmethod
-    def _prepare_v2_relationship_migration(connection: sqlite3.Connection) -> None:
-        columns = {
-            str(row[1]) for row in connection.execute("PRAGMA table_info(relationships)").fetchall()
-        }
-        if "ownership_quality" not in columns:
+    def _has_user_tables(connection: sqlite3.Connection) -> bool:
+        return (
             connection.execute(
-                "ALTER TABLE relationships ADD COLUMN ownership_quality TEXT NOT NULL "
-                "DEFAULT 'legacy_current_only' CHECK (ownership_quality IN "
-                "('exact', 'legacy_current_only'))"
-            )
-
-    @staticmethod
-    def _backfill_v2_relationships(connection: sqlite3.Connection) -> None:
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO record_revision_relationship_sets(
-                source_kind, source_id, source_revision, ownership_quality, created_at
-            )
-            SELECT kind, record_id, current_revision, 'legacy_current_only', updated_at
-            FROM records
-            WHERE current_revision IS NOT NULL
-            """
-        )
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO record_revision_relationships(
-                source_kind, source_id, source_revision, relationship, target_kind,
-                target_id, payload_json, ownership_quality, created_at
-            )
-            SELECT r.source_kind, r.source_id, records.current_revision, r.relationship,
-                   r.target_kind, r.target_id, r.payload_json, 'legacy_current_only', r.created_at
-            FROM relationships AS r
-            JOIN records
-              ON records.kind = r.source_kind AND records.record_id = r.source_id
-            WHERE records.current_revision IS NOT NULL
-            """
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                LIMIT 1
+                """
+            ).fetchone()
+            is not None
         )
 
-    @staticmethod
-    def _current_schema_version(connection: sqlite3.Connection) -> int:
-        metadata_exists = connection.execute(
+    @classmethod
+    def _stored_format(cls, connection: sqlite3.Connection) -> str | None:
+        table_exists = connection.execute(
             """
             SELECT 1 FROM sqlite_master
-            WHERE type = 'table' AND name = 'control_plane_metadata'
+            WHERE type = 'table' AND name = 'control_plane_format'
             """
         ).fetchone()
-        if metadata_exists is None:
-            return 0
-        row = connection.execute(
-            "SELECT value FROM control_plane_metadata WHERE key = 'schema_version'"
-        ).fetchone()
-        if row is None:
-            return 0
-        try:
-            version = int(row[0])
-        except (TypeError, ValueError) as exc:
-            raise DomainError(
-                ErrorCode.WORKSPACE_INVALID,
-                "The SQLite control-plane schema version is invalid.",
-            ) from exc
-        if version < 1:
-            raise DomainError(
-                ErrorCode.WORKSPACE_INVALID,
-                "The SQLite control-plane schema version is invalid.",
-            )
-        return version
+        if table_exists is None:
+            return None
+        rows = connection.execute("SELECT format FROM control_plane_format").fetchall()
+        if len(rows) != 1:
+            cls._raise_incompatible_format(None)
+        return str(rows[0][0])
+
+    @classmethod
+    def _raise_incompatible_format(cls, stored_format: str | None) -> None:
+        details = {"required_format": cls.FORMAT}
+        if stored_format is not None:
+            details["stored_format"] = stored_format
+        raise DomainError(
+            ErrorCode.WORKSPACE_INVALID,
+            "The SQLite control plane has an incompatible durable format. Create a new "
+            "workspace; Flameox does not migrate control-plane files.",
+            details=details,
+        )
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -513,9 +460,9 @@ class ControlPlane:
                 connection.execute(
                     """
                     INSERT INTO cursors(
-                        cursor_digest, schema_version, workspace_id, namespace,
+                        cursor_digest, workspace_id, namespace,
                         snapshot_id, scope_digest, position_json, created_at, expires_at
-                    ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         cursor_digest,
@@ -544,7 +491,7 @@ class ControlPlane:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT schema_version, workspace_id, namespace, snapshot_id, scope_digest,
+                SELECT workspace_id, namespace, snapshot_id, scope_digest,
                        position_json, created_at, expires_at, revoked_at
                 FROM cursors
                 WHERE cursor_digest = ? AND workspace_id = ?
@@ -554,7 +501,6 @@ class ControlPlane:
         if row is None:
             return None
         return CursorControlRecord(
-            schema_version=int(row["schema_version"]),
             workspace_id=str(row["workspace_id"]),
             namespace=str(row["namespace"]),
             snapshot_id=str(row["snapshot_id"]),
@@ -683,7 +629,7 @@ class ControlPlane:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT relationship, target_kind, target_id, payload_json, ownership_quality
+                SELECT relationship, target_kind, target_id, payload_json
                 FROM relationships
                 WHERE source_kind = ? AND source_id = ?
                 ORDER BY relationship, target_kind, target_id
@@ -696,10 +642,6 @@ class ControlPlane:
                 target_kind=str(row["target_kind"]),
                 target_id=str(row["target_id"]),
                 payload_json=str(row["payload_json"]),
-                ownership_quality=cast(
-                    RelationshipOwnershipQuality,
-                    str(row["ownership_quality"]),
-                ),
             )
             for row in rows
         )
@@ -712,14 +654,14 @@ class ControlPlane:
         source_revision: int,
     ) -> tuple[ControlRelationship, ...]:
         with self._connect() as connection:
-            ownership = connection.execute(
+            relationship_set = connection.execute(
                 """
-                SELECT ownership_quality FROM record_revision_relationship_sets
+                SELECT 1 FROM record_revision_relationship_sets
                 WHERE source_kind = ? AND source_id = ? AND source_revision = ?
                 """,
                 (source_kind, source_id, source_revision),
             ).fetchone()
-            if ownership is None:
+            if relationship_set is None:
                 raise DomainError(
                     ErrorCode.WORKSPACE_INVALID,
                     "The requested record revision has no exact relationship-set authority.",
@@ -727,23 +669,11 @@ class ControlPlane:
                         "source_kind": source_kind,
                         "source_id": source_id,
                         "source_revision": source_revision,
-                        "ownership_quality": "unknown",
-                    },
-                )
-            if str(ownership["ownership_quality"]) != "exact":
-                raise DomainError(
-                    ErrorCode.WORKSPACE_INVALID,
-                    "Legacy relationships cannot be assigned to an exact historical revision.",
-                    details={
-                        "source_kind": source_kind,
-                        "source_id": source_id,
-                        "source_revision": source_revision,
-                        "ownership_quality": str(ownership["ownership_quality"]),
                     },
                 )
             rows = connection.execute(
                 """
-                SELECT relationship, target_kind, target_id, payload_json, ownership_quality
+                SELECT relationship, target_kind, target_id, payload_json
                 FROM record_revision_relationships
                 WHERE source_kind = ? AND source_id = ? AND source_revision = ?
                 ORDER BY relationship, target_kind, target_id
@@ -756,10 +686,6 @@ class ControlPlane:
                 target_kind=str(row["target_kind"]),
                 target_id=str(row["target_id"]),
                 payload_json=str(row["payload_json"]),
-                ownership_quality=cast(
-                    RelationshipOwnershipQuality,
-                    str(row["ownership_quality"]),
-                ),
             )
             for row in rows
         )
@@ -1436,8 +1362,8 @@ class ControlPlane:
             """
             INSERT INTO relationships(
                 source_kind, source_id, relationship, target_kind, target_id,
-                payload_json, ownership_quality, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 'exact', ?)
+                payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 (
@@ -1456,8 +1382,8 @@ class ControlPlane:
             connection.execute(
                 """
                 INSERT INTO record_revision_relationship_sets(
-                    source_kind, source_id, source_revision, ownership_quality, created_at
-                ) VALUES (?, ?, ?, 'exact', ?)
+                    source_kind, source_id, source_revision, created_at
+                ) VALUES (?, ?, ?, ?)
                 """,
                 (source_kind, source_id, source_revision, observed_at),
             )
@@ -1465,8 +1391,8 @@ class ControlPlane:
                 """
                 INSERT INTO record_revision_relationships(
                     source_kind, source_id, source_revision, relationship, target_kind,
-                    target_id, payload_json, ownership_quality, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'exact', ?)
+                    target_id, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     (
@@ -1519,9 +1445,9 @@ class ControlPlane:
                 """
                 INSERT INTO projection_intents(
                     intent_id, domain_kind, domain_id, domain_revision, domain_digest,
-                    projection_kind, projection_schema_version, operation_digest, spec_json,
+                    projection_kind, operation_digest, spec_json,
                     state, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
                 """,
                 (
                     spec.intent_id,
@@ -1530,7 +1456,6 @@ class ControlPlane:
                     spec.domain_revision,
                     spec.domain_digest,
                     spec.projection_kind,
-                    spec.projection_schema_version,
                     spec.operation_digest,
                     spec_json,
                     observed_at,
@@ -1543,7 +1468,7 @@ class ControlPlane:
                 SELECT spec_json FROM projection_intents
                 WHERE intent_id = ? OR operation_digest = ? OR (
                     domain_kind = ? AND domain_id = ? AND domain_revision = ?
-                    AND projection_kind = ? AND projection_schema_version = ?
+                    AND projection_kind = ?
                 )
                 LIMIT 1
                 """,
@@ -1554,7 +1479,6 @@ class ControlPlane:
                     spec.domain_id,
                     spec.domain_revision,
                     spec.projection_kind,
-                    spec.projection_schema_version,
                 ),
             ).fetchone()
             if row is not None and str(row["spec_json"]) == spec_json:

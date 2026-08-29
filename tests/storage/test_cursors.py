@@ -53,7 +53,9 @@ def test_cursor_is_an_opaque_workspace_scoped_handle(tmp_path: Path) -> None:
     assert "run-1" not in token
     with sqlite3.connect(first_workspace.paths.control_plane) as connection:
         row = connection.execute("SELECT cursor_digest, position_json FROM cursors").fetchone()
+        columns = {item[1] for item in connection.execute("PRAGMA table_info(cursors)")}
     assert row is not None
+    assert "schema_version" not in columns
     assert row[0] != token
     assert json.loads(row[1]) == ["2026-01-01T00:00:00+00:00", "run-1"]
     assert first.resolve(
