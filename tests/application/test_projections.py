@@ -13,17 +13,20 @@ from flameox.application.run_projection import (
 )
 from flameox.catalog import Catalog
 from flameox.domain import (
+    ArtifactKind,
+    ArtifactRegistration,
     CaptureStatus,
     EnvironmentRecord,
     ExecutionStatus,
     IdentityQuality,
     ProjectionState,
     RunSemantics,
+    Sensitivity,
     ValidationStatus,
     digest_model,
 )
 from flameox.domain.models import ImportRunManifest
-from flameox.storage import ProjectionIntentStore, RunStore, Workspace
+from flameox.storage import ArtifactStore, ProjectionIntentStore, RunStore, Workspace
 from flameox.storage.control_plane import ControlPlane
 
 pytestmark = pytest.mark.integration
@@ -90,7 +93,29 @@ def test_run_revision_and_projection_intent_commit_atomically(
 def test_crash_after_domain_commit_replays_exact_run_projection(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     environment = _environment()
-    run = _run("domain-first", environment)
+    output = tmp_path / "stderr.bin"
+    output.write_text("failed")
+    stored = ArtifactStore(workspace).import_path(
+        output,
+        allowed_roots=(tmp_path,),
+        max_bytes=1_024,
+    )
+    run = _run("domain-first", environment).validated_copy(
+        update={
+            "artifacts": (
+                ArtifactRegistration(
+                    registration_id="pending-output",
+                    run_id="domain-first",
+                    artifact_id=stored.content.artifact_id,
+                    display_name="stderr.bin",
+                    media_type="application/octet-stream",
+                    kind=ArtifactKind.PROCESS_OUTPUT,
+                    role="stderr",
+                    sensitivity=Sensitivity.INTERNAL,
+                ),
+            )
+        }
+    )
 
     with pytest.raises(InjectedCrash):
         ProjectionCoordinator(
@@ -107,6 +132,7 @@ def test_crash_after_domain_commit_replays_exact_run_projection(tmp_path: Path) 
     assert pending_view.projection.state is ProjectionVisibilityState.PENDING
     assert pending_view.projection.current is False
     assert pending_view.projection.projected_revision is None
+    assert pending_view.recovery_actions == ()
 
     reconciled = ProjectionCoordinator(workspace).reconcile_intent(pending.intent_id)
 

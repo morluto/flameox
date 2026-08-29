@@ -289,6 +289,28 @@ class ArtifactStore:
         return BoundedFileSystem(allowed_roots).open_descriptor(source)
 
     def get(self, artifact_id: str) -> StoredArtifact:
+        with self._open_verified(artifact_id) as (stored, _payload_fd):
+            return stored
+
+    def read_range(
+        self, artifact_id: str, *, offset: int, max_bytes: int
+    ) -> tuple[ArtifactContent, bytes]:
+        """Read a bounded range from the same descriptor used for integrity verification."""
+
+        with self._open_verified(artifact_id) as (stored, payload_fd):
+            os.lseek(payload_fd, offset, os.SEEK_SET)
+            chunks: list[bytes] = []
+            remaining = max_bytes
+            while remaining:
+                chunk = os.read(payload_fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return stored.content, b"".join(chunks)
+
+    @contextmanager
+    def _open_verified(self, artifact_id: str) -> Iterator[tuple[StoredArtifact, int]]:
         hexadecimal = artifact_id.removeprefix("sha256:")
         if len(hexadecimal) != 64 or any(
             character not in "0123456789abcdef" for character in hexadecimal
@@ -373,12 +395,13 @@ class ArtifactStore:
                     ErrorCode.ARTIFACT_INTEGRITY_FAILED,
                     "Artifact payload digest does not match recorded metadata.",
                 )
+            os.lseek(payload_fd, 0, os.SEEK_SET)
+            yield (
+                StoredArtifact(content=content, payload_path=payload_path),
+                payload_fd,
+            )
         finally:
             os.close(payload_fd)
-        return StoredArtifact(
-            content=content,
-            payload_path=payload_path,
-        )
 
     def _read_metadata(self, path: Path) -> ArtifactContent:
         try:

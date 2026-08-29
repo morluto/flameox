@@ -317,6 +317,57 @@ async def test_mcp_import_list_get_and_resource_workflow(tmp_path: Path) -> None
 
 
 @pytest.mark.anyio
+async def test_cli_and_mcp_preview_process_output_with_the_same_contract(tmp_path: Path) -> None:
+    artifact = tmp_path / "stderr.txt"
+    artifact.write_text("line one\nline two\n")
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        imported = await client.call_tool(
+            "import_artifact",
+            {
+                "path": "stderr.txt",
+                "kind": "process_output",
+                "sensitivity": "internal",
+            },
+        )
+        assert imported.structured_content is not None
+        artifact_id = imported.structured_content["result"]["artifact_id"]
+        previewed = await client.call_tool(
+            "preview_artifact",
+            {
+                "artifact_id": artifact_id,
+                "offset": 0,
+                "max_bytes": 64,
+                "max_lines": 1,
+            },
+        )
+
+    cli = CliRunner().invoke(
+        app,
+        [
+            "artifacts",
+            "preview",
+            artifact_id,
+            "--max-bytes",
+            "64",
+            "--max-lines",
+            "1",
+            "--workspace",
+            str(workspace.paths.root),
+            "--json",
+        ],
+    )
+
+    assert previewed.is_error is False
+    assert previewed.structured_content is not None
+    assert cli.exit_code == 0, cli.output
+    assert json.loads(cli.stdout) == previewed.structured_content["result"]
+    assert previewed.structured_content["result"]["text"] == "line one\n"
+
+
+@pytest.mark.anyio
 async def test_mcp_kernel_validation_extraction_reports_progress_and_resources(
     tmp_path: Path,
 ) -> None:

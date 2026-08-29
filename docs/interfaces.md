@@ -70,8 +70,12 @@ Tool annotations describe side effects:
 - execute tools consume approved intent;
 - idempotent start tools reconnect when called with the same key and intent.
 
-MCP does not expose arbitrary commands, SQL, native artifact bytes, viewer
-launch, garbage collection, purge, or source editing.
+MCP does not expose arbitrary commands, SQL, arbitrary native artifact bytes,
+viewer launch, garbage collection, purge, or source editing. `preview_artifact`
+is the narrow exception for textual process and validation output: it requires
+explicit byte and line bounds, enforces effective sensitivity and UTF-8 validity,
+and returns a continuation offset without exposing a payload path. The CLI
+provides the equivalent `artifacts preview` operation.
 
 Tool results use a hybrid response boundary. They return the bounded run
 semantics needed to interpret the immediate outcome, such as effective mode and

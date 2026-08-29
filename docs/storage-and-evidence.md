@@ -176,7 +176,15 @@ structurally valid yet unsupported by the installed extractor; that state is
 not equivalent to an empty extraction.
 
 Sensitive native artifacts are not exposed as MCP binary resources. Agent-facing
-resources return bounded metadata and typed evidence references.
+artifact resources return bounded metadata and typed evidence references. The
+`process_output` and `validation_output` kinds additionally support an explicit
+UTF-8 preview operation: callers supply byte and line bounds plus an offset, and
+the result reports returned and total bytes, truncation, and the next offset.
+The artifact service resolves and verifies the content-addressed object, applies
+the maximum sensitivity across all registrations, refuses sensitive or
+unsupported content, and never returns its host path. Failed run projections
+carry this preview operation as recovery guidance while the immutable artifact
+remains the diagnostic authority.
 
 ## Evidence publication
 

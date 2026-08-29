@@ -16,6 +16,7 @@ from flameox.analysis import RecipeService
 from flameox.application import (
     CaptureService,
     ExecutionPolicy,
+    RunProjectionService,
 )
 from flameox.application.capture_admission import CaptureAdmissionService
 from flameox.application.proc import read_boot_id
@@ -467,6 +468,14 @@ timeout_seconds = 30
             (terminal.run_id,),
         ).fetchall()
     assert registered == [(stdout.artifact_id,)]
+    projection = RunProjectionService(workspace).get(terminal.run_id)
+    assert [action.tool_name for action in projection.recovery_actions] == ["preview_artifact"]
+    assert projection.recovery_actions[0].arguments == {
+        "artifact_id": stdout.artifact_id,
+        "offset": 0,
+        "max_bytes": 4_096,
+        "max_lines": 80,
+    }
 
 
 @pytest.mark.anyio

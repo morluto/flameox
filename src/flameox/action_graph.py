@@ -10,6 +10,9 @@ from pydantic import ConfigDict, Field, JsonValue, StrictInt, ValidationError, m
 
 from flameox.models import ContractModel
 
+ARTIFACT_PREVIEW_MAX_BYTES = 64 * 1024
+ARTIFACT_PREVIEW_MAX_LINES = 1_000
+
 
 class ActionId(StrEnum):
     """Stable product-level identities for executable agent workflow edges."""
@@ -29,6 +32,7 @@ class ActionId(StrEnum):
     GET_DETACHED_CAPTURE = "capture.detached.status"
     LIST_RUNS = "run.list"
     LIST_ARTIFACTS = "artifact.list"
+    PREVIEW_ARTIFACT = "artifact.preview"
     IMPORT_ARTIFACT = "artifact.import"
     IMPORT_XCTRACE = "artifact.import.xctrace"
     EXTRACT_PERFETTO = "artifact.extract.perfetto"
@@ -57,6 +61,7 @@ class ToolName(StrEnum):
     GET_DETACHED_CAPTURE = "get_detached_capture"
     LIST_RUNS = "list_runs"
     LIST_ARTIFACTS = "list_artifacts"
+    PREVIEW_ARTIFACT = "preview_artifact"
     IMPORT_ARTIFACT = "import_artifact"
     IMPORT_XCTRACE = "import_xctrace"
     EXTRACT_PERFETTO = "extract_perfetto"
@@ -193,6 +198,13 @@ class _ListRunsArguments(ContractModel):
 class _ListArtifactsArguments(ContractModel):
     limit: StrictInt = Field(default=50, ge=1, le=1_000)
     cursor: str | None = Field(default=None, max_length=4_096)
+
+
+class _PreviewArtifactArguments(ContractModel):
+    artifact_id: str = Field(min_length=1, max_length=200)
+    offset: StrictInt = Field(default=0, ge=0)
+    max_bytes: StrictInt = Field(ge=1, le=ARTIFACT_PREVIEW_MAX_BYTES)
+    max_lines: StrictInt = Field(ge=1, le=ARTIFACT_PREVIEW_MAX_LINES)
 
 
 class _ImportArtifactArguments(ContractModel):
@@ -373,6 +385,13 @@ ACTION_REGISTRY = MappingProxyType(
                 ActionId.LIST_ARTIFACTS,
                 ToolName.LIST_ARTIFACTS,
                 _ListArtifactsArguments,
+                READ_ONLY_ACTION,
+                ActionLifecycle.READ,
+            ),
+            _descriptor(
+                ActionId.PREVIEW_ARTIFACT,
+                ToolName.PREVIEW_ARTIFACT,
+                _PreviewArtifactArguments,
                 READ_ONLY_ACTION,
                 ActionLifecycle.READ,
             ),

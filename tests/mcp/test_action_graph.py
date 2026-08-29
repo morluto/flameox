@@ -75,6 +75,13 @@ def _representative_actions() -> dict[ActionId, ToolAction]:
         ),
         ActionId.LIST_RUNS: tool_action(ActionId.LIST_RUNS),
         ActionId.LIST_ARTIFACTS: tool_action(ActionId.LIST_ARTIFACTS),
+        ActionId.PREVIEW_ARTIFACT: tool_action(
+            ActionId.PREVIEW_ARTIFACT,
+            artifact_id="sha256:" + "0" * 64,
+            offset=0,
+            max_bytes=4_096,
+            max_lines=80,
+        ),
         ActionId.IMPORT_ARTIFACT: tool_action(
             ActionId.IMPORT_ARTIFACT,
             path="trace.json",

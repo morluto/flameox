@@ -19,7 +19,7 @@ from flameox.domain import (
     EvidenceReferenceType,
     Sensitivity,
 )
-from flameox.storage import ArtifactStore, Workspace
+from flameox.storage import ArtifactStore, StoredArtifact, Workspace
 
 pytestmark = pytest.mark.integration
 
@@ -73,6 +73,176 @@ def test_artifact_metadata_effective_sensitivity_includes_registrations_outside_
     assert len(result.registrations) == 1
     assert result.registrations[0].sensitivity is Sensitivity.NORMAL
     assert result.effective_sensitivity is Sensitivity.SENSITIVE
+
+
+def test_process_output_preview_is_bounded_and_continuable(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+    source = tmp_path / "stdout.txt"
+    source.write_text("first\nsecond\nthird\n")
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(
+            path=source,
+            kind=ArtifactKind.PROCESS_OUTPUT,
+            sensitivity=Sensitivity.INTERNAL,
+        )
+    )
+
+    first = ArtifactService(workspace).preview_text(
+        imported.artifact_id,
+        offset=0,
+        max_bytes=64,
+        max_lines=1,
+    )
+    second = ArtifactService(workspace).preview_text(
+        imported.artifact_id,
+        offset=first.next_offset or 0,
+        max_bytes=64,
+        max_lines=2,
+    )
+
+    assert first.text == "first\n"
+    assert first.returned_bytes == 6
+    assert first.total_bytes == 19
+    assert first.truncated is True
+    assert first.next_offset == 6
+    assert second.text == "second\nthird\n"
+    assert second.truncated is False
+    assert second.next_offset is None
+
+
+@pytest.mark.parametrize(
+    ("payload", "kind", "sensitivity", "code"),
+    (
+        (
+            b"binary",
+            ArtifactKind.COLLECTOR_METADATA,
+            Sensitivity.INTERNAL,
+            ErrorCode.ARTIFACT_PARSE_FAILED,
+        ),
+        (
+            b"secret",
+            ArtifactKind.PROCESS_OUTPUT,
+            Sensitivity.SENSITIVE,
+            ErrorCode.SENSITIVE_ARTIFACT_REFUSED,
+        ),
+        (
+            b"\xff",
+            ArtifactKind.PROCESS_OUTPUT,
+            Sensitivity.INTERNAL,
+            ErrorCode.ARTIFACT_PARSE_FAILED,
+        ),
+    ),
+)
+def test_artifact_preview_returns_typed_refusals(
+    tmp_path: Path,
+    payload: bytes,
+    kind: ArtifactKind,
+    sensitivity: Sensitivity,
+    code: ErrorCode,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+    source = tmp_path / "payload.bin"
+    source.write_bytes(payload)
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(path=source, kind=kind, sensitivity=sensitivity)
+    )
+
+    with pytest.raises(DomainError) as error:
+        ArtifactService(workspace).preview_text(
+            imported.artifact_id,
+            offset=0,
+            max_bytes=64,
+            max_lines=10,
+        )
+
+    assert error.value.code is code
+
+
+def test_empty_process_output_preview_and_invalid_offset(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+    source = tmp_path / "empty.txt"
+    source.write_bytes(b"")
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(path=source, kind=ArtifactKind.PROCESS_OUTPUT)
+    )
+    service = ArtifactService(workspace)
+
+    result = service.preview_text(imported.artifact_id, offset=0, max_bytes=1, max_lines=1)
+
+    assert result.text == ""
+    assert result.returned_bytes == 0
+    assert result.truncated is False
+    with pytest.raises(DomainError) as error:
+        service.preview_text(imported.artifact_id, offset=1, max_bytes=1, max_lines=1)
+    assert error.value.code is ErrorCode.INVALID_ARGUMENTS
+
+
+def test_preview_applies_maximum_sensitivity_across_shared_registrations(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+    source = tmp_path / "shared.txt"
+    source.write_text("shared output")
+    imports = ImportService(workspace)
+    process_output = imports.import_artifact(
+        ImportArtifactRequest(
+            path=source,
+            kind=ArtifactKind.PROCESS_OUTPUT,
+            sensitivity=Sensitivity.NORMAL,
+        )
+    )
+    metadata = imports.import_artifact(
+        ImportArtifactRequest(
+            path=source,
+            kind=ArtifactKind.COLLECTOR_METADATA,
+            sensitivity=Sensitivity.SENSITIVE,
+        )
+    )
+
+    assert process_output.artifact_id == metadata.artifact_id
+    with pytest.raises(DomainError) as error:
+        ArtifactService(workspace).preview_text(
+            process_output.artifact_id,
+            offset=0,
+            max_bytes=64,
+            max_lines=10,
+        )
+    assert error.value.code is ErrorCode.SENSITIVE_ARTIFACT_REFUSED
+
+
+def test_preview_rejects_payload_replaced_after_metadata_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+    source = tmp_path / "stdout.txt"
+    source.write_text("captured")
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(path=source, kind=ArtifactKind.PROCESS_OUTPUT)
+    )
+    secret = tmp_path / "secret.txt"
+    secret.write_text("must not escape")
+    original_get = ArtifactStore.get
+
+    def replace_after_verification(store: ArtifactStore, artifact_id: str) -> StoredArtifact:
+        stored = original_get(store, artifact_id)
+        stored.payload_path.unlink()
+        stored.payload_path.symlink_to(secret)
+        return stored
+
+    monkeypatch.setattr(ArtifactStore, "get", replace_after_verification)
+
+    with pytest.raises(DomainError) as error:
+        ArtifactService(workspace).preview_text(
+            imported.artifact_id,
+            offset=0,
+            max_bytes=64,
+            max_lines=10,
+        )
+    assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
 
 
 def test_evidence_lookup_rejects_cas_object_outside_the_snapshot(tmp_path: Path) -> None:

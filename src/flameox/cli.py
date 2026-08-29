@@ -16,6 +16,7 @@ from mcp import Client
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from flameox import __version__, setup_ui
+from flameox.action_graph import ARTIFACT_PREVIEW_MAX_BYTES, ARTIFACT_PREVIEW_MAX_LINES
 from flameox.adapters import (
     AdapterRegistry,
     BenchmarkSamplesExtractor,
@@ -41,6 +42,7 @@ from flameox.application import (
     AnalysisMaterializationService,
     ArtifactPipelineService,
     ArtifactService,
+    ArtifactTextPreview,
     CapabilityService,
     CaptureService,
     CompactionService,
@@ -1676,6 +1678,28 @@ def artifacts_show(
     """Show content identity and contextual registrations, not binary bytes."""
     try:
         result = ArtifactService(_workspace(workspace)).get(artifact_id)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@artifacts_app.command("preview")
+def artifacts_preview(
+    artifact_id: str,
+    max_bytes: Annotated[int, typer.Option("--max-bytes", min=1, max=ARTIFACT_PREVIEW_MAX_BYTES)],
+    max_lines: Annotated[int, typer.Option("--max-lines", min=1, max=ARTIFACT_PREVIEW_MAX_LINES)],
+    offset: Annotated[int, typer.Option("--offset", min=0)] = 0,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Read an explicitly bounded text projection of eligible output evidence."""
+    try:
+        result: ArtifactTextPreview = ArtifactService(_workspace(workspace)).preview_text(
+            artifact_id,
+            offset=offset,
+            max_bytes=max_bytes,
+            max_lines=max_lines,
+        )
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)

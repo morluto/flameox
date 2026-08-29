@@ -6,8 +6,10 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from flameox.action_graph import ActionId, ToolAction, tool_action
 from flameox.application.evidence_lookup import EvidenceLookupService
 from flameox.domain import (
+    ArtifactKind,
     CaptureStatus,
     DomainError,
     ErrorCode,
@@ -87,6 +89,7 @@ class AgentRunProjection(ContractModel):
     artifact_ids: Annotated[tuple[str, ...], Field(max_length=100)] = ()
     artifact_count: Annotated[int, Field(ge=0)] = 0
     artifact_list_truncated: bool = False
+    recovery_actions: Annotated[tuple[ToolAction, ...], Field(max_length=2)] = ()
     limitation_count: Annotated[int, Field(ge=0)] = 0
     limitation_codes: Annotated[tuple[str, ...], Field(max_length=100)] = ()
     redactions: tuple[
@@ -172,6 +175,25 @@ class RunProjectionService:
         projection: AgentRunProjectionStatus,
     ) -> AgentRunProjection:
         artifact_ids = tuple(dict.fromkeys(item.artifact_id for item in run.artifacts))
+        recovery_artifacts = dict.fromkeys(
+            item.artifact_id
+            for item in sorted(run.artifacts, key=lambda item: item.role != "stderr")
+            if item.kind is ArtifactKind.PROCESS_OUTPUT and item.role in {"stdout", "stderr"}
+        )
+        recovery_actions = (
+            tuple(
+                tool_action(
+                    ActionId.PREVIEW_ARTIFACT,
+                    artifact_id=artifact_id,
+                    offset=0,
+                    max_bytes=4_096,
+                    max_lines=80,
+                )
+                for artifact_id in recovery_artifacts
+            )[:2]
+            if run.execution_status is not ExecutionStatus.SUCCEEDED
+            else ()
+        )
         redactions: list[str] = [
             "command_arguments",
             "environment_values",
@@ -210,6 +232,11 @@ class RunProjectionService:
                 "artifact_ids": artifact_ids[:100],
                 "artifact_count": len(artifact_ids),
                 "artifact_list_truncated": len(artifact_ids) > 100,
+                "recovery_actions": (
+                    recovery_actions
+                    if manifest_source == "corpus_projection" and projection.current
+                    else ()
+                ),
                 "limitation_count": len(run.limitations) + len(run.limitation_details),
                 "limitation_codes": tuple(
                     dict.fromkeys(item.code for item in run.limitation_details)

@@ -116,6 +116,7 @@ __all__ = [
     "ArtifactPipelineService",
     "ArtifactRegistrationSummary",
     "ArtifactService",
+    "ArtifactTextPreview",
     "AvailableInferenceToolDiscovery",
     "BandwidthFault",
     "CallEdgeResult",

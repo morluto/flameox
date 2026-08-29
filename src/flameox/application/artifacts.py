@@ -3,8 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import Annotated, cast
 
+from pydantic import Field
+
+from flameox.action_graph import ARTIFACT_PREVIEW_MAX_BYTES, ARTIFACT_PREVIEW_MAX_LINES
 from flameox.catalog import Catalog, Snapshot
 from flameox.domain import (
     ArtifactContent,
@@ -59,6 +62,20 @@ class ArtifactListResult(CursorPageContract):
     total: int
 
 
+class ArtifactTextPreview(ContractModel):
+    artifact_id: str
+    kinds: tuple[ArtifactKind, ...]
+    effective_sensitivity: Sensitivity
+    encoding: str
+    offset: Annotated[int, Field(ge=0)]
+    returned_bytes: Annotated[int, Field(ge=0)]
+    total_bytes: Annotated[int, Field(ge=0)]
+    returned_lines: Annotated[int, Field(ge=0)]
+    text: str
+    truncated: bool
+    next_offset: Annotated[int, Field(ge=0)] | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class SnapshotArtifact:
     """An artifact whose registration and effective policy came from one snapshot."""
@@ -75,6 +92,108 @@ class ArtifactService:
         catalog = Catalog(self.workspace)
         with catalog.open_snapshot(catalog.pin()) as snapshot:
             return self.get_at_snapshot(snapshot, artifact_id, limit=limit)
+
+    def preview_text(
+        self,
+        artifact_id: str,
+        *,
+        offset: int,
+        max_bytes: int,
+        max_lines: int,
+    ) -> ArtifactTextPreview:
+        if (
+            offset < 0
+            or not 1 <= max_bytes <= ARTIFACT_PREVIEW_MAX_BYTES
+            or not 1 <= max_lines <= ARTIFACT_PREVIEW_MAX_LINES
+        ):
+            raise DomainError(
+                ErrorCode.INVALID_ARGUMENTS,
+                "Artifact preview requires a non-negative offset, "
+                f"1-{ARTIFACT_PREVIEW_MAX_BYTES} bytes, and "
+                f"1-{ARTIFACT_PREVIEW_MAX_LINES} lines.",
+            )
+        catalog = Catalog(self.workspace)
+        with catalog.open_snapshot(catalog.pin()) as snapshot:
+            artifact = self.resolve_at_snapshot(snapshot, artifact_id)
+            kind_rows = snapshot.execute(
+                "SELECT DISTINCT kind FROM artifact_registrations WHERE artifact_id = ?",
+                (artifact_id,),
+            ).fetchall()
+        kinds = {ArtifactKind(row[0]) for row in kind_rows}
+        eligible = {ArtifactKind.PROCESS_OUTPUT, ArtifactKind.VALIDATION_OUTPUT}
+        if not kinds.intersection(eligible):
+            raise DomainError(
+                ErrorCode.ARTIFACT_PARSE_FAILED,
+                "Text preview is available only for process and validation output artifacts.",
+                details={"artifact_id": artifact_id, "kinds": sorted(kind.value for kind in kinds)},
+            )
+        if artifact.metadata.effective_sensitivity is Sensitivity.SENSITIVE:
+            raise DomainError(
+                ErrorCode.SENSITIVE_ARTIFACT_REFUSED,
+                "Sensitive artifact content cannot be previewed through this read-only surface.",
+                details={"artifact_id": artifact_id},
+            )
+        total_bytes = artifact.metadata.content.byte_length
+        if offset > total_bytes:
+            raise DomainError(
+                ErrorCode.INVALID_ARGUMENTS,
+                f"Artifact preview offset {offset} exceeds its {total_bytes}-byte length.",
+            )
+        content, selected = ArtifactStore(self.workspace).read_range(
+            artifact_id,
+            offset=offset,
+            max_bytes=max_bytes,
+        )
+        if content != artifact.metadata.content:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Artifact content identity changed after snapshot resolution.",
+            )
+        lines = selected.splitlines(keepends=True)
+        if len(lines) > max_lines:
+            selected = b"".join(lines[:max_lines])
+        try:
+            text = selected.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as error:
+            if error.end == len(selected) and offset + len(selected) < total_bytes:
+                if error.start == 0:
+                    raise DomainError(
+                        ErrorCode.QUERY_BUDGET_EXCEEDED,
+                        "Artifact preview byte bound ends inside the next UTF-8 character.",
+                        details={
+                            "artifact_id": artifact_id,
+                            "offset": offset,
+                            "suggested_max_bytes": min(max_bytes + 4, ARTIFACT_PREVIEW_MAX_BYTES),
+                        },
+                    ) from error
+                selected = selected[: error.start]
+                text = selected.decode("utf-8", errors="strict")
+            else:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_PARSE_FAILED,
+                    "Artifact preview is not valid UTF-8 text.",
+                    details={
+                        "artifact_id": artifact_id,
+                        "encoding": "utf-8",
+                        "offset": offset + error.start,
+                    },
+                ) from error
+        returned_bytes = len(selected)
+        next_offset = offset + returned_bytes
+        truncated = next_offset < total_bytes
+        return ArtifactTextPreview(
+            artifact_id=artifact_id,
+            kinds=tuple(sorted(kinds, key=lambda kind: kind.value)),
+            effective_sensitivity=artifact.metadata.effective_sensitivity,
+            encoding="utf-8",
+            offset=offset,
+            returned_bytes=returned_bytes,
+            total_bytes=total_bytes,
+            returned_lines=len(selected.splitlines()),
+            text=text,
+            truncated=truncated,
+            next_offset=next_offset if truncated else None,
+        )
 
     def get_at_snapshot(
         self,

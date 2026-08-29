@@ -34,6 +34,8 @@ from pydantic.json_schema import GenerateJsonSchema, JsonSchemaMode
 from flameox import __version__
 from flameox.action_graph import (
     ACTION_REGISTRY,
+    ARTIFACT_PREVIEW_MAX_BYTES,
+    ARTIFACT_PREVIEW_MAX_LINES,
     ActionId,
     ExternalAction,
     ManualAction,
@@ -98,6 +100,7 @@ from flameox.application import (
     ArtifactPipeline,
     ArtifactPipelineService,
     ArtifactService,
+    ArtifactTextPreview,
     CallEdgeResult,
     CapabilityList,
     CapabilityService,
@@ -2347,6 +2350,31 @@ def create_server(
                         mime_type="application/json",
                     ),
                 ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @_action_tool(server, ActionId.PREVIEW_ARTIFACT)
+    async def preview_artifact_tool(
+        artifact_id: str,
+        offset: Annotated[StrictInt, Field(ge=0)],
+        max_bytes: Annotated[StrictInt, Field(ge=1, le=ARTIFACT_PREVIEW_MAX_BYTES)],
+        max_lines: Annotated[StrictInt, Field(ge=1, le=ARTIFACT_PREVIEW_MAX_LINES)],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[ArtifactTextPreview]]:
+        """Read bounded UTF-8 process or validation output without exposing a host path."""
+        try:
+            result = ArtifactService(
+                ctx.request_context.lifespan_context.require_workspace()
+            ).preview_text(
+                artifact_id,
+                offset=offset,
+                max_bytes=max_bytes,
+                max_lines=max_lines,
+            )
+            return _success(
+                result,
+                f"Returned {result.returned_bytes} of {result.total_bytes} artifact bytes.",
             )
         except DomainError as error:
             return _failure(error)
