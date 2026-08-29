@@ -8,6 +8,7 @@ import shutil
 import tarfile
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,14 +19,15 @@ from flameox.domain import DomainError, ErrorCode
 from flameox.http_transport import (
     BoundedHttpClient,
     BoundedHttpError,
+    DownloadProgress,
     HttpMethod,
     LoopbackHttpRequest,
     validate_loopback_base_url,
 )
 from flameox.managed_tools import (
     ManagedToolAsset,
+    acquire_verified_asset,
     build_managed_tool_receipt,
-    download_verified_asset,
     read_verified_tool_receipt,
     write_managed_tool_receipt,
 )
@@ -185,11 +187,16 @@ class ToxiproxyToolManager:
             asset.manifest_revision,
         )
 
-    def stage(self) -> ToxiproxyToolReceipt:
+    def stage(
+        self,
+        *,
+        cancel_check: Callable[[], None] | None = None,
+        progress: Callable[[DownloadProgress], None] | None = None,
+    ) -> ToxiproxyToolReceipt:
         self.tools_root.mkdir(parents=True, exist_ok=True)
         try:
             with portalocker.Lock(self.tools_root / ".toxiproxy-stage.lock", mode="a", timeout=30):
-                return self._stage_locked()
+                return self._stage_locked(cancel_check=cancel_check, progress=progress)
         except portalocker.exceptions.LockException as error:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
@@ -198,7 +205,12 @@ class ToxiproxyToolManager:
                 remediation=("Retry capability setup after the other setup operation finishes.",),
             ) from error
 
-    def _stage_locked(self) -> ToxiproxyToolReceipt:
+    def _stage_locked(
+        self,
+        *,
+        cancel_check: Callable[[], None] | None,
+        progress: Callable[[DownloadProgress], None] | None,
+    ) -> ToxiproxyToolReceipt:
         asset = self._asset_for_host()
         if asset is None or asset.executable_member is None:
             raise DomainError(
@@ -218,16 +230,15 @@ class ToxiproxyToolManager:
         staging_root = self.workspace_root / "staging"
         staging_root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=staging_root) as temporary:
-            archive = Path(temporary) / asset.asset_name
             client = self._http_client or BoundedHttpClient()
             try:
-                with archive.open("wb") as stream:
-                    download_verified_asset(
-                        asset,
-                        stream,
-                        http_client=client,
-                        deadline_monotonic=time.monotonic() + 120,
-                    )
+                archive = acquire_verified_asset(
+                    asset,
+                    self.tools_root,
+                    http_client=client,
+                    cancel_check=cancel_check,
+                    progress=progress,
+                )
             except OSError as error:
                 raise DomainError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,

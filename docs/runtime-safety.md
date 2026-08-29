@@ -146,13 +146,22 @@ implicitly.
 
 All Flameox-owned HTTP crosses one reviewed policy transport. Loopback control
 clients and managed HTTPS downloads use explicit total deadlines and per-stage
-timeouts, ignore ambient proxy and certificate environment variables, disable
+inactivity timeouts, ignore ambient proxy and certificate environment variables, disable
 automatic redirects, reject content encodings, and stream into fixed byte
 ceilings. Control clients decode bounded JSON into provider contracts. A managed
 download may follow only a short, operation-declared chain between exact HTTPS
 origins; the transport records its digest and the adapter applies its declared
 identity check before activation. Async readiness and cleanup use the native
 async transport rather than occupying worker threads with blocking sockets.
+
+Managed-download deadlines allow 30 seconds for startup plus the declared asset
+size at a minimum 32 KiB/s transfer rate. Interrupted bytes and a digest of that
+prefix remain in workspace-owned staging. Flameox resumes only with a strong ETag,
+`If-Range`, a 206 response, and an exact `Content-Range`; a changed validator or a
+non-range origin causes an explicit restart. Capability status reports received
+and expected bytes, elapsed time, and whether a committed checkpoint lets another
+attempt resume. Bytes still in the current response segment are never described as resumable. Final
+publication still requires the checked-in byte length and SHA-256.
 
 Direct managed executables have a stricter rule: downloaded bytes cannot run
 until their size and digest match a checked-in upstream manifest identity. For

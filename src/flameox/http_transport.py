@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import ipaddress
 import json
+import re
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -20,6 +20,7 @@ _MAX_JSON_DEPTH = 12
 _MAX_JSON_VALUES = 10_000
 _MAX_JSON_STRING_BYTES = 1024 * 1024
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+_CONTENT_RANGE = re.compile(r"bytes ([0-9]+)-([0-9]+)/([0-9]+)\Z")
 _JSON_VALUE_ADAPTER: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 
 
@@ -84,6 +85,8 @@ class ManagedDownloadRequest(ContractModel):
     deadline_monotonic: float
     max_response_bytes: int = Field(gt=0, le=1024 * 1024 * 1024)
     max_redirects: int = Field(ge=0, le=4, default=0)
+    resume_from: int = Field(ge=0, default=0)
+    if_range: str | None = Field(default=None, min_length=1, max_length=500)
 
     @model_validator(mode="after")
     def exact_https_authority(self) -> ManagedDownloadRequest:
@@ -94,6 +97,12 @@ class ManagedDownloadRequest(ContractModel):
                 raise ValueError("managed download origins must be exact HTTPS origins")
             if parsed.query or parsed.fragment or parsed.userinfo:
                 raise ValueError("managed download origins cannot contain URL extras")
+        if self.resume_from > 0 and self.if_range is None:
+            raise ValueError("managed download resume requires a representation validator")
+        if self.resume_from == 0 and self.if_range is not None:
+            raise ValueError("managed download validators are only valid for resume")
+        if self.resume_from >= self.max_response_bytes:
+            raise ValueError("managed download resume offset exceeds its byte ceiling")
         return self
 
 
@@ -133,10 +142,17 @@ class BoundedHttpResponse:
 
 @dataclass(frozen=True, slots=True)
 class DownloadReceipt:
-    byte_length: int
-    sha256: str
-    final_origin: str
-    redirect_count: int
+    total_bytes: int
+    response_start: int
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadProgress:
+    received_bytes: int
+    expected_bytes: int
+    elapsed_seconds: float
+    resume_possible: bool
+    validator: str | None
 
 
 class BoundedHttpClient:
@@ -259,12 +275,23 @@ class BoundedHttpClient:
         destination: BinarySink,
         *,
         cancel_check: Callable[[], None] | None = None,
+        progress: Callable[[DownloadProgress], None] | None = None,
     ) -> DownloadReceipt:
         current = request.url
         redirects = 0
+        started = time.monotonic()
         while True:
             _remaining(request.deadline_monotonic)
-            with self._download_response(current, request.deadline_monotonic) as response:
+            headers = (
+                {"Range": f"bytes={request.resume_from}-", "If-Range": request.if_range}
+                if request.resume_from > 0 and request.if_range is not None
+                else None
+            )
+            with self._download_response(
+                current,
+                request.deadline_monotonic,
+                headers=headers,
+            ) as response:
                 if response.status_code in _REDIRECT_STATUSES:
                     if redirects >= request.max_redirects:
                         raise BoundedHttpError(
@@ -285,26 +312,64 @@ class BoundedHttpClient:
                     continue
                 _require_success(response)
                 _require_identity_encoding(response)
-                _require_content_length_bound(response, request.max_response_bytes)
-                digest = hashlib.sha256()
-                total = 0
+                response_start, range_supported, declared_response_bytes = _resume_response(
+                    response,
+                    requested_offset=request.resume_from,
+                    maximum=request.max_response_bytes,
+                )
+                validator = _strong_validator(response)
+                if response_start > 0 and validator is not None and validator != request.if_range:
+                    if progress is not None:
+                        progress(
+                            DownloadProgress(
+                                received_bytes=request.resume_from,
+                                expected_bytes=request.max_response_bytes,
+                                elapsed_seconds=max(0.0, time.monotonic() - started),
+                                resume_possible=False,
+                                validator=validator,
+                            )
+                        )
+                    raise BoundedHttpError(
+                        HttpFailureKind.POLICY,
+                        "Managed download response changed its range validator.",
+                        status_code=response.status_code,
+                    )
+                response_bytes = 0
                 for chunk in response.iter_raw(chunk_size=64 * 1024):
                     if cancel_check is not None:
                         cancel_check()
                     _remaining(request.deadline_monotonic)
-                    total += len(chunk)
+                    response_bytes += len(chunk)
+                    total = response_start + response_bytes
                     if total > request.max_response_bytes:
                         raise BoundedHttpError(
                             HttpFailureKind.RESPONSE_TOO_LARGE,
                             "Managed download exceeded its byte ceiling.",
                         )
                     destination.write(chunk)
-                    digest.update(chunk)
+                    if progress is not None:
+                        progress(
+                            DownloadProgress(
+                                received_bytes=total,
+                                expected_bytes=request.max_response_bytes,
+                                elapsed_seconds=max(0.0, time.monotonic() - started),
+                                resume_possible=validator is not None
+                                and (request.resume_from == 0 or range_supported),
+                                validator=validator,
+                            )
+                        )
+                if (
+                    declared_response_bytes is not None
+                    and response_bytes != declared_response_bytes
+                ):
+                    raise BoundedHttpError(
+                        HttpFailureKind.POLICY,
+                        "Managed download body contradicted its Content-Range.",
+                        status_code=response.status_code,
+                    )
                 return DownloadReceipt(
-                    byte_length=total,
-                    sha256=digest.hexdigest(),
-                    final_origin=_origin(response.url),
-                    redirect_count=redirects,
+                    total_bytes=response_start + response_bytes,
+                    response_start=response_start,
                 )
 
     @contextmanager
@@ -312,11 +377,14 @@ class BoundedHttpClient:
         self,
         url: str,
         deadline_monotonic: float,
+        *,
+        headers: Mapping[str, str] | None = None,
     ) -> Iterator[httpx.Response]:
         try:
             with self._sync_client().stream(
                 "GET",
                 url,
+                headers=headers,
                 timeout=_timeout(deadline_monotonic),
             ) as response:
                 yield response
@@ -498,9 +566,19 @@ def _require_identity_encoding(response: httpx.Response) -> None:
 
 
 def _require_content_length_bound(response: httpx.Response, maximum: int) -> None:
+    length = _content_length(response)
+    if length is not None and length > maximum:
+        raise BoundedHttpError(
+            HttpFailureKind.RESPONSE_TOO_LARGE,
+            "HTTP response exceeded its byte ceiling.",
+            status_code=response.status_code,
+        )
+
+
+def _content_length(response: httpx.Response) -> int | None:
     raw = response.headers.get("content-length")
     if raw is None:
-        return
+        return None
     try:
         length = int(raw)
     except ValueError as error:
@@ -509,12 +587,76 @@ def _require_content_length_bound(response: httpx.Response, maximum: int) -> Non
             "HTTP response declared an invalid content length.",
             status_code=response.status_code,
         ) from error
-    if length < 0 or length > maximum:
+    if length < 0:
         raise BoundedHttpError(
-            HttpFailureKind.RESPONSE_TOO_LARGE,
-            "HTTP response exceeded its byte ceiling.",
+            HttpFailureKind.POLICY,
+            "HTTP response declared an invalid content length.",
             status_code=response.status_code,
         )
+    return length
+
+
+def _resume_response(
+    response: httpx.Response,
+    *,
+    requested_offset: int,
+    maximum: int,
+) -> tuple[int, bool, int | None]:
+    _require_content_length_bound(response, maximum)
+    if requested_offset == 0:
+        if response.status_code != 200:
+            raise BoundedHttpError(
+                HttpFailureKind.POLICY,
+                "Managed download returned partial content without a range request.",
+                status_code=response.status_code,
+            )
+        return 0, False, _content_length(response)
+    if response.status_code == 200:
+        return 0, False, _content_length(response)
+    if response.status_code != 206:
+        raise BoundedHttpError(
+            HttpFailureKind.STATUS,
+            "Managed download resume returned an unsupported status.",
+            status_code=response.status_code,
+        )
+    match = _CONTENT_RANGE.fullmatch(response.headers.get("content-range", ""))
+    if match is None:
+        raise BoundedHttpError(
+            HttpFailureKind.POLICY,
+            "Managed download resume omitted a valid Content-Range.",
+            status_code=response.status_code,
+        )
+    start, end, total = (int(value) for value in match.groups())
+    declared_length = end - start + 1
+    content_length = _content_length(response)
+    if (
+        start != requested_offset
+        or end < start
+        or total != maximum
+        or end != total - 1
+        or (content_length is not None and content_length != declared_length)
+    ):
+        raise BoundedHttpError(
+            HttpFailureKind.POLICY,
+            "Managed download resume returned a contradictory Content-Range.",
+            status_code=response.status_code,
+        )
+    return requested_offset, True, declared_length
+
+
+def _strong_validator(response: httpx.Response) -> str | None:
+    etag: str | None = response.headers.get("etag")
+    if (
+        etag is None
+        or etag.startswith("W/")
+        or len(etag) > 500
+        or len(etag) < 2
+        or etag[0] != '"'
+        or etag[-1] != '"'
+        or any(character == '"' or ord(character) < 0x21 for character in etag[1:-1])
+    ):
+        return None
+    return etag
 
 
 def _require_bounded_json(value: Any) -> None:

@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar, cast
 
@@ -48,6 +49,7 @@ from flameox.execution import (
     ProcessContainment,
     SubprocessBroker,
 )
+from flameox.http_transport import DownloadProgress
 from flameox.storage import Workspace
 from tests.support.execution import executable_binding
 
@@ -263,7 +265,17 @@ def test_toxiproxy_setup_uses_dedicated_staging_phase(
             return receipt if cls.staged else None
 
         @classmethod
-        def stage(cls) -> ToxiproxyToolReceipt:
+        def stage(cls, **kwargs: object) -> ToxiproxyToolReceipt:
+            progress = cast(Callable[[DownloadProgress], None], kwargs["progress"])
+            progress(
+                DownloadProgress(
+                    received_bytes=128,
+                    expected_bytes=256,
+                    elapsed_seconds=1.5,
+                    resume_possible=True,
+                    validator='"fixture"',
+                )
+            )
             cls.staged = True
             return receipt
 
@@ -273,11 +285,20 @@ def test_toxiproxy_setup_uses_dedicated_staging_phase(
 
     report = service.get("toxiproxy")
     phases: list[str] = []
-    result = service.prepare(("toxiproxy",), phase_callback=phases.append)
+    downloads: list[DownloadProgress] = []
+
+    def record_progress(phase: str, download: DownloadProgress | None) -> None:
+        phases.append(phase)
+        if download is not None:
+            downloads.append(download)
+
+    result = service.prepare(("toxiproxy",), phase_callback=record_progress)
 
     assert isinstance(report.setup, CapabilitySetup)
     assert report.setup.extra == "toxiproxy"
-    assert phases == ["staging_toxiproxy"]
+    assert phases == ["staging_toxiproxy", "staging_toxiproxy"]
+    assert downloads[0].received_bytes == 128
+    assert downloads[0].resume_possible is True
     assert result.installed == ("toxiproxy",)
     assert service.get("toxiproxy").status is CapabilityStatus.AVAILABLE
 
@@ -573,7 +594,6 @@ def test_capability_setup_installs_only_declared_missing_providers(
         },
         "phase": "completed",
         "requested": ["torch.profiler"],
-        "schema_version": 2,
         "updated_at": None,
     }
     assert isinstance(receipt["updated_at"], str)
@@ -734,7 +754,9 @@ def test_trace_processor_staging_preserves_phase_and_bounded_cause(
     phases: list[str] = []
 
     with pytest.raises(DomainError):
-        service.prepare(("perfetto",), phase_callback=phases.append)
+        service.prepare(
+            ("perfetto",), phase_callback=lambda phase, _download: phases.append(phase)
+        )
 
     receipt = json.loads((tmp_path / "capability-setup.json").read_text())
     assert phases == ["staging_trace_processor"]
@@ -769,13 +791,16 @@ def test_list_capabilities_exposes_latest_setup_receipt(tmp_path: Path) -> None:
     (tmp_path / "capability-setup.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
                 "requested": ["torch.profiler", "perfetto"],
                 "completed": ["torch.profiler"],
                 "phase": "staging_trace_processor",
                 "error": None,
                 "updated_at": "2026-08-01T15:30:00Z",
-                "next_tool": "list_capabilities",
+                "next_action": {
+                    "kind": "tool",
+                    "action": "capabilities.inspect",
+                    "arguments": {"mode": "passive"},
+                },
             }
         )
     )
@@ -808,7 +833,6 @@ def test_capability_setup_receipt_rejects_contradictory_durable_states(
             {
                 "capabilities": [],
                 "latest_setup": {
-                    "schema_version": 1,
                     "requested": ["torch.profiler", "perfetto"],
                     "completed": list(completed),
                     "phase": phase,
@@ -893,7 +917,16 @@ async def test_capability_setup_manager_persists_progress_and_final_receipt(
             phase_callback: Any,
         ) -> CapabilitySetupResult:
             del cancel_event
-            del phase_callback
+            phase_callback(
+                "staging_trace_processor",
+                DownloadProgress(
+                    received_bytes=256,
+                    expected_bytes=1024,
+                    elapsed_seconds=2.0,
+                    resume_possible=True,
+                    validator='"fixture"',
+                ),
+            )
             return CapabilitySetupResult(
                 requested=adapters,
                 already_available=(),
@@ -920,12 +953,17 @@ async def test_capability_setup_manager_persists_progress_and_final_receipt(
         assert [item.phase for item in terminal.progress] == [
             "validating_request",
             "installing_packages",
+            "staging_trace_processor",
             "verifying",
             "completed",
         ]
         assert [item.item for item in terminal.item_outcomes] == ["torch.profiler", "perfetto"]
         assert all(item.status == "complete" for item in terminal.item_outcomes)
         assert terminal.cleanup_status == "complete"
+        download = terminal.progress[2]
+        assert download.completed == 256
+        assert download.total == 1024
+        assert download.message == "Downloading managed Trace Processor: 256 of 1024 bytes."
         assert terminal.terminal_receipt is not None
         assert terminal.terminal_receipt["setup"]["requested"] == [
             "torch.profiler",
@@ -954,7 +992,7 @@ async def test_capability_setup_failure_keeps_staging_phase_and_diagnostics(
             phase_callback: Any,
         ) -> CapabilitySetupResult:
             del adapters, cancel_event
-            phase_callback("staging_trace_processor")
+            phase_callback("staging_trace_processor", None)
             raise DomainError(
                 ErrorCode.PROCESS_FAILED,
                 "FlameOx could not stage the managed Trace Processor.",

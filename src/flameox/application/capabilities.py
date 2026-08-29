@@ -63,6 +63,7 @@ from flameox.domain import (
 )
 from flameox.domain.models import utc_now
 from flameox.execution import ExecutionOutcome, ExecutionRequest, ResourcePolicy, SubprocessBroker
+from flameox.http_transport import DownloadProgress
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
@@ -76,7 +77,6 @@ type CapabilitySetupProgressPhase = Literal[
 class _CapabilitySetupReceipt(ContractModel):
     """Fields shared by every durable capability-setup state."""
 
-    schema_version: Literal[2] = 2
     requested: tuple[str, ...]
     updated_at: datetime
     next_action: ToolAction = Field(
@@ -98,8 +98,16 @@ class _IncompleteCapabilitySetupReceipt(_CapabilitySetupReceipt):
         return self
 
 
+class CapabilityDownloadProgress(ContractModel):
+    received_bytes: int = Field(ge=0)
+    expected_bytes: int = Field(gt=0)
+    elapsed_seconds: float = Field(ge=0)
+    resume_possible: bool
+
+
 class CapabilitySetupProgressReceipt(_IncompleteCapabilitySetupReceipt):
     phase: CapabilitySetupProgressPhase
+    download: CapabilityDownloadProgress | None = None
     error: Literal[None] = None
 
 
@@ -1061,7 +1069,7 @@ class CapabilityService:
         adapters: tuple[str, ...],
         *,
         cancel_event: threading.Event | None = None,
-        phase_callback: Callable[[str], None] | None = None,
+        phase_callback: Callable[[str, DownloadProgress | None], None] | None = None,
     ) -> CapabilitySetupResult:
         """Install only declared FlameOx-managed providers into this runtime."""
         reports = {item.adapter: item for item in self.list().capabilities}
@@ -1172,17 +1180,24 @@ class CapabilityService:
                         next_action=tool_action(ActionId.INITIALIZE_WORKSPACE),
                     )
                 staging_phase = "staging_trace_processor"
+                staging_completed = self._available_requested(requested)
                 self._record_setup_progress(
                     requested,
-                    completed=self._available_requested(requested),
+                    completed=staging_completed,
                     phase="staging_trace_processor",
                 )
                 if phase_callback is not None:
-                    phase_callback("staging_trace_processor")
+                    phase_callback("staging_trace_processor", None)
                 install_trace_processor(
                     self.workspace,
                     cancel_event=cancel_event,
                     broker=self.broker,
+                    progress=self._download_progress_callback(
+                        requested,
+                        staging_completed,
+                        "staging_trace_processor",
+                        phase_callback,
+                    ),
                 )
                 self._check_cancelled(cancel_event)
             if pending_toxiproxy:
@@ -1194,14 +1209,23 @@ class CapabilityService:
                         next_action=tool_action(ActionId.INITIALIZE_WORKSPACE),
                     )
                 staging_phase = "staging_toxiproxy"
+                staging_completed = self._available_requested(requested)
                 self._record_setup_progress(
                     requested,
-                    completed=self._available_requested(requested),
+                    completed=staging_completed,
                     phase="staging_toxiproxy",
                 )
                 if phase_callback is not None:
-                    phase_callback("staging_toxiproxy")
-                receipt = ToxiproxyToolManager(self.workspace.paths.root).stage()
+                    phase_callback("staging_toxiproxy", None)
+                receipt = ToxiproxyToolManager(self.workspace.paths.root).stage(
+                    cancel_check=lambda: self._check_cancelled(cancel_event),
+                    progress=self._download_progress_callback(
+                        requested,
+                        staging_completed,
+                        "staging_toxiproxy",
+                        phase_callback,
+                    ),
+                )
                 self._verify_toxiproxy(receipt)
                 self._check_cancelled(cancel_event)
         except DomainError as exc:
@@ -1401,15 +1425,45 @@ class CapabilityService:
         *,
         completed: tuple[str, ...],
         phase: CapabilitySetupProgressPhase,
+        download: DownloadProgress | None = None,
     ) -> None:
         self._write_setup_receipt(
             CapabilitySetupProgressReceipt(
                 requested=requested,
                 completed=completed,
                 phase=phase,
+                download=(
+                    CapabilityDownloadProgress(
+                        received_bytes=download.received_bytes,
+                        expected_bytes=download.expected_bytes,
+                        elapsed_seconds=download.elapsed_seconds,
+                        resume_possible=download.resume_possible,
+                    )
+                    if download is not None
+                    else None
+                ),
                 updated_at=utc_now(),
             )
         )
+
+    def _download_progress_callback(
+        self,
+        requested: tuple[str, ...],
+        completed: tuple[str, ...],
+        phase: CapabilitySetupProgressPhase,
+        callback: Callable[[str, DownloadProgress | None], None] | None,
+    ) -> Callable[[DownloadProgress], None]:
+        def report(download: DownloadProgress) -> None:
+            self._record_setup_progress(
+                requested,
+                completed=completed,
+                phase=phase,
+                download=download,
+            )
+            if callback is not None:
+                callback(phase, download)
+
+        return report
 
     def _record_setup_completed(
         self,
@@ -1442,19 +1496,6 @@ class CapabilityService:
     def _read_setup_receipt(self) -> CapabilitySetupReceipt | None:
         try:
             payload = json.loads(self.setup_receipt_path.read_text())
-            if (
-                isinstance(payload, dict)
-                and payload.get("schema_version") == 1
-                and payload.get("next_tool") == "list_capabilities"
-            ):
-                payload = {
-                    **payload,
-                    "schema_version": 2,
-                    "next_action": tool_action(ActionId.INSPECT_CAPABILITIES).model_dump(
-                        mode="json"
-                    ),
-                }
-                payload.pop("next_tool", None)
             return _CAPABILITY_SETUP_RECEIPT_ADAPTER.validate_python(payload)
         except (OSError, ValueError):
             return None
@@ -1795,18 +1836,25 @@ class CapabilitySetupManager:
         self.runner.set_cancel_hook(operation_id, cancel_event.set)
         loop = asyncio.get_running_loop()
 
-        def report_phase(phase: str) -> None:
+        def report_phase(phase: str, download: DownloadProgress | None) -> None:
             if phase not in {"staging_trace_processor", "staging_toxiproxy"}:
                 return
 
+            tool = "Trace Processor" if phase == "staging_trace_processor" else "Toxiproxy"
             message = (
-                "Staging the managed Trace Processor."
-                if phase == "staging_trace_processor"
-                else "Staging and verifying managed Toxiproxy."
+                f"Downloading managed {tool}: {download.received_bytes} of "
+                f"{download.expected_bytes} bytes."
+                if download is not None
+                else f"Staging and verifying managed {tool}."
             )
 
             async def emit_progress() -> None:
-                await progress(phase, 2, 3, message)
+                await progress(
+                    phase,
+                    download.received_bytes if download is not None else 2,
+                    download.expected_bytes if download is not None else 3,
+                    message,
+                )
 
             future = asyncio.run_coroutine_threadsafe(emit_progress(), loop)
             future.result()

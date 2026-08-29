@@ -173,10 +173,8 @@ def test_managed_download_follows_only_allowlisted_redirects_and_hashes_bytes() 
         receipt = client.download(request, destination)
 
     assert destination.getvalue() == b"artifact"
-    assert receipt.byte_length == 8
-    assert receipt.sha256 == "c7c5c1d70c5dec4416ab6158afd0b223ef40c29b1dc1f97ed9428b94d4cadb1c"
-    assert receipt.final_origin == "https://assets.example.com"
-    assert receipt.redirect_count == 1
+    assert receipt.total_bytes == 8
+    assert receipt.response_start == 0
 
 
 def test_managed_download_rejects_redirect_outside_declared_origins() -> None:

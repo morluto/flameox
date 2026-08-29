@@ -121,7 +121,9 @@ Managed binary adapters keep tool-specific extraction and compatibility probes,
 but they do not own download or attestation policy. A checked-in immutable asset
 value names the upstream manifest revision, exact URL, size, archive digest, and
 installed executable digest. The shared acquisition helper authenticates those
-facts before an adapter may execute bytes. Reuse re-hashes the installed file
+facts before an adapter may execute bytes. Complete upstream assets are retained
+in content-addressed workspace storage; resumable partials remain staging state,
+not trusted artifacts. Reuse re-hashes the installed file
 against the checked-in executable digest; changing both the binary and its local
 receipt therefore cannot manufacture trust. Perfetto values are transcribed
 from its generated `trace_processor_shell` manifest, and Toxiproxy values are

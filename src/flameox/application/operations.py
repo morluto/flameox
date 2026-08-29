@@ -1189,6 +1189,8 @@ class OperationRunner:
                 if (
                     completed is not None
                     and previous.completed is not None
+                    and previous.phase == phase
+                    and previous.total == total
                     and completed < previous.completed
                 ):
                     raise DomainError(

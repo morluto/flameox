@@ -123,7 +123,7 @@ class _ToolManager(ToxiproxyToolManager):
         )
         self.stage_calls = 0
 
-    def stage(self) -> ToxiproxyToolReceipt:
+    def stage(self, **_kwargs: object) -> ToxiproxyToolReceipt:
         self.stage_calls += 1
         return self.receipt
 

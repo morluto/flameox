@@ -7,7 +7,7 @@ import shutil
 import sys
 import tempfile
 import threading
-import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,11 +29,12 @@ from flameox.execution import (
 )
 from flameox.http_transport import (
     BoundedHttpClient,
+    DownloadProgress,
 )
 from flameox.managed_tools import (
     ManagedToolAsset,
+    acquire_verified_asset,
     build_managed_tool_receipt,
-    download_verified_asset,
     read_verified_tool_receipt,
     write_managed_tool_receipt,
 )
@@ -345,6 +346,7 @@ def install_trace_processor(
     cancel_event: threading.Event | None = None,
     broker: SubprocessBroker | None = None,
     http_client: BoundedHttpClient | None = None,
+    progress: Callable[[DownloadProgress], None] | None = None,
 ) -> TraceProcessorInstallation:
     """Stage the pinned user-space Trace Processor without requiring host privileges."""
     temporary: Path | None = None
@@ -386,24 +388,26 @@ def install_trace_processor(
 
         staging = workspace.paths.staging
         staging.mkdir(parents=True, exist_ok=True)
+        client = http_client or BoundedHttpClient()
+        try:
+            acquired = acquire_verified_asset(
+                asset,
+                workspace.paths.root / "tools",
+                http_client=client,
+                cancel_check=lambda: _check_staging_cancelled(cancel_event),
+                progress=progress,
+            )
+        finally:
+            if http_client is None:
+                client.close()
         with tempfile.NamedTemporaryFile(
             dir=staging,
             prefix="trace-processor-",
             delete=False,
         ) as stream:
             temporary = Path(stream.name)
-            client = http_client or BoundedHttpClient()
-            try:
-                download_verified_asset(
-                    asset,
-                    stream,
-                    http_client=client,
-                    deadline_monotonic=time.monotonic() + 120,
-                    cancel_check=lambda: _check_staging_cancelled(cancel_event),
-                )
-            finally:
-                if http_client is None:
-                    client.close()
+            with acquired.open("rb") as source:
+                shutil.copyfileobj(source, stream)
             stream.flush()
             os.fsync(stream.fileno())
         temporary.chmod(0o755)

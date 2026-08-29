@@ -227,6 +227,10 @@ A consumed synchronous capture plan is not retryable. If the response is lost,
 inspect durable run and operation state rather than submitting the token again.
 Detached capture and capability setup are retryable only with the same
 idempotency key and same request digest. A changed intent requires a new key.
+Managed capability setup projects bounded transfer progress inline: received and
+expected bytes, elapsed time, and durable safe-resume availability. In-flight response
+bytes are not reported as resumable until their authenticated checkpoint is committed. It never exposes asset
+URLs, validators, or request headers through operation status.
 
 Configuration, workload, executable, provider, oracle, and environment identity
 are revalidated before launch. Stale intent fails and must be replanned.
