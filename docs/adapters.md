@@ -241,6 +241,14 @@ to the workload definition, instance, toolchain, and device. Kernel-validation
 receipts distinguish exact agreement, tolerance metrics, failure, and
 unavailable backends. Compile success is not semantic correctness.
 
+When a workload emits `flameox.kernel-validation.v2`, use the dedicated
+registration operation with the producing execution run and its reviewed
+revision. Flameox validates the immutable document before appending it to that
+run, derives producer metadata from the document, and keeps the run's existing
+workload, environment, source, and execution identities authoritative. Extraction
+then publishes bounded case and metric rows against the same run. It does not
+manufacture an import run or accept caller-supplied identity copies.
+
 ### ROCprofiler
 
 ROCprofiler v3 uses its Perfetto-compatible output and the common trace path.

@@ -16,12 +16,14 @@ from flameox.catalog import Catalog, Snapshot, SnapshotHandle
 from flameox.domain import (
     AnalysisRecord,
     DomainError,
+    EnvironmentRecord,
     ErrorCode,
     EvidenceReference,
     EvidenceReferenceType,
     Finding,
     Investigation,
     RunManifest,
+    SourceState,
 )
 from flameox.models import ContractModel
 from flameox.storage import GenerationManifest, Workspace
@@ -63,6 +65,61 @@ class EvidenceSession:
 
     def run(self, run_id: str) -> RunManifest:
         return self._snapshot.run(run_id)
+
+    def environment(self, environment_id: str) -> EnvironmentRecord:
+        row = self.execute(
+            "SELECT observed_at, identity_quality, fields_json, missing_fields "
+            "FROM environments WHERE environment_id = ? "
+            "ORDER BY published_at DESC LIMIT 1",
+            (environment_id,),
+        ).fetchone()
+        if row is None:
+            raise self._missing("environment", environment_id)
+        try:
+            return EnvironmentRecord.model_validate(
+                {
+                    "environment_id": environment_id,
+                    "observed_at": row[0],
+                    "identity_quality": row[1],
+                    "fields": json.loads(str(row[2])),
+                    "missing_fields": row[3],
+                }
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise DomainError(
+                ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
+                f"Environment evidence {environment_id!r} is invalid.",
+            ) from exc
+
+    def source_state(self, source_state_id: str) -> SourceState:
+        row = self.execute(
+            "SELECT identity_quality, repository_root, head_commit, diff_digest, "
+            "executable_digest, build_id, fields_json, missing_fields "
+            "FROM source_states WHERE source_state_id = ? "
+            "ORDER BY published_at DESC LIMIT 1",
+            (source_state_id,),
+        ).fetchone()
+        if row is None:
+            raise self._missing("source state", source_state_id)
+        try:
+            return SourceState.model_validate(
+                {
+                    "source_state_id": source_state_id,
+                    "identity_quality": row[0],
+                    "repository_root": row[1],
+                    "head_commit": row[2],
+                    "diff_digest": row[3],
+                    "executable_digest": row[4],
+                    "build_id": row[5],
+                    "fields": json.loads(str(row[6])),
+                    "missing_fields": row[7],
+                }
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise DomainError(
+                ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
+                f"Source-state evidence {source_state_id!r} is invalid.",
+            ) from exc
 
     def artifact(self, artifact_id: str, *, limit: int = 100) -> SnapshotArtifact:
         return ArtifactService(self._workspace).resolve_at_snapshot(

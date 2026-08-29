@@ -10,12 +10,13 @@ from mcp import Client
 from mcp_types import TextResourceContents
 from typer.testing import CliRunner
 
-from flameox.application import workspace_status
+from flameox.application import CaptureService, ExecutionPolicy, workspace_status
 from flameox.catalog import Catalog
 from flameox.cli import app
 from flameox.domain import DomainError
 from flameox.mcp import create_server
 from flameox.storage import Workspace
+from tests.support.capture import disable_containment, write_workload
 
 pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
@@ -368,6 +369,7 @@ async def test_cli_and_mcp_preview_process_output_with_the_same_contract(tmp_pat
 
 
 @pytest.mark.anyio
+@pytest.mark.process
 async def test_mcp_kernel_validation_extraction_reports_progress_and_resources(
     tmp_path: Path,
 ) -> None:
@@ -375,7 +377,16 @@ async def test_mcp_kernel_validation_extraction_reports_progress_and_resources(
         Path(__file__).parents[1] / "fixtures" / "kernel_validation" / "pass.json",
         tmp_path / "validation.json",
     )
-    Workspace.initialize(tmp_path)
+    workspace = Workspace.initialize(tmp_path)
+    write_workload(tmp_path)
+    disable_containment(workspace)
+    capture = CaptureService(workspace)
+    plan = await capture.plan(
+        workload_name="echo",
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    source_run = (await capture.execute(plan.plan_token)).run
     recorded_progress: list[tuple[float, float | None, str | None]] = []
 
     async def record(
@@ -386,16 +397,17 @@ async def test_mcp_kernel_validation_extraction_reports_progress_and_resources(
         recorded_progress.append((progress, total, message))
 
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:
-        imported = await client.call_tool(
-            "import_artifact",
+        registered = await client.call_tool(
+            "register_kernel_validation",
             {
+                "run_id": source_run.run_id,
+                "expected_run_revision": source_run.revision,
                 "path": "validation.json",
-                "kind": "validation_output",
                 "sensitivity": "internal",
             },
         )
-        assert imported.structured_content is not None
-        run_id = imported.structured_content["result"]["run_id"]
+        assert registered.structured_content is not None
+        run_id = registered.structured_content["result"]["run_id"]
         extracted = await client.call_tool(
             "extract_kernel_validation",
             {"run_id": run_id},
@@ -404,6 +416,7 @@ async def test_mcp_kernel_validation_extraction_reports_progress_and_resources(
         run_resource = await client.read_resource(f"flameox://runs/{run_id}")
 
     assert extracted.is_error is False
+    assert registered.is_error is False
     assert extracted.structured_content is not None
     result = extracted.structured_content["result"]
     assert result["status"] == "pass"
@@ -412,6 +425,10 @@ async def test_mcp_kernel_validation_extraction_reports_progress_and_resources(
     assert {item[1] for item in recorded_progress} == {2}
     assert all(item[2] for item in recorded_progress)
     assert {item.uri for item in extracted.content if item.type == "resource_link"} == {
+        f"flameox://runs/{run_id}",
+        f"flameox://artifacts/{result['artifact_id']}",
+    }
+    assert {item.uri for item in registered.content if item.type == "resource_link"} == {
         f"flameox://runs/{run_id}",
         f"flameox://artifacts/{result['artifact_id']}",
     }

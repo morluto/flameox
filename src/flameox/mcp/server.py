@@ -164,6 +164,7 @@ from flameox.application import (
     KernelValidationCompareRequest,
     KernelValidationComparisonResult,
     KernelValidationComparisonService,
+    KernelValidationRegistrationService,
     LifecycleEvidenceService,
     LifecycleQueryResult,
     MaterializeAnalysisRequest,
@@ -181,6 +182,8 @@ from flameox.application import (
     ReductionPlan,
     ReductionResult,
     ReductionService,
+    RegisterKernelValidationRequest,
+    RegisterKernelValidationResult,
     RegisterPipelineRequest,
     RunDiscoveryService,
     RunFilter,
@@ -2153,6 +2156,66 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
+    @server.tool(name="register_kernel_validation", annotations=ADDITIVE)
+    async def register_kernel_validation_tool(
+        run_id: Annotated[
+            str,
+            Field(min_length=1, max_length=200, description="Reviewed succeeded execution run."),
+        ],
+        expected_run_revision: Annotated[
+            StrictInt,
+            Field(ge=0, description="Exact revision returned by get_run."),
+        ],
+        path: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=4_096,
+                description="Kernel-validation v2 JSON beneath source_root.",
+            ),
+        ],
+        sensitivity: Sensitivity,
+        ctx: Context[AppContext],
+        source_root: Literal["project", "temp"] = "project",
+    ) -> Annotated[CallToolResult, ToolPayload[RegisterKernelValidationResult]]:
+        """Attach validated immutable correctness evidence to its exact producing run."""
+        try:
+            state = ctx.request_context.lifespan_context
+            workspace = state.require_workspace()
+            result = await run_atomic_thread(
+                lambda: KernelValidationRegistrationService(workspace).register(
+                    RegisterKernelValidationRequest(
+                        run_id=run_id,
+                        expected_run_revision=expected_run_revision,
+                        path=_safe_import_path(state.project_root, path, source_root),
+                        sensitivity=sensitivity,
+                        allow_external_path=source_root == "temp",
+                    )
+                )
+            )
+            run_uri = f"flameox://runs/{result.run_id}"
+            artifact_uri = f"flameox://artifacts/{result.artifact_id}"
+            return _success(
+                result,
+                f"Registered kernel validation for run {result.run_id}.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Run {result.run_id}",
+                        uri=run_uri,
+                        description="Producing run with authoritative validation semantics.",
+                        mime_type="application/json",
+                    ),
+                    ResourceLink(
+                        name=f"Artifact {result.artifact_id}",
+                        uri=artifact_uri,
+                        description="Immutable kernel-validation evidence.",
+                        mime_type="application/json",
+                    ),
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
     @_action_tool(server, ActionId.IMPORT_XCTRACE)
     async def import_xctrace_tool(
         path: Annotated[
@@ -3451,7 +3514,7 @@ def create_server(
         run_id: Annotated[str, Field(min_length=1, max_length=200)],
         ctx: Context[AppContext],
     ) -> Annotated[CallToolResult, ToolPayload[KernelValidationExtractionResult]]:
-        """Extract bounded per-case metrics from kernel-validation v1 evidence."""
+        """Extract bounded per-case metrics from registered kernel-validation evidence."""
         try:
             await ctx.report_progress(0, 2, "Kernel-validation extraction started")
             result = await run_atomic_thread(
@@ -3470,7 +3533,7 @@ def create_server(
                     ResourceLink(
                         name=f"Run {result.run_id}",
                         uri=run_uri,
-                        description="Authoritative validation import run.",
+                        description="Authoritative run carrying validation semantics.",
                         mime_type="application/json",
                     ),
                     ResourceLink(

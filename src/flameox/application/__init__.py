@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from flameox.application.inference_providers import *  # noqa: F403
     from flameox.application.integrity import *  # noqa: F403
     from flameox.application.kernel_builds import *  # noqa: F403
+    from flameox.application.kernel_validation import *  # noqa: F403
     from flameox.application.kernel_validation_comparisons import *  # noqa: F403
     from flameox.application.lifecycle import *  # noqa: F403
     from flameox.application.nvbench_imports import *  # noqa: F403
@@ -78,6 +79,7 @@ _MODULES = (
     "otlp",
     "integrity",
     "kernel_builds",
+    "kernel_validation",
     "kernel_validation_comparisons",
     "inference_providers",
     "nvbench_imports",
@@ -238,6 +240,7 @@ __all__ = [
     "KernelValidationMetricPair",
     "KernelValidationMetricSelector",
     "KernelValidationPsnrProfile",
+    "KernelValidationRegistrationService",
     "KernelValidationUnmatchedMetric",
     "LatencyFault",
     "LifecycleEvidenceService",
@@ -310,6 +313,8 @@ __all__ = [
     "ReductionRepeatabilityStatus",
     "ReductionResult",
     "ReductionService",
+    "RegisterKernelValidationRequest",
+    "RegisterKernelValidationResult",
     "RegisterPipelineRequest",
     "RegisteredPipelineStage",
     "RegisteredPipelineStageDeclaration",

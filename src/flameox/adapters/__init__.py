@@ -152,6 +152,7 @@ __all__ = [
     "install_trace_processor",
     "kernel_build_json_schema",
     "kernel_build_v1_json_schema",
+    "load_kernel_validation_document",
     "parse_kernel_build_manifest",
     "run_semantics",
 ]

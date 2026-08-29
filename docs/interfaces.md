@@ -86,6 +86,12 @@ and typed references for native artifacts, normalized evidence generations, and
 other larger durable records. Artifact identifiers remain provenance references;
 they are never the sole carrier of run meaning.
 
+`register_kernel_validation` is the explicit post-run handoff for correctness
+evidence produced by a workload. It requires a succeeded run and its exact
+reviewed revision, returns the linked run and artifact identities inline, and
+links to both resources. `extract_kernel_validation` remains idempotent and
+normalizes the registered document without moving run semantics into its bytes.
+
 Inline fields are response projections, not an alternate persistence model.
 Property-defining execution semantics remain authoritative in the run manifest,
 and selected findings or summaries remain authoritative in their durable records

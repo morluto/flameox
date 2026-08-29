@@ -16,6 +16,7 @@ from pydantic import (
 )
 
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
+from flameox.domain.models import ImportRunManifest
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
@@ -388,17 +389,20 @@ class KernelValidationExtractor:
     def extract(self, run_id: str) -> KernelValidationExtractionResult:
         run = self.runs.read(run_id)
         registrations = tuple(
-            item for item in run.artifacts if item.kind is ArtifactKind.VALIDATION_OUTPUT
+            item
+            for item in run.artifacts
+            if item.kind is ArtifactKind.VALIDATION_OUTPUT
+            and (isinstance(run, ImportRunManifest) or item.role == "kernel_validation")
         )
         if len(registrations) != 1:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
-                "The run must contain exactly one kernel-validation artifact.",
+                "The run must contain exactly one registered kernel-validation artifact.",
                 run_id=run_id,
             )
         registration = registrations[0]
         artifact = self.artifacts.get(registration.artifact_id)
-        document, source_schema_version = self._load(artifact.payload_path)
+        document, source_schema_version = load_kernel_validation_document(artifact.payload_path)
         if registration.producer not in {None, "flameox.import", document.producer}:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
@@ -560,56 +564,39 @@ class KernelValidationExtractor:
             limitations=_summary_limitations(document),
         )
 
-    @staticmethod
-    def _load(
-        path: Path,
-    ) -> tuple[
+def load_kernel_validation_document(
+    path: Path,
+) -> tuple[
         KernelValidationV2,
         Literal["flameox.kernel-validation.v1", "flameox.kernel-validation.v2"],
     ]:
-        try:
-            if path.stat().st_size > _MAX_KERNEL_VALIDATION_BYTES:
-                raise DomainError(
-                    ErrorCode.ARTIFACT_TOO_LARGE,
-                    "Kernel-validation JSON exceeds the 64 MiB contract limit.",
-                )
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            source_schema_version = (
-                payload.get("schema_version") if isinstance(payload, dict) else None
-            )
-            if source_schema_version == "flameox.kernel-validation.v1":
-                payload = _migrate_v1_document(payload)
-            elif source_schema_version != "flameox.kernel-validation.v2":
-                raise ValueError("unsupported kernel-validation schema version")
-            document = KernelValidationV2.model_validate_json(
-                json.dumps(
-                    payload,
-                    allow_nan=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ),
-                strict=True,
-            )
-            return document, cast(
-                Literal[
-                    "flameox.kernel-validation.v1",
-                    "flameox.kernel-validation.v2",
-                ],
-                source_schema_version,
-            )
-        except DomainError:
-            raise
-        except (
-            OSError,
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-            ValidationError,
-            ValueError,
-        ) as exc:
+    try:
+        if path.stat().st_size > _MAX_KERNEL_VALIDATION_BYTES:
             raise DomainError(
-                ErrorCode.ARTIFACT_PARSE_FAILED,
-                "The artifact is not a valid flameox kernel-validation v1/v2 document.",
-            ) from exc
+                ErrorCode.ARTIFACT_TOO_LARGE,
+                "Kernel-validation JSON exceeds the 64 MiB contract limit.",
+            )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        source_schema_version = payload.get("schema_version") if isinstance(payload, dict) else None
+        if source_schema_version == "flameox.kernel-validation.v1":
+            payload = _migrate_v1_document(payload)
+        elif source_schema_version != "flameox.kernel-validation.v2":
+            raise ValueError("unsupported kernel-validation schema version")
+        document = KernelValidationV2.model_validate_json(
+            json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True),
+            strict=True,
+        )
+        return document, cast(
+            Literal["flameox.kernel-validation.v1", "flameox.kernel-validation.v2"],
+            source_schema_version,
+        )
+    except DomainError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError) as exc:
+        raise DomainError(
+            ErrorCode.ARTIFACT_PARSE_FAILED,
+            "The artifact is not a valid flameox kernel-validation v1/v2 document.",
+        ) from exc
 
 
 def kernel_validation_json_schema() -> dict[str, JsonValue]:

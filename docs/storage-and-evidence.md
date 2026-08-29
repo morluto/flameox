@@ -141,6 +141,14 @@ the execution attempted to measure. Two runs may therefore reference the same
 content-addressed artifact while retaining different modes, bounds, filters, or
 target scopes.
 
+Post-run correctness evidence follows the same ownership rule. Registering a
+`flameox.kernel-validation.v2` document appends its immutable artifact
+registration to the exact succeeded execution run and updates that run's typed
+validation status. The operation requires the reviewed run revision and derives
+producer, workload, environment, source, and execution identity from authoritative
+state; callers cannot submit copied identity fields or create a surrogate import
+run. Generic imports remain appropriate for genuinely external validation evidence.
+
 Running, failed, cancelled, timed-out, and completed attempts are all evidence.
 Failure finalization does not discard partial artifacts that pass integrity and
 privacy checks. A later control revision may add publication receipts or

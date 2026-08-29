@@ -77,6 +77,7 @@ from flameox.application import (
     KernelBuildImportService,
     KernelValidationCompareRequest,
     KernelValidationComparisonService,
+    KernelValidationRegistrationService,
     LifecycleEvidenceService,
     MaterializeAnalysisRequest,
     NativeViewerService,
@@ -86,6 +87,7 @@ from flameox.application import (
     RecordFindingRequest,
     RecordHypothesisRequest,
     RecoveryService,
+    RegisterKernelValidationRequest,
     RegisterPipelineRequest,
     RunDiscoveryService,
     RunFilter,
@@ -830,6 +832,34 @@ def import_artifact(
                 sensitivity=sensitivity,
                 producer=producer,
                 producer_version=producer_version,
+                allow_external_path=True,
+            )
+        )
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@app.command("register-kernel-validation")
+def register_kernel_validation(
+    run_id: Annotated[str, typer.Argument(help="Succeeded execution run that produced the file.")],
+    path: Annotated[Path, typer.Argument(help="flameox.kernel-validation.v2 JSON file.")],
+    expected_run_revision: Annotated[int, typer.Option("--expected-run-revision", min=0)],
+    sensitivity: Annotated[
+        Sensitivity,
+        typer.Option("--sensitivity", case_sensitive=False),
+    ] = Sensitivity.INTERNAL,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Attach immutable kernel-validation evidence to its exact producing run."""
+    try:
+        result = KernelValidationRegistrationService(_workspace(workspace)).register(
+            RegisterKernelValidationRequest(
+                run_id=run_id,
+                expected_run_revision=expected_run_revision,
+                path=path,
+                sensitivity=sensitivity,
                 allow_external_path=True,
             )
         )
@@ -2424,7 +2454,7 @@ def extract_node_heap_prof(
 def extract_kernel_validation(
     run_id: Annotated[
         str,
-        typer.Argument(help="Import run containing flameox kernel-validation v1 JSON."),
+        typer.Argument(help="Execution run with registered kernel-validation evidence."),
     ],
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
