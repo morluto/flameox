@@ -4,6 +4,7 @@ import json
 import stat
 from dataclasses import dataclass
 from enum import StrEnum
+from importlib.resources import files
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -55,6 +56,11 @@ class ClientSetupPlan(ContractModel):
     client_version: str | None = None
 
 
+class SkillSetupPlan(ContractModel):
+    path: Path
+    action: ClientPlanAction
+
+
 class SetupPlan(ContractModel):
     schema_version: Literal[1] = 1
     operation: SetupOperation
@@ -62,6 +68,7 @@ class SetupPlan(ContractModel):
     runtime_action: RuntimeAction
     runtime_executable: Path | None
     clients: tuple[ClientSetupPlan, ...]
+    skills: tuple[SkillSetupPlan, ...] = ()
     warnings: tuple[str, ...] = ()
 
 
@@ -74,6 +81,8 @@ class SetupReport(ContractModel):
     runtime_installed: bool
     changed_clients: tuple[SetupClient, ...]
     unchanged_clients: tuple[SetupClient, ...]
+    changed_skills: tuple[Path, ...] = ()
+    unchanged_skills: tuple[Path, ...] = ()
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -97,6 +106,16 @@ class ResolvedSetupPlan:
     install_manifest_original: bytes | None
     install_manifest_mode: int
     commands: tuple[ClientCommandPlan, ...] = ()
+    skill_edits: tuple[SkillEdit, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SkillEdit:
+    path: Path
+    action: ClientPlanAction
+    original: bytes | None
+    updated: bytes | None
+    mode: int
 
 
 class _InstallManifest(ContractModel):
@@ -132,6 +151,7 @@ class SetupService:
     ) -> None:
         resolved_home = home or Path.home()
         self.data_root = data_root or Path(user_data_path("flameox", appauthor=False))
+        self.home = resolved_home
         self.broker = broker or SubprocessBroker()
         self.registry = QualifiedClientConfigFallbacks(
             home=resolved_home,
@@ -186,6 +206,10 @@ class SetupService:
                     self.registry.plan(client, launcher, remove=False)
                     for client in self.registry.configured_clients(strict=True)
                 )
+            skill_edits = self._plan_skills(
+                operation,
+                self.registry.configured_clients(strict=True),
+            )
             public = SetupPlan(
                 operation=operation,
                 version=manifest.active_version if manifest else None,
@@ -201,12 +225,16 @@ class SetupService:
                     )
                     for edit in edits
                 ),
+                skills=tuple(
+                    SkillSetupPlan(path=edit.path, action=edit.action) for edit in skill_edits
+                ),
             )
             return ResolvedSetupPlan(
                 public,
                 edits,
                 manifest_original,
                 manifest_mode,
+                skill_edits=skill_edits,
             )
         if not clients:
             raise DomainError(
@@ -261,6 +289,7 @@ class SetupService:
                 commands.append(driver.plan(launcher, remove=remove))
             else:
                 planned_edits.append(self.registry.plan(client, launcher, remove=remove))
+        skill_edits = self._plan_skills(operation, clients)
         public = SetupPlan(
             operation=operation,
             version=version,
@@ -288,6 +317,9 @@ class SetupService:
                 )
                 for command in commands
             ),
+            skills=tuple(
+                SkillSetupPlan(path=edit.path, action=edit.action) for edit in skill_edits
+            ),
             warnings=tuple(warnings)
             + (
                 ("Client detection is informational; only selected clients will change.",)
@@ -301,6 +333,7 @@ class SetupService:
             manifest_original,
             manifest_mode,
             tuple(commands),
+            skill_edits,
         )
 
     async def apply(self, plan: ResolvedSetupPlan) -> SetupReport:
@@ -347,6 +380,18 @@ class SetupService:
                         "Run `npx flameox@latest setup` and choose Connect or update MCP clients.",
                     ),
                 )
+            mismatched_skills = tuple(
+                edit.path
+                for edit in plan.skill_edits
+                if edit.action is not ClientPlanAction.ALREADY_CURRENT
+            )
+            if mismatched_skills:
+                raise DomainError(
+                    ErrorCode.REVISION_CONFLICT,
+                    "Installed Flameox skills do not match the active runtime setup.",
+                    details={"paths": [str(path) for path in mismatched_skills]},
+                    remediation=("Run `npx flameox@latest setup` to refresh the integration.",),
+                )
             await self.runtime.verify(executable, public.version)
             return SetupReport(
                 operation=public.operation,
@@ -354,6 +399,7 @@ class SetupService:
                 runtime_installed=False,
                 changed_clients=(),
                 unchanged_clients=tuple(edit.client for edit in plan.edits),
+                unchanged_skills=tuple(edit.path for edit in plan.skill_edits),
             )
 
         installation: RuntimeInstallation | None = None
@@ -388,19 +434,34 @@ class SetupService:
         command_unchanged = tuple(
             command.client for command in plan.commands if command not in command_changed
         )
+        changed_skills = tuple(
+            edit
+            for edit in plan.skill_edits
+            if edit.action
+            not in (ClientPlanAction.ALREADY_CURRENT, ClientPlanAction.NOT_CONFIGURED)
+        )
+        unchanged_skills = tuple(
+            edit.path for edit in plan.skill_edits if edit not in changed_skills
+        )
         manifest_original = plan.install_manifest_original
         manifest_updated = (
             manifest_original
             if public.operation is SetupOperation.REMOVE
             else self._updated_install_manifest(public)
         )
-        if not changed and not command_changed and manifest_updated == manifest_original:
+        if (
+            not changed
+            and not command_changed
+            and not changed_skills
+            and manifest_updated == manifest_original
+        ):
             return SetupReport(
                 operation=public.operation,
                 version=public.version,
                 runtime_installed=installation.installed if installation else False,
                 changed_clients=(),
                 unchanged_clients=unchanged + command_unchanged,
+                unchanged_skills=unchanged_skills,
             )
 
         # Client applications are independent authorities. Apply and verify each
@@ -425,6 +486,7 @@ class SetupService:
                     retryable=True,
                 )
             await driver.apply(command)
+        self._apply_skill_edits(changed_skills)
         if (
             manifest_updated is not None
             and manifest_updated != manifest_original
@@ -442,6 +504,8 @@ class SetupService:
             changed_clients=tuple(edit.client for edit in changed)
             + tuple(command.client for command in command_changed),
             unchanged_clients=unchanged + command_unchanged,
+            changed_skills=tuple(edit.path for edit in changed_skills),
+            unchanged_skills=unchanged_skills,
         )
 
     def _updated_install_manifest(
@@ -471,6 +535,20 @@ class SetupService:
                         "Review the new configuration, then run `npx flameox@latest setup` again.",
                     ),
                 )
+        for skill_edit in plan.skill_edits:
+            current = skill_edit.path.read_bytes() if skill_edit.path.exists() else None
+            current_mode = (
+                stat.S_IMODE(skill_edit.path.stat().st_mode)
+                if skill_edit.path.exists()
+                else skill_edit.mode
+            )
+            if current != skill_edit.original or current_mode != skill_edit.mode:
+                raise DomainError(
+                    ErrorCode.REVISION_CONFLICT,
+                    f"Skill changed after the setup preview: {skill_edit.path}",
+                    retryable=True,
+                    remediation=("Review the file, then run setup again.",),
+                )
         manifest, manifest_mode = self._snapshot_file(self.install_manifest)
         if (
             manifest != plan.install_manifest_original
@@ -484,6 +562,67 @@ class SetupService:
                     "Review the active runtime, then run `npx flameox@latest setup` again.",
                 ),
             )
+
+    def _plan_skills(
+        self,
+        operation: SetupOperation,
+        clients: tuple[SetupClient, ...],
+    ) -> tuple[SkillEdit, ...]:
+        if operation is SetupOperation.REMOVE:
+            configured = set(self.registry.configured_clients(strict=True))
+            remaining = configured.difference(clients)
+            paths = {
+                self._skill_path(client)
+                for client in clients
+                if not any(
+                    self._skill_path(other) == self._skill_path(client) for other in remaining
+                )
+            }
+        else:
+            paths = {self._skill_path(client) for client in clients}
+        content = _skill_content()
+        result: list[SkillEdit] = []
+        for path in sorted(paths):
+            original, mode = self._snapshot_file(path)
+            owned = original is not None and _SKILL_MARKER.encode() in original
+            if operation is SetupOperation.REMOVE:
+                action = ClientPlanAction.REMOVE if owned else ClientPlanAction.NOT_CONFIGURED
+                updated = None
+            elif original == content:
+                action = ClientPlanAction.ALREADY_CURRENT
+                updated = original
+            elif original is None or owned:
+                action = ClientPlanAction.CREATE if original is None else ClientPlanAction.UPDATE
+                updated = content
+            else:
+                raise DomainError(
+                    ErrorCode.REVISION_CONFLICT,
+                    f"Refusing to overwrite an unowned Flameox skill: {path}",
+                    remediation=("Move or rename the existing skill, then run setup again.",),
+                )
+            result.append(SkillEdit(path, action, original, updated, mode))
+        return tuple(result)
+
+    @staticmethod
+    def _apply_skill_edits(edits: tuple[SkillEdit, ...]) -> None:
+        for edit in edits:
+            current = edit.path.read_bytes() if edit.path.exists() else None
+            if current != edit.original:
+                raise DomainError(
+                    ErrorCode.REVISION_CONFLICT,
+                    f"Skill changed during setup: {edit.path}",
+                    retryable=True,
+                    remediation=("Review the file, then run setup again.",),
+                )
+            if edit.action is ClientPlanAction.REMOVE:
+                edit.path.unlink(missing_ok=True)
+            elif edit.updated is not None:
+                atomic_write_bytes(edit.path, edit.updated, mode=edit.mode)
+
+    def _skill_path(self, client: SetupClient) -> Path:
+        if client is SetupClient.CLAUDE:
+            return self.home / ".claude" / "skills" / "flameox" / "SKILL.md"
+        return self.home / ".agents" / "skills" / "flameox" / "SKILL.md"
 
     @staticmethod
     def _snapshot_file(path: Path) -> tuple[bytes | None, int]:
@@ -532,3 +671,10 @@ def _is_older_version(candidate: str, current: str) -> bool:
         return Version(candidate) < Version(current)
     except InvalidVersion:
         return False
+
+
+_SKILL_MARKER = "<!-- managed by flameox setup -->"
+
+
+def _skill_content() -> bytes:
+    return files("flameox.skills").joinpath("flameox", "SKILL.md").read_text().encode()

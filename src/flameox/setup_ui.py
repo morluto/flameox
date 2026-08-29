@@ -124,6 +124,8 @@ def print_plan(plan: SetupPlan) -> None:
             typer.echo(f"  {client.display_name}: {status} {client.path}{detected}")
         else:
             typer.echo(f"  {client.display_name}: {client.action.value} {client.path}{detected}")
+    for skill in plan.skills:
+        typer.echo(f"  Agent skill: {skill.action.value} {skill.path}")
     for warning in plan.warnings:
         typer.secho(f"  Warning: {warning}", fg=typer.colors.YELLOW)
     typer.echo()
@@ -150,6 +152,8 @@ def print_report(report: SetupReport) -> None:
         typer.secho(f"{verb}: {changed}", fg=typer.colors.GREEN)
     else:
         typer.secho("Everything is already current.", fg=typer.colors.GREEN)
+    if report.changed_skills:
+        typer.echo("Updated Flameox guidance for the selected agents.")
     typer.echo("Restart connected clients so they reload their MCP configuration.")
 
 

@@ -25,6 +25,12 @@ def test_setup_dry_run_emits_machine_readable_exact_plan(
     assert payload["operation"] == "configure"
     assert payload["clients"][0]["client"] == "claude"
     assert payload["clients"][0]["action"] == "create"
+    assert payload["skills"] == [
+        {
+            "path": str(tmp_path / "home" / ".claude" / "skills" / "flameox" / "SKILL.md"),
+            "action": "create",
+        }
+    ]
     assert not (tmp_path / "home" / ".claude.json").exists()
 
 
@@ -91,6 +97,7 @@ def test_setup_verify_dry_run_reports_configured_launcher_status(
             "client_version": None,
         }
     ]
+    assert payload["skills"][0]["action"] == "create"
 
 
 def test_setup_reports_corrupt_install_metadata_as_a_domain_error(

@@ -67,6 +67,10 @@ async def test_setup_connects_only_explicitly_selected_clients(tmp_path: Path) -
     }
     assert not (home / ".cursor" / "mcp.json").exists()
     assert report.changed_clients == (SetupClient.CLAUDE,)
+    skill = home / ".claude" / "skills" / "flameox" / "SKILL.md"
+    assert skill.exists()
+    assert "Use Flameox as the evidence layer" in skill.read_text()
+    assert report.changed_skills == (skill,)
 
 
 @pytest.mark.anyio
@@ -125,6 +129,58 @@ async def test_setup_is_idempotent_and_preserves_unrelated_json(tmp_path: Path) 
     assert configured["mcpServers"]["other"] == {"command": "x"}
     assert report.changed_clients == ()
     assert report.unchanged_clients == (SetupClient.GEMINI,)
+    assert report.changed_skills == ()
+    assert report.unchanged_skills == (home / ".agents" / "skills" / "flameox" / "SKILL.md",)
+
+
+@pytest.mark.anyio
+async def test_setup_refuses_to_replace_unowned_skill(tmp_path: Path) -> None:
+    service, _, home = make_service(tmp_path)
+    skill = home / ".agents" / "skills" / "flameox" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("user-owned guidance\n")
+
+    with pytest.raises(DomainError) as caught:
+        service.plan(
+            operation=SetupOperation.CONFIGURE,
+            clients=(SetupClient.CODEX,),
+            version="0.1.0",
+        )
+
+    assert caught.value.code is ErrorCode.REVISION_CONFLICT
+    assert skill.read_text() == "user-owned guidance\n"
+
+
+@pytest.mark.anyio
+async def test_shared_skill_survives_until_last_client_is_removed(tmp_path: Path) -> None:
+    service, _, home = make_service(tmp_path)
+    await service.apply(
+        service.plan(
+            operation=SetupOperation.CONFIGURE,
+            clients=(SetupClient.CODEX, SetupClient.GEMINI),
+            version="0.1.0",
+        )
+    )
+    skill = home / ".agents" / "skills" / "flameox" / "SKILL.md"
+
+    await service.apply(
+        service.plan(
+            operation=SetupOperation.REMOVE,
+            clients=(SetupClient.CODEX,),
+            version=None,
+        )
+    )
+    assert skill.exists()
+
+    report = await service.apply(
+        service.plan(
+            operation=SetupOperation.REMOVE,
+            clients=(SetupClient.GEMINI,),
+            version=None,
+        )
+    )
+    assert not skill.exists()
+    assert report.changed_skills == (skill,)
 
 
 @pytest.mark.anyio
@@ -151,6 +207,7 @@ async def test_verify_checks_the_runtime_and_every_configured_launcher(tmp_path:
     assert all(client.action.value == "already_current" for client in plan.public.clients)
     assert report.verified
     assert report.unchanged_clients == (SetupClient.CLAUDE, SetupClient.GEMINI)
+    assert all(skill.action.value == "already_current" for skill in plan.public.skills)
     assert report.model_dump(mode="json")["verified"] is True
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         type(report).model_validate({**report.model_dump(mode="python"), "verified": False})
@@ -242,6 +299,25 @@ async def test_setup_refuses_config_changed_after_preview(tmp_path: Path) -> Non
 
     assert caught.value.code is ErrorCode.REVISION_CONFLICT
     assert json.loads(config.read_text()) == {"new": True}
+
+
+@pytest.mark.anyio
+async def test_setup_refuses_skill_changed_after_preview(tmp_path: Path) -> None:
+    service, _, home = make_service(tmp_path)
+    plan = service.plan(
+        operation=SetupOperation.CONFIGURE,
+        clients=(SetupClient.CODEX,),
+        version="0.1.0",
+    )
+    skill = home / ".agents" / "skills" / "flameox" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("created after preview\n")
+
+    with pytest.raises(DomainError) as caught:
+        await service.apply(plan)
+
+    assert caught.value.code is ErrorCode.REVISION_CONFLICT
+    assert skill.read_text() == "created after preview\n"
 
 
 @pytest.mark.anyio

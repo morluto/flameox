@@ -38,10 +38,12 @@ Restart the client, open the project you intend to inspect, and ask it to:
 
 > Initialize Flameox in this project and list the available profiling capabilities.
 
-The setup command installs a versioned local runtime and changes only approved
-client configuration. Project initialization is separate and creates
-`.diagnostics/` only after the client calls the initialization workflow for its
-fixed project root.
+The setup command installs a versioned local runtime, changes only approved
+client configuration, and installs a small marker-owned Flameox skill for the
+selected agents. The skill helps agents compose Flameox evidence without
+imposing a fixed profiling recipe. Project initialization is separate and
+creates `.diagnostics/` only after the client calls the initialization workflow
+for its fixed project root.
 
 For source development:
 
