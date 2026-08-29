@@ -538,6 +538,52 @@ async def test_extractors_name_missing_artifact_and_require_state_change(tmp_pat
 
 
 @pytest.mark.anyio
+async def test_import_profile_returns_validated_run_semantics_inline(tmp_path: Path) -> None:
+    Workspace.initialize(tmp_path)
+    (tmp_path / "pyspy.json").write_text(
+        '[{"args":{"filename":"scan.py","line":12},"cat":"py-spy",'
+        '"name":"scan","ph":"B","pid":1,"tid":2,"ts":3},'
+        '{"args":{"filename":"scan.py","line":12},"cat":"py-spy",'
+        '"name":"scan","ph":"E","pid":1,"tid":2,"ts":4}]'
+    )
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        result = await client.call_tool(
+            "import_artifact",
+            {
+                "path": "pyspy.json",
+                "kind": "sample_profile",
+                "sensitivity": "normal",
+                "producer": "py-spy",
+                "producer_version": "0.4.2",
+                "profile": "py-spy-chrometrace",
+            },
+        )
+
+    assert result.is_error is False
+    assert result.structured_content is not None
+    semantics = result.structured_content["result"]["semantics"]
+    assert semantics["origin"] == "import"
+    assert semantics["adapter"] == "py-spy"
+    assert semantics["adapter_version"] is None
+    assert semantics["unavailable_fields"] == ["adapter_version", "scope"]
+
+    imported = result.structured_content["result"]
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        qualified = await client.call_tool(
+            "qualify_artifact_import",
+            {
+                "source_run_id": imported["run_id"],
+                "artifact_id": imported["artifact_id"],
+                "profile": "py-spy-chrometrace",
+            },
+        )
+    assert qualified.is_error is False
+    assert qualified.structured_content is not None
+    assert qualified.structured_content["result"]["artifact_id"] == imported["artifact_id"]
+
+
+@pytest.mark.anyio
 async def test_mcp_workspace_initialization_failures_remain_structured(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

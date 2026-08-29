@@ -104,6 +104,17 @@ Flameox never guesses which lineage owns the evidence. `extract_kernel_validatio
 remains idempotent and normalizes the registered document without moving run
 semantics into its bytes.
 
+`import_artifact` keeps free-form producer metadata separate from validated run
+semantics. Omitting `profile` creates a generic import even when `producer` is
+declared. `profile="py-spy-chrometrace"` validates the staged native event shape
+before assigning the py-spy adapter identity; rejection returns a failed run
+that still references the immutable bytes. The import receipt returns the
+bounded semantic projection inline and links to the authoritative run and
+artifact resources.
+`qualify_artifact_import` applies the same validation to an artifact already
+owned by a run, so recovery never depends on retaining the original source path
+and does not duplicate content-addressed bytes.
+
 Inline fields are response projections, not an alternate persistence model.
 Property-defining execution semantics remain authoritative in the run manifest,
 and selected findings or summaries remain authoritative in their durable records

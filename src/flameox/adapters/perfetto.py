@@ -170,9 +170,11 @@ class PerfettoExtractor:
             category = str(row["category"]) if row["category"] is not None else None
             thread_name = str(row["thread_name"]) if row.get("thread_name") is not None else None
             process_name = str(row["process_name"]) if row.get("process_name") is not None else None
+            language = "Python" if run.semantics.adapter == "py-spy" else None
             frame_id = digest_model(
                 {
                     "artifact_id": registration.artifact_id,
+                    "language": language,
                     "function": name,
                     "category": category,
                     "file": filename,
@@ -184,7 +186,7 @@ class PerfettoExtractor:
                 frame_id,
                 {
                     "frame_id": frame_id,
-                    "language": ("Python" if run.semantics.adapter == "py-spy" else None),
+                    "language": language,
                     "function": name,
                     "module": category,
                     "file": filename,
@@ -488,6 +490,15 @@ class PerfettoExtractor:
                 "Slice duration is inclusive and nested slices can overlap.",
                 "Parent-child edges reflect trace nesting, not causal dependence.",
                 "Complete temporal detail remains in the native trace.",
+                *(
+                    (
+                        "Python language attribution is unavailable for this generic py-spy "
+                        "import. Call qualify_artifact_import with this run_id, artifact_id, "
+                        "and profile='py-spy-chrometrace' to validate the preserved bytes.",
+                    )
+                    if run.semantics.adapter == "import" and registration.producer == "py-spy"
+                    else ()
+                ),
                 *(
                     (
                         "Normalized extraction reached the generation row budget; later slices "

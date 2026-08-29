@@ -14,6 +14,7 @@ from flameox.application import (
     EvidenceLookupService,
     HotspotAnalysisRequest,
     ImportArtifactRequest,
+    ImportProfile,
     ImportService,
     NativeViewerService,
 )
@@ -23,6 +24,7 @@ from flameox.storage import Workspace
 from tests.support.providers import require_trace_processor
 
 pytestmark = [pytest.mark.integration, pytest.mark.optional, pytest.mark.requires_perfetto]
+_PYSPY_FIXTURE = Path(__file__).parents[1] / "fixtures" / "pyspy" / "chrometrace-0.4.2.json"
 
 
 @pytest.mark.anyio
@@ -35,37 +37,25 @@ async def test_perfetto_extractor_uses_local_binary_and_curated_query(
     trace = tmp_path / "trace.json"
     trace.write_text(
         json.dumps(
-            {
-                "traceEvents": [
-                    {
-                        "name": "reverse_scan",
-                        "ph": "X",
-                        "ts": 0,
-                        "dur": 1000,
-                        "pid": 1,
-                        "tid": 1,
-                        "args": {"filename": "scan.py", "line": 10},
-                    },
-                    {
-                        "name": "accumulate",
-                        "ph": "X",
-                        "ts": 100,
-                        "dur": 500,
-                        "pid": 1,
-                        "tid": 1,
-                        "args": {"filename": "scan.py", "line": 11},
-                    },
-                    {
-                        "name": "finalize",
-                        "ph": "X",
-                        "ts": 650,
-                        "dur": 200,
-                        "pid": 1,
-                        "tid": 1,
-                        "args": {"filename": "scan.py", "line": 12},
-                    },
-                ]
-            }
+            [
+                {
+                    "name": name,
+                    "cat": "py-spy",
+                    "ph": phase,
+                    "ts": timestamp,
+                    "pid": 1,
+                    "tid": 1,
+                    "args": {"filename": "scan.py", "line": line},
+                }
+                for name, phase, timestamp, line in (
+                    ("reverse_scan", "B", 0, 10),
+                    ("accumulate", "B", 100, 11),
+                    ("accumulate", "E", 600, 11),
+                    ("finalize", "B", 650, 12),
+                    ("finalize", "E", 850, 12),
+                    ("reverse_scan", "E", 1000, 10),
+                )
+            ]
         )
     )
     workspace = Workspace.initialize(tmp_path)
@@ -81,7 +71,10 @@ async def test_perfetto_extractor_uses_local_binary_and_curated_query(
     imported = ImportService(workspace).import_artifact(
         ImportArtifactRequest(
             path=trace,
-            kind=ArtifactKind.EXECUTION_TRACE,
+            kind=ArtifactKind.SAMPLE_PROFILE,
+            producer="py-spy",
+            producer_version="0.4.2",
+            profile=ImportProfile.PYSPY_CHROMETRACE,
         )
     )
 
@@ -162,9 +155,68 @@ async def test_perfetto_extractor_uses_local_binary_and_curated_query(
     assert run_evidence.data["run_id"] == imported.run.run_id
     assert artifact.registrations[0].run_id == imported.run.run_id
     assert viewer.viewer == "trace_processor_shell"
+    with Catalog(workspace).open_snapshot(result.corpus_commit_id) as snapshot:
+        languages = snapshot.execute(
+            "SELECT DISTINCT f.language FROM frames f "
+            "JOIN frame_measurements fm USING (frame_id) WHERE fm.run_id = ?",
+            (imported.run.run_id,),
+        ).fetchall()
+    assert languages == [("Python",)]
     with pytest.raises(DomainError) as not_torch:
         RecipeService(workspace).pytorch(imported.run.run_id)
     assert not_torch.value.code is ErrorCode.COMPARISON_INVALID
+
+
+@pytest.mark.anyio
+@pytest.mark.optional
+@pytest.mark.requires_perfetto
+async def test_real_pyspy_import_profile_controls_language_attribution(tmp_path: Path) -> None:
+    binary = require_trace_processor()
+    workspace = Workspace.initialize(tmp_path)
+    config = workspace.config.validated_copy(
+        update={
+            "analysis": workspace.config.analysis.validated_copy(
+                update={"trace_processor_path": str(binary)}
+            )
+        }
+    )
+    workspace.paths.config.write_text(config.to_toml())
+    Catalog(workspace).rebuild()
+    service = ImportService(workspace)
+    qualified = service.import_artifact(
+        ImportArtifactRequest(
+            path=_PYSPY_FIXTURE,
+            kind=ArtifactKind.SAMPLE_PROFILE,
+            producer="py-spy",
+            producer_version="0.4.2",
+            profile=ImportProfile.PYSPY_CHROMETRACE,
+            allow_external_path=True,
+        )
+    )
+    generic = service.import_artifact(
+        ImportArtifactRequest(
+            path=_PYSPY_FIXTURE,
+            kind=ArtifactKind.SAMPLE_PROFILE,
+            producer="py-spy",
+            producer_version="0.4.2",
+            allow_external_path=True,
+        )
+    )
+
+    await PerfettoExtractor(workspace).extract(qualified.run.run_id)
+    generic_result = await PerfettoExtractor(workspace).extract(generic.run.run_id)
+
+    with Catalog(workspace).open_snapshot(generic_result.corpus_commit_id) as snapshot:
+        languages = snapshot.execute(
+            "SELECT fm.run_id, f.language FROM frames f "
+            "JOIN frame_measurements fm USING (frame_id) "
+            "WHERE fm.run_id IN (?, ?) ORDER BY fm.run_id",
+            (qualified.run.run_id, generic.run.run_id),
+        ).fetchall()
+    language_by_run = {run_id: language for run_id, language in languages}
+    assert language_by_run[qualified.run.run_id] == "Python"
+    assert language_by_run[generic.run.run_id] is None
+    assert any("qualify_artifact_import" in item for item in generic_result.limitations)
 
 
 @pytest.mark.anyio

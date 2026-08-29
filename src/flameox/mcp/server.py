@@ -140,6 +140,7 @@ from flameox.application import (
     FindingService,
     FreezeRunSetRequest,
     ImportArtifactRequest,
+    ImportProfile,
     ImportService,
     InferenceConfigurationList,
     InferenceConfigurationResult,
@@ -180,6 +181,7 @@ from flameox.application import (
     PipelineFilter,
     PipelineListResult,
     PlanReductionRequest,
+    QualifyArtifactImportRequest,
     RecordFindingRequest,
     RecordHypothesisRequest,
     ReductionPlan,
@@ -500,6 +502,7 @@ class ImportReceipt(ContractModel):
     corpus_commit_id: str
     run_resource_uri: str
     artifact_resource_uri: str
+    semantics: RunSemanticsProjection
 
 
 class ExperimentReceipt(ContractModel):
@@ -2131,6 +2134,15 @@ def create_server(
             str | None,
             Field(description="Optional producer version, at most 100 characters.", max_length=100),
         ] = None,
+        profile: Annotated[
+            ImportProfile | None,
+            Field(
+                description=(
+                    "Validated provider format profile. Use py-spy-chrometrace only for "
+                    "native py-spy Chrome traces; omit it for generic imports."
+                )
+            ),
+        ] = None,
     ) -> Annotated[CallToolResult, ToolPayload[ImportReceipt]]:
         """Import one project-local artifact and preserve producer identity.
 
@@ -2148,6 +2160,7 @@ def create_server(
                 sensitivity=sensitivity,
                 producer=None if producer == "auto" else producer,
                 producer_version=producer_version,
+                profile=profile,
                 allow_external_path=source_root == "temp",
             )
             result = await run_atomic_thread(
@@ -2161,6 +2174,7 @@ def create_server(
                 corpus_commit_id=result.corpus_commit_id,
                 run_resource_uri=run_uri,
                 artifact_resource_uri=artifact_uri,
+                semantics=RunSemanticsProjection.from_semantics(result.run.semantics),
             )
             return _success(
                 receipt,
@@ -2176,6 +2190,55 @@ def create_server(
                         name=f"Artifact {result.artifact_id}",
                         uri=artifact_uri,
                         description="Imported artifact metadata.",
+                        mime_type="application/json",
+                    ),
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="qualify_artifact_import", annotations=ADDITIVE)
+    async def qualify_artifact_import_tool(
+        source_run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        artifact_id: Annotated[str, Field(min_length=1, max_length=200)],
+        profile: ImportProfile,
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[ImportReceipt]]:
+        """Validate preserved native bytes and create a semantically qualified import run."""
+        try:
+            workspace = ctx.request_context.lifespan_context.require_workspace()
+            result = await run_atomic_thread(
+                lambda: ImportService(workspace).qualify_artifact(
+                    QualifyArtifactImportRequest(
+                        run_id=source_run_id,
+                        artifact_id=artifact_id,
+                        profile=profile,
+                    )
+                )
+            )
+            run_uri = f"flameox://runs/{result.run.run_id}"
+            artifact_uri = f"flameox://artifacts/{result.artifact_id}"
+            return _success(
+                ImportReceipt(
+                    run_id=result.run.run_id,
+                    artifact_id=result.artifact_id,
+                    corpus_commit_id=result.corpus_commit_id,
+                    run_resource_uri=run_uri,
+                    artifact_resource_uri=artifact_uri,
+                    semantics=RunSemanticsProjection.from_semantics(result.run.semantics),
+                ),
+                f"Qualified {result.artifact_id} in run {result.run.run_id}.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Run {result.run.run_id}",
+                        uri=run_uri,
+                        description="Authoritative qualified import run manifest.",
+                        mime_type="application/json",
+                    ),
+                    ResourceLink(
+                        name=f"Artifact {result.artifact_id}",
+                        uri=artifact_uri,
+                        description="Preserved artifact metadata.",
                         mime_type="application/json",
                     ),
                 ),

@@ -124,6 +124,14 @@ when those values define the property being measured. Imports and internal runs
 represent unavailable semantics explicitly rather than inferring them from
 artifact contents.
 
+Generic import preserves declared artifact metadata but does not promote a
+producer string into trusted run semantics. A registered import profile may do
+so only after validating the immutable staged bytes against its bounded native
+format contract. Qualified imports retain `origin="import"` while naming the
+validated adapter separately; unavailable capture scope remains explicit. A
+failed qualification preserves the immutable artifact on a failed import run
+instead of silently falling back to provider-specific semantics.
+
 Each effective adapter option has one persisted owner. Property-defining values
 live in the typed capture scope; remaining adapter configuration lives beside
 that scope. The complete option mapping used by adapter code is derived from

@@ -5,9 +5,12 @@ import mimetypes
 import stat
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
+import ijson
+from ijson import IncompleteJSONError, JSONError
 from pydantic import Field, StringConstraints
 
 from flameox.application.environment import collect_environment
@@ -19,10 +22,12 @@ from flameox.domain.models import (
     ArtifactKind,
     ArtifactRegistration,
     CaptureStatus,
+    EnvironmentRecord,
     ImportRunManifest,
     RunManifest,
     RunSemantics,
     Sensitivity,
+    SourceState,
     ValidationStatus,
 )
 from flameox.models import ContractModel
@@ -32,6 +37,15 @@ if TYPE_CHECKING:
     from flameox.application.otlp import OtlpExtractionResult
 
 _MAX_BUNDLE_MEMBERS = 100
+_PYSPY_PROFILE_MAX_BYTES = 64 * 1024 * 1024
+_PYSPY_PROFILE_MAX_EVENTS = 1_000_000
+_PYSPY_PROFILE_MAX_THREADS = 4_096
+_PYSPY_PROFILE_MAX_STACK_DEPTH = 4_096
+_PYSPY_PROFILE_MAX_TEXT_LENGTH = 4_096
+
+
+class ImportProfile(StrEnum):
+    PYSPY_CHROMETRACE = "py-spy-chrometrace"
 
 
 def _verify_declared_snapshot(member: BundleMember, snapshot: ArtifactSnapshot) -> None:
@@ -62,6 +76,7 @@ class ImportArtifactRequest(ContractModel):
     role: str = "primary"
     producer: str | None = None
     producer_version: str | None = None
+    profile: ImportProfile | None = None
     allow_external_path: bool = False
 
 
@@ -79,6 +94,12 @@ class ImportDescriptorRequest(ContractModel):
     role: str = "primary"
     producer: str | None = None
     producer_version: str | None = None
+
+
+class QualifyArtifactImportRequest(ContractModel):
+    run_id: str
+    artifact_id: str
+    profile: ImportProfile
 
 
 class ImportResult(ContractModel):
@@ -172,9 +193,54 @@ class ImportService:
             yield snapshot
 
     def import_artifact(self, request: ImportArtifactRequest) -> ImportResult:
+        self._validate_import_sensitivity(
+            kind=request.kind,
+            sensitivity=request.sensitivity,
+            producer=request.producer,
+        )
         allowed_roots = [self.workspace.project_root]
         if request.allow_external_path:
             allowed_roots.append(request.path.absolute().parent)
+        if request.profile is not None:
+            with self.artifacts.temporary_snapshot(
+                request.path,
+                allowed_roots=tuple(allowed_roots),
+                max_bytes=min(
+                    self.workspace.config.capture.max_artifact_bytes,
+                    _PYSPY_PROFILE_MAX_BYTES,
+                ),
+            ) as snapshot:
+                profile_error: DomainError | None = None
+                try:
+                    semantics, limitations = self._validate_pyspy_import_profile(
+                        snapshot.payload_path,
+                        kind=request.kind,
+                        media_type=request.media_type or mimetypes.guess_type(request.path.name)[0],
+                        producer=request.producer,
+                        producer_version=request.producer_version,
+                    )
+                except DomainError as error:
+                    profile_error = error
+                    semantics = RunSemantics(
+                        origin="import",
+                        adapter="import",
+                        configuration={"attempted_import_profile": request.profile.value},
+                        unavailable_fields=("scope",),
+                    )
+                    limitations = (error.message,)
+                return self._import_profiled_snapshot(
+                    snapshot,
+                    kind=request.kind,
+                    sensitivity=request.sensitivity,
+                    display_name=request.path.name,
+                    media_type=request.media_type,
+                    role=request.role,
+                    producer=request.producer,
+                    producer_version=request.producer_version,
+                    semantics=semantics,
+                    limitations=limitations,
+                    terminal_error=profile_error,
+                )
         return self._import_one(
             kind=request.kind,
             sensitivity=request.sensitivity,
@@ -193,6 +259,11 @@ class ImportService:
     def import_descriptor(self, request: ImportDescriptorRequest) -> ImportResult:
         """Register content from an exact descriptor without resolving its source path again."""
 
+        self._validate_import_sensitivity(
+            kind=request.kind,
+            sensitivity=request.sensitivity,
+            producer=request.producer,
+        )
         return self._import_one(
             kind=request.kind,
             sensitivity=request.sensitivity,
@@ -208,18 +279,59 @@ class ImportService:
             ),
         )
 
-    def _import_one(
-        self,
+    def qualify_artifact(self, request: QualifyArtifactImportRequest) -> ImportResult:
+        source_run = self.runs.read(request.run_id)
+        registrations = [
+            item for item in source_run.artifacts if item.artifact_id == request.artifact_id
+        ]
+        if len(registrations) != 1:
+            raise DomainError(
+                ErrorCode.ARTIFACT_NOT_FOUND,
+                "The source run does not own the requested artifact.",
+                run_id=request.run_id,
+                details={"artifact_id": request.artifact_id},
+            )
+        source = registrations[0]
+        stored = self.artifacts.get(source.artifact_id)
+        profile_error: DomainError | None = None
+        try:
+            semantics, limitations = self._validate_pyspy_import_profile(
+                stored.payload_path,
+                kind=source.kind,
+                media_type=source.media_type,
+                producer=source.producer,
+                producer_version=source.producer_version,
+            )
+        except DomainError as error:
+            profile_error = error
+            semantics = RunSemantics(
+                origin="import",
+                adapter="import",
+                configuration={"attempted_import_profile": request.profile.value},
+                unavailable_fields=("scope",),
+            )
+            limitations = (error.message,)
+        return self._record_profiled_artifact(
+            stored,
+            kind=source.kind,
+            sensitivity=source.sensitivity,
+            display_name=source.display_name,
+            media_type=source.media_type,
+            role=source.role,
+            producer=source.producer,
+            producer_version=source.producer_version,
+            semantics=semantics,
+            limitations=limitations,
+            terminal_error=profile_error,
+        )
+
+    @staticmethod
+    def _validate_import_sensitivity(
         *,
         kind: ArtifactKind,
         sensitivity: Sensitivity,
-        display_name: str,
-        media_type: str | None,
-        role: str,
         producer: str | None,
-        producer_version: str | None,
-        store: Callable[[], StoredArtifact],
-    ) -> ImportResult:
+    ) -> None:
         if (
             kind
             in {
@@ -238,6 +350,19 @@ class ImportService:
                 code=ErrorCode.SENSITIVE_ARTIFACT_REFUSED,
                 message=f"{kind.value} artifacts must be marked sensitive.",
             )
+
+    def _import_one(
+        self,
+        *,
+        kind: ArtifactKind,
+        sensitivity: Sensitivity,
+        display_name: str,
+        media_type: str | None,
+        role: str,
+        producer: str | None,
+        producer_version: str | None,
+        store: Callable[[], StoredArtifact],
+    ) -> ImportResult:
         environment = collect_environment()
         source_state = collect_partial_source_state(self.workspace)
         run_id = new_id()
@@ -307,6 +432,263 @@ class ImportService:
             artifact_id=stored.content.artifact_id,
             corpus_commit_id=projected.publication.commit.commit_id,
         )
+
+    def _import_profiled_snapshot(
+        self,
+        snapshot: ArtifactSnapshot,
+        *,
+        kind: ArtifactKind,
+        sensitivity: Sensitivity,
+        display_name: str,
+        media_type: str | None,
+        role: str,
+        producer: str | None,
+        producer_version: str | None,
+        semantics: RunSemantics,
+        limitations: tuple[str, ...],
+        terminal_error: DomainError | None,
+    ) -> ImportResult:
+        """Publish immutable bytes before assigning them semantic ownership."""
+
+        environment = collect_environment()
+        source_state = collect_partial_source_state(self.workspace)
+        run_id = new_id()
+        try:
+            stored = self.artifacts.import_snapshot(snapshot, display_name=display_name)
+        except DomainError as error:
+            failed = ImportRunManifest(
+                run_id=run_id,
+                capture_status=CaptureStatus.FAILED,
+                validation_status=ValidationStatus.NOT_REQUESTED,
+                environment_id=environment.environment_id,
+                source_state_id=source_state.source_state_id,
+                semantics=semantics,
+                limitations=(error.message,),
+            )
+            try:
+                self.projections.create_run(
+                    failed,
+                    environment=environment,
+                    source_state=source_state,
+                )
+            except Exception as projection_error:
+                error.add_note(
+                    "The failed import run has a durable projection recovery record: "
+                    f"{type(projection_error).__name__}."
+                )
+            error.run_id = run_id
+            raise
+        return self._record_profiled_artifact(
+            stored,
+            kind=kind,
+            sensitivity=sensitivity,
+            display_name=display_name,
+            media_type=media_type,
+            role=role,
+            producer=producer,
+            producer_version=producer_version,
+            semantics=semantics,
+            limitations=limitations,
+            terminal_error=terminal_error,
+            environment=environment,
+            source_state=source_state,
+            run_id=run_id,
+        )
+
+    def _record_profiled_artifact(
+        self,
+        stored: StoredArtifact,
+        *,
+        kind: ArtifactKind,
+        sensitivity: Sensitivity,
+        display_name: str,
+        media_type: str | None,
+        role: str,
+        producer: str | None,
+        producer_version: str | None,
+        semantics: RunSemantics,
+        limitations: tuple[str, ...],
+        terminal_error: DomainError | None,
+        environment: EnvironmentRecord | None = None,
+        source_state: SourceState | None = None,
+        run_id: str | None = None,
+    ) -> ImportResult:
+        environment = environment or collect_environment()
+        source_state = source_state or collect_partial_source_state(self.workspace)
+        run_id = run_id or new_id()
+        registration = ArtifactRegistration(
+            registration_id=new_id(),
+            run_id=run_id,
+            artifact_id=stored.content.artifact_id,
+            display_name=display_name,
+            media_type=media_type or mimetypes.guess_type(display_name)[0]
+            or "application/octet-stream",
+            kind=kind,
+            role=role,
+            producer=producer or self._infer_producer(stored.payload_path, kind),
+            producer_version=producer_version,
+            sensitivity=sensitivity,
+        )
+        terminal = ImportRunManifest(
+            run_id=run_id,
+            capture_status=(
+                CaptureStatus.FAILED if terminal_error is not None else CaptureStatus.REGISTERED
+            ),
+            validation_status=ValidationStatus.NOT_REQUESTED,
+            environment_id=environment.environment_id,
+            source_state_id=source_state.source_state_id,
+            semantics=semantics,
+            artifacts=(registration,),
+            limitations=limitations,
+        )
+        projected = self.projections.create_run(
+            terminal,
+            environment=environment,
+            source_state=source_state,
+        )
+        if terminal_error is not None:
+            terminal_error.run_id = run_id
+            raise terminal_error
+        return ImportResult(
+            run=projected.run,
+            artifact_id=stored.content.artifact_id,
+            corpus_commit_id=projected.publication.commit.commit_id,
+        )
+
+    def _validate_pyspy_import_profile(
+        self,
+        path: Path,
+        *,
+        kind: ArtifactKind,
+        media_type: str | None,
+        producer: str | None,
+        producer_version: str | None,
+    ) -> tuple[RunSemantics, tuple[str, ...]]:
+        if kind is not ArtifactKind.SAMPLE_PROFILE:
+            raise DomainError(
+                ErrorCode.INVALID_ARGUMENTS,
+                "The py-spy-chrometrace profile requires kind='sample_profile'.",
+            )
+        if media_type not in {None, "application/json"}:
+            raise DomainError(
+                ErrorCode.INVALID_ARGUMENTS,
+                "The py-spy-chrometrace profile requires JSON media type.",
+            )
+        if producer not in {None, "py-spy"}:
+            raise DomainError(
+                ErrorCode.INVALID_ARGUMENTS,
+                "The py-spy-chrometrace profile conflicts with the declared producer.",
+            )
+        self._validate_pyspy_chrometrace(path)
+        if producer_version is None:
+            limitations = ("Imported py-spy producer version is unavailable.",)
+        else:
+            limitations = (
+                f"Imported py-spy {producer_version} is caller-declared and not independently "
+                "verified.",
+            )
+        return (
+            RunSemantics(
+                origin="import",
+                adapter="py-spy",
+                configuration={"import_profile": ImportProfile.PYSPY_CHROMETRACE.value},
+                unavailable_fields=("adapter_version", "scope"),
+            ),
+            limitations,
+        )
+
+    def _validate_pyspy_chrometrace(self, path: Path) -> None:
+        maximum = min(
+            self.workspace.config.storage.max_rows_per_generation,
+            _PYSPY_PROFILE_MAX_EVENTS,
+        )
+        count = 0
+        stacks: dict[tuple[int, int], list[tuple[str, str, int | None]]] = {}
+        last_timestamp: dict[tuple[int, int], int] = {}
+        try:
+            with path.open("rb") as stream:
+                for count, event in enumerate(ijson.items(stream, "item"), start=1):
+                    if count > maximum:
+                        raise DomainError(
+                            ErrorCode.QUERY_BUDGET_EXCEEDED,
+                            "The py-spy Chrome trace exceeds the import-profile event limit.",
+                        )
+                    if not isinstance(event, dict):
+                        raise ValueError("trace event is not an object")
+                    args = event.get("args")
+                    pid = event.get("pid")
+                    tid = event.get("tid")
+                    timestamp = event.get("ts")
+                    line = args.get("line") if isinstance(args, dict) else None
+                    if (
+                        event.get("cat") != "py-spy"
+                        or event.get("ph") not in {"B", "E"}
+                        or not isinstance(event.get("name"), str)
+                        or not event["name"]
+                        or type(pid) is not int
+                        or pid < 0
+                        or type(tid) is not int
+                        or tid < 0
+                        or type(timestamp) is not int
+                        or timestamp < 0
+                        or not isinstance(args, dict)
+                        or not isinstance(args.get("filename"), str)
+                        or (line is not None and (type(line) is not int or line < 0))
+                    ):
+                        raise ValueError("trace event does not match py-spy Chrome trace shape")
+                    thread = (pid, tid)
+                    if (
+                        thread not in last_timestamp
+                        and len(last_timestamp) >= _PYSPY_PROFILE_MAX_THREADS
+                    ):
+                        raise DomainError(
+                            ErrorCode.QUERY_BUDGET_EXCEEDED,
+                            "The py-spy Chrome trace exceeds the import-profile thread limit.",
+                        )
+                    if timestamp < last_timestamp.get(thread, 0):
+                        raise ValueError("trace timestamps are not monotonic within a thread")
+                    last_timestamp[thread] = timestamp
+                    frame = (event["name"], args["filename"], line)
+                    if (
+                        len(frame[0]) > _PYSPY_PROFILE_MAX_TEXT_LENGTH
+                        or len(frame[1]) > _PYSPY_PROFILE_MAX_TEXT_LENGTH
+                    ):
+                        raise DomainError(
+                            ErrorCode.QUERY_BUDGET_EXCEEDED,
+                            "The py-spy Chrome trace exceeds the import-profile text limit.",
+                        )
+                    stack = stacks.setdefault(thread, [])
+                    if event["ph"] == "B":
+                        if len(stack) >= _PYSPY_PROFILE_MAX_STACK_DEPTH:
+                            raise DomainError(
+                                ErrorCode.QUERY_BUDGET_EXCEEDED,
+                                "The py-spy Chrome trace exceeds the import-profile stack limit.",
+                            )
+                        stack.append(frame)
+                    elif not stack or stack.pop() != frame:
+                        raise ValueError("trace events do not form balanced per-thread stacks")
+                    elif not stack:
+                        stacks.pop(thread)
+        except DomainError:
+            raise
+        except (OSError, IncompleteJSONError, JSONError, ValueError) as exc:
+            raise DomainError(
+                ErrorCode.ARTIFACT_PARSE_FAILED,
+                "The artifact does not match the py-spy Chrome trace profile.",
+                remediation=("Import it without a profile to preserve only generic semantics.",),
+            ) from exc
+        if count == 0:
+            raise DomainError(
+                ErrorCode.ARTIFACT_PARSE_FAILED,
+                "The artifact does not contain any py-spy Chrome trace events.",
+                remediation=("Import it without a profile to preserve only generic semantics.",),
+            )
+        if any(stacks.values()):
+            raise DomainError(
+                ErrorCode.ARTIFACT_PARSE_FAILED,
+                "The py-spy Chrome trace contains unclosed stack frames.",
+                remediation=("Import it without a profile to preserve only generic semantics.",),
+            )
 
     def import_provider_bundle(self, request: ImportBundleRequest) -> ImportBundleResult:
         """Import a primary artifact and its bounded sidecars into a single run.

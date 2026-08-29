@@ -64,6 +64,7 @@ from flameox.application import (
     FreezeRunIdsRequest,
     GarbageCollector,
     ImportArtifactRequest,
+    ImportProfile,
     ImportService,
     InferenceEndpointType,
     InferenceProfilingService,
@@ -84,6 +85,7 @@ from flameox.application import (
     NvbenchImportService,
     OtlpTraceService,
     PipelineFilter,
+    QualifyArtifactImportRequest,
     QuarantineService,
     RecordFindingRequest,
     RecordHypothesisRequest,
@@ -406,6 +408,28 @@ def initialize(
         result = workspace_status(initialized)
     except DomainError as error:
         _fail(error, as_json=json_output)
+    _emit(result, as_json=json_output)
+
+
+@app.command("qualify-artifact-import")
+def qualify_artifact_import(
+    source_run_id: Annotated[str, typer.Argument(help="Run that owns the preserved artifact.")],
+    artifact_id: Annotated[str, typer.Argument(help="Artifact to validate and qualify.")],
+    profile: Annotated[ImportProfile, typer.Option("--profile", case_sensitive=False)],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Create a qualified import run from preserved immutable evidence."""
+    try:
+        result = ImportService(_workspace(workspace)).qualify_artifact(
+            QualifyArtifactImportRequest(
+                run_id=source_run_id,
+                artifact_id=artifact_id,
+                profile=profile,
+            )
+        )
+    except DomainError as error:
+        _fail(error)
     _emit(result, as_json=json_output)
 
 
@@ -820,6 +844,10 @@ def import_artifact(
     ] = Sensitivity.INTERNAL,
     producer: Annotated[str | None, typer.Option("--producer")] = None,
     producer_version: Annotated[str | None, typer.Option("--producer-version")] = None,
+    profile: Annotated[
+        ImportProfile | None,
+        typer.Option("--profile", case_sensitive=False),
+    ] = None,
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
@@ -833,6 +861,7 @@ def import_artifact(
                 sensitivity=sensitivity,
                 producer=producer,
                 producer_version=producer_version,
+                profile=profile,
                 allow_external_path=True,
             )
         )
