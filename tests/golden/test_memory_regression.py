@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import sys
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from flameox.adapters import MemrayExtractor
+from flameox.adapters.memray import memray_extraction_limits
 from flameox.application import (
     AnalysisMaterializationService,
     ComparisonService,
@@ -41,15 +45,18 @@ pytestmark = [
 ]
 
 
-def _capture(path: Path, allocation_count: int) -> None:
+def _capture(path: Path, allocation_count: int) -> str:
     memray = pytest.importorskip("memray", reason="optional provider unavailable: install memray")
     with memray.Tracker(str(path)):
         retained = [bytearray(4_096) for _ in range(allocation_count)]
         assert len(retained) == allocation_count
+    return str(memray.__version__)
 
 
-def test_retained_memory_regression_has_native_and_normalized_evidence(
+@pytest.mark.anyio
+async def test_retained_memory_regression_has_native_and_normalized_evidence(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     Catalog(workspace).rebuild()
@@ -72,16 +79,38 @@ def test_retained_memory_regression_has_native_and_normalized_evidence(
     extractions = {}
     for name, allocation_count in (("baseline", 8), ("candidate", 64)):
         capture_path = tmp_path / f"{name}.bin"
-        _capture(capture_path, allocation_count)
+        producer_version = _capture(capture_path, allocation_count)
         imported = ImportService(workspace).import_artifact(
             ImportArtifactRequest(
                 path=capture_path,
                 kind=ArtifactKind.MEMORY_PROFILE,
                 producer="memray",
+                producer_version=producer_version,
             )
         )
         runs[name] = imported.run
-        extractions[name] = MemrayExtractor(workspace).extract(imported.run.run_id)
+        extractor = MemrayExtractor(workspace)
+        runtime = SimpleNamespace(
+            python=Path(sys.executable),
+            receipt=SimpleNamespace(
+                environment_id="sha256:" + "e" * 64,
+                distributions={"memray": producer_version},
+                limitations=(),
+            ),
+        )
+        monkeypatch.setattr(
+            extractor.provider_runtimes,
+            "find_distribution",
+            lambda selected=runtime, **_kwargs: selected,
+        )
+        monkeypatch.setattr(
+            extractor.provider_runtimes,
+            "verified_use",
+            lambda _runtime, selected=runtime: nullcontext(selected),
+        )
+        extractions[name] = await extractor.extract(
+            imported.run.run_id, limits=memray_extraction_limits(workspace)
+        )
 
     cohorts = RunSetService(workspace)
     baseline = cohorts.freeze(FreezeRunIdsRequest(run_ids=(runs["baseline"].run_id,)))

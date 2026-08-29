@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import shutil
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 
@@ -21,7 +22,62 @@ from flameox.domain import (
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
-from flameox.workers.memray_contract import MEMRAY_WORKER, MemrayWorkerRequest, MemrayWorkerResult
+from flameox.workers.memray_contract import (
+    MEMRAY_EXTRACTOR_NAME,
+    MEMRAY_EXTRACTOR_VERSION,
+    MEMRAY_WORKER,
+    MemrayExtractionCoverage,
+    MemrayExtractionLimits,
+    MemrayWorkerProgress,
+    MemrayWorkerRequest,
+    MemrayWorkerResult,
+)
+
+_WORKER_PROTOCOL_OVERHEAD_BYTES = 2 * 1024 * 1024
+
+
+def memray_extraction_limits(workspace: Workspace) -> MemrayExtractionLimits:
+    maximum_rows = workspace.config.storage.max_rows_per_generation
+    return MemrayExtractionLimits(
+        max_input_bytes=workspace.config.capture.max_artifact_bytes,
+        max_provider_records=100_000,
+        max_frames=max(1, min(250_000, maximum_rows // 3)),
+        max_stack_depth=256,
+        max_aggregate_rows=max(1, min(500_000, maximum_rows // 2)),
+        max_output_bytes=min(
+            workspace.config.storage.max_staging_bytes,
+            workspace.config.capture.max_artifact_bytes,
+        ),
+        wall_time_seconds=workspace.config.capture.default_timeout_seconds,
+        max_worker_memory_bytes=workspace.config.execution.max_memory_bytes,
+    )
+
+
+class _MemrayProgressReader:
+    def __init__(
+        self,
+        harness: IsolatedWorkerHarness,
+        emit: Callable[[str, int, int | None], Awaitable[None]] | None,
+    ) -> None:
+        self.harness = harness
+        self.emit = emit
+        self.last: MemrayWorkerProgress | None = None
+
+    async def __call__(self, job_root: Path) -> None:
+        if self.emit is None:
+            return
+        with suppress(DomainError, OSError, ValueError):
+            payload = self.harness.read_staged_bytes(
+                job_root,
+                "progress.json",
+                max_bytes=4_096,
+            )
+            if payload is None:
+                return
+            current = MemrayWorkerProgress.model_validate_json(payload)
+            if current != self.last:
+                self.last = current
+                await self.emit(current.phase, current.records_seen, None)
 
 
 class MemrayExtractionResult(ContractModel):
@@ -36,14 +92,16 @@ class MemrayExtractionResult(ContractModel):
     allocation_operations: int | None
     total_allocated_bytes: int | None
     capture_records: int
-    frame_count: int
+    limits: MemrayExtractionLimits
+    coverage: MemrayExtractionCoverage
+    evidence_generation_id: str
     corpus_commit_id: str
     limitations: tuple[str, ...] = ()
 
 
 class MemrayExtractor:
-    name = "memray"
-    version = "4"
+    name = MEMRAY_EXTRACTOR_NAME
+    version = MEMRAY_EXTRACTOR_VERSION
 
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
@@ -52,14 +110,13 @@ class MemrayExtractor:
             workspace.paths.records / "provider-runtimes"
         )
 
-    def extract(
+    async def extract(
         self,
         run_id: str,
         *,
-        cancel_check: Callable[[], None] | None = None,
-        progress: Callable[[str, int, int | None], None] | None = None,
+        limits: MemrayExtractionLimits,
+        progress: Callable[[str, int, int | None], Awaitable[None]] | None = None,
     ) -> MemrayExtractionResult:
-        self._check_cancelled(cancel_check)
         run = RunStore(self.workspace).read(run_id)
         registrations = [item for item in run.artifacts if item.kind is ArtifactKind.MEMORY_PROFILE]
         if not registrations:
@@ -107,20 +164,46 @@ class MemrayExtractor:
                 ),
             )
         artifact = ArtifactStore(self.workspace).get(registration.artifact_id)
+        if artifact.payload_path.stat().st_size > limits.max_input_bytes:
+            raise DomainError(
+                ErrorCode.QUERY_BUDGET_EXCEEDED,
+                "Memray capture exceeds the extraction input-byte limit.",
+                run_id=run_id,
+                details={"limits": limits.model_dump(mode="json")},
+                remediation=(
+                    "Increase the workspace capture artifact limit or import a smaller profile.",
+                ),
+            )
         harness = IsolatedWorkerHarness(self.workspace, python=runtime.python)
         worker_results: list[MemrayWorkerResult] = []
         expected_reader_version = runtime.receipt.distributions["memray"]
 
-        def prepare(
+        heartbeat = _MemrayProgressReader(harness, progress)
+
+        async def prepare(
             root: Path,
             generation_id: str,
             published_at: datetime,
         ) -> dict[str, Path]:
             if progress is not None:
-                progress("reading_profile", 0, None)
-            with (
-                self.provider_runtimes.verified_use(runtime),
-                harness.run_typed_sync_session(
+                await progress("reading_profile", 0, None)
+
+            def consume(result: MemrayWorkerResult, job_root: Path) -> dict[str, Path]:
+                if result.reader_version != expected_reader_version:
+                    raise DomainError(
+                        ErrorCode.ADAPTER_INCOMPATIBLE,
+                        "The Memray worker reader does not match its runtime receipt.",
+                        details={
+                            "expected_reader_version": expected_reader_version,
+                            "observed_reader_version": result.reader_version,
+                        },
+                    )
+                self._validate_worker_coverage(result, limits)
+                worker_results.append(result)
+                return self._stage_worker_outputs(harness, result, job_root, root)
+
+            with self.provider_runtimes.verified_use(runtime):
+                return await harness.run_typed_session(
                     MEMRAY_WORKER,
                     MemrayWorkerRequest(
                         artifact_path=str(artifact.payload_path),
@@ -139,22 +222,16 @@ class MemrayExtractor:
                         ),
                         generation_id=generation_id,
                         published_at=published_at,
+                        limits=limits,
                     ),
-                ) as (result, job_root),
-            ):
-                if result.reader_version != expected_reader_version:
-                    raise DomainError(
-                        ErrorCode.ADAPTER_INCOMPATIBLE,
-                        "The Memray worker reader does not match its runtime receipt.",
-                        details={
-                            "expected_reader_version": expected_reader_version,
-                            "observed_reader_version": result.reader_version,
-                        },
-                    )
-                staged = self._stage_worker_outputs(harness, result, job_root, root)
-                worker_results.append(result)
-            self._check_cancelled(cancel_check)
-            return staged
+                    consume=consume,
+                    timeout_seconds=limits.wall_time_seconds,
+                    maximum_rss_bytes=limits.max_worker_memory_bytes,
+                    maximum_writable_growth_bytes=(
+                        limits.max_output_bytes + _WORKER_PROTOCOL_OVERHEAD_BYTES
+                    ),
+                    heartbeat=heartbeat,
+                )
 
         operation_digest = digest_model(
             {
@@ -163,13 +240,14 @@ class MemrayExtractor:
                 "reader_environment_id": runtime.receipt.environment_id,
                 "reader_version": expected_reader_version,
                 "extractor_profile": MEMRAY_WORKER.implementation,
+                "limits": limits.model_dump(mode="json"),
             }
         )
         try:
-            published = self.publisher.publish_prepared_parquet(
+            published = await self.publisher.publish_prepared_parquet(
                 prepare,
-                publisher=self.name,
-                publisher_version=self.version,
+                publisher=MEMRAY_EXTRACTOR_NAME,
+                publisher_version=MEMRAY_EXTRACTOR_VERSION,
                 input_run_ids=(run_id,),
                 input_artifact_ids=(registration.artifact_id,),
                 operation_digest=operation_digest,
@@ -197,9 +275,8 @@ class MemrayExtractor:
                     memray_reader_version=producer_version,
                 ),
             ) from error
-        self._check_cancelled(cancel_check)
         if progress is not None:
-            progress("publishing_evidence", 1, 1)
+            await progress("publishing_evidence", 1, 1)
         worker = worker_results[-1]
         limitations = [
             "Frame aggregates expose bounded callers; complete stacks remain in Memray.",
@@ -211,6 +288,12 @@ class MemrayExtractor:
             limitations.append(
                 "Memray structured allocation statistics are unavailable for this capture format; "
                 "only the raw capture-record count is published."
+            )
+        if not worker.coverage.complete:
+            limitations.append(
+                "Memray normalized evidence reached an extraction limit; coverage reports the "
+                "selected records and dropped contributions. Capture a narrower profile or raise "
+                "applicable workspace budgets before starting a new extraction."
             )
         return MemrayExtractionResult(
             run_id=run_id,
@@ -224,10 +307,29 @@ class MemrayExtractor:
             allocation_operations=worker.allocation_operations,
             total_allocated_bytes=worker.total_allocated_bytes,
             capture_records=worker.capture_records,
-            frame_count=worker.frame_count,
+            limits=limits,
+            coverage=worker.coverage,
+            evidence_generation_id=published.manifest.generation_id,
             corpus_commit_id=published.commit.commit_id,
             limitations=tuple(limitations),
         )
+
+    @staticmethod
+    def _validate_worker_coverage(
+        result: MemrayWorkerResult,
+        limits: MemrayExtractionLimits,
+    ) -> None:
+        coverage = result.coverage
+        if (
+            coverage.frames_published > limits.max_frames
+            or coverage.aggregate_rows_published > limits.max_aggregate_rows
+            or coverage.output_bytes > limits.max_output_bytes
+            or coverage.output_bytes != sum(output.byte_length for output in result.files)
+        ):
+            raise DomainError(
+                ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
+                "The Memray worker coverage exceeds or contradicts its extraction limits.",
+            )
 
     @staticmethod
     def _stage_worker_outputs(
@@ -278,8 +380,3 @@ class MemrayExtractor:
                 "The declared Memray producer version is invalid.",
                 details={"producer_version": version},
             ) from error
-
-    @staticmethod
-    def _check_cancelled(cancel_check: Callable[[], None] | None) -> None:
-        if cancel_check is not None:
-            cancel_check()

@@ -120,7 +120,7 @@ documented proof gap and must not claim equivalent race resistance.
 
 ## Artifact workers
 
-Native readers for AIPerf, Perfetto, OTLP, Nsight, Compute Sanitizer, and
+Native readers for AIPerf, Perfetto, OTLP, Nsight, Memray, Compute Sanitizer, and
 reductions use one isolated worker harness. The parent creates a unique staging
 root, writes a typed request envelope bound to a request ID, operation, and
 implementation identity, launches a registered module through the broker, and
@@ -130,6 +130,11 @@ the trusted root and verifies those facts before import.
 
 The harness is isolation from the application process, not a sandbox by itself.
 Its execution policy, environment, roots, and resource ceilings remain explicit.
+Long Memray extraction uses the asynchronous harness path: cancellation unwinds the
+owning operation task into the broker, terminates the process tree, waits for staging
+cleanup, and never exposes a partial evidence generation. An optional atomic progress
+side-channel is read through the same trusted-root, regular-file, and byte-bound checks
+as worker outputs; malformed progress cannot alter the extraction result.
 The broker can additionally cap aggregate writable-root growth while a process
 tree is alive. Reduction also performs a final file/byte-count check, closing
 the sampling gap for a short process that writes and exits between observations.

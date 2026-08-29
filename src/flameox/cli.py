@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -37,6 +38,7 @@ from flameox.adapters import (
     V8CpuProfExtractor,
     V8HeapProfExtractor,
 )
+from flameox.adapters.memray import memray_extraction_limits
 from flameox.analysis import RecipeService
 from flameox.application import (
     AnalysisMaterializationService,
@@ -1736,7 +1738,7 @@ def catalog_compact(
 ) -> None:
     """Replace reachable small generations with one immutable generation."""
     try:
-        result = CompactionService(_workspace(workspace)).compact()
+        result = asyncio.run(CompactionService(_workspace(workspace)).compact())
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -2732,8 +2734,14 @@ def extract_memray(
     json_output: JsonOption = False,
 ) -> None:
     """Extract peak, retained-end, allocation, and frame evidence."""
+    selected_workspace = _workspace(workspace)
     try:
-        result = MemrayExtractor(_workspace(workspace)).extract(run_id)
+        result = asyncio.run(
+            MemrayExtractor(selected_workspace).extract(
+                run_id,
+                limits=memray_extraction_limits(selected_workspace),
+            )
+        )
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)

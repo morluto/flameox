@@ -319,6 +319,12 @@ outlive an MCP request. It requires an idempotency key and returns an operation 
 `get_extraction` for bounded progress and the terminal extraction receipt, or
 `cancel_extraction` for scoped cooperative cancellation. Native profile artifacts remain
 immutable; normalized evidence is published only as a complete generation.
+The start/status request exposes the effective eight-part extraction budget. Running
+status reports named reader, normalization, and publication phases with observed record
+counts; it does not invent a total when Memray cannot provide one. The terminal receipt
+keeps the same limits beside explicit coverage and limitations. A new idempotency key
+with the same run and limits reuses the exact completed receipt instead of parsing the
+profile again.
 
 ## Errors
 

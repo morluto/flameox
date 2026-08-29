@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ctypes
 import mmap
 import sys
@@ -11,12 +12,13 @@ from typing import cast
 import pytest
 
 from flameox.adapters import MemrayExtractor
+from flameox.adapters.memray import memray_extraction_limits
 from flameox.analysis import RecipeService
 from flameox.application import ImportArtifactRequest, ImportService
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.evidence import GenerationPublisher
-from flameox.storage import Workspace
+from flameox.storage import ArtifactStore, Workspace
 
 pytestmark = [pytest.mark.integration, pytest.mark.optional, pytest.mark.requires_memray]
 
@@ -78,7 +80,16 @@ def _exercise_allocator_case(case: str) -> None:
         del allocations
 
 
-def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
+def _allocation_a() -> bytearray:
+    return bytearray(1_000)
+
+
+def _allocation_b() -> bytearray:
+    return bytearray(2_000)
+
+
+@pytest.mark.anyio
+async def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -102,9 +113,13 @@ def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
         )
     )
     progress: list[tuple[str, int, int | None]] = []
-    result = _extractor(workspace, memray.__version__, monkeypatch).extract(
+    async def record_progress(phase: str, completed: int, total: int | None) -> None:
+        progress.append((phase, completed, total))
+
+    result = await _extractor(workspace, memray.__version__, monkeypatch).extract(
         imported.run.run_id,
-        progress=lambda phase, completed, total: progress.append((phase, completed, total)),
+        limits=memray_extraction_limits(workspace),
+        progress=record_progress,
     )
 
     assert result.peak_memory_bytes >= 100_000
@@ -112,12 +127,18 @@ def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
     assert result.allocation_operations == provider_stats.total_num_allocations
     assert result.total_allocated_bytes == provider_stats.total_memory_allocated
     assert result.capture_records >= result.allocation_operations
-    assert result.frame_count >= 1
+    assert result.coverage.frames_published >= 1
     assert result.producer_version == memray.__version__
     assert result.reader_version == memray.__version__
     assert result.reader_environment_id == "sha256:" + "e" * 64
-    assert {phase for phase, _completed, _total in progress} == {
+    phases = {phase for phase, _completed, _total in progress}
+    assert {"reading_profile", "publishing_evidence"} <= phases
+    assert phases <= {
         "reading_profile",
+        "computing_statistics",
+        "normalizing_high_watermark",
+        "normalizing_retained_end",
+        "writing_evidence",
         "publishing_evidence",
     }
     with Catalog(workspace).open_snapshot() as snapshot:
@@ -217,7 +238,8 @@ def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
         ("python_allocators", True),
     ),
 )
-def test_memray_allocation_operations_match_provider_stats_and_exclude_deallocations(
+@pytest.mark.anyio
+async def test_memray_allocation_operations_match_provider_stats_and_exclude_deallocations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     case: str,
@@ -245,7 +267,9 @@ def test_memray_allocation_operations_match_provider_stats_and_exclude_deallocat
         )
     )
 
-    result = _extractor(workspace, memray.__version__, monkeypatch).extract(imported.run.run_id)
+    result = await _extractor(workspace, memray.__version__, monkeypatch).extract(
+        imported.run.run_id, limits=memray_extraction_limits(workspace)
+    )
 
     assert result.allocation_operations == provider_stats.total_num_allocations
     assert result.total_allocated_bytes == provider_stats.total_memory_allocated
@@ -254,7 +278,8 @@ def test_memray_allocation_operations_match_provider_stats_and_exclude_deallocat
     assert result.capture_records > result.allocation_operations
 
 
-def test_memray_extraction_rejects_a_reader_that_disagrees_with_its_receipt(
+@pytest.mark.anyio
+async def test_memray_extraction_rejects_a_reader_that_disagrees_with_its_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -275,14 +300,17 @@ def test_memray_extraction_rejects_a_reader_that_disagrees_with_its_receipt(
     original_head = workspace.corpus.read_head().commit_id
 
     with pytest.raises(DomainError) as raised:
-        _extractor(workspace, "0.0", monkeypatch).extract(imported.run.run_id)
+        await _extractor(workspace, "0.0", monkeypatch).extract(
+            imported.run.run_id, limits=memray_extraction_limits(workspace)
+        )
 
     assert raised.value.code is ErrorCode.ADAPTER_INCOMPATIBLE
     assert raised.value.details["reader_version"] == "0.0"
     assert workspace.corpus.read_head().commit_id == original_head
 
 
-def test_memray_aggregated_capture_does_not_invent_allocation_statistics(
+@pytest.mark.anyio
+async def test_memray_aggregated_capture_does_not_invent_allocation_statistics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -304,7 +332,9 @@ def test_memray_aggregated_capture_does_not_invent_allocation_statistics(
         )
     )
 
-    result = _extractor(workspace, memray.__version__, monkeypatch).extract(imported.run.run_id)
+    result = await _extractor(workspace, memray.__version__, monkeypatch).extract(
+        imported.run.run_id, limits=memray_extraction_limits(workspace)
+    )
 
     assert result.allocation_operations is None
     assert result.total_allocated_bytes is None
@@ -315,8 +345,52 @@ def test_memray_aggregated_capture_does_not_invent_allocation_statistics(
     )
 
 
+@pytest.mark.anyio
+async def test_memray_limits_report_bounded_coverage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memray = _memray_module()
+    capture = tmp_path / "memory.bin"
+    with memray.Tracker(str(capture)):
+        retained = (_allocation_a(), _allocation_b())
+    assert sum(map(len, retained)) == 3_000
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(
+            path=capture,
+            kind=ArtifactKind.MEMORY_PROFILE,
+            producer="memray",
+            producer_version=memray.__version__,
+        )
+    )
+    limits = memray_extraction_limits(workspace).validated_copy(
+        update={
+            "max_provider_records": 1,
+            "max_frames": 1,
+            "max_stack_depth": 1,
+            "max_aggregate_rows": 2,
+        }
+    )
+    extractor = _extractor(workspace, memray.__version__, monkeypatch)
+
+    first = await extractor.extract(imported.run.run_id, limits=limits)
+    assert first.coverage.complete is False
+    assert any(
+        metric.records_seen > metric.records_selected
+        for metric in (first.coverage.high_watermark, first.coverage.retained_end)
+    )
+    assert first.coverage.frames_published <= 1
+    assert first.coverage.aggregate_rows_published <= 2
+    assert any("reached an extraction limit" in item for item in first.limitations)
+    preserved = ArtifactStore(workspace).get(imported.artifact_id).payload_path
+    assert capture.read_bytes() == preserved.read_bytes()
+
+
 @pytest.mark.parametrize("payload", (b"", b"truncated"))
-def test_memray_rejects_empty_and_truncated_captures(
+@pytest.mark.anyio
+async def test_memray_rejects_empty_and_truncated_captures(
     tmp_path: Path,
     payload: bytes,
     monkeypatch: pytest.MonkeyPatch,
@@ -334,19 +408,22 @@ def test_memray_rejects_empty_and_truncated_captures(
     )
 
     with pytest.raises(DomainError) as error:
-        _extractor(workspace, "1.20.0", monkeypatch).extract(imported.run.run_id)
+        await _extractor(workspace, "1.20.0", monkeypatch).extract(
+            imported.run.run_id, limits=memray_extraction_limits(workspace)
+        )
 
     assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
 
 
-def test_memray_cancellation_before_publication_preserves_the_corpus_head(
+@pytest.mark.anyio
+async def test_memray_cancellation_before_publication_preserves_the_corpus_head(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     memray = _memray_module()
     capture = tmp_path / "memory.bin"
     with memray.Tracker(str(capture)):
-        retained = bytearray(100_000)
+        retained = [bytearray(64) for _ in range(100_000)]
     assert retained
 
     workspace = Workspace.initialize(tmp_path)
@@ -359,19 +436,25 @@ def test_memray_cancellation_before_publication_preserves_the_corpus_head(
         )
     )
     head_before = workspace.corpus.read_head().commit_id
-    checks = 0
+    worker_started = asyncio.Event()
 
-    def cancel() -> None:
-        nonlocal checks
-        checks += 1
-        if checks == 2:
-            raise DomainError(ErrorCode.PROCESS_CANCELLED, "cancelled")
+    async def observe_progress(phase: str, _completed: int, _total: int | None) -> None:
+        if phase not in {"reading_profile", "publishing_evidence"}:
+            worker_started.set()
 
-    with pytest.raises(DomainError) as cancelled:
+    extraction = asyncio.create_task(
         _extractor(workspace, memray.__version__, monkeypatch).extract(
             imported.run.run_id,
-            cancel_check=cancel,
+            limits=memray_extraction_limits(workspace),
+            progress=observe_progress,
         )
+    )
+    await asyncio.wait_for(worker_started.wait(), timeout=10)
+    extraction.cancel()
 
-    assert cancelled.value.code is ErrorCode.PROCESS_CANCELLED
+    with pytest.raises(asyncio.CancelledError):
+        await extraction
     assert workspace.corpus.read_head().commit_id == head_before
+    assert ArtifactStore(workspace).get(imported.artifact_id).payload_path.is_file()
+    worker_staging = workspace.paths.staging / "artifact-workers"
+    assert not worker_staging.exists() or tuple(worker_staging.iterdir()) == ()

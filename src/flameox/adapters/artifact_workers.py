@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import secrets
 import shutil
 import sys
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TypeVar, cast
 
@@ -168,6 +169,9 @@ class IsolatedWorkerHarness:
         *,
         consume: Callable[[ResponseT, Path], T],
         timeout_seconds: float | None = None,
+        maximum_rss_bytes: int | None = None,
+        maximum_writable_growth_bytes: int | None = None,
+        heartbeat: Callable[[Path], Awaitable[None]] | None = None,
         job_root: Path | None = None,
     ) -> T:
         """Keep typed worker outputs alive while one host-side consumer validates them."""
@@ -193,15 +197,34 @@ class IsolatedWorkerHarness:
             ).model_dump(mode="json"),
         )
         try:
-            outcome = await self.broker.run(
-                self._execution_request(
-                    definition.module,
-                    request_path,
-                    response_path,
-                    job_root,
-                    timeout_seconds=timeout_seconds or definition.timeout_seconds,
+            task = asyncio.create_task(
+                self.broker.run(
+                    self._execution_request(
+                        definition.module,
+                        request_path,
+                        response_path,
+                        job_root,
+                        timeout_seconds=timeout_seconds or definition.timeout_seconds,
+                        maximum_rss_bytes=maximum_rss_bytes,
+                        maximum_writable_growth_bytes=maximum_writable_growth_bytes,
+                    )
                 )
             )
+            try:
+                while not task.done():
+                    done, _pending = await asyncio.wait({task}, timeout=0.25)
+                    if task in done:
+                        break
+                    if heartbeat is not None:
+                        await heartbeat(job_root)
+                outcome = await task
+            except asyncio.CancelledError:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+                raise
+            if heartbeat is not None:
+                await heartbeat(job_root)
             response = self._load_typed_response(
                 outcome.process.exit_code,
                 outcome.stderr,
@@ -239,6 +262,28 @@ class IsolatedWorkerHarness:
             )
         return path
 
+    def read_staged_bytes(
+        self,
+        job_root: Path,
+        relative_path: str,
+        *,
+        max_bytes: int,
+    ) -> bytes | None:
+        """Read one optional bounded worker side-channel without trusting its path type."""
+        path = job_root / relative_path
+        if not path.exists():
+            return None
+        filesystem = BoundedFileSystem((job_root,))
+        with filesystem.open_regular(
+            path,
+            max_bytes=max_bytes,
+            require_single_link=True,
+        ) as descriptor:
+            chunks: list[bytes] = []
+            while chunk := os.read(descriptor, min(4_096, max_bytes)):
+                chunks.append(chunk)
+        return b"".join(chunks)
+
     def _job_root(self, name: str) -> Path:
         return self.workspace.paths.staging / "artifact-workers" / f"{name}-{secrets.token_hex(16)}"
 
@@ -250,6 +295,8 @@ class IsolatedWorkerHarness:
         job_root: Path,
         *,
         timeout_seconds: float,
+        maximum_rss_bytes: int | None = None,
+        maximum_writable_growth_bytes: int | None = None,
     ) -> ExecutionRequest:
         return ExecutionRequest(
             argv=(
@@ -274,7 +321,10 @@ class IsolatedWorkerHarness:
                 staging_root=self.workspace.paths.staging,
                 writable_roots=(job_root,),
                 minimum_free_bytes=self.workspace.config.storage.min_free_bytes,
-                maximum_rss_bytes=self.workspace.config.execution.max_memory_bytes,
+                maximum_rss_bytes=(
+                    maximum_rss_bytes or self.workspace.config.execution.max_memory_bytes
+                ),
+                maximum_writable_growth_bytes=maximum_writable_growth_bytes,
                 sampling_interval_ms=self.workspace.config.execution.resource_sampling_interval_ms,
                 max_observed_files=self.workspace.config.execution.max_resource_observed_files,
             ),

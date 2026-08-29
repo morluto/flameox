@@ -1,12 +1,81 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, TypeAdapter
+from pydantic import Field, TypeAdapter, model_validator
 
 from flameox.models import ContractModel
 from flameox.workers.protocol import WorkerDefinition, WorkerOperationId, WorkerOutputFile
+
+MEMRAY_EXTRACTOR_NAME = "memray"
+MEMRAY_EXTRACTOR_VERSION = "5"
+
+
+class MemrayExtractionLimits(ContractModel):
+    max_input_bytes: Annotated[int, Field(gt=0, le=1 << 40)]
+    max_provider_records: Annotated[int, Field(gt=0, le=100_000_000)]
+    max_frames: Annotated[int, Field(gt=0, le=10_000_000)]
+    max_stack_depth: Annotated[int, Field(gt=0, le=4_096)]
+    max_aggregate_rows: Annotated[int, Field(gt=0, le=20_000_000)]
+    max_output_bytes: Annotated[int, Field(gt=0, le=1 << 40)]
+    wall_time_seconds: Annotated[float, Field(gt=0, le=86_400)]
+    max_worker_memory_bytes: Annotated[int, Field(gt=0, le=1 << 50)]
+
+
+class MemrayMetricCoverage(ContractModel):
+    records_seen: int = Field(ge=0)
+    records_selected: int = Field(ge=0)
+    record_bytes_seen: int = Field(ge=0)
+    record_bytes_selected: int = Field(ge=0)
+    dropped_stack_frames: int = Field(ge=0)
+    dropped_stack_frame_bytes: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def normalized_work_is_observed(self) -> MemrayMetricCoverage:
+        if (
+            self.records_selected > self.records_seen
+            or self.record_bytes_selected > self.record_bytes_seen
+        ):
+            raise ValueError("selected Memray coverage exceeds observed work")
+        return self
+
+    @property
+    def complete(self) -> bool:
+        return self.records_seen == self.records_selected and self.dropped_stack_frames == 0
+
+
+class MemrayExtractionCoverage(ContractModel):
+    high_watermark: MemrayMetricCoverage
+    retained_end: MemrayMetricCoverage
+    frames_published: int = Field(ge=0)
+    aggregate_rows_published: int = Field(ge=0)
+    frame_contributions_dropped: int = Field(ge=0)
+    frame_contribution_bytes_dropped: int = Field(ge=0)
+    aggregate_rows_dropped: int = Field(ge=0)
+    aggregate_inclusive_bytes_dropped: int = Field(ge=0)
+    output_bytes: int = Field(ge=0)
+
+    @property
+    def complete(self) -> bool:
+        return (
+            self.high_watermark.complete
+            and self.retained_end.complete
+            and self.frame_contributions_dropped == 0
+            and self.aggregate_rows_dropped == 0
+        )
+
+
+class MemrayWorkerProgress(ContractModel):
+    phase: Literal[
+        "computing_statistics",
+        "normalizing_high_watermark",
+        "normalizing_retained_end",
+        "writing_evidence",
+    ]
+    records_seen: int = Field(ge=0)
+    records_selected: int = Field(ge=0)
+    record_bytes_seen: int = Field(ge=0)
 
 
 class MemrayWorkerRequest(ContractModel):
@@ -21,8 +90,7 @@ class MemrayWorkerRequest(ContractModel):
     )
     generation_id: str = Field(min_length=1, max_length=200)
     published_at: datetime
-    extractor_name: Literal["memray"] = "memray"
-    extractor_version: Literal["4"] = "4"
+    limits: MemrayExtractionLimits
 
 
 class MemrayWorkerResult(ContractModel):
@@ -32,8 +100,8 @@ class MemrayWorkerResult(ContractModel):
     allocation_operations: int | None = Field(default=None, ge=0)
     total_allocated_bytes: int | None = Field(default=None, ge=0)
     capture_records: int = Field(ge=0)
-    frame_count: int = Field(ge=0)
     has_native_traces: bool
+    coverage: MemrayExtractionCoverage
     files: tuple[WorkerOutputFile, ...] = Field(min_length=3, max_length=3)
 
 
@@ -43,6 +111,6 @@ MEMRAY_WORKER = WorkerDefinition(
     request=TypeAdapter(MemrayWorkerRequest),
     response=TypeAdapter(MemrayWorkerResult),
     name="Memray",
-    implementation="flameox.workers.memray/v4",
+    implementation=f"flameox.workers.memray/v{MEMRAY_EXTRACTOR_VERSION}",
     timeout_seconds=300,
 )

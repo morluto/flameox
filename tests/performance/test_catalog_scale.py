@@ -81,7 +81,8 @@ def _measurement_row(index: int) -> dict[str, object]:
     ),
 )
 @pytest.mark.performance
-def test_catalog_scale_budget_matrix(
+@pytest.mark.anyio
+async def test_catalog_scale_budget_matrix(
     tmp_path: Path,
     run_count: int,
     publication_budget: float,
@@ -108,7 +109,7 @@ def test_catalog_scale_budget_matrix(
         )
     publication_seconds = time.perf_counter() - started
 
-    compacted = CompactionService(workspace).compact()
+    compacted = await CompactionService(workspace).compact()
     assert compacted.reachable_file_count_after == 2
 
     catalog = Catalog(workspace)

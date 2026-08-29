@@ -30,7 +30,7 @@ class CompactionService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
 
-    def compact(self) -> CompactionResult:
+    async def compact(self) -> CompactionResult:
         head = self.workspace.corpus.read_head()
         manifests = tuple(
             GenerationManifest.model_validate_json((self.workspace.paths.root / path).read_text())
@@ -96,7 +96,7 @@ class CompactionService:
                     staged[table_name] = staged_path
                 return staged
 
-            published = GenerationPublisher(self.workspace).publish_prepared_parquet(
+            published = await GenerationPublisher(self.workspace).publish_prepared_parquet(
                 prepare,
                 publisher="flameox.compaction",
                 publisher_version="2",

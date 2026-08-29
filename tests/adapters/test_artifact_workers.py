@@ -111,3 +111,49 @@ def test_worker_output_file_rejects_symlink(tmp_path: Path) -> None:
         worker.validate_output_file(job_root, output)
 
     assert error.value.code is ErrorCode.EXECUTION_REFUSED
+
+
+def test_worker_side_channel_is_byte_bounded_and_rejects_symlinks(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    worker = IsolatedWorkerHarness(workspace)
+    job_root = workspace.paths.staging / "worker-progress-proof"
+    job_root.mkdir(parents=True)
+    progress = job_root / "progress.json"
+    progress.write_bytes(b'{"phase":"reading"}')
+
+    assert (
+        worker.read_staged_bytes(job_root, "progress.json", max_bytes=64)
+        == progress.read_bytes()
+    )
+
+    progress.unlink()
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b"{}")
+    progress.symlink_to(outside)
+    with pytest.raises(DomainError) as error:
+        worker.read_staged_bytes(job_root, "progress.json", max_bytes=64)
+
+    assert error.value.code is ErrorCode.EXECUTION_REFUSED
+
+
+def test_worker_execution_applies_explicit_memory_and_staging_growth_limits(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    worker = IsolatedWorkerHarness(workspace)
+    job_root = workspace.paths.staging / "worker-resource-proof"
+
+    request = worker._execution_request(
+        "example.worker",
+        job_root / "request.json",
+        job_root / "response.json",
+        job_root,
+        timeout_seconds=12,
+        maximum_rss_bytes=34,
+        maximum_writable_growth_bytes=56,
+    )
+
+    assert request.timeout_seconds == 12
+    assert request.resource_policy is not None
+    assert request.resource_policy.maximum_rss_bytes == 34
+    assert request.resource_policy.maximum_writable_growth_bytes == 56

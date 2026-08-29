@@ -7,9 +7,10 @@ import os
 import shutil
 import stat
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -189,9 +190,12 @@ class GenerationPublisher:
         assert last_conflict is not None
         raise last_conflict
 
-    def publish_prepared_parquet(
+    async def publish_prepared_parquet(
         self,
-        prepare: Callable[[Path, str, datetime], Mapping[str, Path]],
+        prepare: Callable[
+            [Path, str, datetime],
+            Mapping[str, Path] | Awaitable[Mapping[str, Path]],
+        ],
         *,
         publisher: str,
         publisher_version: str,
@@ -201,11 +205,7 @@ class GenerationPublisher:
         supersedes: tuple[str, ...] = (),
         expected_head: str | None = None,
     ) -> PublishedGeneration:
-        """Publish producer-prepared Parquet without materializing rows in Python.
-
-        The callback may write only beneath the supplied staging root. This class
-        remains responsible for schema/integrity validation and atomic visibility.
-        """
+        """Publish prepared Parquet with one async atomic-visibility state machine."""
         StorageQuota(self.workspace).require_capacity(staging=True)
         attempts = 1 if expected_head is not None else 32
         last_error: DomainError | None = None
@@ -222,7 +222,8 @@ class GenerationPublisher:
                     )
                 published_at = utc_now()
                 staging_root.mkdir(parents=True, exist_ok=False)
-                staged = prepare(staging_root, generation_id, published_at)
+                prepared = prepare(staging_root, generation_id, published_at)
+                staged = await prepared if isawaitable(prepared) else prepared
                 return self._publish_staged_generation(
                     staged,
                     generation_id=generation_id,

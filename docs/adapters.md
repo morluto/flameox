@@ -173,6 +173,20 @@ process and records producer version, reader version and environment, and the
 extractor profile separately. Native reader acceptance—not package-major
 comparison—is the format compatibility boundary.
 
+Memray extraction snapshots its complete complexity budget in the durable
+operation request: input bytes, provider records, unique frames, stack depth,
+aggregate rows, output bytes, wall time, and worker RSS. The isolated reader
+streams each provider record set and retains a bounded heap ordered by allocated
+bytes, with provider order as the deterministic tie-breaker. Normalization then
+visits those largest provider aggregates first, so frame and aggregate limits
+retain contributors from the highest-value records rather than an arbitrary
+prefix. This is a bounded projection, not a replacement for the native profile.
+The result reports records and record bytes seen versus selected, dropped stack
+frames and aggregate contributions, published row counts, and output bytes.
+Capture a narrower profile or raise applicable workspace budgets before starting
+a new extraction when complete normalized coverage is required; the immutable
+native profile remains the authority.
+
 Memray frame paths are interpreted from preserved capture provenance. Relative
 provider filenames resolve lexically against the captured workload cwd, never
 the extractor process cwd. Paths contained by the workspace project root are

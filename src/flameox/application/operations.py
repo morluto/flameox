@@ -617,6 +617,9 @@ class OperationStore:
     def read(self, operation_id: str) -> OperationRecord:
         return self.records.read(operation_id)
 
+    def list(self) -> tuple[OperationRecord, ...]:
+        return self.records.list()
+
     def find(self, *, operation: str, idempotency_digest: str) -> OperationRecord | None:
         payload = self.records.control_plane.find_operation(
             kind=operation,

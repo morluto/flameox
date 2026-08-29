@@ -262,7 +262,8 @@ def test_gc_apply_rejects_candidate_swapped_to_symlink_after_recheck(
     assert not any(workspace.paths.trash.iterdir())
 
 
-def test_gc_retains_generations_reachable_from_a_pinned_run_set(
+@pytest.mark.anyio
+async def test_gc_retains_generations_reachable_from_a_pinned_run_set(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
@@ -275,7 +276,7 @@ def test_gc_retains_generations_reachable_from_a_pinned_run_set(
         Path(relative).parent.name for relative in pinned_commit.generation_manifests
     }
 
-    compacted = CompactionService(workspace).compact()
+    compacted = await CompactionService(workspace).compact()
     assert compacted.superseded_generation_count >= 2
     old = time.time() - 48 * 3600
     for generation_id in pinned_generation_ids:

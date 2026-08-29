@@ -28,6 +28,40 @@ pytestmark = [pytest.mark.integration, pytest.mark.serial]
 DIGEST = "sha256:" + ("a" * 64)
 
 
+@pytest.mark.anyio
+async def test_async_prepared_publication_cancellation_removes_staging(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    publisher = GenerationPublisher(workspace)
+    initial_head = workspace.corpus.read_head().commit_id
+    entered = asyncio.Event()
+
+    async def prepare(
+        _root: Path,
+        _generation_id: str,
+        _published_at: datetime,
+    ) -> dict[str, Path]:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    task = asyncio.create_task(
+        publisher.publish_prepared_parquet(
+            prepare,
+            publisher="test",
+            publisher_version="1",
+        )
+    )
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert workspace.corpus.read_head().commit_id == initial_head
+    assert tuple(workspace.paths.staging.iterdir()) == ()
+
+
 def run_row(run_id: str) -> dict[str, object]:
     return {
         "run_id": run_id,
@@ -502,7 +536,8 @@ def test_concurrent_publishers_retry_contention_without_losing_generations(
         assert snapshot.execute("SELECT count(*) FROM investigations").fetchone() == (8,)
 
 
-def test_compaction_replaces_reachable_small_generations(
+@pytest.mark.anyio
+async def test_compaction_replaces_reachable_small_generations(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
@@ -519,7 +554,7 @@ def test_compaction_replaces_reachable_small_generations(
             "extractor_version FROM runs ORDER BY run_id"
         ).fetchall()
 
-    result = CompactionService(workspace).compact()
+    result = await CompactionService(workspace).compact()
 
     assert result.superseded_generation_count == 3
     assert result.reachable_file_count_before == 3
@@ -537,11 +572,12 @@ def test_compaction_replaces_reachable_small_generations(
         )
 
 
-def test_noop_compaction_preserves_catalog_and_corpus(tmp_path: Path) -> None:
+@pytest.mark.anyio
+async def test_noop_compaction_preserves_catalog_and_corpus(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     Catalog(workspace).rebuild()
 
-    result = CompactionService(workspace).compact()
+    result = await CompactionService(workspace).compact()
 
     assert result.output_corpus_commit_id == result.input_corpus_commit_id
 
