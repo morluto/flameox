@@ -81,6 +81,12 @@ The token is the lookup key and is not duplicated inside the stored intent.
 Inspection reconstructs a preview; consumption atomically makes the capability
 unavailable. Execution receives only the token and optional expected digest.
 
+The plan is an expiring authorization receipt, not a second durable owner of run
+semantics. Its authorization digest is derived from the finalized typed intent;
+there is no parallel request-shaped authorization payload or generic identity
+bag. Executable bindings remain typed, and an approved third-party adapter
+package has one explicit package-identity field.
+
 Every value that can change execution or side effects belongs in stored intent:
 executable bindings, argv, cwd, environment contract, roots, containment,
 budgets, outputs, provider and workload identity, network target, expected

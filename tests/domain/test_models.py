@@ -118,6 +118,15 @@ def _capture_plan_payload(**overrides: object) -> dict[str, object]:
             "identity_id": digest_model(execution_identity_content),
             **execution_identity_content,
         },
+        "execution_limits": {
+            "child_environment_allowlist": ["PATH"],
+            "max_output_bytes": 1024,
+            "max_artifact_bytes": 4096,
+            "minimum_free_bytes": 0,
+            "resource_sampling_interval_ms": 250,
+            "max_resource_observed_files": 100,
+            "max_rows_per_generation": 1000,
+        },
         "created_at": created_at,
         "expires_at": datetime(2026, 1, 1, 0, 5, tzinfo=UTC),
     }

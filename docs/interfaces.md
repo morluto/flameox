@@ -39,7 +39,8 @@ Commands are grouped by task: workspace, capture, workload, experiment,
 inference, import/extract, analysis, evidence lookup, integrity, and retention.
 Mutating commands make mutation explicit. In particular:
 
-- `capture plan` is side-effect-free with respect to workload execution;
+- `capture plan` never runs the measured workload; an adapter may run an explicitly
+  documented, bounded compatibility probe under the requested execution policy;
 - `capture run` plans then consumes one server-owned plan;
 - `open` prints a viewer plan unless `--launch` is supplied;
 - `validate` never repairs;
@@ -66,7 +67,8 @@ Tool annotations describe side effects:
 
 - read-only tools do not mutate durable state;
 - configuration tools modify only their declared project/runtime contract;
-- plan tools do not execute a workload;
+- plan tools do not execute a measurement workload, but may perform bounded
+  compatibility probes declared by the adapter contract;
 - execute tools consume approved intent;
 - idempotent start tools reconnect when called with the same key and intent.
 
@@ -131,6 +133,12 @@ inspection-only: it queries the exact Python interpreter bound to the workload a
 reports missing distributions without changing that environment or Flameox's own
 runtime. None of these steps runs the workload.
 
+Adapter availability and workload compatibility are separate facts. In
+particular, an NVBench workload declares `execution_protocol = "nvbench"` and
+active planning qualifies the exact executable with `--version` before provider
+flags are constructed. The capture plan exposes that qualification inline because
+it is run-scoped interpretation and authorization evidence, not an artifact.
+
 `import_xctrace` and `flameox import-xctrace` are the same application operation.
 They preserve a native `.trace` directory as a sensitive immutable package with
 its bounded `xctrace` table-of-contents export. They do not record a workload,
@@ -161,6 +169,12 @@ Plan previews contain audit identity and reviewable intent. They are not
 execution authority. Execution accepts the opaque `plan_token`; SQLite returns
 the complete issued intent and consumes it atomically. An optional expected plan
 ID detects a caller reviewing one plan and presenting another token.
+
+Plans are short-lived authorization receipts, not durable run manifests and not
+an additional evidence schema. They retain only the finalized typed values needed
+to review, execute, and revalidate one launch. The authorization digest is derived
+from that finalized plan instead of a separately maintained field list. Durable
+semantics move to the run manifest when execution begins.
 
 A consumed synchronous capture plan is not retryable. If the response is lost,
 inspect durable run and operation state rather than submitting the token again.

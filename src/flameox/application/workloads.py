@@ -64,6 +64,7 @@ from flameox.domain import (
     ProbeKind,
     RequirementKind,
     WorkloadDefinition,
+    WorkloadExecutionProtocol,
     WorkloadInstance,
     digest_model,
 )
@@ -230,6 +231,7 @@ class WorkloadConfig(ContractModel):
     requirements: WorkloadRequirementsConfig = Field(default_factory=WorkloadRequirementsConfig)
     writable_paths: Annotated[tuple[str, ...], Field(max_length=16)] = ()
     identity: WorkloadIdentityConfig = Field(default_factory=WorkloadIdentityConfig)
+    execution_protocol: WorkloadExecutionProtocol | None = None
 
     @model_validator(mode="after")
     def validate_templates(self) -> WorkloadConfig:
@@ -976,6 +978,7 @@ def _configure_request_action(
         requirements=config["requirements"],
         writable_paths=config["writable_paths"],
         identity=config["identity"],
+        execution_protocol=config["execution_protocol"],
         expected_configuration_id=expected_configuration_id,
     )
 
@@ -1136,6 +1139,7 @@ class DeclaredWorkflowDetail(ContractModel):
     polarity: MetricPolarity | None = None
     estimand: str | None = None
     validation_spec_id: str | None = None
+    execution_protocol: WorkloadExecutionProtocol | None = None
     requirements: tuple[DeclaredWorkflowRequirement, ...] = ()
     adapter_options: tuple[AdapterOption, ...] = ()
     adapter_option_total: int = Field(default=0, ge=0)
@@ -1394,15 +1398,16 @@ class WorkloadService:
             )
         )
         workload_config = project.workloads[workload_name]
+        workload_definition = self.definition(workload_name)
         requirements, adapter_options, option_total = self._inspection_fields(workload_config)
         if kind is DeclaredWorkflowKind.WORKLOAD:
             config = project.workloads[name]
-            definition = self.definition(name)
             return DeclaredWorkflowDetail(
                 configuration_id=configuration_id,
                 summary=summary,
                 allowed_parameters=config.parameters,
-                validation_spec_id=definition.validation_spec_id,
+                validation_spec_id=workload_definition.validation_spec_id,
+                execution_protocol=workload_definition.execution_protocol,
                 requirements=requirements,
                 adapter_options=adapter_options,
                 adapter_option_total=option_total,
@@ -1418,7 +1423,8 @@ class WorkloadService:
                 primary_metric=fault.primary_metric,
                 polarity=fault.polarity,
                 estimand=fault.estimand,
-                validation_spec_id=self.definition(fault.workload).validation_spec_id,
+                validation_spec_id=workload_definition.validation_spec_id,
+                execution_protocol=workload_definition.execution_protocol,
                 requirements=requirements,
                 adapter_options=adapter_options,
                 adapter_option_total=option_total,
@@ -1436,7 +1442,8 @@ class WorkloadService:
             primary_metric=experiment.primary_metric,
             polarity=experiment.polarity,
             estimand=experiment.estimand,
-            validation_spec_id=self.definition(experiment.workload).validation_spec_id,
+            validation_spec_id=workload_definition.validation_spec_id,
+            execution_protocol=workload_definition.execution_protocol,
             requirements=requirements,
             adapter_options=adapter_options,
             adapter_option_total=option_total,
@@ -1603,6 +1610,7 @@ class WorkloadService:
                 if config.oracle is not None
                 else None
             ),
+            execution_protocol=config.execution_protocol,
         )
 
     def configure(self, request: ConfigureWorkloadRequest) -> WorkloadConfigurationResult:

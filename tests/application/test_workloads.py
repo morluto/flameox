@@ -22,7 +22,7 @@ from flameox.application import (
     WorkloadService,
     parse_experiment_config,
 )
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import DomainError, ErrorCode, WorkloadExecutionProtocol
 from flameox.storage import Workspace
 
 pytestmark = pytest.mark.integration
@@ -40,6 +40,7 @@ def _request(
     argv: tuple[str, ...] = ("python", "-c", "print('ok')"),
     parameters: dict[str, tuple[str | int | float | bool, ...]] | None = None,
     environment: dict[str, str] | None = None,
+    execution_protocol: WorkloadExecutionProtocol | None = None,
     expected_configuration_id: str | None = None,
 ) -> ConfigureWorkloadRequest:
     return ConfigureWorkloadRequest(
@@ -49,6 +50,7 @@ def _request(
             argv=argv,
             parameters=parameters or {},
             environment=environment or {},
+            execution_protocol=execution_protocol,
         ),
         expected_configuration_id=expected_configuration_id,
     )
@@ -149,6 +151,62 @@ def test_configure_workload_is_idempotent_and_records_configuration_source(tmp_p
         service.list_declared(kind=DeclaredWorkflowKind.WORKLOAD, limit=10).workflows[0].name
         == "probe"
     )
+
+
+def test_configure_workload_preserves_declared_execution_protocol(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    service = WorkloadService(workspace)
+
+    service.configure(
+        _request(
+            "benchmark",
+            argv=("./benchmark",),
+            execution_protocol=WorkloadExecutionProtocol.NVBENCH,
+        )
+    )
+
+    definition = service.definition("benchmark")
+    assert definition.execution_protocol is WorkloadExecutionProtocol.NVBENCH
+    detail = service.get_declared(kind=DeclaredWorkflowKind.WORKLOAD, name="benchmark")
+    assert detail.execution_protocol is WorkloadExecutionProtocol.NVBENCH
+    assert 'execution_protocol = "nvbench"' in (tmp_path / "flameox.toml").read_text()
+
+
+def test_referenced_workflows_expose_workload_execution_protocol(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.benchmark]
+argv = ["./benchmark", "{endpoint}"]
+execution_protocol = "nvbench"
+[workloads.benchmark.parameters]
+endpoint = ["unused"]
+[experiments.compare]
+workload = "benchmark"
+treatment_factor = "size"
+primary_metric = "duration"
+polarity = "lower_is_better"
+[experiments.compare.factors]
+size = [1, 2]
+[fault_experiments.fault]
+workload = "benchmark"
+endpoint_parameter = "endpoint"
+upstream_host = "127.0.0.1"
+upstream_port = 8080
+endpoint_template = "http://{host}:{port}"
+[fault_experiments.fault.scenarios.delay]
+type = "latency"
+latency_ms = 10
+"""
+    )
+    service = WorkloadService(workspace)
+
+    experiment = service.get_declared(kind=DeclaredWorkflowKind.EXPERIMENT, name="compare")
+    fault = service.get_declared(kind=DeclaredWorkflowKind.FAULT_EXPERIMENT, name="fault")
+
+    assert experiment.execution_protocol is WorkloadExecutionProtocol.NVBENCH
+    assert fault.execution_protocol is WorkloadExecutionProtocol.NVBENCH
 
 
 def test_literal_braces_round_trip_while_declared_placeholders_render(

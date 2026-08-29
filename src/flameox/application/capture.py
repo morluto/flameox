@@ -6,6 +6,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import secrets
 import shutil
 import stat
@@ -15,7 +16,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 from packaging.requirements import Requirement
 from pydantic import JsonValue, TypeAdapter
@@ -91,6 +92,7 @@ from flameox.domain import (
     AdapterProbeResult,
     AdapterProbeStatus,
     AdapterValidationResult,
+    AdapterWorkloadQualification,
     ArtifactKind,
     ArtifactRegistration,
     CapabilityPermissionStatus,
@@ -98,6 +100,7 @@ from flameox.domain import (
     CapabilityReport,
     CapabilityStatus,
     CaptureContainment,
+    CaptureExecutionLimits,
     CaptureLease,
     CapturePlan,
     CaptureStatus,
@@ -123,6 +126,9 @@ from flameox.domain import (
     RunManifest,
     Sensitivity,
     ValidationStatus,
+    WorkloadDefinition,
+    WorkloadExecutionProtocol,
+    WorkloadInstance,
     WritableRootBinding,
     digest_model,
     new_id,
@@ -654,6 +660,18 @@ class CaptureService:
             mode=preflight_mode,
             workload_name=workload_name,
         )
+        plan_id = secrets.token_hex(32)
+        run_id = new_id()
+        output_root = self.workspace.paths.staging / "captures" / plan_id
+        adapter_workload_qualification = await self._qualify_workload_adapter(
+            adapter,
+            definition=definition,
+            instance=instance,
+            mode=inspection_mode,
+            workload_name=workload_name,
+            execution_policy=execution_policy,
+            probe_root=output_root,
+        )
         if adapter == "compute-sanitizer" and execution_policy is not ExecutionPolicy.TRUSTED_LOCAL:
             raise DomainError(
                 ErrorCode.EXECUTION_REFUSED,
@@ -669,9 +687,6 @@ class CaptureService:
             self.workspace,
             broker=self.broker,
         ).plan(workload_name, cwd=Path(instance.command.cwd))
-        plan_id = secrets.token_hex(32)
-        run_id = new_id()
-        output_root = self.workspace.paths.staging / "captures" / plan_id
         writable_roots = tuple(
             WritableRootBinding(
                 target_path=str(target),
@@ -802,74 +817,13 @@ class CaptureService:
                     "not enforced by a containment backend.",
                 ),
             )
-        identities: dict[str, JsonValue] = {
-            "collector_executable": cast(
-                JsonValue,
-                collector_executable_binding.model_dump(mode="json"),
-            ),
-            "workload_executable": cast(
-                JsonValue,
-                instance.executable_binding.model_dump(mode="json"),
-            ),
-        }
-        if adapter_binding.package_identity is not None:
-            identities["adapter_package_identity"] = adapter_binding.package_identity
         created_at = utc_now()
-        request: dict[str, Any] = {
-            "workspace_id": self.workspace.identity.workspace_id,
-            "run_id": run_id,
-            "workload_name": workload_name,
-            "workload_definition_id": definition.workload_definition_id,
-            "instance": instance.model_dump(mode="json"),
-            "dynamic_parameters": dynamic_parameters,
-            "semantics": semantics.model_dump(mode="json"),
-            "adapter_execution_plan": (
-                adapter_binding.execution_plan.model_dump(mode="json")
-                if adapter_binding.execution_plan is not None
-                else None
-            ),
-            "execution_policy": execution_policy.value,
-            "collector_argv": collector_argv,
-            "collector_executable_binding": collector_executable_binding.model_dump(mode="json"),
-            "collector_environment": collector_environment,
-            "oracle_argv": oracle_argv,
-            "oracle_executable_binding": (
-                oracle_executable_binding.model_dump(mode="json")
-                if oracle_executable_binding is not None
-                else None
-            ),
-            "oracle_launch_executable_binding": (
-                oracle_launch_executable_binding.model_dump(mode="json")
-                if oracle_launch_executable_binding is not None
-                else None
-            ),
-            "oracle_containment": oracle_containment,
-            "oracle_network_contained": oracle_network_contained,
-            "oracle_systemd_scope_unit": oracle_systemd_scope_unit,
-            "bound_identities": identities,
-            "preflight": preflight.model_dump(mode="json"),
-            "adapter_capability": (
-                adapter_capability.model_dump(mode="json")
-                if adapter_capability is not None
-                else None
-            ),
-            "warnings": warnings,
-            "limitation_details": [item.model_dump(mode="json") for item in limitation_details],
-            "writable_roots": [item.model_dump(mode="json") for item in writable_roots],
-            "external_context": (
-                external_context.model_dump(mode="json") if external_context is not None else None
-            ),
-            "planned_execution_identity": planned_execution_identity.model_dump(mode="json"),
-            "policy": self.workspace.config.model_dump(mode="json"),
-            "containment": containment,
-            "systemd_scope_unit": systemd_scope_unit,
-        }
         plan = parse_capture_plan(
             {
                 "plan_token": secrets.token_hex(32),
                 "plan_id": plan_id,
                 "run_id": run_id,
-                "request_digest": digest_model(request),
+                "request_digest": "sha256:" + "0" * 64,
                 "workspace_id": self.workspace.identity.workspace_id,
                 "workload_name": workload_name,
                 "workload_definition_id": definition.workload_definition_id,
@@ -902,27 +856,33 @@ class CaptureService:
                 "external_context": external_context,
                 "planned_execution_identity": planned_execution_identity,
                 "adapter_capability": adapter_capability,
-                "bound_identities": identities,
-                "limits": {
-                    "timeout_seconds": instance.command.timeout_seconds,
-                    "max_output_bytes": self.workspace.config.execution.max_output_bytes,
-                    "max_artifact_bytes": self.workspace.config.capture.max_artifact_bytes,
-                    "max_cpu_percent": self.workspace.config.execution.max_cpu_percent,
-                    "max_memory_bytes": self.workspace.config.execution.max_memory_bytes,
-                    "max_processes": self.workspace.config.execution.max_processes,
-                    "minimum_free_bytes": self.workspace.config.storage.min_free_bytes,
-                    "resource_sampling_interval_ms": (
+                "adapter_workload_qualification": adapter_workload_qualification,
+                "adapter_package_identity": adapter_binding.package_identity,
+                "execution_limits": CaptureExecutionLimits(
+                    child_environment_allowlist=(
+                        self.workspace.config.execution.child_environment_allowlist
+                    ),
+                    max_output_bytes=self.workspace.config.execution.max_output_bytes,
+                    max_artifact_bytes=self.workspace.config.capture.max_artifact_bytes,
+                    minimum_free_bytes=self.workspace.config.storage.min_free_bytes,
+                    resource_sampling_interval_ms=(
                         self.workspace.config.execution.resource_sampling_interval_ms
                     ),
-                    "max_resource_observed_files": (
+                    max_resource_observed_files=(
                         self.workspace.config.execution.max_resource_observed_files
                     ),
-                },
+                    max_rows_per_generation=(
+                        self.workspace.config.storage.max_rows_per_generation
+                    ),
+                ),
                 "warnings": warnings,
                 "limitation_details": limitation_details,
                 "created_at": created_at,
                 "expires_at": created_at + timedelta(seconds=self.plans.ttl_seconds),
             }
+        )
+        plan = plan.validated_copy(
+            update={"request_digest": digest_model(self._authorization_payload(plan))}
         )
         await self.plans.issue(plan)
         return plan
@@ -1007,9 +967,7 @@ class CaptureService:
             measurement_protocol_id=digest_model(
                 {
                     "run_semantic_id": plan.semantics.semantic_id,
-                    "collector_executable_identity": plan.bound_identities.get(
-                        "collector_executable"
-                    ),
+                    "collector_executable_identity": plan.collector_executable_binding,
                     "expected_artifact_kinds": plan.expected_artifact_kinds,
                     "expected_overhead": plan.expected_overhead,
                     "permissions": plan.permissions,
@@ -1131,7 +1089,7 @@ class CaptureService:
                         executable_binding=plan.collector_executable_binding,
                         cwd=Path(plan.workload_instance.command.cwd),
                         environment_allowlist=(
-                            self.workspace.config.execution.child_environment_allowlist
+                            plan.execution_limits.child_environment_allowlist
                         ),
                         environment_overrides=(
                             {
@@ -1141,7 +1099,7 @@ class CaptureService:
                         ),
                         allowed_working_roots=self._allowed_roots(),
                         timeout_seconds=plan.workload_instance.command.timeout_seconds,
-                        max_output_bytes=self.workspace.config.execution.max_output_bytes,
+                        max_output_bytes=plan.execution_limits.max_output_bytes,
                         systemd_scope_unit=plan.systemd_scope_unit,
                         resource_policy=ResourcePolicy(
                             filesystem_path=self.workspace.paths.root,
@@ -1149,17 +1107,12 @@ class CaptureService:
                             writable_roots=(
                                 *(Path(item.storage_path) for item in plan.writable_roots),
                             ),
-                            minimum_free_bytes=cast(
-                                int,
-                                plan.limits["minimum_free_bytes"],
+                            minimum_free_bytes=plan.execution_limits.minimum_free_bytes,
+                            sampling_interval_ms=(
+                                plan.execution_limits.resource_sampling_interval_ms
                             ),
-                            sampling_interval_ms=cast(
-                                int,
-                                plan.limits["resource_sampling_interval_ms"],
-                            ),
-                            max_observed_files=cast(
-                                int,
-                                plan.limits["max_resource_observed_files"],
+                            max_observed_files=(
+                                plan.execution_limits.max_resource_observed_files
                             ),
                         ),
                     ),
@@ -1467,7 +1420,7 @@ class CaptureService:
             snapshot_artifact = self.artifacts.import_path(
                 snapshot_path,
                 allowed_roots=(output_root,),
-                max_bytes=self.workspace.config.capture.max_artifact_bytes,
+                max_bytes=plan.execution_limits.max_artifact_bytes,
             )
             snapshot_registration = ArtifactRegistration(
                 registration_id=new_id(),
@@ -1504,7 +1457,7 @@ class CaptureService:
                             executable_binding=plan.oracle_launch_executable_binding,
                             cwd=Path(oracle.command.cwd),
                             environment_allowlist=(
-                                self.workspace.config.execution.child_environment_allowlist
+                                    plan.execution_limits.child_environment_allowlist
                             ),
                             environment_overrides=(
                                 {"FLAMEOX_ORACLE_RECEIPT": str(output_root / "oracle-receipt.json")}
@@ -1513,7 +1466,7 @@ class CaptureService:
                             ),
                             allowed_working_roots=self._allowed_roots(),
                             timeout_seconds=oracle.command.timeout_seconds,
-                            max_output_bytes=(self.workspace.config.execution.max_output_bytes),
+                            max_output_bytes=plan.execution_limits.max_output_bytes,
                             systemd_scope_unit=plan.oracle_systemd_scope_unit,
                             resource_policy=ResourcePolicy(
                                 filesystem_path=self.workspace.paths.root,
@@ -1521,17 +1474,12 @@ class CaptureService:
                                 writable_roots=(
                                     *(Path(item.storage_path) for item in plan.writable_roots),
                                 ),
-                                minimum_free_bytes=cast(
-                                    int,
-                                    plan.limits["minimum_free_bytes"],
+                                minimum_free_bytes=plan.execution_limits.minimum_free_bytes,
+                                sampling_interval_ms=(
+                                    plan.execution_limits.resource_sampling_interval_ms
                                 ),
-                                sampling_interval_ms=cast(
-                                    int,
-                                    plan.limits["resource_sampling_interval_ms"],
-                                ),
-                                max_observed_files=cast(
-                                    int,
-                                    plan.limits["max_resource_observed_files"],
+                                max_observed_files=(
+                                    plan.execution_limits.max_resource_observed_files
                                 ),
                             ),
                         ),
@@ -1811,7 +1759,7 @@ class CaptureService:
                                         1,
                                         min(
                                             10_000,
-                                            self.workspace.config.storage.max_rows_per_generation
+                                            plan.execution_limits.max_rows_per_generation
                                             - 1,
                                         ),
                                     ),
@@ -2139,9 +2087,8 @@ class CaptureService:
             "runtime_resource_summaries": [
                 runtime_resource_summary_row(
                     terminal,
-                    sampling_interval_ms=cast(
-                        int,
-                        plan.limits["resource_sampling_interval_ms"],
+                    sampling_interval_ms=(
+                        plan.execution_limits.resource_sampling_interval_ms
                     ),
                 )
             ],
@@ -2201,6 +2148,143 @@ class CaptureService:
             plan=plan,
             run=terminal,
             corpus_commit_id=published.commit.commit_id,
+        )
+
+    async def _qualify_workload_adapter(
+        self,
+        adapter: str,
+        *,
+        definition: WorkloadDefinition,
+        instance: WorkloadInstance,
+        mode: ProbeKind,
+        workload_name: str,
+        execution_policy: ExecutionPolicy,
+        probe_root: Path,
+    ) -> AdapterWorkloadQualification | None:
+        if adapter != "nvbench":
+            return None
+        if definition.execution_protocol is not WorkloadExecutionProtocol.NVBENCH:
+            raise DomainError(
+                ErrorCode.ADAPTER_INCOMPATIBLE,
+                "NVBench capture requires a purpose-built linked benchmark executable.",
+                details={
+                    "adapter": adapter,
+                    "adapter_implementation_status": "available",
+                    "workload_compatibility": "undeclared",
+                    "required_execution_protocol": WorkloadExecutionProtocol.NVBENCH.value,
+                },
+                remediation=(
+                    "Declare execution_protocol = 'nvbench' only when workload argv[0] is the "
+                    "direct NVBench-linked benchmark executable, then plan with active probing.",
+                ),
+                next_action=tool_action(
+                    ActionId.GET_DECLARED_WORKFLOW,
+                    kind="workload",
+                    name=workload_name,
+                ),
+            )
+        if mode is not ProbeKind.ACTIVE:
+            raise DomainError(
+                ErrorCode.ADAPTER_INCOMPATIBLE,
+                "NVBench workload compatibility requires an active --version probe.",
+                details={
+                    "adapter": adapter,
+                    "adapter_implementation_status": "available",
+                    "workload_compatibility": "unverified",
+                },
+                remediation=("Plan the capture with preflight_mode='active' or 'auto'.",),
+            )
+        probe_directory = probe_root.with_name(f"{probe_root.name}-qualification")
+        probe_directory.mkdir(parents=True, exist_ok=False)
+        try:
+            probe_argv: tuple[str, ...] = (
+                str(instance.executable_binding.invocation_path),
+                "--version",
+            )
+            _, _, systemd_scope_unit, probe_argv = await self._contain(
+                probe_argv,
+                cwd=Path(instance.command.cwd),
+                writable=probe_directory,
+                writable_roots=(),
+                unit_name=f"flameox-nvbench-probe-{probe_root.name[:16]}.scope",
+                required=execution_policy.requires_containment(
+                    self.workspace.config.execution.containment
+                ),
+                use_containment=execution_policy is not ExecutionPolicy.TRUSTED_LOCAL,
+            )
+            probe_binding = self.executables.resolve(
+                ExecutableResolutionRequest(
+                    token=probe_argv[0],
+                    cwd=Path(instance.command.cwd),
+                    environment=dict(os.environ),
+                    policy=ExecutableTrustPolicy.TRUSTED_HOST_TOOL,
+                )
+            )
+            outcome = await self.broker.run(
+                ExecutionRequest(
+                    argv=(str(probe_binding.invocation_path), *probe_argv[1:]),
+                    executable_binding=probe_binding,
+                    cwd=Path(instance.command.cwd),
+                    environment_allowlist=(
+                        self.workspace.config.execution.child_environment_allowlist
+                    ),
+                    environment_overrides=instance.command.env_overrides,
+                    allowed_working_roots=self._allowed_roots(),
+                    timeout_seconds=min(5.0, instance.command.timeout_seconds),
+                    max_output_bytes=min(
+                        64 * 1024,
+                        self.workspace.config.execution.max_output_bytes,
+                    ),
+                    systemd_scope_unit=systemd_scope_unit,
+                )
+            )
+        except DomainError as error:
+            raise DomainError(
+                ErrorCode.ADAPTER_INCOMPATIBLE,
+                "The declared NVBench executable failed its bounded --version probe.",
+                details={
+                    "adapter": adapter,
+                    "adapter_implementation_status": "available",
+                    "workload_compatibility": "probe_failed",
+                    "probe_error": error.code.value,
+                },
+                remediation=(
+                    "Use the direct executable produced by linking NVBench, not an interpreter "
+                    "or wrapper.",
+                ),
+            ) from error
+        finally:
+            shutil.rmtree(probe_directory, ignore_errors=True)
+        output = (outcome.stdout + outcome.stderr).decode("utf-8", errors="replace")
+        version_line = next(
+            (
+                line.strip()
+                for line in output.splitlines()
+                if re.fullmatch(
+                    r"NVBench(?: version)? v?\d+\.\d+\.\d+(?: \([^\r\n]+\))?",
+                    line.strip(),
+                    flags=re.IGNORECASE,
+                )
+            ),
+            None,
+        )
+        if outcome.process.exit_code != 0 or version_line is None:
+            raise DomainError(
+                ErrorCode.ADAPTER_INCOMPATIBLE,
+                "The declared executable did not identify itself as an NVBench benchmark.",
+                details={
+                    "adapter": adapter,
+                    "adapter_implementation_status": "available",
+                    "workload_compatibility": "probe_mismatch",
+                    "probe_exit_code": outcome.process.exit_code,
+                },
+                remediation=(
+                    "Use a purpose-built executable linked with nvbench::main or NVBENCH_MAIN.",
+                ),
+            )
+        return AdapterWorkloadQualification(
+            protocol=WorkloadExecutionProtocol.NVBENCH,
+            observed_version=version_line[:200],
         )
 
     async def _adapter_capability(
@@ -2405,7 +2489,7 @@ class CaptureService:
         if definition is None or definition.output_filename is None:
             return []
         json_path = output_root / definition.output_filename
-        max_bytes = self.workspace.config.capture.max_artifact_bytes
+        max_bytes = plan.execution_limits.max_artifact_bytes
         try:
             document, document_bytes, document_sha256 = load_nvbench_document_with_integrity(
                 json_path,
@@ -2616,7 +2700,7 @@ class CaptureService:
         if definition is None or definition.output_filename is None:
             return False
         json_path = output_root / definition.output_filename
-        max_bytes = self.workspace.config.capture.max_artifact_bytes
+        max_bytes = plan.execution_limits.max_artifact_bytes
         try:
             specs = load_nvbench_sidecar_specs(json_path, max_bytes=max_bytes)
         except DomainError:
@@ -2641,7 +2725,7 @@ class CaptureService:
             try:
                 if (
                     path.is_symlink()
-                    or path.stat().st_size > self.workspace.config.capture.max_artifact_bytes
+                    or path.stat().st_size > plan.execution_limits.max_artifact_bytes
                 ):
                     return False
                 with path.open("rb") as stream:
@@ -3102,59 +3186,16 @@ class CaptureService:
         )
         return tuple(wrapped)
 
+    def _authorization_payload(self, plan: CapturePlan) -> dict[str, JsonValue]:
+        payload = plan.model_dump(
+            mode="json",
+            exclude={"plan_token", "request_digest"},
+        )
+        payload["policy"] = self.workspace.config.model_dump(mode="json")
+        return cast(dict[str, JsonValue], payload)
+
     async def _recheck(self, plan: CapturePlan) -> None:
-        request = {
-            "workspace_id": plan.workspace_id,
-            "run_id": plan.run_id,
-            "workload_name": plan.workload_name,
-            "workload_definition_id": plan.workload_definition_id,
-            "instance": plan.workload_instance.model_dump(mode="json"),
-            "dynamic_parameters": plan.dynamic_parameters,
-            "semantics": plan.semantics.model_dump(mode="json"),
-            "adapter_execution_plan": plan.adapter_execution_plan,
-            "execution_policy": plan.execution_policy,
-            "collector_argv": plan.collector_argv,
-            "collector_executable_binding": plan.collector_executable_binding.model_dump(
-                mode="json"
-            ),
-            "collector_environment": plan.collector_environment,
-            "oracle_argv": plan.oracle_argv,
-            "oracle_executable_binding": (
-                plan.oracle_executable_binding.model_dump(mode="json")
-                if plan.oracle_executable_binding is not None
-                else None
-            ),
-            "oracle_launch_executable_binding": (
-                plan.oracle_launch_executable_binding.model_dump(mode="json")
-                if plan.oracle_launch_executable_binding is not None
-                else None
-            ),
-            "oracle_containment": plan.oracle_containment,
-            "oracle_network_contained": plan.oracle_network_contained,
-            "oracle_systemd_scope_unit": plan.oracle_systemd_scope_unit,
-            "bound_identities": plan.bound_identities,
-            "preflight": plan.preflight.model_dump(mode="json"),
-            "adapter_capability": (
-                plan.adapter_capability.model_dump(mode="json")
-                if plan.adapter_capability is not None
-                else None
-            ),
-            "warnings": plan.warnings,
-            "limitation_details": [
-                item.model_dump(mode="json") for item in plan.limitation_details
-            ],
-            "writable_roots": [item.model_dump(mode="json") for item in plan.writable_roots],
-            "external_context": (
-                plan.external_context.model_dump(mode="json")
-                if plan.external_context is not None
-                else None
-            ),
-            "planned_execution_identity": (plan.planned_execution_identity.model_dump(mode="json")),
-            "policy": self.workspace.config.model_dump(mode="json"),
-            "containment": plan.containment,
-            "systemd_scope_unit": plan.systemd_scope_unit,
-        }
-        if digest_model(request) != plan.request_digest:
+        if digest_model(self._authorization_payload(plan)) != plan.request_digest:
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "Capture plan contents changed after authorization.",
@@ -3183,8 +3224,7 @@ class CaptureService:
             descriptor = AdapterRegistry(self.workspace).approved_descriptor(plan.adapter)
             if (
                 descriptor.version != plan.adapter_version
-                or descriptor.package_identity
-                != plan.bound_identities.get("adapter_package_identity")
+                or descriptor.package_identity != plan.adapter_package_identity
             ):
                 raise DomainError(
                     ErrorCode.INVALID_CAPTURE_PLAN,
@@ -3383,7 +3423,7 @@ class CaptureService:
                     self.artifacts.import_path,
                     resolved,
                     allowed_roots=(self.workspace.paths.staging,),
-                    max_bytes=self.workspace.config.capture.max_artifact_bytes,
+                    max_bytes=plan.execution_limits.max_artifact_bytes,
                 )
             )
             self._require_bound_adapter_identity(
@@ -3502,7 +3542,7 @@ class CaptureService:
     ) -> None:
         if (
             descriptor.version != plan.adapter_version
-            or descriptor.package_identity != plan.bound_identities.get("adapter_package_identity")
+            or descriptor.package_identity != plan.adapter_package_identity
         ):
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,

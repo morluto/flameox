@@ -720,6 +720,10 @@ class SourceState(ContractModel):
         return self
 
 
+class WorkloadExecutionProtocol(StrEnum):
+    NVBENCH = "nvbench"
+
+
 class WorkloadDefinition(ContractModel):
     schema_version: Literal[1] = 1
     workload_definition_id: Digest
@@ -727,6 +731,7 @@ class WorkloadDefinition(ContractModel):
     command_template: tuple[str, ...]
     parameter_names: tuple[str, ...] = ()
     validation_spec_id: Digest | None = None
+    execution_protocol: WorkloadExecutionProtocol | None = None
 
 
 class WorkloadInstance(ContractModel):
@@ -1124,6 +1129,21 @@ class RunSemanticsProjection(ContractModel):
         )
 
 
+class AdapterWorkloadQualification(ContractModel):
+    protocol: WorkloadExecutionProtocol
+    observed_version: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+
+
+class CaptureExecutionLimits(ContractModel):
+    child_environment_allowlist: tuple[str, ...]
+    max_output_bytes: Annotated[int, Field(gt=0)]
+    max_artifact_bytes: Annotated[int, Field(gt=0)]
+    minimum_free_bytes: Annotated[int, Field(ge=0)]
+    resource_sampling_interval_ms: Annotated[int, Field(ge=25, le=10_000)]
+    max_resource_observed_files: Annotated[int, Field(gt=0, le=1_000_000)]
+    max_rows_per_generation: Annotated[int, Field(gt=0)]
+
+
 class _CapturePlan(ContractModel):
     plan_token: Identifier
     plan_id: Identifier
@@ -1154,8 +1174,9 @@ class _CapturePlan(ContractModel):
     external_context: ExternalExecutionContext | None = None
     planned_execution_identity: WorkloadExecutionIdentity
     adapter_capability: CapabilityReport | None = None
-    bound_identities: dict[str, JsonValue] = Field(default_factory=dict)
-    limits: dict[str, JsonValue] = Field(default_factory=dict)
+    adapter_workload_qualification: AdapterWorkloadQualification | None = None
+    adapter_package_identity: str | None = None
+    execution_limits: CaptureExecutionLimits
     warnings: tuple[str, ...] = ()
     limitation_details: tuple[LimitationDetail, ...] = ()
     created_at: datetime = Field(default_factory=utc_now)

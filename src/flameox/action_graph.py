@@ -117,6 +117,7 @@ class _ConfigureWorkloadArguments(ContractModel):
     requirements: dict[str, JsonValue] | None = None
     writable_paths: tuple[str, ...] = Field(default=(), max_length=16)
     identity: dict[str, JsonValue] | None = None
+    execution_protocol: Literal["nvbench"] | None = None
     expected_configuration_id: str | None = Field(
         default=None,
         pattern=r"^sha256:[0-9a-f]{64}$",

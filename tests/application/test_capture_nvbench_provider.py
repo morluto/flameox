@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,7 +15,10 @@ from flameox.domain import (
     ArtifactKind,
     ArtifactRegistration,
     CaptureStatus,
+    DomainError,
+    ErrorCode,
     ExecutionStatus,
+    PreflightMode,
 )
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
@@ -30,6 +35,9 @@ import struct
 import sys
 
 argv = sys.argv
+if argv[1:] == ["--version"]:
+    print("NVBench version 1.0.0")
+    raise SystemExit(0)
 jsonbin_idx = argv.index("--jsonbin")
 output = pathlib.Path(argv[jsonbin_idx + 1])
 mode = "ok"
@@ -122,6 +130,7 @@ schema_version = 1
 [workloads.bench]
 argv = ["./fake-bench", "mode={mode}"]
 timeout_seconds = 10
+execution_protocol = "nvbench"
 """
     )
     service = CaptureService(workspace)
@@ -130,11 +139,224 @@ timeout_seconds = 10
         adapter="nvbench",
         execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
     )
+    assert plan.adapter_workload_qualification is not None
+    assert plan.adapter_workload_qualification.observed_version == "NVBench version 1.0.0"
     return service, await service.execute(plan.plan_token)
 
 
 def _benchmark_registrations(result: CaptureResult) -> list[ArtifactRegistration]:
     return [item for item in result.run.artifacts if item.kind is ArtifactKind.BENCHMARK_SAMPLES]
+
+
+@pytest.mark.anyio
+async def test_nvbench_rejects_workload_without_explicit_protocol(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    disable_containment(workspace)
+    (tmp_path / "work.py").write_text("print('workload')")
+    (tmp_path / "flameox.toml").write_text(
+        f"""
+schema_version = 1
+[workloads.python]
+argv = [{sys.executable!r}, "work.py"]
+"""
+    )
+
+    with pytest.raises(DomainError) as error:
+        await CaptureService(workspace).plan(
+            workload_name="python",
+            adapter="nvbench",
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
+
+    assert error.value.code is ErrorCode.ADAPTER_INCOMPATIBLE
+    assert error.value.details["workload_compatibility"] == "undeclared"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "executable",
+    (
+        sys.executable,
+        pytest.param(
+            "/bin/sh",
+            marks=pytest.mark.skipif(os.name == "nt", reason="POSIX shell path"),
+        ),
+    ),
+    ids=("python", "shell"),
+)
+async def test_nvbench_rejects_declared_non_nvbench_executable(
+    tmp_path: Path,
+    executable: str,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    disable_containment(workspace)
+    (tmp_path / "flameox.toml").write_text(
+        f"""
+schema_version = 1
+[workloads.invalid]
+argv = [{executable!r}]
+execution_protocol = "nvbench"
+"""
+    )
+
+    with pytest.raises(DomainError) as error:
+        await CaptureService(workspace).plan(
+            workload_name="invalid",
+            adapter="nvbench",
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
+
+    assert error.value.code is ErrorCode.ADAPTER_INCOMPATIBLE
+    assert error.value.details["workload_compatibility"] in {
+        "probe_failed",
+        "probe_mismatch",
+    }
+
+
+@pytest.mark.anyio
+async def test_nvbench_rejects_executable_that_fails_qualification(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    disable_containment(workspace)
+    executable = tmp_path / "not-nvbench"
+    executable.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > probe-args\nexit 7\n")
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.invalid]
+argv = ["./not-nvbench"]
+execution_protocol = "nvbench"
+"""
+    )
+
+    with pytest.raises(DomainError) as error:
+        await CaptureService(workspace).plan(
+            workload_name="invalid",
+            adapter="nvbench",
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
+
+    assert error.value.code is ErrorCode.ADAPTER_INCOMPATIBLE
+    assert error.value.details["workload_compatibility"] == "probe_mismatch"
+    assert (tmp_path / "probe-args").read_text() == "--version\n"
+
+
+@pytest.mark.anyio
+async def test_nvbench_rejects_spoofed_version_output(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    disable_containment(workspace)
+    executable = tmp_path / "not-nvbench"
+    executable.write_text("#!/bin/sh\necho 'not nvbench'\n")
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.invalid]
+argv = ["./not-nvbench"]
+execution_protocol = "nvbench"
+"""
+    )
+
+    with pytest.raises(DomainError) as error:
+        await CaptureService(workspace).plan(
+            workload_name="invalid",
+            adapter="nvbench",
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
+
+    assert error.value.code is ErrorCode.ADAPTER_INCOMPATIBLE
+    assert error.value.details["workload_compatibility"] == "probe_mismatch"
+    assert not list((workspace.paths.staging / "captures").glob("*-qualification"))
+
+
+@pytest.mark.anyio
+async def test_nvbench_qualification_uses_declared_environment(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    disable_containment(workspace)
+    executable = tmp_path / "bench"
+    executable.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$FLAMEOX_NVBENCH_TEST\" = qualified ]; then\n"
+        "  echo 'NVBench v1.0.0 (test:test)'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n"
+    )
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.bench]
+argv = ["./bench"]
+execution_protocol = "nvbench"
+[workloads.bench.environment]
+FLAMEOX_NVBENCH_TEST = "qualified"
+"""
+    )
+
+    plan = await CaptureService(workspace).plan(
+        workload_name="bench",
+        adapter="nvbench",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    assert plan.adapter_workload_qualification is not None
+    assert plan.adapter_workload_qualification.observed_version == "NVBench v1.0.0 (test:test)"
+
+
+@pytest.mark.anyio
+async def test_nvbench_requires_active_qualification(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    disable_containment(workspace)
+    executable = tmp_path / "bench"
+    _fake_nvbench_bench(executable)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.bench]
+argv = ["./bench"]
+execution_protocol = "nvbench"
+"""
+    )
+
+    with pytest.raises(DomainError) as error:
+        await CaptureService(workspace).plan(
+            workload_name="bench",
+            adapter="nvbench",
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+            preflight_mode=PreflightMode.PASSIVE,
+        )
+
+    assert error.value.code is ErrorCode.ADAPTER_INCOMPATIBLE
+    assert error.value.details["workload_compatibility"] == "unverified"
+
+
+@pytest.mark.anyio
+async def test_nvbench_rejects_executable_changed_after_qualification(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    disable_containment(workspace)
+    executable = tmp_path / "bench"
+    _fake_nvbench_bench(executable)
+    (tmp_path / "flameox.toml").write_text(
+        """
+schema_version = 1
+[workloads.bench]
+argv = ["./bench"]
+execution_protocol = "nvbench"
+"""
+    )
+    service = CaptureService(workspace)
+    plan = await service.plan(
+        workload_name="bench",
+        adapter="nvbench",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    executable.write_text(executable.read_text() + "\n# changed after qualification\n")
+
+    with pytest.raises(DomainError) as error:
+        await service.execute(plan.plan_token)
+
+    assert error.value.code is ErrorCode.INVALID_CAPTURE_PLAN
 
 
 @pytest.mark.anyio

@@ -233,6 +233,7 @@ from flameox.domain import (
     Sensitivity,
     TrialOutcome,
     ValidationStatus,
+    WorkloadExecutionProtocol,
 )
 from flameox.mcp.resources import register_resources
 from flameox.models import ContractModel
@@ -973,6 +974,7 @@ def create_server(
         requirements: WorkloadRequirementsConfig | None = None,
         writable_paths: Annotated[tuple[str, ...], Field(max_length=16)] = (),
         identity: WorkloadIdentityConfig | None = None,
+        execution_protocol: WorkloadExecutionProtocol | None = None,
         expected_configuration_id: Annotated[
             str,
             Field(pattern=r"^sha256:[0-9a-f]{64}$"),
@@ -999,6 +1001,7 @@ def create_server(
                     requirements=requirements or WorkloadRequirementsConfig(),
                     writable_paths=writable_paths,
                     identity=identity or WorkloadIdentityConfig(),
+                    execution_protocol=execution_protocol,
                 ),
                 expected_configuration_id=expected_configuration_id,
             )
@@ -1548,7 +1551,8 @@ def create_server(
         The default auto mode runs the declared workload directly in the local environment and
         records that no enforced descendant containment was used. Use managed only when the
         project policy explicitly requires containment, and use trusted_local to request the
-        same direct local execution explicitly. This tool never executes the workload.
+        same direct local execution explicitly. This tool never runs a measurement, but an
+        adapter may execute a bounded compatibility probe such as NVBench ``--version``.
         """
         try:
             if compute_sanitizer_options is not None and adapter != "compute-sanitizer":

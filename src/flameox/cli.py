@@ -1513,7 +1513,7 @@ def capture_plan(
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
-    """Resolve a side-effect-free local capture plan."""
+    """Resolve a capture plan; adapters may run a bounded compatibility probe."""
 
     async def plan(values: dict[str, Any], options: dict[str, Any]) -> BaseModel:
         return await CaptureService(_workspace(workspace)).plan(

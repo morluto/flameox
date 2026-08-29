@@ -219,6 +219,15 @@ reported findings.
 
 ### NVBench
 
+NVBench capture is available only for a declared NVBench executable. A workload
+opts into that contract with `execution_protocol = "nvbench"`; the declaration
+is not inferred from a Python or shell command. Planning then runs the exact
+resolved executable with the bounded, non-benchmarking `--version` probe and
+requires NVBench identity before adding any benchmark flags. Passive inspection
+can report that the adapter implementation is installed, but it cannot establish
+workload compatibility. A failed probe, passive-only planning, or a changed
+executable is refused and requires a new plan.
+
 NVBench imports one JSON document plus only the sidecars it declares. Paths must
 stay beneath the bundle root and pass encoding, type, size, digest, symlink, and
 hard-link checks. Timing and frequency sidecars remain unchanged. Normalization

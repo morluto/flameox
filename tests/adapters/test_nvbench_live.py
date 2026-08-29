@@ -34,6 +34,7 @@ schema_version = 1
 [workloads.bench]
 argv = [{json.dumps(executable)}]
 timeout_seconds = 120
+execution_protocol = "nvbench"
 """
     )
 
