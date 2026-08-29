@@ -210,7 +210,8 @@ def test_python_startup_requires_the_separate_import_trace(tmp_path: Path) -> No
     with pytest.raises(DomainError) as error:
         PythonStartupExtractor(workspace).extract(imported.run.run_id)
 
-    assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
+    assert error.value.code is ErrorCode.ARTIFACT_NOT_FOUND
+    assert error.value.details["required_artifact_kinds"] == ("python_startup",)
 
 
 def test_import_grouping_accumulates_duplicate_self_time_and_keeps_maximum() -> None:

@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import ConfigDict, Field, computed_field
 
-from flameox.domain.errors import DomainError, ErrorCode
+from flameox.domain.errors import DomainError, ErrorCode, missing_artifact_input
 from flameox.domain.identity import digest_model
 from flameox.domain.models import ArtifactKind, ExecutionStatus, RunManifest
 from flameox.evidence import GenerationPublisher
@@ -436,6 +436,13 @@ class PytestExtractor:
 
     def _registration(self, run: RunManifest) -> Any:
         matches = [item for item in run.artifacts if item.kind is ArtifactKind.TEST_EXECUTION]
+        if not matches:
+            raise missing_artifact_input(
+                run_id=run.run_id,
+                requirement="pytest event-stream",
+                artifact_kinds=(ArtifactKind.TEST_EXECUTION.value,),
+                capture_adapters=("pytest",),
+            )
         if len(matches) != 1:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,

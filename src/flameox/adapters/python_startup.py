@@ -8,7 +8,7 @@ import pyperf
 
 from flameox.adapters.compatibility import require_supported_producer_major
 from flameox.adapters.pyperf import PyPerfSample, iter_pyperf_samples, load_pyperf_suite
-from flameox.domain.errors import DomainError, ErrorCode
+from flameox.domain.errors import DomainError, ErrorCode, missing_artifact_input
 from flameox.domain.identity import digest_model
 from flameox.domain.models import ArtifactKind, ArtifactRegistration, RunManifest
 from flameox.evidence import GenerationPublisher
@@ -228,6 +228,21 @@ class PythonStartupExtractor:
             for item in run.artifacts
             if item.kind is ArtifactKind.PYTHON_STARTUP and item.role == "import_trace"
         ]
+        if not benchmark or not import_trace:
+            missing_kinds = tuple(
+                kind.value
+                for kind, matches in (
+                    (ArtifactKind.BENCHMARK_SAMPLES, benchmark),
+                    (ArtifactKind.PYTHON_STARTUP, import_trace),
+                )
+                if not matches
+            )
+            raise missing_artifact_input(
+                run_id=run.run_id,
+                requirement="complete Python startup",
+                artifact_kinds=missing_kinds,
+                capture_adapters=("python-startup",),
+            )
         if len(benchmark) != 1 or len(import_trace) != 1:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,

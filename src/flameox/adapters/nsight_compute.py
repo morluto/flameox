@@ -11,7 +11,13 @@ from packaging.version import InvalidVersion, Version
 
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.command_binding import ExecutableResolver
-from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
+from flameox.domain import (
+    ArtifactKind,
+    DomainError,
+    ErrorCode,
+    digest_model,
+    missing_artifact_input,
+)
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
@@ -104,6 +110,14 @@ class NsightComputeExtractor:
     def extract(self, run_id: str) -> NsightComputeExtractionResult:
         run = RunStore(self.workspace).read(run_id)
         matches = tuple(item for item in run.artifacts if item.kind is ArtifactKind.KERNEL_PROFILE)
+        if not matches:
+            raise missing_artifact_input(
+                run_id=run_id,
+                requirement="Nsight Compute kernel-profile",
+                artifact_kinds=(ArtifactKind.KERNEL_PROFILE.value,),
+                capture_adapters=("nsight.compute",),
+                import_producers=("nsight.compute",),
+            )
         if len(matches) != 1:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,

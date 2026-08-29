@@ -11,6 +11,7 @@ from flameox.domain import (
     ErrorCode,
     RunManifest,
     digest_model,
+    missing_artifact_input,
 )
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
@@ -129,6 +130,13 @@ class CoverageExtractor:
 
     def _registration(self, run: RunManifest) -> Any:
         matches = [item for item in run.artifacts if item.kind is ArtifactKind.EXECUTION_COVERAGE]
+        if not matches:
+            raise missing_artifact_input(
+                run_id=run.run_id,
+                requirement="coverage.py execution-coverage",
+                artifact_kinds=(ArtifactKind.EXECUTION_COVERAGE.value,),
+                capture_adapters=("coverage",),
+            )
         if len(matches) != 1:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,

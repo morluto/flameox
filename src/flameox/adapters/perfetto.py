@@ -19,6 +19,7 @@ from flameox.domain import (
     DomainError,
     ErrorCode,
     digest_model,
+    missing_artifact_input,
 )
 from flameox.evidence import GenerationPublisher
 from flameox.evidence_status import EvidenceAvailability, available_availability, empty_availability
@@ -515,6 +516,17 @@ class PerfettoExtractor:
             registrations = [item for item in registrations if item.artifact_id == artifact_id]
         if len(registrations) == 1:
             return registrations[0]
+        if artifact_id is None and not registrations:
+            raise missing_artifact_input(
+                run_id=run_id,
+                requirement="Perfetto-compatible trace",
+                artifact_kinds=(
+                    ArtifactKind.EXECUTION_TRACE.value,
+                    ArtifactKind.SAMPLE_PROFILE.value,
+                ),
+                capture_adapters=("py-spy", "torch.profiler"),
+                import_producers=("perfetto", "py-spy", "torch.profiler"),
+            )
         if artifact_id is not None:
             message = "The selected Perfetto-compatible trace artifact was not found on the run."
         elif registrations:

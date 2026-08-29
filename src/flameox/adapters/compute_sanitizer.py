@@ -13,6 +13,7 @@ from flameox.domain import (
     ErrorCode,
     RunSemanticsProjection,
     digest_model,
+    missing_artifact_input,
 )
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
@@ -118,6 +119,14 @@ class ComputeSanitizerExtractor:
         registrations = tuple(
             item for item in run.artifacts if item.kind is ArtifactKind.SANITIZER_REPORT
         )
+        if not registrations:
+            raise missing_artifact_input(
+                run_id=run_id,
+                requirement="Compute Sanitizer report",
+                artifact_kinds=(ArtifactKind.SANITIZER_REPORT.value,),
+                capture_adapters=("compute-sanitizer",),
+                import_producers=("compute-sanitizer",),
+            )
         if len(registrations) != 1:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,

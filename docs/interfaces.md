@@ -63,6 +63,14 @@ unions, coercion-dependent values, malformed paths, and unbounded strings are
 rejected at the boundary. Domain failures return `isError=true` with a stable
 typed error projection and, when recovery exists, exact next-tool arguments.
 
+Extractor prerequisites use the same error contract across formats. An unknown
+run is `RUN_NOT_FOUND`; an existing run without the required evidence is
+`ARTIFACT_NOT_FOUND`; bytes that exist but cannot be decoded are
+`ARTIFACT_PARSE_FAILED`. Missing-input details name the required artifact kinds
+and compatible capture adapters or import producers. Recovery points to capture
+or import and is never marked safe to repeat until that prerequisite state has
+changed.
+
 Tool annotations describe side effects:
 
 - read-only tools do not mutate durable state;

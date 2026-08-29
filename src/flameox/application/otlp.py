@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import ConfigDict, computed_field
 
+from flameox.action_graph import manual_action
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.application.evidence_rows import _json
 from flameox.application.projections import ProjectionCoordinator
@@ -16,6 +17,7 @@ from flameox.domain import (
     ErrorCode,
     ProjectionIntentSpec,
     digest_model,
+    missing_artifact_input,
     projection_intent_id,
 )
 from flameox.evidence import publication_operation_digest
@@ -79,20 +81,48 @@ class OtlpTraceService:
         artifact_id: str | None = None,
     ) -> OtlpExtractionResult:
         run = self.runs.read(run_id)
-        registration = next(
-            (
-                item
-                for item in run.artifacts
-                if item.kind is ArtifactKind.OTLP_TRACE
-                and (artifact_id is None or item.artifact_id == artifact_id)
-            ),
-            None,
+        registrations = tuple(
+            item for item in run.artifacts if item.kind is ArtifactKind.OTLP_TRACE
         )
-        if registration is None:
+        if not registrations:
+            raise missing_artifact_input(
+                run_id=run_id,
+                requirement="OTLP trace",
+                artifact_kinds=(ArtifactKind.OTLP_TRACE.value,),
+                capture_adapters=(),
+                import_producers=("auto",),
+            )
+        available_artifact_ids = tuple(item.artifact_id for item in registrations)
+        if artifact_id is not None:
+            selected = tuple(item for item in registrations if item.artifact_id == artifact_id)
+            if selected:
+                registration = selected[0]
+            else:
+                raise DomainError(
+                    ErrorCode.INVALID_ARGUMENTS,
+                    "The selected OTLP trace artifact is not registered on the run.",
+                    run_id=run_id,
+                    details={
+                        "artifact_id": artifact_id,
+                        "available_artifact_ids": available_artifact_ids,
+                    },
+                    next_action=manual_action(
+                        "Choose one reported OTLP artifact_id before retrying extraction.",
+                        missing_arguments=("artifact_id",),
+                    ),
+                )
+        elif len(registrations) == 1:
+            registration = registrations[0]
+        else:
             raise DomainError(
-                ErrorCode.RUN_NOT_FOUND,
-                "The run has no registered OTLP trace artifact matching the request.",
-                details={"run_id": run_id, "artifact_id": artifact_id},
+                ErrorCode.INVALID_ARGUMENTS,
+                "The run contains multiple OTLP trace artifacts; select one.",
+                run_id=run_id,
+                details={"available_artifact_ids": available_artifact_ids},
+                next_action=manual_action(
+                    "Choose one reported OTLP artifact_id before retrying extraction.",
+                    missing_arguments=("artifact_id",),
+                ),
             )
         path = self.artifacts.get(registration.artifact_id).payload_path
         try:

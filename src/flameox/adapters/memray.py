@@ -5,7 +5,13 @@ from pathlib import Path
 from typing import Any
 
 from flameox.adapters.compatibility import require_supported_producer_major
-from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
+from flameox.domain import (
+    ArtifactKind,
+    DomainError,
+    ErrorCode,
+    digest_model,
+    missing_artifact_input,
+)
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
@@ -32,6 +38,16 @@ class MemrayExtractor:
         self.publisher = GenerationPublisher(workspace)
 
     def extract(self, run_id: str) -> MemrayExtractionResult:
+        run = RunStore(self.workspace).read(run_id)
+        registrations = [item for item in run.artifacts if item.kind is ArtifactKind.MEMORY_PROFILE]
+        if not registrations:
+            raise missing_artifact_input(
+                run_id=run_id,
+                requirement="Memray memory-profile",
+                artifact_kinds=(ArtifactKind.MEMORY_PROFILE.value,),
+                capture_adapters=("memray",),
+                import_producers=("memray",),
+            )
         try:
             import memray
         except ImportError as exc:
@@ -40,8 +56,6 @@ class MemrayExtractor:
                 "Memray is not installed.",
                 remediation=("Install flameox's memory optional dependencies.",),
             ) from exc
-        run = RunStore(self.workspace).read(run_id)
-        registrations = [item for item in run.artifacts if item.kind is ArtifactKind.MEMORY_PROFILE]
         if len(registrations) != 1:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,

@@ -8,7 +8,7 @@ from typing import Any
 import pyperf
 
 from flameox.adapters.compatibility import require_supported_producer_major
-from flameox.domain.errors import DomainError, ErrorCode
+from flameox.domain.errors import DomainError, ErrorCode, missing_artifact_input
 from flameox.domain.identity import digest_model
 from flameox.domain.models import ArtifactKind, RunManifest
 from flameox.evidence import GenerationPublisher
@@ -149,6 +149,14 @@ class PyPerfExtractor:
             for registration in run.artifacts
             if registration.kind is ArtifactKind.BENCHMARK_SAMPLES
         ]
+        if not matches:
+            raise missing_artifact_input(
+                run_id=run.run_id,
+                requirement="pyperf benchmark",
+                artifact_kinds=(ArtifactKind.BENCHMARK_SAMPLES.value,),
+                capture_adapters=("pyperf",),
+                import_producers=("pyperf",),
+            )
         if len(matches) != 1:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,

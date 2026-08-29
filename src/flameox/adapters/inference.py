@@ -29,6 +29,7 @@ from flameox.domain import (
     EvidenceLevel,
     RunType,
     digest_model,
+    missing_artifact_input,
 )
 from flameox.evidence import (
     CancelledInferenceRequestOutcome,
@@ -1339,7 +1340,11 @@ class InferenceArtifactExtractor:
         rows are published under that run while provenance retains both the
         artifact run and artifact id.
         """
-        registration = self._registration(run_id, ArtifactKind.INFERENCE_REQUEST_TRACE)
+        registration = self._registration(
+            run_id,
+            ArtifactKind.INFERENCE_REQUEST_TRACE,
+            import_producers=("mooncake",),
+        )
         stored = self.artifacts.get(registration.artifact_id)
         target_run = evidence_run_id or run_id
         parser = MooncakeTraceParser(max_rows=self._request_row_limit())
@@ -1402,7 +1407,11 @@ class InferenceArtifactExtractor:
         evidence_run_id: str | None = None,
     ) -> InferenceExtractionResult:
         """Extract vLLM aggregate measurements, optionally under a target evidence run."""
-        registration = self._registration(run_id, ArtifactKind.INFERENCE_RESULT)
+        registration = self._registration(
+            run_id,
+            ArtifactKind.INFERENCE_RESULT,
+            import_producers=("vllm_bench",),
+        )
         stored = self.artifacts.get(registration.artifact_id)
         target_run = evidence_run_id or run_id
         _document, measurements = VllmResultParser().parse(stored.payload_path)
@@ -1462,7 +1471,11 @@ class InferenceArtifactExtractor:
         self, run_id: str, *, evidence_run_id: str | None = None
     ) -> InferenceExtractionResult:
         """Publish scalar-only measurements from a preserved SGLang JSONL result."""
-        registration = self._registration(run_id, ArtifactKind.INFERENCE_RESULT)
+        registration = self._registration(
+            run_id,
+            ArtifactKind.INFERENCE_RESULT,
+            import_producers=("auto",),
+        )
         stored = self.artifacts.get(registration.artifact_id)
         target_run = evidence_run_id or run_id
         _document, measurements = SglangResultParser().parse(stored.payload_path)
@@ -1834,9 +1847,23 @@ class InferenceArtifactExtractor:
     def _list_run_ids(self) -> list[str]:
         return sorted(run.run_id for run in self.runs.list())
 
-    def _registration(self, run_id: str, kind: ArtifactKind) -> Any:
+    def _registration(
+        self,
+        run_id: str,
+        kind: ArtifactKind,
+        *,
+        import_producers: tuple[str, ...],
+    ) -> Any:
         run = self.runs.read(run_id)
         matches = [item for item in run.artifacts if item.kind is kind]
+        if not matches:
+            raise missing_artifact_input(
+                run_id=run_id,
+                requirement=kind.value.replace("_", " "),
+                artifact_kinds=(kind.value,),
+                capture_adapters=(),
+                import_producers=import_producers,
+            )
         if len(matches) != 1:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
@@ -1853,6 +1880,14 @@ class InferenceArtifactExtractor:
             return profile_exports[0]
         if len(matches) == 1:
             return matches[0]
+        if not matches:
+            raise missing_artifact_input(
+                run_id=run_id,
+                requirement="AIPerf inference result",
+                artifact_kinds=(ArtifactKind.INFERENCE_RESULT.value,),
+                capture_adapters=("aiperf",),
+                import_producers=("aiperf",),
+            )
         raise DomainError(
             ErrorCode.ARTIFACT_PARSE_FAILED,
             "The run must identify exactly one AIPerf profile_export.jsonl artifact.",

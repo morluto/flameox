@@ -443,6 +443,101 @@ async def test_mcp_domain_errors_remain_structured(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_extractors_name_missing_artifact_and_require_state_change(tmp_path: Path) -> None:
+    Workspace.initialize(tmp_path)
+    (tmp_path / "unrelated.log").write_text("not extractor input\n")
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        imported = await client.call_tool(
+            "import_artifact",
+            {
+                "path": "unrelated.log",
+                "kind": "process_output",
+                "sensitivity": "normal",
+            },
+        )
+        assert imported.structured_content is not None
+        run_id = imported.structured_content["result"]["run_id"]
+        calls: tuple[tuple[str, dict[str, str]], ...] = (
+            ("extract_perfetto", {}),
+            ("extract_pyperf", {}),
+            ("extract_python_startup", {}),
+            ("extract_pytest", {}),
+            ("extract_observations", {}),
+            ("extract_nsight_systems", {}),
+            ("extract_benchmark_samples", {}),
+            ("extract_inference_result", {"provider": "aiperf"}),
+            ("extract_inference_trace", {}),
+            ("extract_otlp_trace", {}),
+        )
+        results = [
+            (name, await client.call_tool(name, {"run_id": run_id, **arguments}))
+            for name, arguments in calls
+        ]
+        unknown = await client.call_tool("extract_pyperf", {"run_id": "unknown-run"})
+        malformed_import = await client.call_tool(
+            "import_artifact",
+            {
+                "path": "unrelated.log",
+                "kind": "benchmark_samples",
+                "sensitivity": "normal",
+                "producer": "pyperf",
+            },
+        )
+        assert malformed_import.structured_content is not None
+        malformed = await client.call_tool(
+            "extract_pyperf",
+            {"run_id": malformed_import.structured_content["result"]["run_id"]},
+        )
+        otlp_import = await client.call_tool(
+            "import_artifact",
+            {
+                "path": "unrelated.log",
+                "kind": "otlp_trace",
+                "media_type": "application/json",
+                "sensitivity": "normal",
+            },
+        )
+        assert otlp_import.structured_content is not None
+        otlp_artifact_id = otlp_import.structured_content["result"]["artifact_id"]
+        invalid_otlp_selection = await client.call_tool(
+            "extract_otlp_trace",
+            {
+                "run_id": otlp_import.structured_content["result"]["run_id"],
+                "artifact_id": "wrong-artifact",
+            },
+        )
+
+    for name, result in results:
+        assert result.is_error is True, name
+        assert result.structured_content is not None
+        error = result.structured_content["error"]
+        assert error["code"] == "ARTIFACT_NOT_FOUND", name
+        assert error["run_id"] == run_id
+        assert error["details"]["required_artifact_kinds"]
+        assert (
+            error["details"]["compatible_capture_adapters"]
+            or error["details"]["compatible_import_producers"]
+        )
+        assert error["recovery"]["safe_to_repeat_same_call"] is False
+        assert error["recovery"]["action"]["suggested_action"] in {
+            "capture.detached.start",
+            "artifact.import",
+        }
+
+    assert unknown.structured_content is not None
+    assert unknown.structured_content["error"]["code"] == "RUN_NOT_FOUND"
+    assert malformed.structured_content is not None
+    assert malformed.structured_content["error"]["code"] == "ARTIFACT_PARSE_FAILED"
+    assert invalid_otlp_selection.structured_content is not None
+    selection_error = invalid_otlp_selection.structured_content["error"]
+    assert selection_error["code"] == "INVALID_ARGUMENTS"
+    assert selection_error["details"]["available_artifact_ids"] == [otlp_artifact_id]
+    assert selection_error["recovery"]["safe_to_repeat_same_call"] is False
+    assert selection_error["recovery"]["action"]["missing_arguments"] == ["artifact_id"]
+
+
+@pytest.mark.anyio
 async def test_mcp_workspace_initialization_failures_remain_structured(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

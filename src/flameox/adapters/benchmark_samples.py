@@ -15,7 +15,13 @@ from pydantic import (
     model_validator,
 )
 
-from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
+from flameox.domain import (
+    ArtifactKind,
+    DomainError,
+    ErrorCode,
+    digest_model,
+    missing_artifact_input,
+)
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
@@ -138,6 +144,14 @@ class BenchmarkSamplesExtractor:
         registrations = tuple(
             item for item in run.artifacts if item.kind is ArtifactKind.BENCHMARK_SAMPLES
         )
+        if not registrations:
+            raise missing_artifact_input(
+                run_id=run_id,
+                requirement="structured benchmark-samples",
+                artifact_kinds=(ArtifactKind.BENCHMARK_SAMPLES.value,),
+                capture_adapters=("benchmark-samples",),
+                import_producers=("auto",),
+            )
         if len(registrations) != 1:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,

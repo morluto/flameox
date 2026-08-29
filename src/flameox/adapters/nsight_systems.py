@@ -5,7 +5,13 @@ import json
 from typing import cast
 
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
-from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
+from flameox.domain import (
+    ArtifactKind,
+    DomainError,
+    ErrorCode,
+    digest_model,
+    missing_artifact_input,
+)
 from flameox.evidence import GenerationPublisher
 from flameox.execution import SubprocessBroker
 from flameox.models import ContractModel
@@ -152,6 +158,14 @@ class NsightSystemsExtractor:
         registrations = [
             item for item in run.artifacts if item.kind is ArtifactKind.EXECUTION_TRACE
         ]
+        if not registrations:
+            raise missing_artifact_input(
+                run_id=run_id,
+                requirement="Nsight Systems execution-trace",
+                artifact_kinds=(ArtifactKind.EXECUTION_TRACE.value,),
+                capture_adapters=(),
+                import_producers=("auto",),
+            )
         if len(registrations) != 1:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,

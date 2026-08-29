@@ -18,7 +18,7 @@ from flameox.domain.cursors import (
     CursorValue,
     validate_cursor_position,
 )
-from flameox.domain.errors import DomainError, ErrorCode
+from flameox.domain.errors import DomainError, ErrorCode, missing_artifact_input
 from flameox.domain.identity import (
     SemanticIdentity,
     canonical_json,
@@ -280,6 +280,7 @@ __all__ = [
     "content_id",
     "digest_model",
     "effective_sensitivity",
+    "missing_artifact_input",
     "new_id",
     "parse_managed_runtime_extras",
     "process_termination_from_returncode",

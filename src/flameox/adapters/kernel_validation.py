@@ -15,7 +15,13 @@ from pydantic import (
     model_validator,
 )
 
-from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
+from flameox.domain import (
+    ArtifactKind,
+    DomainError,
+    ErrorCode,
+    digest_model,
+    missing_artifact_input,
+)
 from flameox.domain.models import ImportRunManifest
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
@@ -394,6 +400,14 @@ class KernelValidationExtractor:
             if item.kind is ArtifactKind.VALIDATION_OUTPUT
             and (isinstance(run, ImportRunManifest) or item.role == "kernel_validation")
         )
+        if not registrations:
+            raise missing_artifact_input(
+                run_id=run_id,
+                requirement="kernel-validation",
+                artifact_kinds=(ArtifactKind.VALIDATION_OUTPUT.value,),
+                capture_adapters=(),
+                import_producers=("auto",),
+            )
         if len(registrations) != 1:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
@@ -564,12 +578,13 @@ class KernelValidationExtractor:
             limitations=_summary_limitations(document),
         )
 
+
 def load_kernel_validation_document(
     path: Path,
 ) -> tuple[
-        KernelValidationV2,
-        Literal["flameox.kernel-validation.v1", "flameox.kernel-validation.v2"],
-    ]:
+    KernelValidationV2,
+    Literal["flameox.kernel-validation.v1", "flameox.kernel-validation.v2"],
+]:
     try:
         if path.stat().st_size > _MAX_KERNEL_VALIDATION_BYTES:
             raise DomainError(

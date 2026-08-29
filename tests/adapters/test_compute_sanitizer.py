@@ -51,6 +51,7 @@ def _import(
     workspace: Workspace,
     source: Path,
     *,
+    producer: str = "compute-sanitizer",
     producer_version: str | None = "2026.2.1",
 ) -> str:
     return (
@@ -59,12 +60,26 @@ def _import(
             ImportArtifactRequest(
                 path=source,
                 kind=ArtifactKind.SANITIZER_REPORT,
-                producer="compute-sanitizer",
+                producer=producer,
                 producer_version=producer_version,
             )
         )
         .run.run_id
     )
+
+
+def test_compute_sanitizer_treats_wrong_producer_as_malformed_not_absent(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source = tmp_path / "report.xml"
+    source.write_text(_report())
+    run_id = _import(workspace, source, producer="coverage")
+
+    with pytest.raises(DomainError) as error:
+        ComputeSanitizerExtractor(workspace).extract(run_id)
+
+    assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
 
 
 def test_compute_sanitizer_extracts_precise_memory_findings(tmp_path: Path) -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from flameox.action_graph import NextAction
+from flameox.action_graph import ActionId, NextAction, manual_action
 
 
 class ErrorCode(StrEnum):
@@ -18,6 +18,7 @@ class ErrorCode(StrEnum):
     PROCESS_TIMEOUT = "PROCESS_TIMEOUT"
     PROCESS_CANCELLED = "PROCESS_CANCELLED"
     ARTIFACT_TOO_LARGE = "ARTIFACT_TOO_LARGE"
+    ARTIFACT_NOT_FOUND = "ARTIFACT_NOT_FOUND"
     ARTIFACT_INTEGRITY_FAILED = "ARTIFACT_INTEGRITY_FAILED"
     ARTIFACT_PARSE_FAILED = "ARTIFACT_PARSE_FAILED"
     ADAPTER_INCOMPATIBLE = "ADAPTER_INCOMPATIBLE"
@@ -72,3 +73,45 @@ class DomainError(Exception):
                 self.next_action.model_dump(mode="json") if self.next_action is not None else None
             ),
         }
+
+
+def missing_artifact_input(
+    *,
+    run_id: str,
+    requirement: str,
+    artifact_kinds: tuple[str, ...],
+    capture_adapters: tuple[str, ...],
+    import_producers: tuple[str, ...] = (),
+) -> DomainError:
+    missing_arguments: tuple[str, ...]
+    if capture_adapters:
+        instruction = (
+            "First plan a capture with one of the reported compatible adapters, then start "
+            "that plan and extract the returned run; alternatively import supported evidence."
+        )
+        suggested_action = ActionId.START_DETACHED_CAPTURE
+        missing_arguments = ("plan_token", "idempotency_key")
+    else:
+        instruction = "Import a supported artifact, then extract the returned run."
+        suggested_action = ActionId.IMPORT_ARTIFACT
+        missing_arguments = ("path", "kind", "sensitivity")
+    return DomainError(
+        ErrorCode.ARTIFACT_NOT_FOUND,
+        f"The run contains no {requirement} artifact.",
+        run_id=run_id,
+        details={
+            "missing_entity": "artifact_input",
+            "required_artifact_kinds": artifact_kinds,
+            "compatible_capture_adapters": capture_adapters,
+            "compatible_import_producers": import_producers,
+        },
+        remediation=(
+            "Capture a new run with a compatible adapter or import a supported artifact, "
+            "then extract that returned run.",
+        ),
+        next_action=manual_action(
+            instruction,
+            suggested_action=suggested_action,
+            missing_arguments=missing_arguments,
+        ),
+    )

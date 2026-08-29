@@ -33,7 +33,13 @@ from pydantic import (
     ValidationError,
 )
 
-from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
+from flameox.domain import (
+    ArtifactKind,
+    DomainError,
+    ErrorCode,
+    digest_model,
+    missing_artifact_input,
+)
 from flameox.domain.models import ArtifactRegistration
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
@@ -302,6 +308,13 @@ class NvbenchExtractor:
             and item.producer in {_NVBENCH_PRODUCER, "flameox.import"}
         )
         primaries = tuple(item for item in nvbench_artifacts if item.role == "primary")
+        if not primaries:
+            raise missing_artifact_input(
+                run_id=run_id,
+                requirement="primary NVBench JSON",
+                artifact_kinds=(ArtifactKind.BENCHMARK_SAMPLES.value,),
+                capture_adapters=("nvbench",),
+            )
         if len(primaries) != 1:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,

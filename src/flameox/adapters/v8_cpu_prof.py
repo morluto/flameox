@@ -4,7 +4,14 @@ from pathlib import Path
 from typing import Literal
 
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
-from flameox.domain import ArtifactKind, ArtifactRegistration, DomainError, ErrorCode, digest_model
+from flameox.domain import (
+    ArtifactKind,
+    ArtifactRegistration,
+    DomainError,
+    ErrorCode,
+    digest_model,
+    missing_artifact_input,
+)
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
@@ -82,7 +89,16 @@ def _registration(
     label: str,
 ) -> ArtifactRegistration:
     run = RunStore(workspace).read(run_id)
+    adapter = "node-cpu-prof" if kind is ArtifactKind.SAMPLE_PROFILE else "node-heap-prof"
     registrations = [item for item in run.artifacts if item.kind is kind]
+    if not registrations:
+        raise missing_artifact_input(
+            run_id=run_id,
+            requirement=f"V8 {label} profile",
+            artifact_kinds=(kind.value,),
+            capture_adapters=(adapter,),
+            import_producers=("auto",),
+        )
     if len(registrations) != 1:
         raise DomainError(
             ErrorCode.ARTIFACT_PARSE_FAILED,

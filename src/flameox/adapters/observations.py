@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
+from flameox.domain import (
+    ArtifactKind,
+    DomainError,
+    ErrorCode,
+    digest_model,
+    missing_artifact_input,
+)
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
@@ -30,6 +36,14 @@ class ObservationExtractor:
         registrations = [
             item for item in run.artifacts if item.kind is ArtifactKind.SEMANTIC_OBSERVATIONS
         ]
+        if not registrations:
+            raise missing_artifact_input(
+                run_id=run_id,
+                requirement="semantic-observation",
+                artifact_kinds=(ArtifactKind.SEMANTIC_OBSERVATIONS.value,),
+                capture_adapters=("command",),
+                import_producers=("auto",),
+            )
         if len(registrations) != 1:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
