@@ -73,6 +73,19 @@ Tool annotations describe side effects:
 MCP does not expose arbitrary commands, SQL, native artifact bytes, viewer
 launch, garbage collection, purge, or source editing.
 
+Tool results use a hybrid response boundary. They return the bounded run
+semantics needed to interpret the immediate outcome, such as effective mode and
+scope, status, limitations, coverage, and truncation. They use resource links
+and typed references for native artifacts, normalized evidence generations, and
+other larger durable records. Artifact identifiers remain provenance references;
+they are never the sole carrier of run meaning.
+
+Inline fields are response projections, not an alternate persistence model.
+Property-defining execution semantics remain authoritative in the run manifest,
+and selected findings or summaries remain authoritative in their durable records
+when they must survive the response. A transport may inline a bounded subset for
+agent usability without duplicating or replacing that state.
+
 ## Agent workflow
 
 The normal capture path is:
@@ -183,6 +196,13 @@ templates cover runs, artifacts, pipelines, investigations, hypotheses,
 findings, experiments and trials, analyses, comparisons, and other durable
 records advertised by `mcp inspect`. Artifact resources never contain native
 bytes.
+
+A bounded projection may include small normalized summaries, prioritized
+findings, coverage, or next-step guidance when useful for the current task. It
+links to the authoritative run, analysis, normalized generation, or native
+artifact for deeper inspection. Large result sets and native evidence are not
+repeated in every tool response merely because an inline representation is
+possible.
 
 An empty result and unavailable evidence are different states. Results carry
 coverage, limitation, or recovery information when the requested evidence was

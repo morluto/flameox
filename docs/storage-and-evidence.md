@@ -111,6 +111,19 @@ A run is one attempted execution or import. Its manifest records:
 - oracle and experimental relationships;
 - explicit limitations and unavailable fields.
 
+The run manifest is the durable semantic authority for what was attempted. It
+records effective values after defaults, adapter policy, and workload binding,
+including the adapter mode, capture bounds, filters, and target-process scope
+when those values define the property being measured. Imported and legacy runs
+represent unavailable semantics explicitly rather than inferring them from
+artifact contents.
+
+These run-scoped semantics are not artifacts. Content identity answers which
+bytes were produced; it cannot answer why they were produced or which property
+the execution attempted to measure. Two runs may therefore reference the same
+content-addressed artifact while retaining different modes, bounds, filters, or
+target scopes.
+
 Running, failed, cancelled, timed-out, and completed attempts are all evidence.
 Failure finalization does not discard partial artifacts that pass integrity and
 privacy checks. A later control revision may add publication receipts or
@@ -132,6 +145,19 @@ The native producer artifact is authoritative. Imports stage bytes beneath an
 approved root, read from one descriptor under a size budget, verify identity and
 type, hash the staged bytes, then register a content-addressed object. Equal
 bytes are stored once while each run retains its own provenance relationship.
+
+Artifacts preserve produced evidence, not all Flameox state. They are the right
+boundary for provider-native, large, binary, independently reprocessable, or
+otherwise durable inputs such as profiles, traces, reports, and preserved logs.
+Derived normalized evidence remains in immutable evidence generations rather
+than being forced into artifact payloads or run manifests. Flameox does not wrap
+or rewrite native bytes to embed run semantics.
+
+Small size alone does not make evidence transient. A small provider report may
+still be stored as an artifact when integrity, provenance, or later extraction
+matters. Conversely, status, effective capture scope, limitations, pagination,
+and truncation metadata belong to typed durable records and their bounded
+projections rather than separate artifact payloads.
 
 Artifact metadata includes kind, media type, producer and version, size, digest,
 sensitivity, run relationship, and extraction state. An artifact may be

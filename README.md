@@ -23,7 +23,8 @@
 Flameox connects profilers, benchmark tools, and trace processors to a local
 evidence record. It preserves their native artifacts and provenance, then
 exposes bounded evidence to the agent. The agent states what it wants to test;
-Flameox captures the measurements and preserves the experiment record for review.
+Flameox records that effective execution scope with the run, captures the
+measurements, and preserves the experiment record for review.
 
 ## Quick start
 
@@ -171,6 +172,11 @@ part of the investigation history.
 Large evidence does not live in SQLite. Deleting `catalog.duckdb` does not
 delete evidence; `flameox catalog rebuild` recreates it from committed
 generations.
+
+Runs preserve what was attempted, native artifacts preserve what producers
+emitted, and immutable generations preserve normalized evidence. CLI and MCP
+responses inline only the bounded semantics and summaries needed to interpret an
+outcome, with references for deeper evidence.
 
 The CLI and MCP server expose bounded task-shaped operations, not shell strings,
 raw SQL, or arbitrary artifact bytes. Workloads may access the network unless

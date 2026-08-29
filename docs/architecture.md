@@ -42,19 +42,27 @@ There are six authoritative boundaries:
    execution surfaces accept an opaque, expiring, single-use token—not mutable
    plan fields supplied by the caller.
 3. `ControlPlane` transactionally owns plans, operations, run and record
-   revisions, idempotency, and relationships.
+   revisions, idempotency, and relationships. Run revisions are the semantic
+   authority for what was attempted, including effective adapter mode and
+   capture scope; artifact identity is not a substitute for that state.
 4. The subprocess broker owns child creation, environment construction,
    deadlines, output and resource budgets, observation, and cleanup. The
    artifact-worker harness owns one versioned, typed, request-bound staged
    worker protocol. Every ordinary artifact worker is registered against that
    protocol; workers cannot introduce an ad hoc dictionary envelope.
-5. Native producer formats remain authoritative. Flameox adds schemas only for
-   evidence semantics not owned by the producer.
+5. Native producer formats remain authoritative for the bytes and measurements
+   they contain. Flameox adds schemas only for run or evidence semantics not
+   owned by the producer and does not rewrite native bytes to carry them.
 6. Every analysis acquires one `SnapshotHandle` before lookup and resolves all
    evidence through that handle.
 
 Large artifacts and analytical Parquet stay outside SQLite. DuckDB is disposable
 analysis state built from one committed corpus inventory.
+
+CLI and MCP responses are bounded projections across these authorities. They may
+inline the semantics and summaries needed for the immediate task, but durable
+meaning remains in run and analysis records while native and normalized evidence
+remain in their immutable stores.
 
 ## Package boundaries
 

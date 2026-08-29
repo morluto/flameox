@@ -12,6 +12,9 @@ Every adapter must:
 - preserve the native artifact unchanged;
 - validate and extract the same immutable CAS payload rather than a mutable output path;
 - bind producer, package, executable, workload, and environment identity;
+- publish property-defining effective options, defaults, bounds, filters, and
+  target scope as run semantics rather than relying on artifact bytes to carry
+  them;
 - execute through the shared broker and consume a planned executable binding;
 - parse in a bounded isolated worker when native libraries or large artifacts
   should not enter the application process;
@@ -32,6 +35,11 @@ mutable staging pathname is not authority for bytes imported later.
 Passive discovery reports candidates. It is not execution authorization.
 Planning binds the selected candidate through `ExecutableResolver` under the
 same contract used by execution.
+
+Capture and extraction results may project a bounded subset of these run
+semantics alongside status, limitations, and artifact references. The projection
+is for immediate interpretation; the run remains authoritative after the result
+is no longer available.
 
 ## Producer ownership
 
