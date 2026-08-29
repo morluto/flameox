@@ -12,11 +12,11 @@ modification system.
 
 ## Before you start
 
-Use the repository's issue templates for bugs and feature requests. Small fixes
-and documentation improvements can usually go straight to a pull request. For a
-substantial feature, new integration, or change to a public or persisted contract,
-open an issue first so the intended behavior and contribution fit can be agreed
-before implementation.
+Use the repository's issue templates for bugs, feature requests, and design
+discussions. Small fixes and documentation improvements can usually go straight
+to a pull request. For a substantial feature, new integration, or change to a
+public or persisted contract, open an issue first so the intended behavior and
+contribution fit can be agreed before implementation.
 
 Search existing issues and pull requests before starting. If you discover a
 security vulnerability, follow [SECURITY.md](SECURITY.md) and report it privately

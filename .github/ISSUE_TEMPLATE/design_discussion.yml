@@ -1,0 +1,67 @@
+name: Design discussion
+description: Resolve an architectural or contract question before implementation
+title: ""
+labels:
+  - enhancement
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for a substantial integration, a new public or persisted contract,
+        or a design choice with meaningful tradeoffs. Keep one decision per discussion.
+
+  - type: checkboxes
+    id: duplicate-check
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the open and closed issues and pull requests for a related discussion.
+          required: true
+        - label: I have removed credentials, tokens, private paths, and other sensitive data.
+          required: true
+
+  - type: textarea
+    id: decision
+    attributes:
+      label: Decision needed
+      description: State the exact question maintainers need to resolve.
+      placeholder: Should flameox ... or ...?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and evidence
+      description: Explain why this decision is needed now. Separate observed behavior, derived evidence, and inference.
+    validations:
+      required: true
+
+  - type: textarea
+    id: options
+    attributes:
+      label: Options and tradeoffs
+      description: Compare a small number of viable approaches, including compatibility, safety, evidence, and maintenance costs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and non-goals
+      description: Identify authority boundaries, supported platforms, migration concerns, and intentionally excluded work.
+
+  - type: textarea
+    id: success-criteria
+    attributes:
+      label: Success criteria and open questions
+      description: What facts or outcomes would settle the decision? List only unanswered questions that could change the choice.
+    validations:
+      required: true
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Link relevant source, tests, documentation, upstream tools, measurements, or prior issues.

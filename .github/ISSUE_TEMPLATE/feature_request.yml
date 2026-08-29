@@ -1,0 +1,86 @@
+name: Feature request
+description: Propose a focused improvement to flameox
+title: ""
+labels:
+  - enhancement
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing an improvement. For substantial integrations or public/persisted
+        contract changes, describe the decision that needs maintainer agreement before implementation.
+
+  - type: checkboxes
+    id: duplicate-check
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the open and closed issues and pull requests for a related proposal.
+          required: true
+        - label: I have removed credentials, tokens, private paths, and other sensitive data.
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Adapters and providers
+        - Storage and evidence
+        - Investigations and comparisons
+        - CLI
+        - MCP
+        - Runtime safety
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-limitation
+    attributes:
+      label: Current limitation
+      description: What user or agent workflow is blocked, ambiguous, or unnecessarily difficult today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-cases
+    attributes:
+      label: Use cases
+      description: Give concrete callers, workflows, workloads, or examples. Explain why the current behavior is insufficient.
+    validations:
+      required: true
+
+  - type: textarea
+    id: desired-outcome
+    attributes:
+      label: Desired outcome and success criteria
+      description: Describe observable behavior that would make this useful. Include evidence, compatibility, or performance criteria when they matter.
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and non-goals
+      description: Call out authority boundaries, supported platforms, persistence or compatibility concerns, and what should remain out of scope.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches, existing tools, or workarounds did you consider? Include why they do not meet the need.
+
+  - type: textarea
+    id: possible-direction
+    attributes:
+      label: Possible direction
+      description: Optional proposal for implementation or integration. Treat this as a starting point, not a requirement.
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Add links to relevant documentation, upstream tools, measurements, or prior discussion.

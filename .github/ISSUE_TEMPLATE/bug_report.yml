@@ -1,0 +1,148 @@
+name: Bug report
+description: Report a reproducible problem in flameox
+title: ""
+labels:
+  - bug
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve flameox. Please report one primary behavior per issue.
+        Keep observed facts separate from suspected causes, and remove secrets from logs.
+
+  - type: checkboxes
+    id: duplicate-check
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the open and closed issues for a related report.
+          required: true
+        - label: I have removed credentials, tokens, private paths, and other sensitive data.
+          required: true
+
+  - type: textarea
+    id: observed-behavior
+    attributes:
+      label: Observed behavior
+      description: What happened? Include the affected flameox command, MCP tool, adapter, or artifact kind.
+      placeholder: Describe the behavior and the conditions under which it occurs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Give the smallest realistic commands, configuration, input, or event sequence that demonstrates the problem.
+      placeholder: |
+        1. Initialize or configure ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What contract, invariant, output, or recovery action should have occurred instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact-scope
+    attributes:
+      label: Impact and scope
+      description: Who or what is affected, and what is known not to be affected? Mention data loss, incorrect evidence, blocked recovery, or compatibility impact when relevant.
+    validations:
+      required: true
+
+  - type: input
+    id: flameox-version
+    attributes:
+      label: flameox version
+      description: Use `flameox --version`, package metadata, or the source revision.
+      placeholder: 0.1.0 or git revision
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: Python 3.12.4
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Include OS, architecture, and relevant runtime or provider versions.
+      placeholder: Ubuntu 24.04 x86_64; Memray 1.20.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: interface
+    attributes:
+      label: Interface
+      options:
+        - CLI
+        - MCP
+        - Python API
+        - Storage or artifact format
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: failure-stage
+    attributes:
+      label: Earliest failure stage
+      description: Select the earliest stage where the incorrect behavior is observable.
+      options:
+        - Request parsing or validation
+        - Capability discovery or provider setup
+        - Capture or import
+        - Artifact registration or provenance
+        - Extraction or derived catalog
+        - Analysis, comparison, or finding
+        - Recovery, cancellation, or lifecycle
+        - CLI or MCP transport projection
+        - Unknown
+    validations:
+      required: true
+
+  - type: input
+    id: mcp-client
+    attributes:
+      label: MCP client (if applicable)
+      description: Include the client and version when the issue occurs through MCP; otherwise write not applicable.
+      placeholder: Client name and version
+
+  - type: textarea
+    id: typed-outcome
+    attributes:
+      label: Typed outcome or recovery expected
+      description: Optional but useful for protocol and lifecycle problems. What result, error, recovery action, or state transition should the caller have received?
+
+  - type: textarea
+    id: relevant-output
+    attributes:
+      label: Relevant output or evidence
+      description: Paste the smallest useful CLI output, error, MCP response, trace, or evidence excerpt. Redact sensitive values.
+      render: text
+
+  - type: textarea
+    id: analysis
+    attributes:
+      label: Analysis or suspected cause
+      description: Optional. Clearly label source-derived reasoning or a hypothesis; do not present an unverified cause as fact.
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Links, reduced artifacts, screenshots, or a proposed regression test. Do not attach private evidence without removing sensitive data.
