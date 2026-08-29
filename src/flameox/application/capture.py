@@ -75,6 +75,7 @@ from flameox.application.preflight import PreflightService
 from flameox.application.proc import read_boot_id, read_proc_stat_start_identity
 from flameox.application.progress import ProgressReporter
 from flameox.application.projections import ProjectionCoordinator
+from flameox.application.provider_runtime import ProviderRuntimeManager
 from flameox.application.python_environment import PythonEnvironmentProbe
 from flameox.application.quarantine import QuarantineService
 from flameox.application.source import collect_source_state
@@ -96,6 +97,7 @@ from flameox.domain import (
     AdapterWorkloadQualification,
     ArtifactKind,
     ArtifactRegistration,
+    CapabilityExtra,
     CapabilityPermissionStatus,
     CapabilityProvisioning,
     CapabilityReport,
@@ -770,6 +772,7 @@ class CaptureService:
             adapter_binding.limitation_details,
         )
         adapter_version = adapter_binding.version
+        self._require_memray_reader(adapter, adapter_version)
         semantics = build_run_semantics(adapter, adapter_version, bound_adapter_options)
         if adapter_binding.implementation_id is not None:
             semantics = semantics.validated_copy(
@@ -2399,6 +2402,45 @@ class CaptureService:
         return AdapterWorkloadQualification(
             protocol=WorkloadExecutionProtocol.NVBENCH,
             observed_version=version_line[:200],
+        )
+
+    def _require_memray_reader(
+        self,
+        adapter: str,
+        producer_version: str | None,
+    ) -> None:
+        if adapter != "memray":
+            return
+        if producer_version is None:
+            raise DomainError(
+                ErrorCode.ADAPTER_INCOMPATIBLE,
+                "Memray capture requires an exact workload producer version.",
+            )
+        requirement = Requirement(f"memray=={producer_version}")
+        runtime = ProviderRuntimeManager(
+            self.workspace.paths.records / "provider-runtimes"
+        ).find_distribution(
+            extra=CapabilityExtra.MEMORY,
+            requirement=str(requirement),
+        )
+        if runtime is not None:
+            return
+        raise DomainError(
+            ErrorCode.CAPABILITY_UNAVAILABLE,
+            "The workload Memray producer has no qualified extraction reader.",
+            details={
+                "producer_version": producer_version,
+                "required_reader": str(requirement),
+            },
+            remediation=(
+                "Prepare the exact reader before paying capture overhead, then repeat planning.",
+            ),
+            next_action=tool_action(
+                ActionId.START_CAPABILITY_SETUP,
+                adapters=["memray"],
+                idempotency_key=f"memray-reader-{producer_version}",
+                memray_reader_version=producer_version,
+            ),
         )
 
     async def _adapter_capability(

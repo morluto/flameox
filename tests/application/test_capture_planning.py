@@ -17,6 +17,7 @@ from flameox.application import (
     PreflightService,
     WorkloadService,
 )
+from flameox.application.provider_runtime import ProviderRuntimeManager
 from flameox.domain import (
     CapabilityPermissionStatus,
     CapabilityReport,
@@ -86,7 +87,10 @@ class _PathReportingNvccProbeBroker(SubprocessBroker):
 
 
 @pytest.mark.anyio
-async def test_memray_plan_binds_the_profiled_workload_interpreter(tmp_path: Path) -> None:
+async def test_memray_plan_binds_the_profiled_workload_interpreter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     workspace = Workspace.initialize(tmp_path)
     workload_python = tmp_path / "workload-env" / "bin" / "python"
     workload_python.parent.mkdir(parents=True)
@@ -99,6 +103,11 @@ schema_version = 1
 argv = ["{workload_python}", "workload.py", "--size", "4"]
 """
     )
+    monkeypatch.setattr(
+        ProviderRuntimeManager,
+        "find_distribution",
+        lambda *_args, **_kwargs: object(),
+    )
 
     plan = await CaptureService(workspace).plan(
         workload_name="profile",
@@ -108,6 +117,39 @@ argv = ["{workload_python}", "workload.py", "--size", "4"]
 
     assert plan.collector_argv[:3] == (str(workload_python), "-m", "memray")
     assert plan.collector_argv[-3:] == ("workload.py", "--size", "4")
+
+
+@pytest.mark.anyio
+async def test_memray_plan_requires_an_exact_reader_before_capture(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    workload_python = tmp_path / "workload-env" / "bin" / "python"
+    workload_python.parent.mkdir(parents=True)
+    workload_python.write_text('#!/bin/sh\nprintf \'{"memray":"1.20.0"}\\n\'\n')
+    workload_python.chmod(0o755)
+    (tmp_path / "flameox.toml").write_text(
+        f'''schema_version = 1
+[workloads.profile]
+argv = ["{workload_python}", "workload.py"]
+'''
+    )
+
+    with pytest.raises(DomainError) as raised:
+        await CaptureService(workspace).plan(
+            workload_name="profile",
+            adapter="memray",
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
+
+    assert raised.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
+    assert raised.value.details["producer_version"] == "1.20.0"
+    assert raised.value.next_action == ToolAction(
+        action=ActionId.START_CAPABILITY_SETUP,
+        arguments={
+            "adapters": ["memray"],
+            "idempotency_key": "memray-reader-1.20.0",
+            "memray_reader_version": "1.20.0",
+        },
+    )
 
 
 def test_current_workload_definition_is_active_and_bound_to_plans(tmp_path: Path) -> None:

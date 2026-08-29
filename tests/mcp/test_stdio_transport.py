@@ -62,6 +62,11 @@ async def test_real_stdio_server_keeps_protocol_on_stdout(tmp_path: Path) -> Non
 
     assert "workspace_status" in {tool.name for tool in tools.tools}
     assert "start_capability_setup" in {tool.name for tool in tools.tools}
+    setup_tool = next(tool for tool in tools.tools if tool.name == "start_capability_setup")
+    version_schema = setup_tool.input_schema["properties"]["memray_reader_version"]
+    string_schema = next(item for item in version_schema["anyOf"] if item.get("type") == "string")
+    assert string_schema["minLength"] == 1
+    assert string_schema["maxLength"] == 100
     assert instructions is not None
     assert "get_declared_workflow" in instructions
     assert "start_capability_setup" in instructions

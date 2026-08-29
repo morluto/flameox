@@ -6,6 +6,7 @@ import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
 import pytest
@@ -913,10 +914,11 @@ async def test_capability_setup_manager_persists_progress_and_final_receipt(
             self,
             adapters: tuple[str, ...],
             *,
+            memray_reader_version: str | None,
             cancel_event: object,
             phase_callback: Any,
         ) -> CapabilitySetupResult:
-            del cancel_event
+            del cancel_event, memray_reader_version
             phase_callback(
                 "staging_trace_processor",
                 DownloadProgress(
@@ -978,6 +980,105 @@ async def test_capability_setup_manager_persists_progress_and_final_receipt(
 
 
 @pytest.mark.anyio
+async def test_capability_setup_identity_binds_exact_memray_reader_version(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    observed: list[str | None] = []
+
+    class FakeCapabilityService:
+        def prepare(
+            self,
+            adapters: tuple[str, ...],
+            *,
+            memray_reader_version: str | None,
+            cancel_event: object,
+            phase_callback: Any,
+        ) -> CapabilitySetupResult:
+            del cancel_event, phase_callback
+            observed.append(memray_reader_version)
+            return CapabilitySetupResult(
+                requested=adapters,
+                already_available=(),
+                provider_environment_ids={"memray": "sha256:" + "e" * 64},
+                setup_verification=SetupVerification(
+                    checked_adapters=adapters,
+                    available_adapters=adapters,
+                ),
+            )
+
+        def _read_setup_receipt(self) -> None:
+            return None
+
+    manager = CapabilitySetupManager(workspace, cast(CapabilityService, FakeCapabilityService()))
+    try:
+        started = await manager.start(
+            ("memray",),
+            "memray-reader-proof",
+            memray_reader_version="1.20.0",
+        )
+        terminal = await manager.runner.wait(started.operation_id, timeout_seconds=2)
+
+        assert terminal.state == "terminal"
+        assert observed == ["1.20.0"]
+        assert terminal.terminal_receipt is not None
+        assert terminal.terminal_receipt["setup"]["provider_environment_ids"] == {
+            "memray": "sha256:" + "e" * 64
+        }
+        with pytest.raises(DomainError) as conflict:
+            await manager.start(
+                ("memray",),
+                "memray-reader-proof",
+                memray_reader_version="1.19.3",
+            )
+        assert conflict.value.code is ErrorCode.REVISION_CONFLICT
+    finally:
+        await manager.shutdown()
+
+
+def test_capability_setup_provisions_exact_memray_reader_requirement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    service = CapabilityService(workspace)
+    report = CapabilityReport(
+        adapter="memray",
+        status=CapabilityStatus.UNAVAILABLE,
+        setup=_managed_setup(
+            CapabilityExtra.MEMORY,
+            "memray>=1.17",
+            adapter="memray",
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "list",
+        lambda: CapabilityList(capabilities=(report,)),
+    )
+    prepared: list[str] = []
+    runtime = SimpleNamespace(
+        receipt=SimpleNamespace(environment_id="sha256:" + "e" * 64)
+    )
+
+    def find_distribution(**_kwargs: object) -> object | None:
+        return runtime if prepared else None
+
+    def prepare_provider(**kwargs: object) -> object:
+        prepared.append(str(kwargs["requirement"]))
+        return runtime
+
+    monkeypatch.setattr(service.provider_runtimes, "find_distribution", find_distribution)
+    monkeypatch.setattr(service.provider_runtimes, "prepare", prepare_provider)
+
+    result = service.prepare(("memray",), memray_reader_version="1.20.0")
+
+    assert prepared == ["memray==1.20.0"]
+    assert result.provider_environment_ids == {"memray": "sha256:" + "e" * 64}
+    assert result.setup_verification.status == "verified"
+
+
+@pytest.mark.anyio
 async def test_capability_setup_failure_keeps_staging_phase_and_diagnostics(
     tmp_path: Path,
 ) -> None:
@@ -988,10 +1089,11 @@ async def test_capability_setup_failure_keeps_staging_phase_and_diagnostics(
             self,
             adapters: tuple[str, ...],
             *,
+            memray_reader_version: str | None,
             cancel_event: object,
             phase_callback: Any,
         ) -> CapabilitySetupResult:
-            del adapters, cancel_event
+            del adapters, cancel_event, memray_reader_version
             phase_callback("staging_trace_processor", None)
             raise DomainError(
                 ErrorCode.PROCESS_FAILED,
@@ -1051,9 +1153,11 @@ async def test_capability_setup_cancel_returns_while_staging_cleanup_continues(
             self,
             adapters: tuple[str, ...],
             *,
+            memray_reader_version: str | None,
             cancel_event: threading.Event,
             phase_callback: Any,
         ) -> CapabilitySetupResult:
+            del memray_reader_version
             phase_callback("staging_trace_processor", None)
             staging.set()
             assert cancel_event.wait(timeout=2)

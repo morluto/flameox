@@ -1403,6 +1403,15 @@ def create_server(
             ),
         ],
         ctx: Context[AppContext],
+        memray_reader_version: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=100,
+                description="Exact Memray producer version whose reader runtime is required.",
+            ),
+        ]
+        | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[OperationStatus]]:
         """Start detached capability provisioning and return its durable operation ID.
 
@@ -1412,7 +1421,9 @@ def create_server(
         """
         try:
             result = await ctx.request_context.lifespan_context.capability_setup_service().start(
-                tuple(adapters), idempotency_key
+                tuple(adapters),
+                idempotency_key,
+                memray_reader_version=memray_reader_version,
             )
             return _success(
                 result,

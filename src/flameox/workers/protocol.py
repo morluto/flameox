@@ -20,6 +20,7 @@ WORKER_TRANSPORT: Literal["flameox.artifact-worker/v1"] = "flameox.artifact-work
 class WorkerOperationId(StrEnum):
     AIPERF_PARSE = "aiperf.parse"
     COMPUTE_SANITIZER_PARSE = "compute_sanitizer.parse"
+    MEMRAY_PARSE = "memray.parse"
     NSIGHT_COMPUTE_PARSE = "nsight_compute.parse"
     NSIGHT_SYSTEMS_PARSE = "nsight_systems.parse"
     NVML_OBSERVE = "nvml.observe"

@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-from collections import defaultdict
-from collections.abc import Callable, Iterable
+import shutil
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
-from typing import Any
 
-from flameox.adapters.compatibility import require_supported_producer_major
+from packaging.version import InvalidVersion, Version
+
+from flameox.action_graph import ActionId, tool_action
+from flameox.adapters.artifact_workers import IsolatedWorkerHarness
+from flameox.application.provider_runtime import ProviderRuntimeManager
 from flameox.domain import (
     ArtifactKind,
+    CapabilityExtra,
     DomainError,
     ErrorCode,
     digest_model,
@@ -16,11 +21,16 @@ from flameox.domain import (
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
+from flameox.workers.memray_contract import MEMRAY_WORKER, MemrayWorkerRequest, MemrayWorkerResult
 
 
 class MemrayExtractionResult(ContractModel):
     run_id: str
     artifact_id: str
+    producer_version: str
+    reader_version: str
+    reader_environment_id: str
+    extractor_profile: str
     peak_memory_bytes: int
     retained_end_bytes: int
     total_allocations: int
@@ -31,11 +41,14 @@ class MemrayExtractionResult(ContractModel):
 
 class MemrayExtractor:
     name = "memray"
-    version = "1"
+    version = "2"
 
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
         self.publisher = GenerationPublisher(workspace)
+        self.provider_runtimes = ProviderRuntimeManager(
+            workspace.paths.records / "provider-runtimes"
+        )
 
     def extract(
         self,
@@ -55,14 +68,6 @@ class MemrayExtractor:
                 capture_adapters=("memray",),
                 import_producers=("memray",),
             )
-        try:
-            import memray
-        except ImportError as exc:
-            raise DomainError(
-                ErrorCode.CAPABILITY_UNAVAILABLE,
-                "Memray is not installed.",
-                remediation=("Install flameox's memory optional dependencies.",),
-            ) from exc
         if len(registrations) != 1:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
@@ -70,238 +75,196 @@ class MemrayExtractor:
                 run_id=run_id,
             )
         registration = registrations[0]
-        compatibility_limitations = require_supported_producer_major(
-            registration,
-            package="memray",
-            producer_tokens=("memray",),
+        producer_version = self._producer_version(
+            registration.producer,
+            registration.producer_version,
         )
-        artifact = ArtifactStore(self.workspace).get(registration.artifact_id)
-        try:
-            self._check_cancelled(cancel_check)
-            reader = memray.FileReader(str(artifact.payload_path))
-            high_watermark = self._materialize_records(
-                reader.get_high_watermark_allocation_records(),
-                phase="reading_high_watermark",
-                cancel_check=cancel_check,
-                progress=progress,
-            )
-            retained = self._materialize_records(
-                reader.get_leaked_allocation_records(),
-                phase="reading_retained_end",
-                cancel_check=cancel_check,
-                progress=progress,
-            )
-            metadata = reader.metadata
-        except (OSError, ValueError) as exc:
+        requirement = f"memray=={producer_version}"
+        runtime = self.provider_runtimes.find_distribution(
+            extra=CapabilityExtra.MEMORY,
+            requirement=requirement,
+        )
+        if runtime is None:
             raise DomainError(
-                ErrorCode.ARTIFACT_PARSE_FAILED,
-                "The artifact is not a supported Memray capture.",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "No verified Memray reader matches the artifact producer.",
                 run_id=run_id,
-            ) from exc
-        frame_rows: dict[str, dict[str, Any]] = {}
-        frame_cache: dict[tuple[str, str, int], str] = {}
-        aggregates: dict[tuple[str, str], dict[str, int]] = defaultdict(
-            lambda: {"self": 0, "inclusive": 0, "samples": 0}
-        )
-        self._aggregate(
-            high_watermark,
-            metric="memory.high_watermark",
-            frame_rows=frame_rows,
-            frame_cache=frame_cache,
-            aggregates=aggregates,
-            artifact_id=registration.artifact_id,
-            cancel_check=cancel_check,
-            progress=progress,
-        )
-        self._aggregate(
-            retained,
-            metric="memory.retained_end",
-            frame_rows=frame_rows,
-            frame_cache=frame_cache,
-            aggregates=aggregates,
-            artifact_id=registration.artifact_id,
-            cancel_check=cancel_check,
-            progress=progress,
-        )
-        measurement_rows: list[dict[str, Any]] = [
-            {
-                "measurement_id": digest_model(
-                    {
-                        "run_id": run_id,
-                        "artifact_id": registration.artifact_id,
-                        "name": name,
-                    }
+                details={
+                    "producer_version": producer_version,
+                    "required_reader": requirement,
+                },
+                remediation=(
+                    "Call start_capability_setup with adapters=['memray'] and "
+                    f"memray_reader_version='{producer_version}', then retry extraction.",
                 ),
-                "run_id": run_id,
-                "artifact_id": registration.artifact_id,
-                "name": name,
-                "value_int": value,
-                "value_float": None,
-                "unit": unit,
-                "aggregation": aggregation,
-                "scope": "process",
-                "trial_id": None,
-                "worker_id": None,
-                "worker_run_index": None,
-                "value_index": None,
-                "loop_count": None,
-                "is_warmup": False,
-                "block_id": None,
-                "variant_id": None,
-                "order_in_block": None,
-                "phase": None,
-                "dimensions": {},
-                "evidence_level": "observed",
-            }
-            for name, value, unit, aggregation in (
-                ("memory.peak", int(metadata.peak_memory), "bytes", "peak"),
-                (
-                    "memory.retained_end",
-                    sum(int(record.size) for record in retained),
-                    "bytes",
-                    "total",
-                ),
-                (
-                    "memory.total_allocations",
-                    int(metadata.total_allocations),
-                    "count",
-                    "total",
+                next_action=tool_action(
+                    ActionId.START_CAPABILITY_SETUP,
+                    adapters=["memray"],
+                    idempotency_key=f"memray-reader-{producer_version}",
+                    memray_reader_version=producer_version,
                 ),
             )
-        ]
-        frame_measurements = [
+        artifact = ArtifactStore(self.workspace).get(registration.artifact_id)
+        harness = IsolatedWorkerHarness(self.workspace, python=runtime.python)
+        worker_results: list[MemrayWorkerResult] = []
+        expected_reader_version = runtime.receipt.distributions["memray"]
+
+        def prepare(
+            root: Path,
+            generation_id: str,
+            published_at: datetime,
+        ) -> dict[str, Path]:
+            if progress is not None:
+                progress("reading_profile", 0, None)
+            with (
+                self.provider_runtimes.verified_use(runtime),
+                harness.run_typed_sync_session(
+                    MEMRAY_WORKER,
+                    MemrayWorkerRequest(
+                        artifact_path=str(artifact.payload_path),
+                        run_id=run_id,
+                        artifact_id=registration.artifact_id,
+                        project_root=str(
+                            Path(run.command.cwd)
+                            if run.command is not None
+                            else self.workspace.project_root
+                        ),
+                        generation_id=generation_id,
+                        published_at=published_at,
+                    ),
+                ) as (result, job_root),
+            ):
+                if result.reader_version != expected_reader_version:
+                    raise DomainError(
+                        ErrorCode.ADAPTER_INCOMPATIBLE,
+                        "The Memray worker reader does not match its runtime receipt.",
+                        details={
+                            "expected_reader_version": expected_reader_version,
+                            "observed_reader_version": result.reader_version,
+                        },
+                    )
+                staged = self._stage_worker_outputs(harness, result, job_root, root)
+                worker_results.append(result)
+            self._check_cancelled(cancel_check)
+            return staged
+
+        operation_digest = digest_model(
             {
-                "run_id": run_id,
                 "artifact_id": registration.artifact_id,
-                "frame_id": frame_id,
-                "metric": metric,
-                "self_value": values["self"],
-                "inclusive_value": values["inclusive"],
-                "unit": "bytes",
-                "sample_count": values["samples"],
-                "thread_name": None,
-                "process_name": None,
-                "phase": None,
+                "producer_version": producer_version,
+                "reader_environment_id": runtime.receipt.environment_id,
+                "reader_version": expected_reader_version,
+                "extractor_profile": MEMRAY_WORKER.implementation,
             }
-            for (metric, frame_id), values in sorted(aggregates.items())
-        ]
-        self._check_cancelled(cancel_check)
-        published = self.publisher.publish_rows(
-            {
-                "measurements": measurement_rows,
-                "frames": list(frame_rows.values()),
-                "frame_measurements": frame_measurements,
-            },
-            publisher=self.name,
-            publisher_version=self.version,
-            input_run_ids=(run_id,),
-            input_artifact_ids=(registration.artifact_id,),
         )
+        try:
+            published = self.publisher.publish_prepared_parquet(
+                prepare,
+                publisher=self.name,
+                publisher_version=self.version,
+                input_run_ids=(run_id,),
+                input_artifact_ids=(registration.artifact_id,),
+                operation_digest=operation_digest,
+            )
+        except DomainError as error:
+            if error.code not in {ErrorCode.ADAPTER_INCOMPATIBLE, ErrorCode.ARTIFACT_PARSE_FAILED}:
+                raise
+            raise DomainError(
+                error.code,
+                error.message,
+                run_id=run_id,
+                details={
+                    "producer_version": producer_version,
+                    "reader_version": expected_reader_version,
+                    "reader_environment_id": runtime.receipt.environment_id,
+                },
+                remediation=(
+                    "Prepare or select a reader runtime qualified for this exact producer, "
+                    "then retry extraction against the preserved native artifact.",
+                ),
+                next_action=tool_action(
+                    ActionId.START_CAPABILITY_SETUP,
+                    adapters=["memray"],
+                    idempotency_key=f"memray-reader-{producer_version}",
+                    memray_reader_version=producer_version,
+                ),
+            ) from error
+        self._check_cancelled(cancel_check)
+        if progress is not None:
+            progress("publishing_evidence", 1, 1)
+        worker = worker_results[-1]
         limitations = [
-            *compatibility_limitations,
             "Frame aggregates expose bounded callers; complete stacks remain in Memray.",
+            *runtime.receipt.limitations,
         ]
-        if not metadata.has_native_traces:
+        if not worker.has_native_traces:
             limitations.append("The capture does not contain native stack traces.")
         return MemrayExtractionResult(
             run_id=run_id,
             artifact_id=registration.artifact_id,
-            peak_memory_bytes=int(metadata.peak_memory),
-            retained_end_bytes=sum(int(record.size) for record in retained),
-            total_allocations=int(metadata.total_allocations),
-            frame_count=len(frame_rows),
+            producer_version=producer_version,
+            reader_version=worker.reader_version,
+            reader_environment_id=runtime.receipt.environment_id,
+            extractor_profile=MEMRAY_WORKER.implementation,
+            peak_memory_bytes=worker.peak_memory_bytes,
+            retained_end_bytes=worker.retained_end_bytes,
+            total_allocations=worker.total_allocations,
+            frame_count=worker.frame_count,
             corpus_commit_id=published.commit.commit_id,
             limitations=tuple(limitations),
         )
 
-    def _aggregate(
-        self,
-        records: list[Any],
-        *,
-        metric: str,
-        frame_rows: dict[str, dict[str, Any]],
-        frame_cache: dict[tuple[str, str, int], str],
-        aggregates: dict[tuple[str, str], dict[str, int]],
-        artifact_id: str,
-        cancel_check: Callable[[], None] | None,
-        progress: Callable[[str, int, int | None], None] | None,
-    ) -> None:
-        total = len(records)
-        phase = f"aggregating_{metric.removeprefix('memory.')}"
-        for record_index, record in enumerate(records, start=1):
-            if record_index == 1 or record_index % 256 == 0:
-                self._check_cancelled(cancel_check)
-            size = int(record.size)
-            allocations = int(record.n_allocations)
-            for index, (function, filename, line) in enumerate(record.stack_trace()):
-                raw_frame = (str(function), str(filename), int(line))
-                frame_id = frame_cache.get(raw_frame)
-                if frame_id is None:
-                    normalized = self._normalize(raw_frame[1])
-                    frame_id = digest_model(
-                        {
-                            "language": "Python",
-                            "function": raw_frame[0],
-                            "file": normalized,
-                            "line": raw_frame[2],
-                        }
-                    )
-                    frame_cache[raw_frame] = frame_id
-                    frame_rows[frame_id] = {
-                        "frame_id": frame_id,
-                        "language": "Python",
-                        "function": raw_frame[0],
-                        "module": None,
-                        "file": normalized,
-                        "line": raw_frame[2],
-                        "column": None,
-                        "address": None,
-                        "build_id": None,
-                        "module_relative_address": None,
-                        "inline_chain_id": None,
-                        "source_state_id": None,
-                        "artifact_id": artifact_id,
-                        "inlined": False,
-                        "symbolization": "complete",
-                    }
-                values = aggregates[(metric, frame_id)]
-                values["inclusive"] += size
-                values["samples"] += allocations
-                if index == 0:
-                    values["self"] += size
-            if progress is not None and (record_index == total or record_index % 1_024 == 0):
-                progress(phase, record_index, total)
+    @staticmethod
+    def _stage_worker_outputs(
+        harness: IsolatedWorkerHarness,
+        result: MemrayWorkerResult,
+        job_root: Path,
+        staging_root: Path,
+    ) -> dict[str, Path]:
+        expected = {
+            "measurements": "measurements.parquet",
+            "frames": "frames.parquet",
+            "frame_measurements": "frame_measurements.parquet",
+        }
+        actual_roles = [output.role for output in result.files]
+        if len(set(actual_roles)) != len(actual_roles) or set(actual_roles) != set(expected):
+            raise DomainError(
+                ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
+                "The Memray worker returned an invalid evidence table set.",
+            )
+        staged: dict[str, Path] = {}
+        for output in result.files:
+            if (
+                output.relative_path != expected[output.role]
+                or output.media_type != "application/vnd.apache.parquet"
+            ):
+                raise DomainError(
+                    ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
+                    "The Memray worker output does not match its table contract.",
+                )
+            source = harness.validate_output_file(job_root, output)
+            destination = staging_root / source.name
+            shutil.copyfile(source, destination)
+            staged[output.role] = destination
+        return staged
+
+    @staticmethod
+    def _producer_version(producer: str | None, version: str | None) -> str:
+        if producer is None or producer.casefold() != "memray" or version is None:
+            raise DomainError(
+                ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
+                "Memray extraction requires declared Memray producer identity and version.",
+            )
+        try:
+            return str(Version(version))
+        except InvalidVersion as error:
+            raise DomainError(
+                ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
+                "The declared Memray producer version is invalid.",
+                details={"producer_version": version},
+            ) from error
 
     @staticmethod
     def _check_cancelled(cancel_check: Callable[[], None] | None) -> None:
         if cancel_check is not None:
             cancel_check()
-
-    def _materialize_records(
-        self,
-        records: Iterable[Any],
-        *,
-        phase: str,
-        cancel_check: Callable[[], None] | None,
-        progress: Callable[[str, int, int | None], None] | None,
-    ) -> list[Any]:
-        materialized: list[Any] = []
-        for record_index, record in enumerate(records, start=1):
-            if record_index == 1 or record_index % 256 == 0:
-                self._check_cancelled(cancel_check)
-            materialized.append(record)
-            if progress is not None and record_index % 1_024 == 0:
-                progress(phase, record_index, None)
-        self._check_cancelled(cancel_check)
-        if progress is not None:
-            progress(phase, len(materialized), len(materialized))
-        return materialized
-
-    def _normalize(self, filename: str) -> str:
-        if filename.startswith("<") and filename.endswith(">"):
-            return filename
-        path = Path(filename).resolve()
-        try:
-            return path.relative_to(self.workspace.project_root).as_posix()
-        except ValueError:
-            return str(path)

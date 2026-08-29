@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import sys
+from contextlib import nullcontext
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import cast
 
 import pytest
@@ -24,8 +26,36 @@ def _memray_module() -> ModuleType:
     )
 
 
+def _extractor(
+    workspace: Workspace,
+    version: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> MemrayExtractor:
+    extractor = MemrayExtractor(workspace)
+    runtime = SimpleNamespace(
+        python=Path(sys.executable),
+        receipt=SimpleNamespace(
+            environment_id="sha256:" + "e" * 64,
+            distributions={"memray": version},
+            limitations=(),
+        ),
+    )
+    monkeypatch.setattr(
+        extractor.provider_runtimes,
+        "find_distribution",
+        lambda **_kwargs: runtime,
+    )
+    monkeypatch.setattr(
+        extractor.provider_runtimes,
+        "verified_use",
+        lambda _runtime: nullcontext(runtime),
+    )
+    return extractor
+
+
 def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     memray = _memray_module()
     capture = tmp_path / "memory.bin"
@@ -39,10 +69,12 @@ def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
         ImportArtifactRequest(
             path=capture,
             kind=ArtifactKind.MEMORY_PROFILE,
+            producer="memray",
+            producer_version=memray.__version__,
         )
     )
     progress: list[tuple[str, int, int | None]] = []
-    result = MemrayExtractor(workspace).extract(
+    result = _extractor(workspace, memray.__version__, monkeypatch).extract(
         imported.run.run_id,
         progress=lambda phase, completed, total: progress.append((phase, completed, total)),
     )
@@ -51,12 +83,12 @@ def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
     assert result.retained_end_bytes >= 100_000
     assert result.total_allocations >= 1
     assert result.frame_count >= 1
-    assert any("compatibility could not be verified" in item for item in result.limitations)
+    assert result.producer_version == memray.__version__
+    assert result.reader_version == memray.__version__
+    assert result.reader_environment_id == "sha256:" + "e" * 64
     assert {phase for phase, _completed, _total in progress} == {
-        "reading_high_watermark",
-        "reading_retained_end",
-        "aggregating_high_watermark",
-        "aggregating_retained_end",
+        "reading_profile",
+        "publishing_evidence",
     }
     with Catalog(workspace).open_snapshot() as snapshot:
         measurements = snapshot.execute(
@@ -133,10 +165,39 @@ def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
     assert all(item.frame_id != "later-frame" for item in analysis.hotspots)
 
 
+def test_memray_extraction_rejects_a_reader_that_disagrees_with_its_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memray = _memray_module()
+    capture = tmp_path / "memory.bin"
+    with memray.Tracker(str(capture)):
+        bytearray(1_000)
+    workspace = Workspace.initialize(tmp_path)
+    Catalog(workspace).rebuild()
+    imported = ImportService(workspace).import_artifact(
+        ImportArtifactRequest(
+            path=capture,
+            kind=ArtifactKind.MEMORY_PROFILE,
+            producer="memray",
+            producer_version=memray.__version__,
+        )
+    )
+    original_head = workspace.corpus.read_head().commit_id
+
+    with pytest.raises(DomainError) as raised:
+        _extractor(workspace, "0.0", monkeypatch).extract(imported.run.run_id)
+
+    assert raised.value.code is ErrorCode.ADAPTER_INCOMPATIBLE
+    assert raised.value.details["reader_version"] == "0.0"
+    assert workspace.corpus.read_head().commit_id == original_head
+
+
 @pytest.mark.parametrize("payload", (b"", b"truncated"))
 def test_memray_rejects_empty_and_truncated_captures(
     tmp_path: Path,
     payload: bytes,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     capture = tmp_path / "memory.bin"
@@ -145,17 +206,20 @@ def test_memray_rejects_empty_and_truncated_captures(
         ImportArtifactRequest(
             path=capture,
             kind=ArtifactKind.MEMORY_PROFILE,
+            producer="memray",
+            producer_version="1.20.0",
         )
     )
 
     with pytest.raises(DomainError) as error:
-        MemrayExtractor(workspace).extract(imported.run.run_id)
+        _extractor(workspace, "1.20.0", monkeypatch).extract(imported.run.run_id)
 
     assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
 
 
 def test_memray_cancellation_before_publication_preserves_the_corpus_head(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     memray = _memray_module()
     capture = tmp_path / "memory.bin"
@@ -165,7 +229,12 @@ def test_memray_cancellation_before_publication_preserves_the_corpus_head(
 
     workspace = Workspace.initialize(tmp_path)
     imported = ImportService(workspace).import_artifact(
-        ImportArtifactRequest(path=capture, kind=ArtifactKind.MEMORY_PROFILE)
+        ImportArtifactRequest(
+            path=capture,
+            kind=ArtifactKind.MEMORY_PROFILE,
+            producer="memray",
+            producer_version=memray.__version__,
+        )
     )
     head_before = workspace.corpus.read_head().commit_id
     checks = 0
@@ -173,11 +242,14 @@ def test_memray_cancellation_before_publication_preserves_the_corpus_head(
     def cancel() -> None:
         nonlocal checks
         checks += 1
-        if checks == 4:
+        if checks == 2:
             raise DomainError(ErrorCode.PROCESS_CANCELLED, "cancelled")
 
     with pytest.raises(DomainError) as cancelled:
-        MemrayExtractor(workspace).extract(imported.run.run_id, cancel_check=cancel)
+        _extractor(workspace, memray.__version__, monkeypatch).extract(
+            imported.run.run_id,
+            cancel_check=cancel,
+        )
 
     assert cancelled.value.code is ErrorCode.PROCESS_CANCELLED
     assert workspace.corpus.read_head().commit_id == head_before

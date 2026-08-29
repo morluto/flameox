@@ -136,6 +136,7 @@ class _ListCapabilitiesArguments(ContractModel):
 class _StartCapabilitySetupArguments(ContractModel):
     adapters: Annotated[tuple[str, ...], Field(min_length=1, max_length=6)]
     idempotency_key: str = Field(min_length=1, max_length=200)
+    memray_reader_version: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class _OperationIdArguments(ContractModel):

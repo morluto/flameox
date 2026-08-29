@@ -8,8 +8,7 @@ from typing import Any
 
 import pytest
 
-from flameox.adapters.memray import MemrayExtractor
-from flameox.storage import Workspace
+from flameox.workers import memray as memray_worker
 
 
 @dataclass(frozen=True)
@@ -26,14 +25,14 @@ def test_memray_frame_identity_is_computed_once_across_metrics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    extractor = MemrayExtractor(Workspace.initialize(tmp_path))
     normalized: list[str] = []
 
-    def normalize(filename: str) -> str:
+    def normalize(filename: str, project_root: Path) -> str:
+        assert project_root == tmp_path
         normalized.append(filename)
         return filename
 
-    monkeypatch.setattr(extractor, "_normalize", normalize)
+    monkeypatch.setattr(memray_worker, "_normalize", normalize)
     stack = (("allocate", "agent.py", 10), ("main", "runner.py", 20))
     records = [_AllocationRecord(size=5, n_allocations=1, stack=stack) for _ in range(100)]
     frame_rows: dict[str, dict[str, Any]] = {}
@@ -43,15 +42,14 @@ def test_memray_frame_identity_is_computed_once_across_metrics(
     )
 
     for metric in ("memory.high_watermark", "memory.retained_end"):
-        extractor._aggregate(
+        memray_worker._aggregate(
             records,
             metric=metric,
+            project_root=tmp_path,
             frame_rows=frame_rows,
             frame_cache=frame_cache,
             aggregates=aggregates,
             artifact_id="artifact",
-            cancel_check=None,
-            progress=None,
         )
 
     assert normalized == ["agent.py", "runner.py"]
@@ -61,7 +59,6 @@ def test_memray_frame_identity_is_computed_once_across_metrics(
 
 @pytest.mark.performance
 def test_memray_repeated_frame_aggregation_budget(tmp_path: Path) -> None:
-    extractor = MemrayExtractor(Workspace.initialize(tmp_path))
     stack = (("allocate", "agent.py", 10), ("main", "runner.py", 20))
     record = _AllocationRecord(size=5, n_allocations=1, stack=stack)
     records = [record] * 500_000
@@ -72,15 +69,14 @@ def test_memray_repeated_frame_aggregation_budget(tmp_path: Path) -> None:
     )
 
     started = perf_counter()
-    extractor._aggregate(
+    memray_worker._aggregate(
         records,
         metric="memory.high_watermark",
+        project_root=tmp_path,
         frame_rows=frame_rows,
         frame_cache=frame_cache,
         aggregates=aggregates,
         artifact_id="artifact",
-        cancel_check=None,
-        progress=None,
     )
     elapsed = perf_counter() - started
 

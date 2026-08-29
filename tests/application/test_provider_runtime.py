@@ -180,6 +180,22 @@ def test_provider_setup_publishes_verified_environment_without_mutating_control_
     lock = Path(install.argv[install.argv.index("-r") + 1])
     assert runtime.receipt.installation_lock_sha256 == manager._sha256(lock)
     assert manager.get(runtime.receipt.environment_id) is not None
+    for index in range(65):
+        (manager.root / f"{index:064x}").mkdir()
+    assert (
+        manager.find_distribution(
+            extra=CapabilityExtra.CPU,
+            requirement="py-spy==0.4.2",
+        )
+        == runtime
+    )
+    assert (
+        manager.find_distribution(
+            extra=CapabilityExtra.CPU,
+            requirement="py-spy==0.4.3",
+        )
+        is None
+    )
     repeated = manager.prepare(
         extra=CapabilityExtra.CPU,
         requirement="py-spy>=0.4.2,<0.5",
@@ -396,6 +412,29 @@ def test_provider_discovery_is_passive_and_rejects_changed_executable(tmp_path: 
     assert runtime.executable is not None
     runtime.executable.write_text("#!/bin/sh\nexit 1\n")
     assert manager.find(extra=CapabilityExtra.CPU, requirement="py-spy>=0.4.2,<0.5") is None
+
+
+def test_verified_provider_use_detects_runtime_mutation(tmp_path: Path) -> None:
+    uv = tmp_path / "uv"
+    uv.write_text("#!/bin/sh\nexit 0\n")
+    uv.chmod(0o755)
+    manager = ProviderRuntimeManager(
+        tmp_path / "providers",
+        broker=_ProviderBroker(),
+        uv_executable=str(uv),
+        package_source="index",
+    )
+    runtime = manager.prepare(
+        extra=CapabilityExtra.CPU,
+        requirement="py-spy>=0.4.2,<0.5",
+        executable_name="py-spy",
+    )
+
+    with pytest.raises(DomainError) as raised, manager.verified_use(runtime):
+        assert runtime.executable is not None
+        runtime.executable.write_text("#!/bin/sh\nexit 1\n")
+
+    assert raised.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
 
 
 def test_provider_discovery_accepts_a_contained_python_symlink(tmp_path: Path) -> None:

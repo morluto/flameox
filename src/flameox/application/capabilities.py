@@ -15,6 +15,7 @@ from importlib.util import find_spec
 from pathlib import Path
 from typing import Literal
 
+from packaging.version import InvalidVersion, Version
 from platformdirs import user_data_path
 from pydantic import ConfigDict, Field, TypeAdapter, computed_field, model_validator
 
@@ -44,7 +45,7 @@ from flameox.application.operations import (
     OperationStatus,
 )
 from flameox.application.provider_catalog import MANAGED_PROVIDERS, managed_provider
-from flameox.application.provider_runtime import ProviderRuntimeManager
+from flameox.application.provider_runtime import ProviderRuntime, ProviderRuntimeManager
 from flameox.application.task_supervisor import TaskSupervisor
 from flameox.atomic import atomic_write_json
 from flameox.command_binding import ExecutableResolver
@@ -218,6 +219,7 @@ class CapabilitySetupResult(ContractModel):
     schema_version: int = 1
     requested: tuple[str, ...]
     already_available: tuple[str, ...]
+    provider_environment_ids: dict[str, str] = Field(default_factory=dict, max_length=16)
     next_action: ToolAction = Field(
         default_factory=lambda: tool_action(ActionId.INSPECT_CAPABILITIES)
     )
@@ -1068,12 +1070,18 @@ class CapabilityService:
         self,
         adapters: tuple[str, ...],
         *,
+        memray_reader_version: str | None = None,
         cancel_event: threading.Event | None = None,
         phase_callback: Callable[[str, DownloadProgress | None], None] | None = None,
     ) -> CapabilitySetupResult:
         """Install only declared FlameOx-managed providers into this runtime."""
         reports = {item.adapter: item for item in self.list().capabilities}
         requested = tuple(dict.fromkeys(adapters))
+        memray_requirement, memray_runtime = self._memray_reader_target(
+            requested,
+            memray_reader_version,
+        )
+        reports = self._qualified_memray_reports(reports, memray_runtime)
         unsupported = tuple(
             adapter
             for adapter in requested
@@ -1113,16 +1121,22 @@ class CapabilityService:
                 next_action=tool_action(ActionId.INSPECT_CAPABILITIES),
             )
 
-        already_available = tuple(
-            adapter
-            for adapter in requested
-            if reports[adapter].status is CapabilityStatus.AVAILABLE
+        already_available = self._available_setup_targets(
+            requested,
+            reports,
+            memray_requirement,
+            memray_runtime,
         )
         pending = tuple(adapter for adapter in requested if adapter not in already_available)
         if not pending:
             return CapabilitySetupResult(
                 requested=requested,
                 already_available=already_available,
+                provider_environment_ids=(
+                    {"memray": memray_runtime.receipt.environment_id}
+                    if memray_runtime is not None
+                    else {}
+                ),
                 setup_verification=self._verification(requested, reports),
             )
 
@@ -1159,7 +1173,14 @@ class CapabilityService:
                     if not isinstance(capability_setup, CapabilitySetup):
                         continue
                     self._check_cancelled(cancel_event)
-                    self._prepare_provider(adapter, capability_setup, cancel_event=cancel_event)
+                    self._prepare_provider(
+                        adapter,
+                        capability_setup,
+                        requirement_override=(
+                            memray_requirement if adapter == "memray" else None
+                        ),
+                        cancel_event=cancel_event,
+                    )
                 next_phase: CapabilitySetupProgressPhase | None = (
                     "staging_trace_processor"
                     if pending_trace
@@ -1261,11 +1282,17 @@ class CapabilityService:
                 next_action=_retry_capability_setup_action(),
             ) from exc
         refreshed = {item.adapter: item for item in self.list().capabilities}
-        not_ready = tuple(
-            adapter
-            for adapter in pending
-            if refreshed[adapter].status is not CapabilityStatus.AVAILABLE
+        memray_runtime = self._refresh_memray_runtime(memray_requirement, memray_runtime)
+        refreshed = self._qualified_memray_reports(refreshed, memray_runtime)
+        ready = set(
+            self._available_setup_targets(
+                pending,
+                refreshed,
+                memray_requirement,
+                memray_runtime,
+            )
         )
+        not_ready = tuple(adapter for adapter in pending if adapter not in ready)
         if not_ready:
             self._record_setup_failure(
                 requested,
@@ -1286,14 +1313,88 @@ class CapabilityService:
         return CapabilitySetupResult(
             requested=requested,
             already_available=already_available,
+            provider_environment_ids=(
+                {"memray": memray_runtime.receipt.environment_id}
+                if memray_runtime is not None
+                else {}
+            ),
             setup_verification=self._verification(requested, refreshed),
         )
+
+    def _memray_reader_target(
+        self,
+        requested: tuple[str, ...],
+        version: str | None,
+    ) -> tuple[str | None, ProviderRuntime | None]:
+        if version is None:
+            return None, None
+        if "memray" not in requested:
+            raise DomainError(
+                ErrorCode.INVALID_ARGUMENTS,
+                "memray_reader_version requires the memray adapter.",
+            )
+        try:
+            requirement = f"memray=={Version(version)}"
+        except InvalidVersion as error:
+            raise DomainError(
+                ErrorCode.INVALID_ARGUMENTS,
+                "memray_reader_version must be a valid package version.",
+            ) from error
+        return requirement, self.provider_runtimes.find_distribution(
+            extra=CapabilityExtra.MEMORY,
+            requirement=requirement,
+        )
+
+    @staticmethod
+    def _available_setup_targets(
+        candidates: tuple[str, ...],
+        reports: dict[str, CapabilityReport],
+        requirement: str | None,
+        runtime: ProviderRuntime | None,
+    ) -> tuple[str, ...]:
+        available = {
+            adapter
+            for adapter in candidates
+            if reports[adapter].status is CapabilityStatus.AVAILABLE
+        }
+        if requirement is not None:
+            if runtime is None:
+                available.discard("memray")
+            else:
+                available.add("memray")
+        return tuple(adapter for adapter in candidates if adapter in available)
+
+    def _refresh_memray_runtime(
+        self,
+        requirement: str | None,
+        current: ProviderRuntime | None,
+    ) -> ProviderRuntime | None:
+        if requirement is None:
+            return current
+        return self.provider_runtimes.find_distribution(
+            extra=CapabilityExtra.MEMORY,
+            requirement=requirement,
+        )
+
+    @staticmethod
+    def _qualified_memray_reports(
+        reports: dict[str, CapabilityReport],
+        runtime: ProviderRuntime | None,
+    ) -> dict[str, CapabilityReport]:
+        if runtime is None or "memray" not in reports:
+            return reports
+        qualified = dict(reports)
+        qualified["memray"] = reports["memray"].validated_copy(
+            update={"status": CapabilityStatus.AVAILABLE}
+        )
+        return qualified
 
     def _prepare_provider(
         self,
         adapter: str,
         setup: CapabilitySetup,
         *,
+        requirement_override: str | None = None,
         cancel_event: threading.Event | None,
     ) -> None:
         if setup.requirement is None:
@@ -1324,7 +1425,7 @@ class CapabilityService:
 
         self.provider_runtimes.prepare(
             extra=setup.extra,
-            requirement=setup.requirement,
+            requirement=requirement_override or setup.requirement,
             executable_name=executable_name,
             request_runner=run,
         )
@@ -1807,10 +1908,15 @@ class CapabilitySetupManager:
         self,
         adapters: tuple[str, ...],
         idempotency_key: str,
+        *,
+        memray_reader_version: str | None = None,
     ) -> OperationStatus:
         requested = tuple(dict.fromkeys(adapters))
         return await self.runner.start(
-            {"adapters": requested},
+            {
+                "adapters": requested,
+                "memray_reader_version": memray_reader_version,
+            },
             idempotency_key,
             self._run,
             items=requested,
@@ -1861,10 +1967,11 @@ class CapabilitySetupManager:
 
         try:
             try:
-                requested = self._requested(operation_id)
+                requested, memray_reader_version = self._request(operation_id)
                 result = await asyncio.to_thread(
                     self.service.prepare,
                     requested,
+                    memray_reader_version=memray_reader_version,
                     cancel_event=cancel_event,
                     phase_callback=report_phase,
                 )
@@ -1880,11 +1987,15 @@ class CapabilitySetupManager:
         finally:
             self.runner.clear_cancel_hook(operation_id)
 
-    def _requested(self, operation_id: str) -> tuple[str, ...]:
+    def _request(self, operation_id: str) -> tuple[tuple[str, ...], str | None]:
         record = self.runner.store.read(operation_id)
         # Item identities retain the exact bounded request without exposing
         # package-manager arguments or host paths to the protocol.
-        return tuple(item.item for item in record.item_outcomes)
+        version = record.request.get("memray_reader_version")
+        return (
+            tuple(item.item for item in record.item_outcomes),
+            str(version) if version is not None else None,
+        )
 
 
 def _free_loopback_port() -> int:

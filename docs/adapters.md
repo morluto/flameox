@@ -165,6 +165,14 @@ reader or export. Frame and allocation rows retain source artifact and run
 identity. Missing native symbols, thread identity, contexts, or native frames
 stay unavailable. Flameox does not infer them from display text.
 
+Memray capture binds the producer version discovered from the declared workload
+interpreter. Planning requires a verified managed reader for that exact version,
+so an unavailable reader fails before capture overhead and returns a typed
+`start_capability_setup` action. Extraction runs that reader outside the control
+process and records producer version, reader version and environment, and the
+extractor profile separately. Native reader acceptance—not package-major
+comparison—is the format compatibility boundary.
+
 ### Node/V8 CPU and sampling heap profiles
 
 The Node adapters invoke the declared Node executable with `--cpu-prof` or

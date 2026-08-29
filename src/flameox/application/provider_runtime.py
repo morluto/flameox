@@ -9,7 +9,8 @@ import re
 import secrets
 import shutil
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -17,6 +18,7 @@ from urllib.parse import unquote, urlparse
 
 import portalocker
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 from pydantic import Field
 
 from flameox import __version__
@@ -283,38 +285,93 @@ class ProviderRuntimeManager:
         except (DomainError, OSError):
             return None
         expected = {
+            **self._host_identity(source_tree_sha256=source_tree_sha256),
+            "extra": extra,
+            "requirement": str(parsed),
+            "uv_sha256": uv_binding.identity.sha256,
+        }
+        return next(
+            (
+                runtime
+                for runtime in self._verified_candidates()
+                if all(getattr(runtime.receipt, name) == value for name, value in expected.items())
+            ),
+            None,
+        )
+
+    def find_distribution(
+        self,
+        *,
+        extra: CapabilityExtra,
+        requirement: str,
+    ) -> ProviderRuntime | None:
+        """Find a verified runtime by installed distribution rather than setup request."""
+
+        parsed = Requirement(requirement)
+        try:
+            source_tree_sha256 = (
+                self._source_tree_sha256(self.flameox_source_root)
+                if self.flameox_source_root is not None
+                else None
+            )
+        except (DomainError, OSError):
+            return None
+        expected = {
+            **self._host_identity(source_tree_sha256=source_tree_sha256),
+            "extra": extra,
+        }
+        distribution_name = canonicalize_name(parsed.name)
+        for runtime in self._verified_candidates():
+            if not all(
+                getattr(runtime.receipt, name) == value for name, value in expected.items()
+            ):
+                continue
+            installed = next(
+                (
+                    version
+                    for name, version in runtime.receipt.distributions.items()
+                    if canonicalize_name(name) == distribution_name
+                ),
+                None,
+            )
+            if installed is not None and parsed.specifier.contains(installed, prereleases=True):
+                return runtime
+        return None
+
+    def _verified_candidates(self) -> tuple[ProviderRuntime, ...]:
+        try:
+            candidates = tuple(
+                path
+                for path in sorted(self.root.iterdir(), key=lambda item: item.name)
+                if path.is_dir()
+                and not path.name.startswith(".")
+                and path.name not in {"locks", "wheels"}
+            )
+        except OSError:
+            return ()
+        return tuple(
+            runtime
+            for candidate in candidates
+            if (
+                runtime := self._read_verified(
+                    candidate,
+                    environment_id=f"sha256:{candidate.name}",
+                )
+            )
+            is not None
+        )
+
+    def _host_identity(self, *, source_tree_sha256: str | None) -> dict[str, object]:
+        return {
             "flameox_version": __version__,
             "flameox_package_source": (
                 "local_wheel" if self.flameox_source_root is not None else "index"
             ),
             "flameox_source_tree_sha256": source_tree_sha256,
-            "extra": extra,
-            "requirement": str(parsed),
             "python_requirement": f"{sys.version_info.major}.{sys.version_info.minor}",
             "platform": platform.system().lower(),
             "architecture": platform.machine().lower(),
-            "uv_sha256": uv_binding.identity.sha256,
         }
-        try:
-            candidates = tuple(
-                path
-                for path in self.root.iterdir()
-                if path.is_dir()
-                and not path.name.startswith(".")
-                and path.name not in {"locks", "wheels"}
-            )[:64]
-        except OSError:
-            return None
-        for candidate in candidates:
-            runtime = self._read_verified(
-                candidate,
-                environment_id=f"sha256:{candidate.name}",
-            )
-            if runtime is not None and all(
-                getattr(runtime.receipt, name) == value for name, value in expected.items()
-            ):
-                return runtime
-        return None
 
     def get(self, environment_id: str) -> ProviderRuntime | None:
         """Resolve one exact receipt identity without substituting a compatible runtime."""
@@ -324,6 +381,31 @@ class ProviderRuntimeManager:
             self.root / self._directory_name(environment_id),
             environment_id=environment_id,
         )
+
+    @contextmanager
+    def verified_use(self, runtime: ProviderRuntime) -> Iterator[ProviderRuntime]:
+        """Keep one verified immutable runtime stable while a provider consumes it."""
+        directory_name = self._directory_name(runtime.receipt.environment_id)
+        lock_path = self.root / f"{directory_name}.lock"
+        with portalocker.Lock(lock_path, mode="a", timeout=30):
+            verified = self._read_verified(
+                runtime.root,
+                environment_id=runtime.receipt.environment_id,
+            )
+            if verified is None:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                    "The selected provider runtime no longer matches its receipt.",
+                )
+            yield verified
+            if self._read_verified(
+                runtime.root,
+                environment_id=runtime.receipt.environment_id,
+            ) is None:
+                raise DomainError(
+                    ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                    "The provider runtime changed while it was in use.",
+                )
 
     @staticmethod
     def _active_source_root() -> Path | None:
