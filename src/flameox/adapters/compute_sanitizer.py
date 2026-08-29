@@ -7,7 +7,13 @@ from typing import Any
 from packaging.version import InvalidVersion, Version
 
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
-from flameox.domain import ArtifactKind, DomainError, ErrorCode, digest_model
+from flameox.domain import (
+    ArtifactKind,
+    DomainError,
+    ErrorCode,
+    RunSemanticsProjection,
+    digest_model,
+)
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
@@ -26,10 +32,10 @@ class ComputeSanitizerStatus(StrEnum):
 
 
 class ComputeSanitizerExtractionResult(ContractModel):
-    schema_version: int = 1
     run_id: str
     artifact_id: str
     producer_version: str | None
+    semantics: RunSemanticsProjection
     status: ComputeSanitizerStatus
     finding_count: int
     classifications: dict[str, int]
@@ -143,6 +149,7 @@ class ComputeSanitizerExtractor:
             *compute_sanitizer_compatibility_limitations(registration.producer_version),
             *inspection.limitations,
         ]
+        semantics = RunSemanticsProjection.from_semantics(run.semantics)
         schema_fingerprint = digest_model(
             {
                 "compatibility_family": self.compatibility_family,
@@ -180,6 +187,7 @@ class ComputeSanitizerExtractor:
                         "classifications": classifications,
                         "finding_count": len(records),
                         "producer_version": registration.producer_version,
+                        "semantics": semantics.model_dump(mode="json"),
                         "schema_fingerprint": schema_fingerprint,
                     }
                 ),
@@ -201,6 +209,7 @@ class ComputeSanitizerExtractor:
                 "max_records": maximum - 1,
                 "max_frames": 64,
                 "producer_version": registration.producer_version,
+                "run_semantic_id": semantics.semantic_id,
                 "schema_fingerprint": schema_fingerprint,
             },
         )
@@ -218,6 +227,7 @@ class ComputeSanitizerExtractor:
             run_id=run_id,
             artifact_id=registration.artifact_id,
             producer_version=registration.producer_version,
+            semantics=semantics,
             status=status,
             finding_count=len(records),
             classifications={str(key): int(value) for key, value in classifications.items()},

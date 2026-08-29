@@ -4,7 +4,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, JsonValue
+from pydantic import Field
 
 from flameox.application.evidence_lookup import EvidenceLookupService
 from flameox.domain import (
@@ -15,6 +15,7 @@ from flameox.domain import (
     ProjectionIntent,
     ProjectionState,
     RunManifest,
+    RunSemanticsProjection,
     RunType,
     Sensitivity,
     ValidationStatus,
@@ -58,18 +59,6 @@ class AgentRunProjectionStatus(ContractModel):
     failure_code: str | None = None
 
 
-class AgentRunSemanticsProjection(ContractModel):
-    semantic_id: str
-    origin: Literal["capture", "import", "internal"]
-    adapter: str | None = None
-    adapter_version: str | None = None
-    mode: JsonValue | None = None
-    process_scope: JsonValue | None = None
-    bounds: dict[str, JsonValue] = Field(default_factory=dict, max_length=32)
-    filters: dict[str, JsonValue] = Field(default_factory=dict, max_length=32)
-    unavailable_fields: tuple[str, ...] = ()
-
-
 class AgentRunProjection(ContractModel):
     """Privacy-safe, snapshot-bound run projection for ordinary agent transports."""
 
@@ -92,7 +81,7 @@ class AgentRunProjection(ContractModel):
     source_measurement_run_id: str | None = None
     environment_id: str
     source_state_id: str | None = None
-    semantics: AgentRunSemanticsProjection
+    semantics: RunSemanticsProjection
     command: AgentCommandProjection | None = None
     external_context: AgentExternalContextProjection | None = None
     artifact_ids: Annotated[tuple[str, ...], Field(max_length=100)] = ()
@@ -140,21 +129,8 @@ def safe_external_context(run: RunManifest) -> AgentExternalContextProjection | 
     )
 
 
-def safe_run_semantics(run: RunManifest) -> AgentRunSemanticsProjection:
-    semantics = run.semantics
-    return AgentRunSemanticsProjection(
-        semantic_id=semantics.semantic_id,
-        origin=semantics.origin,
-        adapter=semantics.adapter,
-        adapter_version=semantics.adapter_version,
-        mode=semantics.scope.mode.value if semantics.scope.mode else None,
-        process_scope=(
-            semantics.scope.process_scope.value if semantics.scope.process_scope else None
-        ),
-        bounds=semantics.scope.bounds,
-        filters=semantics.scope.filters,
-        unavailable_fields=semantics.unavailable_fields,
-    )
+def safe_run_semantics(run: RunManifest) -> RunSemanticsProjection:
+    return RunSemanticsProjection.from_semantics(run.semantics)
 
 
 class RunProjectionService:

@@ -108,7 +108,6 @@ __all__ = [
     "AddedPipelineStageComparison",
     "AgentRunProjection",
     "AgentRunProjectionStatus",
-    "AgentRunSemanticsProjection",
     "AnalysisMaterializationService",
     "ArtifactListItem",
     "ArtifactListResult",

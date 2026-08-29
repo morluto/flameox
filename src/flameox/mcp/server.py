@@ -92,7 +92,6 @@ from flameox.analysis import (
 from flameox.application import (
     AdapterPreparationResult,
     AgentRunProjection,
-    AgentRunSemanticsProjection,
     AnalysisMaterializationService,
     ArtifactListResult,
     ArtifactMetadataResult,
@@ -226,6 +225,7 @@ from flameox.domain import (
     Investigation,
     LimitationDetail,
     PreflightMode,
+    RunSemanticsProjection,
     RunSet,
     Sensitivity,
     TrialOutcome,
@@ -471,12 +471,16 @@ class CaptureReceipt(ContractModel):
     validation_status: ValidationStatus
     source_state_id: str | None
     environment_id: str
-    artifact_ids: tuple[str, ...]
-    limitations: tuple[str, ...]
-    limitation_details: tuple[LimitationDetail, ...] = ()
+    artifact_ids: Annotated[tuple[str, ...], Field(max_length=100)]
+    artifact_count: Annotated[int, Field(ge=0)]
+    artifacts_truncated: bool
+    limitations: Annotated[tuple[str, ...], Field(max_length=20)]
+    limitation_details: Annotated[tuple[LimitationDetail, ...], Field(max_length=20)] = ()
+    limitation_count: Annotated[int, Field(ge=0)]
+    limitations_truncated: bool
     corpus_commit_id: str
     resource_uri: str
-    semantics: AgentRunSemanticsProjection
+    semantics: RunSemanticsProjection
 
 
 class ImportReceipt(ContractModel):
@@ -1637,15 +1641,23 @@ def create_server(
                 progress=report,
             )
             resource_uri = f"flameox://runs/{result.run.run_id}"
+            artifact_ids = tuple(item.artifact_id for item in result.run.artifacts)
+            limitation_count = len(result.run.limitations) + len(result.run.limitation_details)
             receipt = CaptureReceipt(
                 run_id=result.run.run_id,
                 execution_status=result.run.execution_status,
                 validation_status=result.run.validation_status,
                 source_state_id=result.run.source_state_id,
                 environment_id=result.run.environment_id,
-                artifact_ids=tuple(item.artifact_id for item in result.run.artifacts),
-                limitations=result.run.limitations,
-                limitation_details=result.run.limitation_details,
+                artifact_ids=artifact_ids[:100],
+                artifact_count=len(artifact_ids),
+                artifacts_truncated=len(artifact_ids) > 100,
+                limitations=result.run.limitations[:20],
+                limitation_details=result.run.limitation_details[:20],
+                limitation_count=limitation_count,
+                limitations_truncated=(
+                    len(result.run.limitations) > 20 or len(result.run.limitation_details) > 20
+                ),
                 corpus_commit_id=result.corpus_commit_id,
                 resource_uri=resource_uri,
                 semantics=safe_run_semantics(result.run),

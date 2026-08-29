@@ -41,6 +41,12 @@ semantics alongside status, limitations, and artifact references. The projection
 is for immediate interpretation; the run remains authoritative after the result
 is no longer available.
 
+Compute Sanitizer extraction projects the effective tool, launch bounds,
+target-process scope and filters, kernel filter, and suppression content digest.
+That projection is also recorded in the normalized provenance observation, while
+the run semantic digest remains the identity authority. Imported reports expose
+capture scope as unavailable instead of inferring it from identical XML bytes.
+
 ## Producer ownership
 
 Use maintained formats and models wherever they exist:

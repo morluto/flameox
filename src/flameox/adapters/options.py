@@ -283,7 +283,11 @@ def run_semantics(
         "torch.profiler": ("wait", "warmup", "active", "repeat"),
     }.get(adapter, ())
     filter_keys = {
-        "compute-sanitizer": ("target_processes_filter", "kernel_name"),
+        "compute-sanitizer": (
+            "target_processes_filter",
+            "kernel_name",
+            "suppression_digest",
+        ),
         "nsight.compute": ("kernel_name",),
     }.get(adapter, ())
     mode = (

@@ -7,13 +7,14 @@ import pytest
 
 from flameox.adapters.builtins import build_capture_invocation
 from flameox.adapters.compute_sanitizer import ComputeSanitizerExtractor
-from flameox.adapters.options import bind_adapter_options
+from flameox.adapters.options import bind_adapter_options, run_semantics
 from flameox.application import ImportArtifactRequest, ImportService
 from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,
     DomainError,
     ErrorCode,
+    RunSemanticsProjection,
 )
 from flameox.storage import Workspace
 
@@ -104,6 +105,8 @@ def test_compute_sanitizer_accepts_clean_empty_report(tmp_path: Path) -> None:
 
     assert result.status == "clean"
     assert result.finding_count == 0
+    assert result.semantics.origin == "import"
+    assert result.semantics.unavailable_fields == ("configuration", "scope")
 
 
 @pytest.mark.parametrize(
@@ -256,6 +259,29 @@ def test_compute_sanitizer_options_are_strict_and_bind_suppression_digest(
 
     assert bound["suppression_file"] == "tools/sanitizer.supp"
     assert str(bound["suppression_digest"]).startswith("sha256:")
+    semantics = run_semantics(
+        "compute-sanitizer",
+        "2026.2.1",
+        bound,
+    )
+    projected = RunSemanticsProjection.from_semantics(semantics)
+    assert projected.mode == "racecheck"
+    assert projected.process_scope == "all"
+    assert projected.bounds == {"launch_count": 3, "launch_skip": 2}
+    assert projected.filters == {
+        "kernel_name": "kernel_substring=attention",
+        "suppression_digest": bound["suppression_digest"],
+        "target_processes_filter": "regex:worker-[0-9]+",
+    }
+    synccheck = RunSemanticsProjection.from_semantics(
+        run_semantics(
+            "compute-sanitizer",
+            "2026.2.1",
+            {**bound, "tool": "synccheck"},
+        )
+    )
+    assert synccheck.semantic_id != projected.semantic_id
+    assert synccheck.mode == "synccheck"
     invocation = build_capture_invocation(
         "compute-sanitizer",
         ("python", "kernel.py"),

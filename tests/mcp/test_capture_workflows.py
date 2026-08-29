@@ -78,6 +78,11 @@ timeout_seconds = 5
     assert semantics["adapter"] == "command"
     assert semantics["semantic_id"].startswith("sha256:")
     assert semantics["bounds"] == {}
+    assert executed.structured_content["result"]["artifact_count"] == len(
+        executed.structured_content["result"]["artifact_ids"]
+    )
+    assert executed.structured_content["result"]["artifacts_truncated"] is False
+    assert executed.structured_content["result"]["limitations_truncated"] is False
     assert "run" not in executed.structured_content["result"]
     assert any(
         item.type == "resource_link" and item.uri == f"flameox://runs/{run_id}"

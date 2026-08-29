@@ -1094,6 +1094,36 @@ class RunSemantics(ContractModel):
         )
 
 
+class RunSemanticsProjection(ContractModel):
+    """Bounded, transport-safe view of authoritative run semantics."""
+
+    semantic_id: Digest
+    origin: Literal["capture", "import", "internal"]
+    adapter: Identifier | None = None
+    adapter_version: Annotated[str, StringConstraints(max_length=200)] | None = None
+    mode: JsonValue | None = None
+    process_scope: JsonValue | None = None
+    bounds: dict[Identifier, JsonValue] = Field(default_factory=dict, max_length=32)
+    filters: dict[Identifier, JsonValue] = Field(default_factory=dict, max_length=32)
+    unavailable_fields: Annotated[tuple[Identifier, ...], Field(max_length=32)] = ()
+
+    @classmethod
+    def from_semantics(cls, semantics: RunSemantics) -> RunSemanticsProjection:
+        return cls(
+            semantic_id=semantics.semantic_id,
+            origin=semantics.origin,
+            adapter=semantics.adapter,
+            adapter_version=semantics.adapter_version,
+            mode=semantics.scope.mode.value if semantics.scope.mode else None,
+            process_scope=(
+                semantics.scope.process_scope.value if semantics.scope.process_scope else None
+            ),
+            bounds=semantics.scope.bounds,
+            filters=semantics.scope.filters,
+            unavailable_fields=semantics.unavailable_fields,
+        )
+
+
 class _CapturePlan(ContractModel):
     plan_token: Identifier
     plan_id: Identifier
