@@ -99,6 +99,7 @@ class MemrayExtractor:
                 run_id=run_id,
             ) from exc
         frame_rows: dict[str, dict[str, Any]] = {}
+        frame_cache: dict[tuple[str, str, int], str] = {}
         aggregates: dict[tuple[str, str], dict[str, int]] = defaultdict(
             lambda: {"self": 0, "inclusive": 0, "samples": 0}
         )
@@ -106,6 +107,7 @@ class MemrayExtractor:
             high_watermark,
             metric="memory.high_watermark",
             frame_rows=frame_rows,
+            frame_cache=frame_cache,
             aggregates=aggregates,
             artifact_id=registration.artifact_id,
             cancel_check=cancel_check,
@@ -115,6 +117,7 @@ class MemrayExtractor:
             retained,
             metric="memory.retained_end",
             frame_rows=frame_rows,
+            frame_cache=frame_cache,
             aggregates=aggregates,
             artifact_id=registration.artifact_id,
             cancel_check=cancel_check,
@@ -217,6 +220,7 @@ class MemrayExtractor:
         *,
         metric: str,
         frame_rows: dict[str, dict[str, Any]],
+        frame_cache: dict[tuple[str, str, int], str],
         aggregates: dict[tuple[str, str], dict[str, int]],
         artifact_id: str,
         cancel_check: Callable[[], None] | None,
@@ -227,26 +231,29 @@ class MemrayExtractor:
         for record_index, record in enumerate(records, start=1):
             if record_index == 1 or record_index % 256 == 0:
                 self._check_cancelled(cancel_check)
-            stack = list(record.stack_trace())
-            for index, (function, filename, line) in enumerate(stack):
-                normalized = self._normalize(filename)
-                frame_id = digest_model(
-                    {
-                        "language": "Python",
-                        "function": function,
-                        "file": normalized,
-                        "line": line,
-                    }
-                )
-                frame_rows.setdefault(
-                    frame_id,
-                    {
+            size = int(record.size)
+            allocations = int(record.n_allocations)
+            for index, (function, filename, line) in enumerate(record.stack_trace()):
+                raw_frame = (str(function), str(filename), int(line))
+                frame_id = frame_cache.get(raw_frame)
+                if frame_id is None:
+                    normalized = self._normalize(raw_frame[1])
+                    frame_id = digest_model(
+                        {
+                            "language": "Python",
+                            "function": raw_frame[0],
+                            "file": normalized,
+                            "line": raw_frame[2],
+                        }
+                    )
+                    frame_cache[raw_frame] = frame_id
+                    frame_rows[frame_id] = {
                         "frame_id": frame_id,
                         "language": "Python",
-                        "function": function,
+                        "function": raw_frame[0],
                         "module": None,
                         "file": normalized,
-                        "line": line,
+                        "line": raw_frame[2],
                         "column": None,
                         "address": None,
                         "build_id": None,
@@ -256,13 +263,12 @@ class MemrayExtractor:
                         "artifact_id": artifact_id,
                         "inlined": False,
                         "symbolization": "complete",
-                    },
-                )
+                    }
                 values = aggregates[(metric, frame_id)]
-                values["inclusive"] += int(record.size)
-                values["samples"] += int(record.n_allocations)
+                values["inclusive"] += size
+                values["samples"] += allocations
                 if index == 0:
-                    values["self"] += int(record.size)
+                    values["self"] += size
             if progress is not None and (record_index == total or record_index % 1_024 == 0):
                 progress(phase, record_index, total)
 
