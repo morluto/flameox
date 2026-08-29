@@ -227,6 +227,34 @@ class ManagedSidecarOutcome:
     finished_at: datetime
 
 
+class ManagedSidecarStartupError(DomainError):
+    """Managed sidecar startup failure with its bounded, finalized process evidence."""
+
+    def __init__(self, cause: Exception, outcome: ManagedSidecarOutcome) -> None:
+        self.outcome = outcome
+        if isinstance(cause, DomainError):
+            super().__init__(
+                cause.code,
+                cause.message,
+                retryable=cause.retryable,
+                details=cause.details,
+                remediation=cause.remediation,
+                next_action=cause.next_action,
+            )
+        else:
+            super().__init__(
+                ErrorCode.PROCESS_FAILED,
+                "Managed sidecar startup failed.",
+                details={"exception_type": type(cause).__name__},
+            )
+
+
+class ManagedSidecarStartupCancelled(asyncio.CancelledError):
+    def __init__(self, outcome: ManagedSidecarOutcome) -> None:
+        super().__init__("managed sidecar startup cancelled")
+        self.outcome = outcome
+
+
 class ProcessObservation(ContractModel):
     """Privacy-bounded process evidence captured around broker cleanup."""
 
@@ -2062,9 +2090,12 @@ class ManagedSidecarLease:
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 "Toxiproxy control API did not become ready before the bounded deadline.",
             )
-        except BaseException:
-            await asyncio.shield(lease.close())
-            raise
+        except asyncio.CancelledError:
+            outcome = await asyncio.shield(lease.close())
+            raise ManagedSidecarStartupCancelled(outcome) from None
+        except Exception as error:
+            outcome = await asyncio.shield(lease.close())
+            raise ManagedSidecarStartupError(error, outcome) from error
 
     @classmethod
     async def start_inference(

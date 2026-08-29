@@ -27,6 +27,7 @@ class ActionId(StrEnum):
     PREPARE_WORKLOAD_DEPENDENCIES = "workload.dependencies.prepare"
     LIST_DECLARED_WORKFLOWS = "workflow.list"
     GET_DECLARED_WORKFLOW = "workflow.get"
+    PLAN_FAULT_EXPERIMENT = "fault_experiment.plan"
     PLAN_CAPTURE = "capture.plan"
     START_DETACHED_CAPTURE = "capture.detached.start"
     GET_DETACHED_CAPTURE = "capture.detached.status"
@@ -59,6 +60,7 @@ class ToolName(StrEnum):
     PREPARE_WORKLOAD_DEPENDENCIES = "prepare_workload_dependencies"
     LIST_DECLARED_WORKFLOWS = "list_declared_workflows"
     GET_DECLARED_WORKFLOW = "get_declared_workflow"
+    PLAN_FAULT_EXPERIMENT = "plan_fault_experiment"
     PLAN_CAPTURE = "plan_capture"
     START_DETACHED_CAPTURE = "start_detached_capture"
     GET_DETACHED_CAPTURE = "get_detached_capture"
@@ -182,6 +184,13 @@ class _PlanCaptureArguments(ContractModel):
     external_context: dict[str, JsonValue] | None = None
     compute_sanitizer_options: dict[str, JsonValue] | None = None
     torch_profiler_options: dict[str, JsonValue] | None = None
+
+
+class _PlanFaultExperimentArguments(ContractModel):
+    experiment_name: str = Field(min_length=1, max_length=100)
+    investigation_id: str = Field(min_length=1, max_length=200)
+    parameters: dict[str, JsonValue] = Field(max_length=128)
+    hypothesis_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class _StartDetachedCaptureArguments(ContractModel):
@@ -368,6 +377,13 @@ ACTION_REGISTRY = MappingProxyType(
                 _GetDeclaredWorkflowArguments,
                 READ_ONLY_ACTION,
                 ActionLifecycle.READ,
+            ),
+            _descriptor(
+                ActionId.PLAN_FAULT_EXPERIMENT,
+                ToolName.PLAN_FAULT_EXPERIMENT,
+                _PlanFaultExperimentArguments,
+                ADDITIVE_ACTION,
+                ActionLifecycle.CONFIGURE,
             ),
             _descriptor(
                 ActionId.PLAN_CAPTURE,

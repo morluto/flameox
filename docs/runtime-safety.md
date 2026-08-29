@@ -187,6 +187,13 @@ process, rejects remote upstreams and arbitrary toxic types, captures bounded
 diagnostics, deletes tracked proxies, and terminates the lease. This is not a
 general proxy API.
 
+A failed readiness, proxy-creation, treatment, or workload-planning phase still
+creates a sidecar-only run. Bounded native stdout and stderr, process status,
+process observations, and a phase-specific diagnostic remain immutable evidence;
+the fault result keeps only the bounded diagnostic summary, recovery, and artifact
+references inline. Retried startup attempts are preserved separately rather than
+overwriting one another.
+
 ## Concurrency and publication
 
 Capture and extraction use unique staging roots and do not hold the workspace

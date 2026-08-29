@@ -1952,7 +1952,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="plan_fault_experiment", annotations=ADDITIVE)
+    @_action_tool(server, ActionId.PLAN_FAULT_EXPERIMENT)
     async def plan_fault_experiment_tool(
         experiment_name: Annotated[
             str,

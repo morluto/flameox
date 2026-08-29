@@ -7,13 +7,14 @@ import secrets
 import shutil
 import socket
 from collections.abc import Awaitable, Callable
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 
 from pydantic import Field, JsonValue, TypeAdapter, computed_field
 
-from flameox.action_graph import ActionId, manual_action
+from flameox.action_graph import ActionId, ManualAction, manual_action
 from flameox.adapters.toxiproxy import ToxiproxyApiError, ToxiproxyClient, ToxiproxyToolManager
 from flameox.application.async_work import run_atomic_thread
 from flameox.application.capture import CaptureService
@@ -75,11 +76,24 @@ from flameox.domain import (
 )
 from flameox.domain.models import Digest, ExecutionRunManifest
 from flameox.evidence import GenerationPublisher
-from flameox.execution import ManagedSidecarLease, ManagedSidecarOutcome, SubprocessBroker
+from flameox.execution import (
+    ManagedSidecarLease,
+    ManagedSidecarOutcome,
+    ManagedSidecarStartupCancelled,
+    ManagedSidecarStartupError,
+    SubprocessBroker,
+)
 from flameox.models import ContractModel
 from flameox.storage import AuthorizedPlanStore, ControlRecordStore, RunStore, Workspace
 
 _BASELINE = "baseline"
+type FaultFailurePhase = Literal[
+    "sidecar_readiness",
+    "proxy_creation",
+    "treatment_configuration",
+    "workload_planning",
+    "capture_execution",
+]
 
 
 class FaultExperimentPlan(ContractModel):
@@ -111,15 +125,23 @@ class FaultExperimentPlan(ContractModel):
         return self.plan_id
 
 
+class FaultTrialDiagnostic(ContractModel):
+    phase: FaultFailurePhase
+    error_code: str
+    message: str = Field(min_length=1, max_length=1_000)
+    retryable: bool
+    next_action: ManualAction | None = None
+
+
 class FaultExperimentResult(ContractModel):
-    schema_version: Literal[1, 2] = 2
+    schema_version: Literal[3] = 3
     result_id: str
     plan_id: str
     experiment: Experiment
     trials: tuple[Trial, ...]
-    treatment_order: tuple[str, ...] | None = None
     block_treatment_orders: tuple[tuple[str, ...], ...] = ()
     trial_artifacts: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    trial_diagnostics: dict[str, FaultTrialDiagnostic] = Field(default_factory=dict)
     corpus_commit_id: str
     limitations: tuple[str, ...] = ()
 
@@ -138,6 +160,37 @@ def _proxy_name(plan_id: Digest, trial_index: int) -> str:
     """Derive a Toxiproxy-safe name from an algorithm-qualified plan digest."""
     digest = plan_id.partition(":")[2]
     return f"flameox-{digest[:12]}-{trial_index:04d}"
+
+
+@dataclass(frozen=True, slots=True)
+class _FailedSidecarAttempt:
+    phase: Literal["sidecar_readiness", "proxy_creation"]
+    error: BaseException
+    outcome: ManagedSidecarOutcome | None
+
+
+@dataclass(frozen=True, slots=True)
+class _SidecarEvidenceFile:
+    path: Path
+    kind: ArtifactKind
+    role: str
+    media_type: str
+    process_outcome: ManagedSidecarOutcome | None = None
+
+
+class _SidecarAttemptError(Exception):
+    def __init__(
+        self,
+        attempts: tuple[_FailedSidecarAttempt, ...],
+    ) -> None:
+        super().__init__("managed sidecar attempts failed")
+        self.attempts = attempts
+
+
+class _SidecarAttemptCancelled(asyncio.CancelledError):
+    def __init__(self, attempts: tuple[_FailedSidecarAttempt, ...]) -> None:
+        super().__init__("managed sidecar attempt cancelled")
+        self.attempts = attempts
 
 
 def _scenario_attributes(scenario: FaultScenario) -> dict[str, int]:
@@ -429,6 +482,7 @@ class FaultExperimentService:
         )
         trials: list[Trial] = []
         artifact_ids: dict[str, list[str]] = {}
+        trial_diagnostics: dict[str, FaultTrialDiagnostic] = {}
         total = len(schedule)
         reporter = ProgressReporter(progress)
         for index, (block, order, cell) in enumerate(schedule):
@@ -439,9 +493,17 @@ class FaultExperimentService:
             lease: ManagedSidecarLease | None = None
             sidecar_ids: tuple[str, ...] = ()
             cancellation: asyncio.CancelledError | None = None
+            failure_phase: FaultFailurePhase | None = None
+            failure_error: Exception | None = None
+            failed_sidecar_attempts: tuple[_FailedSidecarAttempt, ...] = ()
             try:
                 proxy_name = _proxy_name(plan.plan_id, index)
-                active_lease, admin_port, listen_port = await self._start_sidecar(
+                (
+                    active_lease,
+                    admin_port,
+                    listen_port,
+                    failed_sidecar_attempts,
+                ) = await self._start_sidecar(
                     receipt.executable,
                     receipt,
                     plan,
@@ -449,6 +511,7 @@ class FaultExperimentService:
                 )
                 lease = active_lease
                 if cell.treatment != _BASELINE:
+                    failure_phase = "treatment_configuration"
                     scenario = config.scenarios[cell.treatment]
                     if isinstance(scenario, ProxyFault):
                         await active_lease.update_proxy_async(
@@ -465,6 +528,7 @@ class FaultExperimentService:
                             attributes=_scenario_attributes(scenario),
                         )
                 endpoint = plan.endpoint_template.format(host="127.0.0.1", port=listen_port)
+                failure_phase = "workload_planning"
                 capture_plan = await self.captures.plan(
                     workload_name=config.workload,
                     adapter="command",
@@ -475,11 +539,32 @@ class FaultExperimentService:
                     execution_policy=plan.experiment_plan.execution_policy,
                     dynamic_parameters=(plan.endpoint_parameter,),
                 )
+                failure_phase = "capture_execution"
                 captured = await self.captures.execute(capture_plan.plan_token)
                 run = captured.run
                 outcome, failure_class = helper._classify_run(run)
+                failure_phase = None
+            except _SidecarAttemptCancelled as error:
+                cancellation = error
+                failed_sidecar_attempts = error.attempts
+                terminal_attempt = error.attempts[-1]
+                failure_phase = terminal_attempt.phase
+                failure_error = DomainError(
+                    ErrorCode.PROCESS_CANCELLED,
+                    "Managed sidecar startup was cancelled.",
+                    retryable=True,
+                )
+                outcome, failure_class = (
+                    TrialOutcome.CANCELLED,
+                    TrialFailureClass.CANCELLATION,
+                )
             except asyncio.CancelledError as error:
                 cancellation = error
+                failure_error = DomainError(
+                    ErrorCode.PROCESS_CANCELLED,
+                    "Fault trial execution was cancelled.",
+                    retryable=True,
+                )
                 if (
                     run is None
                     and capture_plan is not None
@@ -490,12 +575,23 @@ class FaultExperimentService:
                     TrialOutcome.CANCELLED,
                     TrialFailureClass.CANCELLATION,
                 )
-            except (ToxiproxyApiError, OSError, ValueError):
+            except _SidecarAttemptError as error:
+                failed_sidecar_attempts = error.attempts
+                terminal_attempt = error.attempts[-1]
+                failure_phase = terminal_attempt.phase
+                failure_error = cast(Exception, terminal_attempt.error)
+                outcome, failure_class = (
+                    TrialOutcome.INFRASTRUCTURE_FAILED,
+                    TrialFailureClass.INFRASTRUCTURE_FAILURE,
+                )
+            except (ToxiproxyApiError, OSError, ValueError) as error:
+                failure_error = error
                 outcome, failure_class = (
                     TrialOutcome.INFRASTRUCTURE_FAILED,
                     TrialFailureClass.INFRASTRUCTURE_FAILURE,
                 )
             except DomainError as error:
+                failure_error = error
                 if error.run_id is not None:
                     run = RunStore(self.workspace).read(error.run_id)
                 outcome, failure_class = (
@@ -521,8 +617,27 @@ class FaultExperimentService:
                     admin_port=admin_port,
                     listen_port=listen_port,
                     proxy_name=proxy_name,
+                    failure_phase=failure_phase,
+                    failure_error=failure_error,
                 )
                 artifact_ids[cell.trial_id] = list(sidecar_ids)
+            if failed_sidecar_attempts:
+                if run is None:
+                    terminal_outcome = failed_sidecar_attempts[-1].outcome
+                    run = self._create_sidecar_run(plan, terminal_outcome)
+                else:
+                    run = RunStore(self.workspace).read(run.run_id)
+                failed_ids = await self._attach_failed_sidecar_evidence(
+                    plan,
+                    run,
+                    failed_sidecar_attempts,
+                )
+                artifact_ids.setdefault(cell.trial_id, []).extend(failed_ids)
+            if failure_phase is not None and failure_error is not None:
+                trial_diagnostics[cell.trial_id] = self._fault_diagnostic(
+                    failure_phase,
+                    failure_error,
+                )
             trial = helper._make_trial(
                 plan=plan.experiment_plan,
                 cell=cell,
@@ -557,6 +672,7 @@ class FaultExperimentService:
             trials=tuple(trials),
             block_treatment_orders=tuple(block.order for block in plan.experiment_plan.blocks),
             trial_artifacts={name: tuple(values) for name, values in artifact_ids.items()},
+            trial_diagnostics=trial_diagnostics,
             corpus_commit_id=self.workspace.corpus.read_head().commit_id,
             limitations=(
                 *plan.limitations,
@@ -612,20 +728,22 @@ class FaultExperimentService:
         receipt: object,
         plan: FaultExperimentPlan,
         proxy_name: str,
-    ) -> tuple[ManagedSidecarLease, int, int]:
+    ) -> tuple[ManagedSidecarLease, int, int, tuple[_FailedSidecarAttempt, ...]]:
+        failed_attempts: list[_FailedSidecarAttempt] = []
         for sidecar_attempt in range(3):
-            admin_port = _free_loopback_port()
-            client = ToxiproxyClient(f"http://127.0.0.1:{admin_port}")
-
-            async def readiness(client: ToxiproxyClient = client) -> bool:
-                try:
-                    version = await client.version_async()
-                except ToxiproxyApiError:
-                    return False
-                return version == plan.tool_version
-
             lease: ManagedSidecarLease | None = None
+            phase: Literal["sidecar_readiness", "proxy_creation"] = "sidecar_readiness"
             try:
+                admin_port = _free_loopback_port()
+                client = ToxiproxyClient(f"http://127.0.0.1:{admin_port}")
+
+                async def readiness(client: ToxiproxyClient = client) -> bool:
+                    try:
+                        version = await client.version_async()
+                    except ToxiproxyApiError:
+                        return False
+                    return version == plan.tool_version
+
                 lease = await self.broker.start_toxiproxy(
                     executable,
                     admin_host="127.0.0.1",
@@ -633,18 +751,32 @@ class FaultExperimentService:
                     readiness=readiness,
                     tool_receipt=receipt,
                 )
+                phase = "proxy_creation"
                 listen_port = _free_loopback_port()
                 await lease.create_proxy_async(
                     name=proxy_name,
                     listen=f"127.0.0.1:{listen_port}",
                     upstream=_format_endpoint(plan.upstream_host, plan.upstream_port),
                 )
-                return lease, admin_port, listen_port
-            except (DomainError, ToxiproxyApiError, OSError):
+                return lease, admin_port, listen_port, tuple(failed_attempts)
+            except ManagedSidecarStartupCancelled as error:
+                failed_attempts.append(_FailedSidecarAttempt(phase, error, error.outcome))
+                raise _SidecarAttemptCancelled(tuple(failed_attempts)) from None
+            except asyncio.CancelledError as error:
+                cancellation_outcome = (
+                    await asyncio.shield(lease.close()) if lease is not None else None
+                )
+                failed_attempts.append(_FailedSidecarAttempt(phase, error, cancellation_outcome))
+                raise _SidecarAttemptCancelled(tuple(failed_attempts)) from None
+            except (DomainError, ToxiproxyApiError, OSError) as error:
+                failed_outcome: ManagedSidecarOutcome | None = None
                 if lease is not None:
-                    await asyncio.shield(lease.close())
+                    failed_outcome = await asyncio.shield(lease.close())
+                elif isinstance(error, ManagedSidecarStartupError):
+                    failed_outcome = error.outcome
+                failed_attempts.append(_FailedSidecarAttempt(phase, error, failed_outcome))
                 if sidecar_attempt == 2:
-                    raise
+                    raise _SidecarAttemptError(tuple(failed_attempts)) from error
         raise AssertionError("sidecar retry loop did not return")
 
     def _validate_investigation(self, investigation_id: str, hypothesis_id: str | None) -> None:
@@ -676,6 +808,8 @@ class FaultExperimentService:
         admin_port: int,
         listen_port: int,
         proxy_name: str,
+        failure_phase: FaultFailurePhase | None = None,
+        failure_error: Exception | None = None,
     ) -> tuple[str, ...]:
         root = self.workspace.paths.staging / "fault-sidecars" / run.run_id
         root.mkdir(parents=True, exist_ok=True)
@@ -690,6 +824,13 @@ class FaultExperimentService:
             "treatment": cell.treatment,
             "fault_config": plan.fault_config,
             "scenario": plan.scenarios.get(cell.treatment),
+            "failure": (
+                self._fault_diagnostic(failure_phase, failure_error).model_dump(
+                    mode="json", exclude={"next_action"}
+                )
+                if failure_phase is not None and failure_error is not None
+                else None
+            ),
             "tool": {
                 "version": plan.tool_version,
                 "asset": plan.tool_asset,
@@ -747,39 +888,151 @@ class FaultExperimentService:
         )
         stdout_path.write_bytes(outcome.stdout)
         stderr_path.write_bytes(outcome.stderr)
+        files = (
+            _SidecarEvidenceFile(
+                config_path,
+                ArtifactKind.EXPERIMENT_CONFIGURATION,
+                "fault_configuration",
+                "application/json",
+            ),
+            _SidecarEvidenceFile(
+                snapshot_path,
+                ArtifactKind.PROCESS_TREE_SNAPSHOT,
+                "fault_process_observation",
+                "application/json",
+                outcome,
+            ),
+            _SidecarEvidenceFile(
+                stdout_path, ArtifactKind.PROCESS_OUTPUT, "toxiproxy_stdout", "text/plain"
+            ),
+            _SidecarEvidenceFile(
+                stderr_path, ArtifactKind.PROCESS_OUTPUT, "toxiproxy_stderr", "text/plain"
+            ),
+        )
+        try:
+            return await self._publish_sidecar_evidence(plan, run, files)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    async def _attach_failed_sidecar_evidence(
+        self,
+        plan: FaultExperimentPlan,
+        run: RunManifest,
+        attempts: tuple[_FailedSidecarAttempt, ...],
+    ) -> tuple[str, ...]:
+        root = self.workspace.paths.staging / "fault-sidecars" / run.run_id
+        root.mkdir(parents=True, exist_ok=True)
+        files: list[_SidecarEvidenceFile] = []
+        for index, attempt in enumerate(attempts, start=1):
+            prefix = f"attempt-{index:02d}"
+            diagnostic_path = root / f"{prefix}-diagnostic.json"
+            diagnostic_path.write_text(
+                self._fault_diagnostic(attempt.phase, attempt.error).model_dump_json(
+                    exclude={"next_action"}
+                )
+            )
+            files.append(
+                _SidecarEvidenceFile(
+                    diagnostic_path,
+                    ArtifactKind.COLLECTOR_METADATA,
+                    f"fault_startup_{prefix}_diagnostic",
+                    "application/json",
+                )
+            )
+            outcome = attempt.outcome
+            if outcome is None:
+                continue
+            snapshot_path = root / f"{prefix}-process-snapshot.json"
+            stdout_path = root / f"{prefix}-stdout.log"
+            stderr_path = root / f"{prefix}-stderr.log"
+            evidence_status, limitations = process_observation_coverage(
+                outcome.process_observations
+            )
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "evidence_status": evidence_status.value,
+                        "limitations": limitations,
+                        "observations": [
+                            item.model_dump(mode="json") for item in outcome.process_observations
+                        ],
+                        "process": outcome.process.model_dump(mode="json"),
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+            stdout_path.write_bytes(outcome.stdout)
+            stderr_path.write_bytes(outcome.stderr)
+            files.extend(
+                (
+                    _SidecarEvidenceFile(
+                        snapshot_path,
+                        ArtifactKind.PROCESS_TREE_SNAPSHOT,
+                        f"fault_startup_{prefix}_process_observation",
+                        "application/json",
+                        outcome,
+                    ),
+                    _SidecarEvidenceFile(
+                        stdout_path,
+                        ArtifactKind.PROCESS_OUTPUT,
+                        f"fault_startup_{prefix}_stdout",
+                        "text/plain",
+                    ),
+                    _SidecarEvidenceFile(
+                        stderr_path,
+                        ArtifactKind.PROCESS_OUTPUT,
+                        f"fault_startup_{prefix}_stderr",
+                        "text/plain",
+                    ),
+                )
+            )
+        try:
+            return await self._publish_sidecar_evidence(plan, run, tuple(files))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    async def _publish_sidecar_evidence(
+        self,
+        plan: FaultExperimentPlan,
+        run: RunManifest,
+        files: tuple[_SidecarEvidenceFile, ...],
+    ) -> tuple[str, ...]:
         registrations: list[ArtifactRegistration] = []
         byte_lengths: list[int] = []
-        ids: list[str] = []
-        for path, kind, role in (
-            (config_path, ArtifactKind.EXPERIMENT_CONFIGURATION, "fault_configuration"),
-            (snapshot_path, ArtifactKind.PROCESS_TREE_SNAPSHOT, "fault_process_observation"),
-            (stdout_path, ArtifactKind.PROCESS_OUTPUT, "toxiproxy_stdout"),
-            (stderr_path, ArtifactKind.PROCESS_OUTPUT, "toxiproxy_stderr"),
-        ):
+        snapshot_rows: list[dict[str, object]] = []
+        snapshot_entries: list[dict[str, object]] = []
+        for evidence_file in files:
             registration, byte_length = await self.captures._register_path_async(
                 run.run_id,
-                path,
-                kind=kind,
-                role=role,
-                media_type="application/json" if path.suffix == ".json" else "text/plain",
+                evidence_file.path,
+                kind=evidence_file.kind,
+                role=evidence_file.role,
+                media_type=evidence_file.media_type,
                 producer="flameox.toxiproxy",
                 producer_version=plan.tool_version,
                 sensitivity=Sensitivity.INTERNAL,
             )
             registrations.append(registration)
             byte_lengths.append(byte_length)
-            ids.append(registration.artifact_id)
+            if evidence_file.process_outcome is not None:
+                attempt_outcome = evidence_file.process_outcome
+                evidence_status, limitations = process_observation_coverage(
+                    attempt_outcome.process_observations
+                )
+                rows, entries = process_observation_rows(
+                    run.run_id,
+                    attempt_outcome.process_observations,
+                    artifact_id=registration.artifact_id,
+                    evidence_status=evidence_status,
+                    limitations=limitations,
+                )
+                snapshot_rows.extend(rows)
+                snapshot_entries.extend(entries)
         updated = run.validated_copy(
             update={"revision": run.revision + 1, "artifacts": run.artifacts + tuple(registrations)}
         )
         RunStore(self.workspace).append(updated, expected_revision=run.revision)
-        process_rows, entry_rows = process_observation_rows(
-            run.run_id,
-            outcome.process_observations,
-            artifact_id=ids[1],
-            evidence_status=evidence_status,
-            limitations=snapshot_limitations,
-        )
         self.publisher.publish_rows(
             {
                 "runs": [run_row(updated)],
@@ -787,25 +1040,72 @@ class FaultExperimentService:
                     artifact_registration_row(registration, byte_length=byte_length)
                     for registration, byte_length in zip(registrations, byte_lengths, strict=True)
                 ],
-                "process_snapshots": process_rows,
-                "process_snapshot_entries": entry_rows,
+                "process_snapshots": snapshot_rows,
+                "process_snapshot_entries": snapshot_entries,
             },
             publisher="flameox.toxiproxy",
             publisher_version=plan.tool_version,
             input_run_ids=(run.run_id,),
         )
-        shutil.rmtree(root, ignore_errors=True)
-        return tuple(ids)
+        return tuple(registration.artifact_id for registration in registrations)
+
+    @staticmethod
+    def _fault_diagnostic(
+        phase: FaultFailurePhase,
+        error: BaseException,
+    ) -> FaultTrialDiagnostic:
+        domain_error = error if isinstance(error, DomainError) else None
+        retryable = (
+            domain_error.retryable
+            if domain_error is not None
+            else isinstance(error, (asyncio.CancelledError, OSError, ToxiproxyApiError))
+        )
+        message = {
+            "sidecar_readiness": "The managed sidecar did not become ready.",
+            "proxy_creation": "The managed proxy could not be created.",
+            "treatment_configuration": "The fault treatment could not be configured.",
+            "workload_planning": "The workload capture plan could not be created.",
+            "capture_execution": "The workload capture could not be completed.",
+        }[phase]
+        return FaultTrialDiagnostic(
+            phase=phase,
+            error_code=(
+                domain_error.code.value
+                if domain_error is not None
+                else (
+                    ErrorCode.PROCESS_CANCELLED.value
+                    if isinstance(error, asyncio.CancelledError)
+                    else type(error).__name__
+                )
+            ),
+            message=message,
+            retryable=retryable,
+            next_action=(
+                manual_action(
+                    "Call plan_fault_experiment with the same declared experiment after "
+                    "addressing the reported failure.",
+                    suggested_action=ActionId.PLAN_FAULT_EXPERIMENT,
+                    missing_arguments=(
+                        "experiment_name",
+                        "investigation_id",
+                        "parameters",
+                    ),
+                )
+                if retryable
+                else None
+            ),
+        )
 
     def _create_sidecar_run(
-        self, plan: FaultExperimentPlan, outcome: ManagedSidecarOutcome
+        self, plan: FaultExperimentPlan, outcome: ManagedSidecarOutcome | None
     ) -> RunManifest:
         environment = collect_environment()
         source_state = collect_partial_source_state(self.workspace)
+        now = datetime.now(UTC)
         run = ExecutionRunManifest(
             run_id=new_id(),
-            started_at=outcome.started_at,
-            finished_at=outcome.finished_at,
+            started_at=outcome.started_at if outcome is not None else now,
+            finished_at=outcome.finished_at if outcome is not None else now,
             execution_status=ExecutionStatus.FAILED,
             capture_status=CaptureStatus.FAILED,
             validation_status=ValidationStatus.NOT_REQUESTED,
@@ -819,7 +1119,7 @@ class FaultExperimentService:
                 adapter_version=plan.tool_version,
                 fields=("effective_options",),
             ),
-            process=outcome.process,
+            process=outcome.process if outcome is not None else None,
             limitations=("The workload did not start; this run contains sidecar-only evidence.",),
         )
         RunStore(self.workspace).create(run)

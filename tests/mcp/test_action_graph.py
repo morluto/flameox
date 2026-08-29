@@ -58,6 +58,12 @@ def _representative_actions() -> dict[ActionId, ToolAction]:
             kind="workload",
             name="demo",
         ),
+        ActionId.PLAN_FAULT_EXPERIMENT: tool_action(
+            ActionId.PLAN_FAULT_EXPERIMENT,
+            experiment_name="latency",
+            investigation_id="investigation-1",
+            parameters={},
+        ),
         ActionId.PLAN_CAPTURE: tool_action(
             ActionId.PLAN_CAPTURE,
             workload_name="demo",
