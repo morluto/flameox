@@ -1640,7 +1640,7 @@ def capture_plan(
         options = _json_object(adapter_options, label="adapter options")
         result = _run_async(lambda: plan(values, options))
     except DomainError as error:
-        _fail(error)
+        _fail(error, as_json=json_output)
     _emit(result, as_json=json_output)
 
 
@@ -1671,7 +1671,45 @@ def capture_run(
         options = _json_object(adapter_options, label="adapter options")
         result = _run_async(lambda: run(values, options))
     except DomainError as error:
-        _fail(error)
+        _fail(error, as_json=json_output)
+    _emit(result, as_json=json_output)
+
+
+@capture_app.command("execute")
+def capture_execute(
+    plan_token: Annotated[
+        str,
+        typer.Option(
+            "--plan-token",
+            envvar="FLAMEOX_PLAN_TOKEN",
+            help=(
+                "Opaque single-use capability returned by capture plan; use "
+                "FLAMEOX_PLAN_TOKEN to avoid shell history."
+            ),
+        ),
+    ],
+    expected_plan_id: Annotated[
+        str | None,
+        typer.Option(
+            "--expected-plan-id",
+            help="Public plan identity that must match before the capability is consumed.",
+        ),
+    ] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Execute one previously reviewed capture plan without replanning."""
+
+    async def execute() -> BaseModel:
+        return await CaptureService(_workspace(workspace)).execute(
+            plan_token,
+            expected_plan_id=expected_plan_id,
+        )
+
+    try:
+        result = _run_async(execute)
+    except DomainError as error:
+        _fail(error, as_json=json_output)
     _emit(result, as_json=json_output)
 
 

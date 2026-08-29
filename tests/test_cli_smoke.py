@@ -1,12 +1,17 @@
 import json
+import sqlite3
+import sys
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from click import unstyle
 from typer.testing import CliRunner
 
 from flameox.application import CaptureService
+from flameox.catalog import Catalog
 from flameox.cli import app
+from flameox.storage import Workspace
 
 pytestmark = pytest.mark.integration
 
@@ -23,15 +28,104 @@ def test_capture_help_uses_named_workload_syntax() -> None:
 
     plan = runner.invoke(app, ["capture", "plan", "--help"])
     run = runner.invoke(app, ["capture", "run", "--help"])
+    execute = runner.invoke(app, ["capture", "execute", "--help"])
 
     assert plan.exit_code == 0, plan.output
     assert run.exit_code == 0, run.output
+    assert execute.exit_code == 0, execute.output
     plan_help = unstyle(plan.stdout)
     run_help = unstyle(run.stdout)
+    execute_help = unstyle(execute.stdout)
     assert "--workload" in plan_help
     assert "--workload" in run_help
     assert "argv" not in plan_help.lower()
     assert "argv" not in run_help.lower()
+    assert "--plan-token" in execute_help
+    assert "--expected-plan-id" in execute_help
+    assert "FLAMEOX_PLAN_TOKEN" in execute_help
+    assert "previously reviewed" in execute_help
+
+
+@pytest.mark.process
+@pytest.mark.serial
+def test_capture_cli_executes_the_exact_reviewed_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "flameox.toml").write_text(
+        f"""
+schema_version = 1
+[workloads.reviewed]
+argv = [{json.dumps(sys.executable)}, "-c", "print('reviewed')"]
+cwd = "."
+timeout_seconds = 5
+"""
+    )
+    workspace = Workspace.initialize(tmp_path)
+    config = workspace.config.validated_copy(
+        update={
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
+        }
+    )
+    workspace.paths.config.write_text(config.to_toml())
+    Catalog(workspace).rebuild()
+    runner = CliRunner()
+
+    def plan_capture() -> dict[str, Any]:
+        result = runner.invoke(
+            app,
+            [
+                "capture",
+                "plan",
+                "command",
+                "--workload",
+                "reviewed",
+                "--workspace",
+                str(workspace.paths.root),
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        return cast(dict[str, Any], json.loads(result.stdout))
+
+    def execute_capture(token: str, expected_plan_id: str | None = None) -> dict[str, Any]:
+        monkeypatch.setenv("FLAMEOX_PLAN_TOKEN", token)
+        arguments = [
+            "capture",
+            "execute",
+            "--workspace",
+            str(workspace.paths.root),
+            "--json",
+        ]
+        if expected_plan_id is not None:
+            arguments.extend(("--expected-plan-id", expected_plan_id))
+        return cast(dict[str, Any], json.loads(runner.invoke(app, arguments).stdout))
+
+    plan = plan_capture()
+    token = str(plan["plan_token"])
+    plan_id = str(plan["plan_id"])
+    malformed = execute_capture(token, "malformed")
+    assert malformed["error"]["code"] == "INVALID_ARGUMENTS"
+    mismatched = execute_capture(token, "sha256:" + "0" * 64)
+    assert mismatched["error"]["code"] == "PLAN_ID_MISMATCH"
+
+    executed = execute_capture(token, plan_id)
+    assert executed["run"]["execution_status"] == "succeeded"
+    consumed = execute_capture(token, plan_id)
+    assert consumed["error"]["code"] == "PLAN_TOKEN_CONSUMED"
+    unknown = execute_capture("unknown-token")
+    assert unknown["error"]["code"] == "PLAN_TOKEN_UNKNOWN"
+
+    expired_plan = plan_capture()
+    with sqlite3.connect(workspace.paths.control_plane) as connection:
+        connection.execute(
+            "UPDATE authorized_plans SET expires_at = ? WHERE token = ?",
+            ("2000-01-01T00:00:00+00:00", expired_plan["plan_token"]),
+        )
+    expired = execute_capture(str(expired_plan["plan_token"]))
+    assert expired["error"]["code"] == "PLAN_TOKEN_EXPIRED"
 
 
 def test_workload_help_has_no_inert_approval_command() -> None:

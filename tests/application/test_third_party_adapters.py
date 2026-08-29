@@ -377,7 +377,7 @@ async def test_adapter_execution_failures_are_structured_and_leave_no_staging(
 
     assert failure.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
     assert failure.value.run_id == plan.run_id
-    assert not (workspace.paths.staging / "captures" / plan.plan_id).exists()
+    assert not (workspace.paths.staging / "captures" / plan.run_id).exists()
 
 
 @pytest.mark.anyio

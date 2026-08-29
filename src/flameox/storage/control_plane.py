@@ -474,8 +474,15 @@ class ControlPlane:
             intent_digest, payload_json = self._available_plan(row)
             if expected_digest is not None and intent_digest != expected_digest:
                 raise DomainError(
-                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    ErrorCode.PLAN_ID_MISMATCH,
                     "The authorized plan digest does not match the expected intent.",
+                    details={
+                        "expected_plan_id": expected_digest,
+                        "actual_plan_id": intent_digest,
+                    },
+                    remediation=(
+                        "Review the stored plan identity and retry with that expected plan ID.",
+                    ),
                 )
             changed = connection.execute(
                 """
@@ -1579,17 +1586,32 @@ class ControlPlane:
 
     @staticmethod
     def _available_plan(row: sqlite3.Row | None) -> tuple[str, str]:
-        if row is None or row["consumed_at"] is not None:
-            raise ControlPlane._unavailable_plan()
+        if row is None:
+            raise ControlPlane._unavailable_plan("unknown")
+        if row["consumed_at"] is not None:
+            raise ControlPlane._unavailable_plan("consumed")
         if datetime.fromisoformat(row["expires_at"]) <= utc_now():
-            raise ControlPlane._unavailable_plan()
+            raise ControlPlane._unavailable_plan("expired")
         return str(row["intent_digest"]), str(row["payload_json"])
 
     @staticmethod
-    def _unavailable_plan() -> DomainError:
+    def _unavailable_plan(
+        state: Literal["unknown", "expired", "consumed"] = "consumed",
+    ) -> DomainError:
+        messages = {
+            "unknown": "Authorized plan token is unknown.",
+            "expired": "Authorized plan has expired.",
+            "consumed": "Authorized plan has already been consumed.",
+        }
+        codes = {
+            "unknown": ErrorCode.PLAN_TOKEN_UNKNOWN,
+            "expired": ErrorCode.PLAN_TOKEN_EXPIRED,
+            "consumed": ErrorCode.PLAN_TOKEN_CONSUMED,
+        }
         return DomainError(
-            ErrorCode.INVALID_CAPTURE_PLAN,
-            "Authorized plan is missing, expired, or already consumed.",
+            codes[state],
+            messages[state],
+            remediation=("Create and review a new plan before executing.",),
         )
 
 

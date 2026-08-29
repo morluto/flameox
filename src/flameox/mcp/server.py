@@ -692,7 +692,13 @@ def _recovery_for(error: DomainError) -> RecoveryAction:
         return ToolActionRecovery.from_action(tool_action(ActionId.INITIALIZE_WORKSPACE))
     if error.code is ErrorCode.CAPABILITY_UNAVAILABLE:
         return ToolActionRecovery.from_action(tool_action(ActionId.INSPECT_CAPABILITIES))
-    if error.code in {ErrorCode.INVALID_CAPTURE_PLAN, ErrorCode.PROCESS_TIMEOUT}:
+    if error.code in {
+        ErrorCode.INVALID_CAPTURE_PLAN,
+        ErrorCode.PLAN_TOKEN_UNKNOWN,
+        ErrorCode.PLAN_TOKEN_EXPIRED,
+        ErrorCode.PLAN_TOKEN_CONSUMED,
+        ErrorCode.PROCESS_TIMEOUT,
+    }:
         return ManualRecovery.from_action(
             manual_action(
                 "Inspect the declared workload and supply a complete capture plan request.",
@@ -1657,6 +1663,7 @@ def create_server(
     async def execute_capture_plan_tool(
         plan_token: str,
         ctx: Context[AppContext],
+        expected_plan_id: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[CaptureReceipt]]:
         """Run one current plan with side effects; the token is single-use, then get_run."""
         try:
@@ -1671,6 +1678,7 @@ def create_server(
 
             result = await ctx.request_context.lifespan_context.capture_service().execute(
                 plan_token,
+                expected_plan_id=expected_plan_id,
                 progress=report,
             )
             resource_uri = f"flameox://runs/{result.run.run_id}"

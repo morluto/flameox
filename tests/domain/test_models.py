@@ -89,9 +89,8 @@ def _capture_plan_payload(**overrides: object) -> dict[str, object]:
     }
     payload: dict[str, object] = {
         "plan_token": "token",
-        "plan_id": "plan",
+        "plan_id": DIGEST,
         "run_id": "run",
-        "request_digest": DIGEST,
         "workspace_id": "workspace",
         "workload_name": "workload",
         "workload_definition_id": DIGEST,

@@ -132,6 +132,7 @@ from flameox.domain import (
     WorkloadInstance,
     WritableRootBinding,
     digest_model,
+    is_digest,
     new_id,
 )
 from flameox.domain.executables import (
@@ -585,13 +586,18 @@ class CapturePlanRegistry:
     async def issue(self, plan: CapturePlan) -> None:
         self._require_store().issue(
             plan.plan_token,
-            plan.request_digest,
+            plan.plan_id,
             plan,
             expires_at=plan.expires_at,
         )
 
-    async def consume(self, plan_token: str) -> CapturePlan:
-        return self._require_store().consume(plan_token)
+    async def consume(
+        self,
+        plan_token: str,
+        *,
+        expected_plan_id: str | None = None,
+    ) -> CapturePlan:
+        return self._require_store().consume(plan_token, expected_digest=expected_plan_id)
 
     async def inspect(self, plan_token: str) -> CapturePlan:
         return self._require_store().inspect(plan_token)
@@ -702,9 +708,8 @@ class CaptureService:
             mode=preflight_mode,
             workload_name=workload_name,
         )
-        plan_id = secrets.token_hex(32)
         run_id = new_id()
-        output_root = self.workspace.paths.staging / "captures" / plan_id
+        output_root = self.workspace.paths.staging / "captures" / run_id
         adapter_workload_qualification = await self._qualify_workload_adapter(
             adapter,
             definition=definition,
@@ -781,7 +786,7 @@ class CaptureService:
             cwd=Path(instance.command.cwd),
             writable=output_root,
             writable_roots=writable_roots,
-            unit_name=f"flameox-capture-{plan_id[:24]}.scope",
+            unit_name=f"flameox-capture-{run_id[:24]}.scope",
             required=(
                 execution_policy.requires_containment(self.workspace.config.execution.containment)
             ),
@@ -822,7 +827,7 @@ class CaptureService:
                 cwd=Path(oracle.command.cwd),
                 writable=output_root,
                 writable_roots=writable_roots,
-                unit_name=f"flameox-validation-{plan_id[:21]}.scope",
+                unit_name=f"flameox-validation-{run_id[:21]}.scope",
                 required=execution_policy.requires_containment(
                     self.workspace.config.execution.containment
                 ),
@@ -872,9 +877,8 @@ class CaptureService:
         plan = parse_capture_plan(
             {
                 "plan_token": secrets.token_hex(32),
-                "plan_id": plan_id,
+                "plan_id": "sha256:" + "0" * 64,
                 "run_id": run_id,
-                "request_digest": "sha256:" + "0" * 64,
                 "workspace_id": self.workspace.identity.workspace_id,
                 "workload_name": workload_name,
                 "workload_definition_id": definition.workload_definition_id,
@@ -934,7 +938,7 @@ class CaptureService:
             }
         )
         plan = plan.validated_copy(
-            update={"request_digest": digest_model(self._authorization_payload(plan))}
+            update={"plan_id": digest_model(self._authorization_payload(plan))}
         )
         await self.plans.issue(plan)
         return plan
@@ -943,16 +947,22 @@ class CaptureService:
         self,
         plan_token: str,
         *,
+        expected_plan_id: str | None = None,
         progress: Callable[[float, float, str], Awaitable[None]] | None = None,
     ) -> CaptureResult:
+        if expected_plan_id is not None and not is_digest(expected_plan_id):
+            raise DomainError(
+                ErrorCode.INVALID_ARGUMENTS,
+                "Expected capture plan ID must be a SHA-256 identity.",
+            )
         logger = OperationLogger(self.workspace.paths.root)
         operation_id = logger.new_id()
         started = time.monotonic()
 
-        plan = await self.plans.consume(plan_token)
+        plan = await self.plans.consume(plan_token, expected_plan_id=expected_plan_id)
         await self._recheck(plan)
         StorageQuota(self.workspace).require_capacity(staging=True)
-        output_root = self.workspace.paths.staging / "captures" / plan.plan_id
+        output_root = self.workspace.paths.staging / "captures" / plan.run_id
         output_root.mkdir(parents=True, exist_ok=False)
         for binding in plan.writable_roots:
             Path(binding.storage_path).mkdir(parents=True, exist_ok=False)
@@ -3316,13 +3326,13 @@ class CaptureService:
     def _authorization_payload(self, plan: CapturePlan) -> dict[str, JsonValue]:
         payload = plan.model_dump(
             mode="json",
-            exclude={"plan_token", "request_digest"},
+            exclude={"plan_token", "plan_id"},
         )
         payload["policy"] = self.workspace.config.model_dump(mode="json")
         return cast(dict[str, JsonValue], payload)
 
     async def _recheck(self, plan: CapturePlan) -> None:
-        if digest_model(self._authorization_payload(plan)) != plan.request_digest:
+        if digest_model(self._authorization_payload(plan)) != plan.plan_id:
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "Capture plan contents changed after authorization.",

@@ -50,7 +50,26 @@ def test_authorized_plan_is_durable_and_atomically_single_use(tmp_path: Path) ->
     assert second.consume("opaque-token", expected_digest="content-digest") == intent
     with pytest.raises(DomainError) as reused:
         first.consume("opaque-token", expected_digest="content-digest")
-    assert reused.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+    assert reused.value.code is ErrorCode.PLAN_TOKEN_CONSUMED
+
+
+def test_authorized_plan_reports_unknown_and_expired_states(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    plans = AuthorizedPlanStore(workspace, family="example", model=ExampleIntent)
+
+    with pytest.raises(DomainError) as unknown:
+        plans.consume("unknown-token")
+    assert unknown.value.code is ErrorCode.PLAN_TOKEN_UNKNOWN
+
+    plans.issue(
+        "expired-token",
+        "intent-digest",
+        ExampleIntent(command=("tool",)),
+        expires_at=utc_now() - timedelta(seconds=1),
+    )
+    with pytest.raises(DomainError) as expired:
+        plans.consume("expired-token")
+    assert expired.value.code is ErrorCode.PLAN_TOKEN_EXPIRED
 
 
 def test_authorized_plan_rejects_same_token_with_different_intent(tmp_path: Path) -> None:

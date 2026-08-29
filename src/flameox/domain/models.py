@@ -1146,9 +1146,8 @@ class CaptureExecutionLimits(ContractModel):
 
 class _CapturePlan(ContractModel):
     plan_token: Identifier
-    plan_id: Identifier
+    plan_id: Digest
     run_id: Identifier
-    request_digest: Digest
     workspace_id: Identifier
     workload_name: Identifier
     workload_definition_id: Digest

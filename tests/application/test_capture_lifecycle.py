@@ -104,7 +104,30 @@ async def test_capture_plan_is_single_use_and_publishes_process_evidence(
     assert "candidate" not in workspace.paths.operation_log.read_text()
     with pytest.raises(DomainError) as replay:
         await service.execute(plan.plan_token)
-    assert replay.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+    assert replay.value.code is ErrorCode.PLAN_TOKEN_CONSUMED
+
+
+@pytest.mark.anyio
+@pytest.mark.process
+async def test_capture_expected_plan_identity_fails_before_consumption(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    write_workload(tmp_path)
+    disable_containment(workspace)
+    service = CaptureService(workspace)
+    plan = await service.plan(
+        workload_name="echo",
+        adapter="command",
+        parameters={"message": "candidate"},
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    with pytest.raises(DomainError) as mismatch:
+        await service.execute(plan.plan_token, expected_plan_id="sha256:" + "0" * 64)
+
+    assert mismatch.value.code is ErrorCode.PLAN_ID_MISMATCH
+    assert "expected intent" in mismatch.value.message
+    result = await service.execute(plan.plan_token, expected_plan_id=plan.plan_id)
+    assert result.run.execution_status is ExecutionStatus.SUCCEEDED
 
 
 @pytest.mark.anyio
@@ -510,7 +533,7 @@ async def test_startup_identity_failure_is_terminal_and_cleans_staging(
     assert terminal.finished_at is not None
     assert terminal.process is not None
     assert terminal.process.cancellation_cause == "process_error"
-    assert not (workspace.paths.staging / "captures" / plan.plan_id).exists()
+    assert not (workspace.paths.staging / "captures" / plan.run_id).exists()
 
 
 @pytest.mark.anyio

@@ -25,6 +25,7 @@ from flameox.domain.identity import (
     canonical_json_bytes,
     content_id,
     digest_model,
+    is_digest,
     new_id,
     semantic_identity,
 )
@@ -280,6 +281,7 @@ __all__ = [
     "content_id",
     "digest_model",
     "effective_sensitivity",
+    "is_digest",
     "missing_artifact_input",
     "new_id",
     "parse_managed_runtime_extras",

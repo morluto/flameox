@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -12,6 +13,7 @@ from flameox.models import ContractModel
 _JSON_VALUE: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 _I_JSON_INTEGER_MIN = -(2**53) + 1
 _I_JSON_INTEGER_MAX = 2**53 - 1
+_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
 class SemanticIdentity(ContractModel):
@@ -61,6 +63,10 @@ def sha256_digest(data: bytes) -> str:
 def content_id(data: bytes) -> str:
     """Raw-byte content identity; deliberately independent of semantic JCS."""
     return f"sha256:{sha256_digest(data)}"
+
+
+def is_digest(value: str) -> bool:
+    return _DIGEST_PATTERN.fullmatch(value) is not None
 
 
 def semantic_identity(value: Any, *, projection: str) -> SemanticIdentity:

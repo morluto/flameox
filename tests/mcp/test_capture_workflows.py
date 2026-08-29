@@ -58,9 +58,18 @@ timeout_seconds = 5
         assert planned.is_error is False, planned.structured_content
         assert planned.structured_content is not None
         plan_token = planned.structured_content["result"]["plan_token"]
+        plan_id = planned.structured_content["result"]["plan_id"]
+        malformed = await client.call_tool(
+            "execute_capture_plan",
+            {"plan_token": plan_token, "expected_plan_id": "malformed"},
+        )
+        mismatched = await client.call_tool(
+            "execute_capture_plan",
+            {"plan_token": plan_token, "expected_plan_id": "sha256:" + "0" * 64},
+        )
         executed = await client.call_tool(
             "execute_capture_plan",
-            {"plan_token": plan_token},
+            {"plan_token": plan_token, "expected_plan_id": plan_id},
             progress_callback=record_progress,
         )
         assert executed.structured_content is not None
@@ -72,6 +81,12 @@ timeout_seconds = 5
         )
 
     assert executed.is_error is False
+    assert malformed.is_error is True
+    assert malformed.structured_content is not None
+    assert malformed.structured_content["error"]["code"] == "INVALID_ARGUMENTS"
+    assert mismatched.is_error is True
+    assert mismatched.structured_content is not None
+    assert mismatched.structured_content["error"]["code"] == "PLAN_ID_MISMATCH"
     assert executed.structured_content is not None
     assert executed.structured_content["result"]["resource_uri"] == f"flameox://runs/{run_id}"
     semantics = executed.structured_content["result"]["semantics"]
@@ -90,7 +105,7 @@ timeout_seconds = 5
     )
     assert replayed.is_error is True
     assert replayed.structured_content is not None
-    assert replayed.structured_content["error"]["code"] == "INVALID_CAPTURE_PLAN"
+    assert replayed.structured_content["error"]["code"] == "PLAN_TOKEN_CONSUMED"
     assert replayed.structured_content["error"]["recovery"] == {
         "kind": "manual",
         "safe_to_repeat_same_call": False,
@@ -197,12 +212,11 @@ cwd = "."
 
     assert result.is_error is False, result.structured_content
     assert result.structured_content is not None
-    options = result.structured_content["result"]["adapter_options"]
-    assert options["tool"] == "racecheck"
-    assert options["launch_skip"] == 2
-    assert options["launch_count"] == 3
-    assert options["suppression_file"] == "sanitizer.supp"
-    assert options["suppression_digest"].startswith("sha256:")
+    semantics = result.structured_content["result"]["semantics"]
+    assert semantics["scope"]["mode"] == {"name": "tool", "value": "racecheck"}
+    assert semantics["scope"]["bounds"] == {"launch_skip": 2, "launch_count": 3}
+    assert semantics["configuration"]["suppression_file"] == "sanitizer.supp"
+    assert semantics["scope"]["filters"]["suppression_digest"].startswith("sha256:")
 
 
 @pytest.mark.anyio

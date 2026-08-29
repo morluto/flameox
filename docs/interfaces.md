@@ -41,6 +41,8 @@ Mutating commands make mutation explicit. In particular:
 
 - `capture plan` never runs the measured workload; an adapter may run an explicitly
   documented, bounded compatibility probe under the requested execution policy;
+- `capture execute` consumes one previously reviewed plan token and may require its
+  public plan identity; it accepts no replacement execution fields;
 - `capture run` plans then consumes one server-owned plan;
 - `open` prints a viewer plan unless `--launch` is supplied;
 - `validate` never repairs;

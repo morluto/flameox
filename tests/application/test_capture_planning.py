@@ -536,7 +536,7 @@ writable_paths = ["target"]
     assert len(plan.writable_roots) == 1
     binding = plan.writable_roots[0]
     assert binding.target_path == str(output)
-    assert binding.storage_path.endswith(f"/{plan.plan_id}/writable/0")
+    assert binding.storage_path.endswith(f"/{plan.run_id}/writable/0")
     output.rename(tmp_path / "target-old")
     output.mkdir()
 
