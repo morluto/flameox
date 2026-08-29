@@ -114,9 +114,20 @@ A run is one attempted execution or import. Its manifest records:
 The run manifest is the durable semantic authority for what was attempted. It
 records effective values after defaults, adapter policy, and workload binding,
 including the adapter mode, capture bounds, filters, and target-process scope
-when those values define the property being measured. Imported and legacy runs
+when those values define the property being measured. Imports and internal runs
 represent unavailable semantics explicitly rather than inferring them from
 artifact contents.
+
+Each effective adapter option has one persisted owner. Property-defining values
+live in the typed capture scope; remaining adapter configuration lives beside
+that scope. The complete option mapping used by adapter code is derived from
+those disjoint fields rather than stored a second time. Run semantics are
+immutable across lifecycle revisions and have a content digest that normalized
+generation manifests bind alongside their input run identifiers.
+
+This contract starts evidence schema 2.0. Flameox does not reinterpret 1.x run
+rows or manifests through fallback columns; create a new workspace and re-import
+native evidence when adopting this clean break.
 
 These run-scoped semantics are not artifacts. Content identity answers which
 bytes were produced; it cannot answer why they were produced or which property
@@ -170,8 +181,10 @@ resources return bounded metadata and typed evidence references.
 ## Evidence publication
 
 Normalized evidence uses explicit Arrow schemas and immutable Parquet files.
-Every row can be traced to its run, source artifact, generation, schema version,
-and extractor version.
+Every row can be traced to its run and run-semantic identity, source artifact,
+generation, evidence schema, and extractor version. A null input semantic
+identity is explicit when a generation targets an evidence run that has not yet
+been materialized; it is not inferred from artifact bytes.
 
 Publication follows one commit protocol:
 

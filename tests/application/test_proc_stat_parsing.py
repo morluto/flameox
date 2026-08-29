@@ -12,6 +12,7 @@ from flameox.domain import (
     CaptureStatus,
     ExecutionStatus,
     RunManifest,
+    RunSemantics,
     ValidationStatus,
 )
 from flameox.domain.models import ExecutionRunManifest
@@ -42,6 +43,7 @@ def _running_run(run_id: str, pid: int, starttime: str, boot_id: str) -> RunMani
         capture_status=CaptureStatus.RUNNING,
         validation_status=ValidationStatus.PENDING,
         environment_id=DIGEST,
+        semantics=RunSemantics.unavailable(origin="internal", adapter=None),
         lease=CaptureLease(
             process_id=pid,
             process_start_identity=starttime,

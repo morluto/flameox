@@ -30,6 +30,7 @@ from flameox.storage.corpus import (
     build_commit,
 )
 from flameox.storage.quotas import StorageQuota
+from flameox.storage.runs import RunStore
 from flameox.storage.workspace import Workspace
 
 
@@ -69,6 +70,18 @@ def publication_operation_digest(
 class GenerationPublisher:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
+
+    def _run_semantic_ids(self, run_ids: tuple[str, ...]) -> tuple[str | None, ...]:
+        store = RunStore(self.workspace)
+        semantic_ids: list[str | None] = []
+        for run_id in run_ids:
+            try:
+                semantic_ids.append(store.read(run_id).semantics.semantic_id)
+            except DomainError as error:
+                if error.code is not ErrorCode.RUN_NOT_FOUND:
+                    raise
+                semantic_ids.append(None)
+        return tuple(semantic_ids)
 
     def publish_rows(
         self,
@@ -385,6 +398,7 @@ class GenerationPublisher:
             created_at=published_at,
             input_corpus_commit_id=initial_head.commit_id,
             input_run_ids=input_run_ids,
+            input_run_semantic_ids=self._run_semantic_ids(input_run_ids),
             input_artifact_ids=input_artifact_ids,
             publisher=publisher,
             publisher_version=publisher_version,

@@ -1619,8 +1619,8 @@ class ComparisonService:
         run_placeholders = ", ".join("?" for _ in run_ids)
         run_rows = snapshot.execute(
             "SELECT run_id, environment_id, source_state_id, "
-            "workload_definition_id, validation_status, collector, "
-            "collector_version, measurement_protocol_id, execution_identity_id, "
+            "workload_definition_id, validation_status, adapter, "
+            "adapter_version, measurement_protocol_id, execution_identity_id, "
             "execution_identity_quality, execution_identity_json, "
             "inference_protocol_identity_json FROM current_runs "
             f"WHERE run_id IN ({run_placeholders})",
@@ -1679,7 +1679,7 @@ class ComparisonService:
             invalidating,
             exploratory,
         )
-        collector_configurations = {
+        run_semantic_configurations = {
             (
                 str(run[5]) if run[5] is not None else None,
                 str(run[6]) if run[6] is not None else None,
@@ -1687,8 +1687,8 @@ class ComparisonService:
             )
             for run in all_runs
         }
-        if len(collector_configurations) > 1:
-            invalidating.append("collector version or measurement protocol differs")
+        if len(run_semantic_configurations) > 1:
+            invalidating.append("adapter version or measurement protocol differs")
         artifact_configurations: dict[str, set[tuple[str, str | None, str | None, str]]] = {
             "baseline": set(),
             "candidate": set(),

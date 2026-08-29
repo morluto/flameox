@@ -44,6 +44,7 @@ from flameox.domain import (
     ExecutionStatus,
     MetricPolarity,
     OracleStatus,
+    RunSemantics,
     ValidationStatus,
     digest_model,
 )
@@ -131,7 +132,7 @@ def _publish_inference_run(
         capture_status=CaptureStatus.REGISTERED,
         validation_status=validation_status,
         environment_id=environment.environment_id,
-        collector="inference-replay",
+        semantics=RunSemantics.unavailable(origin="import", adapter="inference-replay"),
         inference_protocol_identity_id=digest_model(protocol_json),
         inference_protocol_identity_json=protocol_json,
     )
@@ -313,7 +314,7 @@ def test_non_inference_runs_still_produce_invalid_for_missing_source_state(
             capture_status=CaptureStatus.REGISTERED,
             validation_status=ValidationStatus.NOT_REQUESTED,
             environment_id=environment.environment_id,
-            collector="import",
+            semantics=RunSemantics.unavailable(origin="import", adapter="import"),
         )
         RunStore(workspace).create(manifest)
         GenerationPublisher(workspace).publish_rows(
@@ -379,7 +380,7 @@ def test_mixed_inference_and_non_inference_runs_are_invalid(
         capture_status=CaptureStatus.REGISTERED,
         validation_status=ValidationStatus.NOT_REQUESTED,
         environment_id=environment.environment_id,
-        collector="import",
+        semantics=RunSemantics.unavailable(origin="import", adapter="import"),
     )
     RunStore(workspace).create(manifest)
     GenerationPublisher(workspace).publish_rows(
@@ -587,7 +588,7 @@ def test_malformed_protocol_json_is_invalidating_not_leaking(
         capture_status=CaptureStatus.REGISTERED,
         validation_status=ValidationStatus.NOT_REQUESTED,
         environment_id=environment.environment_id,
-        collector="inference-replay",
+        semantics=RunSemantics.unavailable(origin="import", adapter="inference-replay"),
         inference_protocol_identity_id=digest_model("garbage"),
         inference_protocol_identity_json="{not valid json",
     )

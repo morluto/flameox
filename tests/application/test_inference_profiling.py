@@ -684,7 +684,7 @@ async def test_cancelled_profile_window_finalizes_run_and_preserves_partial_trac
         await service.capture(plan.plan_token)
 
     diagnostic_runs = [
-        run for run in RunStore(workspace).list() if run.collector == "torch_profiler"
+        run for run in RunStore(workspace).list() if run.semantics.adapter == "torch_profiler"
     ]
     assert len(diagnostic_runs) == 1
     run = diagnostic_runs[0]

@@ -126,6 +126,12 @@ class RunStore:
         projection_intent: ProjectionIntentSpec | None = None,
     ) -> RunManifest:
         manifest = self._canonical(manifest)
+        current = self.read(manifest.run_id)
+        if current.semantics != manifest.semantics:
+            raise DomainError(
+                ErrorCode.REVISION_CONFLICT,
+                "Run semantics are immutable across lifecycle revisions.",
+            )
         self._require_projection_binding(manifest, projection_intent)
         with self.workspace.write_locked():
             self.control_plane.append_run(

@@ -10,7 +10,7 @@ from pydantic import Field, JsonValue, StringConstraints, field_validator, model
 
 from flameox.adapters.kernel_build import KernelBuildTarget
 from flameox.adapters.torch_profiler import torch_profiler_options
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import CaptureScope, DomainError, ErrorCode, RunSemantics, SemanticOption
 from flameox.models import ContractModel
 
 BoundedFilter = Annotated[
@@ -261,6 +261,62 @@ def bind_adapter_options(
             f"Adapter {adapter!r} does not accept capture options.",
         )
     return {}
+
+
+def run_semantics(
+    adapter: str,
+    adapter_version: str | None,
+    effective_options: dict[str, JsonValue],
+) -> RunSemantics:
+    """Build the durable run authority from already validated effective options."""
+
+    mode_key = {
+        "compute-sanitizer": "tool",
+        "nsight.compute": "replay_mode",
+        "torch.profiler": "mode",
+    }.get(adapter)
+    process_scope_key = "target_processes" if adapter == "compute-sanitizer" else None
+    bound_keys = {
+        "compute-sanitizer": ("launch_skip", "launch_count"),
+        "nsight.compute": ("launch_skip", "launch_count"),
+        "nvbench": ("min_samples", "timeout"),
+        "torch.profiler": ("wait", "warmup", "active", "repeat"),
+    }.get(adapter, ())
+    filter_keys = {
+        "compute-sanitizer": ("target_processes_filter", "kernel_name"),
+        "nsight.compute": ("kernel_name",),
+    }.get(adapter, ())
+    mode = (
+        SemanticOption(name=mode_key, value=effective_options[mode_key])
+        if mode_key is not None and effective_options.get(mode_key) is not None
+        else None
+    )
+    process_scope = (
+        SemanticOption(name=process_scope_key, value=effective_options[process_scope_key])
+        if process_scope_key is not None and effective_options.get(process_scope_key) is not None
+        else None
+    )
+    scope_keys = {
+        key for key in (mode_key, process_scope_key, *bound_keys, *filter_keys) if key is not None
+    }
+    return RunSemantics(
+        origin="capture",
+        adapter=adapter,
+        adapter_version=adapter_version,
+        configuration={
+            key: value for key, value in effective_options.items() if key not in scope_keys
+        },
+        scope=CaptureScope(
+            mode=mode,
+            process_scope=process_scope,
+            bounds={key: effective_options[key] for key in bound_keys if key in effective_options},
+            filters={
+                key: effective_options[key]
+                for key in filter_keys
+                if effective_options.get(key) is not None
+            },
+        ),
+    )
 
 
 def compute_sanitizer_options(options: dict[str, object] | None) -> ComputeSanitizerOptions:

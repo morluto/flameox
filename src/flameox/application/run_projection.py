@@ -4,7 +4,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from flameox.application.evidence_lookup import EvidenceLookupService
 from flameox.domain import (
@@ -58,10 +58,21 @@ class AgentRunProjectionStatus(ContractModel):
     failure_code: str | None = None
 
 
+class AgentRunSemanticsProjection(ContractModel):
+    semantic_id: str
+    origin: Literal["capture", "import", "internal"]
+    adapter: str | None = None
+    adapter_version: str | None = None
+    mode: JsonValue | None = None
+    process_scope: JsonValue | None = None
+    bounds: dict[str, JsonValue] = Field(default_factory=dict, max_length=32)
+    filters: dict[str, JsonValue] = Field(default_factory=dict, max_length=32)
+    unavailable_fields: tuple[str, ...] = ()
+
+
 class AgentRunProjection(ContractModel):
     """Privacy-safe, snapshot-bound run projection for ordinary agent transports."""
 
-    schema_version: Literal[1] = 1
     corpus_commit_id: str
     manifest_digest: str
     manifest_source: Literal["corpus_projection", "control_plane"]
@@ -81,8 +92,7 @@ class AgentRunProjection(ContractModel):
     source_measurement_run_id: str | None = None
     environment_id: str
     source_state_id: str | None = None
-    collector: str | None = None
-    collector_version: str | None = None
+    semantics: AgentRunSemanticsProjection
     command: AgentCommandProjection | None = None
     external_context: AgentExternalContextProjection | None = None
     artifact_ids: Annotated[tuple[str, ...], Field(max_length=100)] = ()
@@ -127,6 +137,23 @@ def safe_external_context(run: RunManifest) -> AgentExternalContextProjection | 
         lease_id="[redacted]" if redact else context.lease_id,
         worker_id="[redacted]" if redact else context.worker_id,
         orchestration_run_id="[redacted]" if redact else context.orchestration_run_id,
+    )
+
+
+def safe_run_semantics(run: RunManifest) -> AgentRunSemanticsProjection:
+    semantics = run.semantics
+    return AgentRunSemanticsProjection(
+        semantic_id=semantics.semantic_id,
+        origin=semantics.origin,
+        adapter=semantics.adapter,
+        adapter_version=semantics.adapter_version,
+        mode=semantics.scope.mode.value if semantics.scope.mode else None,
+        process_scope=(
+            semantics.scope.process_scope.value if semantics.scope.process_scope else None
+        ),
+        bounds=semantics.scope.bounds,
+        filters=semantics.scope.filters,
+        unavailable_fields=semantics.unavailable_fields,
     )
 
 
@@ -201,8 +228,7 @@ class RunProjectionService:
                 "source_measurement_run_id": run.source_measurement_run_id,
                 "environment_id": run.environment_id,
                 "source_state_id": run.source_state_id,
-                "collector": run.collector,
-                "collector_version": run.collector_version,
+                "semantics": safe_run_semantics(run),
                 "command": safe_command_projection(run),
                 "external_context": safe_external_context(run),
                 "artifact_ids": artifact_ids[:100],

@@ -1017,8 +1017,84 @@ class WorkloadExecutionIdentity(ContractModel):
 type CaptureContainment = Literal["active", "degraded", "uncontained", "unavailable"]
 
 
+class SemanticOption(ContractModel):
+    name: Identifier
+    value: JsonValue
+
+
+class CaptureScope(ContractModel):
+    """Property-defining capture scope projected from validated adapter options."""
+
+    mode: SemanticOption | None = None
+    process_scope: SemanticOption | None = None
+    bounds: dict[Identifier, JsonValue] = Field(default_factory=dict, max_length=32)
+    filters: dict[Identifier, JsonValue] = Field(default_factory=dict, max_length=32)
+
+
+class RunSemantics(ContractModel):
+    """Durable authority for what a run attempted, independent of produced bytes."""
+
+    origin: Literal["capture", "import", "internal"]
+    adapter: Identifier | None = None
+    adapter_version: Annotated[str, StringConstraints(max_length=200)] | None = None
+    configuration: dict[Identifier, JsonValue] = Field(default_factory=dict, max_length=64)
+    scope: CaptureScope = Field(default_factory=CaptureScope)
+    unavailable_fields: Annotated[tuple[Identifier, ...], Field(max_length=32)] = ()
+
+    @property
+    def semantic_id(self) -> str:
+        return digest_model(self.model_dump(mode="json"))
+
+    @property
+    def effective_options(self) -> dict[str, JsonValue]:
+        options = dict(self.configuration)
+        if self.scope.mode is not None:
+            options[self.scope.mode.name] = self.scope.mode.value
+        if self.scope.process_scope is not None:
+            options[self.scope.process_scope.name] = self.scope.process_scope.value
+        options.update(self.scope.bounds)
+        options.update(self.scope.filters)
+        return options
+
+    @model_validator(mode="after")
+    def semantic_fields_have_one_owner(self) -> RunSemantics:
+        if self.origin == "capture" and self.adapter is None:
+            raise ValueError("captured run semantics require an adapter")
+        owned_names = set(self.configuration) | set(self.scope.bounds) | set(self.scope.filters)
+        if self.scope.mode is not None:
+            owned_names.add(self.scope.mode.name)
+        if self.scope.process_scope is not None:
+            owned_names.add(self.scope.process_scope.name)
+        if len(owned_names) != (
+            len(self.configuration)
+            + len(self.scope.bounds)
+            + len(self.scope.filters)
+            + int(self.scope.mode is not None)
+            + int(self.scope.process_scope is not None)
+        ):
+            raise ValueError("run semantic fields must have exactly one owner")
+        if len(set(self.unavailable_fields)) != len(self.unavailable_fields):
+            raise ValueError("unavailable semantic fields must be unique")
+        return self
+
+    @classmethod
+    def unavailable(
+        cls,
+        *,
+        origin: Literal["import", "internal"],
+        adapter: str | None,
+        adapter_version: str | None = None,
+        fields: tuple[str, ...] = ("configuration", "scope"),
+    ) -> RunSemantics:
+        return cls(
+            origin=origin,
+            adapter=adapter,
+            adapter_version=adapter_version,
+            unavailable_fields=fields,
+        )
+
+
 class _CapturePlan(ContractModel):
-    schema_version: Literal[1] = 1
     plan_token: Identifier
     plan_id: Identifier
     run_id: Identifier
@@ -1027,11 +1103,9 @@ class _CapturePlan(ContractModel):
     workload_name: Identifier
     workload_definition_id: Digest
     workload_instance: WorkloadInstance
-    adapter: Identifier
+    semantics: RunSemantics
     dynamic_parameters: tuple[Identifier, ...] = ()
-    adapter_options: dict[str, JsonValue] = Field(default_factory=dict)
     execution_policy: Literal["trusted_local", "approved_agent"]
-    adapter_version: str | None = None
     adapter_execution_plan: dict[str, JsonValue] | None = None
     collector_argv: tuple[str, ...]
     collector_executable_binding: ResolvedExecutable
@@ -1076,6 +1150,20 @@ class _CapturePlan(ContractModel):
         if self.oracle_argv is not None and any(item is None for item in authority):
             raise ValueError("planned oracle requires complete execution authority")
         return self
+
+    @property
+    def adapter(self) -> str:
+        if self.semantics.adapter is None:
+            raise ValueError("capture plan semantics require an adapter")
+        return self.semantics.adapter
+
+    @property
+    def adapter_version(self) -> str | None:
+        return self.semantics.adapter_version
+
+    @property
+    def adapter_options(self) -> dict[str, JsonValue]:
+        return self.semantics.effective_options
 
 
 class ActiveCapturePlan(_CapturePlan):
@@ -1295,7 +1383,7 @@ class CaptureLease(ContractModel):
 
 
 class _RunManifest(ContractModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     revision: Annotated[int, Field(ge=0)] = 0
     run_id: Identifier
     created_at: datetime = Field(default_factory=utc_now)
@@ -1309,8 +1397,7 @@ class _RunManifest(ContractModel):
     source_measurement_run_id: Identifier | None = None
     environment_id: Digest
     source_state_id: Digest | None = None
-    collector: str | None = None
-    collector_version: str | None = None
+    semantics: RunSemantics
     command: CommandSpec | None = None
     process: ProcessResult | None = None
     lease: CaptureLease | None = None

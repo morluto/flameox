@@ -15,6 +15,7 @@ from flameox.domain import (
     ExecutionStatus,
     ProjectionIntentSpec,
     RunManifest,
+    RunSemantics,
     ValidationStatus,
 )
 from flameox.domain.models import ExecutionRunManifest, utc_now
@@ -34,6 +35,7 @@ def _running_run(*, run_id: str, boot_id: str, start_identity: str) -> RunManife
         capture_status=CaptureStatus.RUNNING,
         validation_status=ValidationStatus.PENDING,
         environment_id=DIGEST,
+        semantics=RunSemantics.unavailable(origin="internal", adapter=None),
         lease=CaptureLease(
             process_id=12345,
             process_start_identity=start_identity,
@@ -71,6 +73,7 @@ def test_recovery_closes_only_disappeared_exact_process_lease(tmp_path: Path) ->
         capture_status=CaptureStatus.RUNNING,
         validation_status=ValidationStatus.PENDING,
         environment_id=DIGEST,
+        semantics=RunSemantics.unavailable(origin="internal", adapter=None),
         lease=CaptureLease(
             process_id=2_147_483_647,
             process_start_identity="never-existed",

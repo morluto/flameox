@@ -74,6 +74,10 @@ timeout_seconds = 5
     assert executed.is_error is False
     assert executed.structured_content is not None
     assert executed.structured_content["result"]["resource_uri"] == f"flameox://runs/{run_id}"
+    semantics = executed.structured_content["result"]["semantics"]
+    assert semantics["adapter"] == "command"
+    assert semantics["semantic_id"].startswith("sha256:")
+    assert semantics["bounds"] == {}
     assert "run" not in executed.structured_content["result"]
     assert any(
         item.type == "resource_link" and item.uri == f"flameox://runs/{run_id}"

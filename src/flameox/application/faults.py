@@ -62,6 +62,7 @@ from flameox.domain import (
     Investigation,
     MetricSource,
     RunManifest,
+    RunSemantics,
     Sensitivity,
     Trial,
     TrialFailureClass,
@@ -794,8 +795,12 @@ class FaultExperimentService:
             measurement_protocol_id=plan.experiment_plan.experiment.measurement_protocol_id,
             environment_id=environment.environment_id,
             source_state_id=source_state.source_state_id,
-            collector="flameox.toxiproxy",
-            collector_version=plan.tool_version,
+            semantics=RunSemantics.unavailable(
+                origin="internal",
+                adapter="flameox.toxiproxy",
+                adapter_version=plan.tool_version,
+                fields=("effective_options",),
+            ),
             process=outcome.process,
             limitations=("The workload did not start; this run contains sidecar-only evidence.",),
         )

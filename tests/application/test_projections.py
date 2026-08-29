@@ -18,6 +18,7 @@ from flameox.domain import (
     ExecutionStatus,
     IdentityQuality,
     ProjectionState,
+    RunSemantics,
     ValidationStatus,
     digest_model,
 )
@@ -50,7 +51,7 @@ def _run(run_id: str, environment: EnvironmentRecord) -> ImportRunManifest:
         capture_status=CaptureStatus.REGISTERED,
         validation_status=ValidationStatus.NOT_REQUESTED,
         environment_id=environment.environment_id,
-        collector="test-import",
+        semantics=RunSemantics.unavailable(origin="import", adapter="test-import"),
     )
 
 

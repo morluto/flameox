@@ -8,6 +8,7 @@ from flameox.domain import (
     DomainError,
     ErrorCode,
     ExecutionStatus,
+    RunSemantics,
     ValidationStatus,
 )
 from flameox.domain.models import ExecutionRunManifest
@@ -26,6 +27,7 @@ def test_drilldown_rejects_run_absent_from_pinned_corpus(tmp_path: Path) -> None
             capture_status=CaptureStatus.PENDING,
             validation_status=ValidationStatus.NOT_REQUESTED,
             environment_id="sha256:" + "0" * 64,
+            semantics=RunSemantics.unavailable(origin="internal", adapter=None),
         )
     )
 

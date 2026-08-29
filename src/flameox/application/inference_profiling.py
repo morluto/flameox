@@ -45,6 +45,7 @@ from flameox.domain import (
     ExecutionStatus,
     ProcessResult,
     RunManifest,
+    RunSemantics,
     Sensitivity,
     SourceState,
     ValidationStatus,
@@ -910,7 +911,11 @@ class InferenceProfilingService:
             source_measurement_run_id=measurement_run_id,
             environment_id=environment.environment_id,
             source_state_id=source_state.source_state_id,
-            collector=plan.profiler,
+            semantics=RunSemantics(
+                origin="internal",
+                adapter=plan.profiler,
+                configuration={"diagnostic_protocol_id": diagnostic_id},
+            ),
             command=CommandSpec(
                 argv=server_argv,
                 cwd=str(plan.server_cwd),

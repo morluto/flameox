@@ -266,7 +266,7 @@ class PyTorchRecipes(RecipeContext):
         if run_ids:
             placeholders = ", ".join("?" for _ in run_ids)
             rows = snapshot.execute(
-                "SELECT lower(coalesce(collector, '')) FROM current_runs "
+                "SELECT lower(coalesce(adapter, '')) FROM current_runs "
                 f"WHERE run_id IN ({placeholders})",
                 run_ids,
             ).fetchall()

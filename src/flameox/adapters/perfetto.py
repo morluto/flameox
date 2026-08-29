@@ -142,7 +142,7 @@ class PerfettoExtractor:
         phases_by_aggregate: dict[_AggregateKey, set[str]] = {}
         operator_observation_rows: list[dict[str, Any]] = []
         trace_event_observation_rows: list[dict[str, Any]] = []
-        torch_source = "torch" in (run.collector or "").lower() or (
+        torch_source = "torch" in (run.semantics.adapter or "").lower() or (
             registration.producer is not None and "torch" in registration.producer.lower()
         )
         events: dict[
@@ -183,7 +183,7 @@ class PerfettoExtractor:
                 frame_id,
                 {
                     "frame_id": frame_id,
-                    "language": ("Python" if run.collector == "py-spy" else None),
+                    "language": ("Python" if run.semantics.adapter == "py-spy" else None),
                     "function": name,
                     "module": category,
                     "file": filename,

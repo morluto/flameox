@@ -44,7 +44,7 @@ from flameox.domain import (
     WorkloadExecutionIdentity,
     digest_model,
 )
-from flameox.evidence import GenerationPublisher
+from flameox.evidence import SCHEMA_MAJOR, GenerationPublisher
 from flameox.storage import RunStore, Workspace
 from tests.support.comparisons import (
     imported_benchmark,
@@ -206,7 +206,7 @@ def test_frozen_run_set_comparison_and_evidence_linked_finding(
         EvidenceReferenceType.COMPARISON,
         result.comparison.comparison_id,
     )
-    assert persisted.data["schema_version"] == 1
+    assert persisted.data["schema_version"] == SCHEMA_MAJOR
     assert (persisted.data["baseline_value_int"] is None) is not (
         persisted.data["baseline_value_float"] is None
     )

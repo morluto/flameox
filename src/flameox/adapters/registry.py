@@ -20,11 +20,10 @@ class AdapterApproval(ContractModel):
     distribution: str
     version: str
     package_identity: str
-    provenance: Literal["agent", "cli", "legacy"] = "legacy"
+    provenance: Literal["agent", "cli"]
 
 
 class AdapterDescriptor(ContractModel):
-    schema_version: int = 1
     adapter: str
     entry_point: str
     distribution: str
@@ -34,7 +33,6 @@ class AdapterDescriptor(ContractModel):
 
 
 class AdapterDiscoveryResult(ContractModel):
-    schema_version: int = 1
     adapters: tuple[AdapterDescriptor, ...]
 
 

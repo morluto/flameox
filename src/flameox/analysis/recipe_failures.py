@@ -73,13 +73,13 @@ class FailureRecipes(RecipeContext):
                   )
             ),
             clusters AS (
-                SELECT collector, execution_status, capture_status,
+                SELECT adapter, execution_status, capture_status,
                     validation_status, exit_code, workload_definition_id,
                     environment_id, source_state_id, count(*) AS run_count,
                     min(created_at) AS first_seen, max(created_at) AS last_seen,
                     min(run_id) AS representative_run_id
                 FROM failed
-                GROUP BY collector, execution_status, capture_status,
+                GROUP BY adapter, execution_status, capture_status,
                     validation_status, exit_code, workload_definition_id,
                     environment_id, source_state_id
             )
@@ -100,7 +100,7 @@ class FailureRecipes(RecipeContext):
             assert count_row is not None
             total = int(count_row[0])
             rows = snapshot.execute(
-                query + " SELECT collector, execution_status, capture_status, "
+                query + " SELECT adapter, execution_status, capture_status, "
                 "validation_status, exit_code, workload_definition_id, "
                 "environment_id, source_state_id, run_count, first_seen, last_seen, "
                 "representative_run_id "
@@ -140,7 +140,7 @@ class FailureRecipes(RecipeContext):
                 )
         failures = tuple(
             FailureCluster(
-                collector=str(row[0]) if row[0] is not None else None,
+                adapter=str(row[0]) if row[0] is not None else None,
                 execution_status=ExecutionStatus(str(row[1])),
                 capture_status=CaptureStatus(str(row[2])),
                 validation_status=ValidationStatus(str(row[3])),
@@ -179,10 +179,10 @@ class FailureRecipes(RecipeContext):
             empty_reason = "no_failures" if failed_run_count == 0 else None
         denominator = failed_run_count or 1
         hypotheses: list[str] = []
-        if len({failure.collector for failure in failures}) > 1:
+        if len({failure.adapter for failure in failures}) > 1:
             hypotheses.append(
-                "Collector-specific behavior is plausible because failures span "
-                "distinct collector groups."
+                "Adapter-specific behavior is plausible because failures span "
+                "distinct adapter groups."
             )
         if len({failure.environment_id for failure in failures}) > 1:
             hypotheses.append(

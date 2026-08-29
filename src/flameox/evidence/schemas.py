@@ -4,8 +4,8 @@ from typing import Any
 
 import pyarrow as pa
 
-SCHEMA_MAJOR = 1
-SCHEMA_MINOR = 17
+SCHEMA_MAJOR = 2
+SCHEMA_MINOR = 0
 UTC_TIMESTAMP = pa.timestamp("us", tz="UTC")
 
 COMMON_FIELDS: tuple[Any, ...] = (
@@ -46,8 +46,9 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("source_measurement_run_id", pa.string()),
             pa.field("environment_id", pa.string(), nullable=False),
             pa.field("source_state_id", pa.string()),
-            pa.field("collector", pa.string()),
-            pa.field("collector_version", pa.string()),
+            pa.field("adapter", pa.string()),
+            pa.field("adapter_version", pa.string()),
+            pa.field("run_semantic_id", pa.string(), nullable=False),
             pa.field("exit_code", pa.int32()),
             pa.field("wall_time_ns", pa.int64()),
             pa.field("orchestrator", pa.string()),

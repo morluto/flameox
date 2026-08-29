@@ -86,6 +86,12 @@ and selected findings or summaries remain authoritative in their durable records
 when they must survive the response. A transport may inline a bounded subset for
 agent usability without duplicating or replacing that state.
 
+MCP capture receipts inline the safe semantic projection—semantic identity,
+adapter identity, mode, process scope, bounds, filters, and explicit unavailable
+fields—and link to the bounded run resource. Typed MCP output schemas version
+these response contracts; individual success envelopes and receipts do not add
+an ornamental schema-version field.
+
 ## Agent workflow
 
 The normal capture path is:

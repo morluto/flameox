@@ -40,12 +40,19 @@ class GenerationManifest(ContractModel):
     created_at: datetime
     input_corpus_commit_id: Digest
     input_run_ids: tuple[str, ...] = ()
+    input_run_semantic_ids: tuple[Digest | None, ...]
     input_artifact_ids: tuple[Digest, ...] = ()
     publisher: str
     publisher_version: str
     operation_digest: Digest | None = None
     files: tuple[GenerationFile, ...]
     supersedes: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def run_semantic_ids_align_with_runs(self) -> GenerationManifest:
+        if len(self.input_run_semantic_ids) != len(self.input_run_ids):
+            raise ValueError("input run and semantic identities must be positionally aligned")
+        return self
 
 
 class _CorpusCommitIntegrityError(ValueError):

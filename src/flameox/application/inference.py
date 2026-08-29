@@ -89,6 +89,7 @@ from flameox.domain import (
     ProcessCancellationCause,
     ProcessTerminationFields,
     RunManifest,
+    RunSemantics,
     Sensitivity,
     SourceState,
     ValidationStatus,
@@ -1695,8 +1696,12 @@ class InferenceReplayService:
             measurement_protocol_id=protocol_id,
             environment_id=environment.environment_id,
             source_state_id=source_state.source_state_id,
-            collector=plan.provider,
-            collector_version=plan.tool_version,
+            semantics=RunSemantics(
+                origin="internal",
+                adapter=plan.provider,
+                adapter_version=plan.tool_version,
+                configuration={"protocol_id": protocol_id},
+            ),
             command=CommandSpec(
                 argv=execution_argv or plan.argv,
                 cwd=str(self.workspace.project_root),

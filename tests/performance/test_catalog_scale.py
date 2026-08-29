@@ -28,8 +28,9 @@ def _run_row(index: int) -> dict[str, object]:
         "measurement_protocol_id": None,
         "environment_id": "synthetic-environment",
         "source_state_id": None,
-        "collector": "baseline" if index % 2 == 0 else "candidate",
-        "collector_version": None,
+        "adapter": "baseline" if index % 2 == 0 else "candidate",
+        "adapter_version": None,
+        "run_semantic_id": "sha256:" + "f" * 64,
         "exit_code": None,
         "wall_time_ns": None,
         "manifest_path": "synthetic",
@@ -121,10 +122,10 @@ def test_catalog_scale_budget_matrix(
             ("synthetic-environment",),
         ).fetchone()
         cohort_comparison = snapshot.execute(
-            "SELECT runs.collector, avg(measurements.value_int) "
+            "SELECT runs.adapter, avg(measurements.value_int) "
             "FROM runs JOIN measurements USING (run_id) "
             "WHERE runs.environment_id = ? AND measurements.name = ? "
-            "GROUP BY runs.collector ORDER BY runs.collector",
+            "GROUP BY runs.adapter ORDER BY runs.adapter",
             ("synthetic-environment", "wall_time"),
         ).fetchall()
     startup_query_seconds = time.perf_counter() - started

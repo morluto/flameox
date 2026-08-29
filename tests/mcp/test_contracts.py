@@ -76,20 +76,16 @@ async def test_mcp_tools_use_explicit_envelopes_and_annotations(
     definitions = output_schema["$defs"]
     success_name = next(name for name in definitions if name.startswith("SuccessPayload_"))
     assert definitions[success_name]["required"] == [
-        "schema_version",
         "ok",
         "result",
         "error",
     ]
-    assert definitions[success_name]["properties"]["schema_version"]["const"] == 1
     assert definitions[success_name]["properties"]["ok"]["const"] is True
     assert definitions["FailurePayload"]["required"] == [
-        "schema_version",
         "ok",
         "result",
         "error",
     ]
-    assert definitions["FailurePayload"]["properties"]["schema_version"]["const"] == 1
     assert definitions["FailurePayload"]["properties"]["ok"]["const"] is False
     assert set(definitions["ErrorCode"]["enum"]) == {code.value for code in ErrorCode}
     assert definitions["RecoveryAction"]["discriminator"]["propertyName"] == "kind"

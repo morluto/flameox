@@ -21,6 +21,7 @@ from flameox.domain.models import (
     CaptureStatus,
     ImportRunManifest,
     RunManifest,
+    RunSemantics,
     Sensitivity,
     ValidationStatus,
 )
@@ -246,7 +247,7 @@ class ImportService:
             validation_status=ValidationStatus.NOT_REQUESTED,
             environment_id=environment.environment_id,
             source_state_id=source_state.source_state_id,
-            collector="import",
+            semantics=RunSemantics.unavailable(origin="import", adapter="import"),
         )
         self.runs.create(initial)
         try:
@@ -340,7 +341,7 @@ class ImportService:
             validation_status=ValidationStatus.NOT_REQUESTED,
             environment_id=environment.environment_id,
             source_state_id=source_state.source_state_id,
-            collector="import",
+            semantics=RunSemantics.unavailable(origin="import", adapter="import"),
         )
         self.runs.create(initial)
 

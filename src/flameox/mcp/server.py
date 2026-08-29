@@ -92,6 +92,7 @@ from flameox.analysis import (
 from flameox.application import (
     AdapterPreparationResult,
     AgentRunProjection,
+    AgentRunSemanticsProjection,
     AnalysisMaterializationService,
     ArtifactListResult,
     ArtifactMetadataResult,
@@ -202,6 +203,7 @@ from flameox.application import (
     XctraceService,
     parse_inference_scenario_config,
     parse_inference_server_config,
+    safe_run_semantics,
     workspace_status,
 )
 from flameox.application.async_work import run_atomic_thread
@@ -413,14 +415,12 @@ class ErrorDetail(ContractModel):
 
 
 class SuccessPayload[T: BaseModel](ContractModel):
-    schema_version: Literal[1]
     ok: Literal[True]
     result: SkipValidation[T]
     error: None
 
 
 class FailurePayload(ContractModel):
-    schema_version: Literal[1]
     ok: Literal[False]
     result: None
     error: ErrorDetail
@@ -466,7 +466,6 @@ class ToolPayload[T: BaseModel](
 class CaptureReceipt(ContractModel):
     """Bounded execution receipt; follow resource_uri for the authoritative run."""
 
-    schema_version: int = 1
     run_id: str
     execution_status: ExecutionStatus
     validation_status: ValidationStatus
@@ -477,10 +476,10 @@ class CaptureReceipt(ContractModel):
     limitation_details: tuple[LimitationDetail, ...] = ()
     corpus_commit_id: str
     resource_uri: str
+    semantics: AgentRunSemanticsProjection
 
 
 class ImportReceipt(ContractModel):
-    schema_version: int = 1
     run_id: str
     artifact_id: str
     corpus_commit_id: str
@@ -489,7 +488,6 @@ class ImportReceipt(ContractModel):
 
 
 class ExperimentReceipt(ContractModel):
-    schema_version: int = 1
     experiment_id: str
     attempted_trials: int
     run_set_ids: tuple[str, ...]
@@ -505,7 +503,6 @@ class ExperimentReceipt(ContractModel):
 
 
 class EvidenceReceipt(ContractModel):
-    schema_version: int = 1
     ref_type: Literal["analysis", "comparison"]
     ref_id: str
     materialized_commit_id: str
@@ -590,7 +587,6 @@ def _success[T: BaseModel](
     resource_links: tuple[ResourceLink, ...] = (),
 ) -> CallToolResult:
     payload = SuccessPayload[T](
-        schema_version=1,
         ok=True,
         result=result,
         error=None,
@@ -609,7 +605,6 @@ def _failure(error: DomainError) -> CallToolResult:
     if error.remediation:
         visible_message += f" {error.remediation[0]}"
     payload = FailurePayload(
-        schema_version=1,
         ok=False,
         result=None,
         error=ErrorDetail(
@@ -644,7 +639,6 @@ def _invalid_arguments(
         )
     message = f"{message} {remediation[0]}"
     payload = FailurePayload(
-        schema_version=1,
         ok=False,
         result=None,
         error=ErrorDetail(
@@ -1654,6 +1648,7 @@ def create_server(
                 limitation_details=result.run.limitation_details,
                 corpus_commit_id=result.corpus_commit_id,
                 resource_uri=resource_uri,
+                semantics=safe_run_semantics(result.run),
             )
             return _success(
                 receipt,

@@ -369,7 +369,7 @@ class AcceleratorLaunchAnalysisResult(BoundedCollectionContract):
 
 
 class FailureCluster(ContractModel):
-    collector: str | None
+    adapter: str | None
     execution_status: ExecutionStatus
     capture_status: CaptureStatus
     validation_status: ValidationStatus

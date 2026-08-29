@@ -39,6 +39,9 @@ from flameox.adapters.options import (
     compute_sanitizer_options,
     read_compute_sanitizer_suppression,
 )
+from flameox.adapters.options import (
+    run_semantics as build_run_semantics,
+)
 from flameox.adapters.registry import AdapterDescriptor, AdapterRegistry
 from flameox.adapters.torch_profiler import SdkTorchProfilerOptions, torch_profiler_options
 from flameox.application.async_work import run_atomic_thread
@@ -657,6 +660,7 @@ class CaptureService:
             adapter_binding.limitation_details,
         )
         adapter_version = adapter_binding.version
+        semantics = build_run_semantics(adapter, adapter_version, bound_adapter_options)
         use_containment = execution_policy is not ExecutionPolicy.TRUSTED_LOCAL
         containment, network_contained, systemd_scope_unit, collector_argv = await self._contain(
             collector_argv,
@@ -769,10 +773,8 @@ class CaptureService:
             "workload_name": workload_name,
             "workload_definition_id": definition.workload_definition_id,
             "instance": instance.model_dump(mode="json"),
-            "adapter": adapter,
             "dynamic_parameters": dynamic_parameters,
-            "adapter_options": bound_adapter_options,
-            "adapter_version": adapter_version,
+            "semantics": semantics.model_dump(mode="json"),
             "adapter_execution_plan": (
                 adapter_binding.execution_plan.model_dump(mode="json")
                 if adapter_binding.execution_plan is not None
@@ -824,10 +826,8 @@ class CaptureService:
                 "workload_name": workload_name,
                 "workload_definition_id": definition.workload_definition_id,
                 "workload_instance": instance,
-                "adapter": adapter,
+                "semantics": semantics,
                 "dynamic_parameters": dynamic_parameters,
-                "adapter_options": bound_adapter_options,
-                "adapter_version": adapter_version,
                 "adapter_execution_plan": (
                     adapter_binding.execution_plan.model_dump(mode="json")
                     if adapter_binding.execution_plan is not None
@@ -958,9 +958,7 @@ class CaptureService:
             workload_instance_id=plan.workload_instance.workload_instance_id,
             measurement_protocol_id=digest_model(
                 {
-                    "adapter": plan.adapter,
-                    "adapter_options": plan.adapter_options,
-                    "adapter_version": plan.adapter_version,
+                    "run_semantic_id": plan.semantics.semantic_id,
                     "collector_executable_identity": plan.bound_identities.get(
                         "collector_executable"
                     ),
@@ -972,8 +970,7 @@ class CaptureService:
             ),
             environment_id=environment.environment_id,
             source_state_id=None,
-            collector=plan.adapter,
-            collector_version=plan.adapter_version,
+            semantics=plan.semantics,
             command=plan.workload_instance.command,
             preflight=plan.preflight,
             writable_roots=plan.writable_roots,
@@ -3046,10 +3043,8 @@ class CaptureService:
             "workload_name": plan.workload_name,
             "workload_definition_id": plan.workload_definition_id,
             "instance": plan.workload_instance.model_dump(mode="json"),
-            "adapter": plan.adapter,
             "dynamic_parameters": plan.dynamic_parameters,
-            "adapter_options": plan.adapter_options,
-            "adapter_version": plan.adapter_version,
+            "semantics": plan.semantics.model_dump(mode="json"),
             "adapter_execution_plan": plan.adapter_execution_plan,
             "execution_policy": plan.execution_policy,
             "collector_argv": plan.collector_argv,

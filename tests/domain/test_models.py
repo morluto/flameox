@@ -23,6 +23,7 @@ from flameox.domain import (
     ProcessResult,
     ProcessTerminationKind,
     RunManifest,
+    RunSemantics,
     RuntimeResourceSummary,
     Sensitivity,
     Trial,
@@ -98,7 +99,7 @@ def _capture_plan_payload(**overrides: object) -> dict[str, object]:
             "workload_instance_id": digest_model(instance_content),
             **instance_content,
         },
-        "adapter": "adapter",
+        "semantics": {"origin": "capture", "adapter": "adapter"},
         "execution_policy": "trusted_local",
         "collector_argv": ["python"],
         "collector_executable_binding": binding,
@@ -224,16 +225,17 @@ def test_import_run_cannot_claim_execution() -> None:
         )
 
 
-def test_run_manifest_parser_routes_schema_one_json_to_legal_variants() -> None:
+def test_run_manifest_parser_routes_schema_two_json_to_legal_variants() -> None:
     adapter: TypeAdapter[RunManifest] = TypeAdapter(RunManifest)
     common = {
-        "schema_version": 1,
+        "schema_version": 2,
         "revision": 0,
         "run_id": "run",
         "created_at": "2026-01-01T00:00:00Z",
         "capture_status": "pending",
         "validation_status": "not_requested",
         "environment_id": DIGEST,
+        "semantics": {"origin": "internal", "unavailable_fields": ["scope"]},
     }
 
     imported = adapter.validate_json(
@@ -269,12 +271,29 @@ def test_run_manifest_parser_routes_schema_one_json_to_legal_variants() -> None:
         )
 
 
+def test_run_manifest_parser_rejects_legacy_schema_without_compatibility_inference() -> None:
+    with pytest.raises(ValidationError, match="schema_version"):
+        TypeAdapter(RunManifest).validate_python(
+            {
+                "schema_version": 1,
+                "run_type": "import",
+                "run_id": "legacy",
+                "capture_status": "registered",
+                "validation_status": "not_requested",
+                "execution_status": "not_applicable",
+                "environment_id": DIGEST,
+                "collector": "import",
+            }
+        )
+
+
 def test_validated_copy_reparses_updates_into_a_valid_contract() -> None:
     imported = ImportRunManifest(
         run_id="run",
         capture_status=CaptureStatus.PENDING,
         validation_status=ValidationStatus.NOT_REQUESTED,
         environment_id=DIGEST,
+        semantics=RunSemantics.unavailable(origin="import", adapter="import"),
     )
 
     updated = imported.validated_copy(
@@ -292,6 +311,7 @@ def test_validated_copy_rejects_invalid_timestamp_and_lifecycle_updates() -> Non
         capture_status=CaptureStatus.PENDING,
         validation_status=ValidationStatus.NOT_REQUESTED,
         environment_id=DIGEST,
+        semantics=RunSemantics.unavailable(origin="internal", adapter=None),
     )
 
     with pytest.raises(ValidationError, match="timezone"):
@@ -448,6 +468,7 @@ def test_contracts_require_timezone_aware_datetimes() -> None:
             capture_status=CaptureStatus.REGISTERED,
             validation_status=ValidationStatus.NOT_REQUESTED,
             environment_id=DIGEST,
+            semantics=RunSemantics.unavailable(origin="import", adapter="import"),
         )
 
     manifest = ImportRunManifest(
@@ -457,6 +478,7 @@ def test_contracts_require_timezone_aware_datetimes() -> None:
         capture_status=CaptureStatus.REGISTERED,
         validation_status=ValidationStatus.NOT_REQUESTED,
         environment_id=DIGEST,
+        semantics=RunSemantics.unavailable(origin="import", adapter="import"),
     )
     assert manifest.created_at.tzinfo is UTC
 

@@ -17,6 +17,7 @@ from flameox.domain import (
     ErrorCode,
     ExecutionStatus,
     RunManifest,
+    RunSemantics,
     ValidationStatus,
 )
 from flameox.domain.models import ExecutionRunManifest, ImportRunManifest
@@ -36,6 +37,7 @@ def import_manifest(run_id: str, *, revision: int = 0) -> RunManifest:
         capture_status=CaptureStatus.PENDING,
         validation_status=ValidationStatus.NOT_REQUESTED,
         environment_id=DIGEST,
+        semantics=RunSemantics.unavailable(origin="import", adapter="import"),
     )
 
 
@@ -417,6 +419,7 @@ def test_run_store_reparses_unchecked_updates_before_persistence(tmp_path: Path)
         capture_status=CaptureStatus.RUNNING,
         validation_status=ValidationStatus.PENDING,
         environment_id=DIGEST,
+        semantics=RunSemantics.unavailable(origin="internal", adapter=None),
     )
     invalid = run.model_copy(update={"finished_at": started - timedelta(seconds=1)})
 
@@ -425,6 +428,23 @@ def test_run_store_reparses_unchecked_updates_before_persistence(tmp_path: Path)
 
     assert error.value.code is ErrorCode.WORKSPACE_INVALID
     assert RunStore(workspace).list() == ()
+
+
+def test_run_semantics_cannot_change_across_revisions(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    store = RunStore(workspace)
+    current = store.create(import_manifest("stable-semantics"))
+    changed = current.validated_copy(
+        update={
+            "revision": 1,
+            "semantics": RunSemantics.unavailable(origin="import", adapter="other"),
+        }
+    )
+
+    with pytest.raises(DomainError, match="semantics are immutable"):
+        store.append(changed, expected_revision=0)
+
+    assert store.read("stable-semantics") == current
 
 
 def test_record_store_reparses_unchecked_updates_before_persistence(tmp_path: Path) -> None:

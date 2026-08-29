@@ -22,8 +22,9 @@ def run_row(manifest: RunManifest) -> dict[str, object]:
         "source_measurement_run_id": manifest.source_measurement_run_id,
         "environment_id": manifest.environment_id,
         "source_state_id": manifest.source_state_id,
-        "collector": manifest.collector,
-        "collector_version": manifest.collector_version,
+        "adapter": manifest.semantics.adapter,
+        "adapter_version": manifest.semantics.adapter_version,
+        "run_semantic_id": manifest.semantics.semantic_id,
         "exit_code": manifest.process.exit_code if manifest.process else None,
         "wall_time_ns": (manifest.process.wall_time_ns if manifest.process else None),
         "orchestrator": (

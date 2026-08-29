@@ -153,6 +153,7 @@ __all__ = [
     "kernel_build_json_schema",
     "kernel_build_v1_json_schema",
     "parse_kernel_build_manifest",
+    "run_semantics",
 ]
 
 

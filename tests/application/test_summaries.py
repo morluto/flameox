@@ -36,6 +36,7 @@ from flameox.domain import (
     OracleReceiptRecord,
     OracleReceiptV1,
     OracleStatus,
+    RunSemantics,
     Sensitivity,
     ValidationStatus,
     digest_model,
@@ -116,6 +117,7 @@ def _publish_validated_run(
         workload_instance_id=_WORKLOAD_INSTANCE_ID,
         measurement_protocol_id=_MEASUREMENT_PROTOCOL_ID,
         environment_id=_ENVIRONMENT_ID,
+        semantics=RunSemantics.unavailable(origin="internal", adapter=None),
         oracle_receipt=receipt,
     )
     RunStore(workspace).create(manifest)
