@@ -7,7 +7,10 @@ import os
 from pathlib import Path
 from typing import cast
 
-from aiperf.common.models import MetricRecordInfo, MetricValue  # type: ignore[import-not-found]
+from aiperf.common.models import (  # type: ignore[import-not-found,import-untyped,unused-ignore]
+    MetricRecordInfo,
+    MetricValue,
+)
 from pydantic import ValidationError
 
 from flameox.workers.aiperf_contract import (
