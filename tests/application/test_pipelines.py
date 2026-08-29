@@ -135,7 +135,7 @@ def test_pipeline_comparison_rejects_stale_derived_projections() -> None:
         "stages": [
             {
                 "stage_name": "generated",
-                "disposition": "changed",
+                "disposition": "content_changed",
                 "baseline_ordinal": 1,
                 "candidate_ordinal": 1,
             }

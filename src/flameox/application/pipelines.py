@@ -342,10 +342,11 @@ def _first_observed_divergent_stage(
     if compatibility is not PipelineCompatibility.COMPATIBLE:
         return None
     for stage in stages:
-        if stage.disposition is PipelineStageDisposition.CHANGED:
-            return stage.stage_name
-        if stage.disposition is not PipelineStageDisposition.IDENTICAL:
+        if stage.disposition is PipelineStageDisposition.IDENTICAL:
+            continue
+        if stage.disposition is PipelineStageDisposition.UNINSPECTABLE:
             return None
+        return stage.stage_name
     return None
 
 
@@ -1142,9 +1143,16 @@ class ArtifactPipelineService:
         baseline_by_name = {stage.name: stage for stage in baseline.stages}
         candidate_by_name = {stage.name: stage for stage in candidate.stages}
         ordered_names = tuple(
-            dict.fromkeys(
-                [stage.name for stage in baseline.stages]
-                + [stage.name for stage in candidate.stages]
+            sorted(
+                baseline_by_name.keys() | candidate_by_name.keys(),
+                key=lambda name: (
+                    min(
+                        stage.ordinal
+                        for stage in (baseline_by_name.get(name), candidate_by_name.get(name))
+                        if stage is not None
+                    ),
+                    name,
+                ),
             )
         )
         stages: list[PipelineStageComparison] = []
