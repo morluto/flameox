@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+
+from packaging.version import InvalidVersion, Version
 
 from flameox.adapters.options import (
     adapter_accepts_options,
@@ -58,6 +61,24 @@ class CaptureInvocation:
     environment: dict[str, str]
 
 
+def node_version_is_supported(value: str | None) -> bool:
+    """Return whether Node exposes the stable V8 profile flags used by these adapters."""
+    if value is None:
+        return False
+    match = re.search(r"\d+(?:\.\d+)+", value)
+    if match is None:
+        return False
+    try:
+        version = Version(match.group())
+    except InvalidVersion:
+        return False
+    return (
+        (version.major == 20 and version >= Version("20.16"))
+        or (version.major == 22 and version >= Version("22.4"))
+        or version.major > 22
+    )
+
+
 BUILTIN_ADAPTERS = {
     adapter.name: adapter
     for adapter in (
@@ -71,6 +92,49 @@ BUILTIN_ADAPTERS = {
             artifact_kinds=(ArtifactKind.PROCESS_OUTPUT,),
             expected_overhead="No profiler overhead; process output only.",
             capture_limitations=("No sampled stack or operator evidence is collected.",),
+        ),
+        BuiltinAdapter(
+            name="node-cpu-prof",
+            dependency_kind=AdapterDependencyKind.EXECUTABLE,
+            dependency="node",
+            supported_modes=("record",),
+            supported_formats=("v8-cpuprofile",),
+            features=("sampled_stacks", "javascript_symbols"),
+            remediation=("Install Node.js 20.16+ or 22.4+ which expose stable --cpu-prof flags.",),
+            version_args=("--version",),
+            output_filename="cpu.cpuprofile",
+            artifact_kinds=(ArtifactKind.SAMPLE_PROFILE,),
+            expected_overhead=(
+                "V8 CPU sampling overhead; exact rate depends on --cpu-prof-interval."
+            ),
+            capture_limitations=(
+                "Only the main Node.js thread is profiled; worker threads are not sampled.",
+                "The CPU profile contains sampled stack locations, not wall-clock or "
+                "allocation evidence.",
+            ),
+            preserve_artifact_on_nonzero=True,
+        ),
+        BuiltinAdapter(
+            name="node-heap-prof",
+            dependency_kind=AdapterDependencyKind.EXECUTABLE,
+            dependency="node",
+            supported_modes=("record",),
+            supported_formats=("v8-sampling-heap-profile",),
+            features=("allocations", "sampled_allocations", "stacks"),
+            remediation=("Install Node.js 20.16+ or 22.4+ which expose stable --heap-prof flags.",),
+            version_args=("--version",),
+            output_filename="heap.heapprofile",
+            artifact_kinds=(ArtifactKind.MEMORY_PROFILE,),
+            expected_overhead=(
+                "V8 heap sampling overhead; exact rate depends on --heap-prof-interval."
+            ),
+            capture_limitations=(
+                "Sampled allocation bytes are an estimate, not the exact retained heap or "
+                "process RSS.",
+                "Only allocations sampled by V8 are reported; small or short-lived "
+                "allocations may be underrepresented.",
+            ),
+            preserve_artifact_on_nonzero=True,
         ),
         BuiltinAdapter(
             name="benchmark-samples",
@@ -453,6 +517,7 @@ def build_capture_invocation(  # noqa: C901 - provider routing is intentionally 
     timeout_seconds: float = 300,
     options: dict[str, object] | None = None,
     project_root: Path | None = None,
+    workload_executable: str | None = None,
 ) -> CaptureInvocation:
     adapter = BUILTIN_ADAPTERS.get(adapter_name)
     if (
@@ -520,6 +585,16 @@ def build_capture_invocation(  # noqa: C901 - provider routing is intentionally 
                 output,
                 *target,
             )
+    elif adapter_name in {"node-cpu-prof", "node-heap-prof"}:
+        return _node_v8_capture_invocation(
+            adapter_name,
+            adapter,
+            workload_argv,
+            output_root,
+            output,
+            executable=executable,
+            workload_executable=workload_executable,
+        )
     elif adapter_name == "torch.profiler":
         return _torch_capture_invocation(
             adapter,
@@ -738,6 +813,71 @@ def _torch_capture_invocation(
             "steady-state phases.",
             *feature_limitations,
         ),
+        environment={},
+    )
+
+
+def _node_v8_capture_invocation(
+    adapter_name: str,
+    adapter: BuiltinAdapter,
+    workload_argv: tuple[str, ...],
+    output_root: Path,
+    output: str,
+    *,
+    executable: str | None,
+    workload_executable: str | None,
+) -> CaptureInvocation:
+    """Inject Node.js --cpu-prof or --heap-prof flags into a declared Node workload.
+
+    Node.js exposes stable V8 profiling through CLI flags (Node 20.16+ / 22.4+).
+    The declared workload argv already starts with the Node executable, so the
+    adapter inserts the profiling flags immediately after argv[0] and before the
+    user script and its arguments.  The output directory and file name are bound
+    explicitly so Flameox owns the artifact path and can preserve it.
+    """
+    if not workload_argv:
+        raise DomainError(
+            ErrorCode.INVALID_CAPTURE_PLAN,
+            "A declared Node.js workload command is required for V8 profiling.",
+        )
+    node_executable = workload_executable or workload_argv[0]
+    node_name = Path(node_executable).name
+    if not (
+        node_name == "node" or node_name.startswith("node") or node_executable.endswith("node")
+    ):
+        raise DomainError(
+            ErrorCode.INVALID_CAPTURE_PLAN,
+            f"V8 profiling requires a Node.js workload; the declared "
+            f"executable is {node_executable!r}.",
+            remediation=("Declare a Node.js command (e.g. `node script.js`) as the workload.",),
+        )
+    if len(workload_argv) < 2:
+        raise DomainError(
+            ErrorCode.INVALID_CAPTURE_PLAN,
+            "A declared Node.js script or module is required after the node executable.",
+        )
+    # Compute the directory and file name for the V8 profile output.
+    output_path = Path(output)
+    prof_dir = str(output_path.parent)
+    prof_name = output_path.name
+    if adapter_name == "node-cpu-prof":
+        prof_flags = (
+            "--cpu-prof",
+            "--cpu-prof-dir=" + prof_dir,
+            "--cpu-prof-name=" + prof_name,
+        )
+    else:
+        prof_flags = (
+            "--heap-prof",
+            "--heap-prof-dir=" + prof_dir,
+            "--heap-prof-name=" + prof_name,
+        )
+    argv = (node_executable, *prof_flags, *workload_argv[1:])
+    return CaptureInvocation(
+        argv=argv,
+        artifact_kinds=adapter.artifact_kinds,
+        expected_overhead=adapter.expected_overhead or "",
+        limitations=adapter.capture_limitations,
         environment={},
     )
 

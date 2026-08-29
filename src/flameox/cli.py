@@ -33,6 +33,8 @@ from flameox.adapters import (
     PytestExtractor,
     PythonStartupExtractor,
     SetupClient,
+    V8CpuProfExtractor,
+    V8HeapProfExtractor,
 )
 from flameox.analysis import RecipeService
 from flameox.application import (
@@ -2369,6 +2371,34 @@ def extract_benchmark_samples(
     """Extract producer-neutral raw benchmark samples and timing semantics."""
     try:
         result = BenchmarkSamplesExtractor(_workspace(workspace)).extract(run_id)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@extract_app.command("node-cpu-prof")
+def extract_node_cpu_prof(
+    run_id: Annotated[str, typer.Argument(help="Run containing a V8 .cpuprofile artifact.")],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Extract bounded evidence from a Node/V8 CPU profile."""
+    try:
+        result = V8CpuProfExtractor(_workspace(workspace)).extract(run_id)
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@extract_app.command("node-heap-prof")
+def extract_node_heap_prof(
+    run_id: Annotated[str, typer.Argument(help="Run containing a V8 .heapprofile artifact.")],
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Extract bounded evidence from a Node/V8 sampling heap profile."""
+    try:
+        result = V8HeapProfExtractor(_workspace(workspace)).extract(run_id)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)

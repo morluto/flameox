@@ -26,6 +26,7 @@ from flameox.adapters.builtins import (
     AdapterDependencyKind,
     build_capture_invocation,
     builtin_adapter,
+    node_version_is_supported,
     replace_compute_sanitizer_suppression,
 )
 from flameox.adapters.compute_sanitizer import (
@@ -644,6 +645,7 @@ class CaptureService:
             output_root,
             capability=adapter_capability,
             options=bound_adapter_options,
+            workload_executable=str(instance.executable_binding.invocation_path),
         )
         collector_environment.update(adapter_binding.environment)
         collector_argv = adapter_binding.argv
@@ -2692,6 +2694,7 @@ class CaptureService:
         *,
         capability: CapabilityReport | None = None,
         options: dict[str, JsonValue] | None = None,
+        workload_executable: str | None = None,
     ) -> _AdapterBinding:
         adapter_definition = builtin_adapter(adapter)
         if adapter_definition is not None:
@@ -2715,6 +2718,7 @@ class CaptureService:
                 timeout_seconds=workload.timeout_seconds,
                 options=cast(dict[str, object] | None, options),
                 project_root=self.workspace.project_root,
+                workload_executable=workload_executable,
             )
             if invocation.environment:
                 conflicts = {
@@ -2736,6 +2740,23 @@ class CaptureService:
                             "to the identical value required by the adapter.",
                         ),
                     )
+            version = capability.version
+            if adapter in {"node-cpu-prof", "node-heap-prof"}:
+                if workload_executable is None:
+                    raise DomainError(
+                        ErrorCode.INVALID_CAPTURE_PLAN,
+                        "The V8 capture plan is missing the declared Node executable.",
+                    )
+                version = await self.capabilities.probe_executable_version(
+                    workload_executable,
+                    cwd=Path(workload.cwd),
+                )
+                if not node_version_is_supported(version):
+                    raise DomainError(
+                        ErrorCode.ADAPTER_INCOMPATIBLE,
+                        "The declared Node.js executable is too old for stable V8 profiling.",
+                        remediation=("Use Node.js 20.16+ or 22.4+ for V8 profiling.",),
+                    )
             return _AdapterBinding(
                 argv=invocation.argv,
                 artifact_kinds=invocation.artifact_kinds,
@@ -2747,7 +2768,7 @@ class CaptureService:
                     for message in invocation.limitations
                 ),
                 permissions=adapter_definition.permissions,
-                version=capability.version,
+                version=version,
             )
 
         registry = AdapterRegistry(self.workspace)

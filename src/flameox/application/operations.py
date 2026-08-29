@@ -947,6 +947,15 @@ class OperationRunner:
         task = self.tasks.get(operation_id)
         if task is not None:
             await task.wait()
+        elif event is not None:
+            # The task handle can disappear just before _execute commits its terminal
+            # record.  We still own the cancellation event in that small window, so
+            # wait for finalization instead of projecting an active run as unmanaged.
+            for _ in range(500):
+                current = self.store.read(operation_id)
+                if not isinstance(current, ActiveOperationRecord):
+                    break
+                await anyio.sleep(0.01)
         return OperationStatus.from_record(
             self.store.read(operation_id),
             adapter=self.adapter,
