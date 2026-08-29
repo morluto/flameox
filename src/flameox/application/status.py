@@ -18,9 +18,9 @@ from flameox.storage import RunStore, Workspace, tree_bytes
 
 
 class WorkspaceStatus(ContractModel):
-    schema_version: int = 1
     workspace_id: str
     project_root: str
+    workspace_root: str
     corpus_commit_id: str
     catalog_exists: bool
     workspace_valid: bool
@@ -93,6 +93,7 @@ def workspace_status(workspace: Workspace) -> WorkspaceStatus:
     return WorkspaceStatus(
         workspace_id=workspace.identity.workspace_id,
         project_root=str(workspace.project_root),
+        workspace_root=str(workspace.paths.root),
         corpus_commit_id=workspace.corpus.read_head().commit_id,
         catalog_exists=catalog_exists,
         workspace_valid=integrity.valid,

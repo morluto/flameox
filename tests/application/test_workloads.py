@@ -18,6 +18,7 @@ from flameox.application import (
     WorkloadConfig,
     WorkloadConfigurationResult,
     WorkloadConfigurationStatus,
+    WorkloadOracleConfig,
     WorkloadService,
     parse_experiment_config,
 )
@@ -25,6 +26,11 @@ from flameox.domain import DomainError, ErrorCode
 from flameox.storage import Workspace
 
 pytestmark = pytest.mark.integration
+
+
+def test_oracle_declaration_requires_a_command() -> None:
+    with pytest.raises(ValidationError, match="argv"):
+        WorkloadOracleConfig.model_validate({"strength": "execution_check"})
 
 
 def _request(

@@ -396,7 +396,7 @@ def initialize(
     try:
         initialized = Workspace.initialize(
             project_root or _cli_defaults().project_root or Path("."),
-            workspace_root=workspace,
+            workspace_root=workspace or _cli_defaults().workspace,
         )
         result = workspace_status(initialized)
     except DomainError as error:
@@ -1290,20 +1290,24 @@ def inference_profile_run(
     _emit(result, as_json=json_output)
 
 
-def _parameter_overrides(value: str) -> dict[str, Any]:
+def _json_object(value: str, *, label: str) -> dict[str, Any]:
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as exc:
         raise DomainError(
             ErrorCode.INVALID_CAPTURE_PLAN,
-            f"Invalid parameter overrides: {exc}",
+            f"Malformed {label} JSON: {exc}",
         ) from exc
     if not isinstance(parsed, dict):
         raise DomainError(
             ErrorCode.INVALID_CAPTURE_PLAN,
-            "Parameter overrides must be a JSON object.",
+            f"{label.capitalize()} must be a JSON object.",
         )
     return cast(dict[str, Any], parsed)
+
+
+def _parameter_overrides(value: str) -> dict[str, Any]:
+    return _json_object(value, label="parameter overrides")
 
 
 @experiment_app.command("plan")
@@ -1432,7 +1436,10 @@ def fault_plan(
 def fault_run(
     name: Annotated[str | None, typer.Argument(help="Named fault experiment.")] = None,
     investigation_id: Annotated[str | None, typer.Option("--investigation")] = None,
-    plan_id: Annotated[str | None, typer.Option("--plan-id")] = None,
+    plan_token: Annotated[
+        str | None,
+        typer.Option("--plan-token", help="Opaque single-use capability returned by fault plan."),
+    ] = None,
     hypothesis_id: Annotated[str | None, typer.Option("--hypothesis")] = None,
     parameters: Annotated[str, typer.Option("--parameters")] = "{}",
     workspace: WorkspaceOption = None,
@@ -1442,12 +1449,12 @@ def fault_run(
 
     async def run() -> BaseModel:
         service = FaultExperimentService(_workspace(workspace))
-        selected_plan = plan_id
+        selected_plan = plan_token
         if selected_plan is None:
             if name is None or investigation_id is None:
                 raise DomainError(
                     ErrorCode.INVALID_CAPTURE_PLAN,
-                    "fault run requires --plan-id or NAME with --investigation.",
+                    "fault run requires --plan-token or NAME with --investigation.",
                 )
             planned = await service.plan(
                 experiment_name=name,
@@ -1456,7 +1463,13 @@ def fault_run(
                 parameter_overrides=_parameter_overrides(parameters),
                 execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
             )
-            selected_plan = planned.plan_id
+            selected_plan = planned.plan_token
+        elif selected_plan.startswith("sha256:"):
+            raise DomainError(
+                ErrorCode.INVALID_CAPTURE_PLAN,
+                "--plan-token requires the opaque capability, not the public plan_id.",
+                remediation=("Pass the plan_token returned by flameox fault plan.",),
+            )
         return await service.run(selected_plan)
 
     try:
@@ -1500,29 +1513,19 @@ def capture_plan(
 ) -> None:
     """Resolve a side-effect-free local capture plan."""
 
-    async def plan() -> BaseModel:
-        try:
-            values = json.loads(parameters)
-            if not isinstance(values, dict):
-                raise ValueError("parameters must be a JSON object")
-            options = json.loads(adapter_options)
-            if not isinstance(options, dict):
-                raise ValueError("adapter options must be a JSON object")
-            return await CaptureService(_workspace(workspace)).plan(
-                workload_name=workload_name,
-                adapter=adapter,
-                parameters=values,
-                adapter_options=options,
-                execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
-            )
-        except (json.JSONDecodeError, ValueError) as exc:
-            raise DomainError(
-                ErrorCode.INVALID_CAPTURE_PLAN,
-                f"Invalid parameter overrides: {exc}",
-            ) from exc
+    async def plan(values: dict[str, Any], options: dict[str, Any]) -> BaseModel:
+        return await CaptureService(_workspace(workspace)).plan(
+            workload_name=workload_name,
+            adapter=adapter,
+            parameters=values,
+            adapter_options=options,
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
 
     try:
-        result = _run_async(plan)
+        values = _parameter_overrides(parameters)
+        options = _json_object(adapter_options, label="adapter options")
+        result = _run_async(lambda: plan(values, options))
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -1539,13 +1542,7 @@ def capture_run(
 ) -> None:
     """Plan and execute one named workload capture."""
 
-    async def run() -> BaseModel:
-        values = json.loads(parameters)
-        if not isinstance(values, dict):
-            raise ValueError("parameters must be a JSON object")
-        options = json.loads(adapter_options)
-        if not isinstance(options, dict):
-            raise ValueError("adapter options must be a JSON object")
+    async def run(values: dict[str, Any], options: dict[str, Any]) -> BaseModel:
         service = CaptureService(_workspace(workspace))
         plan = await service.plan(
             workload_name=workload_name,
@@ -1557,14 +1554,9 @@ def capture_run(
         return await service.execute(plan.plan_token)
 
     try:
-        result = _run_async(run)
-    except (json.JSONDecodeError, ValueError) as exc:
-        _fail(
-            DomainError(
-                ErrorCode.INVALID_CAPTURE_PLAN,
-                f"Invalid parameter overrides: {exc}",
-            )
-        )
+        values = _parameter_overrides(parameters)
+        options = _json_object(adapter_options, label="adapter options")
+        result = _run_async(lambda: run(values, options))
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)

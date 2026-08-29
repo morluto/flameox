@@ -156,7 +156,7 @@ class AdapterPlanningDisposition(StrEnum):
 
 class WorkloadOracleConfig(ContractModel):
     strength: OracleStrength = OracleStrength.EXECUTION_CHECK
-    argv: Annotated[tuple[str, ...], Field(max_length=1_024)] = ()
+    argv: Annotated[tuple[str, ...], Field(min_length=1, max_length=1_024)]
     receipt_schema: Literal["flameox.oracle-receipt.v1"] | None = None
 
 
@@ -1889,11 +1889,6 @@ class WorkloadService:
         config = self._selected(name)
         if config.oracle is None:
             return None
-        if not config.oracle.argv:
-            raise DomainError(
-                ErrorCode.WORKSPACE_INVALID,
-                f"Workload {name!r} declares an oracle without argv.",
-            )
         selected = self._parameters(config, overrides or {}, dynamic_parameters=dynamic_parameters)
         cwd = (self.workspace.project_root / _render(config.cwd, selected)).resolve()
         rendered = tuple(_render(value, selected) for value in config.oracle.argv)

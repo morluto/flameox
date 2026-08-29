@@ -5,6 +5,7 @@ import pytest
 from click import unstyle
 from typer.testing import CliRunner
 
+from flameox.application import CaptureService
 from flameox.cli import app
 
 pytestmark = pytest.mark.integration
@@ -135,6 +136,83 @@ def test_global_project_root_initializes_and_invalid_request_exits_two(
     assert (project / ".diagnostics" / "workspace.json").is_file()
     assert invalid.exit_code == 2
     assert "Structured input is invalid" in invalid.output
+
+
+def test_global_workspace_initializes_the_requested_location(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    workspace = tmp_path / "state" / "flameox"
+
+    result = CliRunner().invoke(
+        app,
+        ["--workspace", str(workspace), "init", str(project), "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (workspace / "workspace.json").is_file()
+    assert not (project / ".diagnostics").exists()
+    assert json.loads(result.stdout)["workspace_root"] == str(workspace)
+
+
+def test_fault_run_names_the_single_use_plan_token() -> None:
+    result = CliRunner().invoke(app, ["fault", "run", "--help"])
+
+    assert result.exit_code == 0, result.output
+    help_text = unstyle(result.stdout)
+    assert "--plan-token" in help_text
+    assert "--plan-id" not in help_text
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    (
+        ("--parameters", "[1]", "Parameter overrides must be a JSON object"),
+        ("--adapter-options", "{", "Malformed adapter options JSON"),
+    ),
+)
+def test_capture_json_is_rejected_at_the_cli_boundary(
+    option: str,
+    value: str,
+    message: str,
+) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["capture", "plan", "command", "--workload", "probe", option, value],
+    )
+
+    assert result.exit_code == 9
+    assert message in result.output
+
+
+def test_capture_does_not_relabel_an_internal_value_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    workspace = project / ".diagnostics"
+    assert CliRunner().invoke(app, ["init", str(project)]).exit_code == 0
+
+    async def fail_after_boundary(*_args: object, **_kwargs: object) -> object:
+        raise ValueError("publication invariant failed")
+
+    monkeypatch.setattr(CaptureService, "plan", fail_after_boundary)
+    result = CliRunner().invoke(
+        app,
+        [
+            "capture",
+            "run",
+            "command",
+            "--workload",
+            "probe",
+            "--workspace",
+            str(workspace),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, ValueError)
+    assert "Invalid parameter overrides" not in result.output
 
 
 def test_analysis_record_rejects_fields_from_another_recipe(tmp_path: Path) -> None:

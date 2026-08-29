@@ -61,14 +61,6 @@ def resolve_evidence_scope(
                 f"Run is absent from the pinned corpus: {input_id}",
             )
         run_ids.add(input_id)
-        artifact_ids.update(
-            str(row[0])
-            for row in snapshot.execute(
-                "SELECT DISTINCT artifact_id FROM artifact_registrations "
-                "WHERE run_id = ? ORDER BY artifact_id",
-                (input_id,),
-            ).fetchall()
-        )
     return EvidenceScope(
         input_ids=values,
         run_ids=tuple(sorted(run_ids)),
