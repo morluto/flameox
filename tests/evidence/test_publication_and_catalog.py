@@ -237,6 +237,25 @@ def test_snapshot_connection_cannot_read_outside_workspace(tmp_path: Path) -> No
             snapshot.execute("SET threads=99")
 
 
+def test_concurrent_read_snapshots_keep_configuration_connection_local(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    catalog = Catalog(workspace)
+    catalog.rebuild()
+    ready = threading.Barrier(2)
+
+    def read_head() -> int:
+        with catalog.open_snapshot() as snapshot:
+            ready.wait(timeout=5)
+            row = snapshot.execute("SELECT 1").fetchone()
+            assert row is not None
+            return cast(int, row[0])
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(lambda _: read_head(), range(2)))
+
+    assert results == (1, 1)
+
+
 def test_catalog_is_rebuildable_after_deletion(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     publisher = GenerationPublisher(workspace)
