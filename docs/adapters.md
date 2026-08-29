@@ -212,6 +212,10 @@ documented schema family, not every Nsight release.
 
 `.nsys-rep` capture artifacts remain opaque until exported by the installed
 `nsys` tool. Flameox does not parse the private report container.
+Automated Nsight captures explicitly disable symbol downloads so provider
+finalization cannot silently consume the capture deadline. The bounded response
+reports workload, provider-finalization, and SQLite-export durations separately;
+symbol resolution is recorded as disabled in the reviewed plan and result.
 
 ### Nsight Compute
 

@@ -137,6 +137,7 @@ class _ProfilingBroker(SubprocessBroker):
             process=ProcessResult(
                 termination=process_termination_from_returncode(0),
                 cleanup_complete=True,
+                wall_time_ns=1_234,
             ),
             stdout=b"",
             stderr=b"",
@@ -355,7 +356,46 @@ def test_nsight_plan_wraps_server_with_documented_cuda_capture_range(tmp_path: P
     assert plan.nsys_executable == nsys
     assert plan.server_argv[:3] == (str(nsys), "profile", "--trace-fork-before-exec=true")
     assert "--capture-range=cudaProfilerApi" in plan.server_argv
+    assert "--resolve-symbols=false" in plan.server_argv
+    assert plan.symbol_resolution == "disabled"
     assert plan.server_argv[-2:] == ("--profiler-config.profiler", "cuda")
+
+
+@pytest.mark.anyio
+async def test_nsight_capture_reports_noninteractive_phase_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _workspace(tmp_path)
+    executable = tmp_path / "aiperf"
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(0o755)
+    nsys = tmp_path / "nsys"
+    nsys.write_text("#!/bin/sh\n")
+    nsys.chmod(0o755)
+    _patch_capture_dependencies(monkeypatch, executable)
+    measurement_run_id = await _seed_measurement_run(workspace)
+    service = InferenceProfilingService(workspace)
+    plan = service.plan(
+        "local",
+        profiler="nsight_systems",
+        nsys_executable=nsys,
+        scenario_name="profile",
+        measurement_run_id=measurement_run_id,
+        timeout_seconds=5,
+    )
+    service.broker = _ProfilingBroker(plan.output_path)
+
+    result = await service.capture(plan.plan_token)
+
+    assert result.symbol_resolution_status == "disabled"
+    assert result.symbol_resolution_duration_ns is None
+    assert result.workload_duration_ns == 1_234
+    assert result.finalization_duration_ns >= 0
+    assert result.export_duration_ns is not None
+    assert result.export_duration_ns >= 0
+    run = RunStore(workspace).read(result.run_id)
+    assert run.semantics.configuration["symbol_resolution"] == "disabled"
 
 
 def test_existing_local_server_cannot_be_profiled(tmp_path: Path) -> None:

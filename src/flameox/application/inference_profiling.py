@@ -145,6 +145,7 @@ class NsightSystemsProfilingPlan(_InferenceProfilingPlan):
     profiler: Literal[ProfilerKind.NSIGHT_SYSTEMS] = ProfilerKind.NSIGHT_SYSTEMS
     nsys_executable: Path
     nsys_executable_binding: ResolvedExecutable
+    symbol_resolution: Literal["disabled"] = "disabled"
     sglang_profile_id: Literal[None] = None
     sglang_profile_options: Literal[None] = None
 
@@ -177,7 +178,6 @@ def parse_inference_profiling_plan(value: Any) -> InferenceProfilingPlan:
 
 
 class InferenceProfilingResult(ContractModel):
-    schema_version: Literal[2] = 2
     run_id: str
     plan_id: str
     measurement_protocol_id: str
@@ -189,6 +189,11 @@ class InferenceProfilingResult(ContractModel):
     artifact_ids: tuple[str, ...]
     artifact_run_ids: tuple[str, ...]
     extracted_run_ids: tuple[str, ...] = ()
+    workload_duration_ns: int | None
+    finalization_duration_ns: int
+    export_duration_ns: int | None
+    symbol_resolution_status: Literal["disabled"] | None
+    symbol_resolution_duration_ns: int | None
     coverage: InferenceProfileCoverage
     limitations: tuple[str, ...]
 
@@ -368,6 +373,7 @@ class InferenceProfilingService:
                         "--cuda-graph-trace=node",
                         "--capture-range=cudaProfilerApi",
                         "--capture-range-end=repeat",
+                        "--resolve-symbols=false",
                         "--output",
                         str(output_path.with_suffix("")),
                         *native_argv,
@@ -700,6 +706,8 @@ class InferenceProfilingService:
             limitations = list(run.limitations)
             benchmark_exit_code: int | None = None
             benchmark_process = None
+            finalization_duration_ns = 0
+            export_duration_ns: int | None = None
             control = InferenceProfilerControlClient(
                 plan.base_url,
                 provider=plan.server_provider,
@@ -763,7 +771,9 @@ class InferenceProfilingService:
                     except DomainError as error:
                         limitations.append(error.message)
                 try:
+                    finalization_started = time.monotonic_ns()
                     server_outcome = await asyncio.shield(lease.close())
+                    finalization_duration_ns = time.monotonic_ns() - finalization_started
                 finally:
                     await http_client.aclose()
 
@@ -776,7 +786,9 @@ class InferenceProfilingService:
                 limitations.append("Managed server process cleanup was incomplete.")
 
             if plan.profiler is ProfilerKind.NSIGHT_SYSTEMS:
-                await self._export_nsight(plan, profile_output, deadline_at, limitations)
+                export_duration_ns = await self._export_nsight(
+                    plan, profile_output, deadline_at, limitations
+                )
             artifacts, runs, preservation_limitations = self._preserve(plan, profile_output)
             limitations.extend(preservation_limitations)
             extracted_runs = await self._extract_preserved(plan, runs, deadline_at, limitations)
@@ -836,6 +848,17 @@ class InferenceProfilingService:
                 artifact_ids=artifacts,
                 artifact_run_ids=runs,
                 extracted_run_ids=extracted_runs,
+                workload_duration_ns=(
+                    benchmark_process.wall_time_ns if benchmark_process is not None else None
+                ),
+                finalization_duration_ns=finalization_duration_ns,
+                export_duration_ns=export_duration_ns,
+                symbol_resolution_status=(
+                    "disabled"
+                    if finished.semantics.configuration.get("symbol_resolution") == "disabled"
+                    else None
+                ),
+                symbol_resolution_duration_ns=None,
                 coverage=coverage,
                 limitations=tuple(limitations),
             )
@@ -914,7 +937,14 @@ class InferenceProfilingService:
             semantics=RunSemantics(
                 origin="internal",
                 adapter=plan.profiler,
-                configuration={"diagnostic_protocol_id": diagnostic_id},
+                configuration={
+                    "diagnostic_protocol_id": diagnostic_id,
+                    **(
+                        {"symbol_resolution": plan.symbol_resolution}
+                        if isinstance(plan, NsightSystemsProfilingPlan)
+                        else {}
+                    ),
+                },
             ),
             command=CommandSpec(
                 argv=server_argv,
@@ -1174,23 +1204,24 @@ class InferenceProfilingService:
         output: BoundDirectory,
         deadline_at: datetime,
         limitations: list[str],
-    ) -> None:
+    ) -> int | None:
         if plan.nsys_executable is None:
             limitations.append("Nsight export executable identity is unavailable.")
-            return
+            return None
         remaining = (deadline_at - utc_now()).total_seconds()
         if remaining <= 0:
             limitations.append("No deadline remained for Nsight SQLite export.")
-            return
+            return None
         try:
             with output.open_file(plan.output_relative_path):
                 pass
         except DomainError:
             limitations.append("Nsight did not emit its native report.")
-            return
+            return None
         sqlite_relative_path = str(Path(plan.output_relative_path).with_suffix(".sqlite"))
         sqlite_path = output.child_process_path(sqlite_relative_path)
         report_path = output.child_process_path(plan.output_relative_path)
+        started_ns = time.monotonic_ns()
         try:
             outcome = await self.broker.run(
                 ExecutionRequest(
@@ -1220,6 +1251,7 @@ class InferenceProfilingService:
                 )
         except DomainError as error:
             limitations.append(f"Nsight SQLite export failed: {error.message}")
+        return time.monotonic_ns() - started_ns
 
     def _preserve(
         self,
