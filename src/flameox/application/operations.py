@@ -22,6 +22,8 @@ from flameox.models import ContractModel
 from flameox.storage import ControlPlane, Workspace
 from flameox.storage.control_plane import canonical_json
 
+_CANCEL_CLEANUP_WAIT_SECONDS = 0.25
+
 
 class OperationState(StrEnum):
     STARTING = "starting"
@@ -946,12 +948,14 @@ class OperationRunner:
             hook()
         task = self.tasks.get(operation_id)
         if task is not None:
-            await task.wait()
+            with anyio.move_on_after(_CANCEL_CLEANUP_WAIT_SECONDS):
+                await task.wait()
         elif event is not None:
             # The task handle can disappear just before _execute commits its terminal
             # record.  We still own the cancellation event in that small window, so
             # wait for finalization instead of projecting an active run as unmanaged.
-            for _ in range(500):
+            deadline = asyncio.get_running_loop().time() + _CANCEL_CLEANUP_WAIT_SECONDS
+            while asyncio.get_running_loop().time() < deadline:
                 current = self.store.read(operation_id)
                 if not isinstance(current, ActiveOperationRecord):
                     break

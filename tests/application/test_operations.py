@@ -412,6 +412,38 @@ async def test_operation_runner_cancellation_preserves_failure_details(tmp_path:
 
 
 @pytest.mark.anyio
+async def test_operation_runner_cancellation_returns_before_blocked_cleanup(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    runner = OperationRunner(workspace, _TEST_OPERATION)
+    cancellation_seen = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def run(operation_id: str, progress: object) -> dict[str, object]:
+        del progress
+        runner.set_cancel_hook(operation_id, cancellation_seen.set)
+        await cancellation_seen.wait()
+        await release_cleanup.wait()
+        return {"cleanup": "complete"}
+
+    started = await runner.start({"value": 1}, "bounded-cancel-key", run)
+    before = asyncio.get_running_loop().time()
+    cancelling = await runner.cancel(started.operation_id)
+
+    assert asyncio.get_running_loop().time() - before < 1
+    assert cancelling.state == "running"
+    assert cancelling.phase == "cancelling"
+    assert cancelling.cancellation_requested is True
+    assert cancelling.cleanup_status == "pending"
+
+    release_cleanup.set()
+    terminal = await runner.wait(started.operation_id, timeout_seconds=1)
+    assert terminal.state == "cancelled"
+    assert terminal.cleanup_status == "complete"
+
+
+@pytest.mark.anyio
 async def test_operation_runner_idempotency_is_shared_by_runners(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     first_runner = OperationRunner(workspace, _TEST_OPERATION)

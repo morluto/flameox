@@ -298,10 +298,10 @@ phases report phase changes without invented percentages. Progress delivery is
 non-authoritative: a logging or notification failure cannot change the operation
 result.
 
-Client cancellation propagates into the owning application operation. The
-operation cancels and awaits children, records truthful terminal state, and
-finishes bounded cleanup before returning cancellation. Detached operations can
-be inspected after client disconnect.
+Client cancellation propagates into the owning application operation. A cancellation
+tool durably records the request and waits up to 250 milliseconds for immediate cleanup;
+if cleanup is still active, it returns the pollable `cancelling` state instead of blocking.
+Detached operations can be inspected after client disconnect.
 
 ## Errors
 

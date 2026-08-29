@@ -80,6 +80,8 @@ task group where concurrent control tasks are required. Cancellation propagates
 to the subprocess broker, DuckDB connection, publisher, or sidecar that owns the
 resource. Cleanup is shielded only for the bounded phase needed to reach a
 truthful terminal state, after which the original cancellation is re-raised.
+Cancellation control calls wait at most 250 milliseconds for that terminal transition;
+longer cleanup remains owned by the operation and is observed through status polling.
 
 The broker's internal asyncio tasks and synchronous worker bridges are part of
 the execution substrate. They must be cancelled or joined before their owner

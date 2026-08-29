@@ -1038,6 +1038,57 @@ async def test_capability_setup_failure_keeps_staging_phase_and_diagnostics(
         await manager.shutdown()
 
 
+@pytest.mark.anyio
+async def test_capability_setup_cancel_returns_while_staging_cleanup_continues(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    staging = threading.Event()
+    release_cleanup = threading.Event()
+
+    class BlockedCapabilityService:
+        def prepare(
+            self,
+            adapters: tuple[str, ...],
+            *,
+            cancel_event: threading.Event,
+            phase_callback: Any,
+        ) -> CapabilitySetupResult:
+            phase_callback("staging_trace_processor", None)
+            staging.set()
+            assert cancel_event.wait(timeout=2)
+            assert release_cleanup.wait(timeout=2)
+            raise DomainError(ErrorCode.PROCESS_CANCELLED, "cancelled")
+
+        def _read_setup_receipt(self) -> None:
+            return None
+
+    manager = CapabilitySetupManager(
+        workspace,
+        cast(CapabilityService, BlockedCapabilityService()),
+    )
+    try:
+        started = await manager.start(("perfetto",), "bounded-staging-cancel")
+        assert await asyncio.to_thread(staging.wait, 1)
+
+        before = asyncio.get_running_loop().time()
+        cancelling = await manager.cancel(started.operation_id)
+
+        assert asyncio.get_running_loop().time() - before < 1
+        assert cancelling.state == "running"
+        assert cancelling.phase == "cancelling"
+        assert cancelling.cancellation_requested is True
+        assert cancelling.cleanup_status == "pending"
+
+        release_cleanup.set()
+        terminal = await manager.runner.wait(started.operation_id, timeout_seconds=1)
+        assert terminal.state == "cancelled"
+        assert terminal.cleanup_status == "complete"
+    finally:
+        release_cleanup.set()
+        await manager.shutdown()
+
+
 def test_entry_point_approval_is_revoked_when_installed_content_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
