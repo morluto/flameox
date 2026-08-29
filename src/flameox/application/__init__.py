@@ -399,6 +399,7 @@ __all__ = [
     "discover_inference_tool",
     "kernel_build_pipeline_request",
     "managed_kernel_build_context",
+    "managed_setup_adapter_names",
     "parse_compare_run_sets_request",
     "parse_experiment_config",
     "parse_inference_profiling_plan",

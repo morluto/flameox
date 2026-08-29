@@ -171,8 +171,11 @@ Capability responses distinguish passive discovery from execution binding.
 Setup installs only allowlisted managed providers into version-addressed provider
 environments; it never adds packages to the running MCP server. Provider setup
 installs core Flameox plus that provider—not a Flameox “all extras” environment—
-so mutually incompatible profilers and reducers remain usable. Third-party entry
-points need an exact package-identity approval. From an editable Flameox checkout,
+so mutually incompatible profilers and reducers remain usable. The MCP setup
+adapter schema is generated from these same definitions and includes inference
+providers such as AIPerf; there is no separate transport vocabulary to drift.
+Third-party entry points need an exact package-identity approval. From an editable
+Flameox checkout,
 setup builds one wheel into workspace-owned content-addressed storage and binds its
 wheel digest, bounded source-tree identity, revision, and dirty state in the provider
 receipt. Released installations resolve Flameox and the provider into a preserved,

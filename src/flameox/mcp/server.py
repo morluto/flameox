@@ -18,6 +18,7 @@ from mcp_types import (
     ToolAnnotations,
 )
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -27,6 +28,7 @@ from pydantic import (
     StrictBool,
     StrictFloat,
     StrictInt,
+    WithJsonSchema,
     model_validator,
 )
 from pydantic.json_schema import GenerateJsonSchema, JsonSchemaMode
@@ -216,6 +218,7 @@ from flameox.application import (
     XctraceImportRequest,
     XctraceImportResult,
     XctraceService,
+    managed_setup_adapter_names,
     parse_inference_scenario_config,
     parse_inference_server_config,
     safe_run_semantics,
@@ -252,6 +255,22 @@ from flameox.domain import (
 from flameox.mcp.resources import register_resources
 from flameox.models import ContractModel
 from flameox.storage import Workspace
+
+_MANAGED_SETUP_ADAPTERS = managed_setup_adapter_names()
+
+
+def _managed_setup_adapter(value: str) -> str:
+    if value not in _MANAGED_SETUP_ADAPTERS:
+        raise ValueError("adapter is not managed by Flameox")
+    return value
+
+
+type ManagedSetupAdapter = Annotated[
+    str,
+    AfterValidator(_managed_setup_adapter),
+    WithJsonSchema({"type": "string", "enum": list(_MANAGED_SETUP_ADAPTERS)}),
+]
+
 
 READ_ONLY = ToolAnnotations(
     read_only_hint=True,
@@ -1377,21 +1396,10 @@ def create_server(
     @_action_tool(server, ActionId.START_CAPABILITY_SETUP)
     async def start_capability_setup(
         adapters: Annotated[
-            tuple[
-                Literal[
-                    "coverage",
-                    "memray",
-                    "perfetto",
-                    "py-spy",
-                    "pytest",
-                    "torch.profiler",
-                    "toxiproxy",
-                ],
-                ...,
-            ],
+            tuple[ManagedSetupAdapter, ...],
             Field(
                 min_length=1,
-                max_length=6,
+                max_length=len(_MANAGED_SETUP_ADAPTERS),
                 description="Managed adapters from list_capabilities to install or stage.",
             ),
         ],

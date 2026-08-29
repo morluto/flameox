@@ -359,18 +359,21 @@ def test_managed_py_spy_is_discoverable_after_verified_setup(tmp_path: Path) -> 
     uv = tmp_path / "uv"
     uv.write_text("#!/bin/sh\nexit 0\n")
     uv.chmod(0o755)
-    ProviderRuntimeManager(
+    runtimes = ProviderRuntimeManager(
         workspace.paths.records / "provider-runtimes",
         broker=_ProviderBroker(),
         uv_executable=str(uv),
         package_source="index",
-    ).prepare(
+    )
+    runtimes.prepare(
         extra=CapabilityExtra.CPU,
         requirement="py-spy>=0.4.2,<0.5",
         executable_name="py-spy",
     )
 
-    report = CapabilityService(workspace).get("py-spy")
+    capabilities = CapabilityService(workspace)
+    capabilities.provider_runtimes = runtimes
+    report = capabilities.get("py-spy")
 
     assert report.status is CapabilityStatus.AVAILABLE
     assert report.executable is not None

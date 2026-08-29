@@ -75,6 +75,17 @@ type CapabilitySetupProgressPhase = Literal[
 ]
 
 
+def managed_setup_adapter_names() -> tuple[str, ...]:
+    """Return the stable setup vocabulary owned by capability definitions."""
+
+    providers = (
+        adapter.name
+        for adapter in BUILTIN_ADAPTERS.values()
+        if adapter.managed_extra is not None and adapter.managed_requirement is not None
+    )
+    return tuple(sorted((*providers, *MANAGED_PROVIDERS, "toxiproxy")))
+
+
 class _CapabilitySetupReceipt(ContractModel):
     """Fields shared by every durable capability-setup state."""
 
@@ -1848,6 +1859,7 @@ class CapabilityService:
             )
             if runtime is not None and runtime.executable is not None:
                 return str(runtime.executable)
+            return None
         if (
             adapter == "perfetto"
             and self.workspace is not None

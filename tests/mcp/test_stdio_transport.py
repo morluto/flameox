@@ -13,6 +13,7 @@ from mcp_types import TextContent, TextResourceContents
 from typer.testing import CliRunner
 
 from flameox import __version__
+from flameox.application import managed_setup_adapter_names
 from flameox.cli import app
 from flameox.domain import RunManifest
 from flameox.storage import RunStore, Workspace
@@ -63,6 +64,12 @@ async def test_real_stdio_server_keeps_protocol_on_stdout(tmp_path: Path) -> Non
     assert "workspace_status" in {tool.name for tool in tools.tools}
     assert "start_capability_setup" in {tool.name for tool in tools.tools}
     setup_tool = next(tool for tool in tools.tools if tool.name == "start_capability_setup")
+    adapter_schema = setup_tool.input_schema["properties"]["adapters"]
+    adapter_definition = setup_tool.input_schema["$defs"][
+        adapter_schema["items"]["$ref"].removeprefix("#/$defs/")
+    ]
+    assert tuple(adapter_definition["enum"]) == managed_setup_adapter_names()
+    assert "aiperf" in adapter_definition["enum"]
     version_schema = setup_tool.input_schema["properties"]["memray_reader_version"]
     string_schema = next(item for item in version_schema["anyOf"] if item.get("type") == "string")
     assert string_schema["minLength"] == 1

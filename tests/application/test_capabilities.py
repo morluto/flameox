@@ -15,9 +15,9 @@ from pydantic import ValidationError
 from flameox import __version__
 from flameox.action_graph import ActionId, ManualAction, ToolAction, manual_action, tool_action
 from flameox.adapters import AdapterDiscoveryResult, AdapterRegistry
-from flameox.adapters.builtins import builtin_adapter
+from flameox.adapters.builtins import BUILTIN_ADAPTERS, builtin_adapter
 from flameox.adapters.toxiproxy import ToxiproxyToolReceipt
-from flameox.application import CapabilityList, CapabilityService
+from flameox.application import CapabilityList, CapabilityService, managed_setup_adapter_names
 from flameox.application.capabilities import (
     CapabilitySetupManager,
     CapabilitySetupResult,
@@ -31,6 +31,7 @@ from flameox.application.operations import (
     OperationStatus,
     operation_digests,
 )
+from flameox.application.provider_catalog import MANAGED_PROVIDERS
 from flameox.application.provider_runtime import ProviderRuntimeManager
 from flameox.domain import (
     CapabilityExtra,
@@ -498,9 +499,29 @@ def test_agent_adapter_preparation_records_exact_identity_and_provenance(
     assert payload["approvals"]["example-profiler"]["provenance"] == "agent"
 
 
+@pytest.mark.parametrize(
+    ("adapter", "extra", "requirement", "package", "version", "executable"),
+    [
+        ("torch.profiler", CapabilityExtra.TORCH, "torch>=2.7", "torch", "2.7", None),
+        (
+            "aiperf",
+            CapabilityExtra.INFERENCE,
+            "aiperf>=0.12,<0.13",
+            "aiperf",
+            "0.12.0",
+            "aiperf",
+        ),
+    ],
+)
 def test_capability_setup_installs_only_declared_missing_providers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    adapter: str,
+    extra: CapabilityExtra,
+    requirement: str,
+    package: str,
+    version: str,
+    executable: str | None,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     monkeypatch.setattr(ProviderRuntimeManager, "_active_source_root", lambda _self: None)
@@ -528,10 +549,15 @@ def test_capability_setup_installs_only_declared_missing_providers(
                 lock = Path(request.argv[request.argv.index("--output-file") + 1])
                 lock.write_text(
                     "flameox==0.1.14 --hash=sha256:" + "a" * 64 + "\n"
-                    "torch==2.7 --hash=sha256:" + "b" * 64 + "\n"
+                    f"{package}=={version} --hash=sha256:" + "b" * 64 + "\n"
                 )
                 return _outcome(request)
             if request.argv[1:3] == ("pip", "install"):
+                if executable is not None:
+                    target_python = Path(request.argv[request.argv.index("--python") + 1])
+                    provider_executable = target_python.parent / executable
+                    provider_executable.write_text("#!/bin/sh\nexit 0\n")
+                    provider_executable.chmod(0o755)
                 return _outcome(request)
             if request.argv[1:3] == ("-I", "-c"):
                 return _outcome(
@@ -540,7 +566,7 @@ def test_capability_setup_installs_only_declared_missing_providers(
                         {
                             "executable": request.argv[0],
                             "prefix": str(Path(request.argv[0]).parent.parent),
-                            "versions": {"flameox": __version__, "torch": "2.7"},
+                            "versions": {"flameox": __version__, package: version},
                         }
                     ).encode(),
                 )
@@ -552,9 +578,9 @@ def test_capability_setup_installs_only_declared_missing_providers(
         broker=broker,
         capability_manifest=tmp_path / "capabilities.json",
     )
-    setup = _managed_setup(CapabilityExtra.TORCH, "torch>=2.7")
+    setup = _managed_setup(extra, requirement)
     missing = CapabilityReport(
-        adapter="torch.profiler",
+        adapter=adapter,
         status=CapabilityStatus.UNAVAILABLE,
         setup=setup,
     )
@@ -563,7 +589,7 @@ def test_capability_setup_installs_only_declared_missing_providers(
         (
             CapabilityList(
                 capabilities=(missing,),
-                recommendation_scope="torch.profiler",
+                recommendation_scope=adapter,
                 next_action=setup.next_action,
             ),
             CapabilityList(
@@ -577,16 +603,16 @@ def test_capability_setup_installs_only_declared_missing_providers(
     monkeypatch.setattr(service, "list", lambda: next(reports))
     monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
     (tmp_path / "bin").mkdir()
-    result = service.prepare(("torch.profiler",))
+    result = service.prepare((adapter,))
 
-    assert result.installed == ("torch.profiler",)
+    assert result.installed == (adapter,)
     assert result.already_available == ()
     assert receipt_during_install is not None
     assert receipt_during_install["phase"] == "installing_packages"
     assert receipt_during_install["completed"] == []
     receipt = json.loads((tmp_path / "capability-setup.json").read_text())
     assert receipt | {"updated_at": None} == {
-        "completed": ["torch.profiler"],
+        "completed": [adapter],
         "error": None,
         "next_action": {
             "kind": "tool",
@@ -594,7 +620,7 @@ def test_capability_setup_installs_only_declared_missing_providers(
             "arguments": {"mode": "passive"},
         },
         "phase": "completed",
-        "requested": ["torch.profiler"],
+        "requested": [adapter],
         "updated_at": None,
     }
     assert isinstance(receipt["updated_at"], str)
@@ -613,6 +639,15 @@ def test_capability_setup_installs_only_declared_missing_providers(
     assert "NO_PROXY" in install.environment_allowlist
     assert "UV_INDEX_URL" in install.environment_allowlist
     assert "SSL_CERT_FILE" in install.environment_allowlist
+    if executable is not None:
+        discovered = CapabilityService(
+            workspace,
+            capability_manifest=tmp_path / "capabilities.json",
+        ).list_for_adapter(adapter)
+        report = next(item for item in discovered.capabilities if item.adapter == adapter)
+        assert report.status is CapabilityStatus.AVAILABLE
+        assert report.executable is not None
+        assert report.executable.startswith(str(tmp_path / "provider-runtimes"))
 
 
 def test_reduction_provider_is_discoverable_without_becoming_a_capture_adapter(
@@ -859,6 +894,39 @@ def test_capability_recommendations_are_scoped_to_selected_adapter(
     assert selected.recommendation_scope == "torch.profiler"
     assert selected.setup_adapters == ()
     assert selected.next_action is None
+
+
+def test_managed_setup_vocabulary_is_derived_from_capability_ownership() -> None:
+    managed_builtins = {
+        adapter.name
+        for adapter in BUILTIN_ADAPTERS.values()
+        if adapter.managed_extra is not None and adapter.managed_requirement is not None
+    }
+
+    assert set(managed_setup_adapter_names()) == (
+        managed_builtins | set(MANAGED_PROVIDERS) | {"toxiproxy"}
+    )
+    assert "aiperf" in managed_builtins
+
+
+def test_aiperf_discovery_returns_the_managed_setup_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_bin = tmp_path / "host-bin"
+    host_bin.mkdir()
+    host_aiperf = host_bin / "aiperf"
+    host_aiperf.write_text("#!/bin/sh\nexit 0\n")
+    host_aiperf.chmod(0o755)
+    monkeypatch.setenv("PATH", str(host_bin))
+    selected = CapabilityService(Workspace.initialize(tmp_path)).list_for_adapter("aiperf")
+
+    assert selected.setup_adapters == ("aiperf",)
+    assert isinstance(selected.next_action, ManualAction)
+    assert selected.next_action.suggested_action is ActionId.START_CAPABILITY_SETUP
+    report = next(item for item in selected.capabilities if item.adapter == "aiperf")
+    assert report.status is CapabilityStatus.UNAVAILABLE
+    assert report.executable is None
 
 
 def test_running_capability_setup_status_contains_exact_poll_action(tmp_path: Path) -> None:
