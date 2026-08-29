@@ -5,11 +5,20 @@ from typing import Annotated, Any, Literal, cast
 
 from pydantic import Field
 
+from flameox.action_graph import ActionId, NextAction, manual_action
 from flameox.catalog import Catalog
 from flameox.domain import CursorNamespace, DomainError, ErrorCode, digest_model
+from flameox.evidence_status import (
+    EvidenceAvailability,
+    EvidenceStatus,
+    available_availability,
+    empty_availability,
+    partial_availability,
+    unavailable_availability,
+)
 from flameox.models import ContractModel
 from flameox.pagination import CursorPageContract
-from flameox.storage import Workspace
+from flameox.storage import RunStore, Workspace
 
 
 class LifecycleItemKind(StrEnum):
@@ -138,6 +147,12 @@ class LifecycleQueryResult(CursorPageContract):
     total: int
     next_cursor: str | None = None
     limitations: tuple[str, ...] = ()
+
+
+class ProcessSnapshotQueryResult(LifecycleQueryResult):
+    run_id: str
+    evidence: EvidenceAvailability
+    next_action: NextAction | None = None
 
 
 class LifecycleEvidenceService:
@@ -477,23 +492,48 @@ class LifecycleEvidenceService:
         )
 
     def get_process_snapshot(
-        self, *, run_id: str, phase: str | None = None, limit: int | None = None
-    ) -> LifecycleQueryResult:
+        self,
+        *,
+        run_id: str,
+        phase: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> ProcessSnapshotQueryResult:
         bounded = self._limit(limit)
+        RunStore(self.workspace).read(run_id)
         head = self.workspace.corpus.read_head()
         where = "s.run_id = ?"
         values: list[object] = [run_id]
         if phase is not None:
             where += " AND s.phase = ?"
             values.append(phase)
+        scope_digest = digest_model({"run_id": run_id, "phase": phase})
+        position = self._cursor(
+            cursor,
+            CursorNamespace.GET_PROCESS_SNAPSHOT,
+            head.commit_id,
+            scope_digest,
+        )
+        offset = position or 0
         query = f"""SELECT e.snapshot_id, e.pid, e.create_time, e.parent_pid, e.name,
                            e.status, e.rss_bytes, e.observed_at, s.artifact_id, s.phase
                     FROM process_snapshot_entries e JOIN process_snapshots s
                       ON s.snapshot_id = e.snapshot_id WHERE {where}
-                    ORDER BY e.pid LIMIT ?"""
+                    ORDER BY s.phase, e.pid LIMIT ? OFFSET ?"""
         catalog = Catalog(self.workspace)
         with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
-            rows = snapshot.execute(query, (*values, bounded + 1)).fetchall()
+            summary_rows = snapshot.execute(
+                f"""SELECT artifact_id, evidence_status, limitations, entry_count
+                     FROM process_snapshots s WHERE {where} ORDER BY phase""",
+                tuple(values),
+            ).fetchall()
+            rows = snapshot.execute(query, (*values, bounded, offset)).fetchall()
+            entry_count_row = snapshot.execute(
+                f"""SELECT count(*) FROM process_snapshot_entries e
+                     JOIN process_snapshots s ON s.snapshot_id = e.snapshot_id
+                     WHERE {where}""",
+                tuple(values),
+            ).fetchone()
         items = tuple(
             ProcessLifecycleItem(
                 run_id=run_id,
@@ -512,15 +552,88 @@ class LifecycleEvidenceService:
             )
             for row in rows[:bounded]
         )
-        return self._result(
-            "get_process_snapshot",
-            head.commit_id,
-            None,
-            {"phase": phase},
-            items,
-            len(rows),
-            len(rows) > bounded,
-            None,
+        known_statuses = {
+            EvidenceStatus.AVAILABLE.value,
+            EvidenceStatus.EMPTY.value,
+            EvidenceStatus.PARTIAL.value,
+            EvidenceStatus.UNAVAILABLE.value,
+        }
+        raw_statuses = {row[1] for row in summary_rows}
+        if not raw_statuses.issubset(known_statuses):
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                "Process snapshot evidence contains an invalid coverage status.",
+                details={"statuses": sorted(str(status) for status in raw_statuses)},
+                remediation=("Re-extract or recapture the process evidence.",),
+            )
+        statuses = {str(status) for status in raw_statuses}
+        evidence_status: EvidenceStatus
+        if not statuses or "unavailable" in statuses:
+            evidence_status = EvidenceStatus.UNAVAILABLE
+        elif "partial" in statuses:
+            evidence_status = EvidenceStatus.PARTIAL
+        elif statuses == {"empty"}:
+            evidence_status = EvidenceStatus.EMPTY
+        else:
+            evidence_status = EvidenceStatus.AVAILABLE
+        limitations = tuple(
+            sorted({str(item) for row in summary_rows for item in (row[2] or [])})
+        )
+        if not summary_rows:
+            limitations = ("no_process_snapshot_evidence",)
+        next_action = (
+            manual_action(
+                "Capture a new run after granting process-enumeration visibility.",
+                suggested_action=ActionId.PLAN_CAPTURE,
+                missing_arguments=("workload_name", "adapter", "mode"),
+            )
+            if evidence_status in {EvidenceStatus.PARTIAL, EvidenceStatus.UNAVAILABLE}
+            else None
+        )
+        evidence = (
+            available_availability("process_observation_complete")
+            if evidence_status is EvidenceStatus.AVAILABLE
+            else (
+                empty_availability("complete_process_observation_was_empty")
+                if evidence_status is EvidenceStatus.EMPTY
+                else (
+                    partial_availability("process_observation_incomplete")
+                    if evidence_status is EvidenceStatus.PARTIAL
+                    else unavailable_availability("process_visibility_unavailable")
+                )
+            )
+        )
+        total = sum(int(row[3]) for row in summary_rows)
+        observed_total = int(entry_count_row[0]) if entry_count_row is not None else 0
+        if observed_total != total:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                "Process snapshot summary count does not match its preserved entries.",
+                details={"summary_count": total, "entry_count": observed_total},
+                remediation=("Re-extract or recapture the process evidence.",),
+            )
+        next_cursor = (
+            self.workspace.cursors.issue(
+                namespace=CursorNamespace.GET_PROCESS_SNAPSHOT,
+                snapshot_id=head.commit_id,
+                scope_digest=scope_digest,
+                position=(offset + len(items),),
+            )
+            if offset + len(items) < total
+            else None
+        )
+        return ProcessSnapshotQueryResult(
+            operation="get_process_snapshot",
+            corpus_commit_id=head.commit_id,
+            run_id=run_id,
+            artifact_id=(str(summary_rows[0][0]) if summary_rows else None),
+            query_bounds={"phase": phase, "limit": bounded},
+            items=items,
+            total=total,
+            next_cursor=next_cursor,
+            limitations=limitations,
+            evidence=evidence,
+            next_action=next_action,
         )
 
     def _query_spans(

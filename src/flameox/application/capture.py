@@ -51,6 +51,7 @@ from flameox.application.capabilities import CapabilityService
 from flameox.application.capture_admission import CaptureAdmission, CaptureAdmissionService
 from flameox.application.environment import AcceleratorIdentityService, collect_environment
 from flameox.application.evidence_rows import (
+    process_observation_coverage,
     process_observation_rows,
     runtime_resource_summary_row,
     runtime_writable_root_rows,
@@ -435,12 +436,17 @@ class _CaptureExecution:
                         ),
                     )
         try:
+            evidence_status, snapshot_limitations = process_observation_coverage(
+                process_observations
+            )
             snapshot_path = self.output_root / "process-snapshot.json"
             snapshot_path.write_text(
                 json.dumps(
                     {
                         "schema_version": 1,
                         "run_id": self.plan.run_id,
+                        "evidence_status": evidence_status.value,
+                        "limitations": snapshot_limitations,
                         "observations": [
                             item.model_dump(mode="json") for item in process_observations
                         ],
@@ -470,6 +476,8 @@ class _CaptureExecution:
                 self.plan.run_id,
                 process_observations,
                 artifact_id=snapshot_artifact.content.artifact_id,
+                evidence_status=evidence_status,
+                limitations=snapshot_limitations,
             )
             artifacts = (*artifacts, snapshot_registration)
         except (DomainError, OSError) as snapshot_error:
@@ -1498,12 +1506,17 @@ class CaptureService:
         validation_limitations: list[str] = []
         oracle_receipt_record: OracleReceiptRecord | None = None
         try:
+            evidence_status, snapshot_limitations = process_observation_coverage(
+                outcome.process_observations
+            )
             snapshot_path = output_root / "process-snapshot.json"
             snapshot_path.write_text(
                 json.dumps(
                     {
                         "schema_version": 1,
                         "run_id": run_id,
+                        "evidence_status": evidence_status.value,
+                        "limitations": snapshot_limitations,
                         "observations": [
                             item.model_dump(mode="json") for item in outcome.process_observations
                         ],
@@ -1533,6 +1546,8 @@ class CaptureService:
                 run_id,
                 outcome.process_observations,
                 artifact_id=snapshot_artifact.content.artifact_id,
+                evidence_status=evidence_status,
+                limitations=snapshot_limitations,
             )
             oracle = self.workloads.resolve_oracle(
                 plan.workload_name,

@@ -946,6 +946,7 @@ class SubprocessBroker:
                     children = process.children(recursive=False)
                 except psutil.Error:
                     children = []
+                    truncated = True
                 if time.monotonic() > deadline:
                     truncated = True
                     break

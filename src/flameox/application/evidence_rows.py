@@ -10,7 +10,27 @@ from flameox.domain import (
     SourceState,
 )
 from flameox.domain.models import utc_now
+from flameox.evidence_status import EvidenceStatus
 from flameox.execution import ProcessObservation, ProcessSnapshotPhase
+
+
+def process_observation_coverage(
+    observations: tuple[ProcessObservation, ...],
+) -> tuple[EvidenceStatus, tuple[str, ...]]:
+    """Summarize whether process evidence can support absence claims."""
+
+    if not observations:
+        return EvidenceStatus.UNAVAILABLE, ("process_enumeration_returned_no_observations",)
+    failures = tuple(
+        sorted(
+            {
+                f"process:{item.pid}:{failure}"
+                for item in observations
+                for failure in item.failures
+            }
+        )
+    )
+    return (EvidenceStatus.PARTIAL, failures) if failures else (EvidenceStatus.AVAILABLE, ())
 
 
 def artifact_registration_row(
@@ -55,8 +75,14 @@ def process_observation_rows(
     observations: tuple[ProcessObservation, ...],
     *,
     artifact_id: str,
+    evidence_status: EvidenceStatus,
+    limitations: tuple[str, ...] = (),
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Project broker observations into the two bounded process evidence tables."""
+    if evidence_status is EvidenceStatus.EMPTY and observations:
+        raise ValueError("empty process evidence cannot contain observations")
+    if evidence_status is EvidenceStatus.AVAILABLE and not observations:
+        raise ValueError("available process evidence must contain observations; use empty")
     phases = sorted({item.snapshot_phase for item in observations}) or [
         ProcessSnapshotPhase.POST_ROOT_EXIT
     ]
@@ -64,6 +90,12 @@ def process_observation_rows(
     entries: list[dict[str, object]] = []
     for phase in phases:
         phase_items = tuple(item for item in observations if item.snapshot_phase == phase)
+        phase_failures = process_observation_coverage(phase_items)[1]
+        phase_status = (
+            EvidenceStatus.PARTIAL
+            if evidence_status is EvidenceStatus.AVAILABLE and phase_failures
+            else evidence_status
+        )
         snapshot_id = f"{artifact_id}:{run_id}:{phase}"
         observed_at = max(
             (item.observed_at for item in phase_items),
@@ -77,14 +109,9 @@ def process_observation_rows(
                 "phase": phase,
                 "observed_at": observed_at,
                 "entry_count": len(phase_items),
+                "evidence_status": phase_status.value,
                 "sources_json": _json(sorted({item.discovery_source for item in phase_items})),
-                "limitations": sorted(
-                    {
-                        f"process:{item.pid}:{failure}"
-                        for item in phase_items
-                        for failure in item.failures
-                    }
-                ),
+                "limitations": sorted({*limitations, *phase_failures}),
             }
         )
         entries.extend(

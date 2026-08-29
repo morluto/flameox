@@ -4,7 +4,7 @@ from typing import Any
 
 import pyarrow as pa
 
-SCHEMA_MAJOR = 4
+SCHEMA_MAJOR = 5
 SCHEMA_MINOR = 0
 UTC_TIMESTAMP = pa.timestamp("us", tz="UTC")
 
@@ -853,6 +853,7 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("phase", pa.string(), nullable=False),
             pa.field("observed_at", UTC_TIMESTAMP, nullable=False),
             pa.field("entry_count", pa.uint64(), nullable=False),
+            pa.field("evidence_status", pa.string(), nullable=False),
             pa.field("sources_json", pa.string(), nullable=False),
             pa.field("limitations", pa.list_(pa.string()), nullable=False),
         ),

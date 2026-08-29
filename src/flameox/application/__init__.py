@@ -298,6 +298,7 @@ __all__ = [
     "PredicateClassification",
     "PredicateObservation",
     "PreflightService",
+    "ProcessSnapshotQueryResult",
     "ProfileChange",
     "ProjectConfig",
     "ProjectionCoordinator",

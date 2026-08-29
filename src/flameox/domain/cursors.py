@@ -23,6 +23,7 @@ class CursorNamespace(StrEnum):
     FINDINGS = "findings"
     FIND_REPEATED_OPERATION_SEQUENCES = "find_repeated_operation_sequences"
     GET_OPERATION_WINDOW = "get_operation_window"
+    GET_PROCESS_SNAPSHOT = "get_process_snapshot"
     INFERENCE_REQUESTS = "inference_requests"
     INVESTIGATIONS = "investigations"
     MEASUREMENTS = "measurements"
@@ -60,6 +61,9 @@ CURSOR_POSITION_SPECS = MappingProxyType(
         ),
         CursorNamespace.GET_OPERATION_WINDOW: CursorPositionSpec(
             ("integer",), "lifecycle evidence"
+        ),
+        CursorNamespace.GET_PROCESS_SNAPSHOT: CursorPositionSpec(
+            ("integer",), "process snapshot evidence"
         ),
         CursorNamespace.INFERENCE_REQUESTS: CursorPositionSpec(("string",), "inference evidence"),
         CursorNamespace.INVESTIGATIONS: CursorPositionSpec(("integer",), "investigation discovery"),

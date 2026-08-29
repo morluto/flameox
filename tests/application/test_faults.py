@@ -377,13 +377,15 @@ latency_ms = 10
     snapshot_payload = json.loads(
         ArtifactStore(workspace).get(snapshot_registration.artifact_id).payload_path.read_text()
     )
-    assert {item["snapshot_phase"] for item in snapshot_payload} == {
+    assert snapshot_payload["evidence_status"] == "available"
+    assert snapshot_payload["limitations"] == []
+    assert {item["snapshot_phase"] for item in snapshot_payload["observations"]} == {
         "pre_cleanup",
         "post_cleanup",
     }
     assert all(
         not set(item).intersection({"cmdline", "environment", "cwd", "exe", "connections"})
-        for item in snapshot_payload
+        for item in snapshot_payload["observations"]
     )
 
 

@@ -186,6 +186,7 @@ from flameox.application import (
     PipelineFilter,
     PipelineListResult,
     PlanReductionRequest,
+    ProcessSnapshotQueryResult,
     QualifyArtifactImportRequest,
     RecordFindingRequest,
     RecordHypothesisRequest,
@@ -3615,15 +3616,25 @@ def create_server(
         ctx: Context[AppContext],
         phase: Annotated[str | None, Field(min_length=1, max_length=50)] = None,
         limit: Annotated[StrictInt | None, Field(ge=1, le=1_000)] = None,
-    ) -> Annotated[CallToolResult, ToolPayload[LifecycleQueryResult]]:
-        """Return bounded privacy-limited process observations for one run."""
+        cursor: Annotated[str | None, Field(max_length=4_096)] = None,
+    ) -> Annotated[CallToolResult, ToolPayload[ProcessSnapshotQueryResult]]:
+        """Return bounded process observations with explicit visibility coverage."""
         try:
             result = await run_atomic_thread(
                 lambda: LifecycleEvidenceService(
                     ctx.request_context.lifespan_context.require_workspace()
-                ).get_process_snapshot(run_id=run_id, phase=phase, limit=limit)
+                ).get_process_snapshot(
+                    run_id=run_id,
+                    phase=phase,
+                    limit=limit,
+                    cursor=cursor,
+                )
             )
-            return _success(result, f"Returned {result.returned} process observations.")
+            return _success(
+                result,
+                f"Process observation is {result.evidence.status}; "
+                f"returned {result.returned} rows.",
+            )
         except DomainError as error:
             return _failure(error)
 

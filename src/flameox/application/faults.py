@@ -21,6 +21,7 @@ from flameox.application.environment import collect_environment
 from flameox.application.evidence_rows import (
     artifact_registration_row,
     environment_row,
+    process_observation_coverage,
     process_observation_rows,
     source_state_row,
 )
@@ -728,9 +729,18 @@ class FaultExperimentService:
             },
         }
         config_path.write_text(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+        evidence_status, snapshot_limitations = process_observation_coverage(
+            outcome.process_observations
+        )
         snapshot_path.write_text(
             json.dumps(
-                [item.model_dump(mode="json") for item in outcome.process_observations],
+                {
+                    "evidence_status": evidence_status.value,
+                    "limitations": snapshot_limitations,
+                    "observations": [
+                        item.model_dump(mode="json") for item in outcome.process_observations
+                    ],
+                },
                 separators=(",", ":"),
                 sort_keys=True,
             )
@@ -767,6 +777,8 @@ class FaultExperimentService:
             run.run_id,
             outcome.process_observations,
             artifact_id=ids[1],
+            evidence_status=evidence_status,
+            limitations=snapshot_limitations,
         )
         self.publisher.publish_rows(
             {

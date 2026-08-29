@@ -312,6 +312,12 @@ the disposable catalog is missing or unreadable. MCP exposes that action as
 `rebuild_catalog`. A new corpus HEAD does not make the catalog stale: each read
 constructs transient views from its exact pinned immutable corpus inventory.
 
+`get_process_snapshot` reads the preserved snapshot summary as well as its bounded
+entries. It reports `available`, `empty`, `partial`, or `unavailable`; an empty row
+set is never presented as proof of zero activity when enumeration coverage is absent.
+Partial and unavailable results include their visibility limitations and a typed
+recovery path for a new capture.
+
 ## Progress and cancellation
 
 Known-duration work reports monotonic completed/total progress. Unknown-duration
