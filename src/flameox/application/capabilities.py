@@ -30,6 +30,7 @@ from flameox.adapters.builtins import (
     AdapterDependencyKind,
     BuiltinAdapter,
     builtin_adapter,
+    node_version_is_supported,
 )
 from flameox.adapters.nsight_compute import find_ncu_report_interface
 from flameox.adapters.registry import AdapterRegistry
@@ -607,6 +608,22 @@ class CapabilityService:
         if version_report.status is not CapabilityStatus.AVAILABLE:
             self._active_cache[adapter] = version_report
             return version_report
+        if adapter in {"node-cpu-prof", "node-heap-prof"} and not node_version_is_supported(
+            version_report.version
+        ):
+            incompatible = version_report.validated_copy(
+                update={
+                    "status": CapabilityStatus.UNAVAILABLE,
+                    "supported_modes": (),
+                    "supported_formats": (),
+                    "limitations": (
+                        "This Node.js version does not expose the stable V8 profiling flags; "
+                        "Node.js 20.16+ or 22.4+ is required.",
+                    ),
+                }
+            )
+            self._active_cache[adapter] = incompatible
+            return incompatible
         if adapter == "perf":
             result = await self._probe_perf(passive)
             result = result.validated_copy(update={"version": version_report.version})
@@ -623,6 +640,29 @@ class CapabilityService:
             )
         self._active_cache[adapter] = result
         return result
+
+    async def probe_executable_version(self, executable: str, *, cwd: Path) -> str:
+        """Probe the exact executable bound to a declared workload."""
+        binding = ExecutableResolver().require_host_tool(executable, cwd=cwd)
+        outcome = await self.broker.run(
+            ExecutionRequest(
+                argv=(str(binding.invocation_path), "--version"),
+                executable_binding=binding,
+                cwd=cwd,
+                environment_allowlist=(),
+                allowed_working_roots=(cwd,),
+                timeout_seconds=5,
+                max_output_bytes=32 * 1024,
+            )
+        )
+        output = (outcome.stdout + b"\n" + outcome.stderr).decode("utf-8", errors="replace")
+        version = next((line.strip() for line in output.splitlines() if line.strip()), None)
+        if outcome.process.exit_code != 0 or version is None:
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "The declared Node.js executable did not return a version.",
+            )
+        return version
 
     async def _probe_version(
         self,

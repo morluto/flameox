@@ -137,6 +137,17 @@ reader or export. Frame and allocation rows retain source artifact and run
 identity. Missing native symbols, thread identity, contexts, or native frames
 stay unavailable. Flameox does not infer them from display text.
 
+### Node/V8 CPU and sampling heap profiles
+
+The Node adapters invoke the declared Node executable with `--cpu-prof` or
+`--heap-prof`, preserving the native `.cpuprofile` or `.heapprofile` output even
+when the workload exits nonzero. Node 20.16+ and 22.4+ are required. Extraction
+runs in the bounded profile worker and streams the native JSON rather than
+loading it into the control process. CPU tree nodes are visited once; heap
+inclusive values include descendant allocations. Frame identity uses normalized
+source coordinates, with a script disambiguator only when no URL is available.
+Unresolved or synthetic frames remain partial symbolization.
+
 ### Perfetto and OTLP
 
 Perfetto-compatible traces are queried through Trace Processor with versioned,

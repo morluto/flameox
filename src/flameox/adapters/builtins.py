@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+
+from packaging.version import InvalidVersion, Version
 
 from flameox.adapters.options import (
     adapter_accepts_options,
@@ -58,6 +61,24 @@ class CaptureInvocation:
     environment: dict[str, str]
 
 
+def node_version_is_supported(value: str | None) -> bool:
+    """Return whether Node exposes the stable V8 profile flags used by these adapters."""
+    if value is None:
+        return False
+    match = re.search(r"\d+(?:\.\d+)+", value)
+    if match is None:
+        return False
+    try:
+        version = Version(match.group())
+    except InvalidVersion:
+        return False
+    return (
+        (version.major == 20 and version >= Version("20.16"))
+        or (version.major == 22 and version >= Version("22.4"))
+        or version.major > 22
+    )
+
+
 BUILTIN_ADAPTERS = {
     adapter.name: adapter
     for adapter in (
@@ -79,9 +100,7 @@ BUILTIN_ADAPTERS = {
             supported_modes=("record",),
             supported_formats=("v8-cpuprofile",),
             features=("sampled_stacks", "javascript_symbols"),
-            remediation=(
-                "Install Node.js 20.16+ or 22.4+ which expose stable --cpu-prof flags.",
-            ),
+            remediation=("Install Node.js 20.16+ or 22.4+ which expose stable --cpu-prof flags.",),
             version_args=("--version",),
             output_filename="cpu.cpuprofile",
             artifact_kinds=(ArtifactKind.SAMPLE_PROFILE,),
@@ -93,6 +112,7 @@ BUILTIN_ADAPTERS = {
                 "The CPU profile contains sampled stack locations, not wall-clock or "
                 "allocation evidence.",
             ),
+            preserve_artifact_on_nonzero=True,
         ),
         BuiltinAdapter(
             name="node-heap-prof",
@@ -101,9 +121,7 @@ BUILTIN_ADAPTERS = {
             supported_modes=("record",),
             supported_formats=("v8-sampling-heap-profile",),
             features=("allocations", "sampled_allocations", "stacks"),
-            remediation=(
-                "Install Node.js 20.16+ or 22.4+ which expose stable --heap-prof flags.",
-            ),
+            remediation=("Install Node.js 20.16+ or 22.4+ which expose stable --heap-prof flags.",),
             version_args=("--version",),
             output_filename="heap.heapprofile",
             artifact_kinds=(ArtifactKind.MEMORY_PROFILE,),
@@ -116,6 +134,7 @@ BUILTIN_ADAPTERS = {
                 "Only allocations sampled by V8 are reported; small or short-lived "
                 "allocations may be underrepresented.",
             ),
+            preserve_artifact_on_nonzero=True,
         ),
         BuiltinAdapter(
             name="benchmark-samples",
@@ -498,6 +517,7 @@ def build_capture_invocation(  # noqa: C901 - provider routing is intentionally 
     timeout_seconds: float = 300,
     options: dict[str, object] | None = None,
     project_root: Path | None = None,
+    workload_executable: str | None = None,
 ) -> CaptureInvocation:
     adapter = BUILTIN_ADAPTERS.get(adapter_name)
     if (
@@ -573,6 +593,7 @@ def build_capture_invocation(  # noqa: C901 - provider routing is intentionally 
             output_root,
             output,
             executable=executable,
+            workload_executable=workload_executable,
         )
     elif adapter_name == "torch.profiler":
         return _torch_capture_invocation(
@@ -804,6 +825,7 @@ def _node_v8_capture_invocation(
     output: str,
     *,
     executable: str | None,
+    workload_executable: str | None,
 ) -> CaptureInvocation:
     """Inject Node.js --cpu-prof or --heap-prof flags into a declared Node workload.
 
@@ -818,12 +840,10 @@ def _node_v8_capture_invocation(
             ErrorCode.INVALID_CAPTURE_PLAN,
             "A declared Node.js workload command is required for V8 profiling.",
         )
-    node_executable = workload_argv[0]
+    node_executable = workload_executable or workload_argv[0]
     node_name = Path(node_executable).name
     if not (
-        node_name == "node"
-        or node_name.startswith("node")
-        or node_executable.endswith("node")
+        node_name == "node" or node_name.startswith("node") or node_executable.endswith("node")
     ):
         raise DomainError(
             ErrorCode.INVALID_CAPTURE_PLAN,

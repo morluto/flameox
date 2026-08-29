@@ -74,6 +74,10 @@ from flameox.adapters import (
     PythonStartupExtractor,
     TorchProfilerCaptureOptions,
     TraceWindowResult,
+    V8CpuProfExtractionResult,
+    V8CpuProfExtractor,
+    V8HeapProfExtractionResult,
+    V8HeapProfExtractor,
 )
 from flameox.analysis import (
     AcceleratorLaunchAnalysisResult,
@@ -3361,6 +3365,44 @@ def create_server(
                 result,
                 f"Extracted {result.measurement_count} measured values and "
                 f"{result.warmup_count} warmups.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="extract_node_cpu_prof", annotations=ADDITIVE)
+    async def extract_node_cpu_prof_tool(
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[V8CpuProfExtractionResult]]:
+        """Extract bounded evidence from a Node/V8 CPU profile."""
+        try:
+            result = await run_atomic_thread(
+                lambda: V8CpuProfExtractor(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).extract(run_id)
+            )
+            return _success(
+                result,
+                f"Extracted {result.frame_count} V8 CPU profile frames.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="extract_node_heap_prof", annotations=ADDITIVE)
+    async def extract_node_heap_prof_tool(
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[V8HeapProfExtractionResult]]:
+        """Extract bounded evidence from a Node/V8 sampling heap profile."""
+        try:
+            result = await run_atomic_thread(
+                lambda: V8HeapProfExtractor(
+                    ctx.request_context.lifespan_context.require_workspace()
+                ).extract(run_id)
+            )
+            return _success(
+                result,
+                f"Extracted {result.frame_count} V8 heap profile frames.",
             )
         except DomainError as error:
             return _failure(error)

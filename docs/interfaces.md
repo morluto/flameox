@@ -93,6 +93,9 @@ plan_capture
   └─ start_detached_capture        long operation
        └─ get_detached_capture
 get_run → extract/analyze → get_evidence → record_analysis/record_finding
+
+V8 profile imports use `extract_node_cpu_prof` or `extract_node_heap_prof` after
+the corresponding native artifact has been preserved.
 ```
 
 Capability responses distinguish passive discovery from execution binding.

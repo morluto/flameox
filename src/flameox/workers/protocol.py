@@ -26,6 +26,7 @@ class WorkerOperationId(StrEnum):
     OTLP_PARSE = "otlp.parse"
     PERFETTO_QUERY = "perfetto.query"
     REDUCTION_EXECUTE = "reduction.execute"
+    V8_PROFILE_PARSE = "v8_profile.parse"
 
 
 class WorkerFailureKind(StrEnum):
