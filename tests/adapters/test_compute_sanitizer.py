@@ -47,6 +47,21 @@ def _precise_record(*, unknown: str = "") -> str:
     """
 
 
+def _initcheck_record() -> str:
+    return """
+    <record>
+      <kind>Initcheck</kind><level>Error</level>
+      <what><text>Uninitialized __global__ memory read</text></what>
+      <accessAddress>0x7fff00001234</accessAddress>
+      <accessSize>4</accessSize>
+      <errorAddress>0x7fff00005678</errorAddress>
+      <where><func>read_values</func><path>/project/src/kernel.cu</path><line>19</line></where>
+      <hostStack><frame><func>main</func><path>/project/src/main.cc</path><line>12</line>
+        <module>/project/build/app</module><pc>0x1</pc></frame></hostStack>
+    </record>
+    """
+
+
 def _import(
     workspace: Workspace,
     source: Path,
@@ -102,7 +117,27 @@ def test_compute_sanitizer_extracts_precise_memory_findings(tmp_path: Path) -> N
             "WHERE kind = 'sanitizer.finding'"
         ).fetchall()
     assert rows[0][:3] == ("memory_access", "src/kernel.cu", 8)
+    assert '"access_address":4660' in rows[0][3]
+    assert '"access_size":4' in rows[0][3]
     assert '"thread":{"x":0,"y":1,"z":2}' in rows[0][3]
+
+
+def test_compute_sanitizer_preserves_current_initcheck_access_fields(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    source = tmp_path / "initcheck.xml"
+    source.write_text(_report(_initcheck_record().replace("/project", str(tmp_path))))
+
+    result = ComputeSanitizerExtractor(workspace).extract(_import(workspace, source))
+
+    assert result.classifications == {"uninitialized_memory": 1}
+    assert result.limitations == ()
+    with Catalog(workspace).open_snapshot() as snapshot:
+        [(value_json,)] = snapshot.execute(
+            "SELECT value_json FROM observations WHERE kind = 'sanitizer.finding'"
+        ).fetchall()
+    assert '"access_address":140733193392692' in value_json
+    assert '"access_size":4' in value_json
+    assert '"error_address":140733193410168' in value_json
 
 
 def test_compute_sanitizer_accepts_clean_empty_report(tmp_path: Path) -> None:
@@ -253,6 +288,24 @@ def test_compute_sanitizer_truncates_records_at_publication_budget(tmp_path: Pat
 def test_compute_sanitizer_options_are_strict_and_bind_suppression_digest(
     tmp_path: Path,
 ) -> None:
+    defaults = bind_adapter_options("compute-sanitizer", None, project_root=tmp_path)
+    assert defaults["launch_count"] == 1
+    unlimited = build_capture_invocation(
+        "compute-sanitizer",
+        ("python", "kernel.py"),
+        tmp_path / "unlimited-output",
+        executable="/opt/cuda/bin/compute-sanitizer",
+        options=cast(
+            dict[str, object],
+            bind_adapter_options(
+                "compute-sanitizer",
+                {"launch_count": 0},
+                project_root=tmp_path,
+            ),
+        ),
+        project_root=tmp_path,
+    )
+    assert any("explicit unlimited capture" in item for item in unlimited.limitations)
     suppression = tmp_path / "tools" / "sanitizer.supp"
     suppression.parent.mkdir()
     suppression.write_text("# fixture\n")

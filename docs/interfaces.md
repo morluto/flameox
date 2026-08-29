@@ -121,6 +121,11 @@ and selected findings or summaries remain authoritative in their durable records
 when they must survive the response. A transport may inline a bounded subset for
 agent usability without duplicating or replacing that state.
 
+Capture responses may also return a bounded `recovery` action. For a timed-out
+Compute Sanitizer probe, unlimited plans receive an executable one-launch replan;
+already-bounded plans require a changed target-only workload or provider filter
+instead of suggesting that the same capture be repeated.
+
 MCP capture receipts inline the safe semantic projection—semantic identity,
 adapter identity, mode, process scope, bounds, filters, and explicit unavailable
 fields—and link to the bounded run resource and any automatically registered

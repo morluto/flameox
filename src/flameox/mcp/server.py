@@ -39,6 +39,7 @@ from flameox.action_graph import (
     ActionId,
     ExternalAction,
     ManualAction,
+    NextAction,
     ToolAction,
     ToolName,
     manual_action,
@@ -494,6 +495,7 @@ class CaptureReceipt(ContractModel):
     corpus_commit_id: str
     resource_uri: str
     semantics: RunSemanticsProjection
+    recovery: NextAction | None = None
 
 
 class ImportReceipt(ContractModel):
@@ -1692,6 +1694,7 @@ def create_server(
                 corpus_commit_id=result.corpus_commit_id,
                 resource_uri=resource_uri,
                 semantics=safe_run_semantics(result.run),
+                recovery=result.recovery,
             )
             return _success(
                 receipt,

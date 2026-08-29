@@ -184,6 +184,8 @@ class ComputeSanitizerExtractor:
                     {
                         "artifact_id": registration.artifact_id,
                         "kind": "sanitizer.extraction",
+                        "run_id": run_id,
+                        "run_semantic_id": semantics.semantic_id,
                         "schema_fingerprint": schema_fingerprint,
                     }
                 ),
@@ -260,6 +262,7 @@ class ComputeSanitizerExtractor:
                     "artifact_id": artifact_id,
                     "record_index": index,
                     "record": record,
+                    "run_id": run_id,
                 }
             ),
             "run_id": run_id,

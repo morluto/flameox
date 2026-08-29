@@ -25,7 +25,7 @@ class ComputeSanitizerCaptureOptions(ContractModel):
 
     tool: Literal["memcheck", "racecheck", "initcheck", "synccheck"] = "memcheck"
     launch_skip: Annotated[int, Field(strict=True, ge=0, le=1_000_000)] = 0
-    launch_count: Annotated[int, Field(strict=True, ge=0, le=1_000_000)] = 0
+    launch_count: Annotated[int, Field(strict=True, ge=0, le=1_000_000)] = 1
     target_processes: Literal["application-only", "all"] = "application-only"
     target_processes_filter: BoundedFilter | None = None
     kernel_name: BoundedFilter | None = None

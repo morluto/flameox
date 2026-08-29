@@ -7,9 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from flameox.adapters.compute_sanitizer import ComputeSanitizerExtractor
 from flameox.application import CaptureService, ExecutionPolicy
+from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode
-from flameox.storage import Workspace
+from flameox.storage import RunStore, Workspace
 from tests.support.capture import disable_containment
 
 pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
@@ -145,6 +147,136 @@ async def test_compute_sanitizer_clean_capture_with_unknown_xml_is_inconclusive(
 
     assert result.run.validation_status.value == "inconclusive"
     assert "Unknown Compute Sanitizer XML element: futureFinding." in result.run.limitations
+
+
+@pytest.mark.anyio
+async def test_compute_sanitizer_same_clean_bytes_retain_mode_and_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_compute_sanitizer(
+        tmp_path,
+        monkeypatch,
+        body=(
+            'while [ "$1" != "--save" ]; do shift; done\n'
+            "shift\n"
+            "printf '%s' '<ComputeSanitizerOutput/>' > \"$1\""
+        ),
+    )
+    (tmp_path / "flameox.toml").write_text(
+        "schema_version = 1\n[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\n"
+    )
+    workspace = Workspace.initialize(tmp_path)
+    disable_containment(workspace)
+    service = CaptureService(workspace)
+
+    runs = []
+    for tool in ("racecheck", "synccheck"):
+        plan = await service.plan(
+            workload_name="probe",
+            adapter="compute-sanitizer",
+            adapter_options={"tool": tool},
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
+        assert plan.adapter_options["launch_count"] == 1
+        runs.append(await service.execute(plan.plan_token))
+
+    first, second = runs
+    assert first.run.artifacts[0].artifact_id == second.run.artifacts[0].artifact_id
+    assert first.run.artifacts[0].producer_version is not None
+    assert first.run.artifacts[0].producer_version.startswith("Version 2026.2.1")
+    first_extraction = ComputeSanitizerExtractor(workspace).extract(first.run.run_id)
+    second_extraction = ComputeSanitizerExtractor(workspace).extract(second.run.run_id)
+    assert first_extraction.status == second_extraction.status == "clean"
+    assert first_extraction.semantics.mode == "racecheck"
+    assert second_extraction.semantics.mode == "synccheck"
+    assert first_extraction.semantics.semantic_id != second_extraction.semantics.semantic_id
+    assert first_extraction.semantics.bounds == second_extraction.semantics.bounds == {
+        "launch_count": 1,
+        "launch_skip": 0,
+    }
+    with Catalog(workspace).open_snapshot(second_extraction.corpus_commit_id) as snapshot:
+        provenance = snapshot.execute(
+            "SELECT run_id, value_json FROM observations "
+            "WHERE kind = 'sanitizer.extraction' ORDER BY run_id"
+        ).fetchall()
+    assert {run_id for run_id, _ in provenance} == {first.run.run_id, second.run.run_id}
+    assert any('"mode":"racecheck"' in value for _, value in provenance)
+    assert any('"mode":"synccheck"' in value for _, value in provenance)
+
+
+@pytest.mark.anyio
+async def test_compute_sanitizer_timeout_returns_bounded_replan_guidance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_compute_sanitizer(tmp_path, monkeypatch, body="sleep 10")
+    (tmp_path / "flameox.toml").write_text(
+        "schema_version = 1\n[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\n"
+        "timeout_seconds = 0.1\n"
+    )
+    workspace = Workspace.initialize(tmp_path)
+    disable_containment(workspace)
+    service = CaptureService(workspace)
+    plan = await service.plan(
+        workload_name="probe",
+        adapter="compute-sanitizer",
+        adapter_options={"launch_count": 0},
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    with pytest.raises(DomainError) as failure:
+        await service.execute(plan.plan_token)
+
+    assert plan.adapter_options["launch_count"] == 0
+    assert failure.value.code is ErrorCode.PROCESS_TIMEOUT
+    assert failure.value.details["bounded_replan"]["effective_launch_count"] == 0
+    assert failure.value.next_action is not None
+    assert failure.value.next_action.kind == "tool"
+    assert failure.value.next_action.arguments["compute_sanitizer_options"]["launch_count"] == 1
+    assert failure.value.run_id is not None
+    run = RunStore(workspace).read(failure.value.run_id)
+    assert any(
+        "isolate a target-only workload" in limitation for limitation in run.limitations
+    )
+    assert any("kernel_name" in limitation for limitation in run.limitations)
+
+
+@pytest.mark.anyio
+async def test_compute_sanitizer_partial_timeout_returns_same_recovery_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_compute_sanitizer(
+        tmp_path,
+        monkeypatch,
+        body=(
+            'while [ "$1" != "--save" ]; do shift; done\n'
+            "shift\n"
+            "printf '%s' '<ComputeSanitizerOutput/>' > \"$1\"\n"
+            "sleep 10"
+        ),
+    )
+    (tmp_path / "flameox.toml").write_text(
+        "schema_version = 1\n[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\n"
+        "timeout_seconds = 0.1\n"
+    )
+    workspace = Workspace.initialize(tmp_path)
+    disable_containment(workspace)
+    service = CaptureService(workspace)
+    plan = await service.plan(
+        workload_name="probe",
+        adapter="compute-sanitizer",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    result = await service.execute(plan.plan_token)
+
+    assert result.run.execution_status.value == "timed_out"
+    assert result.recovery is not None
+    assert result.recovery.kind == "manual"
+    assert "Do not repeat it unchanged" in result.recovery.instruction
+    assert any("Do not repeat it unchanged" in item for item in result.run.limitations)
 
 
 @pytest.mark.anyio

@@ -46,6 +46,10 @@ target-process scope and filters, kernel filter, and suppression content digest.
 That projection is also recorded in the normalized provenance observation, while
 the run semantic digest remains the identity authority. Imported reports expose
 capture scope as unavailable instead of inferring it from identical XML bytes.
+The default diagnostic probe captures one launch. `launch_count=0` is an explicit
+unlimited opt-in. Launch bounds include setup and reference CUDA work before the
+target, so timeout recovery recommends target-only workloads and provider kernel
+or process filters rather than merely retrying the same plan.
 
 ## Producer ownership
 

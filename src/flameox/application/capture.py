@@ -160,6 +160,45 @@ def _limitation(source: LimitationSource, code: str, message: str) -> Limitation
     return LimitationDetail(source=source, code=code, message=message)
 
 
+def _compute_sanitizer_timeout_recovery(plan: CapturePlan) -> tuple[str, NextAction]:
+    launch_count = cast(int, plan.adapter_options["launch_count"])
+    if launch_count == 0:
+        message = (
+            "The timed-out Compute Sanitizer plan was unlimited. Replan with launch_count=1; "
+            "if setup or reference launches still dominate, isolate a target-only workload or "
+            "apply kernel_name or target_processes_filter."
+        )
+        return (
+            message,
+            tool_action(
+                ActionId.PLAN_CAPTURE,
+                workload_name=plan.workload_name,
+                adapter=plan.adapter,
+                parameters=plan.workload_instance.parameters,
+                preflight_mode="auto",
+                capture_mode=(
+                    "trusted_local"
+                    if plan.execution_policy == "trusted_local"
+                    else "managed"
+                ),
+                compute_sanitizer_options={**plan.adapter_options, "launch_count": 1},
+            ),
+        )
+    message = (
+        f"The timed-out Compute Sanitizer plan was already bounded to launch_count={launch_count}. "
+        "Do not repeat it unchanged; isolate a target-only workload and/or add kernel_name or "
+        "target_processes_filter so setup and reference launches do not consume the probe."
+    )
+    return (
+        message,
+        manual_action(
+            message,
+            suggested_action=ActionId.PLAN_CAPTURE,
+            missing_arguments=("workload_name", "compute_sanitizer_options"),
+        ),
+    )
+
+
 def _merge_limitation_details(
     *groups: tuple[LimitationDetail, ...],
 ) -> tuple[LimitationDetail, ...]:
@@ -215,6 +254,7 @@ class CaptureResult(ContractModel):
     run: RunManifest
     pipeline_ids: tuple[str, ...] = ()
     corpus_commit_id: str
+    recovery: NextAction | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1268,6 +1308,26 @@ class CaptureService:
                                 f"{diagnostic_error}",
                             )
                         )
+                if status is ExecutionStatus.TIMED_OUT and plan.adapter == "compute-sanitizer":
+                    recovery_message, recovery = _compute_sanitizer_timeout_recovery(plan)
+                    collector_limitation_details.append(
+                        _limitation(
+                            LimitationSource.COLLECTOR,
+                            "compute_sanitizer_bounded_replan",
+                            recovery_message,
+                        )
+                    )
+                    error.remediation = (*error.remediation, recovery_message)
+                    error.details["bounded_replan"] = {
+                        "adapter": "compute-sanitizer",
+                        "effective_launch_count": plan.adapter_options["launch_count"],
+                        "required_changes": [
+                            "target_only_workload",
+                            "kernel_name",
+                            "target_processes_filter",
+                        ],
+                    }
+                    error.next_action = recovery
                 terminal = await capture.terminate(
                     execution=status,
                     message=error.message,
@@ -1991,6 +2051,13 @@ class CaptureService:
                                 else [f"Collector exited with status {outcome.process.exit_code}."]
                             )
                         )
+                        + (
+                            [
+                                _compute_sanitizer_timeout_recovery(plan)[0]
+                            ]
+                            if timed_out and plan.adapter == "compute-sanitizer"
+                            else []
+                        )
                         + validation_limitations
                     ),
                 ),
@@ -2151,6 +2218,12 @@ class CaptureService:
             run=terminal,
             pipeline_ids=pipeline_ids,
             corpus_commit_id=published.commit.commit_id,
+            recovery=(
+                _compute_sanitizer_timeout_recovery(plan)[1]
+                if terminal.execution_status is ExecutionStatus.TIMED_OUT
+                and plan.adapter == "compute-sanitizer"
+                else None
+            ),
         )
 
     async def _qualify_workload_adapter(
@@ -2359,6 +2432,13 @@ class CaptureService:
             CapabilityPermissionStatus.UNKNOWN_UNTIL_ACTIVE_PROBE,
             CapabilityPermissionStatus.NOT_EXERCISED,
         }
+        identity_probe_required = (
+            adapter == "compute-sanitizer"
+            and definition is not None
+            and definition.dependency_kind is AdapterDependencyKind.EXECUTABLE
+            and report.version is None
+            and mode is not PreflightMode.PASSIVE
+        )
         if permission_sensitive:
             if mode is PreflightMode.PASSIVE:
                 raise DomainError(
@@ -2375,6 +2455,8 @@ class CaptureService:
                         missing_arguments=("parameters",),
                     ),
                 )
+            report = await self.capabilities.probe(adapter, refresh=True)
+        elif identity_probe_required:
             report = await self.capabilities.probe(adapter, refresh=True)
         if (
             report.status is not CapabilityStatus.AVAILABLE

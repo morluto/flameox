@@ -892,6 +892,16 @@ def _compute_sanitizer_capture_invocation(
     project_root: Path | None,
 ) -> CaptureInvocation:
     selected = compute_sanitizer_options(options)
+    limitations = [*adapter.capture_limitations]
+    if selected.launch_count == 0:
+        limitations.append(
+            "launch_count=0 is an explicit unlimited capture and may instrument every CUDA "
+            "launch until the workload exits or times out."
+        )
+    limitations.append(
+        "The launch bound counts setup and reference CUDA work before the target operation; "
+        "isolate a target-only workload or apply a kernel filter when those launches dominate."
+    )
     argv_parts: list[str] = [
         _require_executable(adapter.name, executable),
         "--tool",
@@ -925,7 +935,7 @@ def _compute_sanitizer_capture_invocation(
         argv=argv,
         artifact_kinds=adapter.artifact_kinds,
         expected_overhead=adapter.expected_overhead or "",
-        limitations=adapter.capture_limitations,
+        limitations=tuple(limitations),
         environment={},
     )
 
