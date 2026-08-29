@@ -4,7 +4,7 @@ from typing import Any
 
 import pyarrow as pa
 
-SCHEMA_MAJOR = 2
+SCHEMA_MAJOR = 3
 SCHEMA_MINOR = 0
 UTC_TIMESTAMP = pa.timestamp("us", tz="UTC")
 
@@ -621,8 +621,10 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("artifact_id", pa.string(), nullable=False),
             pa.field("parent_frame_id", pa.string(), nullable=False),
             pa.field("child_frame_id", pa.string(), nullable=False),
+            pa.field("metric", pa.string(), nullable=False),
+            pa.field("weight_value", pa.int64(), nullable=False),
+            pa.field("unit", pa.string(), nullable=False),
             pa.field("sample_count", pa.uint64(), nullable=False),
-            pa.field("duration_ns", pa.int64(), nullable=False),
         ),
     ),
     "stacks": _schema(
@@ -633,9 +635,12 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("artifact_id", pa.string(), nullable=False),
             pa.field("frame_ids", pa.list_(pa.string()), nullable=False),
             pa.field("leaf_frame_id", pa.string(), nullable=False),
-            pa.field("start_ns", pa.int64(), nullable=False),
-            pa.field("duration_ns", pa.int64(), nullable=False),
-            pa.field("track_id", pa.uint64(), nullable=False),
+            pa.field("metric", pa.string(), nullable=False),
+            pa.field("weight_value", pa.int64(), nullable=False),
+            pa.field("unit", pa.string(), nullable=False),
+            pa.field("sample_count", pa.uint64(), nullable=False),
+            pa.field("start_ns", pa.int64()),
+            pa.field("track_id", pa.uint64()),
         ),
     ),
     "observations": _schema(

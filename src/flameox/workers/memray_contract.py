@@ -9,7 +9,7 @@ from flameox.models import ContractModel
 from flameox.workers.protocol import WorkerDefinition, WorkerOperationId, WorkerOutputFile
 
 MEMRAY_EXTRACTOR_NAME = "memray"
-MEMRAY_EXTRACTOR_VERSION = "5"
+MEMRAY_EXTRACTOR_VERSION = "6"
 
 
 class MemrayExtractionLimits(ContractModel):
@@ -18,6 +18,8 @@ class MemrayExtractionLimits(ContractModel):
     max_frames: Annotated[int, Field(gt=0, le=10_000_000)]
     max_stack_depth: Annotated[int, Field(gt=0, le=4_096)]
     max_aggregate_rows: Annotated[int, Field(gt=0, le=20_000_000)]
+    max_unique_edges: Annotated[int, Field(gt=0, le=20_000_000)]
+    max_representative_stacks: Annotated[int, Field(gt=0, le=10_000_000)]
     max_output_bytes: Annotated[int, Field(gt=0, le=1 << 40)]
     wall_time_seconds: Annotated[float, Field(gt=0, le=86_400)]
     max_worker_memory_bytes: Annotated[int, Field(gt=0, le=1 << 50)]
@@ -54,6 +56,12 @@ class MemrayExtractionCoverage(ContractModel):
     frame_contribution_bytes_dropped: int = Field(ge=0)
     aggregate_rows_dropped: int = Field(ge=0)
     aggregate_inclusive_bytes_dropped: int = Field(ge=0)
+    edge_rows_published: int = Field(ge=0)
+    edge_rows_dropped: int = Field(ge=0)
+    edge_weight_bytes_dropped: int = Field(ge=0)
+    representative_stacks_published: int = Field(ge=0)
+    representative_stacks_dropped: int = Field(ge=0)
+    representative_stack_weight_bytes_dropped: int = Field(ge=0)
     output_bytes: int = Field(ge=0)
 
     @property
@@ -63,6 +71,8 @@ class MemrayExtractionCoverage(ContractModel):
             and self.retained_end.complete
             and self.frame_contributions_dropped == 0
             and self.aggregate_rows_dropped == 0
+            and self.edge_rows_dropped == 0
+            and self.representative_stacks_dropped == 0
         )
 
 
@@ -102,7 +112,7 @@ class MemrayWorkerResult(ContractModel):
     capture_records: int = Field(ge=0)
     has_native_traces: bool
     coverage: MemrayExtractionCoverage
-    files: tuple[WorkerOutputFile, ...] = Field(min_length=3, max_length=3)
+    files: tuple[WorkerOutputFile, ...] = Field(min_length=5, max_length=5)
 
 
 MEMRAY_WORKER = WorkerDefinition(

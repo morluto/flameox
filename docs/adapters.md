@@ -175,14 +175,25 @@ comparison—is the format compatibility boundary.
 
 Memray extraction snapshots its complete complexity budget in the durable
 operation request: input bytes, provider records, unique frames, stack depth,
-aggregate rows, output bytes, wall time, and worker RSS. The isolated reader
+aggregate rows, unique call edges, representative stacks, output bytes, wall
+time, and worker RSS. The isolated reader
 streams each provider record set and retains a bounded heap ordered by allocated
 bytes, with provider order as the deterministic tie-breaker. Normalization then
 visits those largest provider aggregates first, so frame and aggregate limits
 retain contributors from the highest-value records rather than an arbitrary
 prefix. This is a bounded projection, not a replacement for the native profile.
+Direct caller/callee edges and representative stacks are normalized as bounded
+navigation evidence for both `memory.high_watermark` and `memory.retained_end`.
+Memray reports stacks leaf-first; Flameox stores them root-to-leaf, preserves
+repeated and recursive frames, and weights edges and stacks in bytes with the
+provider allocation count alongside that weight. It does not invent native
+frames or a Python/native distinction that the selected provider stack API does
+not expose. Native and hybrid stacks remain available in the immutable profile
+when the capture contains them.
+
 The result reports records and record bytes seen versus selected, dropped stack
-frames and aggregate contributions, published row counts, and output bytes.
+frames, aggregates, edges, and representative-stack weight, published row
+counts, and output bytes.
 Capture a narrower profile or raise applicable workspace budgets before starting
 a new extraction when complete normalized coverage is required; the immutable
 native profile remains the authority.

@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import heapq
 import importlib.metadata
+import json
 import os
 import sqlite3
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -66,10 +68,16 @@ def _normalize(
 class _AggregationProjection:
     frame_rows: list[dict[str, Any]]
     aggregates: list[tuple[str, str, int, int, int]]
+    edge_rows: list[dict[str, Any]]
+    stack_rows: list[dict[str, Any]]
     frame_contributions_dropped: int
     frame_contribution_bytes_dropped: int
     aggregate_rows_dropped: int
     aggregate_inclusive_bytes_dropped: int
+    edge_rows_dropped: int
+    edge_weight_bytes_dropped: int
+    representative_stacks_dropped: int
+    representative_stack_weight_bytes_dropped: int
 
 
 class _AggregationState:
@@ -77,6 +85,7 @@ class _AggregationState:
         self,
         *,
         limits: MemrayExtractionLimits,
+        run_id: str,
         artifact_id: str,
         workload_cwd: Path | None,
         project_root: Path,
@@ -84,6 +93,7 @@ class _AggregationState:
         database_path: Path,
     ) -> None:
         self.limits = limits
+        self.run_id = run_id
         self.artifact_id = artifact_id
         self.workload_cwd = workload_cwd
         self.project_root = project_root
@@ -91,6 +101,7 @@ class _AggregationState:
         self.database_path = database_path
         self.frame_cache: dict[tuple[str, str, int], str] = {}
         self.contributions = 0
+        self.pending_stack: tuple[str, tuple[str, ...], int, int] | None = None
         self.connection = sqlite3.connect(database_path)
         self.connection.executescript(
             """
@@ -114,6 +125,28 @@ class _AggregationState:
                 occurrences INTEGER NOT NULL,
                 PRIMARY KEY (metric, frame_id)
             );
+            CREATE TABLE edges (
+                metric TEXT NOT NULL,
+                parent_frame_id TEXT NOT NULL,
+                child_frame_id TEXT NOT NULL,
+                weight_value INTEGER NOT NULL,
+                samples INTEGER NOT NULL,
+                PRIMARY KEY (metric, parent_frame_id, child_frame_id)
+            );
+            CREATE TABLE stacks (
+                stack_id TEXT PRIMARY KEY,
+                metric TEXT NOT NULL,
+                frame_ids_json TEXT NOT NULL,
+                leaf_frame_id TEXT NOT NULL,
+                weight_value INTEGER NOT NULL,
+                samples INTEGER NOT NULL
+            );
+            CREATE TABLE stack_frames (
+                stack_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                frame_id TEXT NOT NULL,
+                PRIMARY KEY (stack_id, position)
+            );
             """
         )
 
@@ -125,7 +158,7 @@ class _AggregationState:
         contribution_bytes: int,
         allocations: int,
         is_leaf: bool,
-    ) -> None:
+    ) -> str:
         frame_id = self.frame_cache.get(raw_frame)
         if frame_id is None:
             normalized, frame_source_state_id, symbolization = _normalize(
@@ -175,8 +208,75 @@ class _AggregationState:
         self.contributions += 1
         if self.contributions % 1_024 == 0:
             self._check_budget()
+        return frame_id
+
+    def add_stack(
+        self,
+        metric: str,
+        frame_ids: tuple[str, ...],
+        *,
+        weight_value: int,
+        samples: int,
+    ) -> None:
+        if not frame_ids:
+            return
+        pending = self.pending_stack
+        if pending is not None and pending[:2] == (metric, frame_ids):
+            self.pending_stack = (
+                metric,
+                frame_ids,
+                pending[2] + weight_value,
+                pending[3] + samples,
+            )
+            return
+        self._flush_stack()
+        self.pending_stack = (metric, frame_ids, weight_value, samples)
+
+    def _flush_stack(self) -> None:
+        if self.pending_stack is None:
+            return
+        metric, frame_ids, weight_value, samples = self.pending_stack
+        self.pending_stack = None
+        for parent_frame_id, child_frame_id in pairwise(frame_ids):
+            self.connection.execute(
+                """
+                INSERT INTO edges VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(metric, parent_frame_id, child_frame_id) DO UPDATE SET
+                    weight_value = weight_value + excluded.weight_value,
+                    samples = samples + excluded.samples
+                """,
+                (metric, parent_frame_id, child_frame_id, weight_value, samples),
+            )
+        stack_id = digest_model(
+            {
+                "artifact_id": self.artifact_id,
+                "metric": metric,
+                "frame_ids": frame_ids,
+            }
+        )
+        self.connection.execute(
+            """
+            INSERT INTO stacks VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(stack_id) DO UPDATE SET
+                weight_value = weight_value + excluded.weight_value,
+                samples = samples + excluded.samples
+            """,
+            (
+                stack_id,
+                metric,
+                json.dumps(frame_ids, separators=(",", ":")),
+                frame_ids[-1],
+                weight_value,
+                samples,
+            ),
+        )
+        self.connection.executemany(
+            "INSERT OR IGNORE INTO stack_frames VALUES (?, ?, ?)",
+            ((stack_id, position, frame_id) for position, frame_id in enumerate(frame_ids)),
+        )
 
     def finalize(self) -> _AggregationProjection:
+        self._flush_stack()
         self.connection.commit()
         self._check_budget()
         self.connection.executescript(
@@ -187,6 +287,13 @@ class _AggregationState:
                 frame_id TEXT NOT NULL,
                 PRIMARY KEY (metric, frame_id)
             );
+            CREATE TEMP TABLE selected_edges (
+                metric TEXT NOT NULL,
+                parent_frame_id TEXT NOT NULL,
+                child_frame_id TEXT NOT NULL,
+                PRIMARY KEY (metric, parent_frame_id, child_frame_id)
+            );
+            CREATE TEMP TABLE selected_stacks (stack_id TEXT PRIMARY KEY);
             """
         )
         self.connection.execute(
@@ -211,6 +318,34 @@ class _AggregationState:
             """,
             (self.limits.max_aggregate_rows,),
         )
+        self.connection.execute(
+            """
+            INSERT INTO selected_edges
+            SELECT e.metric, e.parent_frame_id, e.child_frame_id
+            FROM edges AS e
+            JOIN selected_frames AS parent ON parent.frame_id = e.parent_frame_id
+            JOIN selected_frames AS child ON child.frame_id = e.child_frame_id
+            ORDER BY e.weight_value DESC, e.samples DESC, e.metric,
+                     e.parent_frame_id, e.child_frame_id
+            LIMIT ?
+            """,
+            (self.limits.max_unique_edges,),
+        )
+        self.connection.execute(
+            """
+            INSERT INTO selected_stacks
+            SELECT s.stack_id
+            FROM stacks AS s
+            WHERE NOT EXISTS (
+                SELECT 1 FROM stack_frames AS sf
+                LEFT JOIN selected_frames AS selected ON selected.frame_id = sf.frame_id
+                WHERE sf.stack_id = s.stack_id AND selected.frame_id IS NULL
+            )
+            ORDER BY s.weight_value DESC, s.samples DESC, s.metric, s.stack_id
+            LIMIT ?
+            """,
+            (self.limits.max_representative_stacks,),
+        )
         frame_drop = self.connection.execute(
             """
             SELECT coalesce(sum(occurrences), 0), coalesce(sum(inclusive_value), 0)
@@ -228,6 +363,25 @@ class _AggregationState:
             WHERE s.frame_id IS NULL
             """
         ).fetchone()
+        edge_drop = self.connection.execute(
+            """
+            SELECT count(*), coalesce(sum(e.weight_value), 0)
+            FROM edges AS e
+            LEFT JOIN selected_edges AS s
+              ON s.metric = e.metric
+             AND s.parent_frame_id = e.parent_frame_id
+             AND s.child_frame_id = e.child_frame_id
+            WHERE s.metric IS NULL
+            """
+        ).fetchone()
+        stack_drop = self.connection.execute(
+            """
+            SELECT count(*), coalesce(sum(s.weight_value), 0)
+            FROM stacks AS s
+            LEFT JOIN selected_stacks AS selected USING (stack_id)
+            WHERE selected.stack_id IS NULL
+            """
+        ).fetchone()
         aggregate_rows = [
             (str(metric), str(frame_id), int(self_value), int(inclusive), int(samples))
             for metric, frame_id, self_value, inclusive, samples in self.connection.execute(
@@ -240,7 +394,61 @@ class _AggregationState:
                 """
             )
         ]
+        edge_rows = [
+            {
+                "run_id": self.run_id,
+                "artifact_id": self.artifact_id,
+                "parent_frame_id": str(parent_frame_id),
+                "child_frame_id": str(child_frame_id),
+                "metric": str(metric),
+                "weight_value": int(weight_value),
+                "unit": "bytes",
+                "sample_count": int(samples),
+            }
+            for metric, parent_frame_id, child_frame_id, weight_value, samples
+            in self.connection.execute(
+                """
+                SELECT e.metric, e.parent_frame_id, e.child_frame_id,
+                       e.weight_value, e.samples
+                FROM edges AS e
+                JOIN selected_edges AS s
+                  ON s.metric = e.metric
+                 AND s.parent_frame_id = e.parent_frame_id
+                 AND s.child_frame_id = e.child_frame_id
+                ORDER BY e.metric, e.parent_frame_id, e.child_frame_id
+                """
+            )
+        ]
+        stack_rows = [
+            {
+                "stack_id": str(stack_id),
+                "run_id": self.run_id,
+                "artifact_id": self.artifact_id,
+                "frame_ids": tuple(json.loads(str(frame_ids_json))),
+                "leaf_frame_id": str(leaf_frame_id),
+                "metric": str(metric),
+                "weight_value": int(weight_value),
+                "unit": "bytes",
+                "sample_count": int(samples),
+                "start_ns": None,
+                "track_id": None,
+            }
+            for stack_id, metric, frame_ids_json, leaf_frame_id, weight_value, samples
+            in self.connection.execute(
+                """
+                SELECT s.stack_id, s.metric, s.frame_ids_json, s.leaf_frame_id,
+                       s.weight_value, s.samples
+                FROM stacks AS s JOIN selected_stacks AS selected USING (stack_id)
+                ORDER BY s.metric, s.stack_id
+                """
+            )
+        ]
         referenced = {frame_id for _metric, frame_id, *_values in aggregate_rows}
+        for edge in edge_rows:
+            referenced.add(cast(str, edge["parent_frame_id"]))
+            referenced.add(cast(str, edge["child_frame_id"]))
+        for stack in stack_rows:
+            referenced.update(cast(tuple[str, ...], stack["frame_ids"]))
         frame_rows = [
             {
                 "frame_id": str(frame_id),
@@ -269,10 +477,16 @@ class _AggregationState:
         return _AggregationProjection(
             frame_rows=frame_rows,
             aggregates=aggregate_rows,
+            edge_rows=edge_rows,
+            stack_rows=stack_rows,
             frame_contributions_dropped=int(frame_drop[0]),
             frame_contribution_bytes_dropped=int(frame_drop[1]),
             aggregate_rows_dropped=int(aggregate_drop[0]),
             aggregate_inclusive_bytes_dropped=int(aggregate_drop[1]),
+            edge_rows_dropped=int(edge_drop[0]),
+            edge_weight_bytes_dropped=int(edge_drop[1]),
+            representative_stacks_dropped=int(stack_drop[0]),
+            representative_stack_weight_bytes_dropped=int(stack_drop[1]),
         )
 
     def close(self) -> None:
@@ -335,19 +549,27 @@ def _aggregate(
         allocations = int(record.n_allocations)
         records_selected += 1
         record_bytes_selected += size
+        leaf_to_root: list[str] = []
         for index, (function, filename, line) in enumerate(record.stack_trace()):
             if index >= state.limits.max_stack_depth:
                 dropped_stack_frames += 1
                 dropped_stack_frame_bytes += size
                 continue
             raw_frame = (str(function), str(filename), int(line))
-            state.add(
+            frame_id = state.add(
                 metric,
                 raw_frame,
                 contribution_bytes=size,
                 allocations=allocations,
                 is_leaf=index == 0,
             )
+            leaf_to_root.append(frame_id)
+        state.add_stack(
+            metric,
+            tuple(reversed(leaf_to_root)),
+            weight_value=size,
+            samples=allocations,
+        )
         if records_selected % 1_024 == 0:
             emit_progress()
     emit_progress()
@@ -442,6 +664,7 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
             stats = None
         state = _AggregationState(
             limits=request.limits,
+            run_id=request.run_id,
             artifact_id=request.artifact_id,
             workload_cwd=Path(request.workload_cwd) if request.workload_cwd else None,
             project_root=Path(request.project_root),
@@ -556,6 +779,8 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
         ("measurements", measurement_rows),
         ("frames", frame_rows),
         ("frame_measurements", frame_measurements),
+        ("call_edges", projection.edge_rows),
+        ("stacks", projection.stack_rows),
     ):
         output = _write_table(context.job_root, name, rows, request)
         output_bytes += output.byte_length
@@ -585,6 +810,14 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
             aggregate_rows_dropped=projection.aggregate_rows_dropped,
             aggregate_inclusive_bytes_dropped=(
                 projection.aggregate_inclusive_bytes_dropped
+            ),
+            edge_rows_published=len(projection.edge_rows),
+            edge_rows_dropped=projection.edge_rows_dropped,
+            edge_weight_bytes_dropped=projection.edge_weight_bytes_dropped,
+            representative_stacks_published=len(projection.stack_rows),
+            representative_stacks_dropped=projection.representative_stacks_dropped,
+            representative_stack_weight_bytes_dropped=(
+                projection.representative_stack_weight_bytes_dropped
             ),
             output_bytes=output_bytes,
         ),

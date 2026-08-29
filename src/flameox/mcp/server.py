@@ -3354,12 +3354,13 @@ def create_server(
         ],
         ctx: Context[AppContext],
         cursor: str | None = None,
+        metric: Annotated[str | None, Field(min_length=1, max_length=100)] = None,
     ) -> Annotated[CallToolResult, ToolPayload[CallEdgeResult]]:
         """Return bounded source-linked direct callers for a frame."""
         try:
             result = DrilldownService(
                 ctx.request_context.lifespan_context.require_workspace()
-            ).callers(run_or_artifact, frame_id, limit=limit, cursor=cursor)
+            ).callers(run_or_artifact, frame_id, metric=metric, limit=limit, cursor=cursor)
             return _success(result, f"Returned {result.returned} callers.")
         except DomainError as error:
             return _failure(error)
@@ -3378,12 +3379,13 @@ def create_server(
         ],
         ctx: Context[AppContext],
         cursor: str | None = None,
+        metric: Annotated[str | None, Field(min_length=1, max_length=100)] = None,
     ) -> Annotated[CallToolResult, ToolPayload[CallEdgeResult]]:
         """Return bounded source-linked direct callees for a frame."""
         try:
             result = DrilldownService(
                 ctx.request_context.lifespan_context.require_workspace()
-            ).callees(run_or_artifact, frame_id, limit=limit, cursor=cursor)
+            ).callees(run_or_artifact, frame_id, metric=metric, limit=limit, cursor=cursor)
             return _success(result, f"Returned {result.returned} callees.")
         except DomainError as error:
             return _failure(error)
@@ -3403,12 +3405,13 @@ def create_server(
         ],
         ctx: Context[AppContext],
         cursor: str | None = None,
+        metric: Annotated[str | None, Field(min_length=1, max_length=100)] = None,
     ) -> Annotated[CallToolResult, ToolPayload[StackExamplesResult]]:
         """Return bounded representative stacks containing a frame."""
         try:
             result = DrilldownService(
                 ctx.request_context.lifespan_context.require_workspace()
-            ).examples(run_or_artifact, frame_id, limit=limit, cursor=cursor)
+            ).examples(run_or_artifact, frame_id, metric=metric, limit=limit, cursor=cursor)
             return _success(result, f"Returned {result.returned} stack examples.")
         except DomainError as error:
             return _failure(error)
@@ -3596,7 +3599,7 @@ def create_server(
         except DomainError as error:
             return _failure(error)
 
-    @server.tool(name="get_native_viewer_plan", annotations=READ_ONLY)
+    @_action_tool(server, ActionId.GET_NATIVE_VIEWER_PLAN)
     async def get_native_viewer_plan_tool(
         artifact_id: str,
         ctx: Context[AppContext],

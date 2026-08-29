@@ -11,6 +11,7 @@ from flameox.application.extractions import ExtractionManager
 from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
 from flameox.workers.memray_contract import (
+    MEMRAY_WORKER,
     MemrayExtractionCoverage,
     MemrayExtractionLimits,
     MemrayMetricCoverage,
@@ -31,6 +32,8 @@ def _result(
         max_frames=100,
         max_stack_depth=100,
         max_aggregate_rows=200,
+        max_unique_edges=200,
+        max_representative_stacks=100,
         max_output_bytes=1_000,
         wall_time_seconds=30,
         max_worker_memory_bytes=1_000_000,
@@ -58,6 +61,12 @@ def _result(
         frame_contribution_bytes_dropped=0,
         aggregate_rows_dropped=0,
         aggregate_inclusive_bytes_dropped=0,
+        edge_rows_published=2,
+        edge_rows_dropped=0,
+        edge_weight_bytes_dropped=0,
+        representative_stacks_published=1,
+        representative_stacks_dropped=0,
+        representative_stack_weight_bytes_dropped=0,
         output_bytes=100,
     )
     return MemrayExtractionResult(
@@ -66,7 +75,7 @@ def _result(
         producer_version="1.20.0",
         reader_version="1.20.0",
         reader_environment_id="sha256:" + "e" * 64,
-        extractor_profile="flameox.workers.memray/v5",
+        extractor_profile=MEMRAY_WORKER.implementation,
         peak_memory_bytes=100,
         retained_end_bytes=40,
         allocation_operations=3,
@@ -117,13 +126,15 @@ async def test_memray_extraction_is_durable_reconnectable_and_idempotent(tmp_pat
     )
     try:
         started = await manager.start_memray("run-fixture", "stable-request")
-        assert started.request["extractor_profile"] == "flameox.workers.memray/v5"
+        assert started.request["extractor_profile"] == MEMRAY_WORKER.implementation
         assert set(started.request["limits"]) == {
             "max_input_bytes",
             "max_provider_records",
             "max_frames",
             "max_stack_depth",
             "max_aggregate_rows",
+            "max_unique_edges",
+            "max_representative_stacks",
             "max_output_bytes",
             "wall_time_seconds",
             "max_worker_memory_bytes",

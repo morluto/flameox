@@ -139,9 +139,9 @@ those disjoint fields rather than stored a second time. Run semantics are
 immutable across lifecycle revisions and have a content digest that normalized
 generation manifests bind alongside their input run identifiers.
 
-This contract starts evidence schema 2.0. Flameox does not reinterpret 1.x run
-rows or manifests through fallback columns; create a new workspace and re-import
-native evidence when adopting this clean break.
+This contract starts evidence schema 3.0. Flameox does not reinterpret older
+evidence generations through fallback columns; create a new workspace and
+re-import native evidence when adopting this clean break.
 
 These run-scoped semantics are not artifacts. Content identity answers which
 bytes were produced; it cannot answer why they were produced or which property
@@ -272,8 +272,11 @@ are never edited in place. Compaction publishes replacement files and a new
 commit before superseded generations become eligible for garbage collection.
 
 Core normalized families are runs, artifacts, environments, source states,
-measurements, frames, frame measurements, observations, analyses, comparisons,
-and findings. Adapter-specific tables are allowed when a shared table would
+measurements, frames, frame measurements, weighted call edges, representative
+stacks, observations, analyses, comparisons, and findings. Call edges and stacks
+carry an explicit metric, integer weight, unit, and sample count rather than a
+CPU-specific duration field; optional temporal coordinates remain nullable.
+Adapter-specific tables are allowed when a shared table would
 erase producer semantics. Exact fields and versions live in
 `src/flameox/evidence/schemas.py`; this document deliberately does not mirror
 that registry.

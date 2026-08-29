@@ -45,7 +45,9 @@ class CursorPositionSpec:
 CURSOR_POSITION_SPECS = MappingProxyType(
     {
         CursorNamespace.ARTIFACTS: CursorPositionSpec(("string",), "artifact discovery"),
-        CursorNamespace.CALL_EDGES: CursorPositionSpec(("integer", "string"), "profile drill-down"),
+        CursorNamespace.CALL_EDGES: CursorPositionSpec(
+            ("integer", "string", "string", "string"), "profile drill-down"
+        ),
         CursorNamespace.DECLARED_WORKFLOWS: CursorPositionSpec(("integer",), "workload discovery"),
         CursorNamespace.EXPERIMENT_TRIALS: CursorPositionSpec(("integer",), "experiment trials"),
         CursorNamespace.FINDINGS: CursorPositionSpec(("integer",), "finding discovery"),
@@ -72,7 +74,7 @@ CURSOR_POSITION_SPECS = MappingProxyType(
         ),
         CursorNamespace.RUNS: CursorPositionSpec(("string", "string"), "run discovery"),
         CursorNamespace.STACK_EXAMPLES: CursorPositionSpec(
-            ("integer", "string"), "profile drill-down"
+            ("integer", "string", "string", "string"), "profile drill-down"
         ),
         CursorNamespace.TRACE_WINDOW: CursorPositionSpec(("integer", "string"), "trace evidence"),
     }

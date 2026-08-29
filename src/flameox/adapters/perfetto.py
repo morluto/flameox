@@ -339,8 +339,10 @@ class PerfettoExtractor:
                 "artifact_id": registration.artifact_id,
                 "parent_frame_id": parent_frame_id,
                 "child_frame_id": child_frame_id,
+                "metric": "cpu.wall_time",
+                "weight_value": duration,
+                "unit": "ns",
                 "sample_count": count,
-                "duration_ns": duration,
             }
             for (parent_frame_id, child_frame_id), (
                 count,
@@ -383,8 +385,11 @@ class PerfettoExtractor:
                     "artifact_id": registration.artifact_id,
                     "frame_ids": frame_ids,
                     "leaf_frame_id": leaf_frame_id,
+                    "metric": "cpu.wall_time",
+                    "weight_value": duration,
+                    "unit": "ns",
+                    "sample_count": 1,
                     "start_ns": start,
-                    "duration_ns": duration,
                     "track_id": track_id,
                 }
             )

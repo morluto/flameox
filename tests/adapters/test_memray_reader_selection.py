@@ -96,6 +96,12 @@ def test_memray_extraction_rejects_duplicate_worker_output_roles(tmp_path: Path)
         frame_contribution_bytes_dropped=0,
         aggregate_rows_dropped=0,
         aggregate_inclusive_bytes_dropped=0,
+        edge_rows_published=0,
+        edge_rows_dropped=0,
+        edge_weight_bytes_dropped=0,
+        representative_stacks_published=0,
+        representative_stacks_dropped=0,
+        representative_stack_weight_bytes_dropped=0,
         output_bytes=0,
     )
     output = WorkerOutputFile(
@@ -114,7 +120,7 @@ def test_memray_extraction_rejects_duplicate_worker_output_roles(tmp_path: Path)
         capture_records=0,
         has_native_traces=False,
         coverage=coverage,
-        files=(output, output, output),
+        files=(output, output, output, output, output),
     )
 
     with pytest.raises(DomainError) as raised:

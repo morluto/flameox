@@ -8,7 +8,7 @@ from pathlib import Path
 
 from packaging.version import InvalidVersion, Version
 
-from flameox.action_graph import ActionId, tool_action
+from flameox.action_graph import ActionId, ToolAction, tool_action
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.application.provider_runtime import ProviderRuntimeManager
 from flameox.domain import (
@@ -44,6 +44,8 @@ def memray_extraction_limits(workspace: Workspace) -> MemrayExtractionLimits:
         max_frames=max(1, min(250_000, maximum_rows // 3)),
         max_stack_depth=256,
         max_aggregate_rows=max(1, min(500_000, maximum_rows // 2)),
+        max_unique_edges=max(1, min(250_000, maximum_rows // 8)),
+        max_representative_stacks=max(1, min(50_000, maximum_rows // 24)),
         max_output_bytes=min(
             workspace.config.storage.max_staging_bytes,
             workspace.config.capture.max_artifact_bytes,
@@ -97,6 +99,7 @@ class MemrayExtractionResult(ContractModel):
     evidence_generation_id: str
     corpus_commit_id: str
     limitations: tuple[str, ...] = ()
+    recovery: ToolAction | None = None
 
 
 class MemrayExtractor:
@@ -279,7 +282,8 @@ class MemrayExtractor:
             await progress("publishing_evidence", 1, 1)
         worker = worker_results[-1]
         limitations = [
-            "Frame aggregates expose bounded callers; complete stacks remain in Memray.",
+            "Normalized callers and representative stacks are bounded; complete stacks remain "
+            "in the native Memray profile.",
             *runtime.receipt.limitations,
         ]
         if not worker.has_native_traces:
@@ -312,6 +316,14 @@ class MemrayExtractor:
             evidence_generation_id=published.manifest.generation_id,
             corpus_commit_id=published.commit.commit_id,
             limitations=tuple(limitations),
+            recovery=(
+                tool_action(
+                    ActionId.GET_NATIVE_VIEWER_PLAN,
+                    artifact_id=registration.artifact_id,
+                )
+                if not worker.coverage.complete
+                else None
+            ),
         )
 
     @staticmethod
@@ -323,6 +335,9 @@ class MemrayExtractor:
         if (
             coverage.frames_published > limits.max_frames
             or coverage.aggregate_rows_published > limits.max_aggregate_rows
+            or coverage.edge_rows_published > limits.max_unique_edges
+            or coverage.representative_stacks_published
+            > limits.max_representative_stacks
             or coverage.output_bytes > limits.max_output_bytes
             or coverage.output_bytes != sum(output.byte_length for output in result.files)
         ):
@@ -342,6 +357,8 @@ class MemrayExtractor:
             "measurements": "measurements.parquet",
             "frames": "frames.parquet",
             "frame_measurements": "frame_measurements.parquet",
+            "call_edges": "call_edges.parquet",
+            "stacks": "stacks.parquet",
         }
         actual_roles = [output.role for output in result.files]
         if len(set(actual_roles)) != len(actual_roles) or set(actual_roles) != set(expected):

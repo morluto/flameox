@@ -34,6 +34,7 @@ class ActionId(StrEnum):
     LIST_RUNS = "run.list"
     LIST_ARTIFACTS = "artifact.list"
     PREVIEW_ARTIFACT = "artifact.preview"
+    GET_NATIVE_VIEWER_PLAN = "artifact.native_viewer.plan"
     IMPORT_ARTIFACT = "artifact.import"
     IMPORT_XCTRACE = "artifact.import.xctrace"
     EXTRACT_PERFETTO = "artifact.extract.perfetto"
@@ -65,6 +66,7 @@ class ToolName(StrEnum):
     LIST_RUNS = "list_runs"
     LIST_ARTIFACTS = "list_artifacts"
     PREVIEW_ARTIFACT = "preview_artifact"
+    GET_NATIVE_VIEWER_PLAN = "get_native_viewer_plan"
     IMPORT_ARTIFACT = "import_artifact"
     IMPORT_XCTRACE = "import_xctrace"
     EXTRACT_PERFETTO = "extract_perfetto"
@@ -211,6 +213,10 @@ class _PreviewArtifactArguments(ContractModel):
     offset: StrictInt = Field(default=0, ge=0)
     max_bytes: StrictInt = Field(ge=1, le=ARTIFACT_PREVIEW_MAX_BYTES)
     max_lines: StrictInt = Field(ge=1, le=ARTIFACT_PREVIEW_MAX_LINES)
+
+
+class _ArtifactIdArguments(ContractModel):
+    artifact_id: str = Field(min_length=1, max_length=200)
 
 
 class _ImportArtifactArguments(ContractModel):
@@ -409,6 +415,13 @@ ACTION_REGISTRY = MappingProxyType(
                 ActionId.PREVIEW_ARTIFACT,
                 ToolName.PREVIEW_ARTIFACT,
                 _PreviewArtifactArguments,
+                READ_ONLY_ACTION,
+                ActionLifecycle.READ,
+            ),
+            _descriptor(
+                ActionId.GET_NATIVE_VIEWER_PLAN,
+                ToolName.GET_NATIVE_VIEWER_PLAN,
+                _ArtifactIdArguments,
                 READ_ONLY_ACTION,
                 ActionLifecycle.READ,
             ),

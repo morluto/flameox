@@ -319,12 +319,19 @@ outlive an MCP request. It requires an idempotency key and returns an operation 
 `get_extraction` for bounded progress and the terminal extraction receipt, or
 `cancel_extraction` for scoped cooperative cancellation. Native profile artifacts remain
 immutable; normalized evidence is published only as a complete generation.
-The start/status request exposes the effective eight-part extraction budget. Running
+The start/status request exposes the effective ten-part extraction budget. Running
 status reports named reader, normalization, and publication phases with observed record
 counts; it does not invent a total when Memray cannot provide one. The terminal receipt
 keeps the same limits beside explicit coverage and limitations. A new idempotency key
 with the same run and limits reuses the exact completed receipt instead of parsing the
 profile again.
+
+`get_frame_callers`, `get_frame_callees`, and `get_stack_examples` return bounded
+normalized navigation evidence. Their optional metric filter separates concepts
+such as byte-weighted Memray stacks from nanosecond-weighted sampled CPU stacks;
+each row carries its metric, weight, unit, and sample count. Pagination orders by
+weight with stable metric and identity tie-breakers. These projections do not
+claim causal dependence or replace a provider's complete native stack viewer.
 
 ## Errors
 

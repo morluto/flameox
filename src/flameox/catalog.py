@@ -471,6 +471,16 @@ class Catalog:
                         ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
                         f"Unknown table in generation manifest: {file.table}",
                     )
+                if file.schema_major != SCHEMA_MAJOR:
+                    raise DomainError(
+                        ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
+                        "Evidence generation uses an unsupported schema major.",
+                        details={
+                            "table": file.table,
+                            "observed_schema_major": file.schema_major,
+                            "supported_schema_major": SCHEMA_MAJOR,
+                        },
+                    )
                 path = (self.workspace.paths.root / file.path).resolve()
                 self._require_workspace_path(path)
                 inventory[file.table].append(path)

@@ -11,10 +11,11 @@ from typing import cast
 
 import pytest
 
+from flameox.action_graph import ActionId, tool_action
 from flameox.adapters import MemrayExtractor
 from flameox.adapters.memray import memray_extraction_limits
 from flameox.analysis import RecipeService
-from flameox.application import ImportArtifactRequest, ImportService
+from flameox.application import DrilldownService, ImportArtifactRequest, ImportService
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.evidence import GenerationPublisher
@@ -88,6 +89,14 @@ def _allocation_b() -> bytearray:
     return bytearray(2_000)
 
 
+def _nested_allocation_leaf() -> bytearray:
+    return bytearray(100_000)
+
+
+def _nested_allocation_parent() -> bytearray:
+    return _nested_allocation_leaf()
+
+
 @pytest.mark.anyio
 async def test_memray_extractor_preserves_native_capture_and_names_memory_concepts(
     tmp_path: Path,
@@ -96,7 +105,7 @@ async def test_memray_extractor_preserves_native_capture_and_names_memory_concep
     memray = _memray_module()
     capture = tmp_path / "memory.bin"
     with memray.Tracker(str(capture)):
-        retained = bytearray(100_000)
+        retained = _nested_allocation_parent()
     assert len(retained) == 100_000
     from memray._memray import compute_statistics
 
@@ -149,6 +158,16 @@ async def test_memray_extractor_preserves_native_capture_and_names_memory_concep
             "SELECT metric, sum(self_value), sum(inclusive_value) "
             "FROM frame_measurements GROUP BY metric ORDER BY metric"
         ).fetchall()
+        edge = snapshot.execute(
+            "SELECT parent_frame_id, child_frame_id, metric, weight_value, unit "
+            "FROM call_edges WHERE run_id = ? ORDER BY weight_value DESC LIMIT 1",
+            (imported.run.run_id,),
+        ).fetchone()
+        stack = snapshot.execute(
+            "SELECT leaf_frame_id, metric, weight_value, unit, frame_ids "
+            "FROM stacks WHERE run_id = ? ORDER BY weight_value DESC LIMIT 1",
+            (imported.run.run_id,),
+        ).fetchone()
     assert ("memory.peak", result.peak_memory_bytes, "bytes") in measurements
     assert ("memory.retained_end", result.retained_end_bytes, "bytes") in measurements
     assert (
@@ -166,6 +185,48 @@ async def test_memray_extractor_preserves_native_capture_and_names_memory_concep
         "memory.high_watermark",
         "memory.retained_end",
     }
+    assert edge is not None
+    assert stack is not None
+    assert edge[2] in {"memory.high_watermark", "memory.retained_end"}
+    assert edge[3] > 0
+    assert edge[4] == "bytes"
+    assert stack[1] in {"memory.high_watermark", "memory.retained_end"}
+    assert stack[2] > 0
+    assert stack[3] == "bytes"
+    assert stack[4][-1] == stack[0]
+    drilldown = DrilldownService(workspace)
+    callers = drilldown.callers(
+        imported.run.run_id,
+        str(edge[1]),
+        metric=str(edge[2]),
+    )
+    callees = drilldown.callees(
+        imported.run.run_id,
+        str(edge[0]),
+        metric=str(edge[2]),
+    )
+    examples = drilldown.examples(
+        imported.run.run_id,
+        str(stack[0]),
+        metric=str(stack[1]),
+    )
+    assert callers.frames[0].frame_id == edge[0]
+    assert callees.frames[0].frame_id == edge[1]
+    assert callers.frames[0].unit == callees.frames[0].unit == "bytes"
+    assert examples.examples[0].frames[-1].frame_id == stack[0]
+    assert examples.examples[0].unit == "bytes"
+    absent = drilldown.callers(
+        imported.run.run_id,
+        str(edge[1]),
+        metric="memory.unavailable",
+    )
+    assert absent.returned == 0
+    assert absent.recovery == tool_action(
+        ActionId.GET_NATIVE_VIEWER_PLAN,
+        artifact_id=imported.artifact_id,
+    )
+    assert result.recovery is None
+    assert "The capture does not contain native stack traces." in result.limitations
     pinned_commit_id = workspace.corpus.read_head().commit_id
     GenerationPublisher(workspace).publish_rows(
         {
@@ -384,6 +445,10 @@ async def test_memray_limits_report_bounded_coverage(
     assert first.coverage.frames_published <= 1
     assert first.coverage.aggregate_rows_published <= 2
     assert any("reached an extraction limit" in item for item in first.limitations)
+    assert first.recovery == tool_action(
+        ActionId.GET_NATIVE_VIEWER_PLAN,
+        artifact_id=imported.artifact_id,
+    )
     preserved = ArtifactStore(workspace).get(imported.artifact_id).payload_path
     assert capture.read_bytes() == preserved.read_bytes()
 

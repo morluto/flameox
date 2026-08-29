@@ -111,6 +111,16 @@ async def test_perfetto_extractor_uses_local_binary_and_curated_query(
     examples = drilldown.examples(
         imported.run.run_id,
         hotspot_by_name["reverse_scan"].frame_id,
+        metric="cpu.wall_time",
+        limit=1,
+    )
+    assert examples.next_cursor is not None
+    second_examples = drilldown.examples(
+        imported.run.run_id,
+        hotspot_by_name["reverse_scan"].frame_id,
+        metric="cpu.wall_time",
+        limit=1,
+        cursor=examples.next_cursor,
     )
     first_callees = drilldown.callees(
         imported.run.run_id,
@@ -141,10 +151,16 @@ async def test_perfetto_extractor_uses_local_binary_and_curated_query(
     assert result.representative_stack_count == 2
     assert hotspot_by_name["reverse_scan"].inclusive_value == 1_000_000
     assert callers.frames[0].function == "reverse_scan"
+    assert callers.frames[0].metric == "cpu.wall_time"
+    assert callers.frames[0].unit == "ns"
     assert [frame.function for frame in examples.examples[0].frames] == [
         "reverse_scan",
         "accumulate",
     ]
+    assert examples.examples[0].metric == "cpu.wall_time"
+    assert examples.examples[0].unit == "ns"
+    assert second_examples.returned == 1
+    assert second_examples.next_cursor is None
     assert second_callees.returned == 1
     assert second_callees.next_cursor is None
     assert window.total == 3

@@ -83,6 +83,10 @@ def _representative_actions() -> dict[ActionId, ToolAction]:
             max_bytes=4_096,
             max_lines=80,
         ),
+        ActionId.GET_NATIVE_VIEWER_PLAN: tool_action(
+            ActionId.GET_NATIVE_VIEWER_PLAN,
+            artifact_id="sha256:" + "0" * 64,
+        ),
         ActionId.IMPORT_ARTIFACT: tool_action(
             ActionId.IMPORT_ARTIFACT,
             path="trace.json",

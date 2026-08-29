@@ -217,6 +217,31 @@ def test_rogue_parquet_file_is_invisible_without_manifest(tmp_path: Path) -> Non
         assert snapshot.execute("SELECT count(*) FROM runs").fetchone() == (0,)
 
 
+def test_catalog_rejects_an_older_evidence_schema_major(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    published = GenerationPublisher(workspace).publish_rows(
+        {"frames": []},
+        publisher="test",
+        publisher_version="1",
+    )
+    manifest_path = (
+        workspace.paths.generations / published.manifest.generation_id / "manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"][0]["schema_major"] = 2
+    atomic_write_json(manifest_path, manifest)
+
+    with pytest.raises(DomainError) as raised, Catalog(workspace).open_snapshot():
+        pass
+
+    assert raised.value.code is ErrorCode.EVIDENCE_SCHEMA_MISMATCH
+    assert raised.value.details == {
+        "table": "frames",
+        "observed_schema_major": 2,
+        "supported_schema_major": 3,
+    }
+
+
 def test_catalog_projects_additive_trial_columns_for_old_generations(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     published = GenerationPublisher(workspace).publish_rows(
