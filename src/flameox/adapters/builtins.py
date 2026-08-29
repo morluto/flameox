@@ -15,6 +15,7 @@ from flameox.adapters.options import (
     compute_sanitizer_suppression_path,
     cute_compiler_options,
     nsight_compute_options,
+    nsight_systems_options,
     nvbench_options,
     rocprofv3_options,
     triton_compiler_options,
@@ -412,6 +413,28 @@ BUILTIN_ADAPTERS = {
             preserve_artifact_on_nonzero=True,
         ),
         BuiltinAdapter(
+            name="nsight.systems",
+            dependency_kind=AdapterDependencyKind.EXECUTABLE,
+            dependency="nsys",
+            supported_modes=("profile",),
+            supported_formats=("nsys-rep", "sqlite"),
+            features=("cuda_runtime", "kernels", "nvtx", "process_tree", "trace_windows"),
+            remediation=("Install NVIDIA Nsight Systems and verify CUDA tracing access.",),
+            version_args=("--version",),
+            supported_platforms=("linux", "windows"),
+            output_filename="nsight-systems.nsys-rep",
+            artifact_kinds=(ArtifactKind.EXECUTION_TRACE,),
+            expected_overhead=(
+                "System tracing overhead depends on selected domains and process scope."
+            ),
+            capture_limitations=(
+                "CPU sampling and context-switch sampling are disabled.",
+                "SQLite is a provider export; the native .nsys-rep remains authoritative.",
+                "Symbol downloads are disabled for unattended finalization.",
+            ),
+            preserve_artifact_on_nonzero=True,
+        ),
+        BuiltinAdapter(
             name="nsight.compute",
             dependency_kind=AdapterDependencyKind.EXECUTABLE,
             dependency="ncu",
@@ -633,6 +656,14 @@ def build_capture_invocation(  # noqa: C901 - provider routing is intentionally 
             adapter,
             workload_argv,
             output,
+            executable=executable,
+            options=options,
+        )
+    elif adapter_name == "nsight.systems":
+        return _nsight_systems_capture_invocation(
+            adapter,
+            workload_argv,
+            output_root,
             executable=executable,
             options=options,
         )
@@ -1106,6 +1137,46 @@ def _nsight_compute_capture_invocation(
             ("--kernel-name-base", "demangled", "--kernel-name", selected.kernel_name)
         )
     argv = (*argv_parts, *workload_argv)
+    return CaptureInvocation(
+        argv=argv,
+        artifact_kinds=adapter.artifact_kinds,
+        expected_overhead=adapter.expected_overhead or "",
+        limitations=adapter.capture_limitations,
+        environment={},
+    )
+
+
+def _nsight_systems_capture_invocation(
+    adapter: BuiltinAdapter,
+    workload_argv: tuple[str, ...],
+    output_root: Path,
+    *,
+    executable: str | None,
+    options: dict[str, object] | None,
+) -> CaptureInvocation:
+    selected = nsight_systems_options(options)
+    output_stem = output_root / "nsight-systems"
+    argv_parts = [
+        _require_executable(adapter.name, executable),
+        "profile",
+        f"--trace={','.join(selected.trace)}",
+        "--sample=none",
+        "--cpuctxsw=none",
+        "--resolve-symbols=false",
+        "--export=sqlite",
+        "--force-overwrite=true",
+        "--trace-fork-before-exec="
+        + ("true" if selected.include_pre_exec_fork_interval else "false"),
+        f"--cuda-trace-scope={selected.cuda_trace_scope}",
+        f"--cuda-graph-trace={selected.cuda_graph_trace}",
+        f"--capture-range={selected.capture_range}",
+    ]
+    if selected.capture_range != "none":
+        assert selected.capture_range_end is not None
+        argv_parts.append(f"--capture-range-end={selected.capture_range_end}")
+    if selected.nvtx_capture is not None:
+        argv_parts.append(f"--nvtx-capture={selected.nvtx_capture}")
+    argv = (*argv_parts, "--output", str(output_stem), *workload_argv)
     return CaptureInvocation(
         argv=argv,
         artifact_kinds=adapter.artifact_kinds,

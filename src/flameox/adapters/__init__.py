@@ -106,6 +106,7 @@ __all__ = [
     "NsightComputeOptions",
     "NsightSystemsExtractionResult",
     "NsightSystemsExtractor",
+    "NsightSystemsOptions",
     "NvbenchBenchmark",
     "NvbenchExtractionResult",
     "NvbenchExtractor",

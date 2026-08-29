@@ -1797,6 +1797,10 @@ class CaptureService:
                         role = f"cycle_{cycle_index:04d}"
                     else:
                         role = "primary"
+                    if plan.adapter == "nsight.systems":
+                        role = "native_report" if native.suffix == ".nsys-rep" else "sqlite_export"
+                        if not collector_succeeded or not native_complete:
+                            role = f"partial_{role}"
                     registration = await self._register_path_async(
                         run_id,
                         native,
@@ -1949,14 +1953,21 @@ class CaptureService:
             )
             raise
         except DomainError as error:
+            preserved = tuple(
+                registration
+                for registration, _byte_length in registrations
+                if registration.kind
+                not in {ArtifactKind.PROCESS_OUTPUT, ArtifactKind.PROCESS_TREE_SNAPSHOT}
+            )
             quarantined = await run_atomic_thread(
                 lambda: self._quarantine_native_output(
                     plan,
                     output_root,
                     reason=(
-                        "Artifact validation or registration failed; native output was not "
-                        "published."
+                        "Artifact validation or registration failed; unregistered native output "
+                        "was quarantined."
                     ),
+                    exclude_display_names=frozenset(item.display_name for item in preserved),
                 )
             )
             details = [
@@ -1970,6 +1981,11 @@ class CaptureService:
                 phase="validation or artifact registration failed",
                 error_code=error.code.value,
                 limitation_details=tuple(details),
+                process=outcome.process,
+                process_observations=outcome.process_observations,
+                stdout=outcome.stdout,
+                stderr=outcome.stderr,
+                artifacts=preserved,
             )
             error.run_id = terminal.run_id
             raise
@@ -2535,6 +2551,11 @@ class CaptureService:
                 output_root / PYTHON_STARTUP_PROFILE.wall_output_name,
                 output_root / PYTHON_STARTUP_PROFILE.import_trace_output_name,
             )
+        if plan.adapter == "nsight.systems":
+            return (
+                output_root / "nsight-systems.nsys-rep",
+                output_root / "nsight-systems.sqlite",
+            )
         return (output_root / definition.output_filename,)
 
     async def _register_nvbench_sidecars(
@@ -2822,6 +2843,13 @@ class CaptureService:
             return b"<ComputeSanitizerOutput" in prefix and (
                 b"</ComputeSanitizerOutput>" in suffix or b"<ComputeSanitizerOutput/>" in suffix
             )
+        if plan.adapter == "nsight.systems":
+            sqlite_path = output_root / "nsight-systems.sqlite"
+            try:
+                with sqlite_path.open("rb") as stream:
+                    return stream.read(16) == b"SQLite format 3\x00"
+            except OSError:
+                return False
         if plan.adapter != "torch.profiler":
             return True
         options = torch_profiler_options(cast(dict[str, object], plan.adapter_options))
@@ -2848,6 +2876,7 @@ class CaptureService:
         output_root: Path,
         *,
         reason: str,
+        exclude_display_names: frozenset[str] = frozenset(),
     ) -> LimitationDetail | None:
         paths = tuple(
             path
@@ -2860,7 +2889,7 @@ class CaptureService:
                     else ()
                 ),
             )
-            if path.exists()
+            if path.exists() and path.name not in exclude_display_names
         )
         if not paths:
             return None

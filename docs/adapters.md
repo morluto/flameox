@@ -192,11 +192,20 @@ benchmark comparison.
 
 ### Nsight Systems
 
-The maintained import path accepts NVIDIA's official SQLite export from
-`nsys export --type=sqlite`. Required tables are qualified before extraction;
-unknown required schemas fail. The source SQLite stays authoritative and
-normalized rows preserve CUDA runtime, graph, kernel, stream, correlation, and
-timing identity.
+The generic `nsight.systems` adapter profiles any declared workload. It preserves
+the native `.nsys-rep` and asks the same provider invocation to emit an official
+SQLite export, avoiding a second export workflow. Effective trace domains,
+capture range, range-end behavior, CUDA graph granularity, process scope, and
+disabled CPU sampling and symbol resolution remain run semantics. The defaults
+trace CUDA, NVTX, and OS runtime activity across the application process tree;
+callers must opt into the risky pre-exec fork interval, system-wide CUDA tracing,
+or range-delimited capture. Graph-level CUDA graph tracing is the conservative
+default; node detail is explicit.
+
+The maintained import and capture paths accept NVIDIA's official SQLite export.
+Required tables are qualified before extraction; unknown required schemas fail.
+The native report remains the forward-compatible authority while normalized rows
+preserve CUDA runtime, graph, kernel, stream, correlation, and timing identity.
 
 Export product and schema identity are observed from the export metadata and
 checked against any asserted producer version. Only an explicit metadata

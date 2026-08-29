@@ -118,6 +118,50 @@ class NsightComputeOptions(ContractModel):
         return self
 
 
+NsightSystemsTraceDomain = Literal["cuda", "nvtx", "osrt", "nccl"]
+
+
+class NsightSystemsOptions(ContractModel):
+    """Conservative, bounded Nsight Systems selections for declared workloads."""
+
+    trace: Annotated[tuple[NsightSystemsTraceDomain, ...], Field(min_length=1, max_length=4)] = (
+        "cuda",
+        "nvtx",
+        "osrt",
+    )
+    capture_range: Literal["none", "cudaProfilerApi", "nvtx"] = "none"
+    capture_range_end: Literal["stop", "stop-shutdown"] | None = None
+    nvtx_capture: BoundedFilter | None = None
+    cuda_trace_scope: Literal["process-tree", "system-wide"] = "process-tree"
+    include_pre_exec_fork_interval: bool = False
+    cuda_graph_trace: Literal["graph", "node"] = "graph"
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_range_end_only_for_delimited_capture(cls, value: Any) -> Any:
+        if (
+            isinstance(value, dict)
+            and value.get("capture_range", "none") != "none"
+            and "capture_range_end" not in value
+        ):
+            return {**value, "capture_range_end": "stop"}
+        return value
+
+    @model_validator(mode="after")
+    def selections_are_consistent(self) -> NsightSystemsOptions:
+        if len(set(self.trace)) != len(self.trace):
+            raise ValueError("trace domains must not contain duplicates")
+        if self.capture_range == "cudaProfilerApi" and "cuda" not in self.trace:
+            raise ValueError("cudaProfilerApi capture requires the cuda trace domain")
+        if self.capture_range == "nvtx" and "nvtx" not in self.trace:
+            raise ValueError("NVTX capture requires the nvtx trace domain")
+        if (self.capture_range == "nvtx") != (self.nvtx_capture is not None):
+            raise ValueError("nvtx_capture is required exactly for NVTX-delimited capture")
+        if (self.capture_range == "none") != (self.capture_range_end is None):
+            raise ValueError("capture_range_end is valid only for range-delimited capture")
+        return self
+
+
 class Rocprofv3Options(ContractModel):
     """Trace domains exposed by rocprofv3's documented PFTrace CLI."""
 
@@ -203,6 +247,7 @@ _ADAPTER_OPTION_MODELS: dict[str, type[ContractModel]] = {
     "compute-sanitizer": ComputeSanitizerOptions,
     "cute.compiler": CuteCompilerOptions,
     "nsight.compute": NsightComputeOptions,
+    "nsight.systems": NsightSystemsOptions,
     "nvbench": NvbenchOptions,
     "rocprofv3": Rocprofv3Options,
     "triton.compiler": TritonCompilerOptions,
@@ -273,12 +318,17 @@ def run_semantics(
     mode_key = {
         "compute-sanitizer": "tool",
         "nsight.compute": "replay_mode",
+        "nsight.systems": "capture_range",
         "torch.profiler": "mode",
     }.get(adapter)
-    process_scope_key = "target_processes" if adapter == "compute-sanitizer" else None
+    process_scope_key = {
+        "compute-sanitizer": "target_processes",
+        "nsight.systems": "cuda_trace_scope",
+    }.get(adapter)
     bound_keys = {
         "compute-sanitizer": ("launch_skip", "launch_count"),
         "nsight.compute": ("launch_skip", "launch_count"),
+        "nsight.systems": ("capture_range_end",),
         "nvbench": ("min_samples", "timeout"),
         "torch.profiler": ("wait", "warmup", "active", "repeat"),
     }.get(adapter, ())
@@ -289,6 +339,7 @@ def run_semantics(
             "suppression_digest",
         ),
         "nsight.compute": ("kernel_name",),
+        "nsight.systems": ("nvtx_capture",),
     }.get(adapter, ())
     mode = (
         SemanticOption(name=mode_key, value=effective_options[mode_key])
@@ -313,7 +364,11 @@ def run_semantics(
         scope=CaptureScope(
             mode=mode,
             process_scope=process_scope,
-            bounds={key: effective_options[key] for key in bound_keys if key in effective_options},
+            bounds={
+                key: effective_options[key]
+                for key in bound_keys
+                if effective_options.get(key) is not None
+            },
             filters={
                 key: effective_options[key]
                 for key in filter_keys
@@ -402,6 +457,10 @@ def nvbench_options(options: dict[str, object] | None) -> NvbenchOptions:
 
 def nsight_compute_options(options: dict[str, object] | None) -> NsightComputeOptions:
     return cast(NsightComputeOptions, _validate_adapter_options("nsight.compute", options))
+
+
+def nsight_systems_options(options: dict[str, object] | None) -> NsightSystemsOptions:
+    return cast(NsightSystemsOptions, _validate_adapter_options("nsight.systems", options))
 
 
 def rocprofv3_options(options: dict[str, object] | None) -> Rocprofv3Options:

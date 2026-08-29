@@ -10,6 +10,7 @@ from pydantic import JsonValue
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.domain import (
     ArtifactKind,
+    ArtifactRegistration,
     DomainError,
     ErrorCode,
     digest_model,
@@ -182,13 +183,7 @@ class NsightSystemsExtractor:
                 capture_adapters=(),
                 import_producers=("auto",),
             )
-        if len(registrations) != 1:
-            raise DomainError(
-                ErrorCode.ARTIFACT_PARSE_FAILED,
-                "The run must contain exactly one Nsight Systems structured export.",
-                run_id=run_id,
-            )
-        registration = registrations[0]
+        registration = self._structured_registration(registrations, run_id=run_id)
         if registration.producer not in {"nsight.systems", "nsys"}:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
@@ -444,6 +439,29 @@ class NsightSystemsExtractor:
             coverage=coverage,
             corpus_commit_id=published.commit.commit_id,
             limitations=tuple(limitations),
+        )
+
+    @staticmethod
+    def _structured_registration(
+        registrations: list[ArtifactRegistration], *, run_id: str
+    ) -> ArtifactRegistration:
+        structured = [
+            item
+            for item in registrations
+            if item.role == "sqlite_export"
+        ]
+        if len(structured) == 1:
+            return structured[0]
+        if (
+            len(registrations) == 1
+            and registrations[0].display_name.endswith(".sqlite")
+            and not registrations[0].role.startswith("partial_")
+        ):
+            return registrations[0]
+        raise DomainError(
+            ErrorCode.ARTIFACT_PARSE_FAILED,
+            "The run must contain exactly one Nsight Systems structured export.",
+            run_id=run_id,
         )
 
     async def _run_worker(
