@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flameox"
-version = "0.1.14"
+version = "0.1.15"
 description = "Runtime evidence that helps agents trace, profile, and burn down hotspots in application and native code, GPU kernels, and inference stacks."
 readme = "README.md"
 license = "MIT"
