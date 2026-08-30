@@ -136,11 +136,14 @@ async def test_memray_extractor_preserves_native_capture_and_names_memory_concep
     )
 
     assert result.peak_memory_bytes >= 100_000
-    assert result.retained_end_bytes is not None
-    assert result.retained_end_bytes >= 100_000
-    assert result.allocation_operations == provider_stats.total_num_allocations
+    retained_end_bytes = result.retained_end_bytes
+    assert retained_end_bytes is not None
+    assert retained_end_bytes >= 100_000
+    allocation_operations = result.allocation_operations
+    assert allocation_operations is not None
+    assert allocation_operations == provider_stats.total_num_allocations
     assert result.total_allocated_bytes == provider_stats.total_memory_allocated
-    assert result.capture_records >= result.allocation_operations
+    assert result.capture_records >= allocation_operations
     assert result.coverage.frames_published >= 1
     assert result.producer_version == memray.__version__
     assert result.reader_version == memray.__version__
