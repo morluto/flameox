@@ -1,6 +1,82 @@
 # Changelog
 
 All notable changes to flameox are documented in this file.
+## [0.1.15] - 2026-08-30
+### Bug Fixes
+
+- **capabilities:** Expose GPU adapter workflows
+- **faults:** Preserve pre-capture diagnostics
+- **evidence:** Qualify process snapshot coverage
+- **viewers:** Resolve managed provider runtimes
+- **capabilities:** Expose all managed setup adapters
+- **pipelines:** Report first observed divergence
+- **memray:** Bound and isolate extraction
+- **memray:** Separate allocation operations from records
+- **memray:** Bind frames to captured source context
+- **memray:** Bind extraction to producer-qualified readers
+- **types:** Support optional aiperf installations
+- **operations:** Bound cancellation cleanup waits
+- **providers:** Bind runtime package provenance
+- **collectors:** Bind workload capture code
+- **nsight:** Disable unattended symbol downloads
+- **sanitizer:** Bind bounded capture evidence
+- **extraction:** Recover from missing evidence inputs
+- **perfetto:** Route extraction to managed setup
+- **torch:** Preserve workload launcher semantics
+- **nvbench:** Qualify benchmark workloads
+- **capture:** Preserve terminal process output
+- **analysis:** Bind comparisons to exact evidence
+- **faults:** Generate valid proxy names
+- **core:** Enforce authority at execution boundaries
+- **evidence:** Project scoped sanitizer semantics
+### Documentation
+
+- Define the hybrid run evidence boundary
+- Clarify evidence authority boundaries
+- **contributing:** Improve issue and PR evidence prompts
+- Improve GitHub issue and pull request templates
+- Remove redundant README disclaimer
+- Clarify flameox boundaries
+- Add simplified Chinese README
+### Features
+
+- Hard-break run semantics and evidence ownership
+- **memory:** Add source and lifetime analysis
+- **reductions:** Register reduced artifacts
+- **memray:** Publish bounded stack navigation
+- **analysis:** Make execution evidence retrievable
+- **extraction:** Add durable Memray lifecycle
+- **setup:** Resume managed asset downloads
+- **capture:** Execute reviewed plans from CLI
+- **nsight:** Capture declared workloads
+- **trace:** Unify bounded evidence windows
+- **imports:** Qualify preserved profiler evidence
+- **status:** Expose server and workspace versions
+- **pipelines:** Expose managed evidence lineage
+- **validation:** Link evidence to producing runs
+- **artifacts:** Expose bounded output previews
+- **evidence:** Make run semantics authoritative
+- **setup:** Install Flameox agent guidance
+### Performance
+
+- **memray:** Cache normalized frame identities
+### Refactoring
+
+- **coverage:** Remove obsolete optional import
+- **storage:** Hard-break control-plane format
+- **catalog:** Remove stale-state bookkeeping
+### Styling
+
+- Apply Ruff formatting
+### Testing
+
+- **memory:** Narrow optional allocation count
+- **memory:** Narrow retained measurement contract
+- **runtime:** Cover sidecar transport shutdown
+- **memray:** Bind capture to workload interpreter
+- **capabilities:** Prove managed py-spy discovery
+- **catalog:** Prove concurrent snapshot isolation
+- **pipelines:** Prove public capture handoff
 ## [0.1.14] - 2026-08-13
 ### Bug Fixes
 
