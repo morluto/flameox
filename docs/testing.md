@@ -33,7 +33,9 @@ uv run pip-audit
 ```
 
 The pull-request, merge-group, and main CI lanes own static validation and the
-complete deterministic Python and npm suites. The release workflow does not
+complete deterministic Python and npm suites. Ordinary deterministic tests and
+process-boundary tests run as concurrent xdist lanes; CI combines their coverage
+data before enforcing the project threshold. The release workflow does not
 repeat those suites after a release commit has merged. It owns the distinct
 publication evidence instead: synchronized tag identity, registry metadata,
 Python and npm artifact construction, installed-wheel behavior, archive

@@ -49,16 +49,68 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync --extra dev --extra inference
-      - name: Run parallel-safe tests
+      - name: Run deterministic tests
+        env:
+          COVERAGE_FILE: .coverage.deterministic
         run: >-
           uv run pytest -o addopts='' -ra -q -n auto
-          -m 'not optional and not performance and not serial'
-          --cov=flameox --cov-append --cov-report=
-      - name: Run serial tests
+          -m 'not optional and not performance and not process'
+          --cov=flameox --cov-report= --cov-fail-under=0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: deterministic-coverage
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
+          path: .coverage.deterministic
+
+  process-tests:
+    name: Process-boundary tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --extra dev --extra inference
+      - name: Run process-boundary tests
+        env:
+          COVERAGE_FILE: .coverage.process
         run: >-
-          uv run pytest -o addopts='' -ra -q
-          -m 'not optional and not performance and serial'
-          --cov=flameox --cov-append --cov-report=
+          uv run pytest -o addopts='' -ra -q -n 4
+          -m 'not optional and not performance and process'
+          --cov=flameox --cov-report= --cov-fail-under=0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: process-coverage
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
+          path: .coverage.process
+
+  coverage:
+    name: Deterministic coverage
+    needs: [tests, process-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --extra dev
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: "*-coverage"
+          merge-multiple: true
+      - run: uv run coverage combine .coverage.deterministic .coverage.process
       - run: uv run coverage report --fail-under=60
       - run: uv run coverage xml -o coverage.xml
       - uses: codecov/codecov-action@v5
@@ -170,7 +222,7 @@ jobs:
   required:
     name: Required checks
     if: always()
-    needs: [quality, tests, architecture, npm]
+    needs: [quality, tests, process-tests, coverage, architecture, npm]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
