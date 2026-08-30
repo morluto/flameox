@@ -37,9 +37,44 @@ jobs:
       - run: uv run mypy src tests tools
 
   tests:
-    name: Deterministic tests
+    name: Deterministic tests (${{ matrix.name }})
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: experiments
+            paths: >-
+              tests/application/test_experiments.py
+          - name: golden-investigations
+            paths: >-
+              tests/golden/test_reverse_scan.py
+              tests/golden/test_configuration_observations.py
+          - name: capture-and-faults
+            paths: >-
+              tests/application/test_faults.py
+              tests/application/test_capture_planning.py
+              tests/application/test_capture_environment.py
+              tests/application/test_capture_containment.py
+          - name: interfaces
+            paths: >-
+              tests/mcp
+              tests/test_cli_smoke.py
+              tests/test_http_transport.py
+          - name: core
+            paths: >-
+              tests
+              --ignore=tests/application/test_experiments.py
+              --ignore=tests/golden/test_reverse_scan.py
+              --ignore=tests/golden/test_configuration_observations.py
+              --ignore=tests/application/test_faults.py
+              --ignore=tests/application/test_capture_planning.py
+              --ignore=tests/application/test_capture_environment.py
+              --ignore=tests/application/test_capture_containment.py
+              --ignore=tests/mcp
+              --ignore=tests/test_cli_smoke.py
+              --ignore=tests/test_http_transport.py
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -51,18 +86,19 @@ jobs:
       - run: uv sync --extra dev --extra inference
       - name: Run deterministic tests
         env:
-          COVERAGE_FILE: .coverage.deterministic
+          COVERAGE_FILE: .coverage.deterministic.${{ matrix.name }}
         run: >-
-          uv run pytest -o addopts='' -ra -q -n auto
+          uv run pytest -o addopts='' -ra -q -n 2
           -m 'not optional and not performance and not process'
           --cov=flameox --cov-report= --cov-fail-under=0
+          ${{ matrix.paths }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: deterministic-coverage
+          name: deterministic-${{ matrix.name }}-coverage
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 14
-          path: .coverage.deterministic
+          path: .coverage.deterministic.${{ matrix.name }}
 
   process-tests:
     name: Process-boundary tests
@@ -110,7 +146,7 @@ jobs:
         with:
           pattern: "*-coverage"
           merge-multiple: true
-      - run: uv run coverage combine .coverage.deterministic .coverage.process
+      - run: uv run coverage combine .coverage.deterministic.* .coverage.process
       - run: uv run coverage report --fail-under=60
       - run: uv run coverage xml -o coverage.xml
       - uses: codecov/codecov-action@v5
