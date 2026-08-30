@@ -109,6 +109,34 @@ async def test_setup_does_not_downgrade_active_runtime_for_stale_bootstrap(
 
 
 @pytest.mark.anyio
+async def test_setup_replaces_invalid_install_metadata(tmp_path: Path) -> None:
+    service, runtime, home = make_service(tmp_path)
+    (home / ".claude").mkdir()
+    runtime.versions.add("0.1.0")
+    service.data_root.mkdir(parents=True)
+    atomic_write_json(
+        service.install_manifest,
+        {
+            "obsolete": True,
+            "active_version": "0.1.0",
+            "executable": str(runtime.executable("0.1.0")),
+        },
+    )
+
+    plan = service.plan(
+        operation=SetupOperation.CONFIGURE,
+        clients=(SetupClient.CLAUDE,),
+        version="0.1.1",
+    )
+    await service.apply(plan)
+
+    assert json.loads(service.install_manifest.read_text()) == {
+        "active_version": "0.1.1",
+        "executable": str(runtime.executable("0.1.1")),
+    }
+
+
+@pytest.mark.anyio
 async def test_setup_is_idempotent_and_preserves_unrelated_json(tmp_path: Path) -> None:
     service, _, home = make_service(tmp_path)
     config = home / ".gemini" / "settings.json"

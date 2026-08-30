@@ -173,7 +173,7 @@ class SetupService:
         self.lock_path = self.data_root / "setup.lock"
 
     def inspect(self) -> SetupInspection:
-        manifest = self._read_install_manifest()
+        manifest = self._discover_install_manifest()
         return SetupInspection(
             active_version=manifest.active_version if manifest else None,
             active_executable=manifest.executable if manifest else None,
@@ -251,7 +251,11 @@ class SetupService:
                     ErrorCode.EXECUTION_REFUSED,
                     "A target runtime version is required.",
                 )
-            active_manifest = self._read_install_manifest()
+            active_manifest = (
+                self._discover_install_manifest()
+                if operation is SetupOperation.CONFIGURE
+                else self._read_install_manifest()
+            )
             if (
                 operation is SetupOperation.CONFIGURE
                 and active_manifest is not None
@@ -655,6 +659,14 @@ class SetupService:
                 details={"error": str(exc)},
             ) from exc
         return manifest
+
+    def _discover_install_manifest(self) -> _InstallManifest | None:
+        try:
+            return self._read_install_manifest()
+        except DomainError as exc:
+            if exc.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED:
+                return None
+            raise
 
 
 def _unique_clients(clients: tuple[SetupClient, ...]) -> tuple[SetupClient, ...]:
