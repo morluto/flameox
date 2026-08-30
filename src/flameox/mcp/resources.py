@@ -6,18 +6,20 @@ from typing import Protocol, cast
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 
-from flameox.adapters.kernel_build import kernel_build_json_schema, kernel_build_v1_json_schema
+from flameox.adapters.kernel_build import kernel_build_json_schema
 from flameox.adapters.kernel_validation import kernel_validation_json_schema
-from flameox.application import (
-    ArtifactPipelineService,
-    ArtifactService,
-    EvidenceLookupService,
-    ExperimentService,
+from flameox.application.artifacts import ArtifactService
+from flameox.application.comparisons import RunSetService
+from flameox.application.evidence_lookup import EvidenceLookupService
+from flameox.application.experiments import ExperimentService
+from flameox.application.pipelines import ArtifactPipelineService
+from flameox.application.records import (
     FindingService,
     InvestigationService,
-    RunProjectionService,
-    RunSetService,
 )
+from flameox.application.run_projection import RunProjectionService
+from flameox.application.static_analysis import StaticAnalysisService
+from flameox.application.triton_autotune import TritonAutotuneService
 from flameox.domain import DomainError, ErrorCode, EvidenceReferenceType
 from flameox.storage import Workspace
 
@@ -62,6 +64,33 @@ def register_resources[T: WorkspaceContext](server: MCPServer[T]) -> None:  # no
             return error_payload(error)
 
     @server.resource(
+        "flameox://static-analysis/{run_id}/candidates",
+        mime_type="application/json",
+        description="Bounded source-scoped static-analysis candidates with an opaque next cursor.",
+    )
+    async def static_candidates_resource(run_id: str, ctx: Context) -> str:
+        try:
+            workspace = _workspace(ctx)
+            result = StaticAnalysisService(workspace).candidates(run_id=run_id)
+            return result.model_dump_json(indent=2)
+        except DomainError as error:
+            return error_payload(error)
+
+    @server.resource(
+        "flameox://triton-autotune/{run_id}/selections",
+        mime_type="application/json",
+        description="Bounded Triton autotune selections with an opaque next cursor.",
+    )
+    async def triton_autotune_selections_resource(run_id: str, ctx: Context) -> str:
+        try:
+            workspace = _workspace(ctx)
+            return (
+                TritonAutotuneService(workspace).selections(run_id=run_id).model_dump_json(indent=2)
+            )
+        except DomainError as error:
+            return error_payload(error)
+
+    @server.resource(
         "flameox://schemas/kernel-validation/v2",
         mime_type="application/schema+json",
         description="Published JSON Schema for flameox.kernel-validation.v2.",
@@ -70,19 +99,11 @@ def register_resources[T: WorkspaceContext](server: MCPServer[T]) -> None:  # no
         return json.dumps(kernel_validation_json_schema(), indent=2, sort_keys=True)
 
     @server.resource(
-        "flameox://schemas/kernel-build/v1",
+        "flameox://schemas/kernel-build",
         mime_type="application/schema+json",
-        description="Published JSON Schema for flameox.kernel-build.v1.",
+        description="Published JSON Schema for the kernel-build provenance document.",
     )
     async def kernel_build_schema_resource() -> str:
-        return json.dumps(kernel_build_v1_json_schema(), indent=2, sort_keys=True)
-
-    @server.resource(
-        "flameox://schemas/kernel-build/v2",
-        mime_type="application/schema+json",
-        description="Published JSON Schema for flameox.kernel-build.v2.",
-    )
-    async def kernel_build_v2_schema_resource() -> str:
         return json.dumps(kernel_build_json_schema(), indent=2, sort_keys=True)
 
     @server.resource(
@@ -140,23 +161,19 @@ def register_resources[T: WorkspaceContext](server: MCPServer[T]) -> None:  # no
     async def finding_resource(finding_id: str, ctx: Context) -> str:
         try:
             workspace = _workspace(ctx)
-            return FindingService(workspace).findings.read(finding_id).model_dump_json(indent=2)
+            return FindingService(workspace).get(finding_id).model_dump_json(indent=2)
         except DomainError as error:
             return error_payload(error)
 
     @server.resource(
         "flameox://experiments/{experiment_id}",
         mime_type="application/json",
-        description="Immutable experiment protocol.",
+        description="Bounded experiment outcome reconstructed from durable evidence.",
     )
     async def experiment_resource(experiment_id: str, ctx: Context) -> str:
         try:
             workspace = _workspace(ctx)
-            return (
-                ExperimentService(workspace)
-                .experiments.read(experiment_id)
-                .model_dump_json(indent=2)
-            )
+            return ExperimentService(workspace).status(experiment_id).model_dump_json(indent=2)
         except DomainError as error:
             return error_payload(error)
 

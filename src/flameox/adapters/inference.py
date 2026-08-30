@@ -5,7 +5,7 @@ import math
 from collections.abc import Iterator
 from pathlib import Path
 from statistics import median
-from typing import Annotated, Any, Literal, NamedTuple
+from typing import Annotated, Any, NamedTuple
 
 import ijson
 from ijson import IncompleteJSONError, JSONError
@@ -38,7 +38,6 @@ from flameox.evidence import (
     InferenceRequestItem,
     ReportedInferenceRequestOutcome,
     SucceededInferenceRequestOutcome,
-    inference_request_outcome_columns,
 )
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
@@ -71,7 +70,6 @@ _REQUIRED_FIELDS = frozenset({"timestamp", "input_length", "output_length"})
 class MooncakeRequestRow(ContractModel):
     """One validated, typed request extracted from a Mooncake trace line."""
 
-    schema_version: Literal[1] = 1
     request_id: str
     line_index: Annotated[int, Field(ge=0)]
     timestamp_ms: Annotated[int, Field(ge=0)]
@@ -84,7 +82,6 @@ class MooncakeRequestRow(ContractModel):
 class MooncakeTraceSummary(ContractModel):
     """Bounded summary of a parsed Mooncake trace stream."""
 
-    schema_version: int = 1
     request_count: int
     prefix_hash_count: int
     max_input_length: int
@@ -238,7 +235,7 @@ class AIPerfRequestRow(ContractModel):
     latency_ns: Annotated[int, Field(ge=0)] | None
     tpot_ns: Annotated[int, Field(ge=0)] | None
     mean_itl_ns: Annotated[int, Field(ge=0)] | None
-    outcome: ReportedInferenceRequestOutcome = Field(exclude=True)
+    outcome: ReportedInferenceRequestOutcome
     queue_ns: None = None
     prefill_ns: None = None
     decode_ns: None = None
@@ -247,37 +244,8 @@ class AIPerfRequestRow(ContractModel):
     evidence_level: EvidenceLevel = EvidenceLevel.OBSERVED
     line_index: Annotated[int, Field(ge=0)]
 
-    @property
-    def success(self) -> bool:
-        success = inference_request_outcome_columns(self.outcome).success
-        assert success is not None
-        return success
-
-    @property
-    def cancelled(self) -> bool:
-        cancelled = inference_request_outcome_columns(self.outcome).cancelled
-        assert cancelled is not None
-        return cancelled
-
-    @property
-    def error_type(self) -> str | None:
-        return inference_request_outcome_columns(self.outcome).error_type
-
-    @property
-    def error_code(self) -> str | None:
-        return inference_request_outcome_columns(self.outcome).error_code
-
     def evidence_columns(self) -> dict[str, Any]:
-        columns = self.model_dump(mode="python", exclude={"line_index"})
-        columns.update(
-            {
-                "success": self.success,
-                "cancelled": self.cancelled,
-                "error_type": self.error_type,
-                "error_code": self.error_code,
-            }
-        )
-        return columns
+        return self.model_dump(mode="python", exclude={"line_index"})
 
 
 class AIPerfRecordParser:
@@ -679,7 +647,6 @@ class AIPerfInputsIndex:
 class AIPerfCorrelationSummary(ContractModel):
     """Typed summary of correlating ``profile_export`` records against ``inputs.json``."""
 
-    schema_version: Literal[1] = 1
     inputs_session_count: int
     matched_count: int
     missing_session_count: int
@@ -850,7 +817,6 @@ class VllmResultDocument(ContractModel):
 class VllmMeasurementRow(ContractModel):
     """One normalized measurement derived from a vLLM aggregate result."""
 
-    schema_version: Literal[1] = 1
     measurement_id: str
     name: str
     value_float: float
@@ -1066,7 +1032,7 @@ class VllmResultParser:
 
 
 class SglangResultDocument(ContractModel):
-    """Safe aggregate subset of SGLang 0.5.16 ``bench_serving`` JSONL output."""
+    """Safe aggregate subset of SGLang ``benchmark.serving`` JSONL output."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -1078,7 +1044,7 @@ class SglangResultDocument(ContractModel):
     request_throughput: Annotated[float, Field(ge=0)] | None = None
     input_throughput: Annotated[float, Field(ge=0)] | None = None
     output_throughput: Annotated[float, Field(ge=0)] | None = None
-    total_token_throughput: Annotated[float, Field(ge=0)] | None = None
+    total_throughput: Annotated[float, Field(ge=0)] | None = None
     accept_length: Annotated[float, Field(ge=0)] | None = None
     concurrency: Annotated[float, Field(ge=0)] | None = None
     mean_e2e_latency_ms: Annotated[float, Field(ge=0)] | None = None
@@ -1142,7 +1108,6 @@ class _SglangMetricDescriptor(NamedTuple):
     dimensions: tuple[tuple[str, str], ...] = ()
 
 
-_SGLANG_RESULT_PROFILE = "sglang-0.5.16-bench-serving-aggregate-v1"
 _SGLANG_METRICS: dict[str, _SglangMetricDescriptor] = {
     "duration": _SglangMetricDescriptor(
         "sglang.duration",
@@ -1190,8 +1155,8 @@ _SGLANG_METRICS: dict[str, _SglangMetricDescriptor] = {
         "token_rate",
         (("token_role", "output"),),
     ),
-    "total_token_throughput": _SglangMetricDescriptor(
-        "sglang.total_token_throughput",
+    "total_throughput": _SglangMetricDescriptor(
+        "sglang.total_throughput",
         "tokens/sec",
         "rate",
         "token_rate",
@@ -1234,7 +1199,7 @@ for _latency_family in ("e2e_latency", "ttft", "tpot", "itl"):
 
 
 class SglangResultParser:
-    """Parse exactly one bounded, aggregate-only SGLang 0.5.16 JSONL record.
+    """Parse exactly one bounded, aggregate-only SGLang JSONL record.
 
     SGLang's optional detailed output carries prompts, generations and error
     text.  It is intentionally rejected before any normalization occurs.
@@ -1263,8 +1228,7 @@ class SglangResultParser:
                 continue
             value = float(value)
             dimensions = {
-                "producer": "sglang.bench_serving",
-                "result_profile": _SGLANG_RESULT_PROFILE,
+                "producer": "sglang.benchmark.serving",
                 "semantic_type": descriptor.semantic_type,
                 "completed": str(document.completed),
                 **dict(descriptor.dimensions),
@@ -1273,7 +1237,6 @@ class SglangResultParser:
                 VllmMeasurementRow(
                     measurement_id=digest_model(
                         {
-                            "result_profile": _SGLANG_RESULT_PROFILE,
                             "source_name": source_name,
                             "descriptor": descriptor._asdict(),
                             "value": value,
@@ -1290,7 +1253,6 @@ class SglangResultParser:
 
 
 class InferenceExtractionResult(ContractModel):
-    schema_version: Literal[1] = 1
     run_id: str
     artifact_id: str
     evidence_run_id: str
@@ -1365,10 +1327,7 @@ class InferenceArtifactExtractor:
                     "latency_ns": None,
                     "tpot_ns": None,
                     "mean_itl_ns": None,
-                    "success": None,
-                    "cancelled": None,
-                    "error_type": None,
-                    "error_code": None,
+                    "outcome": {"kind": "unreported"},
                     "queue_ns": None,
                     "prefill_ns": None,
                     "decode_ns": None,
@@ -1622,7 +1581,6 @@ class InferenceArtifactExtractor:
                 "parser_version": self.version,
                 "evidence_run_id": target_run,
                 "provider_environment_id": runtime.receipt.environment_id,
-                "provider_python_sha256": runtime.receipt.python_sha256,
                 "provider_executable_sha256": runtime.receipt.executable_sha256,
                 "aiperf_version": worker_result.aiperf_version,
                 "native_model": worker_result.native_model,
@@ -1671,7 +1629,7 @@ class InferenceArtifactExtractor:
         artifact_id: str,
     ) -> list[dict[str, Any]]:
         """Derive bounded trial-level aggregates from prompt-free request evidence."""
-        successful = [row for row in requests if row["success"] is True]
+        successful = [row for row in requests if row["outcome"]["kind"] == "succeeded"]
         metrics: list[tuple[str, float, str, str, dict[str, str]]] = [
             ("aiperf.requests", float(len(requests)), "requests", "count", {}),
             (

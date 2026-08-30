@@ -24,6 +24,13 @@ def test_torch_launcher_records_workload_phase_on_failure(
         def __exit__(self, *_: object) -> Literal[False]:
             return False
 
+        def events(self) -> tuple[SimpleNamespace, ...]:
+            return (
+                SimpleNamespace(
+                    time_range=SimpleNamespace(start=4.0, end=9.0),
+                ),
+            )
+
         def export_chrome_trace(self, path: str) -> None:
             Path(path).write_text("{}")
 
@@ -72,6 +79,83 @@ def test_torch_launcher_records_workload_phase_on_failure(
     assert diagnostics["phase"] == "workload_execution"
     assert diagnostics["status"] == "failed"
     assert "synthetic workload failure" in diagnostics["detail"]
+    assert diagnostics["event_count"] == 1
+    assert diagnostics["active_duration_us"] == 5.0
+
+
+def test_torch_launcher_records_provider_event_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTimeRange:
+        def __init__(self, start: float, end: float) -> None:
+            self.start = start
+            self.end = end
+
+    class FakeEvent:
+        def __init__(self, start: float, end: float) -> None:
+            self.time_range = FakeTimeRange(start, end)
+
+    class FakeProfile:
+        def __enter__(self) -> FakeProfile:
+            return self
+
+        def __exit__(self, *_: object) -> Literal[False]:
+            return False
+
+        def events(self) -> tuple[FakeEvent, ...]:
+            return (FakeEvent(10.0, 12.5), FakeEvent(11.0, 19.0))
+
+        def export_chrome_trace(self, path: str) -> None:
+            Path(path).write_text("trace")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: False),
+            profiler=SimpleNamespace(
+                ProfilerActivity=SimpleNamespace(CPU="cpu", CUDA="cuda"),
+                profile=lambda **_: FakeProfile(),
+            ),
+        ),
+    )
+    workload = tmp_path / "workload.py"
+    workload.write_text("pass\n")
+    output = tmp_path / "output"
+    output.mkdir()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "torch-launcher",
+            "--output",
+            str(output / "torch-trace.json"),
+            "--config",
+            json.dumps(
+                {
+                    "mode": "whole_entrypoint",
+                    "activities": ["cpu"],
+                    "record_shapes": False,
+                    "profile_memory": False,
+                    "with_stack": False,
+                    "with_flops": False,
+                    "with_modules": False,
+                }
+            ),
+            "--script",
+            str(workload),
+        ],
+    )
+
+    torch_launcher.main()
+
+    diagnostics = json.loads(
+        (output / "torch-profiler-diagnostics.json").read_text(encoding="utf-8")
+    )
+    assert diagnostics["event_count"] == 2
+    assert diagnostics["active_duration_us"] == 9.0
+    assert diagnostics["artifact_size_bytes"] == len("trace")
 
 
 @pytest.mark.parametrize("exit_code", [None, 0, 7])

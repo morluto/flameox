@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import cast
 
@@ -10,13 +9,12 @@ from flameox.application.otlp import _OtlpRowLimitExceeded, _parse_otlp
 from flameox.workers.otlp_contract import OTLP_WORKER, OtlpWorkerRequest, OtlpWorkerResult
 from flameox.workers.protocol import (
     WorkerApplication,
-    WorkerContext,
     WorkerFailureKind,
     run_typed_worker,
 )
 
 
-def _handle(request: OtlpWorkerRequest, _context: WorkerContext) -> OtlpWorkerResult:
+def _handle(request: OtlpWorkerRequest, _job_root: Path) -> OtlpWorkerResult:
     try:
         parsed = _parse_otlp(
             Path(request.artifact_path),
@@ -46,7 +44,7 @@ def main() -> int:
             handler=_handle,
             invalid_failure=WorkerFailureKind.INPUT_MALFORMED,
             invalid_message="OTLP artifact is invalid",
-            caught=(OSError, TypeError, ValueError, json.JSONDecodeError),
+            caught=(OSError, TypeError, ValueError),
         )
     )
 

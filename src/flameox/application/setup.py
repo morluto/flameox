@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from importlib.resources import files
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Protocol
 
 import portalocker
 from packaging.version import InvalidVersion, Version
@@ -62,7 +62,6 @@ class SkillSetupPlan(ContractModel):
 
 
 class SetupPlan(ContractModel):
-    schema_version: Literal[1] = 1
     operation: SetupOperation
     version: str | None
     runtime_action: RuntimeAction
@@ -75,7 +74,6 @@ class SetupPlan(ContractModel):
 class SetupReport(ContractModel):
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
-    schema_version: Literal[1] = 1
     operation: SetupOperation
     version: str | None
     runtime_installed: bool
@@ -91,7 +89,6 @@ class SetupReport(ContractModel):
 
 
 class SetupInspection(ContractModel):
-    schema_version: Literal[1] = 1
     active_version: str | None
     active_executable: Path | None
     configured_clients: tuple[SetupClient, ...]
@@ -119,7 +116,6 @@ class SkillEdit:
 
 
 class _InstallManifest(ContractModel):
-    schema_version: Literal[1] = 1
     active_version: str
     executable: Path
 

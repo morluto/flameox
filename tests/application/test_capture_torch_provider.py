@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from flameox.application import CapabilityService, CaptureService, ExecutionPolicy
+from flameox.action_graph import ToolAction
+from flameox.application.capabilities import CapabilityService
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.python_environment import PythonEnvironmentObservation
 from flameox.domain import (
     CapabilityPermissionStatus,
     CapabilityReport,
     CapabilityStatus,
     CaptureStatus,
+    DomainError,
     ExecutionStatus,
     ProbeKind,
 )
@@ -18,10 +24,8 @@ from tests.support.capture import disable_containment
 
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.optional,
     pytest.mark.process,
     pytest.mark.serial,
-    pytest.mark.requires_torch,
 ]
 
 
@@ -43,7 +47,6 @@ async def test_torch_profiler_capture_registers_public_chrome_trace(
     )
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.torch]
 argv = ["python", "torch_workload.py"]
 cwd = "."
@@ -82,7 +85,7 @@ async def test_torch_profiler_sdk_registers_every_scheduled_cycle(
         "    CPU = 'cpu'\n"
         "    CUDA = 'cuda'\n"
         "class _Profile:\n"
-        "    def __init__(self, schedule, on_trace_ready, **_):\n"
+        "    def __init__(self, schedule=None, on_trace_ready=None, **_):\n"
         "        self.schedule = schedule\n"
         "        self.on_trace_ready = on_trace_ready\n"
         "        self.index = 0\n"
@@ -90,6 +93,7 @@ async def test_torch_profiler_sdk_registers_every_scheduled_cycle(
         "    def __exit__(self, *_): return False\n"
         "    def step(self):\n"
         "        self.index += 1\n"
+        "        if self.schedule is None: return\n"
         "        width = self.schedule['wait'] + self.schedule['warmup'] + "
         "self.schedule['active']\n"
         "        relative = self.index - self.schedule['skip_first']\n"
@@ -123,13 +127,19 @@ async def test_torch_profiler_sdk_registers_every_scheduled_cycle(
         "root = Path(os.environ['FLAMEOX_TORCH_PROFILER_OUTPUT_ROOT'])\n"
         "root.joinpath('torch-trace-cycle-0000.json').write_text('{}')\n"
         "root.joinpath('torch-trace-cycle-0001.json').write_text('{}')\n"
+        "root.joinpath('torch-trace-cycle-0002.json').write_text('{}')\n"
     )
     (tmp_path / "missing_steps.py").write_text(
         "from flameox.sdk import torch_profiler\nwith torch_profiler():\n    pass\n"
     )
+    (tmp_path / "timeout_workload.py").write_text(
+        "import time\n"
+        "from flameox.sdk import torch_profiler\n"
+        "with torch_profiler():\n"
+        "    time.sleep(10)\n"
+    )
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.scheduled]
 argv = ["python", "scheduled_workload.py"]
 cwd = "."
@@ -142,6 +152,10 @@ timeout_seconds = 30
 argv = ["python", "missing_steps.py"]
 cwd = "."
 timeout_seconds = 30
+[workloads.timeout]
+argv = ["python", "timeout_workload.py"]
+cwd = "."
+timeout_seconds = 0.1
 """
     )
     disable_containment(workspace)
@@ -149,13 +163,28 @@ timeout_seconds = 30
         adapter="torch.profiler",
         status=CapabilityStatus.AVAILABLE,
         version="fixture",
-        supported_modes=("sdk",),
+        supported_modes=("whole_entrypoint", "sdk"),
         supported_formats=("chrome-trace",),
         permission_status=CapabilityPermissionStatus.GRANTED,
         probe_kind=ProbeKind.PASSIVE,
     )
     service = CaptureService(workspace)
     monkeypatch.setattr(service.capabilities, "get", lambda _adapter: report)
+
+    async def inspect_torch_distribution(
+        *_args: object,
+        **_kwargs: object,
+    ) -> PythonEnvironmentObservation:
+        return PythonEnvironmentObservation(
+            interpreter=Path("python"),
+            interpreter_sha256="sha256:" + "0" * 64,
+            versions={"torch": "2.7.0"},
+        )
+
+    monkeypatch.setattr(
+        "flameox.application.capture.PythonEnvironmentProbe.inspect",
+        inspect_torch_distribution,
+    )
     plan = await service.plan(
         workload_name="scheduled",
         adapter="torch.profiler",
@@ -183,7 +212,12 @@ timeout_seconds = 30
     schedule = plan.adapter_options["schedule"]
     assert isinstance(schedule, dict)
     assert schedule["repeat"] == 2
-    assert "without shapes, memory, stacks" in plan.expected_overhead
+    assert "Selected activities: cpu." in plan.expected_overhead
+    assert "High-cardinality options: none." in plan.expected_overhead
+    assert plan.semantics.configuration["activities"] == ["cpu"]
+    assert plan.semantics.configuration["record_shapes"] is False
+    sdk_config = json.loads(plan.collector_environment["FLAMEOX_TORCH_PROFILER_CONFIG"])
+    assert "expected_cycles" not in sdk_config
     traces = [
         registration
         for registration in result.run.artifacts
@@ -194,10 +228,7 @@ timeout_seconds = 30
         "torch-trace-cycle-0000.json",
         "torch-trace-cycle-0001.json",
     ]
-    manifest = next(
-        item for item in result.run.artifacts if item.role == "torch_profiler_cycle_manifest"
-    )
-    assert manifest.display_name == "torch-profiler-cycles.json"
+    assert all(item.role != "torch_profiler_cycle_manifest" for item in result.run.artifacts)
 
     invalid_plan = await service.plan(
         workload_name="invalid",
@@ -220,3 +251,34 @@ timeout_seconds = 30
     assert missing_steps.run.execution_status is ExecutionStatus.FAILED
     assert missing_steps.run.capture_status is CaptureStatus.FAILED
     assert all(item.kind.value != "execution_trace" for item in missing_steps.run.artifacts)
+
+    timeout_plan = await service.plan(
+        workload_name="timeout",
+        adapter="torch.profiler",
+        adapter_options={
+            "mode": "sdk",
+            "activities": ["cpu"],
+            "record_shapes": True,
+            "schedule": {"wait": 0, "warmup": 0, "active": 1, "repeat": 1},
+        },
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    with pytest.raises(DomainError) as timed_out:
+        await service.execute(timeout_plan.plan_token)
+
+    error = timed_out.value
+    recovery = error.next_action
+    assert isinstance(recovery, ToolAction)
+    retry_options = recovery.arguments["torch_profiler_options"]
+    assert retry_options == {
+        "mode": "sdk",
+        "activities": ["cpu"],
+        "record_shapes": False,
+        "profile_memory": False,
+        "with_stack": False,
+        "with_flops": False,
+        "with_modules": False,
+        "schedule": {"wait": 0, "warmup": 0, "active": 1, "repeat": 1, "skip_first": 0},
+    }
+    assert any("explicit step boundaries" in item for item in error.remediation)

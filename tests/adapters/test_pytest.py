@@ -5,11 +5,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
 
-from flameox.adapters import PytestExtractor
-from flameox.adapters.pytest import PytestCompletionState
-from flameox.application import ImportArtifactRequest, ImportService
+from flameox.adapters.pytest import PytestCompletionState, PytestExtractor
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,
@@ -124,16 +125,12 @@ def test_pytest_extracts_fixture_cost_outcomes_and_failure_latency(tmp_path: Pat
 
     result = PytestExtractor(workspace).extract(imported.run.run_id)
 
-    assert result.complete is True
-    assert result.interrupted is False
+    assert result.completion is PytestCompletionState.COMPLETE
     payload = result.model_dump(mode="json")
-    assert "completion" not in payload
+    assert payload["completion"] == "complete"
     assert result.validated_copy() == result
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        type(result).model_validate({**payload, "interrupted": True})
     interrupted = result.validated_copy(update={"completion": PytestCompletionState.INTERRUPTED})
-    assert interrupted.complete is False
-    assert interrupted.interrupted is True
+    assert interrupted.completion is PytestCompletionState.INTERRUPTED
     assert result.collected_count == 3
     assert result.executed_count == 2
     assert result.passed_count == 1
@@ -207,7 +204,7 @@ def test_pytest_reportlog_is_the_authoritative_producer_format(tmp_path: Path) -
 
     result = PytestExtractor(workspace).extract(imported.run.run_id)
 
-    assert result.complete is True
+    assert result.completion is PytestCompletionState.COMPLETE
     assert result.collected_count == 2
     assert result.executed_count == 1
     assert result.unexecuted_count == 1
@@ -334,8 +331,7 @@ def test_pytest_interrupt_is_explicitly_non_complete(tmp_path: Path) -> None:
 
     result = PytestExtractor(workspace).extract(imported.run.run_id)
 
-    assert result.interrupted is True
-    assert result.complete is False
+    assert result.completion is PytestCompletionState.INTERRUPTED
     assert any("interrupted" in item for item in result.limitations)
 
 
@@ -347,7 +343,7 @@ def test_pytest_recovers_valid_prefix_from_truncated_final_record(tmp_path: Path
         "\n".join(
             (
                 _report("SessionStart", pytest_version="9.1.1"),
-                _report("SessionFinish", exitstatus=2),
+                _report("SessionFinish", exitstatus=0),
             )
         )
         + '\n{"$report_type":'
@@ -358,5 +354,5 @@ def test_pytest_recovers_valid_prefix_from_truncated_final_record(tmp_path: Path
 
     result = PytestExtractor(workspace).extract(imported.run.run_id)
 
-    assert result.complete is False
+    assert result.completion is PytestCompletionState.INCOMPLETE
     assert any("valid prefix" in item for item in result.limitations)

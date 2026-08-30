@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import CaptureService, ExecutionPolicy
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
 from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,
@@ -74,7 +75,6 @@ async def test_native_output_publication_gate_preserves_invalid_runs(
     timeout = 0.1 if mode.startswith("timeout") else 5
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.profile]
 argv = ["python", "-c", "print('workload')", "mode={mode}"]
 timeout_seconds = {timeout}

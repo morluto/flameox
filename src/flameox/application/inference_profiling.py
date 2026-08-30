@@ -22,11 +22,10 @@ from flameox.analysis.inference_protocol import (
 )
 from flameox.application.evidence_query import EvidenceQueryService
 from flameox.application.imports import ImportDescriptorRequest, ImportService
-from flameox.application.inference import InferenceReplayPlan, InferenceReplayService
+from flameox.application.inference import InferenceScenarioPlan, InferenceScenarioService
 from flameox.application.inference_providers import (
     InferenceServerMode,
     InferenceServerProvider,
-    _loopback_http_url,
     discover_sglang,
     probe_existing_vllm_server_async,
 )
@@ -51,6 +50,7 @@ from flameox.domain import (
     ValidationStatus,
     digest_model,
     new_id,
+    process_exit_code,
 )
 from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.models import ExecutionRunManifest, utc_now
@@ -65,6 +65,7 @@ from flameox.http_transport import (
     BoundedHttpError,
     HttpMethod,
     LoopbackHttpRequest,
+    validate_loopback_base_url,
 )
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, AuthorizedPlanStore, RunStore, Workspace
@@ -85,7 +86,7 @@ class InferenceProfileCoverage(StrEnum):
 
 
 class SglangProfileOptions(ContractModel):
-    """The only SGLang 0.5.16 profiler request Flameox permits in v1."""
+    """The SGLang Torch-profiler request Flameox supports."""
 
     start_step: Literal[5] = 5
     num_steps: Literal[2] = 2
@@ -96,13 +97,12 @@ class SglangProfileOptions(ContractModel):
 
 
 class _InferenceProfilingPlan(ContractModel):
-    schema_version: Literal[2] = 2
     plan_id: str
     plan_token: str = ""
     scenario_name: str | None = None
     measurement_run_id: str | None = None
     timeout_seconds: float | None = None
-    replay_plan: InferenceReplayPlan | None = None
+    scenario_plan: InferenceScenarioPlan | None = None
     server_name: str
     base_url: str
     server_argv: tuple[str, ...]
@@ -115,9 +115,6 @@ class _InferenceProfilingPlan(ContractModel):
     output_relative_path: str
     output_path: Path
     configuration_id: str
-    server_executable_digest: str | None = None
-    server_version: str | None = None
-    benchmark_executable_digest: str | None = None
     diagnostic_only: Literal[True] = True
     limitations: tuple[str, ...]
 
@@ -256,20 +253,17 @@ class InferenceProfilingService:
         ):
             raise DomainError(
                 ErrorCode.EXECUTION_REFUSED,
-                "SGLang profiling supports only its stage-separated Torch profiler in v1.",
+                "SGLang profiling supports only its stage-separated Torch profiler.",
                 remediation=("Use profiler='torch_profiler' for the declared SGLang server.",),
             )
         workload = self.workloads.resolve(server.workload)
-        replay = InferenceReplayService(self.workspace, broker=self.broker)
-        server_executable_digest, server_version = replay._server_tool_identity(server)
-        sglang_discovery = (
-            discover_sglang(Path(server.benchmark_python), broker=self.broker)
-            if server.provider is InferenceServerProvider.SGLANG
+        scenario_service = InferenceScenarioService(self.workspace, broker=self.broker)
+        if (
+            server.provider is InferenceServerProvider.SGLANG
+            and scenario_name is None
             and server.benchmark_python is not None
-            else None
-        )
-        if sglang_discovery is not None:
-            server_version = sglang_discovery.version
+        ):
+            discover_sglang(Path(server.benchmark_python), broker=self.broker)
         native_argv = workload.command.argv
         environment = dict(workload.command.env_overrides)
         limitations: tuple[str, ...]
@@ -325,32 +319,25 @@ class InferenceProfilingService:
         ):
             environment_names.add("VLLM_TORCH_PROFILER_DIR")
         environment_digest = digest_model(workload.command.env_overrides)
-        replay_plan = (
-            replay.plan(scenario_name, timeout_seconds=timeout_seconds, _authorize=False)
+        scenario_plan = (
+            scenario_service._build_plan(scenario_name, timeout_seconds=timeout_seconds)
             if scenario_name is not None and timeout_seconds is not None
             else None
         )
-        if replay_plan is not None and (
-            replay_plan.server_name != server_name or replay_plan.server_mode != "managed"
+        if scenario_plan is not None and (
+            scenario_plan.server_name != server_name or scenario_plan.server_mode != "managed"
         ):
-            self._discard_planned_outputs(replay_plan.output_root)
+            self._discard_planned_outputs(scenario_plan.output_root)
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "Profiling scenario must target the planned managed server.",
-            )
-        if replay_plan is not None and not replay_plan.tool_available:
-            self._discard_planned_outputs(replay_plan.output_root)
-            raise DomainError(
-                ErrorCode.CAPABILITY_UNAVAILABLE,
-                "The inference workload provider is unavailable for the profiling window.",
-                remediation=replay_plan.tool_remediation,
             )
         if measurement_run_id is not None:
             try:
                 self.runs.read(measurement_run_id)
             except BaseException:
-                assert replay_plan is not None
-                self._discard_planned_outputs(replay_plan.output_root)
+                assert scenario_plan is not None
+                self._discard_planned_outputs(scenario_plan.output_root)
                 raise
         try:
             with (
@@ -381,8 +368,8 @@ class InferenceProfilingService:
                         "cuda",
                     )
         except BaseException:
-            if replay_plan is not None:
-                self._discard_planned_outputs(replay_plan.output_root)
+            if scenario_plan is not None:
+                self._discard_planned_outputs(scenario_plan.output_root)
             raise
         identity = {
             "server": server.model_dump(mode="json"),
@@ -401,11 +388,6 @@ class InferenceProfilingService:
             ),
             "configuration_id": digest_model(project.model_dump(mode="json")),
             "server_provider": server.provider,
-            "server_executable_digest": server_executable_digest,
-            "benchmark_executable_digest": (
-                sglang_discovery.executable_digest if sglang_discovery is not None else None
-            ),
-            "server_version": server_version,
             "sglang_profile_options": (
                 sglang_profile_options.model_dump(mode="json")
                 if sglang_profile_options is not None
@@ -414,16 +396,16 @@ class InferenceProfilingService:
             "scenario_name": scenario_name,
             "measurement_run_id": measurement_run_id,
             "timeout_seconds": timeout_seconds,
-            "replay_plan": (
-                replay_plan.model_dump(mode="json", exclude={"plan_token"})
-                if replay_plan is not None
+            "scenario_plan": (
+                scenario_plan.model_dump(mode="json", exclude={"plan_token"})
+                if scenario_plan is not None
                 else None
             ),
         }
         plan_id = digest_model(identity)
         if expected_plan_id is not None and expected_plan_id != plan_id:
             references = (output_reference,) + (
-                (replay_plan.output_root,) if replay_plan is not None else ()
+                (scenario_plan.output_root,) if scenario_plan is not None else ()
             )
             self._discard_planned_outputs(*references)
             raise DomainError(
@@ -435,11 +417,11 @@ class InferenceProfilingService:
         plan = parse_inference_profiling_plan(
             {
                 "plan_id": plan_id,
-                "plan_token": secrets.token_hex(32) if replay_plan is not None else "",
+                "plan_token": secrets.token_hex(32) if scenario_plan is not None else "",
                 "scenario_name": scenario_name,
                 "measurement_run_id": measurement_run_id,
                 "timeout_seconds": timeout_seconds,
-                "replay_plan": replay_plan,
+                "scenario_plan": scenario_plan,
                 "server_name": server_name,
                 "server_provider": server.provider,
                 "profiler": selected_profiler,
@@ -456,11 +438,6 @@ class InferenceProfilingService:
                 "nsys_executable": nsys_executable,
                 "nsys_executable_binding": nsys_binding,
                 "configuration_id": digest_model(project.model_dump(mode="json")),
-                "server_executable_digest": server_executable_digest,
-                "server_version": server_version,
-                "benchmark_executable_digest": (
-                    sglang_discovery.executable_digest if sglang_discovery is not None else None
-                ),
                 "limitations": limitations,
                 # This is a server-side operation token, not a source of plan churn.
                 "sglang_profile_id": (
@@ -469,12 +446,12 @@ class InferenceProfilingService:
                 "sglang_profile_options": sglang_profile_options,
             }
         )
-        if replay_plan is not None:
+        if scenario_plan is not None:
             self.plans.issue(
                 plan.plan_token,
                 plan.plan_id,
                 plan,
-                expires_at=replay_plan.deadline_at,
+                expires_at=scenario_plan.deadline_at,
             )
         return plan
 
@@ -541,7 +518,7 @@ class InferenceProfilingService:
             plan.scenario_name is None
             or plan.measurement_run_id is None
             or plan.timeout_seconds is None
-            or plan.replay_plan is None
+            or plan.scenario_plan is None
         ):
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
@@ -551,13 +528,13 @@ class InferenceProfilingService:
         with (
             TrustedRoot(self.workspace.paths.staging) as trusted_root,
             trusted_root.open_directory(plan.output_root) as profile_output,
-            trusted_root.open_directory(plan.replay_plan.output_root) as replay_output,
+            trusted_root.open_directory(plan.scenario_plan.output_root) as scenario_output,
         ):
             return await self._capture_bound(
                 plan,
                 trusted_root,
                 profile_output,
-                replay_output,
+                scenario_output,
             )
 
     async def _capture_bound(  # noqa: C901
@@ -565,7 +542,7 @@ class InferenceProfilingService:
         plan: InferenceProfilingPlan,
         trusted_root: TrustedRoot,
         profile_output: BoundDirectory,
-        replay_output: BoundDirectory,
+        scenario_output: BoundDirectory,
     ) -> InferenceProfilingResult:
         scenario_name = plan.scenario_name
         measurement_run_id = plan.measurement_run_id
@@ -573,7 +550,7 @@ class InferenceProfilingService:
         assert scenario_name is not None
         assert measurement_run_id is not None
         assert timeout_seconds is not None
-        replay = InferenceReplayService(self.workspace, broker=self.broker)
+        scenario_service = InferenceScenarioService(self.workspace, broker=self.broker)
         project = self.workloads.load()
         if digest_model(project.model_dump(mode="json")) != plan.configuration_id:
             raise DomainError(
@@ -603,42 +580,26 @@ class InferenceProfilingService:
             server_environment["VLLM_TORCH_PROFILER_DIR"] = str(
                 profile_output.child_process_path(plan.output_relative_path)
             )
-        server_digest, server_version = replay._server_tool_identity(server)
-        if (
-            server.provider is InferenceServerProvider.SGLANG
-            and server.benchmark_python is not None
-        ):
-            sglang_discovery = discover_sglang(Path(server.benchmark_python), broker=self.broker)
-            server_version = sglang_discovery.version
-            benchmark_digest = sglang_discovery.executable_digest
-        else:
-            benchmark_digest = None
-        if (
-            server_digest != plan.server_executable_digest
-            or server_version != plan.server_version
-            or benchmark_digest != plan.benchmark_executable_digest
-        ):
+        try:
+            ExecutableResolver().revalidate(plan.server_executable_binding)
+        except DomainError as error:
             raise DomainError(
                 ErrorCode.REVISION_CONFLICT,
                 "Managed server executable identity changed after profiling was planned.",
                 remediation=("Plan the inference profile again, then retry capture.",),
-            )
-        replay_plan = plan.replay_plan
-        assert replay_plan is not None
-        replay._validate_plan(replay_plan)
-        if replay_plan.server_name != plan.server_name or replay_plan.server_mode != "managed":
+            ) from error
+        scenario_plan = plan.scenario_plan
+        assert scenario_plan is not None
+        scenario_service._validate_plan(scenario_plan)
+        if scenario_plan.server_name != plan.server_name or scenario_plan.server_mode != "managed":
             raise DomainError(
                 ErrorCode.INVALID_CAPTURE_PLAN,
                 "Profiling scenario must target the planned managed server.",
             )
-        if not replay_plan.tool_available:
-            raise DomainError(
-                ErrorCode.CAPABILITY_UNAVAILABLE,
-                "The inference workload provider is unavailable for the profiling window.",
-                remediation=replay_plan.tool_remediation,
-            )
-        environment = await replay._managed_environment(replay_plan)
-        measurement_protocol = replay._protocol_identity(replay_plan, environment=environment)
+        environment = await scenario_service._managed_environment(scenario_plan)
+        measurement_protocol = scenario_service._protocol_identity(
+            scenario_plan, environment=environment
+        )
         measurement_protocol_id = digest_model(measurement_protocol.model_dump(mode="json"))
         self._validate_measurement_run(
             measurement_run_id,
@@ -651,7 +612,7 @@ class InferenceProfilingService:
                 "profiler": AttachedProfilerState(profiler=plan.profiler),
             }
         )
-        deadline_at = replay_plan.deadline_at
+        deadline_at = scenario_plan.deadline_at
         parsed = urlsplit(plan.base_url)
         assert parsed.hostname is not None
         port = parsed.port or 80
@@ -731,31 +692,14 @@ class InferenceProfilingService:
                     remaining = (deadline_at - utc_now()).total_seconds()
                     if remaining <= 0:
                         raise DomainError(ErrorCode.PROCESS_TIMEOUT, "Profiling deadline expired.")
-                    replay_binding = replay_plan.tool_executable_binding
-                    if replay_binding is None:
-                        raise DomainError(
-                            ErrorCode.CAPABILITY_UNAVAILABLE,
-                            "The profiling replay tool has no executable binding.",
-                        )
                     outcome = await self.broker.run(
-                        ExecutionRequest(
-                            argv=replay._runtime_argv(replay_plan, replay_output),
-                            executable_binding=replay_binding,
-                            cwd=self.workspace.project_root,
-                            environment_allowlist=(
-                                self.workspace.config.execution.child_environment_allowlist
-                            ),
-                            allowed_working_roots=(self.workspace.project_root,),
-                            timeout_seconds=remaining,
-                            max_output_bytes=16 * 1024 * 1024,
-                            inherited_directory_fds=replay_output.inherited_descriptors(),
-                        )
+                        scenario_service._request(scenario_plan, scenario_output)
                     )
                     benchmark_process = outcome.process
-                    benchmark_exit_code = outcome.process.exit_code
-                    if outcome.process.exit_code != 0:
+                    benchmark_exit_code = process_exit_code(outcome.process.termination)
+                    if benchmark_exit_code != 0:
                         limitations.append(
-                            f"Profile workload exited with status {outcome.process.exit_code}."
+                            f"Profile workload exited with status {benchmark_exit_code}."
                         )
                 except DomainError as error:
                     limitations.append(f"Profile window failed: {error.message}")
@@ -792,13 +736,13 @@ class InferenceProfilingService:
             artifacts, runs, preservation_limitations = self._preserve(plan, profile_output)
             limitations.extend(preservation_limitations)
             extracted_runs = await self._extract_preserved(plan, runs, deadline_at, limitations)
-            replay_cleanup_limitation = replay._cleanup_staging(
+            scenario_cleanup_limitation = scenario_service._cleanup_staging(
                 trusted_root,
-                replay_plan.output_root,
+                scenario_plan.output_root,
                 preservation_complete=True,
             )
-            if replay_cleanup_limitation is not None:
-                limitations.append(replay_cleanup_limitation)
+            if scenario_cleanup_limitation is not None:
+                limitations.append(scenario_cleanup_limitation)
             if artifacts and not extracted_runs:
                 limitations.append(
                     "No recognized profiler trace was extracted from preserved artifacts."
@@ -1071,7 +1015,7 @@ class InferenceProfilingService:
             else ExecutionStatus.SUCCEEDED
             if (
                 process is not None
-                and process.exit_code == 0
+                and process_exit_code(process.termination) == 0
                 and coverage is InferenceProfileCoverage.COMPLETE
             )
             else ExecutionStatus.FAILED
@@ -1245,9 +1189,10 @@ class InferenceProfilingService:
                     inherited_directory_fds=output.inherited_descriptors(),
                 )
             )
-            if outcome.process.exit_code != 0:
+            if process_exit_code(outcome.process.termination) != 0:
                 limitations.append(
-                    f"Nsight SQLite export exited with status {outcome.process.exit_code}."
+                    "Nsight SQLite export exited with status "
+                    f"{process_exit_code(outcome.process.termination)}."
                 )
         except DomainError as error:
             limitations.append(f"Nsight SQLite export failed: {error.message}")
@@ -1399,7 +1344,7 @@ class InferenceProfilerControlClient:
         timeout_seconds: float = 5.0,
         http_client: BoundedHttpClient | None = None,
     ) -> None:
-        self.base_url = _loopback_http_url(base_url)
+        self.base_url = validate_loopback_base_url(base_url)
         self.provider = provider
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -1526,7 +1471,3 @@ class InferenceProfilerControlClient:
             "record_shapes": options.record_shapes,
             "with_stack": options.with_stack,
         }
-
-
-# Backwards-compatible import name for callers that only target vLLM.
-VllmProfilerControlClient = InferenceProfilerControlClient

@@ -152,24 +152,6 @@ class NvbenchSummary(_NvbenchModel):
         return None
 
 
-class NvbenchAxisValue(_NvbenchModel):
-    """A single value along an NVBench axis."""
-
-    input_string: str | None = None
-    description: str | None = None
-    value: int | float | str | None = None
-    is_active: bool | None = None
-
-
-class NvbenchAxis(_NvbenchModel):
-    """An NVBench axis specification."""
-
-    name: BoundedString
-    type: Literal["type", "int64", "float64", "string"]
-    flags: str | None = None
-    values: tuple[NvbenchAxisValue, ...] = Field(default_factory=tuple, max_length=10_000)
-
-
 class NvbenchState(_NvbenchModel):
     """An NVBench benchmark execution state."""
 
@@ -270,7 +252,6 @@ def require_supported_nvbench_schema(
 
 
 class NvbenchExtractionResult(ContractModel):
-    schema_version: int = 1
     run_id: str
     artifact_id: str
     producer_version: str | None

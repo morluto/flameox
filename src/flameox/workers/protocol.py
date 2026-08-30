@@ -121,15 +121,9 @@ class WorkerDefinition[RequestT, ResponseT]:
 
 
 @dataclass(frozen=True, slots=True)
-class WorkerContext:
-    job_root: Path
-    request_path: Path
-
-
-@dataclass(frozen=True, slots=True)
 class WorkerApplication[RequestT, ResponseT]:
     definition: WorkerDefinition[RequestT, ResponseT]
-    handler: Callable[[RequestT, WorkerContext], ResponseT]
+    handler: Callable[[RequestT, Path], ResponseT]
     invalid_failure: WorkerFailureKind
     invalid_message: str
     caught: tuple[type[BaseException], ...]
@@ -160,10 +154,7 @@ def run_typed_worker[RequestT, ResponseT](
         return 2
     try:
         request = application.definition.request.validate_python(envelope.payload)
-        response = application.handler(
-            request,
-            WorkerContext(arguments.request.parent, arguments.request),
-        )
+        response = application.handler(request, arguments.request.parent)
         validated = application.definition.response.validate_python(response)
         response_payload = cast(
             JsonValue,

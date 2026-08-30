@@ -5,8 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from flameox.adapters import V8CpuProfExtractor, V8HeapProfExtractor
-from flameox.application import ImportArtifactRequest, ImportService
+from flameox.adapters.v8_cpu_prof import V8CpuProfExtractor
+from flameox.adapters.v8_heap_prof import V8HeapProfExtractor
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import Workspace

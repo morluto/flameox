@@ -4,23 +4,27 @@ from pathlib import Path
 
 import pytest
 
-from flameox.adapters import ObservationExtractor
+from flameox.adapters.observations import ObservationExtractor
 from flameox.analysis import ExecutionObservation, RecipeService
-from flameox.application import (
+from flameox.application.analysis_records import (
     AnalysisMaterializationService,
-    CaptureService,
+    ExecutionAnalysisRequest,
+)
+from flameox.application.capture import CaptureService
+from flameox.application.comparisons import (
     ComparisonService,
+    FreezeRunIdsRequest,
+    MeasurementCompareRunSetsRequest,
+    RunSetService,
+)
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.records import (
     CreateInvestigationRequest,
     EvidenceInput,
-    ExecutionAnalysisRequest,
-    ExecutionPolicy,
     FindingService,
-    FreezeRunIdsRequest,
     InvestigationService,
-    MeasurementCompareRunSetsRequest,
     RecordFindingRequest,
     RecordHypothesisRequest,
-    RunSetService,
 )
 from flameox.domain import (
     EvidenceLevel,
@@ -51,7 +55,6 @@ async def test_configuration_interaction_is_visible_as_semantic_evidence(
     )
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.policy]
 argv = ["python", "policy.py", "{mode}"]
 cwd = "."
@@ -102,9 +105,7 @@ mode = ["bad", "fixed"]
         analyses[mode] = RecipeService(workspace).execution(result.run.run_id)
 
     by_name = {
-        item.name: item
-        for item in analyses["bad"].items
-        if isinstance(item, ExecutionObservation)
+        item.name: item for item in analyses["bad"].items if isinstance(item, ExecutionObservation)
     }
     assert by_name["policy.old_log_prob_source"].value_json == ('{"source":"current_policy"}')
     assert by_name["policy.clipping_enabled"].value_json == '{"value":false}'

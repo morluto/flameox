@@ -8,7 +8,7 @@ import pytest
 from click import unstyle
 from typer.testing import CliRunner
 
-from flameox.application import CaptureService
+from flameox.application.capture import CaptureService
 from flameox.catalog import Catalog
 from flameox.cli import app
 from flameox.storage import Workspace
@@ -21,6 +21,24 @@ def test_help_lists_flameoxs_purpose() -> None:
 
     assert result.exit_code == 0
     assert "runtime evidence" in result.stdout
+
+
+def test_cli_rejects_an_explicit_workspace_with_an_incompatible_control_plane(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    with sqlite3.connect(workspace.paths.control_plane) as connection:
+        connection.execute("UPDATE control_plane_format SET format = 'other.control-plane'")
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    result = CliRunner().invoke(
+        app,
+        ["status", "--workspace", str(workspace.paths.root), "--json"],
+    )
+
+    assert result.exit_code == 5
+    assert json.loads(result.stdout)["error"]["code"] == "WORKSPACE_INVALID"
 
 
 def test_capture_help_uses_named_workload_syntax() -> None:
@@ -54,7 +72,6 @@ def test_capture_cli_executes_the_exact_reviewed_plan(
 ) -> None:
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.reviewed]
 argv = [{json.dumps(sys.executable)}, "-c", "print('reviewed')"]
 cwd = "."
@@ -366,3 +383,58 @@ def test_inference_configuration_errors_and_empty_list_are_structured(tmp_path: 
     error_payload = json.loads(invalid.stdout)
     assert error_payload["error"]["code"] == "INVALID_ARGUMENTS"
     assert error_payload["error"]["details"]["validation_errors"]
+
+
+def test_sglang_configuration_requires_a_launcher_without_writing(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    workspace = project / ".diagnostics"
+    runner = CliRunner()
+    assert runner.invoke(app, ["init", str(project)]).exit_code == 0
+    config_path = project / "flameox.toml"
+    assert not config_path.exists()
+
+    result = runner.invoke(
+        app,
+        [
+            "inference",
+            "configure-server",
+            "local-sglang",
+            "existing_local",
+            "model",
+            "--provider",
+            "sglang",
+            "--workspace",
+            str(workspace),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 3, result.output
+    payload = json.loads(result.stdout)["error"]
+    assert payload["code"] == "CAPABILITY_UNAVAILABLE"
+    assert payload["details"]["missing_field"] == "benchmark_python"
+    assert payload["next_action"] == {
+        "kind": "tool",
+        "action": "inference.server.configure",
+        "arguments": {
+            "name": "local-sglang",
+            "operation": "create",
+            "mode": "existing_local",
+            "model": "model",
+            "provider": "sglang",
+            "base_url": "http://127.0.0.1:8000",
+        },
+    }
+    assert not config_path.exists()
+
+
+def test_inference_server_help_names_sglang_launcher() -> None:
+    result = CliRunner().invoke(app, ["inference", "configure-server", "--help"])
+
+    help_text = unstyle(result.stdout)
+    normalized_help = " ".join(help_text.replace("│", "").split())
+    assert result.exit_code == 0, result.output
+    assert "vLLM or SGLang" in help_text
+    assert "--benchmark-python" in help_text
+    assert "may differ from the server runtime" in normalized_help

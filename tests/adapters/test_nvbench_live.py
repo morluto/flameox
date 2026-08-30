@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from flameox.adapters.nvbench import NvbenchExtractor
-from flameox.application import CaptureService, ExecutionPolicy
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
 from flameox.domain import ArtifactKind, CaptureStatus, ExecutionStatus
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
@@ -30,7 +31,6 @@ async def test_configured_nvbench_executable_emits_native_output(tmp_path: Path)
     disable_containment(workspace)
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.bench]
 argv = [{json.dumps(executable)}]
 timeout_seconds = 120

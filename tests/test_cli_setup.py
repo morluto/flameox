@@ -71,7 +71,6 @@ def test_setup_verify_dry_run_reports_configured_launcher_status(
     (data / "install.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
                 "active_version": "0.1.0",
                 "executable": str(executable),
             }
@@ -120,10 +119,13 @@ def test_setup_reports_corrupt_install_metadata_as_a_domain_error(
 
 def test_npm_bootstrap_prints_runtime_to_wizard_handoff(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    monkeypatch.setenv("FLAMEOX_SETUP_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("FLAMEOX_SETUP_DATA_ROOT", str(tmp_path / "data"))
     monkeypatch.setenv("FLAMEOX_NPM_BOOTSTRAP", "1")
     result = CliRunner().invoke(app, ["setup", "--claude", "--dry-run"])
 
-    assert result.exit_code == 3, result.output
+    assert result.exit_code == 0, result.output
     assert "Managed runtime ready. Starting flameox setup..." in result.output
-    assert "qualified Claude Code MCP management CLI was not found" in result.output
+    assert "'mechanism': 'qualified_config_file'" in result.output

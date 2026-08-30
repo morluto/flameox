@@ -21,7 +21,7 @@ from typing import cast
 from packaging.requirements import Requirement
 from pydantic import JsonValue, TypeAdapter
 
-from flameox.action_graph import ActionId, NextAction, manual_action, tool_action
+from flameox.action_graph import ActionId, NextAction, ToolAction, manual_action, tool_action
 from flameox.adapters.builtins import (
     BUILTIN_ADAPTERS,
     AdapterDependencyKind,
@@ -35,7 +35,8 @@ from flameox.adapters.compute_sanitizer import (
     compute_sanitizer_compatibility_limitations,
     inspect_compute_sanitizer_report,
 )
-from flameox.adapters.kernel_build import KernelBuildManifestV2
+from flameox.adapters.coverage import qualified_control_coverage_reader_version
+from flameox.adapters.kernel_build import KernelBuildManifest
 from flameox.adapters.options import (
     bind_adapter_options,
     compute_sanitizer_options,
@@ -45,7 +46,15 @@ from flameox.adapters.options import (
     run_semantics as build_run_semantics,
 )
 from flameox.adapters.registry import AdapterDescriptor, AdapterRegistry
-from flameox.adapters.torch_profiler import SdkTorchProfilerOptions, torch_profiler_options
+from flameox.adapters.torch_profiler import (
+    SdkTorchProfilerOptions,
+    torch_profiler_options,
+    torch_profiler_trace_filenames,
+)
+from flameox.adapters.triton_autotune import (
+    TritonAutotuneSelection,
+    load_triton_autotune_selections,
+)
 from flameox.application.async_work import run_atomic_thread
 from flameox.application.capabilities import CapabilityService
 from flameox.application.capture_admission import CaptureAdmission, CaptureAdmissionService
@@ -60,8 +69,8 @@ from flameox.application.execution_identity import ExecutionIdentityService
 from flameox.application.execution_policy import ExecutionPolicy
 from flameox.application.kernel_builds import (
     KernelBuildCaptureCollector,
-    kernel_build_pipeline_request,
-    managed_kernel_build_context,
+    kernel_build_pipeline_requests,
+    qualify_triton_compiler_target,
 )
 from flameox.application.nvbench_imports import (
     collect_nvbench_sidecar_specs,
@@ -109,8 +118,12 @@ from flameox.domain import (
     CapturePlan,
     CaptureStatus,
     CommandSpec,
+    CompilerIdentity,
+    CompilerQualification,
     DomainError,
     ErrorCode,
+    ExecutionIdentityBasis,
+    ExecutionIdentityInputStatus,
     ExecutionStatus,
     ExternalExecutionContext,
     IdentityQuality,
@@ -137,6 +150,7 @@ from flameox.domain import (
     digest_model,
     is_digest,
     new_id,
+    process_exit_code,
 )
 from flameox.domain.executables import (
     ExecutableResolutionRequest,
@@ -165,6 +179,121 @@ def _limitation(source: LimitationSource, code: str, message: str) -> Limitation
     return LimitationDetail(source=source, code=code, message=message)
 
 
+def _memray_region_validation_issues(
+    observations: Path,
+    *,
+    expected_region: str,
+    max_bytes: int,
+) -> tuple[tuple[str, str], ...]:
+    """Validate the SDK region lifecycle without making observations authoritative.
+
+    The Memray file remains the provider evidence. These bounded SDK observations
+    only prove that the declared region was entered and closed as planned, and
+    therefore belong in run validation rather than in a second region receipt.
+    """
+    if not observations.is_file():
+        return (
+            (
+                "memray_region_missing",
+                f"Memray SDK region {expected_region!r} was never entered.",
+            ),
+        )
+    try:
+        with observations.open("rb") as stream:
+            payload = stream.read(max_bytes + 1)
+    except OSError as exc:
+        return (
+            (
+                "memray_region_observations_unreadable",
+                f"Memray SDK region observations could not be read: {exc}.",
+            ),
+        )
+    if len(payload) > max_bytes:
+        return (
+            (
+                "memray_region_observations_limit",
+                "Memray SDK region observations exceeded the artifact limit.",
+            ),
+        )
+
+    starts: list[dict[str, object]] = []
+    ends: list[dict[str, object]] = []
+    errors: list[tuple[str, str]] = []
+    try:
+        lines = payload.decode("utf-8").splitlines()
+        for line in lines:
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                continue
+            name = event.get("name")
+            values = event.get("values")
+            if not isinstance(name, str) or not isinstance(values, dict):
+                continue
+            region = values.get("region")
+            if name == "flameox.memray.region.start":
+                starts.append(values)
+            elif name == "flameox.memray.region.end":
+                ends.append(values)
+            elif name == "flameox.memray.region.error" and isinstance(region, str):
+                reason = values.get("reason")
+                if reason in {"overlap", "repeated"}:
+                    errors.append((reason, region))
+    except (UnicodeDecodeError, TypeError, ValueError) as exc:
+        return (
+            (
+                "memray_region_observations_invalid",
+                f"Memray SDK region observations are malformed: {exc}.",
+            ),
+        )
+
+    issues: list[tuple[str, str]] = []
+    for reason, region in errors:
+        issues.append(
+            (
+                f"memray_region_{reason}",
+                f"Memray SDK region {region!r} was rejected as {reason}.",
+            )
+        )
+    matching_starts = [item for item in starts if item.get("region") == expected_region]
+    matching_ends = [item for item in ends if item.get("region") == expected_region]
+    if len(matching_starts) == 0:
+        issues.append(
+            (
+                "memray_region_missing",
+                f"Memray SDK region {expected_region!r} was never entered.",
+            )
+        )
+    elif len(matching_starts) > 1:
+        issues.append(
+            (
+                "memray_region_repeated",
+                f"Memray SDK region {expected_region!r} was entered more than once.",
+            )
+        )
+    if len(matching_ends) > 1:
+        issues.append(
+            (
+                "memray_region_repeated",
+                f"Memray SDK region {expected_region!r} was closed more than once.",
+            )
+        )
+    if len(matching_starts) == 1 and not matching_ends:
+        issues.append(
+            (
+                "memray_region_unclosed",
+                f"Memray SDK region {expected_region!r} was entered but never closed.",
+            )
+        )
+    if any(item.get("region") != expected_region for item in (*starts, *ends)):
+        issues.append(
+            (
+                "memray_region_identity_mismatch",
+                f"Memray SDK observations do not match planned region {expected_region!r}.",
+            )
+        )
+    return tuple(dict.fromkeys(issues))
+
+
 def _compute_sanitizer_timeout_recovery(plan: CapturePlan) -> tuple[str, NextAction]:
     launch_count = cast(int, plan.adapter_options["launch_count"])
     if launch_count == 0:
@@ -182,9 +311,7 @@ def _compute_sanitizer_timeout_recovery(plan: CapturePlan) -> tuple[str, NextAct
                 parameters=plan.workload_instance.parameters,
                 preflight_mode="auto",
                 capture_mode=(
-                    "trusted_local"
-                    if plan.execution_policy == "trusted_local"
-                    else "managed"
+                    "trusted_local" if plan.execution_policy == "trusted_local" else "managed"
                 ),
                 compute_sanitizer_options={**plan.adapter_options, "launch_count": 1},
             ),
@@ -200,6 +327,102 @@ def _compute_sanitizer_timeout_recovery(plan: CapturePlan) -> tuple[str, NextAct
             message,
             suggested_action=ActionId.PLAN_CAPTURE,
             missing_arguments=("workload_name", "compute_sanitizer_options"),
+        ),
+    )
+
+
+def _torch_profiler_recovery(
+    plan: CapturePlan,
+    *,
+    cancellation_cause: ProcessCancellationCause | None = None,
+    error_code: ErrorCode | None = None,
+) -> tuple[str, NextAction] | None:
+    """Return the one useful lower-overhead retry for a failed Torch capture."""
+
+    if plan.adapter != "torch.profiler":
+        return None
+    failure = (
+        "timed out"
+        if cancellation_cause is ProcessCancellationCause.TIMEOUT
+        else (
+            "exceeded the bounded process output"
+            if cancellation_cause is ProcessCancellationCause.OUTPUT_LIMIT
+            else (
+                "exceeded the artifact-size limit"
+                if error_code is ErrorCode.ARTIFACT_TOO_LARGE
+                else (
+                    "exceeded a runtime resource limit"
+                    if cancellation_cause
+                    in {
+                        ProcessCancellationCause.MEMORY_LIMIT_EXCEEDED,
+                        ProcessCancellationCause.STORAGE_RESERVE_EXCEEDED,
+                        ProcessCancellationCause.WRITABLE_LIMIT_EXCEEDED,
+                    }
+                    else None
+                )
+            )
+        )
+    )
+    if failure is None:
+        return None
+
+    selected = torch_profiler_options(cast(dict[str, object], plan.adapter_options))
+    retry_options = selected.model_dump(mode="json")
+    expensive_options = (
+        "record_shapes",
+        "profile_memory",
+        "with_stack",
+        "with_flops",
+        "with_modules",
+    )
+    enabled = tuple(name for name in expensive_options if retry_options[name])
+    narrower_window = (
+        "A tighter operation window requires workload instrumentation with "
+        "flameox.sdk.torch_profiler() and explicit step boundaries."
+    )
+    if not enabled:
+        message = (
+            (
+                f"The torch.profiler capture {failure}, but all optional high-cardinality "
+                f"features are already disabled. Repeating the whole-entrypoint plan cannot "
+                f"narrow its scope. {narrower_window}"
+            )
+            if selected.mode == "whole_entrypoint"
+            else (
+                f"The torch.profiler SDK capture {failure}, but all optional "
+                "high-cardinality features are already disabled. Review the workload-owned "
+                "step boundaries or schedule before retrying it."
+            )
+        )
+        return (
+            message,
+            manual_action(
+                message,
+                suggested_action=ActionId.PLAN_CAPTURE,
+                missing_arguments=(
+                    ("workload instrumentation",)
+                    if selected.mode == "whole_entrypoint"
+                    else ("schedule",)
+                ),
+            ),
+        )
+    retry_options.update({name: False for name in expensive_options})
+    message = (
+        f"The torch.profiler capture {failure}. Replan with {', '.join(enabled)} disabled. "
+        f"{narrower_window}"
+    )
+    return (
+        message,
+        tool_action(
+            ActionId.PLAN_CAPTURE,
+            workload_name=plan.workload_name,
+            adapter=plan.adapter,
+            parameters=plan.workload_instance.parameters,
+            preflight_mode="auto",
+            capture_mode=(
+                "trusted_local" if plan.execution_policy == "trusted_local" else "managed"
+            ),
+            torch_profiler_options=cast(dict[str, JsonValue], retry_options),
         ),
     )
 
@@ -350,25 +573,44 @@ class _CaptureExecution:
     ) -> None:
         """Persist cancellation without allowing finalization failures to mask it."""
 
-        try:
-            await asyncio.shield(
-                self.terminate(
-                    execution=ExecutionStatus.CANCELLED,
-                    message=message,
-                    phase=phase,
-                    error_code="cancelled",
-                    cleanup_complete=cleanup_complete,
-                    process=process,
-                    process_observations=process_observations,
-                    stdout=stdout,
-                    stderr=stderr,
+        finalization = asyncio.create_task(
+            self.terminate(
+                execution=ExecutionStatus.CANCELLED,
+                message=message,
+                phase=phase,
+                error_code="cancelled",
+                cleanup_complete=cleanup_complete,
+                process=process,
+                process_observations=process_observations,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        )
+        while True:
+            try:
+                await asyncio.shield(finalization)
+            except asyncio.CancelledError:
+                # The MCP lifespan uses level cancellation, and concurrent callers may
+                # also repeat Task.cancel(). Retain ownership until the authoritative
+                # run-manifest transition has either committed or failed.
+                if not finalization.done():
+                    continue
+            except Exception as terminate_error:
+                logging.getLogger("flameox.capture").warning(
+                    "Cleanup after cancellation raised: %s",
+                    terminate_error,
                 )
-            )
-        except Exception as terminate_error:
-            logging.getLogger("flameox.capture").warning(
-                "Cleanup after cancellation raised: %s",
-                terminate_error,
-            )
+                return
+            else:
+                return
+            try:
+                finalization.result()
+            except Exception as terminate_error:
+                logging.getLogger("flameox.capture").warning(
+                    "Cleanup after cancellation raised: %s",
+                    terminate_error,
+                )
+            return
 
     async def terminate(
         self,
@@ -443,7 +685,6 @@ class _CaptureExecution:
             snapshot_path.write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
                         "run_id": self.plan.run_id,
                         "evidence_status": evidence_status.value,
                         "limitations": snapshot_limitations,
@@ -775,16 +1016,65 @@ class CaptureService:
         kinds = adapter_binding.artifact_kinds
         overhead = adapter_binding.expected_overhead
         warnings = adapter_binding.limitations
+        workload_config = self.workloads.load().workloads[workload_name]
+        accelerator_requirements = tuple(
+            requirement
+            for requirement in workload_config.identity.environment.required
+            if requirement.startswith(("cuda.", "metal."))
+        )
+        alternative_action: ToolAction | None = None
+        if adapter == "pyperf" and accelerator_requirements:
+            alternative_action = tool_action(
+                ActionId.PLAN_CAPTURE,
+                workload_name=workload_name,
+                adapter="benchmark-samples",
+                parameters=instance.parameters,
+                preflight_mode=preflight.mode.value,
+                capture_mode=(
+                    "trusted_local"
+                    if execution_policy is ExecutionPolicy.TRUSTED_LOCAL
+                    else "managed"
+                ),
+            )
+            warnings = (
+                *warnings,
+                "This workload declares accelerator identity requirements "
+                f"({', '.join(accelerator_requirements)}). pyperf records fresh-process "
+                "wall time, not an operation metric. alternative_action plans a structured "
+                "benchmark-samples capture; PyTorch workloads may instead instrument the "
+                "prepared callable with flameox.sdk.torch_benchmark().",
+            )
         limitation_details = _merge_limitation_details(
             _preflight_limitation_details(preflight),
             adapter_binding.limitation_details,
         )
         adapter_version = adapter_binding.version
+        compiler_identity: CompilerIdentity | None = None
+        if adapter == "triton.compiler":
+            compiler_identity = await self._triton_compiler_identity(workload_name)
+            if adapter_version is not None and adapter_version != compiler_identity.version:
+                raise DomainError(
+                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    "Triton capability version contradicts the declared interpreter distribution.",
+                )
+            adapter_version = compiler_identity.version
         self._require_memray_reader(adapter, adapter_version)
+        reader_version = (
+            qualified_control_coverage_reader_version() if adapter == "coverage" else None
+        )
         semantics = build_run_semantics(adapter, adapter_version, bound_adapter_options)
-        workload_cwd = Path(instance.command.cwd).relative_to(
-            self.workspace.project_root
-        ).as_posix()
+        if reader_version is not None:
+            semantics = semantics.validated_copy(
+                update={
+                    "configuration": {
+                        **semantics.configuration,
+                        "reader_version": reader_version,
+                    }
+                }
+            )
+        workload_cwd = (
+            Path(instance.command.cwd).relative_to(self.workspace.project_root).as_posix()
+        )
         semantics = semantics.validated_copy(
             update={
                 "scope": semantics.scope.validated_copy(
@@ -935,6 +1225,7 @@ class CaptureService:
                 "adapter_capability": adapter_capability,
                 "adapter_workload_qualification": adapter_workload_qualification,
                 "adapter_package_identity": adapter_binding.package_identity,
+                "compiler_identity": compiler_identity,
                 "execution_limits": CaptureExecutionLimits(
                     child_environment_allowlist=(
                         self.workspace.config.execution.child_environment_allowlist
@@ -948,10 +1239,9 @@ class CaptureService:
                     max_resource_observed_files=(
                         self.workspace.config.execution.max_resource_observed_files
                     ),
-                    max_rows_per_generation=(
-                        self.workspace.config.storage.max_rows_per_generation
-                    ),
+                    max_rows_per_generation=(self.workspace.config.storage.max_rows_per_generation),
                 ),
+                "alternative_action": alternative_action,
                 "warnings": warnings,
                 "limitation_details": limitation_details,
                 "created_at": created_at,
@@ -977,7 +1267,7 @@ class CaptureService:
                 "Expected capture plan ID must be a SHA-256 identity.",
             )
         logger = OperationLogger(self.workspace.paths.root)
-        operation_id = logger.new_id()
+        operation_id = new_id()
         started = time.monotonic()
 
         plan = await self.plans.consume(plan_token, expected_plan_id=expected_plan_id)
@@ -988,7 +1278,7 @@ class CaptureService:
         for binding in plan.writable_roots:
             Path(binding.storage_path).mkdir(parents=True, exist_ok=False)
         if plan.adapter in {"triton.compiler", "cute.compiler"}:
-            self._create_kernel_build_dump_dir(plan, output_root)
+            self._create_kernel_build_dump_dir(plan)
         try:
             staging_ownership = StagingOwnershipService(self.workspace).acquire(
                 output_root,
@@ -1020,6 +1310,12 @@ class CaptureService:
             .workloads[plan.workload_name]
             .identity.environment.required
         )
+        if plan.adapter == "triton.compiler":
+            identity_requirements = tuple(
+                dict.fromkeys(
+                    (*identity_requirements, "cuda.driver", "cuda.runtime", "cuda.devices")
+                )
+            )
         planned_accelerator = (
             AcceleratorIdentityFacet(
                 provider=(
@@ -1065,6 +1361,11 @@ class CaptureService:
             writable_roots=plan.writable_roots,
             external_context=plan.external_context,
             execution_identity=plan.planned_execution_identity,
+            compiler_qualification=(
+                CompilerQualification(compiler=plan.compiler_identity)
+                if plan.compiler_identity is not None
+                else None
+            ),
             lease=startup_lease,
             limitations=_limitation_projection(plan.limitation_details),
             limitation_details=plan.limitation_details,
@@ -1136,6 +1437,8 @@ class CaptureService:
         capture.run = prepared
         admission: CaptureAdmission | None = None
         collector_limitation_details: list[LimitationDetail] = []
+        recovery: NextAction | None = None
+        compiler_qualification = prepared.compiler_qualification
 
         try:
             admission = await self.plans.acquire_capture_slot(run_id)
@@ -1171,9 +1474,7 @@ class CaptureService:
                         argv=collector_argv,
                         executable_binding=plan.collector_executable_binding,
                         cwd=Path(plan.workload_instance.command.cwd),
-                        environment_allowlist=(
-                            plan.execution_limits.child_environment_allowlist
-                        ),
+                        environment_allowlist=(plan.execution_limits.child_environment_allowlist),
                         environment_overrides=(
                             {
                                 **plan.workload_instance.command.env_overrides,
@@ -1194,9 +1495,7 @@ class CaptureService:
                             sampling_interval_ms=(
                                 plan.execution_limits.resource_sampling_interval_ms
                             ),
-                            max_observed_files=(
-                                plan.execution_limits.max_resource_observed_files
-                            ),
+                            max_observed_files=(plan.execution_limits.max_resource_observed_files),
                         ),
                     ),
                     on_started=capture.record_lease,
@@ -1298,59 +1597,30 @@ class CaptureService:
                 if quarantined is not None:
                     collector_limitation_details.append(quarantined)
                 early_artifacts: list[ArtifactRegistration] = []
-                torch_diagnostics = output_root / "torch-profiler-diagnostics.json"
-                if plan.adapter == "torch.profiler" and torch_diagnostics.is_file():
-                    try:
-                        # Bound diagnostic read to prevent memory exhaustion.
-                        max_diagnostics_bytes = 1 * 1024 * 1024  # 1 MiB
-                        if torch_diagnostics.stat().st_size > max_diagnostics_bytes:
-                            collector_limitation_details.append(
-                                _limitation(
-                                    LimitationSource.COLLECTOR,
-                                    "diagnostics_oversized",
-                                    "Torch profiler diagnostics exceed 1 MiB; skipping parse.",
-                                )
-                            )
-                            diagnostic_phase = None
-                            diagnostic_status = None
-                        else:
-                            diagnostic_payload = json.loads(
-                                torch_diagnostics.read_text(encoding="utf-8")
-                            )
-                            diagnostic_phase = diagnostic_payload.get("phase")
-                            diagnostic_status = diagnostic_payload.get("status")
-                        if diagnostic_status == "failed" and isinstance(diagnostic_phase, str):
-                            collector_limitation_details.append(
-                                _limitation(
-                                    LimitationSource.COLLECTOR,
-                                    "failure_phase",
-                                    f"Torch profiler collector failed during {diagnostic_phase}.",
-                                )
-                            )
-                        diagnostic_registration = await self._register_path_async(
-                            run_id,
-                            torch_diagnostics,
-                            kind=ArtifactKind.COLLECTOR_METADATA,
-                            role="torch_profiler_diagnostics",
-                            media_type="application/json",
-                            producer=plan.adapter,
-                            producer_version=plan.adapter_version,
+                diagnostic_registration = await self._register_torch_diagnostics(
+                    plan,
+                    output_root,
+                    run_id,
+                    collector_limitation_details,
+                )
+                if diagnostic_registration is not None:
+                    early_artifacts.append(diagnostic_registration[0])
+                torch_recovery = _torch_profiler_recovery(
+                    plan,
+                    cancellation_cause=partial_process.cancellation_cause,
+                    error_code=error.code,
+                )
+                if torch_recovery is not None:
+                    recovery_message, recovery = torch_recovery
+                    collector_limitation_details.append(
+                        _limitation(
+                            LimitationSource.COLLECTOR,
+                            "torch_profiler_lower_overhead_replan",
+                            recovery_message,
                         )
-                        early_artifacts.append(diagnostic_registration[0])
-                    except (
-                        DomainError,
-                        OSError,
-                        UnicodeDecodeError,
-                        json.JSONDecodeError,
-                    ) as diagnostic_error:
-                        collector_limitation_details.append(
-                            _limitation(
-                                LimitationSource.COLLECTOR,
-                                "diagnostics_registration_failed",
-                                "Torch profiler diagnostics could not be registered: "
-                                f"{diagnostic_error}",
-                            )
-                        )
+                    )
+                    error.remediation = (*error.remediation, recovery_message)
+                    error.next_action = recovery
                 if status is ExecutionStatus.TIMED_OUT and plan.adapter == "compute-sanitizer":
                     recovery_message, recovery = _compute_sanitizer_timeout_recovery(plan)
                     collector_limitation_details.append(
@@ -1404,12 +1674,26 @@ class CaptureService:
                 "capture run disappeared after collector execution",
             )
 
-        sanitizer_finding_exit = (
-            plan.adapter == "compute-sanitizer"
-            and outcome.process.exit_code == plan.adapter_options.get("finding_exit_code")
-        )
+        sanitizer_finding_exit = plan.adapter == "compute-sanitizer" and process_exit_code(
+            outcome.process.termination
+        ) == plan.adapter_options.get("finding_exit_code")
         sanitizer_finding = False
-        collector_succeeded = outcome.process.exit_code == 0 or sanitizer_finding_exit
+        collector_succeeded = (
+            process_exit_code(outcome.process.termination) == 0 or sanitizer_finding_exit
+        )
+        torch_recovery = _torch_profiler_recovery(
+            plan,
+            cancellation_cause=outcome.process.cancellation_cause,
+        )
+        if torch_recovery is not None:
+            recovery_message, recovery = torch_recovery
+            collector_limitation_details.append(
+                _limitation(
+                    LimitationSource.COLLECTOR,
+                    "torch_profiler_lower_overhead_replan",
+                    recovery_message,
+                )
+            )
         native_paths = self._native_output_paths(plan, output_root)
         valid_native_paths = self._valid_native_output_paths(plan, output_root)
         unexpected_native_paths = self._unexpected_native_output_paths(plan, output_root)
@@ -1419,15 +1703,17 @@ class CaptureService:
             and self._native_output_manifest_is_valid(plan, output_root)
         )
         native_definition = builtin_adapter(plan.adapter)
-        preserve_nonzero_artifact = bool(
-            native_definition is not None and native_definition.preserve_artifact_on_nonzero
+        preserve_nonzero_artifact = (
+            bool(native_definition is not None and native_definition.preserve_artifact_on_nonzero)
+            or plan.adapter == "memray"
         )
         if not collector_succeeded and not outcome.process.timed_out:
             collector_limitation_details.append(
                 _limitation(
                     LimitationSource.COLLECTOR,
                     "nonzero_exit",
-                    f"Collector exited with status {outcome.process.exit_code}.",
+                    "Collector exited with status "
+                    f"{process_exit_code(outcome.process.termination)}.",
                 )
             )
         if (
@@ -1497,15 +1783,31 @@ class CaptureService:
             )
 
         registrations: list[tuple[ArtifactRegistration, int]] = []
-        kernel_build_manifest: KernelBuildManifestV2 | None = None
+        kernel_build_manifest: KernelBuildManifest | None = None
+        autotune_selections: tuple[TritonAutotuneSelection, ...] = ()
         process_snapshot_rows: list[dict[str, object]] = []
         process_snapshot_entries: list[dict[str, object]] = []
         adapter_validation_rows: list[dict[str, object]] = []
         adapter_extraction_rows: list[dict[str, object]] = []
         validation_status = ValidationStatus.NOT_REQUESTED
         validation_limitations: list[str] = []
+        memray_region_validation_failed = False
         oracle_receipt_record: OracleReceiptRecord | None = None
         try:
+            if plan.adapter == "memray" and plan.adapter_options.get("mode") == "sdk":
+                region = plan.adapter_options.get("region")
+                if isinstance(region, str):
+                    for code, message in _memray_region_validation_issues(
+                        output_root / "observations.jsonl",
+                        expected_region=region,
+                        max_bytes=plan.execution_limits.max_artifact_bytes,
+                    ):
+                        memray_region_validation_failed = True
+                        collector_succeeded = False
+                        validation_status = ValidationStatus.ERROR
+                        collector_limitation_details.append(
+                            _limitation(LimitationSource.VALIDATION, code, message)
+                        )
             evidence_status, snapshot_limitations = process_observation_coverage(
                 outcome.process_observations
             )
@@ -1513,7 +1815,6 @@ class CaptureService:
             snapshot_path.write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
                         "run_id": run_id,
                         "evidence_status": evidence_status.value,
                         "limitations": snapshot_limitations,
@@ -1554,7 +1855,7 @@ class CaptureService:
                 cast(dict[str, Scalar], plan.workload_instance.parameters),
                 dynamic_parameters=plan.dynamic_parameters,
             )
-            if oracle is not None and outcome.process.exit_code == 0:
+            if oracle is not None and process_exit_code(outcome.process.termination) == 0:
                 try:
                     if plan.oracle_argv is None or plan.oracle_launch_executable_binding is None:
                         raise DomainError(
@@ -1567,10 +1868,17 @@ class CaptureService:
                             executable_binding=plan.oracle_launch_executable_binding,
                             cwd=Path(oracle.command.cwd),
                             environment_allowlist=(
-                                    plan.execution_limits.child_environment_allowlist
+                                plan.execution_limits.child_environment_allowlist
                             ),
                             environment_overrides=(
-                                {"FLAMEOX_ORACLE_RECEIPT": str(output_root / "oracle-receipt.json")}
+                                {
+                                    "FLAMEOX_ORACLE_RECEIPT": str(
+                                        output_root / "oracle-receipt.json"
+                                    ),
+                                    "FLAMEOX_WORKLOAD_INSTANCE_ID": (
+                                        plan.workload_instance.workload_instance_id
+                                    ),
+                                }
                                 if oracle.receipt_schema is not None
                                 else {}
                             ),
@@ -1598,16 +1906,11 @@ class CaptureService:
                     validation_status = ValidationStatus.FAILED
                     validation_output = output_root / "validation.stdout"
                     atomic_write_bytes(validation_output, validation.stdout)
-                    role = (
-                        "validation_cross_treatment_equivalence"
-                        if oracle.strength is OracleStrength.CROSS_TREATMENT_EQUIVALENCE
-                        else f"validation_{oracle.strength.value}"
-                    )
                     stdout_registration = await self._register_path_async(
                         run_id,
                         validation_output,
                         kind=ArtifactKind.VALIDATION_OUTPUT,
-                        role=role,
+                        role="validation_stdout",
                         media_type="application/octet-stream",
                     )
                     registrations.append(stdout_registration)
@@ -1627,7 +1930,7 @@ class CaptureService:
                     if oracle.receipt_schema is None:
                         validation_status = (
                             ValidationStatus.PASSED
-                            if validation.process.exit_code == 0
+                            if process_exit_code(validation.process.termination) == 0
                             else ValidationStatus.FAILED
                         )
                     else:
@@ -1650,13 +1953,21 @@ class CaptureService:
                             receipt = parse_oracle_receipt(
                                 authoritative_receipt.payload_path.read_bytes()
                             )
+                            if (
+                                oracle.strength is OracleStrength.CROSS_TREATMENT_EQUIVALENCE
+                                and receipt.binding is None
+                            ):
+                                raise DomainError(
+                                    ErrorCode.WORKSPACE_INVALID,
+                                    "Cross-treatment equivalence requires a pair-bound receipt.",
+                                )
                             oracle_receipt_record = OracleReceiptRecord(
                                 receipt=receipt,
                                 receipt_artifact_id=receipt_registration[0].artifact_id,
                                 validation_stdout_artifact_id=stdout_registration[0].artifact_id,
                                 validation_stderr_artifact_id=stderr_artifact_id,
                             )
-                            if validation.process.exit_code == 0:
+                            if process_exit_code(validation.process.termination) == 0:
                                 validation_status = {
                                     OracleStatus.PASS: ValidationStatus.PASSED,
                                     OracleStatus.FAIL: ValidationStatus.FAILED,
@@ -1670,13 +1981,13 @@ class CaptureService:
                         except DomainError as error:
                             validation_status = (
                                 ValidationStatus.FAILED
-                                if validation.process.exit_code != 0
+                                if process_exit_code(validation.process.termination) != 0
                                 else ValidationStatus.ERROR
                             )
                             validation_limitations.append(
                                 f"Oracle receipt validation failed: {error.message}"
                             )
-                    if validation.process.exit_code != 0:
+                    if process_exit_code(validation.process.termination) != 0:
                         validation_limitations.append(
                             "The declared validation oracle exited unsuccessfully."
                         )
@@ -1687,51 +1998,17 @@ class CaptureService:
                 except DomainError as error:
                     validation_status = ValidationStatus.ERROR
                     validation_limitations.append(error.message)
+            if memray_region_validation_failed:
+                validation_status = ValidationStatus.ERROR
             await capture.report(6, "Validation complete")
-            torch_diagnostics = output_root / "torch-profiler-diagnostics.json"
-            if plan.adapter == "torch.profiler" and torch_diagnostics.is_file():
-                try:
-                    # Bound diagnostic read to prevent memory exhaustion from
-                    # a malicious or corrupted multi-gigabyte diagnostics file.
-                    max_diagnostics_bytes = 1 * 1024 * 1024  # 1 MiB
-                    if torch_diagnostics.stat().st_size > max_diagnostics_bytes:
-                        collector_limitation_details.append(
-                            _limitation(
-                                LimitationSource.COLLECTOR,
-                                "diagnostics_oversized",
-                                "Torch profiler diagnostics exceed 1 MiB; skipping parse.",
-                            )
-                        )
-                        diagnostic_phase = None
-                        diagnostic_status = None
-                    else:
-                        diagnostic_payload = json.loads(
-                            torch_diagnostics.read_text(encoding="utf-8")
-                        )
-                        diagnostic_phase = diagnostic_payload.get("phase")
-                        diagnostic_status = diagnostic_payload.get("status")
-                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                    diagnostic_phase = None
-                    diagnostic_status = None
-                if diagnostic_status == "failed" and isinstance(diagnostic_phase, str):
-                    collector_limitation_details.append(
-                        _limitation(
-                            LimitationSource.COLLECTOR,
-                            "failure_phase",
-                            f"Torch profiler collector failed during {diagnostic_phase}.",
-                        )
-                    )
-                registrations.append(
-                    await self._register_path_async(
-                        run_id,
-                        torch_diagnostics,
-                        kind=ArtifactKind.COLLECTOR_METADATA,
-                        role="torch_profiler_diagnostics",
-                        media_type="application/json",
-                        producer=plan.adapter,
-                        producer_version=plan.adapter_version,
-                    )
-                )
+            diagnostic_registration = await self._register_torch_diagnostics(
+                plan,
+                output_root,
+                run_id,
+                collector_limitation_details,
+            )
+            if diagnostic_registration is not None:
+                registrations.append(diagnostic_registration)
             for name, payload, kind, role, media_type in (
                 (
                     "stdout.bin",
@@ -1767,13 +2044,66 @@ class CaptureService:
                 (
                     kernel_build_registrations,
                     kernel_build_manifest,
+                    kernel_build_native_paths,
+                    kernel_build_limitations,
                 ) = await self._collect_kernel_build(
                     plan,
                     output_root,
                     run_id,
-                    outcome.process.exit_code if outcome.process.exit_code is not None else 1,
+                    process_exit_code(outcome.process.termination) or 1,
                 )
                 registrations.extend(kernel_build_registrations)
+                collector_limitation_details.extend(
+                    _limitation(
+                        LimitationSource.COLLECTOR,
+                        "kernel_build_collection",
+                        limitation,
+                    )
+                    for limitation in kernel_build_limitations
+                )
+                if plan.adapter == "triton.compiler":
+                    autotune_selections, autotune_limitations = await run_atomic_thread(
+                        lambda: load_triton_autotune_selections(
+                            output_root / "triton-autotune.jsonl",
+                            run_id=run_id,
+                        )
+                    )
+                    collector_limitation_details.extend(
+                        _limitation(
+                            LimitationSource.COLLECTOR,
+                            "triton_autotune_listener",
+                            limitation,
+                        )
+                        for limitation in autotune_limitations
+                    )
+                    compiler_identity = plan.compiler_identity
+                    if compiler_identity is None:
+                        raise DomainError(
+                            ErrorCode.INVALID_CAPTURE_PLAN,
+                            "Triton capture plan is missing its bound compiler identity.",
+                        )
+                    compiler_target, compiler_target_limitations = await run_atomic_thread(
+                        lambda: qualify_triton_compiler_target(
+                            events_path=output_root / "triton-compiler.jsonl",
+                            native_paths=kernel_build_native_paths,
+                            compiler=compiler_identity,
+                            environment_id=environment.environment_id,
+                            accelerator=accelerator,
+                            target_intent=plan.semantics.configuration.get("target"),
+                        )
+                    )
+                    compiler_qualification = CompilerQualification(
+                        compiler=compiler_identity,
+                        target=compiler_target,
+                    )
+                    collector_limitation_details.extend(
+                        _limitation(
+                            LimitationSource.COLLECTOR,
+                            "triton_compiler_target",
+                            limitation,
+                        )
+                        for limitation in compiler_target_limitations
+                    )
             elif plan.adapter_execution_plan is not None and collector_succeeded:
                 (
                     plugin_registrations,
@@ -1837,6 +2167,9 @@ class CaptureService:
                         media_type = "application/json" if is_wall else "text/plain"
                         if outcome.process.timed_out:
                             role = f"partial_{role}"
+                    elif plan.adapter == "torch.benchmark":
+                        producer = "torch.utils.benchmark"
+                        media_type = "application/json"
                     elif outcome.process.timed_out:
                         role = (
                             f"partial_cycle_{cycle_index:04d}"
@@ -1873,8 +2206,7 @@ class CaptureService:
                                         1,
                                         min(
                                             10_000,
-                                            plan.execution_limits.max_rows_per_generation
-                                            - 1,
+                                            plan.execution_limits.max_rows_per_generation - 1,
                                         ),
                                     ),
                                 )
@@ -1902,7 +2234,7 @@ class CaptureService:
                                 }
                             )
                             has_findings = bool(inspection.records)
-                            supported_exit = outcome.process.exit_code in {
+                            supported_exit = process_exit_code(outcome.process.termination) in {
                                 0,
                                 plan.adapter_options.get("finding_exit_code"),
                             }
@@ -1924,24 +2256,6 @@ class CaptureService:
                                     )
                                 )
                             validation_limitations.extend(inspection.limitations)
-                manifest = output_root / "torch-profiler-cycles.json"
-                if (
-                    plan.adapter == "torch.profiler"
-                    and torch_profiler_options(cast(dict[str, object], plan.adapter_options)).mode
-                    == "sdk"
-                    and native_complete
-                ):
-                    registrations.append(
-                        await self._register_path_async(
-                            run_id,
-                            manifest,
-                            kind=ArtifactKind.COLLECTOR_METADATA,
-                            role="torch_profiler_cycle_manifest",
-                            media_type="application/json",
-                            producer=plan.adapter,
-                            producer_version=plan.adapter_version,
-                        )
-                    )
                 if plan.adapter == "nvbench" and valid_native_paths:
                     primary_registration = next(
                         registered
@@ -2003,6 +2317,11 @@ class CaptureService:
             )
             raise
         except DomainError as error:
+            torch_recovery = _torch_profiler_recovery(plan, error_code=error.code)
+            if torch_recovery is not None:
+                recovery_message, recovery = torch_recovery
+                error.remediation = (*error.remediation, recovery_message)
+                error.next_action = recovery
             preserved = tuple(
                 registration
                 for registration, _byte_length in registrations
@@ -2022,6 +2341,17 @@ class CaptureService:
             )
             details = [
                 _limitation(LimitationSource.ARTIFACT, error.code.value.lower(), error.message),
+                *(
+                    [
+                        _limitation(
+                            LimitationSource.COLLECTOR,
+                            "torch_profiler_lower_overhead_replan",
+                            recovery_message,
+                        )
+                    ]
+                    if torch_recovery is not None
+                    else []
+                ),
             ]
             if quarantined is not None:
                 details.append(quarantined)
@@ -2091,6 +2421,7 @@ class CaptureService:
                         (succeeded and (not native_paths or native_complete))
                         or (preserve_nonzero_artifact and bool(valid_native_paths))
                         or (timed_out and bool(valid_native_paths))
+                        or (memray_region_validation_failed and bool(valid_native_paths))
                         or (
                             plan.adapter in {"triton.compiler", "cute.compiler"}
                             and any(
@@ -2103,6 +2434,7 @@ class CaptureService:
                 "validation_status": validation_status,
                 "process": outcome.process,
                 "artifacts": tuple(registration for registration, _ in registrations),
+                "compiler_qualification": compiler_qualification,
                 "oracle_receipt": oracle_receipt_record,
                 "limitations": _limitation_projection(
                     terminal_limitation_details,
@@ -2114,13 +2446,14 @@ class CaptureService:
                             else (
                                 ["Collector timed out; registered artifacts may be partial."]
                                 if timed_out
-                                else [f"Collector exited with status {outcome.process.exit_code}."]
+                                else [
+                                    "Collector exited with status "
+                                    f"{process_exit_code(outcome.process.termination)}."
+                                ]
                             )
                         )
                         + (
-                            [
-                                _compute_sanitizer_timeout_recovery(plan)[0]
-                            ]
+                            [_compute_sanitizer_timeout_recovery(plan)[0]]
                             if timed_out and plan.adapter == "compute-sanitizer"
                             else []
                         )
@@ -2154,17 +2487,19 @@ class CaptureService:
                 and registration.role != "kernel_build_manifest"
             }
             try:
-                pipeline = await run_atomic_thread(
-                    lambda: ArtifactPipelineService(self.workspace).register_managed(
-                        kernel_build_pipeline_request(
-                            kernel_build_manifest,
-                            run_id=terminal.run_id,
-                            registration_ids_by_path=registration_ids_by_path,
-                        ),
-                        workload_instance=plan.workload_instance,
+                pipeline_service = ArtifactPipelineService(self.workspace)
+                pipeline_ids_list: list[str] = []
+                for request in kernel_build_pipeline_requests(
+                    kernel_build_manifest,
+                    run_id=terminal.run_id,
+                    registration_ids_by_path=registration_ids_by_path,
+                    run=terminal,
+                ):
+                    pipeline = await run_atomic_thread(
+                        partial(pipeline_service.register_managed, request)
                     )
-                )
-                pipeline_ids = (pipeline.pipeline_id,)
+                    pipeline_ids_list.append(pipeline.pipeline_id)
+                pipeline_ids = tuple(pipeline_ids_list)
             except DomainError as error:
                 pipeline_failed = terminal.validated_copy(
                     update={
@@ -2222,9 +2557,7 @@ class CaptureService:
             "runtime_resource_summaries": [
                 runtime_resource_summary_row(
                     terminal,
-                    sampling_interval_ms=(
-                        plan.execution_limits.resource_sampling_interval_ms
-                    ),
+                    sampling_interval_ms=(plan.execution_limits.resource_sampling_interval_ms),
                 )
             ],
             "runtime_writable_root_growth": runtime_writable_root_rows(
@@ -2234,6 +2567,10 @@ class CaptureService:
             "process_snapshots": process_snapshot_rows,
             "process_snapshot_entries": process_snapshot_entries,
         }
+        if plan.adapter == "triton.compiler":
+            publication_rows["triton_autotune_selections"] = [
+                selection.row() for selection in autotune_selections
+            ]
         try:
             published = await run_atomic_thread(
                 lambda: self.publisher.publish_rows(
@@ -2285,10 +2622,14 @@ class CaptureService:
             pipeline_ids=pipeline_ids,
             corpus_commit_id=published.commit.commit_id,
             recovery=(
-                _compute_sanitizer_timeout_recovery(plan)[1]
-                if terminal.execution_status is ExecutionStatus.TIMED_OUT
-                and plan.adapter == "compute-sanitizer"
-                else None
+                recovery
+                if recovery is not None
+                else (
+                    _compute_sanitizer_timeout_recovery(plan)[1]
+                    if terminal.execution_status is ExecutionStatus.TIMED_OUT
+                    and plan.adapter == "compute-sanitizer"
+                    else None
+                )
             ),
         )
 
@@ -2410,7 +2751,7 @@ class CaptureService:
             ),
             None,
         )
-        if outcome.process.exit_code != 0 or version_line is None:
+        if process_exit_code(outcome.process.termination) != 0 or version_line is None:
             raise DomainError(
                 ErrorCode.ADAPTER_INCOMPATIBLE,
                 "The declared executable did not identify itself as an NVBench benchmark.",
@@ -2418,7 +2759,7 @@ class CaptureService:
                     "adapter": adapter,
                     "adapter_implementation_status": "available",
                     "workload_compatibility": "probe_mismatch",
-                    "probe_exit_code": outcome.process.exit_code,
+                    "probe_exit_code": process_exit_code(outcome.process.termination),
                 },
                 remediation=(
                     "Use a purpose-built executable linked with nvbench::main or NVBENCH_MAIN.",
@@ -2634,7 +2975,9 @@ class CaptureService:
             return ()
         if plan.adapter == "torch.profiler":
             options = torch_profiler_options(cast(dict[str, object], plan.adapter_options))
-            return tuple(output_root / filename for filename in options.output_filenames)
+            return tuple(
+                output_root / filename for filename in torch_profiler_trace_filenames(options)
+            )
         if plan.adapter == "python-startup":
             return (
                 output_root / PYTHON_STARTUP_PROFILE.wall_output_name,
@@ -2727,7 +3070,7 @@ class CaptureService:
         return registrations
 
     @staticmethod
-    def _create_kernel_build_dump_dir(plan: CapturePlan, output_root: Path) -> None:
+    def _create_kernel_build_dump_dir(plan: CapturePlan) -> None:
         env_key = "TRITON_DUMP_DIR" if plan.adapter == "triton.compiler" else "CUTE_DSL_DUMP_DIR"
         dump_path = plan.collector_environment.get(env_key)
         if dump_path is not None:
@@ -2739,15 +3082,15 @@ class CaptureService:
         output_root: Path,
         run_id: str,
         exit_code: int,
-    ) -> tuple[list[tuple[ArtifactRegistration, int]], KernelBuildManifestV2]:
+    ) -> tuple[
+        list[tuple[ArtifactRegistration, int]],
+        KernelBuildManifest,
+        tuple[Path, ...],
+        tuple[str, ...],
+    ]:
         env_key = "TRITON_DUMP_DIR" if plan.adapter == "triton.compiler" else "CUTE_DSL_DUMP_DIR"
         dump_path = plan.collector_environment.get(env_key)
         dump_dir = Path(dump_path) if dump_path is not None else output_root / "dumps"
-        source_environment = {
-            key: value
-            for key, value in plan.collector_environment.items()
-            if key not in {"FLAMEOX_OBSERVATIONS_PATH"}
-        }
         cute_keep: tuple[str, ...] | None = None
         if plan.adapter == "cute.compiler":
             keep_value = plan.adapter_options.get("keep_allowlist")
@@ -2758,40 +3101,29 @@ class CaptureService:
         if reproducer_env is not None:
             reproducer_path = Path(reproducer_env)
         collector = KernelBuildCaptureCollector(self.workspace)
-        build_context = managed_kernel_build_context(
-            workload_instance=plan.workload_instance,
-            adapter=plan.adapter,
-            producer_version=plan.adapter_version,
-            adapter_options=plan.adapter_options,
-        )
-        manifest, manifest_path, native_paths = await run_atomic_thread(
+        manifest, manifest_path, native_paths, limitations = await run_atomic_thread(
             lambda: collector.collect(
                 adapter=plan.adapter,
                 dump_dir=dump_dir,
                 output_root=output_root,
-                workload_label=plan.workload_name,
-                build_context=build_context,
                 exit_code=exit_code,
-                producer_version=plan.adapter_version,
-                source_environment=source_environment,
                 cute_keep_allowlist=cute_keep,
                 reproducer_path=reproducer_path,
             )
         )
         registrations: list[tuple[ArtifactRegistration, int]] = []
-        declarations = {
-            stage.artifact.path: stage for stage in manifest.stages if stage.artifact is not None
+        declarations = {artifact.path: artifact for artifact in manifest.artifacts}
+        grouped_paths = {
+            artifact.path for group in manifest.native_groups for artifact in group.artifacts
         }
         for native in native_paths:
             relative = native.relative_to(output_root).as_posix()
-            stage = declarations[relative]
-            declaration = stage.artifact
-            assert declaration is not None
+            declaration = declarations[relative]
             registered = await self._register_path_async(
                 run_id,
                 native,
                 kind=ArtifactKind.KERNEL_BUILD,
-                role=declaration.role,
+                role="compiler_output" if relative in grouped_paths else "compiler_attachment",
                 media_type=declaration.media_type,
                 producer=plan.adapter,
                 producer_version=plan.adapter_version,
@@ -2821,7 +3153,7 @@ class CaptureService:
             expected_sha256=manifest_sha256,
         )
         registrations.append(registered_manifest)
-        return registrations, manifest
+        return registrations, manifest, native_paths, limitations
 
     def _require_registered_integrity(
         self,
@@ -2834,7 +3166,8 @@ class CaptureService:
         stored = self.artifacts.get(registration.artifact_id)
         if byte_length != expected_byte_length or (
             expected_sha256 is not None
-            and stored.content.integrity.sha256 != expected_sha256.removeprefix("sha256:").lower()
+            and stored.content.artifact_id
+            != f"sha256:{expected_sha256.removeprefix('sha256:').lower()}"
         ):
             raise DomainError(
                 ErrorCode.ARTIFACT_INTEGRITY_FAILED,
@@ -2851,6 +3184,73 @@ class CaptureService:
             for path in self._native_output_paths(plan, output_root)
             if self._native_output_is_valid(path)
         )
+
+    async def _register_torch_diagnostics(
+        self,
+        plan: CapturePlan,
+        output_root: Path,
+        run_id: str,
+        limitations: list[LimitationDetail],
+    ) -> tuple[ArtifactRegistration, int] | None:
+        if plan.adapter != "torch.profiler":
+            return None
+        path = output_root / "torch-profiler-diagnostics.json"
+        if not path.is_file():
+            return None
+        try:
+            if path.stat().st_size > 1 * 1024 * 1024:
+                limitations.append(
+                    _limitation(
+                        LimitationSource.COLLECTOR,
+                        "diagnostics_oversized",
+                        "Torch profiler diagnostics exceed 1 MiB; skipping parse.",
+                    )
+                )
+            else:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    limitations.append(
+                        _limitation(
+                            LimitationSource.COLLECTOR,
+                            "diagnostics_malformed",
+                            "Torch profiler diagnostics are not a JSON object.",
+                        )
+                    )
+                elif payload.get("status") == "failed" and isinstance(payload.get("phase"), str):
+                    limitations.append(
+                        _limitation(
+                            LimitationSource.COLLECTOR,
+                            "failure_phase",
+                            f"Torch profiler collector failed during {payload['phase']}.",
+                        )
+                    )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            limitations.append(
+                _limitation(
+                    LimitationSource.COLLECTOR,
+                    "diagnostics_parse_failed",
+                    f"Torch profiler diagnostics could not be parsed: {error}.",
+                )
+            )
+        try:
+            return await self._register_path_async(
+                run_id,
+                path,
+                kind=ArtifactKind.COLLECTOR_METADATA,
+                role="torch_profiler_diagnostics",
+                media_type="application/json",
+                producer=plan.adapter,
+                producer_version=plan.adapter_version,
+            )
+        except DomainError as error:
+            limitations.append(
+                _limitation(
+                    LimitationSource.COLLECTOR,
+                    "diagnostics_registration_failed",
+                    f"Torch profiler diagnostics could not be registered: {error.message}",
+                )
+            )
+            return None
 
     @staticmethod
     def _native_output_is_valid(path: Path) -> bool:
@@ -2939,25 +3339,7 @@ class CaptureService:
                     return stream.read(16) == b"SQLite format 3\x00"
             except OSError:
                 return False
-        if plan.adapter != "torch.profiler":
-            return True
-        options = torch_profiler_options(cast(dict[str, object], plan.adapter_options))
-        if not isinstance(options, SdkTorchProfilerOptions):
-            return True
-        path = output_root / "torch-profiler-cycles.json"
-        try:
-            if path.is_symlink() or path.stat().st_size > 65_536:
-                return False
-            payload = json.loads(path.read_text())
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            return False
-        if not isinstance(payload, dict):
-            return False
-        return payload == {
-            "schema_version": "flameox.torch-profiler-cycles.v1",
-            "expected_cycles": options.expected_cycles,
-            "files": list(options.output_filenames),
-        }
+        return True
 
     def _quarantine_native_output(
         self,
@@ -2972,11 +3354,6 @@ class CaptureService:
             for path in (
                 *self._native_output_paths(plan, output_root),
                 *self._unexpected_native_output_paths(plan, output_root),
-                *(
-                    (output_root / "torch-profiler-cycles.json",)
-                    if plan.adapter == "torch.profiler"
-                    else ()
-                ),
             )
             if path.exists() and path.name not in exclude_display_names
         )
@@ -3287,7 +3664,7 @@ class CaptureService:
             )
         except DomainError:
             return False
-        return outcome.process.exit_code == 0
+        return process_exit_code(outcome.process.termination) == 0
 
     def _bubblewrap_argv(
         self,
@@ -3398,6 +3775,36 @@ class CaptureService:
         payload["policy"] = self.workspace.config.model_dump(mode="json")
         return cast(dict[str, JsonValue], payload)
 
+    async def _triton_compiler_identity(self, workload_name: str) -> CompilerIdentity:
+        observed = await ExecutionIdentityService(
+            self.workspace,
+            broker=self.broker,
+        ).distribution_identity(workload_name, "triton")
+        if (
+            observed.status is not ExecutionIdentityInputStatus.EXACT
+            or observed.identity_basis is not ExecutionIdentityBasis.DISTRIBUTION_METADATA
+            or observed.distribution is None
+            or observed.distribution.casefold() != "triton"
+            or observed.version is None
+            or observed.content_digest is None
+        ):
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "The declared workload interpreter could not bind an exact Triton distribution.",
+                remediation=(
+                    "Install a complete Triton distribution in the declared interpreter, then "
+                    "create a new capture plan.",
+                ),
+            )
+        instance = self.workloads.resolve(workload_name)
+        return CompilerIdentity(
+            adapter="triton.compiler",
+            distribution=observed.distribution,
+            version=observed.version,
+            content_digest=observed.content_digest,
+            interpreter_digest=instance.executable_binding.identity.sha256,
+        )
+
     async def _recheck(self, plan: CapturePlan) -> None:
         if digest_model(self._authorization_payload(plan)) != plan.plan_id:
             raise DomainError(
@@ -3414,6 +3821,14 @@ class CaptureService:
                 "The active internal collector changed after planning.",
                 remediation=("Create and review a new capture plan.",),
             )
+        if plan.compiler_identity is not None:
+            current_compiler = await self._triton_compiler_identity(plan.workload_name)
+            if current_compiler != plan.compiler_identity:
+                raise DomainError(
+                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    "The Triton distribution changed after planning.",
+                    remediation=("Create a new capture plan for the current interpreter.",),
+                )
         if plan.adapter_capability is not None and plan.adapter_capability.probe_kind == "active":
             current_capability = await self.capabilities.probe(plan.adapter, refresh=True)
             planned_capability = plan.adapter_capability.model_dump(

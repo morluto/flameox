@@ -1,0 +1,102 @@
+{
+  "$defs": {
+    "KernelBuildArtifact": {
+      "additionalProperties": false,
+      "description": "One provider-native file, identified without assigning it pipeline state.",
+      "properties": {
+        "byte_length": {
+          "minimum": 0,
+          "title": "Byte Length",
+          "type": "integer"
+        },
+        "media_type": {
+          "default": "application/octet-stream",
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Media Type",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "byte_length",
+        "sha256"
+      ],
+      "title": "KernelBuildArtifact",
+      "type": "object"
+    },
+    "KernelBuildArtifactGroup": {
+      "additionalProperties": false,
+      "description": "One native compiler dump directory, without a cross-group ordering claim.",
+      "properties": {
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/KernelBuildArtifact"
+          },
+          "maxItems": 99,
+          "minItems": 1,
+          "title": "Artifacts",
+          "type": "array"
+        },
+        "path": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "artifacts"
+      ],
+      "title": "KernelBuildArtifactGroup",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Provider-native compiler evidence grouped by its original dump directories.\n\nThe manifest is deliberately not a pipeline. It preserves raw group membership,\nbytes, and provider provenance; ``ArtifactPipeline`` owns normalized stage\nordering and predecessor lineage. The authoritative run owns execution\nsemantics.",
+  "properties": {
+    "attachments": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/KernelBuildArtifact"
+      },
+      "maxItems": 20,
+      "title": "Attachments",
+      "type": "array"
+    },
+    "native_groups": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/KernelBuildArtifactGroup"
+      },
+      "maxItems": 99,
+      "title": "Native Groups",
+      "type": "array"
+    },
+    "producer": {
+      "enum": [
+        "triton",
+        "cute"
+      ],
+      "title": "Producer",
+      "type": "string"
+    }
+  },
+  "required": [
+    "producer"
+  ],
+  "title": "KernelBuildManifest",
+  "type": "object"
+}

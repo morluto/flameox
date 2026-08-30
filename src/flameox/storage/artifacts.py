@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from flameox.atomic import atomic_write_json, fsync_directory
 from flameox.domain.errors import DomainError, ErrorCode
-from flameox.domain.models import ArtifactContent, Integrity, utc_now
+from flameox.domain.models import ArtifactContent
 from flameox.filesystem import BoundedFileSystem
 from flameox.storage.quotas import StorageQuota
 from flameox.storage.workspace import Workspace
@@ -28,7 +28,6 @@ _SAFE_PAYLOAD_NAME = re.compile(r"^payload(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,15})?
 class StoredArtifact:
     content: ArtifactContent
     payload_path: Path
-    created: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,7 +123,7 @@ class ArtifactStore:
         """Yield an immutable bounded copy without committing it to the CAS."""
         source = source.absolute()
         self._require_allowed_parent(source, allowed_roots)
-        source_fd = self._open_source(source, allowed_roots)
+        source_fd = BoundedFileSystem(allowed_roots).open_descriptor(source)
         try:
             with self.temporary_snapshot_descriptor(source_fd, max_bytes=max_bytes) as snapshot:
                 yield snapshot
@@ -253,7 +252,6 @@ class ArtifactStore:
         metadata_path = object_root / "artifact.json"
         with self.workspace.write_locked():
             StorageQuota(self.workspace).require_capacity(staging=True)
-            created = False
             if metadata_path.exists():
                 verified = self.get(artifact_id)
                 content = verified.content
@@ -275,18 +273,9 @@ class ArtifactStore:
                     artifact_id=artifact_id,
                     byte_length=snapshot.byte_length,
                     payload_name=payload_name,
-                    integrity=Integrity(sha256=hexadecimal, hashed_at=utc_now()),
                 )
                 atomic_write_json(metadata_path, content.model_dump(mode="json"))
-                created = True
-        return StoredArtifact(content=content, payload_path=payload_path, created=created)
-
-    def _open_source(
-        self,
-        source: Path,
-        allowed_roots: tuple[Path, ...],
-    ) -> int:
-        return BoundedFileSystem(allowed_roots).open_descriptor(source)
+        return StoredArtifact(content=content, payload_path=payload_path)
 
     def get(self, artifact_id: str) -> StoredArtifact:
         with self._open_verified(artifact_id) as (stored, _payload_fd):
@@ -334,6 +323,11 @@ class ArtifactStore:
                 "Artifact storage path escapes the artifact root.",
             ) from exc
         content = self._read_metadata(metadata_path)
+        if content.artifact_id != artifact_id:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Artifact metadata identity does not match its content-addressed location.",
+            )
         if _SAFE_PAYLOAD_NAME.fullmatch(content.payload_name) is None:
             raise DomainError(
                 ErrorCode.ARTIFACT_INTEGRITY_FAILED,
@@ -390,7 +384,7 @@ class ArtifactStore:
                 if not chunk:
                     break
                 digest.update(chunk)
-            if digest.hexdigest() != content.integrity.sha256:
+            if digest.hexdigest() != hexadecimal:
                 raise DomainError(
                     ErrorCode.ARTIFACT_INTEGRITY_FAILED,
                     "Artifact payload digest does not match recorded metadata.",

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import runpy
 import sys
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import assert_never
+from typing import Protocol, assert_never, cast
 
 from flameox.atomic import atomic_write_json
 
@@ -28,6 +29,12 @@ class _InlineTarget:
 
 
 type _Target = _ModuleTarget | _ScriptTarget | _InlineTarget
+
+
+class _Profiler(Protocol):
+    def events(self) -> object: ...
+
+    def export_chrome_trace(self, path: str) -> None: ...
 
 
 def _parse_target(options: argparse.Namespace, parser: argparse.ArgumentParser) -> _Target:
@@ -76,16 +83,61 @@ def _write_diagnostic(
     phase: str,
     status: str,
     detail: str | None = None,
+    values: dict[str, int | float] | None = None,
 ) -> None:
     payload: dict[str, object] = {
-        "schema_version": "flameox.torch-profiler-diagnostics.v1",
         "phase": phase,
         "status": status,
     }
     if detail is not None:
         payload["detail"] = " ".join(detail.split())[:500]
+    if values:
+        payload.update(values)
     with suppress(OSError):
         atomic_write_json(path, payload)
+
+
+def _provider_diagnostics(profile: object) -> dict[str, int | float]:
+    """Return bounded scalar facts exposed by the completed provider profile."""
+
+    events_method = getattr(profile, "events", None)
+    if not callable(events_method):
+        return {}
+    try:
+        events = events_method()
+        event_count = 0
+        min_start: float | None = None
+        max_end: float | None = None
+        for event in events:
+            event_count += 1
+            time_range = getattr(event, "time_range", None)
+            start = getattr(time_range, "start", None)
+            end = getattr(time_range, "end", None)
+            if (
+                isinstance(start, (int, float))
+                and not isinstance(start, bool)
+                and math.isfinite(start)
+                and isinstance(end, (int, float))
+                and not isinstance(end, bool)
+                and math.isfinite(end)
+                and end >= start
+            ):
+                min_start = float(start) if min_start is None else min(min_start, start)
+                max_end = float(end) if max_end is None else max(max_end, end)
+    except Exception:
+        return {}
+
+    values: dict[str, int | float] = {"event_count": event_count}
+    if min_start is not None and max_end is not None:
+        values["active_duration_us"] = max_end - min_start
+    return values
+
+
+def _trace_size(path: Path) -> dict[str, int]:
+    try:
+        return {"artifact_size_bytes": path.stat().st_size}
+    except OSError:
+        return {}
 
 
 def main() -> None:
@@ -107,6 +159,7 @@ def main() -> None:
     diagnostic_path = Path(options.output).resolve().parent / "torch-profiler-diagnostics.json"
     _write_diagnostic(diagnostic_path, phase="wrapper_startup", status="started")
     phase = "wrapper_startup"
+    profile: _Profiler | None = None
     try:
         target_name = _prepare_target(target_case)
         try:
@@ -146,7 +199,8 @@ def main() -> None:
             with_stack=config["with_stack"],
             with_flops=config["with_flops"],
             with_modules=config["with_modules"],
-        ) as profile:
+        ) as active_profile:
+            profile = cast(_Profiler, active_profile)
             phase = "workload_execution"
             _write_diagnostic(diagnostic_path, phase=phase, status="running")
             try:
@@ -159,13 +213,23 @@ def main() -> None:
         phase = "trace_finalization"
         _write_diagnostic(diagnostic_path, phase=phase, status="running")
         profile.export_chrome_trace(str(output))
-        _write_diagnostic(diagnostic_path, phase="completed", status="succeeded")
+        diagnostics = _provider_diagnostics(profile)
+        diagnostics.update(_trace_size(output))
+        _write_diagnostic(
+            diagnostic_path,
+            phase="completed",
+            status="succeeded",
+            values=diagnostics,
+        )
     except BaseException as exc:
+        diagnostics = _provider_diagnostics(profile) if profile is not None else {}
+        diagnostics.update(_trace_size(Path(options.output).resolve()))
         _write_diagnostic(
             diagnostic_path,
             phase=phase,
             status="failed",
             detail=f"{type(exc).__name__}: {exc}",
+            values=diagnostics,
         )
         raise
 

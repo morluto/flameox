@@ -414,11 +414,7 @@ def _preserve_interrupted_response(
 ) -> tuple[int, bool]:
     if latest is None:
         segment.unlink(missing_ok=True)
-        return (
-            (previous.received_bytes, True)
-            if previous is not None
-            else (0, False)
-        )
+        return (previous.received_bytes, True) if previous is not None else (0, False)
     if not latest.resume_possible or latest.validator is None:
         segment.unlink(missing_ok=True)
         partial.unlink(missing_ok=True)
@@ -428,11 +424,7 @@ def _preserve_interrupted_response(
     segment_bytes = segment.stat().st_size if segment.exists() else 0
     if latest.received_bytes != previous_bytes + segment_bytes:
         segment.unlink(missing_ok=True)
-        return (
-            (previous.received_bytes, True)
-            if previous is not None
-            else (0, False)
-        )
+        return (previous.received_bytes, True) if previous is not None else (0, False)
     if previous is not None and latest.validator != previous.validator:
         segment.unlink(missing_ok=True)
         partial.unlink(missing_ok=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 
 from flameox.workers.nvml_contract import (
@@ -15,7 +16,6 @@ from flameox.workers.nvml_contract import (
 )
 from flameox.workers.protocol import (
     WorkerApplication,
-    WorkerContext,
     WorkerFailureKind,
     run_typed_worker,
 )
@@ -98,7 +98,7 @@ def _device(handle: object, index: int) -> NvmlDeviceIdentity:
     )
 
 
-def _observe(request: NvmlWorkerRequest, _context: WorkerContext) -> NvmlSnapshot:
+def _observe(request: NvmlWorkerRequest, _job_root: Path) -> NvmlSnapshot:
     pynvml = _nvml()
     topology_names = {
         getattr(pynvml, "NVML_TOPOLOGY_INTERNAL", -1): "internal",

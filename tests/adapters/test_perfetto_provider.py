@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from flameox.adapters import PerfettoExtractor
+from flameox.adapters.perfetto import PerfettoExtractor
 from flameox.analysis import RecipeService
-from flameox.application import (
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportService,
 )

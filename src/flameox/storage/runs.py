@@ -12,10 +12,8 @@ from flameox.domain.models import (
     parse_run_manifest_json,
 )
 from flameox.domain.projections import ProjectionIntentSpec
-from flameox.storage.control_plane import ControlPlane, canonical_json
+from flameox.storage.control_plane import ControlPlane, _serialize_control_payload
 from flameox.storage.workspace import Workspace
-
-_OUTPUT_ONLY_FIELDS = {"process": {"timed_out"}}
 
 
 class RunStore:
@@ -148,7 +146,7 @@ class RunStore:
     def _canonical(manifest: RunManifest) -> RunManifest:
         try:
             canonical = parse_run_manifest(
-                manifest.model_dump(mode="python", exclude=_OUTPUT_ONLY_FIELDS)
+                manifest.model_dump(mode="python", exclude_computed_fields=True)
             )
         except ValueError as exc:
             raise DomainError(
@@ -164,7 +162,9 @@ class RunStore:
 
     @staticmethod
     def _json(manifest: RunManifest) -> str:
-        return canonical_json(manifest.model_dump(mode="json", exclude=_OUTPUT_ONLY_FIELDS))
+        return _serialize_control_payload(
+            manifest.model_dump(mode="json", exclude_computed_fields=True)
+        )
 
     def _require_projection_binding(
         self,
@@ -175,11 +175,9 @@ class RunStore:
             return
         expected_digest = digest_model(manifest.model_dump(mode="json"))
         if (
-            intent.workspace_id != self.workspace.identity.workspace_id
-            or intent.domain_kind != "run"
-            or intent.domain_id != manifest.run_id
-            or intent.domain_revision != manifest.revision
-            or intent.domain_digest != expected_digest
+            intent.run_id != manifest.run_id
+            or intent.run_revision != manifest.revision
+            or intent.run_digest != expected_digest
         ):
             raise DomainError(
                 ErrorCode.INVALID_ARGUMENTS,

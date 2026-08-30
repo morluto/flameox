@@ -23,7 +23,6 @@ from flameox.storage.locks import RETENTION_EXCLUSIVE, WRITE_EXCLUSIVE
 
 
 class _QuarantineManifest(ContractModel):
-    schema_version: Literal[2] = 2
     quarantine_id: str
     operation: str
     detected_at: datetime
@@ -92,7 +91,6 @@ _QUARANTINE_MANIFEST: TypeAdapter[QuarantineManifest] = TypeAdapter(QuarantineMa
 
 
 class QuarantineRestoreResult(ContractModel):
-    schema_version: int = 1
     quarantine_id: str
     restored_path: str
 

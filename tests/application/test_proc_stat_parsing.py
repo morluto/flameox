@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 import flameox.application.proc as proc
-from flameox.application import RecoveryService
+from flameox.application.recovery import RecoveryService
 from flameox.domain import (
     CaptureLease,
     CaptureStatus,

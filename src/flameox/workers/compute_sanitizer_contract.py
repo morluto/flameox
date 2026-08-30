@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import Field, JsonValue, TypeAdapter, model_validator
 
@@ -9,7 +9,6 @@ from flameox.workers.protocol import WorkerDefinition, WorkerOperationId
 
 
 class ComputeSanitizerWorkerRequest(ContractModel):
-    schema_version: Literal[1] = 1
     artifact_path: str = Field(min_length=1, max_length=4_096)
     project_root: str = Field(min_length=1, max_length=4_096)
     max_records: Annotated[int, Field(gt=0, le=100_000_000)]
@@ -17,7 +16,6 @@ class ComputeSanitizerWorkerRequest(ContractModel):
 
 
 class ComputeSanitizerWorkerResult(ContractModel):
-    schema_version: Literal[1] = 1
     records: tuple[dict[str, JsonValue], ...]
     classifications: dict[str, Annotated[int, Field(ge=0)]] = Field(max_length=128)
     limitations: tuple[str, ...] = Field(default=(), max_length=1_024)

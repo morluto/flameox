@@ -4,6 +4,7 @@ import hashlib
 import os
 import stat
 import sys
+from asyncio import run as run_async
 from contextlib import suppress
 from pathlib import Path
 from typing import cast
@@ -17,6 +18,7 @@ from flameox.domain import (
     IdentityQuality,
     SourceState,
     digest_model,
+    process_exit_code,
 )
 from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.storage import Workspace
@@ -27,19 +29,23 @@ def collect_partial_source_state(
     *,
     executable: Path | None = None,
 ) -> SourceState:
-    del workspace
-    executable = (executable or Path(sys.executable)).resolve()
-    executable_digest = _file_digest(executable)
-    fields: dict[str, JsonValue] = {
-        "resolved_executable": str(executable),
-    }
+    return _partial_source_state(executable or Path(sys.executable))
+
+
+def _partial_source_state(executable: Path | None) -> SourceState:
+    resolved_executable = executable.resolve() if executable is not None else None
+    executable_digest = _file_digest(resolved_executable) if resolved_executable else None
+    fields: dict[str, JsonValue] = {}
+    if resolved_executable is not None:
+        fields["resolved_executable"] = str(resolved_executable)
     content: dict[str, JsonValue] = {
         "identity_quality": "partial",
         "repository_root": ".",
-        "executable_digest": executable_digest,
         "fields": fields,
         "missing_fields": ["git_diff", "untracked_inputs", "submodules"],
     }
+    if executable_digest is not None:
+        content["executable_digest"] = executable_digest
     return SourceState(
         source_state_id=digest_model(content),
         identity_quality=IdentityQuality.PARTIAL,
@@ -50,23 +56,39 @@ def collect_partial_source_state(
     )
 
 
+def collect_import_source_state(workspace: Workspace) -> SourceState:
+    """Collect a repository identity for a synchronous evidence import.
+
+    Imports do not have a workload executable.  Reuse the capture source-state
+    collector with that fact made explicit instead of assigning the controller
+    interpreter to imported evidence.
+    """
+    return run_async(
+        collect_source_state(
+            workspace,
+            workload_executable=None,
+            broker=SubprocessBroker(),
+        )
+    )
+
+
 async def collect_source_state(
     workspace: Workspace,
     *,
-    workload_executable: str,
+    workload_executable: str | None,
     broker: SubprocessBroker,
 ) -> SourceState:
     git_binding = ExecutableResolver().resolve_host_tool("git")
-    resolved_executable = _resolve_executable(
-        workload_executable,
-        workspace.project_root,
+    resolved_executable = (
+        _resolve_executable(workload_executable, workspace.project_root)
+        if workload_executable is not None
+        else None
     )
-    executable_digest = _file_digest(resolved_executable)
+    executable_digest = (
+        _file_digest(resolved_executable) if resolved_executable is not None else None
+    )
     if git_binding is None or not (workspace.project_root / ".git").exists():
-        return collect_partial_source_state(
-            workspace,
-            executable=resolved_executable,
-        )
+        return _partial_source_state(resolved_executable)
     try:
         head = await _git(workspace, broker, "rev-parse", "HEAD")
         branch = await _git(
@@ -107,10 +129,7 @@ async def collect_source_state(
             ignored_root=workspace.paths.root,
         )
     except (DomainError, OSError, UnicodeDecodeError):
-        return collect_partial_source_state(
-            workspace,
-            executable=resolved_executable,
-        )
+        return _partial_source_state(resolved_executable)
     diff_digest = f"sha256:{hashlib.sha256(diff).hexdigest()}"
     quality = (
         IdentityQuality.CLEAN
@@ -119,19 +138,21 @@ async def collect_source_state(
     )
     fields: dict[str, JsonValue] = {
         "branch": branch,
-        "resolved_executable": str(resolved_executable),
         "untracked_inputs": cast(JsonValue, untracked),
         "submodules": submodules,
     }
+    if resolved_executable is not None:
+        fields["resolved_executable"] = str(resolved_executable)
     content: dict[str, JsonValue] = {
         "identity_quality": quality.value,
         "repository_root": ".",
         "head_commit": head,
         "diff_digest": diff_digest,
-        "executable_digest": executable_digest,
         "fields": fields,
         "missing_fields": [],
     }
+    if executable_digest is not None:
+        content["executable_digest"] = executable_digest
     return SourceState(
         source_state_id=digest_model(content),
         identity_quality=quality,
@@ -177,7 +198,7 @@ async def _git_bytes(
             max_output_bytes=max_output_bytes,
         )
     )
-    if outcome.process.exit_code != 0:
+    if process_exit_code(outcome.process.termination) != 0:
         raise DomainError(
             code=ErrorCode.PROCESS_FAILED,
             message="Git source-state inspection failed.",

@@ -23,11 +23,7 @@ def process_observation_coverage(
         return EvidenceStatus.UNAVAILABLE, ("process_enumeration_returned_no_observations",)
     failures = tuple(
         sorted(
-            {
-                f"process:{item.pid}:{failure}"
-                for item in observations
-                for failure in item.failures
-            }
+            {f"process:{item.pid}:{failure}" for item in observations for failure in item.failures}
         )
     )
     return (EvidenceStatus.PARTIAL, failures) if failures else (EvidenceStatus.AVAILABLE, ())

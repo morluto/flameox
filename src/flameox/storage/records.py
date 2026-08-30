@@ -1,21 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import TypeVar
 
 from pydantic import BaseModel, TypeAdapter
 
 from flameox.domain import DomainError, ErrorCode
-from flameox.storage.control_plane import ControlPlane, ControlRelationship, canonical_json
+from flameox.storage.control_plane import (
+    ControlPlane,
+    ControlRelationship,
+    _serialize_control_payload,
+)
 from flameox.storage.workspace import Workspace
 
 RecordT = TypeVar("RecordT", bound=BaseModel)
-type ModelFieldSelection = (
-    set[int]
-    | set[str]
-    | Mapping[int, ModelFieldSelection | bool]
-    | Mapping[str, ModelFieldSelection | bool]
-)
 
 
 class ControlRecordStore[RecordT: BaseModel]:
@@ -29,14 +26,12 @@ class ControlRecordStore[RecordT: BaseModel]:
         model: type[RecordT] | TypeAdapter[RecordT],
         id_field: str,
         revision_field: str | None = None,
-        output_only_fields: ModelFieldSelection | None = None,
     ) -> None:
         self.workspace = workspace
         self.kind = kind
         self._adapter = TypeAdapter(model) if isinstance(model, type) else model
         self.id_field = id_field
         self.revision_field = revision_field
-        self.output_only_fields = output_only_fields or set()
         self.control_plane = ControlPlane(workspace)
 
     def create(
@@ -188,7 +183,7 @@ class ControlRecordStore[RecordT: BaseModel]:
     def _canonical(self, record: RecordT) -> RecordT:
         try:
             return self._adapter.validate_python(
-                record.model_dump(mode="python", exclude=self.output_only_fields)
+                record.model_dump(mode="python", exclude_computed_fields=True)
             )
         except ValueError as exc:
             raise DomainError(
@@ -196,23 +191,11 @@ class ControlRecordStore[RecordT: BaseModel]:
                 f"Invalid {self.kind} record cannot be persisted.",
             ) from exc
 
-    def _validate_identifier(self, identifier: str) -> str:
-        if (
-            not identifier
-            or "/" in identifier
-            or "\\" in identifier
-            or "\x00" in identifier
-            or identifier == ".."
-            or identifier.startswith(".")
-        ):
-            raise DomainError(ErrorCode.WORKSPACE_INVALID, "Invalid record identifier.")
-        return identifier
-
     def _identifier(self, record: RecordT) -> str:
         value = getattr(record, self.id_field, None)
         if not isinstance(value, str):
             raise DomainError(ErrorCode.WORKSPACE_INVALID, "Record identifier is invalid.")
-        return self._validate_identifier(value)
+        return value
 
     def _revision(self, record: RecordT) -> int:
         if self.revision_field is None:
@@ -226,4 +209,6 @@ class ControlRecordStore[RecordT: BaseModel]:
         return value
 
     def _json(self, record: RecordT) -> str:
-        return canonical_json(record.model_dump(mode="json", exclude=self.output_only_fields))
+        return _serialize_control_payload(
+            record.model_dump(mode="json", exclude_computed_fields=True)
+        )

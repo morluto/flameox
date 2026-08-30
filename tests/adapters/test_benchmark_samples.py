@@ -5,8 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from flameox.adapters import BenchmarkSamplesExtractor
-from flameox.application import EvidenceQueryService, ImportArtifactRequest, ImportService
+from flameox.adapters.benchmark_samples import (
+    BenchmarkSamplesExtractor,
+    BenchmarkSamplesV1,
+)
+from flameox.application.evidence_query import EvidenceQueryService
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import Workspace
 
@@ -221,3 +228,29 @@ def test_structured_benchmark_rejects_conflicting_registered_producer(tmp_path: 
         BenchmarkSamplesExtractor(workspace).extract(conflicting_dimension_run)
 
     assert dimension_error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
+
+
+def test_structured_benchmark_rejects_one_metric_name_with_host_and_device_time() -> None:
+    with pytest.raises(ValueError, match="cannot mix timing clocks"):
+        BenchmarkSamplesV1.model_validate(
+            {
+                "schema_version": "flameox.benchmark-samples.v1",
+                "producer": "fixture",
+                "benchmarks": [
+                    {
+                        "name": "gae.step",
+                        "unit": "ns",
+                        "measurement_clock": "host_monotonic",
+                        "synchronization": "device_synchronize",
+                        "samples": [100],
+                    },
+                    {
+                        "name": "gae.step",
+                        "unit": "ns",
+                        "measurement_clock": "cuda_event",
+                        "synchronization": "device_synchronize",
+                        "samples": [90],
+                    },
+                ],
+            }
+        )

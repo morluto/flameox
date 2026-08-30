@@ -49,7 +49,3 @@ MANAGED_PROVIDERS = {
     NVIDIA_NVML_PROVIDER.name: NVIDIA_NVML_PROVIDER,
     SHRINKRAY_PROVIDER.name: SHRINKRAY_PROVIDER,
 }
-
-
-def managed_provider(name: str) -> ManagedProviderDefinition | None:
-    return MANAGED_PROVIDERS.get(name)

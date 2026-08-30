@@ -42,7 +42,6 @@ from flameox.application.inference_providers import (
     InferenceScenarioProvider,
     InferenceServerMode,
     InferenceServerProvider,
-    _loopback_http_url,
 )
 from flameox.application.runtime_resources import RUNTIME_RESOURCE_METRICS
 from flameox.atomic import atomic_write_text
@@ -74,6 +73,7 @@ from flameox.domain.executables import (
     ResolvedExecutable,
 )
 from flameox.domain.models import Digest
+from flameox.http_transport import validate_loopback_base_url
 from flameox.models import ContractModel
 from flameox.pagination import CursorPageContract
 from flameox.storage import Workspace
@@ -159,6 +159,15 @@ class WorkloadOracleConfig(ContractModel):
     strength: OracleStrength = OracleStrength.EXECUTION_CHECK
     argv: Annotated[tuple[str, ...], Field(min_length=1, max_length=1_024)]
     receipt_schema: Literal["flameox.oracle-receipt.v1"] | None = None
+
+    @model_validator(mode="after")
+    def cross_treatment_requires_receipt(self) -> WorkloadOracleConfig:
+        if (
+            self.strength is OracleStrength.CROSS_TREATMENT_EQUIVALENCE
+            and self.receipt_schema is None
+        ):
+            raise ValueError("cross-treatment equivalence requires a typed oracle receipt")
+        return self
 
 
 class WorkloadRequirementsConfig(ContractModel):
@@ -277,9 +286,6 @@ class _CommonExperimentConfig(ContractModel):
 
 
 class _FactorExperimentConfig(_CommonExperimentConfig):
-    # Empty legacy fields remain in the wire model so existing config digests
-    # and schema-1 round trips retain their shape.
-    variants: Annotated[tuple[Scalar, ...], Field(max_length=0)] = ()
     factors: dict[str, Annotated[tuple[Scalar, ...], Field(min_length=1, max_length=32)]] = Field(
         min_length=1,
         max_length=8,
@@ -287,8 +293,6 @@ class _FactorExperimentConfig(_CommonExperimentConfig):
     exclude: Annotated[tuple[dict[str, Scalar], ...], Field(max_length=1_000)] = ()
     treatment_factor: str
     baseline_value: Scalar | None = None
-    scaling_parameter: Literal[None] = None
-    scaling_values: Annotated[tuple[Scalar, ...], Field(max_length=0)] = ()
 
     @model_validator(mode="after")
     def treatment_is_declared(self) -> _FactorExperimentConfig:
@@ -314,43 +318,6 @@ class _ExplicitFactorExperimentConfig(_FactorExperimentConfig):
         tuple[dict[str, Scalar], ...],
         Field(min_length=1, max_length=10_000),
     ]
-
-
-class _LegacyExperimentConfig(_CommonExperimentConfig):
-    # Legacy variants remain a supported schema-1 input. Parsing gives them a
-    # distinct type before planning projects them into the factor model.
-    variants: Annotated[tuple[str, ...], Field(min_length=1, max_length=16)]
-    factors: Annotated[dict[str, tuple[Scalar, ...]], Field(max_length=0)] = Field(
-        default_factory=dict
-    )
-    combination_policy: Literal["cartesian"] = "cartesian"
-    combinations: Annotated[tuple[dict[str, Scalar], ...], Field(max_length=0)] = ()
-    exclude: Annotated[tuple[dict[str, Scalar], ...], Field(max_length=0)] = ()
-    treatment_factor: Literal[None] = None
-
-    @field_validator("variants")
-    @classmethod
-    def variants_are_unique(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if len(set(value)) != len(value):
-            raise ValueError("experiment variants must be unique")
-        return value
-
-
-class _UnscaledLegacyExperimentConfig(_LegacyExperimentConfig):
-    scaling_parameter: Literal[None] = None
-    scaling_values: Annotated[tuple[Scalar, ...], Field(max_length=0)] = ()
-
-
-class _ScaledLegacyExperimentConfig(_LegacyExperimentConfig):
-    scaling_parameter: str
-    scaling_values: Annotated[tuple[Scalar, ...], Field(min_length=1, max_length=1_000)]
-
-    @field_validator("scaling_values")
-    @classmethod
-    def scaling_values_are_unique(cls, value: tuple[Scalar, ...]) -> tuple[Scalar, ...]:
-        if len(scalar_identity_set(list(value))) != len(value):
-            raise ValueError("experiment scaling values must be unique")
-        return value
 
 
 class _PerformanceExperimentConfig(_CommonExperimentConfig):
@@ -407,54 +374,17 @@ class _ExplicitFactorOutcomeExperimentConfig(
     pass
 
 
-class _UnscaledLegacyPerformanceExperimentConfig(
-    _UnscaledLegacyExperimentConfig,
-    _PerformanceExperimentConfig,
-):
-    pass
-
-
-class _UnscaledLegacyOutcomeExperimentConfig(
-    _UnscaledLegacyExperimentConfig,
-    _OutcomeExperimentConfig,
-):
-    pass
-
-
-class _ScaledLegacyPerformanceExperimentConfig(
-    _ScaledLegacyExperimentConfig,
-    _PerformanceExperimentConfig,
-):
-    pass
-
-
-class _ScaledLegacyOutcomeExperimentConfig(
-    _ScaledLegacyExperimentConfig,
-    _OutcomeExperimentConfig,
-):
-    pass
-
-
 def _experiment_config_kind(value: object) -> str:
     if isinstance(value, Mapping):
         analysis = value.get("analysis", "performance")
-        if value.get("factors"):
-            shape = f"factor_{value.get('combination_policy', 'cartesian')}"
-        elif value.get("scaling_parameter") is not None or value.get("scaling_values"):
-            shape = "legacy_scaled"
-        else:
-            shape = "legacy_unscaled"
+        shape = f"factor_{value.get('combination_policy', 'cartesian')}"
         return f"{shape}_{analysis}"
 
     analysis = "outcome" if isinstance(value, _OutcomeExperimentConfig) else "performance"
     if isinstance(value, _ExplicitFactorExperimentConfig):
         shape = "factor_explicit"
-    elif isinstance(value, _CartesianFactorExperimentConfig):
-        shape = "factor_cartesian"
-    elif isinstance(value, _ScaledLegacyExperimentConfig):
-        shape = "legacy_scaled"
     else:
-        shape = "legacy_unscaled"
+        shape = "factor_cartesian"
     return f"{shape}_{analysis}"
 
 
@@ -462,11 +392,7 @@ type ExperimentConfig = Annotated[
     Annotated[_CartesianFactorPerformanceExperimentConfig, Tag("factor_cartesian_performance")]
     | Annotated[_CartesianFactorOutcomeExperimentConfig, Tag("factor_cartesian_outcome")]
     | Annotated[_ExplicitFactorPerformanceExperimentConfig, Tag("factor_explicit_performance")]
-    | Annotated[_ExplicitFactorOutcomeExperimentConfig, Tag("factor_explicit_outcome")]
-    | Annotated[_UnscaledLegacyPerformanceExperimentConfig, Tag("legacy_unscaled_performance")]
-    | Annotated[_UnscaledLegacyOutcomeExperimentConfig, Tag("legacy_unscaled_outcome")]
-    | Annotated[_ScaledLegacyPerformanceExperimentConfig, Tag("legacy_scaled_performance")]
-    | Annotated[_ScaledLegacyOutcomeExperimentConfig, Tag("legacy_scaled_outcome")],
+    | Annotated[_ExplicitFactorOutcomeExperimentConfig, Tag("factor_explicit_outcome")],
     Discriminator(_experiment_config_kind),
 ]
 
@@ -474,7 +400,7 @@ _EXPERIMENT_CONFIG_ADAPTER: TypeAdapter[ExperimentConfig] = TypeAdapter(Experime
 
 
 def parse_experiment_config(value: object) -> ExperimentConfig:
-    """Parse a flat schema-1 experiment into its single legal configuration case."""
+    """Parse a flat factor experiment into its single legal configuration case."""
 
     return _EXPERIMENT_CONFIG_ADAPTER.validate_python(value)
 
@@ -539,6 +465,14 @@ FaultScenario = Annotated[
 ]
 
 
+class FaultJsonMeasurement(ContractModel):
+    """Compare the workload's strict elapsed-time JSON receipt on stdout."""
+
+    source: Literal["stdout_json"]
+    practical_threshold: Annotated[float, Field(ge=0, allow_inf_nan=False)] = 0
+    confidence_level: Annotated[float, Field(gt=0, lt=1, allow_inf_nan=False)] = 0.95
+
+
 class FaultExperimentConfig(ContractModel):
     workload: str
     endpoint_parameter: str
@@ -548,11 +482,7 @@ class FaultExperimentConfig(ContractModel):
     scenarios: dict[str, FaultScenario] = Field(min_length=1, max_length=64)
     blocks: int = Field(default=1, gt=0, le=1_000)
     repetitions: int = Field(default=1, gt=0, le=1_000)
-    primary_metric: str = "categorical_outcome"
-    polarity: MetricPolarity = MetricPolarity.NEUTRAL
-    estimand: str = "median_paired_log_ratio"
-    practical_threshold: float = Field(default=0, ge=0)
-    confidence_level: float = Field(default=0.95, gt=0, lt=1)
+    measurement: FaultJsonMeasurement | None = None
     random_seed: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
@@ -599,7 +529,7 @@ class _CommonInferenceServerConfig(ContractModel):
     @field_validator("base_url")
     @classmethod
     def base_url_is_loopback_http(cls, value: str) -> str:
-        _loopback_http_url(value)
+        validate_loopback_base_url(value)
         return value
 
 
@@ -625,7 +555,7 @@ class _SglangInferenceServerConfig(_CommonInferenceServerConfig):
     @classmethod
     def base_url_is_root(cls, value: str) -> str:
         if urlsplit(value).path not in ("", "/"):
-            raise ValueError("sglang inference servers require a root base_url in v1")
+            raise ValueError("sglang inference servers require a root base_url")
         return value
 
 
@@ -705,7 +635,7 @@ def parse_inference_server_config(value: object) -> InferenceServerConfig:
 
 
 class _CommonInferenceScenarioConfig(ContractModel):
-    """Fields shared by every maintained inference replay provider.
+    """Fields shared by every maintained inference benchmark provider.
 
     Trace input, repetition, and timing-scale parameters are bounded and
     forward-compatible with the maintained AIPerf and vLLM bench providers.
@@ -787,7 +717,6 @@ def parse_inference_scenario_config(value: object) -> InferenceScenarioConfig:
 
 
 class ProjectConfig(ContractModel):
-    schema_version: Literal[1] = 1
     workloads: dict[str, WorkloadConfig] = Field(default_factory=dict, max_length=1_000)
     experiments: dict[str, ExperimentConfig] = Field(
         default_factory=dict,
@@ -942,7 +871,6 @@ class ConfigureWorkloadRequest(ContractModel):
 
 
 class _WorkloadConfigurationStatus(ContractModel):
-    schema_version: Literal[1] = 1
     config_path: Literal["flameox.toml"] = "flameox.toml"
 
 
@@ -1038,12 +966,10 @@ type WorkloadConfigurationStatus = Annotated[
 class WorkloadConfigurationResult(ContractModel):
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
-    schema_version: Literal[1] = 1
     action: ConfigurationAction
     name: str
     configuration_id: str
     workload_definition_id: str
-    configuration_source: Literal["agent"] = "agent"
     next_action: ToolAction = Field(default_factory=_list_workloads_action)
 
     @computed_field  # type: ignore[prop-decorator]
@@ -1075,7 +1001,6 @@ class ConfigureInferenceScenarioRequest(ContractModel):
 class InferenceConfigurationResult(ContractModel):
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
-    schema_version: Literal[1] = 1
     kind: InferenceConfigurationKind
     action: ConfigurationAction
     name: str
@@ -1089,7 +1014,6 @@ class InferenceConfigurationResult(ContractModel):
 
 
 class InferenceConfigurationList(ContractModel):
-    schema_version: Literal[1] = 1
     configuration_id: Digest
     servers: dict[str, InferenceServerConfig]
     scenarios: dict[str, InferenceScenarioConfig]
@@ -1114,7 +1038,6 @@ class DeclaredWorkflowSummary(ContractModel):
 class DeclaredWorkflowList(CursorPageContract):
     page_items_field = "workflows"
 
-    schema_version: int = 1
     configuration_id: str
     workflows: tuple[DeclaredWorkflowSummary, ...]
 
@@ -1127,7 +1050,6 @@ def _require_complete_adapter_option_count(options: tuple[AdapterOption, ...], t
 class DeclaredWorkflowDetail(ContractModel):
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
-    schema_version: int = 1
     configuration_id: str
     summary: DeclaredWorkflowSummary
     allowed_parameters: dict[str, tuple[Scalar, ...]]
@@ -1151,32 +1073,18 @@ class DeclaredWorkflowDetail(ContractModel):
 
     @computed_field  # type: ignore[prop-decorator]
     @property
-    def adapter_options_total(self) -> int:
-        return self.adapter_option_total
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
     def adapter_options_truncated(self) -> bool:
         return self.adapter_option_total > len(self.adapter_options)
 
 
 class DeclaredWorkflowRequirement(ContractModel):
-    model_config = ConfigDict(json_schema_mode_override="serialization")
-
     name: str
     kind: RequirementKind
     probe_kind: ProbeKind
     required: bool
 
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def optional(self) -> bool:
-        return not self.required
-
 
 class AdapterOption(ContractModel):
-    model_config = ConfigDict(json_schema_mode_override="serialization")
-
     adapter: str
     status: CapabilityStatus
     planning_disposition: AdapterPlanningDisposition
@@ -1187,11 +1095,6 @@ class AdapterOption(ContractModel):
     features: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     remediation: tuple[str, ...] = ()
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def capability_status(self) -> CapabilityStatus:
-        return self.status
 
 
 class WorkloadInspection(WorkloadDefinition):
@@ -1206,11 +1109,6 @@ class WorkloadInspection(WorkloadDefinition):
     def adapter_option_count_is_coherent(self) -> WorkloadInspection:
         _require_complete_adapter_option_count(self.adapter_options, self.adapter_option_total)
         return self
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def adapter_options_total(self) -> int:
-        return self.adapter_option_total
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -1414,15 +1312,24 @@ class WorkloadService:
             )
         if kind is DeclaredWorkflowKind.FAULT_EXPERIMENT:
             fault = project.fault_experiments[name]
+            measurement = fault.measurement
             return DeclaredWorkflowDetail(
                 configuration_id=configuration_id,
                 summary=summary,
                 allowed_parameters=workload_config.parameters,
                 workload_name=fault.workload,
                 blocks=fault.blocks,
-                primary_metric=fault.primary_metric,
-                polarity=fault.polarity,
-                estimand=fault.estimand,
+                primary_metric=(
+                    "fault.client_elapsed" if measurement is not None else "categorical_outcome"
+                ),
+                polarity=(
+                    MetricPolarity.LOWER_IS_BETTER
+                    if measurement is not None
+                    else MetricPolarity.NEUTRAL
+                ),
+                estimand=(
+                    "median_paired_log_ratio" if measurement is not None else "categorical_outcome"
+                ),
                 validation_spec_id=workload_definition.validation_spec_id,
                 execution_protocol=workload_definition.execution_protocol,
                 requirements=requirements,
@@ -1731,7 +1638,6 @@ class WorkloadService:
             name=name,
             configuration_id=digest_model(updated),
             workload_definition_id=definition_id,
-            configuration_source="agent",
         )
 
     def configure_inference_server(
@@ -2078,8 +1984,6 @@ class WorkloadService:
 
     def _render_project_config(self, text: str, name: str, config: WorkloadConfig) -> str:
         document = tomlkit.parse(text) if text else tomlkit.document()
-        if "schema_version" not in document:
-            document["schema_version"] = 1
         workloads = document.get("workloads")
         if workloads is None:
             workloads = tomlkit.table()
@@ -2104,8 +2008,6 @@ class WorkloadService:
         config: InferenceServerConfig | InferenceScenarioConfig,
     ) -> str:
         document = tomlkit.parse(text) if text else tomlkit.document()
-        if "schema_version" not in document:
-            document["schema_version"] = 1
         group = document.get(section)
         if group is None:
             group = tomlkit.table()

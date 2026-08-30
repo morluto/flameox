@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
 from uuid import uuid4
 
 import anyio
-from pydantic import Field, TypeAdapter, computed_field, model_validator
+from pydantic import Field, TypeAdapter, model_validator
 
 from flameox.action_graph import ActionId, NextAction, next_action_for_action
 from flameox.application.task_supervisor import (
@@ -20,7 +20,7 @@ from flameox.domain import DomainError, ErrorCode, digest_model
 from flameox.domain.models import Digest, utc_now
 from flameox.models import ContractModel
 from flameox.storage import ControlPlane, Workspace
-from flameox.storage.control_plane import canonical_json
+from flameox.storage.control_plane import _serialize_control_payload
 
 _CANCEL_CLEANUP_WAIT_SECONDS = 0.25
 
@@ -125,33 +125,10 @@ class _OperationRecord(ContractModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_identity_projections(cls, value: Any) -> Any:
-        if not isinstance(value, Mapping):
-            return value
-        payload = dict(value)
-        supplied_request_digest = payload.pop("request_digest", None)
-        if (
-            supplied_request_digest is not None
-            and "request" in payload
-            and supplied_request_digest != digest_model(payload["request"])
-        ):
-            raise ValueError("operation request digest does not match its request")
-        supplied_operation_id = payload.pop("operation_id", None)
-        idempotency_digest = payload.get("idempotency_digest")
-        if supplied_operation_id is not None and isinstance(idempotency_digest, str):
-            expected_operation_id = f"op-{idempotency_digest.removeprefix('sha256:')}"
-            if supplied_operation_id != expected_operation_id:
-                raise ValueError("operation identifier does not match its idempotency digest")
-        return payload
-
-    @computed_field  # type: ignore[prop-decorator]
     @property
     def request_digest(self) -> Digest:
         return digest_model(self.request)
 
-    @computed_field  # type: ignore[prop-decorator]
     @property
     def operation_id(self) -> str:
         return f"op-{self.idempotency_digest.removeprefix('sha256:')}"
@@ -161,23 +138,6 @@ class _OperationRecord(ContractModel):
         payload["revision"] = self.revision + 1
         payload["updated_at"] = utc_now()
         return payload
-
-
-def _parse_active_cancellation_projection(value: Any) -> Any:
-    if not isinstance(value, Mapping) or "cancellation_requested" not in value:
-        return value
-    payload = dict(value)
-    supplied = payload.pop("cancellation_requested")
-    cleanup_status = payload.get(
-        "cleanup_status",
-        OperationCleanupStatus.NOT_REQUIRED,
-    )
-    if cleanup_status in {
-        OperationCleanupStatus.NOT_REQUIRED,
-        OperationCleanupStatus.PENDING,
-    } and supplied != (cleanup_status == OperationCleanupStatus.PENDING):
-        raise ValueError("operation cancellation must agree with pending cleanup")
-    return payload
 
 
 class ActiveOperationRecord(_OperationRecord):
@@ -196,12 +156,6 @@ class ActiveOperationRecord(_OperationRecord):
     owner_id: str
     owner_heartbeat_at: datetime
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_cancellation_projection(cls, value: Any) -> Any:
-        return _parse_active_cancellation_projection(value)
-
-    @computed_field  # type: ignore[prop-decorator]
     @property
     def cancellation_requested(self) -> bool:
         return self.cleanup_status is OperationCleanupStatus.PENDING
@@ -396,12 +350,6 @@ class UnmanagedOperationRecord(_OperationRecord):
     owner_id: Literal[None] = None
     owner_heartbeat_at: Literal[None] = None
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_cancellation_projection(cls, value: Any) -> Any:
-        return _parse_active_cancellation_projection(value)
-
-    @computed_field  # type: ignore[prop-decorator]
     @property
     def cancellation_requested(self) -> bool:
         return self.cleanup_status is OperationCleanupStatus.PENDING
@@ -536,6 +484,11 @@ class OperationStatus(ContractModel):
         payload = record.model_dump(
             exclude={"idempotency_digest", "owner_id", "owner_heartbeat_at"}
         )
+        payload.update(
+            operation_id=record.operation_id,
+            request_digest=record.request_digest,
+            cancellation_requested=record.cancellation_requested,
+        )
         if adapter is not None and adapter.kind != record.operation:
             raise ValueError("operation adapter kind does not match the durable record")
         if adapter is not None and isinstance(record, ActiveOperationRecord):
@@ -553,7 +506,7 @@ class OperationStatus(ContractModel):
         return cls.model_validate(payload)
 
 
-class _OperationRecords:
+class OperationStore:
     def __init__(self, workspace: Workspace) -> None:
         self.control_plane = ControlPlane(workspace)
 
@@ -562,11 +515,10 @@ class _OperationRecords:
         self.control_plane.create_operation(
             operation_id=canonical.operation_id,
             kind=canonical.operation,
-            state=canonical.state,
             revision=canonical.revision,
             idempotency_digest=canonical.idempotency_digest,
             intent_digest=canonical.request_digest,
-            payload_json=canonical_json(canonical.model_dump(mode="json")),
+            payload_json=_serialize_control_payload(canonical.model_dump(mode="json")),
             run_id=canonical.subject_id,
         )
         return record
@@ -602,33 +554,21 @@ class _OperationRecords:
         )
         self.control_plane.append_operation(
             operation_id=canonical.operation_id,
-            state=canonical.state,
             expected_revision=expected_revision,
             next_revision=canonical.revision,
-            payload_json=canonical_json(canonical.model_dump(mode="json")),
+            payload_json=_serialize_control_payload(canonical.model_dump(mode="json")),
         )
         return record
 
-
-class OperationStore:
-    def __init__(self, workspace: Workspace) -> None:
-        self.records = _OperationRecords(workspace)
-
-    def read(self, operation_id: str) -> OperationRecord:
-        return self.records.read(operation_id)
-
-    def list(self) -> tuple[OperationRecord, ...]:
-        return self.records.list()
-
     def find(self, *, operation: str, idempotency_digest: str) -> OperationRecord | None:
-        payload = self.records.control_plane.find_operation(
+        payload = self.control_plane.find_operation(
             kind=operation,
             idempotency_digest=idempotency_digest,
         )
         return _OPERATION_RECORD.validate_json(payload) if payload is not None else None
 
     def find_subject(self, *, operation: str, subject_id: str) -> OperationRecord | None:
-        payload = self.records.control_plane.find_operation_by_run_id(
+        payload = self.control_plane.find_operation_by_run_id(
             kind=operation,
             run_id=subject_id,
         )
@@ -718,7 +658,7 @@ class OperationRunner:
                 ):
                     unmanaged = self._mark_unmanaged(existing)
                     try:
-                        self.store.records.append(
+                        self.store.append(
                             unmanaged,
                             expected_revision=existing.revision,
                         )
@@ -733,7 +673,7 @@ class OperationRunner:
                 ):
                     recovered = existing.recover(owner_id=self.owner_id)
                     try:
-                        self.store.records.append(
+                        self.store.append(
                             recovered,
                             expected_revision=existing.revision,
                         )
@@ -768,7 +708,7 @@ class OperationRunner:
                 )
                 operation_id = record.operation_id
                 try:
-                    self.store.records.create(record)
+                    self.store.create(record)
                 except DomainError as error:
                     if error.code is not ErrorCode.REVISION_CONFLICT:
                         raise
@@ -819,7 +759,7 @@ class OperationRunner:
                 return OperationStatus.from_record(current, adapter=self.adapter)
             retried = ActiveOperationRecord.model_validate(
                 {
-                    **current.model_dump(mode="python"),
+                    **{name: getattr(current, name) for name in _OperationRecord.model_fields},
                     "state": OperationState.STARTING,
                     "phase": "retrying",
                     "revision": current.revision + 1,
@@ -836,7 +776,7 @@ class OperationRunner:
                 }
             )
             try:
-                self.store.records.append(retried, expected_revision=current.revision)
+                self.store.append(retried, expected_revision=current.revision)
             except DomainError as error:
                 if error.code is not ErrorCode.REVISION_CONFLICT:
                     raise
@@ -885,7 +825,7 @@ class OperationRunner:
         ):
             unmanaged = self._mark_unmanaged(record)
             try:
-                self.store.records.append(unmanaged, expected_revision=record.revision)
+                self.store.append(unmanaged, expected_revision=record.revision)
                 record = unmanaged
             except DomainError as error:
                 if error.code is not ErrorCode.REVISION_CONFLICT:
@@ -1213,7 +1153,7 @@ class OperationRunner:
             updated = transition(current)
             if updated is None:
                 return None
-            self.store.records.append(
+            self.store.append(
                 updated,
                 expected_revision=current.revision,
             )

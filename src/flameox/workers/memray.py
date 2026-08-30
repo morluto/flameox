@@ -17,10 +17,8 @@ import pyarrow.parquet as pq
 
 from flameox.atomic import atomic_write_json
 from flameox.domain import DomainError, ErrorCode, digest_model
-from flameox.evidence.schemas import SCHEMA_MAJOR, schema_for
+from flameox.evidence.schemas import schema_for
 from flameox.workers.memray_contract import (
-    MEMRAY_EXTRACTOR_NAME,
-    MEMRAY_EXTRACTOR_VERSION,
     MEMRAY_WORKER,
     MemrayExtractionCoverage,
     MemrayExtractionLimits,
@@ -33,7 +31,6 @@ from flameox.workers.memray_contract import (
 )
 from flameox.workers.protocol import (
     WorkerApplication,
-    WorkerContext,
     WorkerFailureKind,
     WorkerOutputFile,
     run_typed_worker,
@@ -616,16 +613,8 @@ def _write_table(
     root: Path,
     name: str,
     rows: list[dict[str, Any]],
-    request: MemrayWorkerRequest,
 ) -> WorkerOutputFile:
     schema = schema_for(name)
-    common = {
-        "schema_version": SCHEMA_MAJOR,
-        "evidence_generation_id": request.generation_id,
-        "published_at": request.published_at,
-        "extractor_name": MEMRAY_EXTRACTOR_NAME,
-        "extractor_version": MEMRAY_EXTRACTOR_VERSION,
-    }
     path = root / f"{name}.parquet"
     with pq.ParquetWriter(
         path,
@@ -636,7 +625,7 @@ def _write_table(
     ) as writer:
         for start in range(0, len(rows), 16_384):
             table = pa.Table.from_pylist(
-                [{**common, **row} for row in rows[start : start + 16_384]],
+                rows[start : start + 16_384],
                 schema=schema,
             )
             writer.write_table(table, row_group_size=16_384)
@@ -653,7 +642,7 @@ def _write_table(
     )
 
 
-def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorkerResult:
+def _handle(request: MemrayWorkerRequest, job_root: Path) -> MemrayWorkerResult:
     try:
         import memray
         from memray._memray import compute_statistics
@@ -668,9 +657,7 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
                 ErrorCode.QUERY_BUDGET_EXCEEDED,
                 "Memray capture exceeds the extraction input-byte limit.",
             )
-        reader = memray.FileReader(request.artifact_path)
-        metadata = reader.metadata
-        progress_path = context.job_root / "progress.json"
+        progress_path = job_root / "progress.json"
 
         def report(progress: MemrayWorkerProgress) -> None:
             atomic_write_json(progress_path, progress.model_dump(mode="json"))
@@ -698,45 +685,51 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
             workload_cwd=Path(request.workload_cwd) if request.workload_cwd else None,
             project_root=Path(request.project_root),
             source_state_id=request.source_state_id,
-            database_path=context.job_root / "aggregation.sqlite",
+            database_path=job_root / "aggregation.sqlite",
         )
         try:
-            _, high_water_coverage = _aggregate(
-                reader.get_high_watermark_allocation_records(),
-                metric="memory.high_watermark",
-                state=state,
-                progress=report,
-            )
-            retained_end, retained_coverage = _aggregate(
-                reader.get_leaked_allocation_records(),
-                metric="memory.retained_end",
-                state=state,
-                progress=report,
-            )
-            allocation_coverage: MemrayMetricCoverageState
-            try:
-                _allocated_bytes, allocation_coverage = _aggregate(
-                    (record for record in reader.get_allocation_records() if int(record.size) > 0),
-                    metric="memory.allocated",
+            with memray.FileReader(request.artifact_path) as reader:
+                metadata = reader.metadata
+                _, high_water_coverage = _aggregate(
+                    reader.get_high_watermark_allocation_records(),
+                    metric="memory.high_watermark",
                     state=state,
                     progress=report,
                 )
-            except NotImplementedError:
-                allocation_coverage = MemrayMetricUnavailable()
-            temporary_coverage: MemrayMetricCoverageState
-            try:
-                temporary_allocated, temporary_coverage = _aggregate(
-                    reader.get_temporary_allocation_records(
-                        threshold=request.limits.temporary_allocation_threshold
-                    ),
-                    metric="memory.temporary",
+                retained_end, retained_coverage = _aggregate(
+                    reader.get_leaked_allocation_records(),
+                    metric="memory.retained_end",
                     state=state,
                     progress=report,
                 )
-            except NotImplementedError:
-                temporary_allocated = None
-                temporary_coverage = MemrayMetricUnavailable()
-            projection = state.finalize()
+                allocation_coverage: MemrayMetricCoverageState
+                try:
+                    _allocated_bytes, allocation_coverage = _aggregate(
+                        (
+                            record
+                            for record in reader.get_allocation_records()
+                            if int(record.size) > 0
+                        ),
+                        metric="memory.allocated",
+                        state=state,
+                        progress=report,
+                    )
+                except NotImplementedError:
+                    allocation_coverage = MemrayMetricUnavailable()
+                temporary_coverage: MemrayMetricCoverageState
+                try:
+                    temporary_allocated, temporary_coverage = _aggregate(
+                        reader.get_temporary_allocation_records(
+                            threshold=request.limits.temporary_allocation_threshold
+                        ),
+                        metric="memory.temporary",
+                        state=state,
+                        progress=report,
+                    )
+                except NotImplementedError:
+                    temporary_allocated = None
+                    temporary_coverage = MemrayMetricUnavailable()
+                projection = state.finalize()
         finally:
             state.close()
     except (OSError, sqlite3.Error, ValueError) as error:
@@ -874,7 +867,7 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
         ("call_edges", projection.edge_rows),
         ("stacks", projection.stack_rows),
     ):
-        output = _write_table(context.job_root, name, rows, request)
+        output = _write_table(job_root, name, rows)
         output_bytes += output.byte_length
         if output_bytes > request.limits.max_output_bytes:
             raise DomainError(
@@ -887,7 +880,6 @@ def _handle(request: MemrayWorkerRequest, context: WorkerContext) -> MemrayWorke
         peak_memory_bytes=int(metadata.peak_memory),
         retained_end_bytes=retained_end,
         temporary_allocated_bytes=temporary_allocated,
-        temporary_allocation_threshold=request.limits.temporary_allocation_threshold,
         allocation_operations=(int(stats.total_num_allocations) if stats is not None else None),
         total_allocated_bytes=(int(stats.total_memory_allocated) if stats is not None else None),
         capture_records=int(metadata.total_allocations),

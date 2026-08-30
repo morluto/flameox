@@ -24,7 +24,7 @@ from flameox.domain import (
     digest_model,
 )
 from flameox.models import ContractModel
-from flameox.storage import ProjectionIntentStore, RunStore, Workspace
+from flameox.storage import ControlPlane, RunStore, Workspace
 
 
 class AgentCommandProjection(ContractModel):
@@ -132,21 +132,13 @@ def safe_external_context(run: RunManifest) -> AgentExternalContextProjection | 
     )
 
 
-def safe_run_semantics(run: RunManifest) -> RunSemanticsProjection:
-    return RunSemanticsProjection.from_semantics(run.semantics)
-
-
 class RunProjectionService:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
 
     def get(self, run_id: str) -> AgentRunProjection:
         authoritative = RunStore(self.workspace).read(run_id)
-        intent = ProjectionIntentStore(self.workspace).latest(
-            domain_kind="run",
-            domain_id=run_id,
-            projection_kind="run.core",
-        )
+        intent = ControlPlane(self.workspace).latest_projection_intent(run_id=run_id)
         try:
             with EvidenceLookupService(self.workspace).session() as evidence:
                 projected = evidence.run(run_id)
@@ -226,7 +218,7 @@ class RunProjectionService:
                 "source_measurement_run_id": run.source_measurement_run_id,
                 "environment_id": run.environment_id,
                 "source_state_id": run.source_state_id,
-                "semantics": safe_run_semantics(run),
+                "semantics": RunSemanticsProjection.from_semantics(run.semantics),
                 "command": safe_command_projection(run),
                 "external_context": safe_external_context(run),
                 "artifact_ids": artifact_ids[:100],

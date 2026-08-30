@@ -15,6 +15,7 @@ from flameox.domain import (
     ExecutionIdentityQuality,
     WorkloadExecutionIdentity,
     digest_model,
+    process_exit_code,
 )
 from flameox.domain.executables import ResolvedExecutable
 from flameox.execution import ExecutionRequest, SubprocessBroker
@@ -211,6 +212,31 @@ class ExecutionIdentityService:
         inputs.extend(self._native(value) for value in config.identity.native_files)
         return self._report(inputs)
 
+    async def distribution_identity(
+        self,
+        workload_name: str,
+        distribution: str,
+    ) -> ExecutionIdentityInput:
+        """Bind one installed distribution through the declared workload interpreter.
+
+        This deliberately bypasses project-module lookup: compiler identity is
+        the installed distribution selected by the interpreter, not a local
+        file which happens to shadow its import name.
+        """
+
+        if not distribution.isidentifier():
+            raise ValueError("distribution probe names must be Python identifiers")
+        instance = self.workloads.resolve(workload_name)
+        return (
+            await self._metadata_modules(
+                (distribution,),
+                executable=instance.command.argv[0],
+                executable_binding=instance.executable_binding,
+                cwd=Path(instance.command.cwd),
+                environment=instance.command.env_overrides,
+            )
+        )[0]
+
     async def _modules(
         self,
         names: tuple[str, ...],
@@ -264,7 +290,7 @@ class ExecutionIdentityService:
                     max_output_bytes=65_536,
                 )
             )
-            if outcome.process.exit_code != 0:
+            if process_exit_code(outcome.process.termination) != 0:
                 raise ValueError("metadata probe exited unsuccessfully")
             values = json.loads(outcome.stdout)
             if (

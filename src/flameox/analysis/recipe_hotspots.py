@@ -162,9 +162,7 @@ class HotspotRecipes(RecipeContext):
             )
             rows = snapshot.execute(
                 "SELECT name, value_int, value_float, unit, aggregation, scope "
-                "FROM measurements WHERE "
-                + where
-                + " AND name LIKE 'memory.%' "
+                "FROM measurements WHERE " + where + " AND name LIKE 'memory.%' "
                 "AND name NOT LIKE 'memory.frame_coverage.%' ORDER BY name LIMIT ?",
                 (*parameters, bounded),
             ).fetchall()

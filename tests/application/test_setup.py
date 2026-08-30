@@ -6,8 +6,12 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from flameox.adapters import RuntimeInstallation, SetupClient
-from flameox.application import SetupOperation, SetupService
+from flameox.adapters.client_setup import SetupClient
+from flameox.adapters.setup_runtime import RuntimeInstallation
+from flameox.application.setup import (
+    SetupOperation,
+    SetupService,
+)
 from flameox.atomic import atomic_write_bytes, atomic_write_json
 from flameox.domain import DomainError, ErrorCode
 
@@ -263,7 +267,6 @@ def test_verify_refuses_a_malformed_client_configuration(tmp_path: Path) -> None
     atomic_write_json(
         service.install_manifest,
         {
-            "schema_version": 1,
             "active_version": "0.1.0",
             "executable": str(runtime.executable("0.1.0")),
         },

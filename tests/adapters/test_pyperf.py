@@ -5,8 +5,11 @@ from pathlib import Path
 import pyperf
 import pytest
 
-from flameox.adapters import PyPerfExtractor
-from flameox.application import ImportArtifactRequest, ImportService
+from flameox.adapters.pyperf import PyPerfExtractor
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import Workspace
@@ -51,7 +54,7 @@ def test_pyperf_extraction_preserves_worker_and_warmup_hierarchy(
 
     assert result.measurement_count == 4
     assert result.warmup_count == 2
-    assert any("compatibility could not be verified" in item for item in result.limitations)
+    assert result.limitations == ()
     with Catalog(workspace).open_snapshot() as snapshot:
         rows = snapshot.execute(
             "SELECT worker_id, worker_run_index, value_index, loop_count, "
@@ -89,7 +92,7 @@ def test_pyperf_rejects_empty_and_malformed_artifacts(
     assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
 
 
-def test_pyperf_rejects_identified_newer_producer_major(tmp_path: Path) -> None:
+def test_pyperf_uses_the_reader_as_the_format_compatibility_boundary(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     source = tmp_path / "benchmark.json"
     write_suite(source)
@@ -102,8 +105,7 @@ def test_pyperf_rejects_identified_newer_producer_major(tmp_path: Path) -> None:
         )
     )
 
-    with pytest.raises(DomainError) as error:
-        PyPerfExtractor(workspace).extract(imported.run.run_id)
+    result = PyPerfExtractor(workspace).extract(imported.run.run_id)
 
-    assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
-    assert error.value.details["producer_version"] == "999.0"
+    assert result.measurement_count == 4
+    assert result.limitations == ()

@@ -7,11 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from flameox.application import (
-    CaptureService,
-    ExecutionPolicy,
-    WorkloadService,
-)
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.workloads import WorkloadService
 from flameox.catalog import Catalog
 from flameox.config import ContainmentPolicy
 from flameox.domain import (
@@ -48,7 +46,6 @@ def test_writable_roots_reject_traversal_and_symlink_escape(
     (tmp_path / "escape").symlink_to(tmp_path.parent, target_is_directory=True)
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.build]
 argv = ["python", "-c", "print('build')"]
 writable_paths = [{json.dumps(writable_path)}]
@@ -97,7 +94,6 @@ async def test_capture_preserves_runtime_storage_policy_termination(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.wait]
 argv = ["python", "-c", "import time; time.sleep(10)"]
 timeout_seconds = 20

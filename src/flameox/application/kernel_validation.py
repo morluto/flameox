@@ -151,12 +151,7 @@ class KernelValidationRegistrationService:
             allowed_roots=tuple(allowed_roots),
             max_bytes=self.workspace.config.capture.max_artifact_bytes,
         ) as snapshot:
-            document, source_schema = load_kernel_validation_document(snapshot.payload_path)
-            if source_schema != "flameox.kernel-validation.v2":
-                raise DomainError(
-                    ErrorCode.ARTIFACT_PARSE_FAILED,
-                    "Run-linked kernel validation requires flameox.kernel-validation.v2.",
-                )
+            document = load_kernel_validation_document(snapshot.payload_path)
             status = {
                 KernelValidationStatus.PASS: ValidationStatus.PASSED,
                 KernelValidationStatus.FAIL: ValidationStatus.FAILED,

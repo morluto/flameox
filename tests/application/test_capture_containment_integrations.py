@@ -7,10 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import (
-    CaptureService,
-    ExecutionPolicy,
-)
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
 from flameox.domain import (
     ExecutionStatus,
     ValidationStatus,
@@ -37,7 +35,7 @@ async def test_capture_plan_uses_minimal_bubblewrap_and_systemd_limits(
         pytest.skip("Bubblewrap and a systemd user manager are required for active containment.")
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n"
+        ""
         "[workloads.echo]\n"
         'argv = ["python", "-c", "'
         "import os, pathlib; "
@@ -121,7 +119,6 @@ async def test_approved_cargo_build_uses_only_declared_writable_root(
         generated.unlink()
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.cargo_check]
 argv = [{json.dumps(cargo)}, "check", "--offline"]
 writable_paths = ["target"]

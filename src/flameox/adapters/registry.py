@@ -4,19 +4,19 @@ import hashlib
 import json
 from importlib.metadata import Distribution, EntryPoint, entry_points
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 from flameox.action_graph import ActionId, tool_action
 from flameox.atomic import atomic_write_json
-from flameox.domain import ADAPTER_API_VERSION, AdapterV1, DomainError, ErrorCode, digest_model
+from flameox.domain import AdapterV1, DomainError, ErrorCode, digest_model
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
 ENTRY_POINT_GROUP = "flameox.adapters"
+_ADAPTER_API_VERSION = 1
 
 
 class AdapterApproval(ContractModel):
-    schema_version: int = 1
     distribution: str
     version: str
     package_identity: str
@@ -162,18 +162,6 @@ class AdapterRegistry:
             self._write_approvals(approvals)
         return self.discover()
 
-    def load_approved(self, adapter: str) -> Any:
-        descriptor = self.approved_descriptor(adapter)
-        entry_point = self._entry_point(descriptor)
-        try:
-            return entry_point.load()
-        except Exception as exc:
-            raise DomainError(
-                ErrorCode.CAPABILITY_UNAVAILABLE,
-                f"Approved adapter {adapter!r} could not be loaded.",
-                details={"exception_type": type(exc).__name__},
-            ) from exc
-
     def approved_descriptor(self, adapter: str) -> AdapterDescriptor:
         descriptor = next(
             (
@@ -192,10 +180,18 @@ class AdapterRegistry:
 
     def load_contract(self, adapter: str) -> tuple[AdapterDescriptor, AdapterV1]:
         descriptor = self.approved_descriptor(adapter)
-        loaded = self.load_approved(adapter)
+        entry_point = self._entry_point(descriptor)
+        try:
+            loaded = entry_point.load()
+        except Exception as exc:
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                f"Approved adapter {adapter!r} could not be loaded.",
+                details={"exception_type": type(exc).__name__},
+            ) from exc
         if (
             getattr(loaded, "name", None) != adapter
-            or getattr(loaded, "api_version", None) != ADAPTER_API_VERSION
+            or getattr(loaded, "api_version", None) != _ADAPTER_API_VERSION
             or any(
                 not callable(getattr(loaded, method, None))
                 for method in ("probe", "plan", "validate", "extract")
@@ -240,10 +236,14 @@ class AdapterRegistry:
             return {}
         try:
             payload = json.loads(self.approvals_path.read_text())
-            return {
-                key: AdapterApproval.model_validate(value)
-                for key, value in payload["approvals"].items()
-            }
+            if not isinstance(payload, dict) or set(payload) != {"approvals"}:
+                raise ValueError("adapter approval registry fields are invalid")
+            approvals = payload["approvals"]
+            if not isinstance(approvals, dict) or not all(
+                isinstance(key, str) for key in approvals
+            ):
+                raise ValueError("adapter approvals must be a string-keyed object")
+            return {key: AdapterApproval.model_validate(value) for key, value in approvals.items()}
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
@@ -254,7 +254,6 @@ class AdapterRegistry:
         atomic_write_json(
             self.approvals_path,
             {
-                "schema_version": 1,
                 "approvals": {
                     key: value.model_dump(mode="json") for key, value in sorted(approvals.items())
                 },

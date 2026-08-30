@@ -23,7 +23,6 @@ async def test_mcp_capture_uses_current_workload_and_plan_tokens_are_single_use(
 ) -> None:
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.echo]
 argv = ["python", "-c", "print('captured')"]
 cwd = "."
@@ -110,15 +109,8 @@ timeout_seconds = 5
         "kind": "manual",
         "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
-        "next_tool": None,
-        "action": {
-            "kind": "manual",
-            "instruction": (
-                "Inspect the declared workload and supply a complete capture plan request."
-            ),
-            "suggested_action": "capture.plan",
-            "missing_arguments": ["workload_name", "adapter", "parameters"],
-        },
+        "instruction": "Inspect the declared workload and supply a complete capture plan request.",
+        "missing_arguments": ["workload_name", "adapter", "parameters"],
     }
     assert fetched.structured_content is not None
     assert fetched.structured_content["result"]["run_id"] == run_id
@@ -134,7 +126,6 @@ async def test_mcp_plan_capture_ignores_adhoc_arguments_without_overriding_workl
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.probe]
 argv = ["python", "-c", "print('ok')"]
 """
@@ -171,6 +162,55 @@ argv = ["python", "-c", "print('ok')"]
 
 
 @pytest.mark.anyio
+async def test_mcp_pyperf_accelerator_plan_returns_a_structured_sample_route(
+    tmp_path: Path,
+) -> None:
+    Workspace.initialize(tmp_path)
+    (tmp_path / "operation.py").write_text("pass\n")
+    (tmp_path / "flameox.toml").write_text(
+        """
+[workloads.operation]
+argv = ["python", "operation.py"]
+[workloads.operation.identity.environment]
+required = ["cuda.devices"]
+"""
+    )
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        planned = await client.call_tool(
+            "plan_capture",
+            {"workload_name": "operation", "adapter": "pyperf", "parameters": {}},
+        )
+        assert planned.structured_content is not None
+        routed = await client.call_tool(
+            "plan_capture",
+            planned.structured_content["result"]["alternative_action"]["arguments"],
+        )
+
+    assert planned.is_error is False, planned.structured_content
+    assert planned.structured_content is not None
+    result = planned.structured_content["result"]
+    assert result["semantics"]["scope"]["process_scope"] == {
+        "name": "sample_scope",
+        "value": "fresh_process_invocation",
+    }
+    assert result["alternative_action"] == {
+        "kind": "tool",
+        "action": "capture.plan",
+        "arguments": {
+            "workload_name": "operation",
+            "adapter": "benchmark-samples",
+            "parameters": {},
+            "preflight_mode": result["preflight"]["mode"],
+            "capture_mode": "trusted_local",
+        },
+    }
+    assert routed.is_error is False, routed.structured_content
+    assert routed.structured_content is not None
+    assert routed.structured_content["result"]["semantics"]["adapter"] == "benchmark-samples"
+
+
+@pytest.mark.anyio
 async def test_mcp_plan_capture_binds_compute_sanitizer_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -184,7 +224,6 @@ async def test_mcp_plan_capture_binds_compute_sanitizer_options(
     (tmp_path / "sanitizer.supp").write_text("# fixture\n")
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.probe]
 argv = ["/bin/true"]
 cwd = "."
@@ -224,7 +263,6 @@ async def test_mcp_plan_missing_dependency_routes_to_managed_preparation(tmp_pat
     Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.probe]
 argv = ["python", "-c", "print('ok')"]
 [workloads.probe.requirements]
@@ -247,16 +285,11 @@ python_distributions = ["flameox-agent-fixture>=99"]
         "kind": "manual",
         "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
-        "action": {
-            "kind": "manual",
-            "instruction": (
-                "Install the missing distributions in the workload's declared Python "
-                "environment or select another workload, then plan capture again."
-            ),
-            "suggested_action": "workflow.get",
-            "missing_arguments": [],
-        },
-        "next_tool": None,
+        "instruction": (
+            "Install the missing distributions in the workload's declared Python "
+            "environment or select another workload, then plan capture again."
+        ),
+        "missing_arguments": [],
     }
 
 
@@ -268,7 +301,6 @@ async def test_mcp_cancellation_propagates_to_terminal_run_state(
 ) -> None:
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.wait]
 argv = ["python", "-c", "import time; time.sleep(30)"]
 cwd = "."
@@ -328,7 +360,6 @@ async def test_mcp_detached_capture_start_reconnect_and_cancellation(
 ) -> None:
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.wait]
 argv = ["python", "-c", "import time; time.sleep(30)"]
 cwd = "."
@@ -368,6 +399,16 @@ timeout_seconds = 60
             "cancel_detached_capture",
             {"run_id": run_id},
         )
+        terminal = cancelled
+        for _ in range(200):
+            assert terminal.structured_content is not None
+            if terminal.structured_content["result"]["state"] == "terminal":
+                break
+            await asyncio.sleep(0.05)
+            terminal = await client.call_tool(
+                "get_detached_capture",
+                {"run_id": run_id},
+            )
 
     assert tools["start_detached_capture"].annotations is not None
     assert tools["start_detached_capture"].annotations.idempotent_hint is True
@@ -375,5 +416,12 @@ timeout_seconds = 60
     assert reconnected.structured_content is not None
     assert reconnected.structured_content["result"]["state"] == "running"
     assert cancelled.structured_content is not None
-    assert cancelled.structured_content["result"]["state"] == "terminal"
-    assert cancelled.structured_content["result"]["execution_status"] == "cancelled"
+    assert cancelled.structured_content["result"]["state"] in {"running", "terminal"}
+    if cancelled.structured_content["result"]["state"] == "running":
+        assert any(
+            "cleanup is still in progress" in limitation
+            for limitation in cancelled.structured_content["result"]["limitations"]
+        )
+    assert terminal.structured_content is not None
+    assert terminal.structured_content["result"]["state"] == "terminal"
+    assert terminal.structured_content["result"]["execution_status"] == "cancelled"

@@ -122,8 +122,7 @@ def test_worker_side_channel_is_byte_bounded_and_rejects_symlinks(tmp_path: Path
     progress.write_bytes(b'{"phase":"reading"}')
 
     assert (
-        worker.read_staged_bytes(job_root, "progress.json", max_bytes=64)
-        == progress.read_bytes()
+        worker.read_staged_bytes(job_root, "progress.json", max_bytes=64) == progress.read_bytes()
     )
 
     progress.unlink()

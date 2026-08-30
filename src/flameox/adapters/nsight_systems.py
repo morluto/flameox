@@ -248,8 +248,7 @@ class NsightSystemsExtractor:
         releases_match = (
             asserted_release is None
             or observed_release is None
-            or asserted_release
-            == observed_release[: len(asserted_release)]
+            or asserted_release == observed_release[: len(asserted_release)]
         )
         if not releases_match:
             raise DomainError(
@@ -445,11 +444,7 @@ class NsightSystemsExtractor:
     def _structured_registration(
         registrations: list[ArtifactRegistration], *, run_id: str
     ) -> ArtifactRegistration:
-        structured = [
-            item
-            for item in registrations
-            if item.role == "sqlite_export"
-        ]
+        structured = [item for item in registrations if item.role == "sqlite_export"]
         if len(structured) == 1:
             return structured[0]
         if (

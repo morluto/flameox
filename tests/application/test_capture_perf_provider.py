@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import CapabilityService, CaptureService, ExecutionPolicy
+from flameox.application.capabilities import CapabilityService
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
 from flameox.domain import DomainError, ErrorCode, ExecutionStatus, PreflightMode
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
@@ -33,7 +35,6 @@ async def test_perf_capture_registers_native_profile_when_kernel_allows_sampling
     )
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.busy]
 argv = ["python", "busy.py"]
 cwd = "."

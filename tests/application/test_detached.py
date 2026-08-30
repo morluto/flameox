@@ -10,17 +10,18 @@ import pytest
 from pydantic import ValidationError
 
 from flameox.action_graph import ActionId, ToolAction
-from flameox.application import (
+from flameox.application.capture import (
     CapturePlanRegistry,
     CaptureService,
+)
+from flameox.application.detached import (
     DetachedCaptureManager,
-    DetachedCaptureRecord,
     DetachedCaptureStatus,
     DetachedProgress,
-    ExecutionPolicy,
 )
+from flameox.application.execution_policy import ExecutionPolicy
 from flameox.catalog import Catalog
-from flameox.domain import DomainError, ErrorCode, ExecutionStatus, digest_model
+from flameox.domain import DomainError, ErrorCode, ExecutionStatus
 from flameox.storage import ArtifactStore, RunStore, Workspace
 
 pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
@@ -30,7 +31,6 @@ def _workspace(tmp_path: Path, command: str, *, timeout: float = 30) -> Workspac
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.detached]
 argv = [{json.dumps(sys.executable)}, "-c", {json.dumps(command)}]
 timeout_seconds = {timeout}
@@ -61,7 +61,7 @@ def test_detached_progress_rejects_completed_work_beyond_total() -> None:
 @pytest.mark.parametrize(
     "payload",
     (
-        {"state": "running", "failure_code": "failed"},
+        {"state": "running", "failure": {"code": "failed"}},
         {
             "state": "terminal",
             "execution_status": "running",
@@ -141,6 +141,59 @@ async def test_detached_idempotency_key_cannot_authorize_another_plan(
 
 
 @pytest.mark.anyio
+async def test_detached_cancel_returns_while_owned_cleanup_is_still_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _workspace(tmp_path, "print('unused')")
+    captures, manager = _manager(workspace)
+    plan = await captures.plan(
+        workload_name="detached",
+        adapter="command",
+        execution_policy=ExecutionPolicy.APPROVED_AGENT,
+    )
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def block_until_cleanup_is_released(
+        plan_token: str,
+        *,
+        expected_plan_id: str | None = None,
+        progress: object,
+    ) -> None:
+        del plan_token, expected_plan_id
+        assert callable(progress)
+        await progress(4, 8, "Capture started")
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cleanup_started.set()
+            await release_cleanup.wait()
+            raise
+
+    monkeypatch.setattr(captures, "execute", block_until_cleanup_is_released)
+    await manager.start(plan.plan_token, "bounded-cancel-wait")
+    record = manager.runner.store.find_subject(
+        operation=manager._ADAPTER.kind,
+        subject_id=plan.run_id,
+    )
+    assert record is not None
+
+    status = await asyncio.wait_for(manager.cancel(plan.run_id), timeout=1)
+
+    assert cleanup_started.is_set()
+    assert status.state == "starting"
+    assert status.limitations == (
+        "Cancellation was requested; owned cleanup is still in progress. Poll this run for its "
+        "terminal status.",
+    )
+
+    release_cleanup.set()
+    terminal = await manager.runner.wait(record.operation_id, timeout_seconds=1)
+    assert terminal.state == "cancelled"
+
+
+@pytest.mark.anyio
 async def test_detached_idempotency_creation_is_atomic_across_managers(
     tmp_path: Path,
 ) -> None:
@@ -165,50 +218,14 @@ async def test_detached_idempotency_creation_is_atomic_across_managers(
     )
 
     assert sum(isinstance(result, DomainError) for result in results) == 1
-    operations = first_manager.runner.store.records.list()
+    operations = first_manager.runner.store.list()
     assert len(operations) == 1
     assert operations[0].subject_id in {first_plan.run_id, second_plan.run_id}
-    assert first_manager.records.list() == ()
     winner = next(result for result in results if not isinstance(result, DomainError))
     assert isinstance(winner, DetachedCaptureStatus)
     assert winner.run_id in {first_plan.run_id, second_plan.run_id}
     owner = first_manager if winner.run_id == first_plan.run_id else second_manager
     await owner.cancel(winner.run_id)
-
-
-@pytest.mark.anyio
-async def test_detached_startup_crash_returns_replan_recovery(
-    tmp_path: Path,
-) -> None:
-    workspace = _workspace(tmp_path, "print('done')")
-    captures, manager = _manager(workspace)
-    plan = await captures.plan(
-        workload_name="detached",
-        adapter="command",
-        execution_policy=ExecutionPolicy.APPROVED_AGENT,
-    )
-    manager.records.create(
-        DetachedCaptureRecord(
-            run_id=plan.run_id,
-            idempotency_digest="sha256:startup-crash",
-            plan_digest=digest_model({"plan_id": plan.plan_token}),
-            plan_request={
-                "workload_name": "detached",
-                "adapter": "command",
-                "parameters": {},
-                "preflight_mode": "auto",
-                "capture_mode": "managed",
-            },
-        )
-    )
-
-    status = manager.status(plan.run_id)
-
-    assert status.state == "failed_to_start"
-    assert status.recovery is not None
-    assert isinstance(status.recovery.next_action, ToolAction)
-    assert status.recovery.next_action.action is ActionId.PLAN_CAPTURE
-    assert status.recovery.next_action.arguments["workload_name"] == "detached"
 
 
 @pytest.mark.anyio
@@ -245,10 +262,11 @@ async def test_detached_task_failure_never_reports_nonterminal_run_as_running(
 
     assert status.state == "failed_to_start"
     assert status.execution_status is ExecutionStatus.PLANNED
-    assert status.failure_code == ErrorCode.INTERNAL_ERROR.value
+    assert status.failure is not None
+    assert status.failure.code == ErrorCode.INTERNAL_ERROR.value
     assert status.recovery is not None
-    assert isinstance(status.recovery.next_action, ToolAction)
-    assert status.recovery.next_action.action is ActionId.PLAN_CAPTURE
+    assert isinstance(status.recovery, ToolAction)
+    assert status.recovery.action is ActionId.PLAN_CAPTURE
 
 
 @pytest.mark.anyio
@@ -339,8 +357,9 @@ async def test_detached_output_limit_failure_remains_inspectable(tmp_path: Path)
         await asyncio.sleep(0.025)
 
     assert status.execution_status is ExecutionStatus.FAILED
-    assert status.failure_code == ErrorCode.QUERY_BUDGET_EXCEEDED.value
-    assert "output exceeded" in (status.failure_message or "").lower()
+    assert status.failure is not None
+    assert status.failure.code == ErrorCode.QUERY_BUDGET_EXCEEDED.value
+    assert "output exceeded" in status.failure.message.lower()
     run = RunStore(workspace).read(plan.run_id)
     stdout = next(item for item in run.artifacts if item.role == "stdout")
     assert ArtifactStore(workspace).get(stdout.artifact_id).payload_path.read_bytes() == b"x" * 100

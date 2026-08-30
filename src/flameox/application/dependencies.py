@@ -25,7 +25,6 @@ from flameox.storage import Workspace
 class WorkloadDependencySetupResult(ContractModel):
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
-    schema_version: int = 2
     workload_name: str
     requested: tuple[str, ...]
     already_available: tuple[str, ...]
@@ -41,16 +40,10 @@ class WorkloadDependencySetupResult(ContractModel):
         available = set(self.already_available)
         if tuple(item for item in self.requested if item in available) != self.already_available:
             raise ValueError("already-available requirements must be an ordered requested subset")
-        expected = _dependency_next_action(self.preflight, workload_name=self.workload_name)
+        expected = _dependency_next_action(self.preflight)
         if self.next_action != expected:
             raise ValueError("next action must match the active preflight result")
         return self
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def installed(self) -> tuple[str, ...]:
-        """Compatibility projection: this inspection-only operation installs nothing."""
-        return ()
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -60,8 +53,6 @@ class WorkloadDependencySetupResult(ContractModel):
 
 def _dependency_next_action(
     preflight: PreflightReport,
-    *,
-    workload_name: str,
 ) -> NextAction:
     if any(
         item.kind is RequirementKind.PYTHON_DISTRIBUTION
@@ -130,7 +121,7 @@ class WorkloadDependencyService:
             requested=names,
             already_available=already_available,
             preflight=preflight,
-            next_action=_dependency_next_action(preflight, workload_name=workload_name),
+            next_action=_dependency_next_action(preflight),
         )
 
     @staticmethod

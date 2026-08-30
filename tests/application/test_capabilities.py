@@ -14,14 +14,19 @@ from pydantic import ValidationError
 
 from flameox import __version__
 from flameox.action_graph import ActionId, ManualAction, ToolAction, manual_action, tool_action
-from flameox.adapters import AdapterDiscoveryResult, AdapterRegistry
 from flameox.adapters.builtins import BUILTIN_ADAPTERS, builtin_adapter
+from flameox.adapters.registry import (
+    AdapterDiscoveryResult,
+    AdapterRegistry,
+)
 from flameox.adapters.toxiproxy import ToxiproxyToolReceipt
-from flameox.application import CapabilityList, CapabilityService, managed_setup_adapter_names
 from flameox.application.capabilities import (
+    CapabilityList,
+    CapabilityService,
     CapabilitySetupManager,
     CapabilitySetupResult,
     SetupVerification,
+    managed_setup_adapter_names,
 )
 from flameox.application.dependencies import WorkloadDependencyService
 from flameox.application.operations import (
@@ -434,7 +439,14 @@ def test_entry_point_approval_is_lazy_and_revoked_by_distribution_change(
 
         def load(self) -> object:
             loaded.append(self.value)
-            return object()
+
+            class FakeAdapter:
+                name = "example"
+                api_version = 1
+
+                probe = plan = validate = extract = lambda self: None
+
+            return FakeAdapter()
 
     entry_point = FakeEntryPoint()
     monkeypatch.setattr(
@@ -451,19 +463,19 @@ def test_entry_point_approval_is_lazy_and_revoked_by_distribution_change(
     assert discovered.adapters[0].approved is False
     assert loaded == []
     with pytest.raises(DomainError) as refused:
-        registry.load_approved("example")
+        registry.load_contract("example")
     assert refused.value.code is ErrorCode.EXECUTION_REFUSED
 
     approved = registry.approve("example-profiler")
     assert approved.adapters[0].approved is True
-    registry.load_approved("example")
+    registry.load_contract("example")
     assert loaded == ["example_plugin:adapter"]
 
     approved_snapshot = AdapterDiscoveryResult(adapters=approved.adapters)
     entry_point.dist.version = "2.0"
     monkeypatch.setattr(registry, "discover", lambda: approved_snapshot)
     with pytest.raises(DomainError) as changed:
-        registry.load_approved("example")
+        registry.load_contract("example")
     assert changed.value.code is ErrorCode.REVISION_CONFLICT
 
 
@@ -1322,7 +1334,7 @@ def test_entry_point_approval_is_revoked_when_installed_content_changes(
     installed.write_text("VERSION = 2\n")
 
     with pytest.raises(DomainError) as changed:
-        registry.load_approved("example")
+        registry.load_contract("example")
 
     assert changed.value.code is ErrorCode.EXECUTION_REFUSED
     assert loaded == []
@@ -1339,7 +1351,6 @@ async def test_prepare_workload_dependencies_inspects_declared_interpreter_witho
     python.chmod(0o755)
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.probe]
 argv = ["{python}", "-c", "pass"]
 [workloads.probe.requirements]
@@ -1363,7 +1374,7 @@ python_distributions = ["agent-fixture>=2"]
 
     result = await WorkloadDependencyService(workspace, broker=broker).prepare("probe")
 
-    assert result.installed == ()
+    assert "installed" not in result.model_dump(mode="json")
     assert result.environment_mutated is False
     assert result.already_available == ("agent-fixture>=2",)
     assert result.status == "ready"
@@ -1390,7 +1401,6 @@ async def test_prepare_workload_dependencies_reports_missing_without_installing(
     python.chmod(0o755)
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.probe]
 argv = ["{python}", "-c", "pass"]
 [workloads.probe.requirements]
@@ -1400,7 +1410,7 @@ python_distributions = ["agent-fixture>=2"]
 
     result = await WorkloadDependencyService(workspace).prepare("probe")
 
-    assert result.installed == ()
+    assert "installed" not in result.model_dump(mode="json")
     assert result.environment_mutated is False
     assert result.already_available == ()
     assert result.status == "blocked"

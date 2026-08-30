@@ -2,13 +2,11 @@ from __future__ import annotations
 
 from flameox import __version__
 from flameox.action_graph import ActionId, ToolAction, tool_action
-from flameox.adapters import (
-    CoverageExtractor,
-    MemrayExtractor,
-    ObservationExtractor,
-    PerfettoExtractor,
-    PyPerfExtractor,
-)
+from flameox.adapters.coverage import CoverageExtractor
+from flameox.adapters.memray import MemrayExtractor
+from flameox.adapters.observations import ObservationExtractor
+from flameox.adapters.perfetto import PerfettoExtractor
+from flameox.adapters.pyperf import PyPerfExtractor
 from flameox.application.capabilities import CapabilityService
 from flameox.application.integrity import IntegrityLevel, IntegrityService
 from flameox.application.quarantine import QuarantineService
@@ -21,7 +19,6 @@ from flameox.storage import RunStore, Workspace, tree_bytes
 
 class WorkspaceStatus(ContractModel):
     server_version: str
-    workspace_created_with_version: str
     workspace_id: str
     project_root: str
     workspace_root: str
@@ -92,7 +89,6 @@ def workspace_status(workspace: Workspace) -> WorkspaceStatus:
     )
     return WorkspaceStatus(
         server_version=__version__,
-        workspace_created_with_version=workspace.identity.flameox_version,
         workspace_id=workspace.identity.workspace_id,
         project_root=str(workspace.project_root),
         workspace_root=str(workspace.paths.root),
@@ -127,9 +123,5 @@ def workspace_status(workspace: Workspace) -> WorkspaceStatus:
         },
         capability_warnings=capability_warnings,
         warnings=tuple(warnings),
-        next_action=(
-            tool_action(ActionId.REBUILD_CATALOG)
-            if not catalog_valid
-            else None
-        ),
+        next_action=(tool_action(ActionId.REBUILD_CATALOG) if not catalog_valid else None),
     )

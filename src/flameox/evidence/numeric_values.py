@@ -83,15 +83,3 @@ def tagged_numeric_value_from_columns(
             f"Persisted {field_name} is invalid.",
             details={"invalid_field": field_name},
         ) from error
-
-
-def tagged_numeric_value_to_columns(
-    value: NumericValue | None,
-) -> tuple[int | None, float | None, int | None, str | None]:
-    if isinstance(value, IntegerValue):
-        return value.value, None, None, value.kind
-    if isinstance(value, FloatingValue):
-        return None, value.value, None, value.kind
-    if isinstance(value, UnsignedIntegerValue):
-        return None, None, value.value, value.kind
-    return None, None, None, None

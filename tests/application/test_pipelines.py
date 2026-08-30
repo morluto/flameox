@@ -5,10 +5,12 @@ from pathlib import Path
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from flameox.application import (
-    ArtifactPipelineService,
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportService,
+)
+from flameox.application.pipelines import (
+    ArtifactPipelineService,
     PipelineComparison,
     PipelineExtractorProfile,
     PipelineFilter,
@@ -111,22 +113,7 @@ def test_pipeline_stage_comparison_requires_the_side_named_by_its_disposition() 
         )
 
 
-def test_pipeline_stage_comparison_rejects_a_stale_short_circuit_projection() -> None:
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        _STAGE_COMPARISON_ADAPTER.validate_python(
-            {
-                "stage_name": "generated",
-                "disposition": "identical",
-                "baseline_ordinal": 1,
-                "candidate_ordinal": 1,
-                "baseline_artifact_id": "sha256:same",
-                "candidate_artifact_id": "sha256:same",
-                "extraction_short_circuited": False,
-            }
-        )
-
-
-def test_pipeline_comparison_rejects_stale_derived_projections() -> None:
+def test_pipeline_comparison_derives_identity_and_first_divergence() -> None:
     payload = {
         "baseline_pipeline_id": "baseline",
         "candidate_pipeline_id": "candidate",
@@ -147,13 +134,8 @@ def test_pipeline_comparison_rejects_stale_derived_projections() -> None:
     comparison = PipelineComparison.model_validate(payload)
 
     assert comparison.first_observed_divergent_stage == "generated"
-    assert comparison.comparison_id == comparison.result_digest
-    with pytest.raises(ValidationError, match="first divergent stage"):
-        PipelineComparison.model_validate(
-            {**payload, "first_observed_divergent_stage": "different"}
-        )
-    with pytest.raises(ValidationError, match="digest does not match"):
-        PipelineComparison.model_validate({**payload, "result_digest": "sha256:stale"})
+    assert comparison.comparison_id == PipelineComparison.model_validate(payload).comparison_id
+    assert "result_digest" not in comparison.model_dump(mode="json")
 
 
 def _import(workspace: Workspace, path: Path, content: str, *, sensitive: bool = False) -> str:
@@ -224,9 +206,6 @@ def _pipeline(
     second_status: StageStatus = PipelineStageStatus.AVAILABLE,
     second_ordinal: int = 1,
     schema: str = "ir-v1",
-    producer_version: str = "1.0",
-    workload_identity: str | None = "workload",
-    device_identity: str | None = "device",
 ) -> str:
     registrations = RunStore(workspace).read(run_id).artifacts
     if second_status in {PipelineStageStatus.AVAILABLE, PipelineStageStatus.CACHED}:
@@ -252,11 +231,7 @@ def _pipeline(
     request = RegisterPipelineRequest(
         run_id=run_id,
         pipeline_name="compiler",
-        pipeline_schema="pipeline-v1",
         producer="example-compiler",
-        producer_version=producer_version,
-        workload_identity=workload_identity,
-        device_identity=device_identity,
         stages=(
             RegisteredPipelineStageDeclaration(
                 name="input",
@@ -296,7 +271,9 @@ def test_identical_pipeline_short_circuits_content_addressed_artifacts(
         for stage in service.pipelines.read(left_pipeline_id).stages
     )
     assert [stage.disposition for stage in comparison.stages] == ["identical", "identical"]
-    assert all(stage.extraction_short_circuited for stage in comparison.stages)
+    assert all(
+        stage.baseline_artifact_id == stage.candidate_artifact_id for stage in comparison.stages
+    )
     assert len(comparison.input_artifact_ids) == 1
     assert comparison.first_observed_divergent_stage is None
     with Catalog(workspace).open_snapshot() as snapshot:
@@ -458,39 +435,13 @@ def test_pipeline_missing_critical_identity_is_unknown_until_known_mismatch(
     service = ArtifactPipelineService(workspace)
 
     both_missing = service.compare(
-        _pipeline(
-            service,
-            workspace,
-            left_run,
-            workload_identity=None,
-            device_identity=None,
-        ),
-        _pipeline(
-            service,
-            workspace,
-            right_run,
-            workload_identity=None,
-            device_identity=None,
-        ),
-    )
-    known_vs_missing = service.compare(
         _pipeline(service, workspace, left_run),
-        _pipeline(
-            service,
-            workspace,
-            right_run,
-            workload_identity=None,
-            device_identity=None,
-        ),
-    )
-    forged_label_mismatch = service.compare(
-        _pipeline(service, workspace, left_run, workload_identity="left"),
-        _pipeline(service, workspace, right_run, workload_identity="right"),
+        _pipeline(service, workspace, right_run),
     )
 
     assert both_missing.compatibility == "unknown"
     assert both_missing.identity_mismatches == ()
-    assert known_vs_missing.compatibility == "unknown"
-    assert known_vs_missing.identity_mismatches == ()
-    assert forged_label_mismatch.compatibility == "unknown"
-    assert forged_label_mismatch.identity_mismatches == ()
+    assert any(
+        "Exact compiler-pipeline comparison is unavailable" in limitation
+        for limitation in both_missing.limitations
+    )

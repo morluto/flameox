@@ -215,7 +215,6 @@ class SummaryClaim(ContractModel):
 
 
 class EvidenceSummary(ContractModel):
-    schema_version: Literal[2] = 2
     summary_digest: str
     corpus_commit_id: str
     selection_shape: SummarySelectionShape
@@ -231,7 +230,6 @@ class EvidenceSummary(ContractModel):
 
 
 class EvidenceSummaryBundle(ContractModel):
-    schema_version: Literal[2] = 2
     summary: EvidenceSummary
     markdown: str
 
@@ -282,7 +280,6 @@ class EvidenceSummaryService:
             claims = tuple(self._claim(evidence, finding_id) for finding_id in request.finding_ids)
             proof_assessment = self._proof_assessment(
                 evidence,
-                request=request,
                 runs=runs,
                 references=references,
             )
@@ -611,7 +608,6 @@ class EvidenceSummaryService:
         self,
         evidence: EvidenceSession,
         *,
-        request: EvidenceSummaryRequest,
         runs: tuple[SummaryRun, ...],
         references: tuple[SummaryReference, ...],
     ) -> SummaryProofAssessment:

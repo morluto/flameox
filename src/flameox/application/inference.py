@@ -1,4 +1,4 @@
-"""Plan and run inference replay scenarios against declared local servers.
+"""Plan and run inference benchmark scenarios against declared local servers.
 
 The service loads a declared scenario and server from ``flameox.toml``, either
 leases a managed vLLM workload or passively probes an existing loopback server,
@@ -7,7 +7,7 @@ canonical ``SubprocessBroker`` under one absolute deadline. The broker owns
 containment, quotas, cancellation, and process snapshots; this module never
 adds an inference request client or unrestricted command surface.
 
-Replay measurements are exploratory by default: a single replay run does not
+Benchmark measurements are exploratory by default: a single scenario run does not
 establish equivalence or causality. The plan and result preserve the exact
 rendered argv, provider/tool identity, resolved output paths, and an explicit
 exploratory reason so a later confirmatory experiment can reference the same
@@ -20,13 +20,12 @@ import asyncio
 import json
 import secrets
 import time
-from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Literal, assert_never
+from typing import Annotated, Literal, assert_never
 from urllib.parse import urlsplit
 
-from pydantic import ConfigDict, Field, TypeAdapter, computed_field, model_validator
+from pydantic import ConfigDict, Field, TypeAdapter, computed_field
 
 from flameox.action_graph import ActionId, ToolAction, manual_action, tool_action
 from flameox.analysis.inference_protocol import (
@@ -44,15 +43,14 @@ from flameox.application.environment import AcceleratorIdentityService, collect_
 from flameox.application.imports import ImportDescriptorRequest, ImportService
 from flameox.application.inference_providers import (
     AIPerfProfileRequest,
-    AvailableInferenceToolDiscovery,
     ExistingServerProbe,
     InferenceEndpointType,
     InferenceScenarioProvider,
     InferenceServerMode,
     InferenceServerProvider,
     InferenceTool,
+    QualifiedInferenceTool,
     SglangBenchServingRequest,
-    UnavailableInferenceToolDiscovery,
     VllmBenchServeRequest,
     discover_inference_tool,
     discover_sglang,
@@ -74,6 +72,7 @@ from flameox.application.workloads import (
     _SglangInferenceServerConfig,
     _VllmBenchInferenceScenarioConfig,
 )
+from flameox.command_binding import ExecutableResolver
 from flameox.domain import (
     ArtifactKind,
     ArtifactRegistration,
@@ -87,7 +86,7 @@ from flameox.domain import (
     OracleStatus,
     OracleStrength,
     ProcessCancellationCause,
-    ProcessTerminationFields,
+    ProcessTermination,
     RunManifest,
     RunSemantics,
     Sensitivity,
@@ -95,9 +94,10 @@ from flameox.domain import (
     ValidationStatus,
     digest_model,
     new_id,
+    process_exit_code,
 )
 from flameox.domain.executables import ResolvedExecutable
-from flameox.domain.models import ExecutionRunManifest, utc_now
+from flameox.domain.models import ExecutionRunManifest, UnreportedProcessTermination, utc_now
 from flameox.execution import (
     ExecutionOutcome,
     ExecutionRequest,
@@ -120,7 +120,6 @@ _PROVIDER_TOOL: dict[
 ] = {
     InferenceScenarioProvider.AIPERF: InferenceTool.AIPERF,
     InferenceScenarioProvider.VLLM_BENCH: InferenceTool.VLLM,
-    InferenceScenarioProvider.SGLANG_BENCH: InferenceTool.VLLM,
 }
 
 
@@ -152,184 +151,9 @@ def _configure_inference_server_action(
 _MAX_RESULT_LIMITATIONS = 16
 
 
-class _ReadyReplayTool(ContractModel):
-    state: Literal["ready"] = "ready"
-    executable: str
-    version: str | None = None
-    executable_digest: str | None = None
-    executable_binding: ResolvedExecutable
-    argv: Annotated[tuple[str, ...], Field(min_length=1, max_length=1_024)]
+class _InferenceScenarioPlan(ContractModel):
+    """A validated benchmark intent with an exclusively allocated output authority."""
 
-
-class _UnavailableReplayTool(ContractModel):
-    state: Literal["unavailable"] = "unavailable"
-    executable: str | None = None
-    version: str | None = None
-    executable_digest: str | None = None
-    compatibility_reason: str | None = None
-    remediation: Annotated[tuple[str, ...], Field(max_length=8)] = ()
-    argv: tuple[()] = ()
-
-
-type _ReplayTool = Annotated[
-    _ReadyReplayTool | _UnavailableReplayTool,
-    Field(discriminator="state"),
-]
-
-_FLAT_REPLAY_TOOL_FIELDS = frozenset(
-    {
-        "tool_executable",
-        "tool_version",
-        "tool_executable_digest",
-        "tool_executable_binding",
-        "tool_compatibility_reason",
-        "tool_remediation",
-        "argv",
-        "tool_available",
-        "tool_compatible",
-    }
-)
-
-
-def _advertise_replay_tool_projections(schema: dict[str, Any]) -> None:
-    properties = schema.setdefault("properties", {})
-    assert isinstance(properties, dict)
-    properties.pop("replay_tool", None)
-    nullable_string = {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None}
-    properties.update(
-        {
-            "tool_executable": {**nullable_string, "title": "Tool Executable"},
-            "tool_version": {**nullable_string, "title": "Tool Version"},
-            "tool_executable_digest": {
-                **nullable_string,
-                "title": "Tool Executable Digest",
-            },
-            "tool_executable_binding": {
-                "anyOf": [{"type": "object"}, {"type": "null"}],
-                "default": None,
-                "title": "Tool Executable Binding",
-            },
-            "tool_compatibility_reason": {
-                **nullable_string,
-                "title": "Tool Compatibility Reason",
-            },
-            "tool_remediation": {
-                "default": [],
-                "items": {"type": "string"},
-                "maxItems": 8,
-                "title": "Tool Remediation",
-                "type": "array",
-            },
-            "argv": {
-                "default": [],
-                "items": {"type": "string"},
-                "maxItems": 1_024,
-                "title": "Argv",
-                "type": "array",
-            },
-            "tool_available": {
-                "readOnly": True,
-                "title": "Tool Available",
-                "type": "boolean",
-            },
-            "tool_compatible": {
-                "readOnly": True,
-                "title": "Tool Compatible",
-                "type": "boolean",
-            },
-        }
-    )
-    required = schema.setdefault("required", [])
-    assert isinstance(required, list)
-    for field_name in (
-        "replay_tool",
-        "tool_executable",
-        "tool_version",
-        "tool_executable_digest",
-        "tool_executable_binding",
-        "tool_compatibility_reason",
-        "tool_remediation",
-        "argv",
-    ):
-        if field_name in required:
-            required.remove(field_name)
-    for field_name in ("tool_available", "tool_compatible"):
-        if field_name not in required:
-            required.append(field_name)
-
-
-def _parse_flat_replay_tool(value: Mapping[str, object]) -> dict[str, object]:
-    parsed = dict(value)
-    supplied = _FLAT_REPLAY_TOOL_FIELDS.intersection(parsed)
-    if "replay_tool" in parsed:
-        if supplied:
-            raise ValueError("use either replay_tool or flattened tool fields, not both")
-        return parsed
-
-    available = parsed.pop("tool_available", None)
-    compatible = parsed.pop("tool_compatible", None)
-    if available is not None and compatible is not None and available != compatible:
-        raise ValueError("tool availability and compatibility must agree")
-    argv = parsed.pop("argv", ())
-    planned = bool(argv)
-    if available is not None and available != planned:
-        raise ValueError("tool availability must match executable argv")
-    if compatible is not None and compatible != planned:
-        raise ValueError("tool compatibility must match executable argv")
-
-    executable_binding = parsed.pop("tool_executable_binding", None)
-    snapshot: dict[str, object] = {
-        "state": "ready" if planned else "unavailable",
-        "executable": parsed.pop("tool_executable", None),
-        "version": parsed.pop("tool_version", None),
-        "executable_digest": parsed.pop("tool_executable_digest", None),
-        "argv": argv,
-    }
-    reason = parsed.pop("tool_compatibility_reason", None)
-    remediation = parsed.pop("tool_remediation", ())
-    if planned and (reason is not None or remediation):
-        raise ValueError("an available tool cannot carry incompatibility recovery")
-    if planned:
-        snapshot["executable_binding"] = executable_binding
-    if not planned:
-        snapshot["compatibility_reason"] = reason
-        snapshot["remediation"] = remediation
-    parsed["replay_tool"] = snapshot
-    return parsed
-
-
-def _replay_tool_snapshot(
-    discovery: AvailableInferenceToolDiscovery | UnavailableInferenceToolDiscovery,
-    argv: tuple[str, ...],
-) -> _ReplayTool:
-    if isinstance(discovery, AvailableInferenceToolDiscovery):
-        return _ReadyReplayTool(
-            executable=str(discovery.executable),
-            version=discovery.version,
-            executable_digest=discovery.executable_digest,
-            executable_binding=discovery.executable_binding,
-            argv=argv,
-        )
-    if argv:
-        raise ValueError("an unavailable tool cannot carry executable argv")
-    return _UnavailableReplayTool(
-        executable=str(discovery.executable) if discovery.executable is not None else None,
-        version=discovery.version,
-        executable_digest=discovery.executable_digest,
-        compatibility_reason=discovery.compatibility_reason,
-        remediation=discovery.remediation,
-    )
-
-
-class _InferenceReplayPlan(ContractModel):
-    model_config = ConfigDict(
-        json_schema_extra=_advertise_replay_tool_projections,
-        json_schema_mode_override="serialization",
-    )
-
-    """A validated replay intent with an exclusively allocated output authority."""
-
-    schema_version: Literal[3] = 3
     plan_id: str
     plan_token: str = ""
     scenario_name: str
@@ -342,12 +166,11 @@ class _InferenceReplayPlan(ContractModel):
     tokenizer_revision: str | None = None
     quantization: str | None = None
     endpoint_type: InferenceEndpointType = InferenceEndpointType.CHAT
-    replay_tool: _ReplayTool = Field(exclude=True)
+    executable_binding: ResolvedExecutable
+    provider_version: str | None = None
+    argv: Annotated[tuple[str, ...], Field(min_length=1, max_length=1_024)]
     provider_environment_id: str | None = None
-    provider_python: str | None = None
-    provider_python_sha256: str | None = None
     server_executable_digest: str | None = None
-    server_version: str | None = None
     health_ready: bool | None = None
     probed_model_ids: Annotated[tuple[str, ...], Field(max_length=64)] = ()
     output_root: BoundDirectoryReference
@@ -368,66 +191,8 @@ class _InferenceReplayPlan(ContractModel):
     configuration_id: str
     created_at: datetime = Field(default_factory=utc_now)
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_tool_readiness_projections(cls, value: object) -> object:
-        if not isinstance(value, Mapping):
-            return value
-        return _parse_flat_replay_tool(value)
 
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def tool_executable(self) -> str | None:
-        return self.replay_tool.executable
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def tool_version(self) -> str | None:
-        return self.replay_tool.version
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def tool_executable_digest(self) -> str | None:
-        return self.replay_tool.executable_digest
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def tool_executable_binding(self) -> ResolvedExecutable | None:
-        if isinstance(self.replay_tool, _ReadyReplayTool):
-            return self.replay_tool.executable_binding
-        return None
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def tool_compatibility_reason(self) -> str | None:
-        if isinstance(self.replay_tool, _UnavailableReplayTool):
-            return self.replay_tool.compatibility_reason
-        return None
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def tool_remediation(self) -> tuple[str, ...]:
-        if isinstance(self.replay_tool, _UnavailableReplayTool):
-            return self.replay_tool.remediation
-        return ()
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def argv(self) -> tuple[str, ...]:
-        return self.replay_tool.argv
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def tool_available(self) -> bool:
-        return isinstance(self.replay_tool, _ReadyReplayTool)
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def tool_compatible(self) -> bool:
-        return self.tool_available
-
-
-class AIPerfReplayPlan(_InferenceReplayPlan):
+class AIPerfScenarioPlan(_InferenceScenarioPlan):
     provider: Literal[InferenceScenarioProvider.AIPERF]
     server_provider: Literal[InferenceServerProvider.VLLM] = InferenceServerProvider.VLLM
     streaming: bool = True
@@ -439,7 +204,7 @@ class AIPerfReplayPlan(_InferenceReplayPlan):
     random_range_ratio: Literal[None] = None
 
 
-class VllmBenchReplayPlan(_InferenceReplayPlan):
+class VllmBenchScenarioPlan(_InferenceScenarioPlan):
     provider: Literal[InferenceScenarioProvider.VLLM_BENCH]
     server_provider: Literal[InferenceServerProvider.VLLM] = InferenceServerProvider.VLLM
     streaming: Literal[True] = True
@@ -451,9 +216,10 @@ class VllmBenchReplayPlan(_InferenceReplayPlan):
     random_range_ratio: Literal[None] = None
 
 
-class SglangBenchReplayPlan(_InferenceReplayPlan):
+class SglangBenchScenarioPlan(_InferenceScenarioPlan):
     provider: Literal[InferenceScenarioProvider.SGLANG_BENCH]
     server_provider: Literal[InferenceServerProvider.SGLANG] = InferenceServerProvider.SGLANG
+    benchmark_capabilities: Annotated[tuple[str, ...], Field(min_length=1, max_length=32)]
     streaming: Literal[True] = True
     trace_artifact_id: Literal[None] = None
     burstiness: Literal[None] = None
@@ -463,34 +229,32 @@ class SglangBenchReplayPlan(_InferenceReplayPlan):
     random_range_ratio: Annotated[float, Field(gt=0, le=1)] = 1.0
 
 
-type InferenceReplayPlan = Annotated[
-    AIPerfReplayPlan | VllmBenchReplayPlan | SglangBenchReplayPlan,
+type InferenceScenarioPlan = Annotated[
+    AIPerfScenarioPlan | VllmBenchScenarioPlan | SglangBenchScenarioPlan,
     Field(discriminator="provider"),
 ]
 
-_INFERENCE_REPLAY_PLAN_ADAPTER: TypeAdapter[InferenceReplayPlan] = TypeAdapter(InferenceReplayPlan)
+_INFERENCE_SCENARIO_PLAN_ADAPTER: TypeAdapter[InferenceScenarioPlan] = TypeAdapter(
+    InferenceScenarioPlan
+)
 
 
-def parse_inference_replay_plan(value: object) -> InferenceReplayPlan:
-    """Parse a replay plan into the provider case that can execute it."""
+def parse_inference_scenario_plan(value: object) -> InferenceScenarioPlan:
+    """Parse a scenario plan into the provider case that can execute it."""
 
-    return _INFERENCE_REPLAY_PLAN_ADAPTER.validate_python(value)
+    return _INFERENCE_SCENARIO_PLAN_ADAPTER.validate_python(value)
 
 
-class InferenceReplayResult(ProcessTerminationFields):
-    """The bounded outcome of one executed inference replay plan."""
+class InferenceScenarioResult(ContractModel):
+    """The bounded outcome of one executed inference benchmark plan."""
 
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
-    schema_version: Literal[2] = 2
-    result_id: str
     run_id: str
-    plan_id: str
     scenario_name: str
     server_name: str
     provider: InferenceScenarioProvider
-    argv: Annotated[tuple[str, ...], Field(max_length=1_024)]
-    executed_argv: Annotated[tuple[str, ...], Field(max_length=1_024)]
+    termination: ProcessTermination = Field(default_factory=UnreportedProcessTermination)
     output_path: str | None = None
     output_path_retained: bool = False
     wall_time_ns: Annotated[int, Field(ge=0)] | None = None
@@ -522,8 +286,8 @@ class _OracleObservation(ContractModel):
     limitations: tuple[str, ...] = ()
 
 
-class InferenceReplayService:
-    """Plan and run inference replay scenarios against declared local servers."""
+class InferenceScenarioService:
+    """Plan and run inference benchmark scenarios against declared local servers."""
 
     def __init__(
         self,
@@ -541,8 +305,8 @@ class InferenceReplayService:
         self.probe_timeout_seconds = probe_timeout_seconds
         self.plans = AuthorizedPlanStore(
             workspace,
-            family="inference_replay",
-            model=_INFERENCE_REPLAY_PLAN_ADAPTER,
+            family="inference_scenario",
+            model=_INFERENCE_SCENARIO_PLAN_ADAPTER,
         )
 
     def plan(
@@ -551,9 +315,30 @@ class InferenceReplayService:
         *,
         timeout_seconds: float | None = None,
         expected_plan_id: str | None = None,
-        _authorize: bool = True,
-    ) -> InferenceReplayPlan:
-        """Build a validated replay plan without executing the replay tool.
+    ) -> InferenceScenarioPlan:
+        """Build and authorize a reviewed benchmark scenario."""
+        plan = self._build_plan(
+            scenario_name,
+            timeout_seconds=timeout_seconds,
+            expected_plan_id=expected_plan_id,
+        )
+        authorized = plan.validated_copy(update={"plan_token": secrets.token_hex(32)})
+        self.plans.issue(
+            authorized.plan_token,
+            authorized.plan_id,
+            authorized,
+            expires_at=authorized.deadline_at,
+        )
+        return authorized
+
+    def _build_plan(
+        self,
+        scenario_name: str,
+        *,
+        timeout_seconds: float | None = None,
+        expected_plan_id: str | None = None,
+    ) -> InferenceScenarioPlan:
+        """Build a validated scenario plan without executing the benchmark tool.
 
         The plan passively probes an ``existing_local`` server so the agent can
         decide whether to run. Managed servers are probed only after their
@@ -564,15 +349,32 @@ class InferenceReplayService:
         deadline = self._deadline(timeout_seconds, scenario, server)
         deadline_at = utc_now() + timedelta(seconds=deadline)
         configuration_id = digest_model(project.model_dump(mode="json"))
-        tool = _PROVIDER_TOOL[scenario.provider]
-        discovery = (
-            discover_sglang(Path(server.benchmark_python), broker=self.broker)
-            if scenario.provider is InferenceScenarioProvider.SGLANG_BENCH
-            and server.benchmark_python is not None
-            else self._discover_tool(tool)
-        )
+        if scenario.provider is InferenceScenarioProvider.SGLANG_BENCH:
+            if server.benchmark_python is None:
+                raise DomainError(
+                    ErrorCode.WORKSPACE_INVALID,
+                    "SGLang benchmark scenarios require a declared benchmark_python launcher.",
+                )
+            try:
+                discovery = discover_sglang(Path(server.benchmark_python), broker=self.broker)
+            except DomainError as error:
+                raise DomainError(
+                    error.code,
+                    error.message,
+                    retryable=error.retryable,
+                    details=error.details,
+                    remediation=error.remediation,
+                    run_id=error.run_id,
+                    next_action=_configure_inference_server_action(
+                        scenario.server,
+                        server,
+                        configuration_id=configuration_id,
+                    ),
+                ) from error
+        else:
+            discovery = self._discover_tool(_PROVIDER_TOOL[scenario.provider])
         probe: ExistingServerProbe | None = None
-        if server.mode is InferenceServerMode.EXISTING_LOCAL and discovery.available:
+        if server.mode is InferenceServerMode.EXISTING_LOCAL:
             probe = probe_existing_vllm_server(
                 server.base_url, timeout_seconds=self.probe_timeout_seconds
             )
@@ -594,23 +396,20 @@ class InferenceReplayService:
                         configuration_id=configuration_id,
                     ),
                 )
-        server_executable_digest, server_version = self._server_tool_identity(server)
+        server_executable_digest = self._server_tool_identity(server)
         plan_id = digest_model(
             {
                 "scenario": scenario.model_dump(mode="json"),
                 "server": server.model_dump(mode="json"),
-                "provider_executable": str(discovery.executable),
+                "provider_executable_binding": discovery.executable_binding.model_dump(mode="json"),
                 "provider_version": discovery.version,
-                "provider_executable_digest": discovery.executable_digest,
-                "provider_environment_id": discovery.provider_environment_id,
-                "provider_python": (
-                    str(discovery.provider_python)
-                    if discovery.provider_python is not None
-                    else None
+                **(
+                    {"benchmark_capabilities": discovery.benchmark_capabilities}
+                    if scenario.provider is InferenceScenarioProvider.SGLANG_BENCH
+                    else {}
                 ),
-                "provider_python_sha256": discovery.provider_python_sha256,
+                "provider_environment_id": discovery.provider_environment_id,
                 "server_executable_digest": server_executable_digest,
-                "server_version": server_version,
                 "timeout_seconds": deadline,
                 "configuration_id": configuration_id,
             }
@@ -628,27 +427,19 @@ class InferenceReplayService:
             else "result.json"
         )
         with TrustedRoot(self.workspace.paths.staging) as trusted_root:
-            output = trusted_root.allocate_directory(f"inference-replay/{secrets.token_hex(16)}")
+            output = trusted_root.allocate_directory(f"inference-scenario/{secrets.token_hex(16)}")
             try:
                 output_path = output.absolute_display_path(output_relative_path)
-                if discovery.available:
-                    assert discovery.executable is not None
-                    request = self._build_request(
-                        scenario,
-                        server,
-                        discovery.executable,
-                        output_path=output_path,
-                    )
-                else:
-                    request = None
-                replay_tool = _replay_tool_snapshot(
-                    discovery,
-                    request.argv() if request is not None else (),
+                request = self._build_request(
+                    scenario,
+                    server,
+                    discovery.executable_binding.canonical_target,
+                    output_path=output_path,
                 )
-                plan = parse_inference_replay_plan(
+                plan = parse_inference_scenario_plan(
                     dict(
                         plan_id=plan_id,
-                        plan_token=secrets.token_hex(32) if _authorize else "",
+                        plan_token="",
                         scenario_name=scenario_name,
                         server_name=scenario.server,
                         provider=scenario.provider,
@@ -662,16 +453,16 @@ class InferenceReplayService:
                         quantization=server.quantization,
                         endpoint_type=scenario.endpoint_type,
                         streaming=scenario.streaming,
-                        replay_tool=replay_tool,
-                        provider_environment_id=discovery.provider_environment_id,
-                        provider_python=(
-                            str(discovery.provider_python)
-                            if discovery.provider_python is not None
-                            else None
+                        executable_binding=discovery.executable_binding,
+                        provider_version=discovery.version,
+                        **(
+                            {"benchmark_capabilities": discovery.benchmark_capabilities}
+                            if scenario.provider is InferenceScenarioProvider.SGLANG_BENCH
+                            else {}
                         ),
-                        provider_python_sha256=discovery.provider_python_sha256,
+                        argv=request.argv(),
+                        provider_environment_id=discovery.provider_environment_id,
                         server_executable_digest=server_executable_digest,
-                        server_version=server_version,
                         health_ready=probe.health_ready if probe is not None else None,
                         probed_model_ids=probe.model_ids if probe is not None else (),
                         output_root=output.reference,
@@ -696,19 +487,13 @@ class InferenceReplayService:
                         timeout_seconds=deadline,
                         deadline_at=deadline_at,
                         exploratory_reason=(
-                            "Single replay run is exploratory; equivalence or causality requires "
+                            "Single benchmark run is exploratory; equivalence or causality "
+                            "requires "
                             "a predeclared confirmatory experiment with a semantic oracle."
                         ),
                         configuration_id=configuration_id,
                     )
                 )
-                if _authorize:
-                    self.plans.issue(
-                        plan.plan_token,
-                        plan.plan_id,
-                        plan,
-                        expires_at=plan.deadline_at,
-                    )
                 return plan
             except BaseException:
                 output.close()
@@ -722,8 +507,8 @@ class InferenceReplayService:
         plan_token: str,
         *,
         expected_plan_id: str | None = None,
-    ) -> InferenceReplayResult:
-        """Consume and execute one server-owned replay intent."""
+    ) -> InferenceScenarioResult:
+        """Consume and execute one server-owned benchmark intent."""
         plan = self.plans.consume(plan_token, expected_digest=expected_plan_id)
         self._validate_plan(plan)
         with (
@@ -734,10 +519,10 @@ class InferenceReplayService:
 
     async def _run_bound(
         self,
-        plan: InferenceReplayPlan,
+        plan: InferenceScenarioPlan,
         trusted_root: TrustedRoot,
         output: BoundDirectory,
-    ) -> InferenceReplayResult:
+    ) -> InferenceScenarioResult:
         output_path = output.absolute_display_path(plan.output_relative_path)
         environment = await self._managed_environment(plan)
         execution_argv = self._runtime_argv(plan, output)
@@ -783,7 +568,7 @@ class InferenceReplayService:
             )
             internal_error = DomainError(
                 ErrorCode.INTERNAL_ERROR,
-                "Unexpected inference replay failure.",
+                "Unexpected inference benchmark failure.",
                 run_id=run.run_id,
             )
             self._finish_failed_run(
@@ -859,150 +644,11 @@ class InferenceReplayService:
             artifact_run_ids,
             (*extraction_limitations, *oracle.limitations),
             oracle,
-            execution_argv,
-        )
-
-    def run_sync(
-        self,
-        plan_token: str,
-        *,
-        expected_plan_id: str | None = None,
-    ) -> InferenceReplayResult:
-        """Synchronous wrapper around :meth:`run` for non-async callers."""
-        plan = self.plans.consume(plan_token, expected_digest=expected_plan_id)
-        self._validate_plan(plan)
-        with (
-            TrustedRoot(self.workspace.paths.staging) as trusted_root,
-            trusted_root.open_directory(plan.output_root) as output,
-        ):
-            return self._run_sync_bound(plan, trusted_root, output)
-
-    def _run_sync_bound(
-        self,
-        plan: InferenceReplayPlan,
-        trusted_root: TrustedRoot,
-        output: BoundDirectory,
-    ) -> InferenceReplayResult:
-        output_path = output.absolute_display_path(plan.output_relative_path)
-        execution_argv = self._runtime_argv(plan, output)
-        run, environment, source_state = self._start_run(
-            plan,
-            execution_argv=execution_argv,
-        )
-        try:
-            outcome, probe, output_path, oracle = self._execute_sync(plan, output)
-        except (KeyboardInterrupt, SystemExit):
-            artifact_ids, artifact_run_ids, _preserved, _limitations = (
-                self._preserve_outputs_safely(plan, output)
-            )
-            self._finish_cancelled_run(
-                run, environment, source_state, artifact_ids, artifact_run_ids
-            )
-            raise
-        except DomainError as error:
-            artifact_ids, artifact_run_ids, _preserved, limitations = self._preserve_outputs_safely(
-                plan, output
-            )
-            self._finish_failed_run(
-                run,
-                environment,
-                source_state,
-                error,
-                artifact_ids,
-                artifact_run_ids,
-                limitations,
-            )
-            error.run_id = run.run_id
-            if artifact_ids:
-                error.details = {
-                    **error.details,
-                    "partial_artifact_ids": artifact_ids,
-                    "partial_artifact_run_ids": artifact_run_ids,
-                }
-            raise
-        except Exception as cause:
-            artifact_ids, artifact_run_ids, _preserved, limitations = self._preserve_outputs_safely(
-                plan, output
-            )
-            internal_error = DomainError(
-                ErrorCode.INTERNAL_ERROR,
-                "Unexpected inference replay failure.",
-                run_id=run.run_id,
-            )
-            self._finish_failed_run(
-                run,
-                environment,
-                source_state,
-                internal_error,
-                artifact_ids,
-                artifact_run_ids,
-                limitations,
-            )
-            raise internal_error from cause
-        artifact_ids, artifact_run_ids, preserved, preservation_limitations = (
-            self._preserve_outputs_safely(plan, output)
-        )
-        try:
-            extraction_limitations = (
-                *preservation_limitations,
-                *self._extract_outputs(plan, run.run_id, preserved),
-            )
-        except Exception as cause:
-            internal_error = DomainError(
-                ErrorCode.INTERNAL_ERROR,
-                "Unexpected inference extraction failure.",
-                run_id=run.run_id,
-            )
-            self._finish_failed_run(
-                run,
-                environment,
-                source_state,
-                internal_error,
-                artifact_ids,
-                artifact_run_ids,
-                preservation_limitations,
-            )
-            raise internal_error from cause
-        finished = self._finish_run(
-            run,
-            environment,
-            source_state,
-            outcome,
-            artifact_ids,
-            artifact_run_ids,
-            (*extraction_limitations, *oracle.limitations),
-            oracle,
-        )
-        cleanup_limitation = self._cleanup_staging(
-            trusted_root,
-            plan.output_root,
-            preservation_complete=not preservation_limitations,
-        )
-        if cleanup_limitation is not None:
-            extraction_limitations = (*extraction_limitations, cleanup_limitation)
-            finished = self._append_limitation(
-                finished,
-                environment,
-                source_state,
-                cleanup_limitation,
-            )
-        return self._result(
-            plan,
-            finished.run_id,
-            outcome,
-            probe,
-            output_path,
-            None,
-            artifact_ids,
-            artifact_run_ids,
-            (*extraction_limitations, *oracle.limitations),
-            oracle,
-            execution_argv,
         )
 
     async def _execute(
         self,
-        plan: InferenceReplayPlan,
+        plan: InferenceScenarioPlan,
         output: BoundDirectory,
     ) -> tuple[
         ExecutionOutcome,
@@ -1088,54 +734,17 @@ class InferenceReplayService:
         if outcome.stderr:
             output.write_bytes("server.stderr", outcome.stderr)
 
-    def _execute_sync(
-        self,
-        plan: InferenceReplayPlan,
-        output: BoundDirectory,
-    ) -> tuple[ExecutionOutcome, ExistingServerProbe, Path, _OracleObservation]:
-        output_path, probe = self._prepare(plan, output)
-        request = self._request(plan, output)
-        outcome = self.broker.run_sync(request)
-        oracle = self._run_oracle_sync(plan, output, outcome)
-        return outcome, probe, output_path, oracle
-
-    def _prepare(
-        self,
-        plan: InferenceReplayPlan,
-        output: BoundDirectory,
-    ) -> tuple[Path, ExistingServerProbe]:
-        output_path, server = self._prepare_existing_target(plan, output)
-        probe = probe_existing_vllm_server(
-            server.base_url, timeout_seconds=self.probe_timeout_seconds
-        )
-        return output_path, probe
-
     def _prepare_existing_target(
         self,
-        plan: InferenceReplayPlan,
+        plan: InferenceScenarioPlan,
         output: BoundDirectory,
     ) -> tuple[Path, InferenceServerConfig]:
-        if not plan.tool_available:
-            raise DomainError(
-                ErrorCode.CAPABILITY_UNAVAILABLE,
-                f"Inference replay tool for scenario {plan.scenario_name!r} is unavailable.",
-                remediation=plan.tool_remediation
-                or ("Install the project's inference extra, then retry planning.",),
-                details={
-                    "scenario": plan.scenario_name,
-                    "provider": plan.provider,
-                },
-                next_action=manual_action(
-                    "Install the reported inference provider tool before retrying this plan."
-                ),
-            )
         project = self.workloads.load()
         _scenario, server = self._resolve(plan.scenario_name, project)
         if server.mode is not InferenceServerMode.EXISTING_LOCAL:
             raise DomainError(
                 ErrorCode.EXECUTION_REFUSED,
-                "Synchronous replay is limited to existing_local servers; use async run for "
-                f"managed server {plan.server_name!r}.",
+                f"Scenario {plan.scenario_name!r} does not target an existing local server.",
                 details={"server": plan.server_name, "mode": server.mode},
             )
         output_path = output.absolute_display_path(plan.output_relative_path)
@@ -1143,23 +752,18 @@ class InferenceReplayService:
 
     def _request(
         self,
-        plan: InferenceReplayPlan,
+        plan: InferenceScenarioPlan,
         output: BoundDirectory,
     ) -> ExecutionRequest:
         remaining = (plan.deadline_at - utc_now()).total_seconds()
         if remaining <= 0:
             raise DomainError(
                 ErrorCode.PROCESS_TIMEOUT,
-                "The inference replay deadline expired before benchmark execution.",
-            )
-        if not isinstance(plan.replay_tool, _ReadyReplayTool):
-            raise DomainError(
-                ErrorCode.CAPABILITY_UNAVAILABLE,
-                "The planned inference replay tool is unavailable.",
+                "The inference scenario deadline expired before benchmark execution.",
             )
         return ExecutionRequest(
             argv=self._runtime_argv(plan, output),
-            executable_binding=plan.replay_tool.executable_binding,
+            executable_binding=plan.executable_binding,
             cwd=self.workspace.project_root,
             environment_allowlist=self.workspace.config.execution.child_environment_allowlist,
             allowed_working_roots=(self.workspace.project_root,),
@@ -1170,7 +774,7 @@ class InferenceReplayService:
 
     @staticmethod
     def _runtime_argv(
-        plan: InferenceReplayPlan,
+        plan: InferenceScenarioPlan,
         output: BoundDirectory,
     ) -> tuple[str, ...]:
         """Replace display-only output paths with the inherited descriptor path."""
@@ -1190,7 +794,7 @@ class InferenceReplayService:
 
     def _oracle_request(
         self,
-        plan: InferenceReplayPlan,
+        plan: InferenceScenarioPlan,
         output: BoundDirectory,
     ) -> tuple[OracleIdentity, ExecutionRequest] | None:
         if plan.semantic_oracle_workload is None:
@@ -1205,7 +809,7 @@ class InferenceReplayService:
         if remaining <= 0:
             raise DomainError(
                 ErrorCode.PROCESS_TIMEOUT,
-                "The inference replay deadline expired before semantic validation.",
+                "The inference scenario deadline expired before semantic validation.",
             )
         process_root = output.child_process_root
         receipt_path = output.child_process_path("oracle-receipt.json")
@@ -1238,7 +842,7 @@ class InferenceReplayService:
 
     async def _run_oracle(
         self,
-        plan: InferenceReplayPlan,
+        plan: InferenceScenarioPlan,
         output: BoundDirectory,
         benchmark: ExecutionOutcome,
     ) -> _OracleObservation:
@@ -1249,33 +853,12 @@ class InferenceReplayService:
                 limitations=("No semantic oracle was declared for this inference scenario.",),
             )
         identity, request = prepared
-        if benchmark.process.exit_code != 0:
+        if process_exit_code(benchmark.process.termination) != 0:
             return _OracleObservation(
                 identity=identity,
                 limitations=("Semantic validation was skipped because the benchmark failed.",),
             )
         validation = await self.broker.run(request)
-        return self._oracle_observation(identity, validation, output)
-
-    def _run_oracle_sync(
-        self,
-        plan: InferenceReplayPlan,
-        output: BoundDirectory,
-        benchmark: ExecutionOutcome,
-    ) -> _OracleObservation:
-        prepared = self._oracle_request(plan, output)
-        if prepared is None:
-            return _OracleObservation(
-                identity=OracleIdentity(kind="none"),
-                limitations=("No semantic oracle was declared for this inference scenario.",),
-            )
-        identity, request = prepared
-        if benchmark.process.exit_code != 0:
-            return _OracleObservation(
-                identity=identity,
-                limitations=("Semantic validation was skipped because the benchmark failed.",),
-            )
-        validation = self.broker.run_sync(request)
         return self._oracle_observation(identity, validation, output)
 
     @staticmethod
@@ -1287,7 +870,7 @@ class InferenceReplayService:
         output.write_bytes("oracle.stdout", validation.stdout)
         if validation.stderr:
             output.write_bytes("oracle.stderr", validation.stderr)
-        if validation.process.exit_code != 0:
+        if process_exit_code(validation.process.termination) != 0:
             return _OracleObservation(
                 identity=identity,
                 validation_status=ValidationStatus.FAILED,
@@ -1367,9 +950,9 @@ class InferenceReplayService:
             ) from exc
         return scenario, server
 
-    def _server_tool_identity(self, server: InferenceServerConfig) -> tuple[str | None, str | None]:
+    def _server_tool_identity(self, server: InferenceServerConfig) -> str | None:
         if not isinstance(server, _ManagedInferenceServerConfig):
-            return None, None
+            return None
         workload = self.workloads.resolve(server.workload)
         binding = workload.executable_binding
         if binding is None:
@@ -1377,26 +960,12 @@ class InferenceReplayService:
                 ErrorCode.WORKSPACE_INVALID,
                 "A managed inference workload is missing its executable binding.",
             )
-        executable = binding.canonical_target
-        executable_digest = binding.identity.sha256
-        discovery = (
-            discover_inference_tool(InferenceTool.VLLM)
-            if server.provider is InferenceServerProvider.VLLM
-            else None
-        )
-        version = (
-            discovery.version
-            if discovery is not None
-            and discovery.executable is not None
-            and executable.resolve() == discovery.executable.resolve()
-            else None
-        )
-        return executable_digest, version
+        return binding.identity.sha256
 
     def _discover_tool(
         self,
         tool: Literal[InferenceTool.AIPERF, InferenceTool.VLLM],
-    ) -> AvailableInferenceToolDiscovery | UnavailableInferenceToolDiscovery:
+    ) -> QualifiedInferenceTool:
         runtime = (
             ProviderRuntimeManager(
                 self.workspace.paths.records / "provider-runtimes",
@@ -1410,17 +979,17 @@ class InferenceReplayService:
         )
         return discover_inference_tool(tool, provider_runtime=runtime)
 
-    def _validate_plan(self, plan: InferenceReplayPlan) -> None:
+    def _validate_plan(self, plan: InferenceScenarioPlan) -> None:
         output_parts = plan.output_root.parts()
         if (
             len(output_parts) != 2
-            or output_parts[0] != "inference-replay"
+            or output_parts[0] != "inference-scenario"
             or len(output_parts[1]) != 32
             or any(character not in "0123456789abcdef" for character in output_parts[1])
         ):
             raise DomainError(
                 ErrorCode.REVISION_CONFLICT,
-                "Inference output authority is not an allocated replay directory.",
+                "Inference output authority is not an allocated scenario directory.",
             )
         expected_output_path = self.workspace.paths.staging.joinpath(
             *output_parts,
@@ -1439,42 +1008,32 @@ class InferenceReplayService:
                 "Inference configuration changed after this plan was created.",
                 remediation=("Plan the inference scenario again, then retry execution.",),
             )
-        provider = (
-            discover_sglang(Path(plan.tool_executable), broker=self.broker)
-            if plan.provider is InferenceScenarioProvider.SGLANG_BENCH
-            and plan.tool_executable is not None
-            else self._discover_tool(_PROVIDER_TOOL[plan.provider])
-        )
-        if not plan.tool_available:
-            raise DomainError(
-                ErrorCode.CAPABILITY_UNAVAILABLE,
-                f"Inference replay tool for scenario {plan.scenario_name!r} is unavailable.",
-                remediation=plan.tool_remediation
-                or ("Install the project's inference extra, then retry planning.",),
-                details={
-                    "scenario": plan.scenario_name,
-                    "provider": plan.provider,
-                },
-                next_action=manual_action(
-                    "Install the reported inference provider tool before retrying this plan."
-                ),
-            )
-        if (
-            provider.executable_digest != plan.tool_executable_digest
-            or provider.version != plan.tool_version
-            or provider.provider_environment_id != plan.provider_environment_id
-            or (str(provider.provider_python) if provider.provider_python is not None else None)
-            != plan.provider_python
-            or provider.provider_python_sha256 != plan.provider_python_sha256
-        ):
+        try:
+            ExecutableResolver().revalidate(plan.executable_binding)
+        except DomainError as error:
             raise DomainError(
                 ErrorCode.REVISION_CONFLICT,
                 "Inference provider executable changed after planning.",
                 remediation=("Plan the inference scenario again, then retry execution.",),
-            )
+            ) from error
+        if plan.provider_environment_id is not None:
+            runtime = ProviderRuntimeManager(
+                self.workspace.paths.records / "provider-runtimes",
+                broker=self.broker,
+            ).get(plan.provider_environment_id)
+            if (
+                runtime is None
+                or runtime.executable is None
+                or runtime.executable.resolve() != plan.executable_binding.canonical_target
+            ):
+                raise DomainError(
+                    ErrorCode.REVISION_CONFLICT,
+                    "The qualified inference provider environment changed after planning.",
+                    remediation=("Plan the inference scenario again, then retry execution.",),
+                )
         _scenario, server = self._resolve(plan.scenario_name, project)
-        server_digest, server_version = self._server_tool_identity(server)
-        if server_digest != plan.server_executable_digest or server_version != plan.server_version:
+        server_digest = self._server_tool_identity(server)
+        if server_digest != plan.server_executable_digest:
             raise DomainError(
                 ErrorCode.REVISION_CONFLICT,
                 "Managed server executable identity changed after planning.",
@@ -1495,7 +1054,7 @@ class InferenceReplayService:
                     details={"timeout_seconds": timeout_seconds},
                 )
             return timeout_seconds
-        # One absolute deadline for the whole replay. AIPerf trace replay can be
+        # One absolute deadline for the whole scenario. AIPerf trace replay can be
         # long, so default to a generous bounded value rather than the workload
         # default.
         return 1800.0 if scenario.provider is InferenceScenarioProvider.AIPERF else 600.0
@@ -1509,7 +1068,7 @@ class InferenceReplayService:
         output_path: Path,
     ) -> AIPerfProfileRequest | VllmBenchServeRequest | SglangBenchServingRequest:
         # AIPerf's fixed_schedule requires a Mooncake trace; without a declared
-        # trace_artifact_id the replay uses the tool's default schedule.
+        # trace_artifact_id the benchmark uses the tool's default schedule.
         fixed_schedule = scenario.trace_artifact_id is not None
         trace_path = (
             self.artifacts.get(scenario.trace_artifact_id).payload_path
@@ -1542,7 +1101,7 @@ class InferenceReplayService:
                     "sglang_bench scenarios require an sglang inference server",
                 )
             return SglangBenchServingRequest(
-                benchmark_python=Path(server.benchmark_python),
+                executable=executable,
                 base_url=server.base_url,
                 model=server.model,
                 tokenizer=server.tokenizer,
@@ -1577,7 +1136,7 @@ class InferenceReplayService:
 
     def _result(
         self,
-        plan: InferenceReplayPlan,
+        plan: InferenceScenarioPlan,
         run_id: str,
         outcome: ExecutionOutcome,
         probe: ExistingServerProbe,
@@ -1587,35 +1146,22 @@ class InferenceReplayService:
         artifact_run_ids: tuple[str, ...],
         extraction_limitations: tuple[str, ...],
         oracle: _OracleObservation,
-        execution_argv: tuple[str, ...],
-    ) -> InferenceReplayResult:
+    ) -> InferenceScenarioResult:
         process = outcome.process
         limitations: list[str] = []
         if not probe.health_ready:
-            limitations.append("Server health probe was not ready before replay.")
+            limitations.append("Server health probe was not ready before the benchmark.")
         if not probe.model_ids:
-            limitations.append("Server exposed no model ids before replay.")
+            limitations.append("Server exposed no model ids before the benchmark.")
         if process.timed_out:
-            limitations.append("Replay was terminated by the absolute deadline.")
+            limitations.append("The benchmark was terminated by the absolute deadline.")
         limitations.extend(extraction_limitations)
         limitations.append(plan.exploratory_reason)
-        return InferenceReplayResult(
-            result_id=digest_model(
-                {
-                    "plan_id": plan.plan_id,
-                    "exit_code": process.exit_code,
-                    "wall_time_ns": process.wall_time_ns,
-                    "output_path": str(output_path),
-                    "completed_at": datetime.now(UTC).isoformat(),
-                }
-            ),
+        return InferenceScenarioResult(
             run_id=run_id,
-            plan_id=plan.plan_id,
             scenario_name=plan.scenario_name,
             server_name=plan.server_name,
             provider=plan.provider,
-            argv=plan.argv,
-            executed_argv=execution_argv,
             output_path=str(output_path),
             output_path_retained=output_path.parent.exists(),
             termination=process.termination,
@@ -1648,7 +1194,7 @@ class InferenceReplayService:
             f"{omitted} additional limitations are recorded on the canonical run.",
         )
 
-    async def _managed_environment(self, plan: InferenceReplayPlan) -> EnvironmentRecord:
+    async def _managed_environment(self, plan: InferenceScenarioPlan) -> EnvironmentRecord:
         if plan.server_mode != "managed":
             return collect_environment()
         remaining = (plan.deadline_at - utc_now()).total_seconds()
@@ -1667,15 +1213,14 @@ class InferenceReplayService:
 
     def _start_run(
         self,
-        plan: InferenceReplayPlan,
+        plan: InferenceScenarioPlan,
         *,
         environment: EnvironmentRecord | None = None,
         execution_argv: tuple[str, ...] | None = None,
     ) -> tuple[RunManifest, EnvironmentRecord, SourceState]:
-        """Create the canonical execution run that owns normalized replay evidence."""
+        """Create the canonical execution run that owns normalized benchmark evidence."""
         environment = environment or collect_environment()
-        candidate = Path(plan.tool_executable) if plan.tool_executable is not None else None
-        executable = candidate if candidate is not None and candidate.is_file() else None
+        executable = plan.executable_binding.canonical_target
         source_state = collect_partial_source_state(self.workspace, executable=executable)
         protocol = self._protocol_identity(plan, environment=environment)
         protocol_json = json.dumps(
@@ -1699,7 +1244,7 @@ class InferenceReplayService:
             semantics=RunSemantics(
                 origin="internal",
                 adapter=plan.provider,
-                adapter_version=plan.tool_version,
+                adapter_version=plan.provider_version,
                 configuration={"protocol_id": protocol_id},
             ),
             command=CommandSpec(
@@ -1720,7 +1265,7 @@ class InferenceReplayService:
 
     def _protocol_identity(
         self,
-        plan: InferenceReplayPlan,
+        plan: InferenceScenarioPlan,
         *,
         environment: EnvironmentRecord,
     ) -> InferenceProtocolIdentity:
@@ -1732,7 +1277,7 @@ class InferenceReplayService:
                 {
                     "kind": "synthetic",
                     "provider": plan.provider,
-                    "provider_executable_digest": plan.tool_executable_digest,
+                    "provider_executable_digest": plan.executable_binding.identity.sha256,
                     "request_count": plan.num_prompts,
                     "endpoint_type": plan.endpoint_type,
                     "streaming": plan.streaming,
@@ -1769,17 +1314,16 @@ class InferenceReplayService:
                 )
         return InferenceProtocolIdentity(
             provider=plan.provider,
-            provider_version=plan.tool_version,
-            provider_executable_digest=plan.tool_executable_digest,
+            provider_version=plan.provider_version,
+            provider_executable_digest=plan.executable_binding.identity.sha256,
             provider_environment_id=plan.provider_environment_id,
-            provider_python_digest=plan.provider_python_sha256,
             trace=TraceIdentity(
                 format=(
                     "mooncake"
                     if plan.trace_artifact_id is not None
                     else "aiperf"
                     if plan.provider is InferenceScenarioProvider.AIPERF
-                    else "sglang.bench_serving"
+                    else "sglang.benchmark.serving"
                     if plan.provider is InferenceScenarioProvider.SGLANG_BENCH
                     else "vllm"
                 ),
@@ -1788,12 +1332,12 @@ class InferenceReplayService:
                     if plan.trace_artifact_id is not None
                     else "aiperf"
                     if plan.provider is InferenceScenarioProvider.AIPERF
-                    else "sglang.bench_serving"
+                    else "sglang.benchmark.serving"
                     if plan.provider is InferenceScenarioProvider.SGLANG_BENCH
                     else "vllm"
                 ),
                 producer_version=(
-                    None if plan.trace_artifact_id is not None else plan.tool_version
+                    None if plan.trace_artifact_id is not None else plan.provider_version
                 ),
                 artifact_digest=trace_digest,
                 request_count=plan.num_prompts if plan.trace_artifact_id is None else None,
@@ -1828,7 +1372,7 @@ class InferenceReplayService:
                 ),
                 managed_server_command_digest=managed_command_digest,
                 server_executable_digest=plan.server_executable_digest,
-                server_version=plan.server_version,
+                server_version=None,
             ),
             hardware=self._hardware_identity(environment),
             profiler=ProfilerState(),
@@ -1879,7 +1423,7 @@ class InferenceReplayService:
             ExecutionStatus.TIMED_OUT
             if process.timed_out
             else ExecutionStatus.SUCCEEDED
-            if process.exit_code == 0
+            if process_exit_code(process.termination) == 0
             else ExecutionStatus.FAILED
         )
         limitations = tuple(dict.fromkeys((*run.limitations, *extraction_limitations)))
@@ -1943,7 +1487,7 @@ class InferenceReplayService:
                 ),
                 "artifacts": registrations,
                 "limitations": tuple(
-                    dict.fromkeys((*run.limitations, "Inference replay was cancelled."))
+                    dict.fromkeys((*run.limitations, "Inference benchmark was cancelled."))
                 ),
             }
         )
@@ -2030,7 +1574,7 @@ class InferenceReplayService:
 
     def _extract_outputs(
         self,
-        plan: InferenceReplayPlan,
+        plan: InferenceScenarioPlan,
         evidence_run_id: str,
         preserved: tuple[tuple[str, str, str], ...],
     ) -> tuple[str, ...]:
@@ -2087,7 +1631,7 @@ class InferenceReplayService:
 
     def _preserve_outputs(
         self,
-        plan: InferenceReplayPlan,
+        plan: InferenceScenarioPlan,
         output: BoundDirectory,
     ) -> tuple[
         tuple[str, ...],
@@ -2163,7 +1707,7 @@ class InferenceReplayService:
                                 else plan.provider
                             ),
                             producer_version=(
-                                "flameox.oracle-receipt.v1" if is_oracle else plan.tool_version
+                                "flameox.oracle-receipt.v1" if is_oracle else plan.provider_version
                             ),
                         )
                     )
@@ -2179,7 +1723,7 @@ class InferenceReplayService:
 
     def _preserve_outputs_safely(
         self,
-        plan: InferenceReplayPlan,
+        plan: InferenceScenarioPlan,
         output: BoundDirectory,
     ) -> tuple[
         tuple[str, ...],

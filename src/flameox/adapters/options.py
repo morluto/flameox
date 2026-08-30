@@ -8,9 +8,12 @@ from typing import Annotated, Any, Literal, cast
 
 from pydantic import Field, JsonValue, StringConstraints, field_validator, model_validator
 
-from flameox.adapters.kernel_build import KernelBuildTarget
+from flameox.adapters.memray_options import MemrayCaptureOptions, memray_capture_options
+from flameox.adapters.nsight_compute_options import NsightComputeOptions
+from flameox.adapters.torch_benchmark import TorchBenchmarkOptions, torch_benchmark_options
 from flameox.adapters.torch_profiler import torch_profiler_options
 from flameox.domain import CaptureScope, DomainError, ErrorCode, RunSemantics, SemanticOption
+from flameox.domain.compiler_build import CompilerTarget
 from flameox.models import ContractModel
 
 BoundedFilter = Annotated[
@@ -68,54 +71,6 @@ class NvbenchOptions(ContractModel):
     min_samples: Annotated[int, Field(ge=1, le=1_000_000)] | None = None
     timeout: Annotated[float, Field(gt=0, le=86_400)] | None = None
     devices: Annotated[str, StringConstraints(min_length=1, max_length=200)] | None = None
-
-
-class NsightComputeOptions(ContractModel):
-    """Bounded selections accepted by the managed Nsight Compute capture."""
-
-    set: (
-        Annotated[
-            str,
-            StringConstraints(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$"),
-        ]
-        | None
-    ) = "basic"
-    sections: (
-        Annotated[
-            tuple[
-                Annotated[
-                    str,
-                    StringConstraints(
-                        min_length=1,
-                        max_length=100,
-                        pattern=r"^[A-Za-z0-9_.-]+$",
-                    ),
-                ],
-                ...,
-            ],
-            Field(min_length=1, max_length=32),
-        ]
-        | None
-    ) = None
-    kernel_name: BoundedFilter | None = None
-    launch_skip: Annotated[int, Field(ge=0, le=1_000_000)] = 0
-    launch_count: Annotated[int, Field(ge=1, le=1_000_000)] = 1
-    replay_mode: Literal["kernel", "application", "range", "app-range"] = "kernel"
-
-    @model_validator(mode="before")
-    @classmethod
-    def explicit_sections_replace_default_set(cls, value: Any) -> Any:
-        if isinstance(value, dict) and value.get("sections") is not None and "set" not in value:
-            return {**value, "set": None}
-        return value
-
-    @model_validator(mode="after")
-    def one_profile_selection(self) -> NsightComputeOptions:
-        if (self.set is None) == (self.sections is None):
-            raise ValueError("exactly one of set or sections must be selected")
-        if self.sections is not None and len(set(self.sections)) != len(self.sections):
-            raise ValueError("sections must not contain duplicates")
-        return self
 
 
 NsightSystemsTraceDomain = Literal["cuda", "nvtx", "osrt", "nccl"]
@@ -211,7 +166,7 @@ class TritonCompilerOptions(ContractModel):
     dump_subdir: _BoundedSubdir = "triton-dumps"
     kernel_dump: bool = True
     reproducer_filename: _BoundedFilename | None = None
-    target: KernelBuildTarget | None = None
+    target: CompilerTarget | None = None
 
 
 CuteDslKeepToken = Literal["ir", "ir-debug", "ptx", "cubin", "sass", "llvm", "all"]
@@ -226,7 +181,7 @@ class CuteCompilerOptions(ContractModel):
     """
 
     dump_subdir: _BoundedSubdir = "cute-dsl-dumps"
-    target: KernelBuildTarget | None = None
+    target: CompilerTarget | None = None
     keep_allowlist: Annotated[
         tuple[CuteDslKeepToken, ...],
         Field(min_length=1, max_length=20),
@@ -246,10 +201,12 @@ class CuteCompilerOptions(ContractModel):
 _ADAPTER_OPTION_MODELS: dict[str, type[ContractModel]] = {
     "compute-sanitizer": ComputeSanitizerOptions,
     "cute.compiler": CuteCompilerOptions,
+    "memray": MemrayCaptureOptions,
     "nsight.compute": NsightComputeOptions,
     "nsight.systems": NsightSystemsOptions,
     "nvbench": NvbenchOptions,
     "rocprofv3": Rocprofv3Options,
+    "torch.benchmark": TorchBenchmarkOptions,
     "triton.compiler": TritonCompilerOptions,
 }
 
@@ -282,6 +239,9 @@ def bind_adapter_options(
     if adapter == "torch.profiler":
         selected = torch_profiler_options(cast(dict[str, object] | None, options))
         return cast(dict[str, JsonValue], selected.model_dump(mode="json"))
+    if adapter == "torch.benchmark":
+        torch_benchmark = torch_benchmark_options(cast(dict[str, object] | None, options))
+        return cast(dict[str, JsonValue], torch_benchmark.model_dump(mode="json"))
     if adapter == "compute-sanitizer":
         raw = dict(options or {})
         suppression = raw.get("suppression_file")
@@ -315,6 +275,40 @@ def run_semantics(
 ) -> RunSemantics:
     """Build the durable run authority from already validated effective options."""
 
+    if adapter == "pyperf":
+        return RunSemantics(
+            origin="capture",
+            adapter=adapter,
+            adapter_version=adapter_version,
+            scope=CaptureScope(
+                process_scope=SemanticOption(
+                    name="sample_scope",
+                    value="fresh_process_invocation",
+                )
+            ),
+        )
+
+    if adapter == "memray":
+        selected = memray_capture_options(cast(dict[str, object], effective_options))
+        return RunSemantics(
+            origin="capture",
+            adapter=adapter,
+            adapter_version=adapter_version,
+            configuration={
+                "native_traces": selected.native_traces,
+                "trace_python_allocators": selected.trace_python_allocators,
+            },
+            scope=CaptureScope(
+                mode=SemanticOption(name="mode", value=selected.mode),
+                process_scope=SemanticOption(name="process_scope", value="workload_process"),
+                bounds={"warmup_count": selected.warmup_count},
+                filters={
+                    "thread_scope": "all_threads",
+                    **({"region": selected.region} if selected.region is not None else {}),
+                },
+            ),
+        )
+
     mode_key = {
         "compute-sanitizer": "tool",
         "nsight.compute": "replay_mode",
@@ -331,6 +325,7 @@ def run_semantics(
         "nsight.systems": ("capture_range_end",),
         "nvbench": ("min_samples", "timeout"),
         "torch.profiler": ("wait", "warmup", "active", "repeat"),
+        "torch.benchmark": ("min_run_time_seconds", "max_samples"),
     }.get(adapter, ())
     filter_keys = {
         "compute-sanitizer": (

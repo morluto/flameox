@@ -8,14 +8,12 @@ from pydantic import Field, TypeAdapter
 from flameox.domain import DomainError, ErrorCode, digest_model
 from flameox.domain.models import utc_now
 from flameox.models import ContractModel
-from flameox.storage.control_plane import ControlPlane, canonical_json
+from flameox.storage.control_plane import ControlPlane, _serialize_control_payload
 from flameox.storage.workspace import Workspace
 
 
 class _RetentionIntent(ContractModel):
-    schema_version: Literal[1] = 1
     intent_id: str
-    revision: int = Field(ge=1)
     corpus_commit_id: str
     owner_kind: str
     owner_id: str
@@ -25,14 +23,12 @@ class _RetentionIntent(ContractModel):
 
 class PendingRetentionIntent(_RetentionIntent):
     state: Literal["pending"] = "pending"
-    revision: Literal[1] = 1
 
     def complete(self, *, materialized_commit_id: str) -> CompletedRetentionIntent:
         return CompletedRetentionIntent.model_validate(
             {
                 **self.model_dump(mode="python"),
                 "state": "completed",
-                "revision": 2,
                 "materialized_commit_id": materialized_commit_id,
                 "completed_at": utc_now(),
             }
@@ -41,7 +37,6 @@ class PendingRetentionIntent(_RetentionIntent):
 
 class CompletedRetentionIntent(_RetentionIntent):
     state: Literal["completed"] = "completed"
-    revision: Literal[2] = 2
     materialized_commit_id: str
     completed_at: datetime
 
@@ -78,7 +73,6 @@ class RetentionIntentStore:
     ) -> RetentionIntent:
         intent_id = digest_model(
             {
-                "schema_version": 1,
                 "corpus_commit_id": corpus_commit_id,
                 "owner_kind": owner_kind,
                 "owner_id": owner_id,
@@ -97,8 +91,8 @@ class RetentionIntentStore:
             self.control_plane.create_record(
                 kind=self._KIND,
                 record_id=intent_id,
-                revision=pending.revision,
-                payload_json=canonical_json(pending.model_dump(mode="json")),
+                revision=1,
+                payload_json=_serialize_control_payload(pending.model_dump(mode="json")),
             )
             return pending
         except DomainError as error:
@@ -137,9 +131,9 @@ class RetentionIntentStore:
             self.control_plane.append_record(
                 kind=self._KIND,
                 record_id=intent.intent_id,
-                expected_revision=intent.revision,
-                next_revision=completed.revision,
-                payload_json=canonical_json(completed.model_dump(mode="json")),
+                expected_revision=1,
+                next_revision=2,
+                payload_json=_serialize_control_payload(completed.model_dump(mode="json")),
             )
             return completed
         except DomainError as error:

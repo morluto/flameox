@@ -9,20 +9,22 @@ import pytest
 from pydantic import ValidationError
 
 from flameox import __version__
-from flameox.application import (
+from flameox.application.artifacts import ArtifactService
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportService,
-    PlanReductionRequest,
-    ReductionLimits,
-    ReductionMinimality,
-    ReductionResult,
-    ReductionService,
 )
-from flameox.application.artifacts import ArtifactService
 from flameox.application.projections import ProjectionCoordinator
 from flameox.application.provider_runtime import (
     ProviderRuntime,
     ProviderRuntimeReceipt,
+)
+from flameox.application.reduction_contracts import ReductionMinimality
+from flameox.application.reductions import (
+    PlanReductionRequest,
+    ReductionLimits,
+    ReductionResult,
+    ReductionService,
 )
 from flameox.domain import ArtifactKind, CapabilityExtra, DomainError, ErrorCode, digest_model
 from flameox.storage import ArtifactStore, Workspace
@@ -103,7 +105,6 @@ raise SystemExit(0)
 def _configure(project: Path, predicate_code: str) -> None:
     (project / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.predicate]
 argv = ["python", "-c", {json.dumps(predicate_code)}]
 cwd = "."
@@ -260,10 +261,13 @@ async def test_shrinkray_reduction_preserves_receipts_and_revalidates_final_cand
     head_before_reuse = workspace.corpus.read_head().commit_id
     assert await service.execute(plan.plan_id) == result
     assert workspace.corpus.read_head().commit_id == head_before_reuse
-    assert sum(
-        item.registration_id == result.reduced_registration_id
-        for item in service.runs.read(source_run_id).artifacts
-    ) == 1
+    assert (
+        sum(
+            item.registration_id == result.reduced_registration_id
+            for item in service.runs.read(source_run_id).artifacts
+        )
+        == 1
+    )
 
 
 @pytest.mark.anyio
@@ -301,9 +305,7 @@ async def test_failed_reduction_operation_can_be_retried(
         await service.execute(plan.plan_id)
     result = await service.execute(plan.plan_id)
 
-    assert result.reduction_id == digest_model(
-        {"operation": "reduction", "plan_id": plan.plan_id}
-    )
+    assert result.reduction_id == digest_model({"operation": "reduction", "plan_id": plan.plan_id})
     assert attempts == 2
 
 
@@ -361,10 +363,13 @@ async def test_completed_reduction_reconciles_projection_failures_without_rerunn
 
     assert provider_calls == 1
     assert result.reduced_registration_id is not None
-    assert sum(
-        item.registration_id == result.reduced_registration_id
-        for item in service.runs.read(source_run_id).artifacts
-    ) == 1
+    assert (
+        sum(
+            item.registration_id == result.reduced_registration_id
+            for item in service.runs.read(source_run_id).artifacts
+        )
+        == 1
+    )
     assert result.final_artifact_id is not None
     metadata = ArtifactService(workspace).get(result.final_artifact_id)
     assert metadata.total_reductions == 1
@@ -424,8 +429,7 @@ async def test_completed_reduction_reconciles_a_run_projection_after_domain_comm
     assert result.final_artifact_id is not None
     metadata = ArtifactService(workspace).get(result.final_artifact_id)
     assert any(
-        item.registration_id == result.reduced_registration_id
-        for item in metadata.registrations
+        item.registration_id == result.reduced_registration_id for item in metadata.registrations
     )
 
 

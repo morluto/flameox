@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from flameox import __version__
-from flameox.application import CapabilityService
+from flameox.application.capabilities import CapabilityService
 from flameox.application.provider_runtime import ProviderRuntimeManager
 from flameox.domain import (
     CapabilityExtra,
@@ -95,10 +95,10 @@ class _FailingProviderBroker(_ProviderBroker):
         self.phase = phase
 
     def run_sync(self, request: ExecutionRequest, **kwargs: Any) -> ExecutionOutcome:
-        is_failure = (self.phase == "build" and request.argv[1] == "build") or (
-            self.phase == "install" and request.argv[1:3] == ("pip", "install")
-        ) or (
-            self.phase == "resolve" and request.argv[1:3] == ("pip", "compile")
+        is_failure = (
+            (self.phase == "build" and request.argv[1] == "build")
+            or (self.phase == "install" and request.argv[1:3] == ("pip", "install"))
+            or (self.phase == "resolve" and request.argv[1:3] == ("pip", "compile"))
         )
         if not is_failure:
             return super().run_sync(request, **kwargs)
@@ -343,9 +343,7 @@ def test_provider_setup_auto_detects_an_editable_checkout(
         @staticmethod
         def read_text(filename: str) -> str | None:
             assert filename == "direct_url.json"
-            return json.dumps(
-                {"url": source.as_uri(), "dir_info": {"editable": True}}
-            )
+            return json.dumps({"url": source.as_uri(), "dir_info": {"editable": True}})
 
     monkeypatch.setattr(metadata, "distribution", lambda _name: _Distribution())
 

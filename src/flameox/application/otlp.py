@@ -3,34 +3,29 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import ConfigDict, computed_field
+from pydantic import model_validator
 
 from flameox.action_graph import manual_action
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
 from flameox.application.evidence_rows import _json
-from flameox.application.projections import ProjectionCoordinator
 from flameox.domain import (
     ArtifactKind,
     DomainError,
     ErrorCode,
-    ProjectionIntentSpec,
-    digest_model,
     missing_artifact_input,
-    projection_intent_id,
 )
-from flameox.evidence import publication_operation_digest
+from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.storage import ArtifactStore, RunStore, Workspace
 from flameox.workers.otlp_contract import OTLP_WORKER, OtlpWorkerRequest, OtlpWorkerResult
 
 
 class OtlpExtractionResult(ContractModel):
-    model_config = ConfigDict(json_schema_mode_override="serialization")
-
     run_id: str
     artifact_id: str
+    status: Literal["complete", "row_limit_exceeded"]
     evidence_generation_id: str | None = None
     resource_count: int = 0
     scope_count: int = 0
@@ -39,10 +34,11 @@ class OtlpExtractionResult(ContractModel):
     link_count: int = 0
     limitations: tuple[str, ...] = ()
 
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def failed(self) -> bool:
-        return self.evidence_generation_id is None
+    @model_validator(mode="after")
+    def generation_matches_status(self) -> OtlpExtractionResult:
+        if (self.status == "complete") != (self.evidence_generation_id is not None):
+            raise ValueError("complete OTLP normalization requires an evidence generation")
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +67,7 @@ class OtlpTraceService:
         self.workspace = workspace
         self.artifacts = ArtifactStore(workspace)
         self.runs = RunStore(workspace)
-        self.projections = ProjectionCoordinator(workspace)
+        self.publisher = GenerationPublisher(workspace)
         self.worker = IsolatedWorkerHarness(workspace)
 
     def extract_otlp_trace(
@@ -138,6 +134,7 @@ class OtlpTraceService:
                 return OtlpExtractionResult(
                     run_id=run_id,
                     artifact_id=registration.artifact_id,
+                    status="row_limit_exceeded",
                     resource_count=response.counts["resources"],
                     scope_count=response.counts["scopes"],
                     span_count=response.counts["spans"],
@@ -157,6 +154,7 @@ class OtlpTraceService:
             return OtlpExtractionResult(
                 run_id=run_id,
                 artifact_id=registration.artifact_id,
+                status="row_limit_exceeded",
                 resource_count=error.counts["resources"],
                 scope_count=error.counts["scopes"],
                 span_count=error.counts["spans"],
@@ -187,52 +185,21 @@ class OtlpTraceService:
             for row in table_rows:
                 row["run_id"] = run_id
                 row["artifact_id"] = registration.artifact_id
-        intent_id = projection_intent_id(
-            workspace_id=self.workspace.identity.workspace_id,
-            domain_kind="artifact_registration",
-            domain_id=registration.registration_id,
-            domain_revision=run.revision,
-            projection_kind="extract.otlp",
+        published = self.publisher.publish_rows_idempotent(
+            rows,
+            publisher="flameox.otlp",
+            publisher_version=self.extractor_version,
+            input_run_ids=(run_id,),
+            input_artifact_ids=(registration.artifact_id,),
+            operation_identity={
+                "registration_id": registration.registration_id,
+                "run_revision": run.revision,
+            },
         )
-        operation_identity = {"projection_intent_id": intent_id}
-        intent = self.projections.stage(
-            ProjectionIntentSpec(
-                intent_id=intent_id,
-                workspace_id=self.workspace.identity.workspace_id,
-                domain_kind="artifact_registration",
-                domain_id=registration.registration_id,
-                domain_revision=run.revision,
-                domain_digest=digest_model(
-                    {
-                        "run_digest": digest_model(run.model_dump(mode="json")),
-                        "registration": registration.model_dump(mode="json"),
-                    }
-                ),
-                projection_kind="extract.otlp",
-                publisher="flameox.otlp",
-                publisher_version=self.extractor_version,
-                input_run_ids=(run_id,),
-                input_artifact_ids=(registration.artifact_id,),
-                expected_tables=tuple(rows),
-                operation_digest=publication_operation_digest(
-                    publisher="flameox.otlp",
-                    publisher_version=self.extractor_version,
-                    input_run_ids=(run_id,),
-                    input_artifact_ids=(registration.artifact_id,),
-                    operation_identity=operation_identity,
-                ),
-                replay_context={
-                    "run_id": run_id,
-                    "artifact_id": registration.artifact_id,
-                    "registration_id": registration.registration_id,
-                    "media_type": registration.media_type,
-                },
-            )
-        )
-        published = self.projections.publish_rows(intent.intent_id, rows)
         return OtlpExtractionResult(
             run_id=run_id,
             artifact_id=registration.artifact_id,
+            status="complete",
             evidence_generation_id=published.manifest.generation_id,
             resource_count=len(parsed.resources),
             scope_count=len(parsed.scopes),

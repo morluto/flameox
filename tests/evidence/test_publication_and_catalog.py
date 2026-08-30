@@ -15,12 +15,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from flameox.application import CompactionService, IntegrityLevel, IntegrityService
 from flameox.atomic import atomic_write_json
 from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode
-from flameox.evidence import GenerationPublisher, schema_for
-from flameox.storage import CorpusCommit, Workspace
+from flameox.evidence import GenerationPublisher, schema_for, table_names
+from flameox.storage import CorpusCommit, GenerationManifest, Workspace
 from flameox.storage.locks import RETENTION_EXCLUSIVE, WorkspaceLockIntent
 
 pytestmark = [pytest.mark.integration, pytest.mark.serial]
@@ -39,8 +38,6 @@ async def test_async_prepared_publication_cancellation_removes_staging(
 
     async def prepare(
         _root: Path,
-        _generation_id: str,
-        _published_at: datetime,
     ) -> dict[str, Path]:
         entered.set()
         await asyncio.Event().wait()
@@ -80,7 +77,6 @@ def run_row(run_id: str) -> dict[str, object]:
         "run_semantic_id": "sha256:" + "f" * 64,
         "exit_code": None,
         "wall_time_ns": None,
-        "manifest_path": "runs/run/manifest.json",
     }
 
 
@@ -110,6 +106,16 @@ def test_publication_is_visible_only_through_new_corpus_commit(tmp_path: Path) -
         assert new_snapshot.execute(
             "SELECT count(*) FROM runtime_writable_root_growth"
         ).fetchone() == (0,)
+
+
+def test_empty_snapshot_preserves_struct_evidence_columns(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+
+    with Catalog(workspace).open_snapshot() as snapshot:
+        fields = snapshot.execute("DESCRIBE inference_requests").fetchall()
+
+    outcome = next(field for field in fields if field[0] == "outcome")
+    assert outcome[1] == "STRUCT(kind VARCHAR, error_type VARCHAR, error_code VARCHAR)"
 
 
 def test_current_runs_uses_domain_revision_not_projection_completion_order(
@@ -200,7 +206,7 @@ def test_idempotent_publication_reuses_or_supersedes_exact_operation(tmp_path: P
     assert repeated.manifest.generation_id == first.manifest.generation_id
     assert changed.manifest.supersedes == (first.manifest.generation_id,)
     assert changed.manifest.operation_digest != first.manifest.operation_digest
-    assert len(workspace.corpus.read_head().generation_manifests) == 1
+    assert len(workspace.corpus.read_head().generation_ids) == 1
     with Catalog(workspace).open_snapshot() as snapshot:
         assert snapshot.execute("SELECT count(*) FROM runs").fetchone() == (1,)
 
@@ -217,71 +223,208 @@ def test_rogue_parquet_file_is_invisible_without_manifest(tmp_path: Path) -> Non
         assert snapshot.execute("SELECT count(*) FROM runs").fetchone() == (0,)
 
 
-def test_catalog_rejects_an_older_evidence_schema_major(tmp_path: Path) -> None:
+def test_catalog_rejects_parquet_schema_drift(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     published = GenerationPublisher(workspace).publish_rows(
         {"frames": []},
         publisher="test",
         publisher_version="1",
     )
-    manifest_path = (
-        workspace.paths.generations / published.manifest.generation_id / "manifest.json"
+    path = workspace.paths.root / published.manifest.files[0].path
+    table = pq.read_table(path).append_column(
+        "unexpected_column",
+        pa.array([], type=pa.int32()),
     )
-    manifest = json.loads(manifest_path.read_text())
-    manifest["files"][0]["schema_major"] = 2
-    atomic_write_json(manifest_path, manifest)
+    pq.write_table(table, path)
 
     with pytest.raises(DomainError) as raised, Catalog(workspace).open_snapshot():
         pass
 
     assert raised.value.code is ErrorCode.EVIDENCE_SCHEMA_MISMATCH
-    assert raised.value.details == {
-        "table": "frames",
-        "observed_schema_major": 2,
-        "supported_schema_major": 5,
-    }
 
 
-def test_catalog_projects_additive_trial_columns_for_old_generations(tmp_path: Path) -> None:
+def test_manifest_owns_normalized_provenance_and_physical_rows_do_not_repeat_it(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    published = GenerationPublisher(workspace).publish_rows(
+        {"runs": [run_row("run-1")]},
+        publisher="test",
+        publisher_version="1",
+    )
+    path = workspace.paths.root / published.manifest.files[0].path
+    physical_columns = set(pq.read_schema(path).names)
+    assert physical_columns.isdisjoint(
+        {
+            "evidence_generation_id",
+            "published_at",
+            "extractor_name",
+            "extractor_version",
+        }
+    )
+    assert all(
+        set(schema_for(name).names).isdisjoint(
+            {"evidence_generation_id", "published_at", "extractor_name"}
+        )
+        for name in table_names()
+    )
+    assert "extractor_version" in schema_for("adapter_extractions").names
+
+    with Catalog(workspace).open_snapshot() as snapshot:
+        provenance = snapshot.execute(
+            "SELECT evidence_generation_id, published_at, extractor_name, extractor_version "
+            "FROM runs WHERE run_id = 'run-1'"
+        ).fetchone()
+    assert provenance == (
+        published.manifest.generation_id,
+        published.manifest.created_at,
+        "test",
+        "1",
+    )
+
+
+def test_catalog_preserves_table_owned_extractor_version(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     published = GenerationPublisher(workspace).publish_rows(
         {
-            "trials": [
+            "adapter_extractions": [
                 {
-                    "trial_id": "trial-1",
-                    "experiment_id": "experiment-1",
-                    "variant_id": "variant-1",
-                    "run_id": None,
-                    "combination_id": "combination-1",
-                    "factors_json": '{"treatment":"base"}',
-                    "block_id": "block-1",
-                    "order_in_block": 1,
-                    "parameter_name": None,
-                    "parameter_value_int": None,
-                    "parameter_value_float": None,
-                    "attempt": 1,
-                    "outcome": "succeeded",
-                    "exclusion_reason": None,
-                    "validation_status": "not_requested",
-                    "failure_class": "none",
-                    "oracle_receipt_json": None,
-                    "oracle_receipt_artifact_id": None,
+                    "extraction_id": "extraction-1",
+                    "run_id": "run-1",
+                    "input_artifact_id": "sha256:" + "a" * 64,
+                    "adapter": "adapter",
+                    "adapter_package_identity": "adapter-package",
+                    "extractor_version": "provider-3",
+                    "summary_json": "{}",
+                    "limitations": [],
                 }
             ]
         },
         publisher="test",
         publisher_version="1",
     )
-    path = workspace.paths.root / published.manifest.files[0].path
-    table = pq.read_table(path).drop(["oracle_receipt_json", "oracle_receipt_artifact_id"])
-    pq.write_table(table, path)
 
-    Catalog(workspace).rebuild()
     with Catalog(workspace).open_snapshot() as snapshot:
-        row = snapshot.execute(
-            "SELECT trial_id, oracle_receipt_json, oracle_receipt_artifact_id FROM trials"
+        provenance = snapshot.execute(
+            "SELECT evidence_generation_id, published_at, extractor_name, extractor_version "
+            "FROM adapter_extractions"
         ).fetchone()
-    assert row == ("trial-1", None, None)
+
+    assert provenance == (
+        published.manifest.generation_id,
+        published.manifest.created_at,
+        "test",
+        "provider-3",
+    )
+
+
+def test_catalog_projects_manifest_provenance_for_each_generation_file(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    first = GenerationPublisher(workspace).publish_rows(
+        {"runs": [run_row("run-1")]},
+        publisher="first-publisher",
+        publisher_version="1",
+    )
+    second = GenerationPublisher(workspace).publish_rows(
+        {"runs": [run_row("run-2")]},
+        publisher="second-publisher",
+        publisher_version="2",
+    )
+
+    with Catalog(workspace).open_snapshot() as snapshot:
+        provenance = snapshot.execute(
+            "SELECT run_id, evidence_generation_id, published_at, "
+            "extractor_name, extractor_version FROM runs ORDER BY run_id"
+        ).fetchall()
+
+    assert provenance == [
+        (
+            "run-1",
+            first.manifest.generation_id,
+            first.manifest.created_at,
+            "first-publisher",
+            "1",
+        ),
+        (
+            "run-2",
+            second.manifest.generation_id,
+            second.manifest.created_at,
+            "second-publisher",
+            "2",
+        ),
+    ]
+
+
+def test_snapshot_rejects_manifest_replacement_behind_committed_generation_id(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    published = GenerationPublisher(workspace).publish_rows(
+        {"runs": [run_row("run-1")]},
+        publisher="test",
+        publisher_version="1",
+    )
+    manifest_path = workspace.corpus.generation_path(published.manifest.generation_id)
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest_path.name == f"{published.manifest.generation_id.removeprefix('sha256:')}.json"
+    assert "generation_id" not in manifest
+    assert workspace.corpus.read_head().generation_ids == (published.manifest.generation_id,)
+    manifest["publisher"] = "replacement"
+    atomic_write_json(manifest_path, manifest)
+
+    with pytest.raises(DomainError) as raised, Catalog(workspace).open_snapshot():
+        pass
+
+    assert raised.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+
+
+def test_catalog_rejects_manifest_row_count_mismatch(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    published = GenerationPublisher(workspace).publish_rows(
+        {"runs": [run_row("run-1"), run_row("run-2")]},
+        publisher="test",
+        publisher_version="1",
+    )
+    manifest_path = workspace.corpus.generation_path(published.manifest.generation_id)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"][0]["row_count"] = 1
+    atomic_write_json(manifest_path, manifest)
+
+    with pytest.raises(DomainError) as raised, Catalog(workspace).open_snapshot():
+        pass
+
+    assert raised.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+
+
+def test_catalog_rejects_manifest_byte_length_mismatch(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    published = GenerationPublisher(workspace).publish_rows(
+        {"runs": [run_row("run-1")]},
+        publisher="test",
+        publisher_version="1",
+    )
+    manifest_path = workspace.corpus.generation_path(published.manifest.generation_id)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"][0]["byte_length"] += 1
+    atomic_write_json(manifest_path, manifest)
+
+    with pytest.raises(DomainError) as raised, Catalog(workspace).open_snapshot():
+        pass
+
+    assert raised.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
+
+
+def test_generation_manifest_rejects_persisted_derived_identity(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    published = GenerationPublisher(workspace).publish_rows(
+        {"frames": []},
+        publisher="test",
+        publisher_version="1",
+    )
+    manifest = published.manifest.model_dump(mode="json")
+    manifest["generation_id"] = published.manifest.generation_id
+    with pytest.raises(ValueError):
+        GenerationManifest.model_validate(manifest)
 
 
 def test_snapshot_connection_cannot_read_outside_workspace(tmp_path: Path) -> None:
@@ -556,55 +699,9 @@ def test_concurrent_publishers_retry_contention_without_losing_generations(
 
     assert len(set(commit_ids)) == 8
     head = workspace.corpus.read_head()
-    assert len(head.generation_manifests) == 8
+    assert len(head.generation_ids) == 8
     with Catalog(workspace).open_snapshot() as snapshot:
         assert snapshot.execute("SELECT count(*) FROM investigations").fetchone() == (8,)
-
-
-@pytest.mark.anyio
-async def test_compaction_replaces_reachable_small_generations(
-    tmp_path: Path,
-) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    publisher = GenerationPublisher(workspace)
-    for index in range(3):
-        publisher.publish_rows(
-            {"runs": [run_row(f"run-{index}")]},
-            publisher="test",
-            publisher_version="1",
-        )
-    with Catalog(workspace).open_snapshot() as snapshot:
-        provenance_before = snapshot.execute(
-            "SELECT run_id, evidence_generation_id, published_at, extractor_name, "
-            "extractor_version FROM runs ORDER BY run_id"
-        ).fetchall()
-
-    result = await CompactionService(workspace).compact()
-
-    assert result.superseded_generation_count == 3
-    assert result.reachable_file_count_before == 3
-    assert result.reachable_file_count_after == 1
-    assert len(workspace.corpus.read_head().generation_manifests) == 1
-    assert IntegrityService(workspace).validate(IntegrityLevel.QUICK).valid
-    with Catalog(workspace).open_snapshot() as snapshot:
-        assert snapshot.execute("SELECT count(*) FROM runs").fetchone() == (3,)
-        assert (
-            snapshot.execute(
-                "SELECT run_id, evidence_generation_id, published_at, extractor_name, "
-                "extractor_version FROM runs ORDER BY run_id"
-            ).fetchall()
-            == provenance_before
-        )
-
-
-@pytest.mark.anyio
-async def test_noop_compaction_preserves_catalog_and_corpus(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    Catalog(workspace).rebuild()
-
-    result = await CompactionService(workspace).compact()
-
-    assert result.output_corpus_commit_id == result.input_corpus_commit_id
 
 
 def test_generation_row_quota_is_enforced_before_staging(tmp_path: Path) -> None:
@@ -728,7 +825,7 @@ def test_publication_crashes_before_head_never_expose_partial_generation(
 
     assert workspace.corpus.read_head().commit_id == original_head
     assert not list(workspace.paths.evidence.rglob("*.parquet"))
-    assert not list(workspace.paths.generations.rglob("manifest.json"))
+    assert not list(workspace.paths.generations.glob("*.json"))
     with Catalog(workspace).open_snapshot(original_head) as snapshot:
         assert snapshot.execute("SELECT count(*) FROM runs").fetchone() == (0,)
 

@@ -12,14 +12,17 @@ from typing import cast
 import pytest
 
 from flameox.action_graph import ActionId, tool_action
-from flameox.adapters import MemrayExtractor
-from flameox.adapters.memray import memray_extraction_limits
+from flameox.adapters.memray import MemrayExtractor, memray_extraction_limits
 from flameox.analysis import RecipeService
-from flameox.application import DrilldownService, ImportArtifactRequest, ImportService
+from flameox.application.drilldown import DrilldownService
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.evidence import GenerationPublisher
-from flameox.storage import ArtifactStore, GenerationManifest, Workspace
+from flameox.storage import ArtifactStore, Workspace
 
 pytestmark = [pytest.mark.integration, pytest.mark.optional, pytest.mark.requires_memray]
 
@@ -191,7 +194,7 @@ async def test_memray_extractor_preserves_native_capture_and_names_memory_concep
     }
     assert result.coverage.allocation_volume.status == "available"
     assert result.coverage.temporary.status == "available"
-    assert result.temporary_allocation_threshold == 1
+    assert result.limits.temporary_allocation_threshold == 1
     assert edge is not None
     assert stack is not None
     assert edge[2] in {"memory.allocated", "memory.high_watermark", "memory.retained_end"}
@@ -290,10 +293,10 @@ async def test_memray_extractor_preserves_native_capture_and_names_memory_concep
         "memory.allocated_bytes",
         "memory.allocation_operations",
         "memory.capture_records",
-            "memory.peak",
-            "memory.retained_end",
-            "memory.temporary",
-        }
+        "memory.peak",
+        "memory.retained_end",
+        "memory.temporary",
+    }
     assert analysis.hotspots
     assert all(item.frame_id != "later-frame" for item in analysis.hotspots)
 
@@ -470,10 +473,8 @@ async def test_memray_limits_report_bounded_coverage(
         limits=memray_extraction_limits(workspace),
     )
     active_generations = [
-        GenerationManifest.model_validate_json(
-            (workspace.paths.root / relative_path).read_text()
-        )
-        for relative_path in workspace.corpus.read_head().generation_manifests
+        workspace.corpus.read_generation(generation_id)
+        for generation_id in workspace.corpus.read_head().generation_ids
     ]
     assert [item.generation_id for item in active_generations if item.publisher == "memray"] == [
         second.evidence_generation_id

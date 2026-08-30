@@ -13,7 +13,6 @@ from flameox.storage import ArtifactStore, Workspace
 
 
 class V8HeapProfExtractionResult(ContractModel):
-    schema_version: int = 1
     run_id: str
     artifact_id: str
     sample_count: int

@@ -34,9 +34,9 @@ def main() -> int:
 
     os.environ["FLAMEOX_PYTEST_RUN_STARTED_NS"] = str(time.time_ns())
     os.environ["PYTHONSAFEPATH"] = "1"
-    plugin_name = "_flameox_bound_pytest_" + hashlib.sha256(
-        _PLUGIN_SOURCE.encode()
-    ).hexdigest()[:16]
+    plugin_name = (
+        "_flameox_bound_pytest_" + hashlib.sha256(_PLUGIN_SOURCE.encode()).hexdigest()[:16]
+    )
     plugin = types.ModuleType(plugin_name)
     exec(compile(_PLUGIN_SOURCE, "<flameox-pytest-plugin>", "exec"), plugin.__dict__)
     sys.modules[plugin.__name__] = plugin

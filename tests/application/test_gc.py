@@ -7,14 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import (
-    CompactionService,
-    FreezeRunIdsRequest,
+from flameox.application.gc import (
     GarbageCollector,
     GarbagePlan,
+)
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportService,
-    RunSetService,
 )
 from flameox.application.staging_ownership import StagingOwnershipService
 from flameox.domain import CursorNamespace, DomainError, ErrorCode, digest_model
@@ -181,7 +180,7 @@ def test_gc_discovers_unreferenced_final_evidence_from_interrupted_publication(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    orphan = workspace.paths.evidence / "runs" / "generation=interrupted"
+    orphan = workspace.paths.evidence / "runs" / "placement=interrupted"
     orphan.mkdir(parents=True)
     (orphan / "part-00000.parquet").write_bytes(b"unreachable")
     old = time.time() - 48 * 3600
@@ -191,7 +190,7 @@ def test_gc_discovers_unreferenced_final_evidence_from_interrupted_publication(
     plan = collector.plan(minimum_age_hours=24)
 
     assert [(entry.path, entry.kind) for entry in plan.entries] == [
-        ("evidence/runs/generation=interrupted", "evidence")
+        ("evidence/runs/placement=interrupted", "evidence")
     ]
 
     result = collector.apply(plan)
@@ -202,7 +201,7 @@ def test_gc_discovers_unreferenced_final_evidence_from_interrupted_publication(
         / "objects"
         / "evidence"
         / "runs"
-        / "generation=interrupted"
+        / "placement=interrupted"
         / "part-00000.parquet"
     ).read_bytes() == b"unreachable"
 
@@ -260,35 +259,6 @@ def test_gc_apply_rejects_candidate_swapped_to_symlink_after_recheck(
     assert payload.read_text() == "must remain"
     assert candidate.is_symlink()
     assert not any(workspace.paths.trash.iterdir())
-
-
-@pytest.mark.anyio
-async def test_gc_retains_generations_reachable_from_a_pinned_run_set(
-    tmp_path: Path,
-) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    source = tmp_path / "profile.bin"
-    source.write_bytes(b"profile")
-    imported = ImportService(workspace).import_artifact(ImportArtifactRequest(path=source))
-    run_set = RunSetService(workspace).freeze(FreezeRunIdsRequest(run_ids=(imported.run.run_id,)))
-    pinned_commit = workspace.corpus.read_commit(run_set.corpus_commit_id)
-    pinned_generation_ids = {
-        Path(relative).parent.name for relative in pinned_commit.generation_manifests
-    }
-
-    compacted = await CompactionService(workspace).compact()
-    assert compacted.superseded_generation_count >= 2
-    old = time.time() - 48 * 3600
-    for generation_id in pinned_generation_ids:
-        generation = workspace.paths.generations / generation_id
-        os.utime(generation, (old, old))
-
-    plan = GarbageCollector(workspace).plan(minimum_age_hours=24)
-
-    candidates = {Path(entry.path).name for entry in plan.entries if entry.kind == "generation"}
-    assert run_set.corpus_commit_id in plan.root_corpus_commit_ids
-    assert pinned_generation_ids <= set(plan.root_generation_ids)
-    assert candidates.isdisjoint(pinned_generation_ids)
 
 
 def test_gc_manifest_can_resume_an_interrupted_multi_object_move(

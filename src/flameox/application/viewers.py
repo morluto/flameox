@@ -24,7 +24,6 @@ _DEFAULT_LIMITATIONS = (
 
 
 class _NativeViewerPlan(ContractModel):
-    schema_version: int = 1
     artifact_id: str
     artifact_path: str
     artifact_kinds: tuple[ArtifactKind, ...]
@@ -44,7 +43,6 @@ class _LaunchedNativeViewerPlan(_NativeViewerPlan):
 
 
 class NativeViewerLaunchResult(ContractModel):
-    schema_version: int = 1
     plan: _LaunchedNativeViewerPlan
     process: ProcessResult
 
@@ -244,9 +242,7 @@ class NativeViewerService:
             ErrorCode.CAPABILITY_UNAVAILABLE,
             f"No verified managed {name!r} viewer is available.",
             details={"producer_version": version},
-            remediation=(
-                f"Call start_capability_setup with adapters=[{name!r}], then retry.",
-            ),
+            remediation=(f"Call start_capability_setup with adapters=[{name!r}], then retry.",),
             next_action=tool_action(
                 ActionId.START_CAPABILITY_SETUP,
                 adapters=[name],

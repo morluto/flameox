@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import DrilldownService, ImportArtifactRequest, ImportService
+from flameox.application.drilldown import DrilldownService
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.catalog import Catalog
 from flameox.domain import (
     CaptureStatus,

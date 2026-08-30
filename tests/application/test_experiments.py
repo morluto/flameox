@@ -8,22 +8,26 @@ import pytest
 from pydantic import ValidationError
 
 from flameox.analysis import RecipeService
-from flameox.application import (
+from flameox.application.comparisons import (
     ComparisonService,
-    CreateInvestigationRequest,
-    ExecutionPolicy,
-    ExperimentPlan,
-    ExperimentService,
     FreezeRunIdsRequest,
     FreezeRunMembersRequest,
     IncludedFreezeRunSetMember,
-    InvestigationService,
     MeasurementCompareRunSetsRequest,
     RunSetService,
-    parse_experiment_config,
 )
-from flameox.application.experiments import OutcomeExperimentResult
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.experiments import (
+    ExperimentPlan,
+    ExperimentService,
+    OutcomeExperimentResult,
+)
+from flameox.application.records import (
+    CreateInvestigationRequest,
+    InvestigationService,
+)
 from flameox.application.runtime_resources import RUNTIME_RESOURCE_METRIC_CATALOG
+from flameox.application.workloads import parse_experiment_config
 from flameox.catalog import Catalog
 from flameox.config import WorkspaceConfig
 from flameox.domain import (
@@ -79,7 +83,8 @@ def test_experiment_config_accepts_closed_runtime_resource_catalog(metric: str) 
     config = parse_experiment_config(
         {
             "workload": "scan",
-            "variants": ("baseline", "candidate"),
+            "factors": {"implementation": ("baseline", "candidate")},
+            "treatment_factor": "implementation",
             "primary_metric": metric,
         }
     )
@@ -109,7 +114,8 @@ def test_experiment_config_rejects_writable_root_growth_metric() -> None:
         parse_experiment_config(
             {
                 "workload": "scan",
-                "variants": ("baseline", "candidate"),
+                "factors": {"implementation": ("baseline", "candidate")},
+                "treatment_factor": "implementation",
                 "primary_metric": "runtime_resource.writable_root_growth_bytes",
             }
         )
@@ -131,7 +137,6 @@ async def test_randomized_experiment_records_trials_and_compares_run_sets(
     )
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 
 [workloads.scan]
 argv = ["python", "bench.py", "implementation={implementation}"]
@@ -142,7 +147,7 @@ timeout_seconds = 30
 implementation = ["", "candidate"]
 
 [workloads.scan.oracle]
-strength = "cross_treatment_equivalence"
+strength = "contract_check"
 argv = ["python", "-c", "print('same-output')"]
 
 [experiments.scan_comparison]
@@ -213,6 +218,10 @@ implementation = ["candidate", ""]
     assert result.comparison is not None
     assert result.comparison.comparison.experiment_id == result.experiment.experiment_id
     assert result.comparison.comparison.validity is ComparisonValidity.EXPLORATORY
+    assert any(
+        "pair-bound cross-treatment validation evidence is unavailable" in reason
+        for reason in result.comparison.comparison.mismatches
+    )
     assert result.comparison.comparison.complete_pair_n == 2
     assert result.comparison.comparison.protocol_identity_id is not None
     assert result.comparison.comparison.metric_contract_id.startswith("sha256:")
@@ -345,14 +354,13 @@ async def test_runtime_resource_primary_metric_runs_paired_comparison(tmp_path: 
     (tmp_path / "bench.py").write_text("assert sum(range(1000)) >= 0\n")
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.scan]
 argv = ["python", "bench.py"]
 cwd = "."
 [workloads.scan.parameters]
 implementation = ["baseline", "candidate"]
 [workloads.scan.oracle]
-strength = "cross_treatment_equivalence"
+strength = "contract_check"
 argv = ["python", "-c", "print('same-output')"]
 [experiments.resources]
 workload = "scan"
@@ -380,6 +388,22 @@ implementation = ["baseline", "candidate"]
         CreateInvestigationRequest(question="Does resource use differ?")
     )
     service = ExperimentService(workspace)
+    interrupted_plan = await service.plan(
+        experiment_name="resources",
+        investigation_id=investigation.investigation_id,
+        adapter="command",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    service.experiments.create(interrupted_plan.experiment)
+
+    interrupted = service.status(interrupted_plan.experiment.experiment_id)
+
+    assert interrupted.lifecycle == "collecting_or_interrupted"
+    assert interrupted.trial_counts.observed == 0
+    assert interrupted.block_coverage.complete_blocks is None
+    assert interrupted.recovery is not None
+    assert interrupted.comparison is None
+
     plan = await service.plan(
         experiment_name="resources",
         investigation_id=investigation.investigation_id,
@@ -391,6 +415,38 @@ implementation = ["baseline", "candidate"]
 
     assert result.comparison is not None
     assert result.comparison.comparison.metric == "runtime_resource.peak_rss_bytes"
+    experiment_id = result.experiment.experiment_id
+    comparison_id = result.comparison.comparison.comparison_id
+    comparison_validity = result.comparison.comparison.validity
+    comparison_decision = result.comparison.comparison.decision
+    analysis_id = result.comparison.analysis.analysis_id if result.comparison.analysis else None
+    del result
+
+    reconstructed = ExperimentService(workspace).status(experiment_id)
+
+    assert reconstructed.lifecycle == "complete"
+    assert reconstructed.protocol.experiment_id == experiment_id
+    assert reconstructed.trial_counts.observed == 2
+    assert reconstructed.trial_counts.attempted == 2
+    assert reconstructed.trial_counts.completed == 2
+    assert reconstructed.trial_counts.succeeded == 2
+    assert reconstructed.trial_counts.failed == 0
+    assert reconstructed.block_coverage.complete_blocks == 1
+    assert reconstructed.block_coverage.incomplete_blocks == 0
+    assert reconstructed.trials.uri == f"flameox://experiments/{experiment_id}/trials"
+    assert reconstructed.comparison is not None
+    assert reconstructed.comparison.comparison.resource_id == comparison_id
+    assert reconstructed.comparison.validity is comparison_validity
+    assert reconstructed.comparison.decision is comparison_decision
+    assert reconstructed.comparison.baseline_run_set.uri.startswith("flameox://run-sets/")
+    assert reconstructed.comparison.candidate_run_set.uri.startswith("flameox://run-sets/")
+    assert reconstructed.comparison.analysis is not None
+    assert reconstructed.comparison.analysis.resource_id == analysis_id
+    assert {item.role for item in reconstructed.validation_evidence} == {"validation_stdout"}
+    assert all(
+        item.artifact.uri.startswith("flameox://artifacts/")
+        for item in reconstructed.validation_evidence
+    )
 
 
 @pytest.mark.anyio
@@ -418,16 +474,36 @@ async def test_structured_benchmark_samples_run_the_automatic_paired_analysis(
         "with open(os.environ['FLAMEOX_BENCHMARK_OUTPUT'], 'w') as stream:\n"
         "    json.dump(document, stream)\n"
     )
+    (tmp_path / "pair_oracle.py").write_text(
+        "import json, os, sys\n"
+        "treatment = sys.argv[1]\n"
+        "document = {\n"
+        "  'schema_version': 'flameox.oracle-receipt.v1',\n"
+        "  'status': 'pass', 'reason': 'pair_match',\n"
+        "  'binding': {\n"
+        "    'pair_id': 'sha256:' + '1' * 64,\n"
+        "    'treatment': treatment,\n"
+        "    'input_identity': 'sha256:' + '2' * 64,\n"
+        "    'workload_identity': os.environ['FLAMEOX_WORKLOAD_INSTANCE_ID'],\n"
+        "    'output_identity': 'sha256:' + ('3' if treatment == 'baseline' else '4') * 64,\n"
+        "    'compared_property': 'forward',\n"
+        "    'oracle_identity': 'sha256:' + '5' * 64,\n"
+        "    'tolerance': {'absolute': 0, 'relative': 0, 'equal_nan': False},\n"
+        "  },\n"
+        "}\n"
+        "with open(os.environ['FLAMEOX_ORACLE_RECEIPT'], 'w') as stream:\n"
+        "    json.dump(document, stream)\n"
+    )
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.kernel]
 argv = ["python", "structured_bench.py", "implementation={implementation}"]
 [workloads.kernel.parameters]
 implementation = ["baseline", "candidate"]
 [workloads.kernel.oracle]
 strength = "cross_treatment_equivalence"
-argv = ["python", "-c", "print('same-output')"]
+argv = ["python", "pair_oracle.py", "{implementation}"]
+receipt_schema = "flameox.oracle-receipt.v1"
 
 [experiments.kernel]
 workload = "kernel"
@@ -509,14 +585,13 @@ async def test_explicit_factor_matrix_completes_when_progress_delivery_fails(
     (tmp_path / "bench.py").write_text("assert sum(range(1000)) >= 0\n")
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.scan]
 argv = ["python", "bench.py"]
 cwd = "."
 [workloads.scan.parameters]
 implementation = ["baseline", "candidate", "other"]
 [workloads.scan.oracle]
-strength = "cross_treatment_equivalence"
+strength = "contract_check"
 argv = ["python", "-c", "print('same-output')"]
 [experiments.partial]
 workload = "scan"
@@ -575,7 +650,6 @@ async def test_experiment_plan_rejects_multiplicative_trial_explosion(
     scaling_values = ", ".join(str(value) for value in range(32))
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 
 [workloads.scan]
 argv = ["python", "-c", "print('{{variant}}', '{{length}}')"]
@@ -623,7 +697,6 @@ async def test_cancelled_experiment_preserves_attempted_trial(
     (tmp_path / "wait.py").write_text("import time\ntime.sleep(30)\n")
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 
 [workloads.wait]
 argv = ["python", "wait.py", "{variant}"]
@@ -707,7 +780,6 @@ async def test_failed_experiment_preserves_failed_and_unattempted_cells(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.probe]
 argv = ["python", "-c", "print('{variant}')"]
 [workloads.probe.parameters]
@@ -757,7 +829,6 @@ async def test_multifactor_cartesian_exclusions_and_order_are_materialized_stabl
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.matrix]
 argv = ["python", "-c", "print('{mode}', '{dtype}', '{case}')"]
 [workloads.matrix.parameters]
@@ -822,7 +893,6 @@ async def test_factorial_variants_preserve_cohort_identity_without_a_representat
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.matrix]
 argv = ["python", "-c", "print('{implementation}', '{size}')"]
 [workloads.matrix.parameters]
@@ -946,7 +1016,6 @@ async def test_multifactor_explicit_partial_matrix_and_budget_validation(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.matrix]
 argv = ["python", "-c", "print('{mode}', '{case}')"]
 [workloads.matrix.parameters]
@@ -1042,7 +1111,6 @@ async def test_outcome_experiment_classifies_oracle_failure_and_pairs_coordinate
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.semantic]
 argv = ["python", "-c", "print('{mode}', '{case}')"]
 [workloads.semantic.parameters]
@@ -1098,7 +1166,8 @@ case = ["bad", "clean"]
     assert result.outcome.complete_pairs == 2
     assert result.outcome.unmatched_cells == 0
     assert plan.baseline_variant == ""
-    assert result.outcome.first_failure_factors == {"mode": "", "case": "bad"}
+    assert result.outcome.first_failure is not None
+    assert result.outcome.first_failure.factors == {"mode": "", "case": "bad"}
     counts = {item.treatment: item for item in result.outcome.counts}
     assert counts[""].oracle_failed == 1
     assert counts[""].failure_rate == 0.5
@@ -1114,6 +1183,17 @@ case = ["bad", "clean"]
             (result.experiment.experiment_id,),
         ).fetchone()
     assert row == ("absence_of_failure_fixed_attempts_v1", "base_only_failure", 2)
+    experiment_id = result.experiment.experiment_id
+    del result
+
+    reconstructed = ExperimentService(workspace).status(experiment_id)
+
+    assert reconstructed.lifecycle == "complete"
+    assert reconstructed.outcome is not None
+    assert reconstructed.outcome.disposition is ExperimentOutcomeDisposition.BASE_ONLY_FAILURE
+    assert reconstructed.comparison is None
+    assert reconstructed.trial_counts.failed == 1
+    assert reconstructed.trial_counts.excluded == 1
 
 
 @pytest.mark.anyio
@@ -1138,7 +1218,6 @@ Path(os.environ["FLAMEOX_ORACLE_RECEIPT"]).write_text(json.dumps({
     )
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.semantic]
 argv = ["python", "-c", "print('{treatment}')"]
 [workloads.semantic.parameters]
@@ -1234,7 +1313,6 @@ async def test_outcome_partial_matrix_reports_unmatched_and_insufficient_evidenc
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.semantic]
 argv = ["python", "-c", "print('{mode}', '{case}')"]
 [workloads.semantic.parameters]
@@ -1294,7 +1372,6 @@ async def test_outcome_experiment_distinguishes_unsupported_environment(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.semantic]
 argv = ["python", "-c", "print('{mode}')"]
 [workloads.semantic.parameters]
@@ -1341,7 +1418,6 @@ async def test_outcome_experiment_classifies_hangs_as_timeouts(tmp_path: Path) -
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.hang]
 argv = ["python", "-c", "import time; time.sleep(1)", "{mode}"]
 timeout_seconds = 0.1

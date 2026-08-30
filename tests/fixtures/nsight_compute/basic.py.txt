@@ -76,10 +76,43 @@ class Action:
         return [
             {
                 "rule_identifier": "ExplicitRoofline",
-                "section_identifier": "SpeedOfLight_RooflineChart",
-                "k" * 250: "v" * 300,
+                "section_identifier": "SpeedOfLight",
+                "rule_message": {
+                    "title": "Roofline analysis",
+                    "message": "Arithmetic intensity is below the available roofline.",
+                    "type": "OPTIMIZATION",
+                },
+                "speedup_estimation": {"type": "GLOBAL", "speedup": 42.38},
+                "focus_metrics": [
+                    {
+                        "name": "sm__throughput.avg.pct_of_peak_sustained_elapsed",
+                        "value": 84.56,
+                        "severity": "HIGH",
+                        "info": "Inspect the roofline chart.",
+                    }
+                ],
             },
-            {"deep": {"a": {"b": {"c": {"d": {"e": "end"}}}}}},
+            {
+                "rule_identifier": "MemoryPipelines",
+                "section_identifier": "SpeedOfLight",
+                "rule_message": {
+                    "title": "Memory throughput",
+                    "message": "Memory pipelines limit local hardware efficiency.",
+                    "type": "WARNING",
+                },
+                "speedup_estimation": {"type": "LOCAL", "speedup": 80.0},
+                "focus_metrics": [
+                    {
+                        "name": "dram__throughput.avg.pct_of_peak_sustained_elapsed",
+                        "value": 93.2,
+                        "severity": "HIGH",
+                        "info": "Review memory access efficiency.",
+                    }
+                ],
+            },
+            {
+                "section_identifier": "SpeedOfLight_RooflineChart",
+            },
         ]
 
     def source_files(self):

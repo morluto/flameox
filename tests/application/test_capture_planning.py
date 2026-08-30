@@ -7,17 +7,18 @@ from typing import Any
 import pytest
 
 from flameox.action_graph import ActionId, ToolAction
-from flameox.application import (
-    AdapterOption,
+from flameox.application.capabilities import (
     CapabilityList,
     CapabilityService,
-    CaptureService,
+)
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.preflight import PreflightService
+from flameox.application.provider_runtime import ProviderRuntimeManager
+from flameox.application.workloads import (
     DeclaredWorkflowKind,
-    ExecutionPolicy,
-    PreflightService,
     WorkloadService,
 )
-from flameox.application.provider_runtime import ProviderRuntimeManager
 from flameox.domain import (
     CapabilityPermissionStatus,
     CapabilityReport,
@@ -98,7 +99,6 @@ async def test_memray_plan_binds_the_profiled_workload_interpreter(
     workload_python.chmod(0o755)
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.profile]
 argv = ["{workload_python}", "workload.py", "--size", "4"]
 """
@@ -128,8 +128,7 @@ async def test_memray_plan_requires_an_exact_reader_before_capture(tmp_path: Pat
     workload_python.write_text('#!/bin/sh\nprintf \'{"memray":"1.20.0"}\\n\'\n')
     workload_python.chmod(0o755)
     (tmp_path / "flameox.toml").write_text(
-        f'''schema_version = 1
-[workloads.profile]
+        f'''[workloads.profile]
 argv = ["{workload_python}", "workload.py"]
 '''
     )
@@ -175,7 +174,6 @@ def test_declared_workflow_discovery_is_paginated_and_bound_to_configuration(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.alpha]
 argv = ["python", "-c", "print('{size}')"]
 [workloads.alpha.parameters]
@@ -226,7 +224,6 @@ def test_declared_workflow_details_expose_requirements_and_adapter_options(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.probe]
 argv = ["python", "-c", "print('ok')"]
 [workloads.probe.requirements]
@@ -244,39 +241,18 @@ active = ["perf"]
     requirements = {item.name: item for item in detail.requirements}
     assert requirements["python"].kind == "executable"
     assert requirements["python"].required is True
-    assert requirements["python"].optional is False
     assert requirements["perf"].required is False
-    assert requirements["perf"].optional is True
     assert requirements["perf"].probe_kind == "active"
-    requirement_payload = requirements["perf"].model_dump(mode="python")
-    assert requirements["perf"].validated_copy() == requirements["perf"]
-    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
-        type(requirements["perf"]).model_validate({**requirement_payload, "optional": False})
     assert detail.adapter_option_total >= len(detail.adapter_options)
     assert detail.adapter_options_truncated is (
         detail.adapter_option_total > len(detail.adapter_options)
     )
-    assert detail.adapter_options_total == detail.adapter_option_total
     assert detail.validated_copy() == detail
-    contradictory_counts = detail.model_dump()
-    contradictory_counts["adapter_options_total"] = detail.adapter_option_total + 1
-    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
-        type(detail).model_validate(contradictory_counts)
-    contradictory_truncation = detail.model_dump()
-    contradictory_truncation["adapter_options_truncated"] = not detail.adapter_options_truncated
-    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
-        type(detail).model_validate(contradictory_truncation)
     assert tuple(item.adapter for item in detail.adapter_options) == tuple(
         sorted(item.adapter for item in detail.adapter_options)
     )
     command = next(item for item in detail.adapter_options if item.adapter == "command")
     assert command.planning_disposition == "ready"
-    assert command.capability_status is command.status
-    assert command.validated_copy() == command
-    contradictory = command.model_dump()
-    contradictory["capability_status"] = CapabilityStatus.UNAVAILABLE
-    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
-        AdapterOption.model_validate(contradictory)
     assert inspection.command_template == ("python", "-c", "print('ok')")
     assert inspection.configuration_id == detail.configuration_id
 
@@ -288,7 +264,6 @@ async def test_preflight_distinguishes_required_optional_and_active_requirements
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.probe]
 argv = ["python", "-c", "print('ok')"]
 [workloads.probe.requirements]
@@ -321,7 +296,6 @@ async def test_active_preflight_preserves_permission_denied_state(tmp_path: Path
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.probe]
 argv = ["python", "-c", "print('ok')"]
 [workloads.probe.requirements]
@@ -370,7 +344,6 @@ async def test_active_nvcc_preflight_classifies_missing_cuda_headers(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.gpu]
 argv = ["python", "-c", "print('gpu')"]
 [workloads.gpu.requirements]
@@ -403,7 +376,6 @@ async def test_active_nvcc_probe_failure_is_not_classified_as_compile_failure(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.gpu]
 argv = ["python", "-c", "print('gpu')"]
 [workloads.gpu.requirements]
@@ -433,7 +405,6 @@ async def test_cuda_preflight_id_ignores_ephemeral_probe_paths(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.gpu]
 argv = ["python", "-c", "print('gpu')"]
 [workloads.gpu.requirements]
@@ -461,7 +432,6 @@ async def test_required_preflight_failure_blocks_capture_planning(tmp_path: Path
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.probe]
 argv = ["python", "-c", "print('ok')"]
 [workloads.probe.requirements]
@@ -533,7 +503,6 @@ async def test_missing_workload_package_points_to_declared_environment(
     python.chmod(0o755)
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.echo]
 argv = ["{python}", "-c", "print('candidate')"]
 """
@@ -563,7 +532,6 @@ async def test_capture_plan_binds_declared_writable_root_and_rejects_replacement
     output.mkdir()
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.build]
 argv = ["python", "-c", "print('build')"]
 writable_paths = ["target"]

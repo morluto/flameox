@@ -5,10 +5,13 @@ from pathlib import Path
 import pytest
 
 from flameox.action_graph import ActionId, ManualAction
-from flameox.application import ImportArtifactRequest, ImportService
 from flameox.application.evidence_rows import (
     process_observation_coverage,
     process_observation_rows,
+)
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
 )
 from flameox.application.lifecycle import LifecycleEvidenceService
 from flameox.domain import DomainError, ErrorCode

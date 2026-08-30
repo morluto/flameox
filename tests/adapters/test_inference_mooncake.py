@@ -5,12 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from flameox.adapters import (
+from flameox.adapters.inference import (
     InferenceArtifactExtractor,
     MooncakeRequestRow,
     MooncakeTraceParser,
 )
-from flameox.application import EvidenceQueryService, ImportArtifactRequest, ImportService
+from flameox.application.evidence_query import EvidenceQueryService
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, Sensitivity
 from flameox.storage import Workspace
 

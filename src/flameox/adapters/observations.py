@@ -16,7 +16,6 @@ from flameox.storage import ArtifactStore, RunStore, Workspace
 
 
 class ObservationExtractionResult(ContractModel):
-    schema_version: int = 1
     run_id: str
     artifact_id: str
     observation_count: int
@@ -73,7 +72,7 @@ class ObservationExtractor:
                             ),
                             "run_id": run_id,
                             "artifact_id": registration.artifact_id,
-                            "kind": event["kind"],
+                            "kind": "annotation",
                             "name": event["name"],
                             "value_json": json.dumps(
                                 values,
@@ -116,19 +115,10 @@ class ObservationExtractor:
     def _validate_event(self, event: Any) -> None:
         if not isinstance(event, dict):
             raise ValueError("event must be an object")
-        if set(event) != {
-            "schema_version",
-            "kind",
-            "name",
-            "phase",
-            "monotonic_ns",
-            "values",
-        }:
-            raise ValueError("event fields differ from schema version 1")
+        if set(event) != {"name", "phase", "monotonic_ns", "values"}:
+            raise ValueError("event fields differ from the SDK observation contract")
         if (
-            event["schema_version"] != 1
-            or event["kind"] != "annotation"
-            or not isinstance(event["name"], str)
+            not isinstance(event["name"], str)
             or not isinstance(event["monotonic_ns"], int)
             or (event["phase"] is not None and not isinstance(event["phase"], str))
         ):

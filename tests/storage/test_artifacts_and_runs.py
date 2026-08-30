@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from pydantic import TypeAdapter
 
 import flameox.filesystem as filesystem_module
 from flameox.domain import (
@@ -493,43 +492,3 @@ def test_artifact_get_rejects_race_symlink_swap(tmp_path: Path) -> None:
         store.get(stored.content.artifact_id)
 
     assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
-
-
-def test_record_store_rejects_dotdot_identifier(tmp_path: Path) -> None:
-    """Regression: ControlRecordStore must reject '..' identifiers to prevent
-    directory traversal outside the records directory."""
-    from flameox.domain.models import RunManifest
-    from flameox.storage.records import ControlRecordStore
-
-    workspace = Workspace.initialize(tmp_path)
-    store: ControlRecordStore[RunManifest] = ControlRecordStore(
-        workspace,
-        kind="test",
-        model=TypeAdapter(RunManifest),
-        id_field="run_id",
-    )
-
-    with pytest.raises(DomainError) as error:
-        store.read("..")
-
-    assert error.value.code is ErrorCode.WORKSPACE_INVALID
-
-
-def test_record_store_rejects_dot_prefix_identifier(tmp_path: Path) -> None:
-    """Regression: ControlRecordStore must reject dot-prefixed identifiers
-    to prevent hidden-file traversal and .dotfile access."""
-    from flameox.domain.models import RunManifest
-    from flameox.storage.records import ControlRecordStore
-
-    workspace = Workspace.initialize(tmp_path)
-    store: ControlRecordStore[RunManifest] = ControlRecordStore(
-        workspace,
-        kind="test",
-        model=TypeAdapter(RunManifest),
-        id_field="run_id",
-    )
-
-    with pytest.raises(DomainError) as error:
-        store.read(".hidden")
-
-    assert error.value.code is ErrorCode.WORKSPACE_INVALID

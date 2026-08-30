@@ -9,7 +9,6 @@ from flameox.workers.protocol import WorkerDefinition, WorkerOperationId
 
 
 class PerfettoExtractRequest(ContractModel):
-    schema_version: Literal[1] = 1
     operation: Literal["extract"]
     artifact_path: str = Field(min_length=1, max_length=4_096)
     binary_path: str = Field(min_length=1, max_length=4_096)
@@ -17,7 +16,6 @@ class PerfettoExtractRequest(ContractModel):
 
 
 class PerfettoWindowRequest(ContractModel):
-    schema_version: Literal[1] = 1
     operation: Literal["window"]
     artifact_path: str = Field(min_length=1, max_length=4_096)
     binary_path: str = Field(min_length=1, max_length=4_096)
@@ -65,14 +63,12 @@ class PerfettoWindowRow(ContractModel):
 
 
 class PerfettoExtractResult(ContractModel):
-    schema_version: Literal[1] = 1
     operation: Literal["extract"] = "extract"
     truncated: bool
     rows: tuple[PerfettoSliceRow, ...]
 
 
 class PerfettoWindowResult(ContractModel):
-    schema_version: Literal[1] = 1
     operation: Literal["window"] = "window"
     total: Annotated[int, Field(ge=0)]
     rows: tuple[PerfettoWindowRow, ...]

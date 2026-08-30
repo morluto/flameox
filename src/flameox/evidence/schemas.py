@@ -4,26 +4,14 @@ from typing import Any
 
 import pyarrow as pa
 
-SCHEMA_MAJOR = 5
-SCHEMA_MINOR = 0
 UTC_TIMESTAMP = pa.timestamp("us", tz="UTC")
-
-COMMON_FIELDS: tuple[Any, ...] = (
-    pa.field("schema_version", pa.int32(), nullable=False),
-    pa.field("evidence_generation_id", pa.string(), nullable=False),
-    pa.field("published_at", UTC_TIMESTAMP, nullable=False),
-    pa.field("extractor_name", pa.string(), nullable=False),
-    pa.field("extractor_version", pa.string(), nullable=False),
-)
 
 
 def _schema(table: str, fields: tuple[Any, ...]) -> pa.Schema:
     return pa.schema(
-        (*COMMON_FIELDS, *fields),
+        fields,
         metadata={
             b"flameox.table": table.encode(),
-            b"flameox.schema.major": str(SCHEMA_MAJOR).encode(),
-            b"flameox.schema.minor": str(SCHEMA_MINOR).encode(),
         },
     )
 
@@ -64,7 +52,6 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("limitations", pa.list_(pa.string())),
             pa.field("limitation_details_json", pa.string()),
             pa.field("resource_availability", pa.string()),
-            pa.field("manifest_path", pa.string(), nullable=False),
             pa.field("manifest_json", pa.string()),
         ),
     ),
@@ -142,24 +129,29 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("pipeline_id", pa.string(), nullable=False),
             pa.field("run_id", pa.string(), nullable=False),
             pa.field("pipeline_name", pa.string(), nullable=False),
-            pa.field("pipeline_schema", pa.string(), nullable=False),
             pa.field("producer", pa.string(), nullable=False),
-            pa.field("producer_version", pa.string(), nullable=False),
             pa.field("identity_quality", pa.string(), nullable=False),
-            pa.field("workload_identity", pa.string()),
-            pa.field("device_identity", pa.string()),
-            pa.field("workload_definition_id", pa.string()),
-            pa.field("workload_instance_id", pa.string()),
-            pa.field("command_digest", pa.string()),
-            pa.field("parameters_digest", pa.string()),
             pa.field("compiler_identity_id", pa.string()),
-            pa.field("build_protocol_id", pa.string()),
             pa.field("target_identity_id", pa.string()),
-            pa.field("source_state_id", pa.string()),
-            pa.field("environment_id", pa.string(), nullable=False),
             pa.field("stages_json", pa.string(), nullable=False),
             pa.field("limitations", pa.list_(pa.string()), nullable=False),
             pa.field("created_at", UTC_TIMESTAMP, nullable=False),
+        ),
+    ),
+    "triton_autotune_selections": _schema(
+        "triton_autotune_selections",
+        (
+            pa.field("selection_id", pa.string(), nullable=False),
+            pa.field("run_id", pa.string(), nullable=False),
+            pa.field("function_name", pa.string(), nullable=False),
+            pa.field("key_digest", pa.string(), nullable=False),
+            pa.field("cache_hit", pa.bool_(), nullable=False),
+            pa.field("duration_ms", pa.float64()),
+            pa.field("winner_config_id", pa.string(), nullable=False),
+            pa.field("candidate_count", pa.uint32(), nullable=False),
+            pa.field("candidates_truncated", pa.bool_(), nullable=False),
+            pa.field("candidates_json", pa.string(), nullable=False),
+            pa.field("limitations", pa.list_(pa.string()), nullable=False),
         ),
     ),
     "kernel_validation_cases": _schema(
@@ -240,7 +232,6 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("candidate_only_count", pa.uint64(), nullable=False),
             pa.field("mismatches", pa.list_(pa.string()), nullable=False),
             pa.field("input_artifact_ids", pa.list_(pa.string()), nullable=False),
-            pa.field("result_digest", pa.string(), nullable=False),
         ),
     ),
     "kernel_validation_comparison_pairs": _schema(
@@ -316,7 +307,6 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("input_artifact_ids", pa.list_(pa.string()), nullable=False),
             pa.field("extractor_identities", pa.list_(pa.string()), nullable=False),
             pa.field("limitations", pa.list_(pa.string()), nullable=False),
-            pa.field("result_digest", pa.string(), nullable=False),
         ),
     ),
     "reduction_results": _schema(
@@ -568,16 +558,41 @@ SCHEMAS: dict[str, pa.Schema] = {
             pa.field("latency_ns", pa.int64()),
             pa.field("tpot_ns", pa.int64()),
             pa.field("mean_itl_ns", pa.int64()),
-            pa.field("success", pa.bool_()),
-            pa.field("cancelled", pa.bool_()),
-            pa.field("error_type", pa.string()),
-            pa.field("error_code", pa.string()),
+            pa.field(
+                "outcome",
+                pa.struct(
+                    (
+                        pa.field("kind", pa.string(), nullable=False),
+                        pa.field("error_type", pa.string()),
+                        pa.field("error_code", pa.string()),
+                    )
+                ),
+                nullable=False,
+            ),
             pa.field("queue_ns", pa.int64()),
             pa.field("prefill_ns", pa.int64()),
             pa.field("decode_ns", pa.int64()),
             pa.field("cache_hit", pa.bool_()),
             pa.field("prefix_hash_count", pa.int32()),
             pa.field("evidence_level", pa.string(), nullable=False),
+        ),
+    ),
+    "static_candidates": _schema(
+        "static_candidates",
+        (
+            pa.field("candidate_id", pa.string(), nullable=False),
+            pa.field("run_id", pa.string(), nullable=False),
+            pa.field("artifact_id", pa.string(), nullable=False),
+            pa.field("rule_id", pa.string()),
+            pa.field("level", pa.string()),
+            pa.field("message", pa.string(), nullable=False),
+            pa.field("relative_path", pa.string(), nullable=False),
+            pa.field("start_line", pa.int32()),
+            pa.field("start_column", pa.int32()),
+            pa.field("end_line", pa.int32()),
+            pa.field("end_column", pa.int32()),
+            pa.field("provider_fingerprint", pa.string()),
+            pa.field("provider_confidence", pa.float64()),
         ),
     ),
     "frames": _schema(

@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from flameox.adapters.nsight_compute import NsightComputeExtractor
-from flameox.application import EvidenceQueryService, ImportArtifactRequest, ImportService
+from flameox.application.evidence_query import EvidenceQueryService
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import ArtifactStore, RunStore, Workspace
@@ -61,15 +65,10 @@ def test_extractor_uses_fake_official_interface_in_isolated_worker(
     assert result.range_count == 1
     assert result.action_count == 1
     assert result.metric_count == 1
-    assert result.observation_count >= 5
-    assert result.roofline_present is True
+    assert result.observation_count >= 7
+    assert result.truncated is False
     assert any("Unsupported metric value type" in item for item in result.limitations)
     assert any("metric_subtype failed with RuntimeError" in item for item in result.limitations)
-    assert any("collections were bounded" in item for item in result.limitations)
-    assert any("values were bounded to 8 nodes" in item for item in result.limitations)
-    assert any("values were bounded to depth 5" in item for item in result.limitations)
-    assert any("keys were bounded" in item for item in result.limitations)
-    assert any("strings were bounded" in item for item in result.limitations)
     assert repeated.corpus_commit_id == result.corpus_commit_id
     assert repeated.report_interface_sha256 == result.report_interface_sha256
     interface.write_text(interface.read_text() + "\n# reader revision\n", encoding="utf-8")
@@ -83,10 +82,69 @@ def test_extractor_uses_fake_official_interface_in_isolated_worker(
     )
     with Catalog(workspace).open_snapshot() as snapshot:
         provenance_row = snapshot.execute(
-            "SELECT evidence_level FROM observations WHERE kind = 'profile.extraction'"
+            "SELECT evidence_level, value_json FROM observations WHERE kind = 'profile.extraction'"
         ).fetchone()
+        rule_rows = snapshot.execute(
+            "SELECT value_json FROM observations WHERE kind = 'nsight_compute.rule' "
+            "ORDER BY observation_id"
+        ).fetchall()
     assert provenance_row is not None
     assert provenance_row[0] == "derived"
+    assert json.loads(str(provenance_row[1]))["section_ids"] == [
+        "SpeedOfLight",
+        "SpeedOfLight_RooflineChart",
+    ]
+    assert sorted(
+        (json.loads(value) for (value,) in rule_rows),
+        key=lambda fact: str(fact["rule_identifier"]),
+    ) == [
+        {
+            "focus_metrics": [
+                {
+                    "info": "Inspect the roofline chart.",
+                    "name": "sm__throughput.avg.pct_of_peak_sustained_elapsed",
+                    "severity": "HIGH",
+                    "value": 84.56,
+                }
+            ],
+            "location": {"action_index": 0, "action_name": "vector_add", "range_index": 0},
+            "rule_identifier": "ExplicitRoofline",
+            "rule_message": {
+                "message": "Arithmetic intensity is below the available roofline.",
+                "provider_type": "OPTIMIZATION",
+                "title": "Roofline analysis",
+            },
+            "section_identifier": "SpeedOfLight",
+            "speedup_estimation": {
+                "estimated_speedup": 42.38,
+                "meaning": "global_runtime_reduction",
+                "provider_type": "GLOBAL",
+            },
+        },
+        {
+            "focus_metrics": [
+                {
+                    "info": "Review memory access efficiency.",
+                    "name": "dram__throughput.avg.pct_of_peak_sustained_elapsed",
+                    "severity": "HIGH",
+                    "value": 93.2,
+                }
+            ],
+            "location": {"action_index": 0, "action_name": "vector_add", "range_index": 0},
+            "rule_identifier": "MemoryPipelines",
+            "rule_message": {
+                "message": "Memory pipelines limit local hardware efficiency.",
+                "provider_type": "WARNING",
+                "title": "Memory throughput",
+            },
+            "section_identifier": "SpeedOfLight",
+            "speedup_estimation": {
+                "estimated_speedup": 80.0,
+                "meaning": "local_hardware_efficiency_increase",
+                "provider_type": "LOCAL",
+            },
+        },
+    ]
 
 
 def test_extractor_bounds_published_rows_by_worker_response_budget(

@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from flameox.adapters import PerfettoExtractor
-from flameox.application import CaptureService, ExecutionPolicy
-from flameox.domain import ExecutionStatus
+from flameox.adapters.perfetto import PerfettoExtractor
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.domain import ExecutionStatus, process_exit_code
 from flameox.storage import Workspace
 from tests.support.providers import require_trace_processor
 
@@ -40,7 +41,6 @@ async def test_py_spy_capture_round_trips_through_perfetto(
     )
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.busy]
 argv = ["python", "busy.py"]
 cwd = "."
@@ -69,7 +69,9 @@ timeout_seconds = 30
 
     assert captured.run.process is not None
     expected_status = (
-        ExecutionStatus.SUCCEEDED if captured.run.process.exit_code == 0 else ExecutionStatus.FAILED
+        ExecutionStatus.SUCCEEDED
+        if process_exit_code(captured.run.process.termination) == 0
+        else ExecutionStatus.FAILED
     )
     assert captured.run.execution_status is expected_status
     assert extracted.slice_count > 0

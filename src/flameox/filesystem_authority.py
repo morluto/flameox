@@ -18,7 +18,6 @@ from flameox.models import ContractModel
 class DirectoryIdentity(ContractModel):
     """Stable identity of a directory opened through the trusted-root boundary."""
 
-    schema_version: Literal[1] = 1
     device: Annotated[int, Field(ge=0)]
     inode: Annotated[int, Field(gt=0)]
     guarantee: Literal["posix_dir_fd_no_links"] = "posix_dir_fd_no_links"
@@ -49,7 +48,6 @@ class BoundDirectoryReference(ContractModel):
 class FileIdentity(ContractModel):
     """Identity and mutation-sensitive metadata for one admitted output file."""
 
-    schema_version: Literal[1] = 1
     device: Annotated[int, Field(ge=0)]
     inode: Annotated[int, Field(gt=0)]
     byte_length: Annotated[int, Field(ge=0)]

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -16,7 +15,6 @@ from flameox.workers.compute_sanitizer_contract import (
 )
 from flameox.workers.protocol import (
     WorkerApplication,
-    WorkerContext,
     WorkerFailureKind,
     run_typed_worker,
 )
@@ -263,7 +261,7 @@ def _extract(
 
 def _handle(
     request: ComputeSanitizerWorkerRequest,
-    _context: WorkerContext,
+    _job_root: Path,
 ) -> ComputeSanitizerWorkerResult:
     result = _extract(
         Path(request.artifact_path),
@@ -289,7 +287,7 @@ def main() -> int:
             handler=_handle,
             invalid_failure=WorkerFailureKind.INPUT_MALFORMED,
             invalid_message="Compute Sanitizer XML is unsupported or invalid",
-            caught=(OSError, ET.ParseError, ValueError, KeyError, TypeError, json.JSONDecodeError),
+            caught=(OSError, ET.ParseError, ValueError, KeyError, TypeError),
         )
     )
 

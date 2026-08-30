@@ -4,7 +4,7 @@ import json
 import math
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any, Literal, assert_never, cast
+from typing import Annotated, Literal, assert_never
 
 from pydantic import (
     Field,
@@ -123,22 +123,11 @@ class ExactPsnrProfile(ContractModel):
         return value
 
 
-class LegacyPsnrProfile(ContractModel):
-    identity_quality: Literal["legacy_unqualified"] = "legacy_unqualified"
-    reason: Literal["v1_missing_profile"] = "v1_missing_profile"
-
-
-type PsnrProfile = Annotated[
-    ExactPsnrProfile | LegacyPsnrProfile,
-    Field(discriminator="identity_quality"),
-]
-
-
 class EvaluatedKernelValidationMetric(_KernelValidationMetric):
     value: KernelMetricValue
     comparator: Comparator
     threshold: float
-    profile: PsnrProfile | None = None
+    profile: ExactPsnrProfile | None = None
     status: Literal[KernelValidationStatus.PASS, KernelValidationStatus.FAIL]
     limitation: Annotated[str, StringConstraints(max_length=500)] | None = None
 
@@ -150,7 +139,7 @@ class EvaluatedKernelValidationMetric(_KernelValidationMetric):
             raise ValueError(f"{self.name} requires comparator {expected}")
         if self.name == "psnr":
             if self.profile is None:
-                raise ValueError("psnr requires an exact or explicitly legacy metric profile")
+                raise ValueError("psnr requires an exact metric profile")
         elif self.profile is not None:
             raise ValueError("only psnr metrics may carry a PSNR profile")
         if isinstance(self.value, PositiveInfinityKernelMetricValue):
@@ -364,15 +353,10 @@ def _aggregate_status(
 
 
 class KernelValidationExtractionResult(ContractModel):
-    schema_version: int = 2
     run_id: str
     artifact_id: str
     producer: str
     producer_version: str | None
-    source_schema_version: Literal[
-        "flameox.kernel-validation.v1",
-        "flameox.kernel-validation.v2",
-    ]
     status: KernelValidationStatus
     coverage_complete: bool
     case_count: int
@@ -416,7 +400,7 @@ class KernelValidationExtractor:
             )
         registration = registrations[0]
         artifact = self.artifacts.get(registration.artifact_id)
-        document, source_schema_version = load_kernel_validation_document(artifact.payload_path)
+        document = load_kernel_validation_document(artifact.payload_path)
         if registration.producer not in {None, "flameox.import", document.producer}:
             raise DomainError(
                 ErrorCode.ARTIFACT_PARSE_FAILED,
@@ -558,8 +542,7 @@ class KernelValidationExtractor:
             input_run_ids=(run_id,),
             input_artifact_ids=(registration.artifact_id,),
             operation_identity={
-                "schema_version": document.schema_version,
-                "source_schema_version": source_schema_version,
+                "format": document.schema_version,
                 "document_digest": digest_model(document.model_dump(mode="json")),
             },
         )
@@ -568,7 +551,6 @@ class KernelValidationExtractor:
             artifact_id=registration.artifact_id,
             producer=document.producer,
             producer_version=document.producer_version,
-            source_schema_version=source_schema_version,
             status=document.status,
             coverage_complete=document.coverage_complete,
             case_count=len(document.cases),
@@ -579,12 +561,7 @@ class KernelValidationExtractor:
         )
 
 
-def load_kernel_validation_document(
-    path: Path,
-) -> tuple[
-    KernelValidationV2,
-    Literal["flameox.kernel-validation.v1", "flameox.kernel-validation.v2"],
-]:
+def load_kernel_validation_document(path: Path) -> KernelValidationV2:
     try:
         if path.stat().st_size > _MAX_KERNEL_VALIDATION_BYTES:
             raise DomainError(
@@ -592,66 +569,27 @@ def load_kernel_validation_document(
                 "Kernel-validation JSON exceeds the 64 MiB contract limit.",
             )
         payload = json.loads(path.read_text(encoding="utf-8"))
-        source_schema_version = payload.get("schema_version") if isinstance(payload, dict) else None
-        if source_schema_version == "flameox.kernel-validation.v1":
-            payload = _migrate_v1_document(payload)
-        elif source_schema_version != "flameox.kernel-validation.v2":
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema_version") != "flameox.kernel-validation.v2"
+        ):
             raise ValueError("unsupported kernel-validation schema version")
         document = KernelValidationV2.model_validate_json(
             json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True),
             strict=True,
         )
-        return document, cast(
-            Literal["flameox.kernel-validation.v1", "flameox.kernel-validation.v2"],
-            source_schema_version,
-        )
+        return document
     except DomainError:
         raise
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError) as exc:
         raise DomainError(
             ErrorCode.ARTIFACT_PARSE_FAILED,
-            "The artifact is not a valid flameox kernel-validation v1/v2 document.",
+            "The artifact is not a valid flameox kernel-validation v2 document.",
         ) from exc
 
 
 def kernel_validation_json_schema() -> dict[str, JsonValue]:
     return KernelValidationV2.model_json_schema(mode="validation")
-
-
-def _migrate_v1_document(payload: dict[str, Any]) -> dict[str, Any]:
-    """Upgrade finite v1 values while marking missing PSNR identity explicitly."""
-
-    payload["schema_version"] = "flameox.kernel-validation.v2"
-    cases = payload.get("cases")
-    if not isinstance(cases, list):
-        return payload
-    for case in cases:
-        if not isinstance(case, dict):
-            continue
-        outputs = case.get("outputs")
-        if not isinstance(outputs, list):
-            continue
-        for output in outputs:
-            if not isinstance(output, dict):
-                continue
-            metrics = output.get("metrics")
-            if not isinstance(metrics, list):
-                continue
-            for metric in metrics:
-                if not isinstance(metric, dict) or metric.get("status") not in {
-                    "pass",
-                    "fail",
-                }:
-                    continue
-                value = metric.get("value")
-                if isinstance(value, int | float) and not isinstance(value, bool):
-                    metric["value"] = {"kind": "finite", "value": value}
-                if metric.get("name") == "psnr" and "profile" not in metric:
-                    metric["profile"] = {
-                        "identity_quality": "legacy_unqualified",
-                        "reason": "v1_missing_profile",
-                    }
-    return payload
 
 
 def _summary_limitations(document: KernelValidationV2) -> tuple[str, ...]:

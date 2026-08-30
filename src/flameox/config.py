@@ -3,7 +3,7 @@ from __future__ import annotations
 import tomllib
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 
 import tomli_w
 from pydantic import Field
@@ -63,7 +63,6 @@ class StorageConfig(ContractModel):
 
 
 class WorkspaceConfig(ContractModel):
-    schema_version: Literal[1] = 1
     capture: CaptureConfig = Field(default_factory=CaptureConfig)
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)

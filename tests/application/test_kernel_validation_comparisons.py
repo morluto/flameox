@@ -7,14 +7,22 @@ from typing import Any, cast
 
 import pytest
 
-from flameox.adapters import KernelValidationExtractor, KernelValidationV2
-from flameox.application import (
-    EvidenceLookupService,
+from flameox.adapters.kernel_validation import (
+    KernelValidationExtractor,
+    KernelValidationV2,
+)
+from flameox.application.comparisons import (
     FreezeRunIdsRequest,
     FreezeRunMembersRequest,
+    IncludedFreezeRunSetMember,
+    RunSetService,
+)
+from flameox.application.evidence_lookup import EvidenceLookupService
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportService,
-    IncludedFreezeRunSetMember,
+)
+from flameox.application.kernel_validation_comparisons import (
     KernelMetricChangeKind,
     KernelMetricDirection,
     KernelValidationCompareRequest,
@@ -22,7 +30,6 @@ from flameox.application import (
     KernelValidationComparisonService,
     KernelValidationInputIdentity,
     KernelValidationMetricSelector,
-    RunSetService,
 )
 from flameox.catalog import Catalog
 from flameox.domain import (
@@ -492,8 +499,9 @@ def test_preregistered_randomized_blocks_produce_confirmatory_uncertainty(
     assert comparison.decision is ComparisonDecision.MEANINGFUL_IMPROVEMENT
     assert comparison.complete_pair_n == 3
     assert comparison.estimate == pytest.approx(-0.005)
-    assert comparison.confidence_low == pytest.approx(-0.005)
-    assert comparison.confidence_high == pytest.approx(-0.005)
+    assert comparison.confidence_interval is not None
+    assert comparison.confidence_interval.low == pytest.approx(-0.005)
+    assert comparison.confidence_interval.high == pytest.approx(-0.005)
 
     changed_protocol = protocol.validated_copy(
         update={

@@ -55,7 +55,7 @@ def test_download_authenticates_manifest_digest_and_exact_length(tmp_path: Path)
     transport = httpx.MockTransport(
         lambda _request: httpx.Response(
             200,
-            headers={"content-length": str(len(payload)), 'etag': '"fixture"'},
+            headers={"content-length": str(len(payload)), "etag": '"fixture"'},
             stream=httpx.ByteStream(payload),
         )
     )

@@ -3,12 +3,23 @@ from __future__ import annotations
 import contextvars
 import json
 import os
+import sys
 import threading
 import time
-from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
 from typing import Any
+
+from flameox.adapters.benchmark_samples import (
+    BenchmarkDevice,
+    BenchmarkSamplesV1,
+    BenchmarkSeries,
+)
+from flameox.adapters.memray_options import MemrayCaptureOptions, memray_capture_options
+from flameox.adapters.torch_benchmark import TorchBenchmarkOptions, parse_torch_benchmark_options
+from flameox.atomic import atomic_write_json
+from flameox.domain import DomainError
 
 _PHASE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "flameox_phase",
@@ -18,6 +29,12 @@ _WRITE_LOCK = threading.Lock()
 _MAX_EVENT_BYTES = 16 * 1024
 _TORCH_PROFILER_CONFIG = "FLAMEOX_TORCH_PROFILER_CONFIG"
 _TORCH_PROFILER_OUTPUT_ROOT = "FLAMEOX_TORCH_PROFILER_OUTPUT_ROOT"
+_TORCH_BENCHMARK_CONFIG = "FLAMEOX_TORCH_BENCHMARK_CONFIG"
+_TORCH_BENCHMARK_OUTPUT = "FLAMEOX_BENCHMARK_OUTPUT"
+_MEMRAY_CONFIG = "FLAMEOX_MEMRAY_CONFIG"
+_MEMRAY_OUTPUT = "FLAMEOX_MEMRAY_OUTPUT"
+_MEMRAY_REGION_LOCK = threading.Lock()
+_MEMRAY_REGION_STATE = "idle"
 
 
 def observe(name: str, **values: Any) -> None:
@@ -28,8 +45,6 @@ def observe(name: str, **values: Any) -> None:
     if path is None:
         return
     payload = {
-        "schema_version": 1,
-        "kind": "annotation",
         "name": name,
         "phase": _PHASE.get(),
         "monotonic_ns": time.monotonic_ns(),
@@ -80,6 +95,176 @@ def phase(name: str) -> Iterator[None]:
         _PHASE.reset(token)
 
 
+def torch_benchmark(
+    name: str,
+    operation: Callable[[], object],
+    *,
+    dimensions: Mapping[str, str] | None = None,
+) -> None:
+    """Measure one prepared callable with PyTorch's Timer and publish bounded samples.
+
+    Setup, lazy initialization, and correctness checks belong to the workload before this call.
+    The optional CUDA-event series is deliberately a separately named device metric.
+    """
+
+    if not callable(operation):
+        raise TypeError("torch_benchmark operation must be callable")
+    config = _torch_benchmark_config()
+    output = _torch_benchmark_output()
+    try:
+        import torch
+        from torch.utils.benchmark import Timer
+    except ImportError as exc:
+        raise RuntimeError("PyTorch is unavailable in the workload environment") from exc
+
+    cuda_available = torch.cuda.is_available()
+    measurement = Timer(
+        stmt="operation()",
+        globals={"operation": operation},
+        num_threads=config.num_threads,
+    ).blocked_autorange(min_run_time=config.min_run_time_seconds)
+    host_samples = _timer_samples_ns(measurement, config.max_samples)
+    host = BenchmarkSeries(
+        name=name,
+        unit="ns",
+        measurement_clock="host_monotonic",
+        synchronization="device_synchronize" if cuda_available else "not_required",
+        scope="operator",
+        loop_count=_timer_loop_count(measurement),
+        dimensions=dict(dimensions or {}),
+        samples=host_samples,
+    )
+    benchmarks = [host]
+    if config.cuda_event_timing:
+        if not cuda_available:
+            raise RuntimeError("CUDA-event timing was requested, but CUDA is unavailable")
+        device, event_samples = _cuda_event_samples(
+            torch,
+            operation,
+            sample_count=config.max_samples,
+        )
+        benchmarks.append(
+            BenchmarkSeries(
+                name=f"{name}.cuda_event",
+                unit="ns",
+                measurement_clock="cuda_event",
+                synchronization="device_synchronize",
+                scope="device",
+                loop_count=1,
+                device=device,
+                dimensions=dict(dimensions or {}),
+                samples=event_samples,
+            )
+        )
+    _append_torch_benchmark_document(
+        output,
+        producer_version=str(torch.__version__),
+        benchmarks=tuple(benchmarks),
+    )
+
+
+def _torch_benchmark_config() -> TorchBenchmarkOptions:
+    raw = os.environ.get(_TORCH_BENCHMARK_CONFIG)
+    if raw is None:
+        raise RuntimeError("torch_benchmark() requires a Flameox torch.benchmark capture plan")
+    try:
+        return parse_torch_benchmark_options(json.loads(raw))
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise RuntimeError("Flameox torch.benchmark configuration is invalid") from exc
+
+
+def _torch_benchmark_output() -> Path:
+    value = os.environ.get(_TORCH_BENCHMARK_OUTPUT)
+    if value is None:
+        raise RuntimeError("torch_benchmark() requires a Flameox benchmark output path")
+    return Path(value)
+
+
+def _timer_loop_count(measurement: Any) -> int:
+    count = getattr(measurement, "number_per_run", None)
+    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+        raise RuntimeError("torch.utils.benchmark.Timer returned no valid loop count")
+    return count
+
+
+def _timer_samples_ns(measurement: Any, max_samples: int) -> tuple[int, ...]:
+    values = getattr(measurement, "times", None)
+    if not isinstance(values, list | tuple) or not values:
+        raise RuntimeError("torch.utils.benchmark.Timer returned no samples")
+    samples: list[int] = []
+    for value in values[:max_samples]:
+        if not isinstance(value, float) or value < 0 or value != value:
+            raise RuntimeError("torch.utils.benchmark.Timer returned an invalid sample")
+        samples.append(round(value * 1_000_000_000))
+    return tuple(samples)
+
+
+def _cuda_event_samples(
+    torch: Any,
+    operation: Callable[[], object],
+    *,
+    sample_count: int,
+) -> tuple[BenchmarkDevice, tuple[int, ...]]:
+    index = torch.cuda.current_device()
+    stream = torch.cuda.current_stream()
+    stream_id = getattr(stream, "cuda_stream", None)
+    device = BenchmarkDevice(
+        type="cuda",
+        index=index,
+        stream=str(stream_id) if stream_id is not None else None,
+    )
+    samples: list[int] = []
+    for _ in range(sample_count):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        operation()
+        end.record()
+        torch.cuda.synchronize()
+        elapsed_ms = start.elapsed_time(end)
+        if not isinstance(elapsed_ms, float) or elapsed_ms < 0 or elapsed_ms != elapsed_ms:
+            raise RuntimeError("CUDA event timing returned an invalid sample")
+        samples.append(round(elapsed_ms * 1_000_000))
+    return device, tuple(samples)
+
+
+def _append_torch_benchmark_document(
+    output: Path,
+    *,
+    producer_version: str,
+    benchmarks: tuple[BenchmarkSeries, ...],
+) -> None:
+    with _WRITE_LOCK:
+        if output.exists():
+            try:
+                existing = BenchmarkSamplesV1.model_validate_json(
+                    output.read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeDecodeError, ValueError) as exc:
+                raise RuntimeError(
+                    "Flameox benchmark output is not a valid benchmark document"
+                ) from exc
+            if (
+                existing.producer != "torch.utils.benchmark"
+                or existing.producer_version != producer_version
+            ):
+                raise RuntimeError("Flameox benchmark output belongs to another producer")
+            document = BenchmarkSamplesV1(
+                schema_version="flameox.benchmark-samples.v1",
+                producer=existing.producer,
+                producer_version=existing.producer_version,
+                benchmarks=(*existing.benchmarks, *benchmarks),
+            )
+        else:
+            document = BenchmarkSamplesV1(
+                schema_version="flameox.benchmark-samples.v1",
+                producer="torch.utils.benchmark",
+                producer_version=producer_version,
+                benchmarks=benchmarks,
+            )
+        atomic_write_json(output, document.model_dump(mode="json"))
+
+
 class TorchProfilerSession:
     """Narrow scheduled-profiler handle exposed to an approved workload."""
 
@@ -117,13 +302,13 @@ def torch_profiler() -> Iterator[TorchProfilerSession]:
         raise RuntimeError("Flameox torch.profiler SDK configuration is invalid")
     schedule = config.get("schedule")
     activities = config.get("activities")
-    expected_cycles = config.get("expected_cycles")
+    cycle_count = schedule.get("repeat") if isinstance(schedule, dict) else None
     if (
         not isinstance(schedule, dict)
         or not isinstance(activities, list)
-        or not isinstance(expected_cycles, int)
-        or isinstance(expected_cycles, bool)
-        or expected_cycles < 1
+        or not isinstance(cycle_count, int)
+        or isinstance(cycle_count, bool)
+        or cycle_count < 1
     ):
         raise RuntimeError("Flameox torch.profiler SDK configuration is incomplete")
     try:
@@ -148,7 +333,7 @@ def torch_profiler() -> Iterator[TorchProfilerSession]:
 
     def export_trace(profile: Any) -> None:
         nonlocal cycle
-        if cycle >= expected_cycles:
+        if cycle >= cycle_count:
             raise RuntimeError("torch.profiler emitted more trace cycles than planned")
         output = output_root / f"torch-trace-cycle-{cycle:04d}.json"
         if output.exists():
@@ -180,31 +365,110 @@ def torch_profiler() -> Iterator[TorchProfilerSession]:
         failed = True
         raise
     finally:
-        if not failed and cycle != expected_cycles:
+        if not failed and cycle != cycle_count:
             raise RuntimeError(
-                f"torch.profiler emitted {cycle} of {expected_cycles} planned trace cycles"
+                f"torch.profiler emitted {cycle} of {cycle_count} planned trace cycles"
             )
-        if not failed and cycle == expected_cycles:
-            manifest = output_root / "torch-profiler-cycles.json"
-            temporary = output_root / ".torch-profiler-cycles.tmp"
-            if manifest.exists() or temporary.exists():
-                raise RuntimeError("torch.profiler cycle manifest already exists")
-            temporary.write_text(
-                json.dumps(
-                    {
-                        "schema_version": "flameox.torch-profiler-cycles.v1",
-                        "expected_cycles": expected_cycles,
-                        "files": [
-                            f"torch-trace-cycle-{index:04d}.json"
-                            for index in range(expected_cycles)
-                        ],
-                    },
-                    allow_nan=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                )
+
+
+@contextmanager
+def memray_region(name: str) -> Iterator[None]:
+    """Track exactly one plan-bound memory region for this process.
+
+    Memray covers every thread while a tracker is active and permits only one
+    tracker per process. A second Flameox region therefore fails before it can
+    produce ambiguous evidence.
+    """
+
+    selected, output = _memray_region_config(name)
+    try:
+        import memray
+    except ImportError as exc:
+        raise RuntimeError("Memray is unavailable in the workload environment") from exc
+    global _MEMRAY_REGION_STATE
+    with _MEMRAY_REGION_LOCK:
+        if _MEMRAY_REGION_STATE != "idle":
+            reason = "overlap" if _MEMRAY_REGION_STATE == "active" else "repeated"
+            with suppress(BaseException):
+                observe("flameox.memray.region.error", region=name, reason=reason)
+            raise RuntimeError(
+                "Memray SDK capture permits exactly one region per process; end the active "
+                "region or create a fresh capture plan with one declared region."
             )
-            os.replace(temporary, manifest)
+        _MEMRAY_REGION_STATE = "active"
+    completed = False
+    failure: BaseException | None = None
+    cuda_initialized_before = _torch_cuda_initialized()
+    try:
+        observe(
+            "flameox.memray.region.start",
+            region=name,
+            warmup_count=selected.warmup_count,
+            torch_cuda_initialized=cuda_initialized_before,
+        )
+        with memray.Tracker(
+            output,
+            native_traces=selected.native_traces,
+            trace_python_allocators=selected.trace_python_allocators,
+        ):
+            yield
+        completed = True
+    except BaseException as error:
+        failure = error
+        raise
+    finally:
+        with _MEMRAY_REGION_LOCK:
+            _MEMRAY_REGION_STATE = "closed"
+        try:
+            observe(
+                "flameox.memray.region.end",
+                region=name,
+                completed=completed,
+                torch_cuda_initialized=_torch_cuda_initialized(),
+            )
+        except BaseException as observation_error:
+            if failure is None:
+                raise
+            failure.add_note(
+                "Flameox Memray region-end observation also failed "
+                f"({type(observation_error).__name__}); the workload failure remains primary."
+            )
+
+
+def _memray_region_config(name: str) -> tuple[MemrayCaptureOptions, str]:
+    raw_config = os.environ.get(_MEMRAY_CONFIG)
+    output = os.environ.get(_MEMRAY_OUTPUT)
+    if raw_config is None or output is None:
+        raise RuntimeError("memray_region() requires a Flameox Memray SDK capture plan")
+    try:
+        config = json.loads(raw_config)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("invalid Flameox Memray configuration") from exc
+    if not isinstance(config, dict):
+        raise RuntimeError("Flameox Memray SDK configuration is invalid")
+    try:
+        selected = memray_capture_options(config)
+    except DomainError as exc:
+        raise RuntimeError("Flameox Memray SDK configuration is invalid") from exc
+    if selected.mode != "sdk" or selected.region != name:
+        raise RuntimeError("memray_region() must use the exact region declared by the capture plan")
+    return selected, output
+
+
+def _torch_cuda_initialized() -> bool | None:
+    """Read already-loaded Torch state without creating allocations in the region."""
+
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return None
+    cuda = getattr(torch, "cuda", None)
+    is_initialized = getattr(cuda, "is_initialized", None)
+    if not callable(is_initialized):
+        return None
+    try:
+        return bool(is_initialized())
+    except Exception:
+        return None
 
 
 def _bounded_value(value: Any, *, depth: int = 0) -> Any:

@@ -24,7 +24,14 @@ from pydantic import Field
 from flameox import __version__
 from flameox.atomic import atomic_write_json
 from flameox.command_binding import ExecutableResolver
-from flameox.domain import CapabilityExtra, DomainError, ErrorCode, digest_model, is_digest
+from flameox.domain import (
+    CapabilityExtra,
+    DomainError,
+    ErrorCode,
+    digest_model,
+    is_digest,
+    process_exit_code,
+)
 from flameox.domain.executables import ResolvedExecutable
 from flameox.execution import (
     INSTALLER_ENVIRONMENT_ALLOWLIST,
@@ -322,9 +329,7 @@ class ProviderRuntimeManager:
         }
         distribution_name = canonicalize_name(parsed.name)
         for runtime in self._verified_candidates():
-            if not all(
-                getattr(runtime.receipt, name) == value for name, value in expected.items()
-            ):
+            if not all(getattr(runtime.receipt, name) == value for name, value in expected.items()):
                 continue
             installed = next(
                 (
@@ -398,10 +403,13 @@ class ProviderRuntimeManager:
                     "The selected provider runtime no longer matches its receipt.",
                 )
             yield verified
-            if self._read_verified(
-                runtime.root,
-                environment_id=runtime.receipt.environment_id,
-            ) is None:
+            if (
+                self._read_verified(
+                    runtime.root,
+                    environment_id=runtime.receipt.environment_id,
+                )
+                is None
+            ):
                 raise DomainError(
                     ErrorCode.ARTIFACT_INTEGRITY_FAILED,
                     "The provider runtime changed while it was in use.",
@@ -617,7 +625,10 @@ class ProviderRuntimeManager:
 
         head = invoke("rev-parse", "HEAD")
         status = invoke("status", "--porcelain", "--untracked-files=normal")
-        if head.process.exit_code != 0 or status.process.exit_code != 0:
+        if (
+            process_exit_code(head.process.termination) != 0
+            or process_exit_code(status.process.termination) != 0
+        ):
             return None, None
         revision = head.stdout.decode("utf-8", errors="replace").strip()
         return (revision or None), bool(status.stdout.strip())
@@ -694,9 +705,7 @@ class ProviderRuntimeManager:
                     return None
                 locks_root = self.root / "locks"
                 lock_root = locks_root / receipt.installation_lock_sha256.removeprefix("sha256:")
-                lock = (
-                    lock_root / "requirements.txt"
-                )
+                lock = lock_root / "requirements.txt"
                 if (
                     lock_root.is_symlink()
                     or not lock_root.resolve().is_relative_to(locks_root.resolve())
@@ -768,7 +777,7 @@ class ProviderRuntimeManager:
                 max_output_bytes=16 * 1024 * 1024,
             )
         )
-        if outcome.process.exit_code != 0:
+        if process_exit_code(outcome.process.termination) != 0:
             detail = (
                 outcome.stderr.decode(errors="replace").strip()
                 or outcome.stdout.decode(errors="replace").strip()
@@ -832,7 +841,7 @@ class ProviderRuntimeManager:
                 max_output_bytes=64 * 1024,
             )
         )
-        if outcome.process.exit_code != 0:
+        if process_exit_code(outcome.process.termination) != 0:
             raise self._invalid("provider environment verification failed")
         try:
             payload = json.loads(outcome.stdout)
@@ -865,7 +874,7 @@ class ProviderRuntimeManager:
                 max_output_bytes=4 * 1024,
             )
         )
-        if outcome.process.exit_code != 0:
+        if process_exit_code(outcome.process.termination) != 0:
             raise self._invalid("uv version probe failed")
         value = outcome.stdout.decode("utf-8", errors="replace").strip()
         if not value.startswith("uv ") or len(value) > 100:

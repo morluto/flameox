@@ -1,44 +1,14 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
 
 from flameox.action_graph import ActionId, tool_action
-from flameox.evidence_status import (
-    parse_evidence_availability,
-    recoverable_unavailable_evidence,
-)
+from flameox.evidence_status import recoverable_unavailable_evidence
 
 pytestmark = pytest.mark.unit
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {
-            "status": "unavailable",
-            "reason": "not_extracted",
-            "next_tool": "extract_memray",
-        },
-        {
-            "status": "unavailable",
-            "reason": "not_extracted",
-            "next_arguments": {"run_id": "run-1"},
-        },
-        {
-            "status": "available",
-            "reason": "evidence_present",
-            "next_tool": "extract_memray",
-            "next_arguments": {"run_id": "run-1"},
-        },
-    ],
-)
-def test_evidence_availability_rejects_incoherent_recovery(payload: dict[str, object]) -> None:
-    with pytest.raises(ValidationError):
-        parse_evidence_availability(payload)
-
-
-def test_recoverable_unavailable_evidence_round_trips_with_one_complete_action() -> None:
+def test_recoverable_unavailable_evidence_serializes_one_complete_action() -> None:
     evidence = recoverable_unavailable_evidence(
         "not_extracted",
         next_action=tool_action(
@@ -48,17 +18,16 @@ def test_recoverable_unavailable_evidence_round_trips_with_one_complete_action()
         ),
     )
 
-    assert parse_evidence_availability(evidence.model_dump(mode="python")) == evidence
     assert evidence.model_dump(mode="json") == {
         "status": "unavailable",
         "reason": "not_extracted",
         "next_action": {
             "kind": "tool",
             "action": "artifact.extract.memray",
-                "arguments": {
-                    "run_id": "run-1",
-                    "idempotency_key": "extract-run-1",
-                    "temporary_allocation_threshold": 1,
-                },
+            "arguments": {
+                "run_id": "run-1",
+                "idempotency_key": "extract-run-1",
+                "temporary_allocation_threshold": 1,
+            },
         },
     }

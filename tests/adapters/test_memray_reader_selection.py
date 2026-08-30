@@ -6,9 +6,11 @@ from typing import Any, cast
 import pytest
 
 from flameox.action_graph import ActionId, ToolAction
-from flameox.adapters import MemrayExtractor
-from flameox.adapters.memray import memray_extraction_limits
-from flameox.application import ImportArtifactRequest, ImportService
+from flameox.adapters.memray import MemrayExtractor, memray_extraction_limits
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import Workspace
 from flameox.workers.memray_contract import (
@@ -132,7 +134,6 @@ def test_memray_extraction_rejects_duplicate_worker_output_roles(tmp_path: Path)
         peak_memory_bytes=0,
         retained_end_bytes=0,
         temporary_allocated_bytes=0,
-        temporary_allocation_threshold=1,
         allocation_operations=0,
         total_allocated_bytes=0,
         capture_records=0,

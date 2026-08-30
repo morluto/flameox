@@ -11,7 +11,6 @@ from aiperf.common.models import (  # type: ignore[import-not-found,import-untyp
     MetricRecordInfo,
     MetricValue,
 )
-from pydantic import ValidationError
 
 from flameox.workers.aiperf_contract import (
     AIPERF_WORKER,
@@ -23,7 +22,6 @@ from flameox.workers.aiperf_contract import (
 )
 from flameox.workers.protocol import (
     WorkerApplication,
-    WorkerContext,
     WorkerFailureKind,
     WorkerOutputFile,
     run_typed_worker,
@@ -131,9 +129,9 @@ def _projection(record: MetricRecordInfo, line_index: int) -> AIPerfProjectionRo
     )
 
 
-def _handle(request: AIPerfWorkerRequest, context: WorkerContext) -> AIPerfWorkerResult:
+def _handle(request: AIPerfWorkerRequest, job_root: Path) -> AIPerfWorkerResult:
     source = Path(request.artifact_path)
-    output = context.job_root / "projection.jsonl"
+    output = job_root / "projection.jsonl"
     temporary = output.with_suffix(".tmp")
     digest = hashlib.sha256()
     byte_count = 0
@@ -183,7 +181,7 @@ def main() -> int:
             handler=_handle,
             invalid_failure=WorkerFailureKind.INPUT_MALFORMED,
             invalid_message="The AIPerf export violates its native record schema",
-            caught=(OSError, ValueError, ValidationError),
+            caught=(OSError, ValueError),
         )
     )
 

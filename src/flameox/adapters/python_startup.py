@@ -6,7 +6,6 @@ from typing import Any
 
 import pyperf
 
-from flameox.adapters.compatibility import require_supported_producer_major
 from flameox.adapters.pyperf import PyPerfSample, iter_pyperf_samples, load_pyperf_suite
 from flameox.domain.errors import DomainError, ErrorCode, missing_artifact_input
 from flameox.domain.identity import digest_model
@@ -22,7 +21,6 @@ _IMPORT_TIME = re.compile(
 
 
 class PythonStartupExtractionResult(ContractModel):
-    schema_version: int = 2
     run_id: str
     artifact_id: str
     import_trace_artifact_id: str
@@ -46,11 +44,6 @@ class PythonStartupExtractor:
         run = RunStore(self.workspace).read(run_id)
         benchmark_registration, import_registration = self._registrations(run)
         limitations = [
-            *require_supported_producer_major(
-                benchmark_registration,
-                package="pyperf",
-                producer_tokens=("pyperf",),
-            ),
             "The initial OS file-cache state was uncontrolled; no caches were dropped.",
             "Import-time instrumentation affects the separate trace process, not wall samples.",
         ]

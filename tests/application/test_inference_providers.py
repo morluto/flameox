@@ -14,12 +14,11 @@ from flameox.application.inference_providers import (
     VllmBenchServeRequest,
     discover_inference_tool,
     discover_sglang,
-    parse_inference_tool_discovery,
     probe_existing_vllm_server,
     probe_existing_vllm_server_async,
 )
 from flameox.application.provider_runtime import ProviderRuntime, ProviderRuntimeReceipt
-from flameox.domain import CapabilityExtra
+from flameox.domain import CapabilityExtra, DomainError, ErrorCode
 from flameox.http_transport import BoundedHttpClient
 
 pytestmark = pytest.mark.unit
@@ -70,17 +69,6 @@ def test_provider_requests_refuse_non_loopback_servers(tmp_path: Path) -> None:
             model="model",
             result_path=tmp_path / "result.json",
             num_prompts=1,
-        )
-
-
-def test_tool_discovery_requires_an_executable_when_available() -> None:
-    with pytest.raises(ValidationError):
-        parse_inference_tool_discovery(
-            {
-                "tool": "aiperf",
-                "available": True,
-                "executable": None,
-            }
         )
 
 
@@ -135,7 +123,7 @@ def test_sglang_bench_refuses_unsupported_non_streaming_mode(tmp_path: Path) -> 
     with pytest.raises(ValidationError, match="literal_error"):
         SglangBenchServingRequest.model_validate(
             {
-                "benchmark_python": Path("/opt/sglang/bin/python"),
+                "executable": Path("/opt/sglang/bin/python"),
                 "base_url": "http://127.0.0.1:8000",
                 "model": "model",
                 "result_path": tmp_path / "result.jsonl",
@@ -219,17 +207,16 @@ def test_aiperf_discovery_rejects_unsupported_version(
         ),
     )
 
-    result = discover_inference_tool(InferenceTool.AIPERF, provider_runtime=runtime)
+    with pytest.raises(DomainError, match="outside Flameox") as exc_info:
+        discover_inference_tool(InferenceTool.AIPERF, provider_runtime=runtime)
 
-    assert result.available is False
-    assert result.compatible is False
-    assert result.executable_digest is not None
-    assert result.compatibility_reason is not None
+    assert exc_info.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
+    assert exc_info.value.next_action is not None
 
 
 def test_sglang_bench_uses_fixed_module_random_workload_and_safe_output(tmp_path: Path) -> None:
     request = SglangBenchServingRequest(
-        benchmark_python=Path("/opt/sglang/bin/python"),
+        executable=Path("/opt/sglang/bin/python"),
         base_url="http://127.0.0.1:8000",
         model="model",
         tokenizer="tokenizer",
@@ -243,7 +230,7 @@ def test_sglang_bench_uses_fixed_module_random_workload_and_safe_output(tmp_path
 
     argv = request.argv()
 
-    assert argv[:3] == ("/opt/sglang/bin/python", "-m", "sglang.bench_serving")
+    assert argv[:3] == ("/opt/sglang/bin/python", "-m", "sglang.benchmark.serving")
     assert "sglang-oai-chat" in argv
     assert "--output-details" not in argv
     assert argv[argv.index("--output-file") + 1] == str(tmp_path / "result.jsonl")
@@ -253,7 +240,7 @@ def test_sglang_bench_uses_fixed_module_random_workload_and_safe_output(tmp_path
 def test_sglang_bench_rejects_base_url_paths(tmp_path: Path) -> None:
     with pytest.raises(ValidationError, match="without URL extras"):
         SglangBenchServingRequest(
-            benchmark_python=Path("/opt/sglang/bin/python"),
+            executable=Path("/opt/sglang/bin/python"),
             base_url="http://127.0.0.1:8000/api",
             model="model",
             result_path=tmp_path / "result.jsonl",
@@ -263,7 +250,11 @@ def test_sglang_bench_rejects_base_url_paths(tmp_path: Path) -> None:
         )
 
 
-def test_sglang_discovery_uses_the_bounded_broker(tmp_path: Path) -> None:
+@pytest.mark.parametrize("reported_version", ("0.5.16", "0.5.18"))
+def test_sglang_discovery_qualifies_supported_launcher_versions(
+    tmp_path: Path,
+    reported_version: str,
+) -> None:
     from flameox.domain import ProcessResult, process_termination_from_returncode
     from flameox.execution import (
         ExecutionOutcome,
@@ -282,9 +273,30 @@ def test_sglang_discovery_uses_the_bounded_broker(tmp_path: Path) -> None:
 
         def run_sync(self, request: ExecutionRequest, **_kwargs: object) -> ExecutionOutcome:
             self.request = request
+            stdout = (
+                b"\n".join(
+                    option.encode()
+                    for option in (
+                        "--backend",
+                        "--host",
+                        "--port",
+                        "--model",
+                        "--dataset-name",
+                        "--random-input-len",
+                        "--random-output-len",
+                        "--random-range-ratio",
+                        "--num-prompts",
+                        "--seed",
+                        "--output-file",
+                        "--warmup-requests",
+                    )
+                )
+                if request.argv[-1] == "--help"
+                else f"{reported_version}\n".encode()
+            )
             return ExecutionOutcome(
                 process=ProcessResult(termination=process_termination_from_returncode(0)),
-                stdout=b"0.5.16\n",
+                stdout=stdout,
                 stderr=b"",
                 resolved_executable=executable,
                 executable_binding=request.executable_binding,
@@ -294,8 +306,55 @@ def test_sglang_discovery_uses_the_bounded_broker(tmp_path: Path) -> None:
     broker = Broker()
     discovery = discover_sglang(executable, broker=broker)
 
-    assert discovery.available is True
-    assert discovery.remediation == ()
+    assert discovery.version == reported_version
+    assert discovery.executable_binding.canonical_target == executable
+    assert discovery.benchmark_capabilities == (
+        "--backend",
+        "--host",
+        "--port",
+        "--model",
+        "--dataset-name",
+        "--random-input-len",
+        "--random-output-len",
+        "--random-range-ratio",
+        "--num-prompts",
+        "--seed",
+        "--output-file",
+        "--warmup-requests",
+    )
     assert broker.request is not None
     assert broker.request.timeout_seconds == 5
     assert broker.request.max_output_bytes == 1024
+
+
+def test_sglang_discovery_refuses_an_incomplete_launcher_interface(tmp_path: Path) -> None:
+    from flameox.domain import ProcessResult, process_termination_from_returncode
+    from flameox.execution import (
+        ExecutionOutcome,
+        ExecutionRequest,
+        ProcessContainment,
+        SubprocessBroker,
+    )
+
+    executable = tmp_path / "python"
+    executable.write_text("launcher")
+    executable.chmod(0o755)
+
+    class Broker(SubprocessBroker):
+        def run_sync(self, request: ExecutionRequest, **_kwargs: object) -> ExecutionOutcome:
+            return ExecutionOutcome(
+                process=ProcessResult(termination=process_termination_from_returncode(0)),
+                stdout=b"--backend\n--host\n--port\n",
+                stderr=b"",
+                resolved_executable=executable,
+                executable_binding=request.executable_binding,
+                containment=ProcessContainment.PROCESS_GROUP,
+            )
+
+    with pytest.raises(DomainError, match=r"supported sglang\.benchmark\.serving") as exc_info:
+        discover_sglang(executable, broker=Broker())
+
+    assert exc_info.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
+    assert exc_info.value.details["module"] == "sglang.benchmark.serving"
+    assert "--model" in exc_info.value.details["missing_options"]
+    assert exc_info.value.next_action is not None

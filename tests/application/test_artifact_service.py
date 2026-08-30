@@ -4,13 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import (
-    ArtifactService,
-    EvidenceLookupService,
+from flameox.application.artifacts import ArtifactService
+from flameox.application.evidence_lookup import EvidenceLookupService
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportService,
-    NativeViewerService,
 )
+from flameox.application.viewers import NativeViewerService
 from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,

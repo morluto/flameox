@@ -72,7 +72,7 @@ def test_operation_store_rejects_terminal_state_without_a_receipt(tmp_path: Path
         owner_heartbeat_at=utc_now(),
     )
     store = OperationStore(workspace)
-    store.records.create(record)
+    store.create(record)
     serialized = record.model_dump(mode="json")
     serialized.update(
         {
@@ -95,7 +95,7 @@ def test_operation_store_rejects_terminal_state_without_a_receipt(tmp_path: Path
     assert error.value.code is ErrorCode.WORKSPACE_INVALID
 
 
-def test_operation_record_rejects_contradictory_identity_projections(tmp_path: Path) -> None:
+def test_operation_record_keeps_derived_status_fields_out_of_storage(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     request = {"value": 1}
     _, idempotency_digest = operation_digests(
@@ -114,17 +114,11 @@ def test_operation_record_rejects_contradictory_identity_projections(tmp_path: P
     )
     payload = record.model_dump(mode="python")
 
-    with pytest.raises(ValueError, match="request digest"):
-        ActiveOperationRecord.model_validate({**payload, "request_digest": "sha256:" + "a" * 64})
-    with pytest.raises(ValueError, match="operation identifier"):
-        ActiveOperationRecord.model_validate({**payload, "operation_id": "op-" + "b" * 64})
-
     cancelling = record.request_cancellation()
+    assert not {"operation_id", "request_digest", "cancellation_requested"} & payload.keys()
+    assert record.operation_id.startswith("op-")
+    assert record.request_digest.startswith("sha256:")
     assert cancelling.cancellation_requested is True
-    with pytest.raises(ValueError, match="cancellation must agree"):
-        ActiveOperationRecord.model_validate(
-            {**cancelling.model_dump(mode="python"), "cancellation_requested": False}
-        )
 
 
 def test_operation_store_rejects_transition_after_terminal_state(tmp_path: Path) -> None:
@@ -145,9 +139,9 @@ def test_operation_store_rejects_transition_after_terminal_state(tmp_path: Path)
         owner_heartbeat_at=utc_now(),
     )
     store = OperationStore(workspace)
-    store.records.create(active)
+    store.create(active)
     terminal = active.completed(receipt={"result": "done"}, item_outcomes=())
-    store.records.append(terminal, expected_revision=active.revision)
+    store.append(terminal, expected_revision=active.revision)
     reactivated = ActiveOperationRecord(
         operation=active.operation,
         workspace_id=active.workspace_id,
@@ -161,7 +155,7 @@ def test_operation_store_rejects_transition_after_terminal_state(tmp_path: Path)
     )
 
     with pytest.raises(DomainError, match="cannot transition again"):
-        store.records.append(reactivated, expected_revision=terminal.revision)
+        store.append(reactivated, expected_revision=terminal.revision)
 
     assert store.read(active.operation_id) == terminal
 
@@ -184,9 +178,9 @@ def test_operation_store_rejects_running_to_starting_transition(tmp_path: Path) 
         owner_heartbeat_at=utc_now(),
     )
     store = OperationStore(workspace)
-    store.records.create(active)
+    store.create(active)
     running = active.running()
-    store.records.append(running, expected_revision=active.revision)
+    store.append(running, expected_revision=active.revision)
     regressed = ActiveOperationRecord.model_validate(
         {
             **running.model_dump(mode="python"),
@@ -196,7 +190,7 @@ def test_operation_store_rejects_running_to_starting_transition(tmp_path: Path) 
     )
 
     with pytest.raises(DomainError, match="back to starting"):
-        store.records.append(regressed, expected_revision=running.revision)
+        store.append(regressed, expected_revision=running.revision)
 
 
 def test_operation_revision_history_retains_creation_and_a_bounded_tail(tmp_path: Path) -> None:
@@ -217,11 +211,11 @@ def test_operation_revision_history_retains_creation_and_a_bounded_tail(tmp_path
         owner_heartbeat_at=utc_now(),
     )
     store = OperationStore(workspace)
-    store.records.create(record)
+    store.create(record)
 
     for _ in range(ControlPlane.MAX_OPERATION_REVISIONS * 2):
         updated = record.heartbeat()
-        store.records.append(updated, expected_revision=record.revision)
+        store.append(updated, expected_revision=record.revision)
         record = updated
 
     with sqlite3.connect(workspace.paths.control_plane) as connection:
@@ -314,7 +308,7 @@ async def test_operation_runner_uses_lifespan_task_supervisor(tmp_path: Path) ->
 
 
 @pytest.mark.anyio
-async def test_operation_runner_cancellation_persists_cleanup_and_is_replayable(
+async def test_operation_runner_cancellation_persists_cleanup(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
@@ -515,7 +509,7 @@ async def test_operation_runner_recovers_one_stale_owner_under_cas(tmp_path: Pat
         owner_id="dead-owner",
         owner_heartbeat_at=utc_now() - timedelta(minutes=1),
     )
-    OperationStore(workspace).records.create(stale)
+    OperationStore(workspace).create(stale)
     first_runner = OperationRunner(workspace, adapter)
     second_runner = OperationRunner(workspace, adapter)
     executions = 0

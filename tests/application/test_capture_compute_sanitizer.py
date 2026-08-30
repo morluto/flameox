@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 
 from flameox.adapters.compute_sanitizer import ComputeSanitizerExtractor
-from flameox.application import CaptureService, ExecutionPolicy
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
 from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode
 from flameox.storage import RunStore, Workspace
@@ -49,9 +50,7 @@ async def test_compute_sanitizer_rejects_suppression_changed_after_planning(
     )
     suppression = tmp_path / "sanitizer.supp"
     suppression.write_text("# planned bytes\n")
-    (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\n"
-    )
+    (tmp_path / "flameox.toml").write_text("[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\n")
     workspace = Workspace.initialize(tmp_path)
     disable_containment(workspace)
     service = CaptureService(workspace)
@@ -89,10 +88,7 @@ async def test_compute_sanitizer_preserves_workload_suppression_argument(
     suppression = tmp_path / "sanitizer.supp"
     suppression.write_text("# authorized collector suppression\n")
     (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n"
-        "[workloads.probe]\n"
-        "argv = ['/bin/true', '--suppressions', 'workload.supp']\n"
-        "cwd = '.'\n"
+        "[workloads.probe]\nargv = ['/bin/true', '--suppressions', 'workload.supp']\ncwd = '.'\n"
     )
     workspace = Workspace.initialize(tmp_path)
     disable_containment(workspace)
@@ -131,9 +127,7 @@ async def test_compute_sanitizer_clean_capture_with_unknown_xml_is_inconclusive(
             '> "$1"\n'
         ),
     )
-    (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\n"
-    )
+    (tmp_path / "flameox.toml").write_text("[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\n")
     workspace = Workspace.initialize(tmp_path)
     disable_containment(workspace)
     service = CaptureService(workspace)
@@ -163,9 +157,7 @@ async def test_compute_sanitizer_same_clean_bytes_retain_mode_and_version(
             "printf '%s' '<ComputeSanitizerOutput/>' > \"$1\""
         ),
     )
-    (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\n"
-    )
+    (tmp_path / "flameox.toml").write_text("[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\n")
     workspace = Workspace.initialize(tmp_path)
     disable_containment(workspace)
     service = CaptureService(workspace)
@@ -191,10 +183,14 @@ async def test_compute_sanitizer_same_clean_bytes_retain_mode_and_version(
     assert first_extraction.semantics.mode == "racecheck"
     assert second_extraction.semantics.mode == "synccheck"
     assert first_extraction.semantics.semantic_id != second_extraction.semantics.semantic_id
-    assert first_extraction.semantics.bounds == second_extraction.semantics.bounds == {
-        "launch_count": 1,
-        "launch_skip": 0,
-    }
+    assert (
+        first_extraction.semantics.bounds
+        == second_extraction.semantics.bounds
+        == {
+            "launch_count": 1,
+            "launch_skip": 0,
+        }
+    )
     with Catalog(workspace).open_snapshot(second_extraction.corpus_commit_id) as snapshot:
         provenance = snapshot.execute(
             "SELECT run_id, value_json FROM observations "
@@ -212,8 +208,7 @@ async def test_compute_sanitizer_timeout_returns_bounded_replan_guidance(
 ) -> None:
     _install_fake_compute_sanitizer(tmp_path, monkeypatch, body="sleep 10")
     (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\n"
-        "timeout_seconds = 0.1\n"
+        "[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\ntimeout_seconds = 0.1\n"
     )
     workspace = Workspace.initialize(tmp_path)
     disable_containment(workspace)
@@ -236,9 +231,7 @@ async def test_compute_sanitizer_timeout_returns_bounded_replan_guidance(
     assert failure.value.next_action.arguments["compute_sanitizer_options"]["launch_count"] == 1
     assert failure.value.run_id is not None
     run = RunStore(workspace).read(failure.value.run_id)
-    assert any(
-        "isolate a target-only workload" in limitation for limitation in run.limitations
-    )
+    assert any("isolate a target-only workload" in limitation for limitation in run.limitations)
     assert any("kernel_name" in limitation for limitation in run.limitations)
 
 
@@ -258,8 +251,7 @@ async def test_compute_sanitizer_partial_timeout_returns_same_recovery_projectio
         ),
     )
     (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\n"
-        "timeout_seconds = 0.1\n"
+        "[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\ntimeout_seconds = 0.1\n"
     )
     workspace = Workspace.initialize(tmp_path)
     disable_containment(workspace)
@@ -284,9 +276,7 @@ async def test_compute_sanitizer_refuses_managed_capture_without_gpu_device_bind
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\n"
-    )
+    (tmp_path / "flameox.toml").write_text("[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\n")
     workspace = Workspace.initialize(tmp_path)
     _install_fake_compute_sanitizer(tmp_path, monkeypatch, body="exit 0")
     service = CaptureService(workspace)

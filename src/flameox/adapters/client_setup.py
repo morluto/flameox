@@ -10,7 +10,7 @@ from typing import Any
 import tomlkit
 
 from flameox.command_binding import ExecutableResolver
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import DomainError, ErrorCode, process_exit_code
 from flameox.execution import ExecutionRequest, SubprocessBroker
 
 
@@ -68,26 +68,6 @@ class _ClientDefinition:
     format: str
     config_key: str
     detected: bool
-
-
-@dataclass(frozen=True, slots=True)
-class _SetClientEntry:
-    value: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class _RemoveClientEntry:
-    pass
-
-
-type _ClientEntryEdit = _SetClientEntry | _RemoveClientEntry
-
-
-FALLBACK_SETUP_CLIENTS = (
-    SetupClient.CURSOR,
-    SetupClient.OPENCODE,
-    SetupClient.ANTIGRAVITY,
-)
 
 
 class QualifiedClientConfigFallbacks:
@@ -165,22 +145,6 @@ class QualifiedClientConfigFallbacks:
                 configured.append(client)
         return tuple(configured)
 
-    def allowed_config_paths(self) -> frozenset[Path]:
-        opencode_root = self.home / ".config" / "opencode"
-        return frozenset(
-            {
-                self.home / ".claude.json",
-                self.home / ".cursor" / "mcp.json",
-                opencode_root / "opencode.json",
-                opencode_root / "opencode.jsonc",
-                opencode_root / ".opencode.json",
-                opencode_root / ".opencode.jsonc",
-                self.home / ".codex" / "config.toml",
-                self.home / ".gemini" / "settings.json",
-                self.home / ".gemini" / "config" / "mcp_config.json",
-            }
-        )
-
     def plan(
         self,
         client: SetupClient,
@@ -217,7 +181,7 @@ class QualifiedClientConfigFallbacks:
                     original,
                     mode,
                 )
-            updated = self._updated_content(definition, original, _RemoveClientEntry())
+            updated = self._updated_content(definition, original, None)
             return ClientConfigEdit(
                 client,
                 definition.path,
@@ -239,7 +203,7 @@ class QualifiedClientConfigFallbacks:
                 original,
                 mode,
             )
-        updated = self._updated_content(definition, original, _SetClientEntry(wanted))
+        updated = self._updated_content(definition, original, wanted)
         action = ClientPlanAction.CREATE if original is None else ClientPlanAction.UPDATE
         return ClientConfigEdit(
             client,
@@ -303,7 +267,7 @@ class QualifiedClientConfigFallbacks:
         self,
         definition: _ClientDefinition,
         original: bytes | None,
-        edit: _ClientEntryEdit,
+        edit: dict[str, Any] | None,
     ) -> bytes:
         text = self._decode(definition.path, original) if original is not None else ""
         if definition.format == "toml":
@@ -320,17 +284,17 @@ class QualifiedClientConfigFallbacks:
         section = document.setdefault(definition.config_key, {})
         if not isinstance(section, dict):
             raise self._invalid_config(definition.path, f"{definition.config_key} is not an object")
-        if isinstance(edit, _RemoveClientEntry):
+        if edit is None:
             section.pop("flameox", None)
         else:
-            section["flameox"] = edit.value
+            section["flameox"] = edit
         return (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode()
 
     def _edit_toml(
         self,
         definition: _ClientDefinition,
         text: str,
-        edit: _ClientEntryEdit,
+        edit: dict[str, Any] | None,
     ) -> str:
         try:
             document = tomlkit.parse(text) if text else tomlkit.document()
@@ -342,12 +306,12 @@ class QualifiedClientConfigFallbacks:
             document[definition.config_key] = section
         if not hasattr(section, "get") or not hasattr(section, "__setitem__"):
             raise self._invalid_config(definition.path, "MCP section is not a table")
-        if isinstance(edit, _RemoveClientEntry):
+        if edit is None:
             section.pop("flameox", None)
         else:
             table = tomlkit.table()
-            table.add("command", edit.value["command"])
-            table.add("args", edit.value["args"])
+            table.add("command", edit["command"])
+            table.add("args", edit["args"])
             section["flameox"] = table
         return tomlkit.dumps(document)
 
@@ -384,17 +348,17 @@ class QualifiedClientConfigFallbacks:
         self,
         definition: _ClientDefinition,
         text: str,
-        edit: _ClientEntryEdit,
+        edit: dict[str, Any] | None,
         helper: Path,
     ) -> str:
         request: dict[str, Any] = {
             "operation": "modify",
             "text": text or "{}\n",
             "path": [definition.config_key, "flameox"],
-            "remove": isinstance(edit, _RemoveClientEntry),
+            "remove": edit is None,
         }
-        if isinstance(edit, _SetClientEntry):
-            request["value"] = edit.value
+        if edit is not None:
+            request["value"] = edit
         result = self._run_jsonc_helper(request, definition.path, helper)
         updated = result.get("text")
         if not isinstance(updated, str):
@@ -442,7 +406,7 @@ class QualifiedClientConfigFallbacks:
                     "Run setup through `npx flameox@latest setup` with Node.js available.",
                 ),
             ) from exc
-        if outcome.process.exit_code != 0:
+        if process_exit_code(outcome.process.termination) != 0:
             message = outcome.stderr.decode("utf-8", errors="replace").strip()
             message = message or "unknown JSONC parser failure"
             raise self._invalid_config(path, message)
@@ -494,9 +458,6 @@ class QualifiedClientConfigFallbacks:
             details={"error": str(error)},
             remediation=("Repair the configuration, then run `npx flameox@latest setup` again.",),
         )
-
-
-ClientConfigRegistry = QualifiedClientConfigFallbacks
 
 
 def _plain_mapping(value: Any) -> dict[str, Any] | None:

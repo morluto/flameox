@@ -17,7 +17,7 @@ from flameox.application.imports import (
     ImportService,
 )
 from flameox.command_binding import ExecutableResolver
-from flameox.domain import ArtifactKind, DomainError, ErrorCode, Sensitivity
+from flameox.domain import ArtifactKind, DomainError, ErrorCode, Sensitivity, process_exit_code
 from flameox.domain.executables import ResolvedExecutable
 from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
 from flameox.filesystem import BoundedFileSystem
@@ -28,7 +28,6 @@ _MAX_TRACE_MEMBERS = 10_000
 
 
 class XctraceCapability(ContractModel):
-    schema_version: Literal[1] = 1
     status: Literal["available", "missing", "unsupported", "permission_denied", "unknown"]
     executable: str | None = None
     version: str | None = None
@@ -45,7 +44,6 @@ class XctraceImportRequest(ContractModel):
 
 
 class XctraceImportResult(ContractModel):
-    schema_version: Literal[1] = 1
     run_id: str
     trace_artifact_id: str
     toc_artifact_id: str
@@ -86,7 +84,7 @@ class XctraceService:
                 limitations=("xcrun was not found.",),
             )
         version = await self._run(executable, ("xctrace", "version"), max_output_bytes=64 * 1024)
-        if version.process.exit_code != 0:
+        if process_exit_code(version.process.termination) != 0:
             detail = version.stderr.decode(errors="replace").lower()
             status = "permission_denied" if "permission" in detail else "unsupported"
             return XctraceCapability(
@@ -105,10 +103,9 @@ class XctraceService:
             ("xctrace", "list", "templates"),
             max_output_bytes=512 * 1024,
         )
-        template_available = (
-            templates.process.exit_code == 0
-            and "Metal System Trace" in templates.stdout.decode(errors="replace")
-        )
+        template_available = process_exit_code(
+            templates.process.termination
+        ) == 0 and "Metal System Trace" in templates.stdout.decode(errors="replace")
         return XctraceCapability(
             status="available" if template_available and qualified_version else "unsupported",
             executable=str(executable.invocation_path),
@@ -173,7 +170,7 @@ class XctraceService:
                 max_output_bytes=request.max_export_bytes,
                 allowed_roots=(self.workspace.project_root, trace.parent, staging),
             )
-            if exported.process.exit_code != 0 or not toc.is_file():
+            if process_exit_code(exported.process.termination) != 0 or not toc.is_file():
                 raise DomainError(
                     ErrorCode.ARTIFACT_PARSE_FAILED,
                     "xctrace could not export a table of contents for the trace bundle.",

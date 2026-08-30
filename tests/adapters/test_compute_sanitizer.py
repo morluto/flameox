@@ -8,7 +8,10 @@ import pytest
 from flameox.adapters.builtins import build_capture_invocation
 from flameox.adapters.compute_sanitizer import ComputeSanitizerExtractor
 from flameox.adapters.options import bind_adapter_options, run_semantics
-from flameox.application import ImportArtifactRequest, ImportService
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,

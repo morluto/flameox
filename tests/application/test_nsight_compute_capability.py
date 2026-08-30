@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from flameox.application import CapabilityService
+from flameox.application.capabilities import CapabilityService
 from flameox.domain import CapabilityStatus, ProcessResult, process_termination_from_returncode
 from flameox.execution import (
     ExecutionOutcome,

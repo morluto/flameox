@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from flameox.domain import ResourceAvailability, RunManifest, digest_model
-from flameox.storage.control_plane import canonical_json
+from flameox.domain import ResourceAvailability, RunManifest, digest_model, process_exit_code
+from flameox.storage.control_plane import _serialize_control_payload
 
 
 def run_row(manifest: RunManifest) -> dict[str, object]:
@@ -25,7 +25,7 @@ def run_row(manifest: RunManifest) -> dict[str, object]:
         "adapter": manifest.semantics.adapter,
         "adapter_version": manifest.semantics.adapter_version,
         "run_semantic_id": manifest.semantics.semantic_id,
-        "exit_code": manifest.process.exit_code if manifest.process else None,
+        "exit_code": process_exit_code(manifest.process.termination) if manifest.process else None,
         "wall_time_ns": (manifest.process.wall_time_ns if manifest.process else None),
         "orchestrator": (
             manifest.external_context.orchestrator if manifest.external_context else None
@@ -73,8 +73,7 @@ def run_row(manifest: RunManifest) -> dict[str, object]:
                 else ResourceAvailability.PARTIAL
             )
         ),
-        "manifest_path": f"control-plane:run/{manifest.run_id}@{manifest.revision}",
-        "manifest_json": canonical_json(
+        "manifest_json": _serialize_control_payload(
             manifest.model_dump(mode="json", exclude={"process": {"timed_out"}})
         ),
     }

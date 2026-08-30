@@ -8,10 +8,9 @@ from enum import Enum
 from typing import Any, ClassVar, Literal, cast
 
 import duckdb
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from flameox.application.artifacts import ArtifactService, SnapshotArtifact
-from flameox.application.recoverable_move import validate_manifest_id
 from flameox.catalog import Catalog, Snapshot, SnapshotHandle
 from flameox.domain import (
     AnalysisRecord,
@@ -26,11 +25,13 @@ from flameox.domain import (
     SourceState,
 )
 from flameox.models import ContractModel
-from flameox.storage import GenerationManifest, Workspace
+from flameox.storage import Workspace
+from flameox.storage.corpus import Digest, GenerationManifest
+
+_GENERATION_ID = TypeAdapter(Digest)
 
 
 class EvidenceLookupResult(ContractModel):
-    schema_version: int = 1
     corpus_commit_id: str
     ref_type: EvidenceReferenceType
     ref_id: str
@@ -45,6 +46,7 @@ class EvidenceSession:
         EvidenceReferenceType.COMPARISON: ("comparisons", "comparison_id"),
         EvidenceReferenceType.OBSERVATION: ("observations", "observation_id"),
         EvidenceReferenceType.RUN_SET: ("run_sets", "run_set_id"),
+        EvidenceReferenceType.STATIC_CANDIDATE: ("static_candidates", "candidate_id"),
         EvidenceReferenceType.TRIAL: ("trials", "trial_id"),
     }
 
@@ -202,19 +204,6 @@ class EvidenceSession:
             "ORDER BY ref_type, ref_id, relation",
             parameters,
         ).fetchall()
-        if revisioned and not rows:
-            legacy = self.execute(
-                "SELECT 1 FROM evidence_refs WHERE owner_type = ? AND owner_id = ? "
-                "AND owner_revision IS NULL LIMIT 1",
-                (owner_type, owner_id),
-            ).fetchone()
-            if legacy is not None:
-                raise DomainError(
-                    ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
-                    f"Evidence references for {owner_type} {owner_id!r} predate exact "
-                    "owner-revision binding and are ambiguous.",
-                    details={"owner_revision": owner_revision, "corpus_commit_id": self.commit_id},
-                )
         try:
             return tuple(
                 EvidenceReference.model_validate(
@@ -372,29 +361,29 @@ class EvidenceSession:
         )
 
     def _generation(self, generation_id: str) -> GenerationManifest:
-        validate_manifest_id(generation_id, kind="generation")
-        relative = f"generations/{generation_id}/manifest.json"
-        if relative not in self._snapshot.commit.generation_manifests:
+        try:
+            validated_id = _GENERATION_ID.validate_python(generation_id)
+        except ValidationError as exc:
+            raise DomainError(
+                ErrorCode.INVALID_ARGUMENTS,
+                "A generation reference must be a sha256 content digest.",
+                details={"generation_id": generation_id},
+            ) from exc
+        if validated_id not in self._snapshot.commit.generation_ids:
             raise self._missing(
                 EvidenceReferenceType.GENERATION.value,
-                generation_id,
+                validated_id,
             )
-        path = self._workspace.paths.root / relative
         try:
-            manifest = GenerationManifest.model_validate_json(path.read_text())
-        except (OSError, ValueError) as exc:
+            return self._workspace.corpus.read_generation(validated_id)
+        except DomainError as exc:
+            if exc.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED:
+                raise
             raise DomainError(
                 ErrorCode.WORKSPACE_INVALID,
-                f"Generation {generation_id!r} is invalid in the pinned corpus snapshot.",
+                f"Generation {validated_id!r} is invalid in the pinned corpus snapshot.",
                 details={"corpus_commit_id": self.commit_id},
             ) from exc
-        if manifest.generation_id != generation_id:
-            raise DomainError(
-                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                "The generation manifest identity does not match its committed path.",
-                details={"corpus_commit_id": self.commit_id},
-            )
-        return manifest
 
     def _missing(
         self,

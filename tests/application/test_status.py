@@ -6,14 +6,14 @@ import pytest
 
 from flameox import __version__
 from flameox.action_graph import ActionId
-from flameox.application import (
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportService,
-    QuarantineService,
-    workspace_status,
 )
+from flameox.application.quarantine import QuarantineService
+from flameox.application.status import workspace_status
 from flameox.catalog import Catalog
-from flameox.domain import ArtifactKind
+from flameox.domain import ArtifactKind, new_id
 from flameox.observability import OperationLogger
 from flameox.storage import Workspace
 from flameox.storage.corpus import build_commit
@@ -45,7 +45,6 @@ def test_status_reports_integrity_storage_recovery_and_capabilities(
     result = workspace_status(workspace)
 
     assert result.server_version == __version__
-    assert result.workspace_created_with_version == workspace.identity.flameox_version
 
     assert result.workspace_valid
     assert result.catalog_valid
@@ -61,7 +60,7 @@ def test_operation_log_failure_does_not_change_operation_outcome(tmp_path: Path)
     logger.path.mkdir(parents=True)
 
     emitted = logger.emit(
-        operation_id=logger.new_id(),
+        operation_id=new_id(),
         operation="test",
         phase="complete",
     )
@@ -90,7 +89,7 @@ def test_status_does_not_treat_a_new_corpus_head_as_stale_catalog_state(tmp_path
     head = workspace.corpus.read_head()
     newer = build_commit(
         parent_commit_id=head.commit_id,
-        generation_manifests=head.generation_manifests,
+        generation_ids=head.generation_ids,
     )
     workspace.corpus.write_commit(newer)
     workspace.corpus.publish_head(newer.commit_id)

@@ -5,9 +5,11 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from flameox.application import (
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportService,
+)
+from flameox.application.integrity import (
     IntegrityIssue,
     IntegrityLevel,
     IntegrityResult,
@@ -72,7 +74,7 @@ def test_integrity_uses_pinned_corpus_without_stale_catalog_bookkeeping(tmp_path
     head = workspace.corpus.read_head()
     newer = build_commit(
         parent_commit_id=head.commit_id,
-        generation_manifests=head.generation_manifests,
+        generation_ids=head.generation_ids,
     )
     workspace.corpus.write_commit(newer)
     workspace.corpus.publish_head(newer.commit_id)

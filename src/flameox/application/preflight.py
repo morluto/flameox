@@ -25,6 +25,7 @@ from flameox.domain import (
     RequirementResult,
     RequirementStatus,
     digest_model,
+    process_exit_code,
 )
 from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.storage import Workspace
@@ -75,7 +76,6 @@ class PreflightService:
                 self._distribution(
                     name,
                     required=name not in requirements.optional,
-                    workload_name=workload_name,
                     environment=python_environment,
                 )
             )
@@ -272,7 +272,11 @@ class PreflightService:
                     ),
                     temporary_root=temporary_root,
                 )
-                if outcome.process.exit_code == 0 and output.is_file() and output.stat().st_size:
+                if (
+                    process_exit_code(outcome.process.termination) == 0
+                    and output.is_file()
+                    and output.stat().st_size
+                ):
                     return RequirementResult(
                         requirement="nvcc",
                         kind=RequirementKind.EXECUTABLE,
@@ -404,7 +408,6 @@ class PreflightService:
         name: str,
         *,
         required: bool,
-        workload_name: str,
         environment: PythonEnvironmentObservation | None,
     ) -> RequirementResult:
         try:

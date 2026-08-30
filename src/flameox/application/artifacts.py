@@ -46,7 +46,6 @@ class ArtifactReductionProvenance(ContractModel):
 
 
 class ArtifactMetadataResult(ContractModel):
-    schema_version: int = 1
     content: ArtifactContent
     resource_uri: str
     registrations: tuple[ArtifactRegistrationSummary, ...]
@@ -68,7 +67,6 @@ class ArtifactListItem(ContractModel):
 class ArtifactListResult(CursorPageContract):
     page_items_field = "artifacts"
 
-    schema_version: int = 1
     corpus_commit_id: str
     artifacts: tuple[ArtifactListItem, ...]
     total: int
@@ -363,9 +361,7 @@ class ArtifactService:
                 (artifact_id, artifact_id),
             ).fetchone()
             assert count_row is not None
-            predicate = (
-                "AND reduction_id > ? " if after is not None else ""
-            )
+            predicate = "AND reduction_id > ? " if after is not None else ""
             parameters: tuple[object, ...] = (
                 (artifact_id, artifact_id, after, limit + 1)
                 if after is not None

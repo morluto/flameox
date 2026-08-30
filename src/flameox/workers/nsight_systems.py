@@ -17,7 +17,6 @@ from flameox.workers.nsight_systems_contract import (
 )
 from flameox.workers.protocol import (
     WorkerApplication,
-    WorkerContext,
     WorkerFailureKind,
     run_typed_worker,
 )
@@ -554,7 +553,7 @@ def _extract(path: Path, *, limit: int) -> dict[str, object]:
 
 def _handle(
     request: NsightSystemsWorkerRequest,
-    _context: WorkerContext,
+    _job_root: Path,
 ) -> NsightSystemsWorkerResult:
     try:
         result = _extract(Path(request.artifact_path), limit=request.max_rows_per_table)
@@ -573,9 +572,7 @@ def _handle(
         truncated_tables=tuple(cast(list[str], result["truncated_tables"])),
         product_name=cast(dict[str, str], result["metadata"]).get("product_name"),
         product_version=cast(dict[str, str], result["metadata"]).get("product_version"),
-        export_schema_version=cast(dict[str, str], result["metadata"]).get(
-            "export_schema_version"
-        ),
+        export_schema_version=cast(dict[str, str], result["metadata"]).get("export_schema_version"),
         export_schema_checksum=cast(dict[str, str], result["metadata"]).get(
             "export_schema_checksum"
         ),

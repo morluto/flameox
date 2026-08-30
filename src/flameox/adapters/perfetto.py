@@ -39,7 +39,6 @@ type _AggregateKey = tuple[str, str | None, str | None]
 
 
 class PerfettoExtractionResult(ContractModel):
-    schema_version: int = 1
     run_id: str
     artifact_id: str
     trace_processor_path: str

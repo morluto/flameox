@@ -42,7 +42,6 @@ class CallEdgeDetail(FrameDetail):
 class CallEdgeResult(CursorPageContract):
     page_items_field = "frames"
 
-    schema_version: int = 1
     corpus_commit_id: str
     input_id: str
     frame_id: str
@@ -72,7 +71,6 @@ class StackExample(ContractModel):
 class StackExamplesResult(CursorPageContract):
     page_items_field = "examples"
 
-    schema_version: int = 1
     corpus_commit_id: str
     input_id: str
     frame_id: str

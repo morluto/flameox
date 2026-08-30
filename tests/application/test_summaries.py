@@ -7,14 +7,15 @@ from pathlib import Path
 import pytest
 from pydantic import JsonValue
 
-from flameox.application import (
-    CaptureService,
-    EvidenceLookupService,
+from flameox.application.capture import CaptureService
+from flameox.application.evidence_lookup import EvidenceLookupService
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.run_projection import RunProjectionService
+from flameox.application.run_rows import run_row
+from flameox.application.summaries import (
     EvidenceSummary,
     EvidenceSummaryRequest,
     EvidenceSummaryService,
-    ExecutionPolicy,
-    RunProjectionService,
     SummaryClaim,
     SummaryExcerptPolicy,
     SummaryProofAssessment,
@@ -24,7 +25,6 @@ from flameox.application import (
     SummarySupportStatus,
     render_evidence_summary_markdown,
 )
-from flameox.application.run_rows import run_row
 from flameox.catalog import Catalog
 from flameox.domain import (
     CaptureStatus,
@@ -57,7 +57,6 @@ _MEASUREMENT_PROTOCOL_ID = "sha256:" + "4" * 64
 def _write_workload(project: Path) -> None:
     (project / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.proof]
 argv = ["python", "-c", "print('{message}')"]
 cwd = "."

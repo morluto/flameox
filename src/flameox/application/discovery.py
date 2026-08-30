@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import datetime
-from typing import Any, cast
+from typing import cast
 
-from pydantic import ConfigDict, Field, computed_field, model_validator
+from pydantic import ConfigDict, Field, computed_field
 
 from flameox.catalog import Catalog
 from flameox.domain import (
@@ -64,18 +63,6 @@ class DiscoveryCoverage(ContractModel):
     filters_applied: tuple[str, ...]
     unavailable_facets: tuple[str, ...] = ()
 
-    @model_validator(mode="before")
-    @classmethod
-    def parse_population_projection(cls, value: Any) -> Any:
-        if not isinstance(value, Mapping) or "population_complete" not in value:
-            return value
-        parsed = dict(value)
-        supplied = parsed.pop("population_complete")
-        unavailable = parsed.get("unavailable_facets", ())
-        if isinstance(unavailable, (list, tuple)) and supplied != (not unavailable):
-            raise ValueError("population completeness must agree with unavailable facets")
-        return parsed
-
     @computed_field  # type: ignore[prop-decorator]
     @property
     def population_complete(self) -> bool:
@@ -85,7 +72,6 @@ class DiscoveryCoverage(ContractModel):
 class RunListResult(CursorPageContract):
     page_items_field = "runs"
 
-    schema_version: int = 1
     corpus_commit_id: str
     runs: tuple[RunSummary, ...]
     total: int

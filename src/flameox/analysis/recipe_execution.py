@@ -169,8 +169,7 @@ class ExecutionRecipes(RecipeContext):
                     baseline_by_key.keys() & candidate_by_key.keys(),
                     key=repr,
                 )
-                if baseline_by_key[item_key].value_json
-                != candidate_by_key[item_key].value_json
+                if baseline_by_key[item_key].value_json != candidate_by_key[item_key].value_json
             )
         collections: dict[
             str,
@@ -245,9 +244,7 @@ class ExecutionRecipes(RecipeContext):
         predicates = [where]
         query_parameters = list(parameters)
         if filters.file_prefix is not None:
-            escaped = (
-                filters.file_prefix.replace("^", "^^").replace("%", "^%").replace("_", "^_")
-            )
+            escaped = filters.file_prefix.replace("^", "^^").replace("%", "^%").replace("_", "^_")
             predicates.append("file LIKE ? ESCAPE '^'")
             query_parameters.append(f"{escaped}%")
         if filters.kind is not None:

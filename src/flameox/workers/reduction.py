@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import shlex
 import shutil
 import time
 import zipfile
 from pathlib import Path
-
-from pydantic import ValidationError
 
 from flameox.application.reduction_contracts import (
     PredicateClassification,
@@ -16,12 +13,11 @@ from flameox.application.reduction_contracts import (
     ReductionDisposition,
 )
 from flameox.atomic import atomic_write_bytes, atomic_write_json
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import DomainError, ErrorCode, process_exit_code
 from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
 from flameox.filesystem import BoundedFileSystem
 from flameox.workers.protocol import (
     WorkerApplication,
-    WorkerContext,
     WorkerFailureKind,
     WorkerOutputFile,
     run_typed_worker,
@@ -132,8 +128,8 @@ def _require_tree_budget(root: Path, *, max_files: int, max_bytes: int) -> None:
             )
 
 
-def _handle(request: ShrinkRayWorkerRequest, context: WorkerContext) -> ShrinkRayWorkerResult:
-    root = context.job_root
+def _handle(request: ShrinkRayWorkerRequest, job_root: Path) -> ShrinkRayWorkerResult:
+    root = job_root
     receipts = root / "predicate-receipts"
     receipts.mkdir(mode=0o700)
     target = root / "input.flameox-data"
@@ -161,14 +157,14 @@ def _handle(request: ShrinkRayWorkerRequest, context: WorkerContext) -> ShrinkRa
         "--memory-limit",
         str(config.maximum_rss_bytes),
         "--seed",
-        str(request.seed),
+        "0",
         "--volume",
         "normal",
         "--in-place",
         "--input-type",
         "arg",
         "--parallelism",
-        str(request.parallelism),
+        "1",
         "--ui",
         "basic",
         "--formatter",
@@ -214,7 +210,7 @@ def _handle(request: ShrinkRayWorkerRequest, context: WorkerContext) -> ShrinkRa
                 ),
             )
         )
-        exit_code = outcome.process.exit_code
+        exit_code = process_exit_code(outcome.process.termination)
         atomic_write_bytes(stdout_path, outcome.stdout)
         atomic_write_bytes(stderr_path, outcome.stderr)
     except DomainError as error:
@@ -351,7 +347,7 @@ def main() -> int:
             handler=_handle,
             invalid_failure=WorkerFailureKind.INPUT_MALFORMED,
             invalid_message="The ShrinkRay reduction request or output is invalid",
-            caught=(OSError, ValueError, ValidationError, json.JSONDecodeError),
+            caught=(OSError, ValueError),
         )
     )
 

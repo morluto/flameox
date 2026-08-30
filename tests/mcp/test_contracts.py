@@ -92,7 +92,9 @@ async def test_mcp_tools_use_explicit_envelopes_and_annotations(
     assert definitions["FailurePayload"]["properties"]["ok"]["const"] is False
     assert set(definitions["ErrorCode"]["enum"]) == {code.value for code in ErrorCode}
     assert definitions["RecoveryAction"]["discriminator"]["propertyName"] == "kind"
-    assert "context" not in definitions["ToolActionRecovery"]["properties"]
+    assert "action" not in definitions["RecoveryToolAction"]["properties"]
+    assert "next_tool" not in definitions["RecoveryToolAction"]["properties"]
+    assert "next_arguments" not in definitions["RecoveryToolAction"]["properties"]
     assert "never executes" in (by_name["configure_workload"].description or "")
     assert result.is_error is False
     assert result.structured_content is not None
@@ -165,9 +167,7 @@ async def test_every_mcp_tool_uses_sdk_generated_schemas_and_annotations(
     assert {"collection", "filters", "items", "totals", "next_cursor"} <= set(
         execution_result["properties"]
     )
-    assert not {"observations", "added", "removed", "changed"} & set(
-        execution_result["properties"]
-    )
+    assert not {"observations", "added", "removed", "changed"} & set(execution_result["properties"])
 
 
 @pytest.mark.anyio
@@ -322,6 +322,17 @@ async def test_accelerator_tools_advertise_bounded_v2_schemas(tmp_path: Path) ->
         "suppression_file",
         "finding_exit_code",
     }
+    memray = tools["plan_capture"].input_schema["$defs"]["MemrayCaptureOptions"]
+    assert memray["additionalProperties"] is False
+    assert set(memray["properties"]) == {
+        "mode",
+        "region",
+        "warmup_count",
+        "native_traces",
+        "trace_python_allocators",
+    }
+    assert memray["properties"]["warmup_count"]["minimum"] == 0
+    assert memray["properties"]["warmup_count"]["maximum"] == 1_000_000
 
 
 @pytest.mark.anyio
@@ -362,6 +373,20 @@ async def test_accelerator_tools_advertise_bounded_v2_schemas(tmp_path: Path) ->
                 "compute_sanitizer_options": {"launch_skip": True},
             },
             ("compute_sanitizer_options.launch_skip",),
+        ),
+        (
+            "plan_capture",
+            {
+                "workload_name": "workload",
+                "adapter": "memray",
+                "parameters": {},
+                "memray_options": {
+                    "mode": "sdk",
+                    "region": "steady_step",
+                    "warmup_count": True,
+                },
+            },
+            ("memray_options.warmup_count",),
         ),
     ],
 )
@@ -511,21 +536,16 @@ async def test_mcp_domain_errors_remain_structured(tmp_path: Path) -> None:
         "initialize_workspace."
     ]
     assert result.structured_content["error"]["recovery"] == {
-        "kind": "tool_action",
+        "kind": "tool",
         "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
-        "action": {
-            "kind": "tool",
-            "action": "workspace.initialize",
-            "arguments": {},
-        },
-        "next_tool": "initialize_workspace",
-        "next_arguments": {},
+        "tool_name": "initialize_workspace",
+        "arguments": {},
     }
     assert configuration.is_error is True
     assert configuration.structured_content is not None
     assert configuration.structured_content["error"]["code"] == "WORKSPACE_NOT_FOUND"
-    assert configuration.structured_content["error"]["recovery"]["next_tool"] == (
+    assert configuration.structured_content["error"]["recovery"]["tool_name"] == (
         "initialize_workspace"
     )
 
@@ -608,10 +628,7 @@ async def test_extractors_name_missing_artifact_and_require_state_change(tmp_pat
             or error["details"]["compatible_import_producers"]
         )
         assert error["recovery"]["safe_to_repeat_same_call"] is False
-        assert error["recovery"]["action"]["suggested_action"] in {
-            "capture.detached.start",
-            "artifact.import",
-        }
+        assert error["recovery"]["kind"] == "manual"
 
     assert unknown.structured_content is not None
     assert unknown.structured_content["error"]["code"] == "RUN_NOT_FOUND"
@@ -622,7 +639,7 @@ async def test_extractors_name_missing_artifact_and_require_state_change(tmp_pat
     assert selection_error["code"] == "INVALID_ARGUMENTS"
     assert selection_error["details"]["available_artifact_ids"] == [otlp_artifact_id]
     assert selection_error["recovery"]["safe_to_repeat_same_call"] is False
-    assert selection_error["recovery"]["action"]["missing_arguments"] == ["artifact_id"]
+    assert selection_error["recovery"]["missing_arguments"] == ["artifact_id"]
 
 
 @pytest.mark.anyio
@@ -746,7 +763,7 @@ async def test_mcp_workspace_initialization_failures_remain_structured(
 async def test_mcp_invalid_configuration_exposes_missing_action_inputs(tmp_path: Path) -> None:
     Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n[experiments.broken]\nworkload = 'missing'\n"
+        "[experiments.broken]\nworkload = 'missing'\n"
         "treatment_factor = 'mode'\n[experiments.broken.factors]\nmode = ['a', 'b']\n"
     )
 
@@ -767,13 +784,8 @@ async def test_mcp_invalid_configuration_exposes_missing_action_inputs(tmp_path:
         "kind": "manual",
         "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
-        "next_tool": None,
-        "action": {
-            "kind": "manual",
-            "instruction": "Supply a complete named workload definition before continuing.",
-            "suggested_action": "workload.configure",
-            "missing_arguments": ["name", "operation", "argv"],
-        },
+        "instruction": "Supply a complete named workload definition before continuing.",
+        "missing_arguments": ["name", "operation", "argv"],
     }
 
 
@@ -782,7 +794,7 @@ async def test_mcp_invalid_configuration_falls_back_to_typed_manual_recovery(
     tmp_path: Path,
 ) -> None:
     Workspace.initialize(tmp_path)
-    (tmp_path / "flameox.toml").write_text("schema_version =\n")
+    (tmp_path / "flameox.toml").write_text("invalid =\n")
 
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:
         failed = await client.call_tool(
@@ -801,13 +813,8 @@ async def test_mcp_invalid_configuration_falls_back_to_typed_manual_recovery(
         "kind": "manual",
         "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
-        "next_tool": None,
-        "action": {
-            "kind": "manual",
-            "instruction": "Repair flameox.toml manually, then verify its status.",
-            "suggested_action": "workload.configuration.inspect",
-            "missing_arguments": [],
-        },
+        "instruction": "Repair flameox.toml manually, then verify its status.",
+        "missing_arguments": [],
     }
     diagnostic = failed.structured_content["error"]["details"]["diagnostic"]
     assert diagnostic

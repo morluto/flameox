@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 from flameox.adapters.compute_sanitizer import ComputeSanitizerExtractor
-from flameox.application import (
-    CaptureService,
-    ExecutionPolicy,
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportService,
 )
@@ -113,7 +113,7 @@ async def test_live_compute_sanitizer_wrapper_preserves_finding_as_validation(
     _, _, executable = compute_sanitizer_probe
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n"
+        ""
         "[workloads.out_of_bounds]\n"
         f"argv = [{str(executable)!r}, 'oob']\n"
         "cwd = '.'\n"

@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 from threading import Lock
 from typing import Any, Literal
-from uuid import uuid4
 
 from concurrent_log_handler import ConcurrentRotatingFileHandler
 from pydantic import Field
@@ -38,7 +37,6 @@ class _ReportingRotatingFileHandler(ConcurrentRotatingFileHandler):
 class OperationEvent(ContractModel):
     """Closed diagnostic metadata; lifecycle authority remains in the control plane."""
 
-    schema_version: int = 1
     timestamp: str
     operation_id: str
     operation: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
@@ -60,9 +58,6 @@ class OperationLogger:
 
     def __init__(self, root: Path) -> None:
         self.path = root / "logs" / "operations.jsonl"
-
-    def new_id(self) -> str:
-        return str(uuid4())
 
     def emit(
         self,

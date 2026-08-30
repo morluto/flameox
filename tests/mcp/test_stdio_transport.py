@@ -13,7 +13,7 @@ from mcp_types import TextContent, TextResourceContents
 from typer.testing import CliRunner
 
 from flameox import __version__
-from flameox.application import managed_setup_adapter_names
+from flameox.application.capabilities import managed_setup_adapter_names
 from flameox.cli import app
 from flameox.domain import RunManifest
 from flameox.storage import RunStore, Workspace
@@ -97,16 +97,11 @@ async def test_real_stdio_server_keeps_protocol_on_stdout(tmp_path: Path) -> Non
         "Call list_runs to choose an existing run."
     ]
     assert structured_error.structured_content["error"]["recovery"] == {
-        "kind": "tool_action",
+        "kind": "tool",
         "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
-        "action": {
-            "kind": "tool",
-            "action": "run.list",
-            "arguments": {"limit": 50},
-        },
-        "next_tool": "list_runs",
-        "next_arguments": {"limit": 50},
+        "tool_name": "list_runs",
+        "arguments": {"limit": 50},
     }
 
 
@@ -238,7 +233,6 @@ async def test_real_stdio_discovers_then_plans_and_executes_declared_workload(
     assert status.structured_content["result"]["status"] == "missing"
     assert configured.is_error is False
     assert configured.structured_content is not None
-    assert configured.structured_content["result"]["configuration_source"] == "agent"
     assert planned.structured_content["result"]["execution_policy"] == "trusted_local"
     assert any(
         "Trusted-local execution selected" in warning
@@ -304,7 +298,6 @@ async def test_real_stdio_server_reports_progress_and_propagates_cancellation(
 ) -> None:
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.wait]
 argv = ["python", "-c", "import time; time.sleep(30)"]
 cwd = "."

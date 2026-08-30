@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import (
+from flameox.application.records import (
     CreateInvestigationRequest,
     InvestigationService,
     RecordHypothesisRequest,

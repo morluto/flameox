@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from flameox.action_graph import ActionId
-from flameox.application import DrilldownService
+from flameox.application.drilldown import DrilldownService
 from flameox.evidence import GenerationPublisher
 from flameox.storage import Workspace
 

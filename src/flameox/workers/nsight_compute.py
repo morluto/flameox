@@ -11,6 +11,14 @@ from typing import Any, cast
 from pydantic import JsonValue
 
 from flameox.domain import DomainError, ErrorCode
+from flameox.nsight_compute import (
+    NsightComputeFocusMetric,
+    NsightComputeProviderRuleFact,
+    NsightComputeReportLocation,
+    NsightComputeRuleMessage,
+    NsightComputeSpeedupEstimation,
+    NsightComputeSpeedupMeaning,
+)
 from flameox.workers.nsight_compute_contract import (
     NSIGHT_COMPUTE_WORKER,
     NsightComputeWorkerRequest,
@@ -18,7 +26,6 @@ from flameox.workers.nsight_compute_contract import (
 )
 from flameox.workers.protocol import (
     WorkerApplication,
-    WorkerContext,
     WorkerFailureKind,
     run_typed_worker,
 )
@@ -32,6 +39,11 @@ _SOURCE_FILE_ID_CHARS = 200
 _SOURCE_FILE_PATH_CHARS = 500
 _UINT32_MAX = 2**32 - 1
 _UINT64_MAX = 2**64 - 1
+_RULE_MESSAGE_CHARS = 8_000
+_RULE_TITLE_CHARS = 2_000
+_RULE_TYPE_CHARS = 100
+_RULE_FOCUS_METRIC_LIMIT = 32
+_RULE_FOCUS_INFORMATION_CHARS = 2_000
 
 
 def _bounded_text(value: object, limit: int = 2_000) -> str:
@@ -294,6 +306,244 @@ def _metric_value(
     return "unknown", None
 
 
+def _provider_rule_speedup_meaning(
+    value: object,
+) -> tuple[NsightComputeSpeedupMeaning, str | None]:
+    """Classify only provider labels whose global/local meaning is explicit."""
+    if value is None:
+        return "unknown", None
+    provider_type = _bounded_text(value, _RULE_TYPE_CHARS)
+    folded = provider_type.casefold()
+    if "global" in folded:
+        return "global_runtime_reduction", provider_type
+    if "local" in folded:
+        return "local_hardware_efficiency_increase", provider_type
+    return "unknown", provider_type
+
+
+def _rule_message(value: object, *, limitations: list[str]) -> NsightComputeRuleMessage | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        limitations.append("ncu_report rule_results_as_dicts returned an invalid rule_message.")
+        return None
+    message = value.get("message")
+    if not isinstance(message, str) or not message:
+        limitations.append("ncu_report rule_results_as_dicts rule_message omitted its text.")
+        return None
+    title = value.get("title")
+    provider_type = value.get("type")
+    return NsightComputeRuleMessage(
+        title=(
+            _normalized_text(
+                title,
+                limit=_RULE_TITLE_CHARS,
+                limitation=(f"Rule message titles were bounded to {_RULE_TITLE_CHARS} characters."),
+                limitations=limitations,
+            )
+            if isinstance(title, str) and title
+            else None
+        ),
+        message=_normalized_text(
+            message,
+            limit=_RULE_MESSAGE_CHARS,
+            limitation=f"Rule messages were bounded to {_RULE_MESSAGE_CHARS} characters.",
+            limitations=limitations,
+        ),
+        provider_type=(
+            _normalized_text(
+                provider_type,
+                limit=_RULE_TYPE_CHARS,
+                limitation=f"Rule message types were bounded to {_RULE_TYPE_CHARS} characters.",
+                limitations=limitations,
+            )
+            if provider_type is not None
+            else None
+        ),
+    )
+
+
+def _rule_speedup(
+    value: object,
+    *,
+    limitations: list[str],
+) -> NsightComputeSpeedupEstimation | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        limitations.append(
+            "ncu_report rule_results_as_dicts returned an invalid speedup_estimation."
+        )
+        return None
+    speedup = value.get("speedup")
+    if (
+        isinstance(speedup, bool)
+        or not isinstance(speedup, int | float)
+        or not math.isfinite(speedup)
+    ):
+        limitations.append(
+            "ncu_report rule_results_as_dicts speedup_estimation returned an invalid speedup."
+        )
+        return None
+    if speedup < 0:
+        limitations.append(
+            "ncu_report rule_results_as_dicts speedup_estimation returned a negative speedup."
+        )
+        return None
+    meaning, provider_type = _provider_rule_speedup_meaning(value.get("type"))
+    return NsightComputeSpeedupEstimation(
+        estimated_speedup=float(speedup),
+        meaning=meaning,
+        provider_type=provider_type,
+    )
+
+
+def _rule_focus_metrics(
+    values: object,
+    *,
+    limitations: list[str],
+) -> tuple[NsightComputeFocusMetric, ...]:
+    if values is None:
+        return ()
+    try:
+        iterator = iter(cast(Iterable[object], values))
+    except TypeError:
+        limitations.append(
+            "ncu_report rule_results_as_dicts returned an invalid focus_metrics collection."
+        )
+        return ()
+    bounded = _bounded_items(
+        iterator,
+        limit=_RULE_FOCUS_METRIC_LIMIT,
+        limitation=(f"Rule focus metrics were bounded to {_RULE_FOCUS_METRIC_LIMIT} entries."),
+        limitations=limitations,
+    )
+    facts: list[NsightComputeFocusMetric] = []
+    for value in bounded:
+        if not isinstance(value, Mapping):
+            limitations.append(
+                "ncu_report rule_results_as_dicts returned a non-mapping focus metric."
+            )
+            continue
+        name = value.get("name")
+        if not isinstance(name, str) or not name:
+            limitations.append("ncu_report rule_results_as_dicts focus metric omitted its name.")
+            continue
+        numeric = value.get("value")
+        if (
+            isinstance(numeric, bool)
+            or not isinstance(numeric, int | float)
+            or not math.isfinite(numeric)
+        ):
+            numeric_value = None
+            if numeric is not None:
+                limitations.append(
+                    "ncu_report rule_results_as_dicts focus metric has a non-finite value."
+                )
+        else:
+            numeric_value = float(numeric)
+        severity = value.get("severity")
+        information = value.get("info")
+        facts.append(
+            NsightComputeFocusMetric(
+                name=_normalized_text(
+                    name,
+                    limit=500,
+                    limitation="Rule focus-metric names were bounded to 500 characters.",
+                    limitations=limitations,
+                ),
+                value=numeric_value,
+                severity=(
+                    _normalized_text(
+                        severity,
+                        limit=_RULE_TYPE_CHARS,
+                        limitation=(
+                            "Rule focus-metric severities were bounded to "
+                            f"{_RULE_TYPE_CHARS} characters."
+                        ),
+                        limitations=limitations,
+                    )
+                    if severity is not None
+                    else None
+                ),
+                info=(
+                    _normalized_text(
+                        information,
+                        limit=_RULE_FOCUS_INFORMATION_CHARS,
+                        limitation=(
+                            "Rule focus-metric information was bounded to "
+                            f"{_RULE_FOCUS_INFORMATION_CHARS} characters."
+                        ),
+                        limitations=limitations,
+                    )
+                    if information is not None
+                    else None
+                ),
+            )
+        )
+    return tuple(facts)
+
+
+def _rule_fact(
+    rule: object,
+    *,
+    range_index: int,
+    action_index: int,
+    action_name: str,
+    limitations: list[str],
+) -> NsightComputeProviderRuleFact | None:
+    if not isinstance(rule, Mapping):
+        limitations.append("ncu_report rule_results_as_dicts returned a non-mapping rule.")
+        return None
+    identifier = rule.get("rule_identifier")
+    section = _provider_rule_section_identifier(rule, limitations=limitations)
+    if not isinstance(identifier, str) or not identifier:
+        limitations.append("ncu_report rule_results_as_dicts rule omitted rule_identifier.")
+        return None
+    if section is None:
+        limitations.append("ncu_report rule_results_as_dicts rule omitted section_identifier.")
+        return None
+    return NsightComputeProviderRuleFact(
+        location=NsightComputeReportLocation(
+            range_index=range_index,
+            action_index=action_index,
+            action_name=action_name,
+        ),
+        rule_identifier=_normalized_text(
+            identifier,
+            limit=500,
+            limitation="Rule identifiers were bounded to 500 characters.",
+            limitations=limitations,
+        ),
+        section_identifier=section,
+        rule_message=_rule_message(rule.get("rule_message"), limitations=limitations),
+        speedup_estimation=_rule_speedup(
+            rule.get("speedup_estimation"),
+            limitations=limitations,
+        ),
+        focus_metrics=_rule_focus_metrics(rule.get("focus_metrics"), limitations=limitations),
+    )
+
+
+def _provider_rule_section_identifier(
+    rule: object,
+    *,
+    limitations: list[str],
+) -> str | None:
+    """Read the documented raw section field independently of fact publication."""
+    if not isinstance(rule, Mapping):
+        return None
+    section = rule.get("section_identifier")
+    if not isinstance(section, str) or not section:
+        return None
+    return _normalized_text(
+        section,
+        limit=500,
+        limitation="Rule section identifiers were bounded to 500 characters.",
+        limitations=limitations,
+    )
+
+
 def _extract(  # noqa: C901 - bounded traversal mirrors the official report hierarchy
     report_path: Path,
     *,
@@ -317,11 +567,12 @@ def _extract(  # noqa: C901 - bounded traversal mirrors the official report hier
     limitations: list[str] = []
     section_ids: set[str] = set()
     metric_ids: set[str] = set()
-    roofline_present = False
     range_total = int(report.num_ranges())
     action_seen = 0
     metric_seen = 0
     actions_truncated = False
+    metrics_truncated = False
+    rules_truncated = False
 
     bounded_range_total = min(range_total, max_ranges)
     for range_index in range(bounded_range_total):
@@ -378,11 +629,9 @@ def _extract(  # noqa: C901 - bounded traversal mirrors the official report hier
                 unit = _bounded_text(
                     _call(metric, "unit", "", limitations=limitations) or "unknown", 100
                 )
-                lower_identity = metric_name.casefold()
-                roofline_present = roofline_present or "roofline" in lower_identity
                 if (
                     any(
-                        marker in lower_identity
+                        marker in metric_name.casefold()
                         for marker in (
                             "device__attribute",
                             "context_id",
@@ -422,7 +671,6 @@ def _extract(  # noqa: C901 - bounded traversal mirrors the official report hier
                         _call(metric, "rollup_operation", limitations=limitations),
                         limitations=limitations,
                     ),
-                    "roofline": "roofline" in lower_identity,
                 }
                 if value_kind in {
                     "integer",
@@ -446,25 +694,45 @@ def _extract(  # noqa: C901 - bounded traversal mirrors the official report hier
                 elif value_kind == "unknown":
                     limitations.append(f"Unsupported metric value type: {metric_name[:200]}.")
             if len(metric_names) > remaining_metrics:
+                metrics_truncated = True
                 limitations.append(f"Metrics were truncated to {max_metrics} entries.")
 
             rules = _call(action, "rule_results_as_dicts", (), limitations=limitations) or ()
             rule_budget = max(0, max_observations - len(observations))
-            bounded_rules = tuple(islice(cast(Iterable[object], rules), rule_budget + 1))
+            try:
+                rule_iterator = iter(cast(Iterable[object], rules))
+            except TypeError:
+                limitations.append(
+                    "ncu_report rule_results_as_dicts returned an unsupported collection."
+                )
+                rule_iterator = iter(())
+            bounded_rules = tuple(islice(rule_iterator, rule_budget + 1))
+            for rule in bounded_rules:
+                section_identifier = _provider_rule_section_identifier(
+                    rule,
+                    limitations=limitations,
+                )
+                if section_identifier is not None:
+                    section_ids.add(section_identifier)
             for rule in bounded_rules[:rule_budget]:
-                normalized = _safe_json(rule, limitations=limitations)
-                if isinstance(normalized, dict):
-                    section = normalized.get("section_identifier")
-                    if isinstance(section, str):
-                        section = section[:500]
-                        section_ids.add(section)
-                        roofline_present = roofline_present or "roofline" in section.casefold()
-                    identifier = normalized.get("rule_identifier")
-                    name = identifier[:500] if isinstance(identifier, str) else "rule"
-                else:
-                    name = "rule"
-                observations.append({"kind": "profile.rule", "name": name, "value": normalized})
+                fact = _rule_fact(
+                    rule,
+                    range_index=range_index,
+                    action_index=action_index,
+                    action_name=action_name,
+                    limitations=limitations,
+                )
+                if fact is None:
+                    continue
+                observations.append(
+                    {
+                        "kind": "nsight_compute.rule",
+                        "name": fact.rule_identifier,
+                        "value": fact.model_dump(mode="json"),
+                    }
+                )
             if len(bounded_rules) > rule_budget:
+                rules_truncated = True
                 limitations.append("Rule results were truncated by the observation budget.")
 
             source_files = _call(action, "source_files", {}, limitations=limitations) or {}
@@ -570,7 +838,15 @@ def _extract(  # noqa: C901 - bounded traversal mirrors the official report hier
         "section_ids": sorted(section_ids),
         "range_count": min(range_total, max_ranges),
         "action_count": action_seen,
-        "roofline_present": roofline_present,
+        "truncated": any(
+            (
+                range_total > max_ranges,
+                actions_truncated,
+                metrics_truncated,
+                rules_truncated,
+                len(observations) >= max_observations,
+            )
+        ),
         "limitations": list(dict.fromkeys(limitations)),
     }
 
@@ -598,7 +874,7 @@ def _call_with_arg(
 def main() -> int:
     def handle(
         request: NsightComputeWorkerRequest,
-        _context: WorkerContext,
+        _job_root: Path,
     ) -> NsightComputeWorkerResult:
         result = _extract(
             Path(request.artifact_path),
@@ -622,7 +898,7 @@ def main() -> int:
             section_ids=tuple(cast(list[str], result["section_ids"])),
             range_count=cast(int, result["range_count"]),
             action_count=cast(int, result["action_count"]),
-            roofline_present=cast(bool, result["roofline_present"]),
+            truncated=cast(bool, result["truncated"]),
             limitations=tuple(cast(list[str], result["limitations"])),
         )
 

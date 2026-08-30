@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import Field, JsonValue, TypeAdapter
 
@@ -9,7 +9,6 @@ from flameox.workers.protocol import WorkerDefinition, WorkerOperationId
 
 
 class NsightComputeWorkerRequest(ContractModel):
-    schema_version: Literal[1] = 1
     artifact_path: str = Field(min_length=1, max_length=4_096)
     interface_path: str = Field(min_length=1, max_length=4_096)
     max_ranges: Annotated[int, Field(gt=0, le=1_000)]
@@ -19,7 +18,6 @@ class NsightComputeWorkerRequest(ContractModel):
 
 
 class NsightComputeWorkerResult(ContractModel):
-    schema_version: Literal[1] = 1
     report_version: str = Field(min_length=1, max_length=200)
     measurements: tuple[dict[str, JsonValue], ...]
     observations: tuple[dict[str, JsonValue], ...]
@@ -27,7 +25,7 @@ class NsightComputeWorkerResult(ContractModel):
     section_ids: tuple[str, ...]
     range_count: Annotated[int, Field(ge=0)]
     action_count: Annotated[int, Field(ge=0)]
-    roofline_present: bool
+    truncated: bool
     limitations: tuple[str, ...] = Field(default=(), max_length=1_024)
 
 

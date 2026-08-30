@@ -93,7 +93,7 @@ def start_local_task(
     *,
     name: str,
 ) -> TaskHandle:
-    """Compatibility owner for non-lifespan callers such as direct application tests."""
+    """Own a background task for direct CLI and embedded application callers."""
 
     async def invoke() -> None:
         await function()

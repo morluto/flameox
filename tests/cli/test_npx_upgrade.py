@@ -49,7 +49,6 @@ def test_npx_upgrade_activates_or_preserves_the_managed_runtime(
         (active_executable.parent.parent / "runtime.json").write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
                     "distribution": "flameox",
                     "version": active_version,
                     "executable": str(active_executable),
@@ -61,7 +60,6 @@ def test_npx_upgrade_activates_or_preserves_the_managed_runtime(
     (data / "install.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
                 "active_version": active_version,
                 "executable": str(active_executable),
             }
@@ -223,7 +221,6 @@ runtime.chmod(0o700)
     assert manifest == {
         "active_version": expected_version,
         "executable": str(current_executable),
-        "schema_version": 1,
     }
     assert json.loads(config.read_text())["mcpServers"]["flameox"] == {
         "command": str(current_executable),

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import (
+from flameox.application.comparisons import (
     ComparisonService,
     FreezeRunIdsRequest,
     MeasurementCompareRunSetsRequest,

@@ -5,9 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from flameox.adapters import (
-    SglangResultParser,
-)
+from flameox.adapters.inference import SglangResultParser
 from flameox.domain import DomainError
 
 pytestmark = pytest.mark.unit
@@ -46,7 +44,7 @@ def test_sglang_result_parser_emits_safe_optional_scalar_metrics(tmp_path: Path)
                 "request_throughput": 2.0,
                 "input_throughput": 8.0,
                 "output_throughput": 4.0,
-                "total_token_throughput": 12.0,
+                "total_throughput": 12.0,
                 "accept_length": 3.5,
                 "concurrency": 1.5,
                 "mean_ttft_ms": 4.0,
@@ -63,9 +61,9 @@ def test_sglang_result_parser_emits_safe_optional_scalar_metrics(tmp_path: Path)
     values = {row.name: row.value_float for row in rows}
     assert values["sglang.accept_length"] == 3.5
     assert values["sglang.request_throughput"] == 2.0
-    assert values["sglang.total_token_throughput"] == 12.0
+    assert values["sglang.total_throughput"] == 12.0
     assert "sglang.new_throughput" not in values
-    assert all(row.dimensions["producer"] == "sglang.bench_serving" for row in rows)
+    assert all(row.dimensions["producer"] == "sglang.benchmark.serving" for row in rows)
     by_name = {row.name: row for row in rows}
     assert by_name["sglang.request_throughput"].unit == "requests/sec"
     assert by_name["sglang.input_throughput"].unit == "tokens/sec"
@@ -74,10 +72,6 @@ def test_sglang_result_parser_emits_safe_optional_scalar_metrics(tmp_path: Path)
     assert by_name["sglang.total_output_tokens"].unit == "tokens"
     assert by_name["sglang.accept_length"].unit == "tokens"
     assert by_name["sglang.concurrency"].unit == "dimensionless"
-    assert all(
-        row.dimensions["result_profile"] == "sglang-0.5.16-bench-serving-aggregate-v1"
-        for row in rows
-    )
     assert by_name["sglang.mean_ttft_ms"].aggregation == "mean"
     assert by_name["sglang.p95_ttft_ms"].aggregation == "percentile"
     assert by_name["sglang.p95_ttft_ms"].dimensions["percentile"] == "95"
@@ -92,7 +86,7 @@ def test_sglang_every_supported_metric_has_an_explicit_descriptor(tmp_path: Path
         "request_throughput": 2.0,
         "input_throughput": 8.0,
         "output_throughput": 4.0,
-        "total_token_throughput": 12.0,
+        "total_throughput": 12.0,
         "accept_length": 3.5,
         "concurrency": 1.5,
     }
@@ -104,7 +98,7 @@ def test_sglang_every_supported_metric_has_an_explicit_descriptor(tmp_path: Path
         "sglang.request_throughput": ("requests/sec", "rate", "request_rate"),
         "sglang.input_throughput": ("tokens/sec", "rate", "token_rate"),
         "sglang.output_throughput": ("tokens/sec", "rate", "token_rate"),
-        "sglang.total_token_throughput": ("tokens/sec", "rate", "token_rate"),
+        "sglang.total_throughput": ("tokens/sec", "rate", "token_rate"),
         "sglang.accept_length": ("tokens", "mean", "speculative_accept_length"),
         "sglang.concurrency": ("dimensionless", "mean", "concurrency"),
     }

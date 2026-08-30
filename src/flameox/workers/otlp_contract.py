@@ -11,14 +11,12 @@ type OtlpRow = dict[str, JsonValue]
 
 
 class OtlpWorkerRequest(ContractModel):
-    schema_version: Literal[1] = 1
     artifact_path: str = Field(min_length=1, max_length=4_096)
     media_type: str = Field(min_length=1, max_length=200)
     row_limit: Annotated[int, Field(gt=0, le=100_000_000)]
 
 
 class OtlpWorkerResult(ContractModel):
-    schema_version: Literal[1] = 1
     row_limit_exceeded: bool = False
     resources: tuple[OtlpRow, ...] = ()
     scopes: tuple[OtlpRow, ...] = ()

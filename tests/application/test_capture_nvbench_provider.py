@@ -10,7 +10,11 @@ from pathlib import Path
 import pytest
 
 from flameox.adapters.nvbench import NvbenchExtractor
-from flameox.application import CaptureResult, CaptureService, ExecutionPolicy
+from flameox.application.capture import (
+    CaptureResult,
+    CaptureService,
+)
+from flameox.application.execution_policy import ExecutionPolicy
 from flameox.domain import (
     ArtifactKind,
     ArtifactRegistration,
@@ -126,7 +130,6 @@ async def _capture(
     _fake_nvbench_bench(bench)
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.bench]
 argv = ["./fake-bench", "mode={mode}"]
 timeout_seconds = 10
@@ -155,7 +158,6 @@ async def test_nvbench_rejects_workload_without_explicit_protocol(tmp_path: Path
     (tmp_path / "work.py").write_text("print('workload')")
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.python]
 argv = [{sys.executable!r}, "work.py"]
 """
@@ -192,7 +194,6 @@ async def test_nvbench_rejects_declared_non_nvbench_executable(
     disable_containment(workspace)
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.invalid]
 argv = [{executable!r}]
 execution_protocol = "nvbench"
@@ -222,7 +223,6 @@ async def test_nvbench_rejects_executable_that_fails_qualification(tmp_path: Pat
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.invalid]
 argv = ["./not-nvbench"]
 execution_protocol = "nvbench"
@@ -250,7 +250,6 @@ async def test_nvbench_rejects_spoofed_version_output(tmp_path: Path) -> None:
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.invalid]
 argv = ["./not-nvbench"]
 execution_protocol = "nvbench"
@@ -276,7 +275,7 @@ async def test_nvbench_qualification_uses_declared_environment(tmp_path: Path) -
     executable = tmp_path / "bench"
     executable.write_text(
         "#!/bin/sh\n"
-        "if [ \"$FLAMEOX_NVBENCH_TEST\" = qualified ]; then\n"
+        'if [ "$FLAMEOX_NVBENCH_TEST" = qualified ]; then\n'
         "  echo 'NVBench v1.0.0 (test:test)'\n"
         "  exit 0\n"
         "fi\n"
@@ -285,7 +284,6 @@ async def test_nvbench_qualification_uses_declared_environment(tmp_path: Path) -
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.bench]
 argv = ["./bench"]
 execution_protocol = "nvbench"
@@ -312,7 +310,6 @@ async def test_nvbench_requires_active_qualification(tmp_path: Path) -> None:
     _fake_nvbench_bench(executable)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.bench]
 argv = ["./bench"]
 execution_protocol = "nvbench"
@@ -339,7 +336,6 @@ async def test_nvbench_rejects_executable_changed_after_qualification(tmp_path: 
     _fake_nvbench_bench(executable)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.bench]
 argv = ["./bench"]
 execution_protocol = "nvbench"

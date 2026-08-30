@@ -31,9 +31,9 @@ class _TorchProfilerCaptureOptions(ContractModel):
         "cpu",
         "cuda_if_available",
     )
-    record_shapes: StrictBool = True
-    profile_memory: StrictBool = True
-    with_stack: StrictBool = True
+    record_shapes: StrictBool = False
+    profile_memory: StrictBool = False
+    with_stack: StrictBool = False
     with_flops: StrictBool = False
     with_modules: StrictBool = False
 
@@ -52,26 +52,10 @@ class WholeEntrypointTorchProfilerOptions(_TorchProfilerCaptureOptions):
     mode: Literal["whole_entrypoint"] = "whole_entrypoint"
     schedule: Literal[None] = None
 
-    @property
-    def expected_cycles(self) -> int:
-        return 1
-
-    @property
-    def output_filenames(self) -> tuple[str, ...]:
-        return ("torch-trace.json",)
-
 
 class SdkTorchProfilerOptions(_TorchProfilerCaptureOptions):
     mode: Literal["sdk"] = "sdk"
     schedule: TorchProfilerSchedule
-
-    @property
-    def expected_cycles(self) -> int:
-        return self.schedule.repeat
-
-    @property
-    def output_filenames(self) -> tuple[str, ...]:
-        return tuple(f"torch-trace-cycle-{cycle:04d}.json" for cycle in range(self.expected_cycles))
 
 
 def _torch_profiler_variant(value: Any) -> Literal["whole_entrypoint", "sdk"]:
@@ -91,6 +75,18 @@ type TorchProfilerCaptureOptions = Annotated[
 _TORCH_PROFILER_OPTIONS: TypeAdapter[TorchProfilerCaptureOptions] = TypeAdapter(
     TorchProfilerCaptureOptions
 )
+
+
+def torch_profiler_trace_filenames(
+    options: TorchProfilerCaptureOptions,
+) -> tuple[str, ...]:
+    """Derive the immutable trace set from the capture plan's selected mode."""
+
+    if isinstance(options, SdkTorchProfilerOptions):
+        return tuple(
+            f"torch-trace-cycle-{cycle:04d}.json" for cycle in range(options.schedule.repeat)
+        )
+    return ("torch-trace.json",)
 
 
 def torch_profiler_options(

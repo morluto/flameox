@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, cast
+from typing import cast
 
 from pydantic import Field
 
@@ -32,10 +32,7 @@ _INFERENCE_REQUEST_COLUMNS = (
     "latency_ns",
     "tpot_ns",
     "mean_itl_ns",
-    "success",
-    "cancelled",
-    "error_type",
-    "error_code",
+    "outcome",
     "queue_ns",
     "prefill_ns",
     "decode_ns",
@@ -70,7 +67,6 @@ class MeasurementItem(ContractModel):
 class MeasurementQueryResult(CursorPageContract):
     page_items_field = "measurements"
 
-    schema_version: Literal[3] = 3
     corpus_commit_id: str
     measurements: tuple[MeasurementItem, ...]
     total: int
@@ -80,7 +76,6 @@ class MeasurementQueryResult(CursorPageContract):
 class InferenceRequestQueryResult(CursorPageContract):
     page_items_field = "requests"
 
-    schema_version: int = 1
     corpus_commit_id: str
     requests: tuple[InferenceRequestItem, ...]
     total: int

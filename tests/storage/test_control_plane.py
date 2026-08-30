@@ -20,10 +20,6 @@ from flameox.storage.control_plane import ControlPlane
 pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
 
-class ExampleIntent(ContractModel):
-    command: tuple[str, ...]
-
-
 class CapabilityIntent(ContractModel):
     plan_token: str
     command: tuple[str, ...]
@@ -31,9 +27,9 @@ class CapabilityIntent(ContractModel):
 
 def test_authorized_plan_is_durable_and_atomically_single_use(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    first = AuthorizedPlanStore(workspace, family="example", model=ExampleIntent)
-    second = AuthorizedPlanStore(workspace, family="example", model=ExampleIntent)
-    intent = ExampleIntent(command=("tool", "--bounded"))
+    first = AuthorizedPlanStore(workspace, family="example", model=CapabilityIntent)
+    second = AuthorizedPlanStore(workspace, family="example", model=CapabilityIntent)
+    intent = CapabilityIntent(plan_token="opaque-token", command=("tool", "--bounded"))
     expires_at = utc_now() + timedelta(minutes=5)
 
     first.issue("opaque-token", "content-digest", intent, expires_at=expires_at)
@@ -55,7 +51,7 @@ def test_authorized_plan_is_durable_and_atomically_single_use(tmp_path: Path) ->
 
 def test_authorized_plan_reports_unknown_and_expired_states(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    plans = AuthorizedPlanStore(workspace, family="example", model=ExampleIntent)
+    plans = AuthorizedPlanStore(workspace, family="example", model=CapabilityIntent)
 
     with pytest.raises(DomainError) as unknown:
         plans.consume("unknown-token")
@@ -64,7 +60,7 @@ def test_authorized_plan_reports_unknown_and_expired_states(tmp_path: Path) -> N
     plans.issue(
         "expired-token",
         "intent-digest",
-        ExampleIntent(command=("tool",)),
+        CapabilityIntent(plan_token="expired-token", command=("tool",)),
         expires_at=utc_now() - timedelta(seconds=1),
     )
     with pytest.raises(DomainError) as expired:
@@ -74,12 +70,12 @@ def test_authorized_plan_reports_unknown_and_expired_states(tmp_path: Path) -> N
 
 def test_authorized_plan_rejects_same_token_with_different_intent(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    plans = AuthorizedPlanStore(workspace, family="example", model=ExampleIntent)
+    plans = AuthorizedPlanStore(workspace, family="example", model=CapabilityIntent)
     expires_at = utc_now() + timedelta(minutes=5)
     plans.issue(
         "opaque-token",
         "first-digest",
-        ExampleIntent(command=("first",)),
+        CapabilityIntent(plan_token="opaque-token", command=("first",)),
         expires_at=expires_at,
     )
 
@@ -87,7 +83,7 @@ def test_authorized_plan_rejects_same_token_with_different_intent(tmp_path: Path
         plans.issue(
             "opaque-token",
             "second-digest",
-            ExampleIntent(command=("second",)),
+            CapabilityIntent(plan_token="opaque-token", command=("second",)),
             expires_at=expires_at,
         )
     assert conflict.value.code is ErrorCode.REVISION_CONFLICT
@@ -127,7 +123,6 @@ def test_control_plane_uses_one_durable_format_sentinel(tmp_path: Path) -> None:
 def test_control_plane_refuses_an_incompatible_durable_format(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     with sqlite3.connect(workspace.paths.control_plane) as connection:
-        connection.execute("PRAGMA ignore_check_constraints = ON")
         connection.execute("UPDATE control_plane_format SET format = 'other.control-plane'")
 
     with pytest.raises(DomainError) as error:
@@ -158,32 +153,6 @@ def test_control_plane_rejects_preexisting_tables_without_the_current_sentinel(
 
     assert error.value.code is ErrorCode.WORKSPACE_INVALID
     assert error.value.details == {"required_format": ControlPlane.FORMAT}
-
-
-def test_control_plane_has_no_table_local_version_or_legacy_ownership_columns(
-    tmp_path: Path,
-) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    with sqlite3.connect(workspace.paths.control_plane) as connection:
-        table_columns = {
-            table: {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
-            for table in (
-                "cursors",
-                "projection_intents",
-                "relationships",
-                "record_revision_relationships",
-                "record_revision_relationship_sets",
-            )
-        }
-
-    assert "schema_version" not in table_columns["cursors"]
-    assert "projection_schema_version" not in table_columns["projection_intents"]
-    for columns in (
-        table_columns["relationships"],
-        table_columns["record_revision_relationships"],
-        table_columns["record_revision_relationship_sets"],
-    ):
-        assert "ownership_quality" not in columns
 
 
 def test_retention_intent_durably_bridges_snapshot_to_materialization(tmp_path: Path) -> None:

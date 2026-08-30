@@ -33,58 +33,44 @@ class CursorNamespace(StrEnum):
     PIPELINES = "pipelines"
     RUNS = "runs"
     STACK_EXAMPLES = "stack_examples"
+    STATIC_CANDIDATES = "static_candidates"
     TRACE_WINDOW = "trace_window"
+    TRITON_AUTOTUNE_SELECTIONS = "triton_autotune_selections"
 
 
 @dataclass(frozen=True, slots=True)
 class CursorPositionSpec:
     components: tuple[CursorComponentKind, ...]
-    query_family: str
     max_age_seconds: int = 900
-    replay_policy: Literal["replayable"] = "replayable"
 
 
 CURSOR_POSITION_SPECS = MappingProxyType(
     {
-        CursorNamespace.ARTIFACTS: CursorPositionSpec(("string",), "artifact discovery"),
-        CursorNamespace.ARTIFACT_REDUCTIONS: CursorPositionSpec(
-            ("string",), "artifact reduction lineage"
-        ),
-        CursorNamespace.CALL_EDGES: CursorPositionSpec(
-            ("integer", "string", "string", "string"), "profile drill-down"
-        ),
-        CursorNamespace.DECLARED_WORKFLOWS: CursorPositionSpec(("integer",), "workload discovery"),
-        CursorNamespace.EXPERIMENT_TRIALS: CursorPositionSpec(("integer",), "experiment trials"),
-        CursorNamespace.FINDINGS: CursorPositionSpec(("integer",), "finding discovery"),
-        CursorNamespace.FIND_REPEATED_OPERATION_SEQUENCES: CursorPositionSpec(
-            ("integer",), "lifecycle evidence"
-        ),
-        CursorNamespace.GET_OPERATION_WINDOW: CursorPositionSpec(
-            ("integer",), "lifecycle evidence"
-        ),
-        CursorNamespace.GET_PROCESS_SNAPSHOT: CursorPositionSpec(
-            ("integer",), "process snapshot evidence"
-        ),
-        CursorNamespace.INFERENCE_REQUESTS: CursorPositionSpec(("string",), "inference evidence"),
-        CursorNamespace.INVESTIGATIONS: CursorPositionSpec(("integer",), "investigation discovery"),
-        CursorNamespace.MEASUREMENTS: CursorPositionSpec(("string",), "measurement evidence"),
-        CursorNamespace.EXECUTION_ANALYSIS: CursorPositionSpec(
-            ("integer",), "execution analysis evidence"
-        ),
+        CursorNamespace.ARTIFACTS: CursorPositionSpec(("string",)),
+        CursorNamespace.ARTIFACT_REDUCTIONS: CursorPositionSpec(("string",)),
+        CursorNamespace.CALL_EDGES: CursorPositionSpec(("integer", "string", "string", "string")),
+        CursorNamespace.DECLARED_WORKFLOWS: CursorPositionSpec(("integer",)),
+        CursorNamespace.EXPERIMENT_TRIALS: CursorPositionSpec(("integer",)),
+        CursorNamespace.FINDINGS: CursorPositionSpec(("integer",)),
+        CursorNamespace.FIND_REPEATED_OPERATION_SEQUENCES: CursorPositionSpec(("integer",)),
+        CursorNamespace.GET_OPERATION_WINDOW: CursorPositionSpec(("integer",)),
+        CursorNamespace.GET_PROCESS_SNAPSHOT: CursorPositionSpec(("integer",)),
+        CursorNamespace.INFERENCE_REQUESTS: CursorPositionSpec(("string",)),
+        CursorNamespace.INVESTIGATIONS: CursorPositionSpec(("integer",)),
+        CursorNamespace.MEASUREMENTS: CursorPositionSpec(("string",)),
+        CursorNamespace.EXECUTION_ANALYSIS: CursorPositionSpec(("integer",)),
         CursorNamespace.NORMALIZED_TRACE_WINDOW: CursorPositionSpec(
-            ("string", "string", "integer", "string"), "normalized trace evidence"
+            ("string", "string", "integer", "string")
         ),
-        CursorNamespace.OPERATION_TRANSITIONS: CursorPositionSpec(
-            ("integer",), "lifecycle evidence"
-        ),
-        CursorNamespace.PIPELINES: CursorPositionSpec(
-            ("string", "string"), "artifact pipeline discovery"
-        ),
-        CursorNamespace.RUNS: CursorPositionSpec(("string", "string"), "run discovery"),
+        CursorNamespace.OPERATION_TRANSITIONS: CursorPositionSpec(("integer",)),
+        CursorNamespace.PIPELINES: CursorPositionSpec(("string", "string")),
+        CursorNamespace.RUNS: CursorPositionSpec(("string", "string")),
         CursorNamespace.STACK_EXAMPLES: CursorPositionSpec(
-            ("integer", "string", "string", "string"), "profile drill-down"
+            ("integer", "string", "string", "string")
         ),
-        CursorNamespace.TRACE_WINDOW: CursorPositionSpec(("integer", "string"), "trace evidence"),
+        CursorNamespace.STATIC_CANDIDATES: CursorPositionSpec(("string",)),
+        CursorNamespace.TRACE_WINDOW: CursorPositionSpec(("integer", "string")),
+        CursorNamespace.TRITON_AUTOTUNE_SELECTIONS: CursorPositionSpec(("string",)),
     }
 )
 

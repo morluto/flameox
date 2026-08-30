@@ -8,7 +8,6 @@ import pytest
 
 from flameox.workers import nvml
 from flameox.workers.nvml_contract import NvmlWorkerRequest
-from flameox.workers.protocol import WorkerContext
 
 pytestmark = pytest.mark.unit
 
@@ -84,7 +83,7 @@ def test_nvml_worker_projects_stable_identity_and_field_failures(
 
     snapshot = nvml._observe(
         NvmlWorkerRequest(include_topology=True),
-        WorkerContext(job_root=tmp_path, request_path=tmp_path / "request.json"),
+        tmp_path,
     )
 
     assert snapshot.cuda_driver_version == "12.9"

@@ -91,7 +91,7 @@ def test_inference_configuration_references_managed_workload() -> None:
                 }
             },
             "inference_scenarios": {
-                "replay": {
+                "benchmark": {
                     "server": "local",
                     "provider": "aiperf",
                     "endpoint_type": "chat",
@@ -102,7 +102,7 @@ def test_inference_configuration_references_managed_workload() -> None:
     )
 
     assert config.inference_servers["local"].base_url == "http://127.0.0.1:8000"
-    assert config.inference_scenarios["replay"].provider == "aiperf"
+    assert config.inference_scenarios["benchmark"].provider == "aiperf"
 
 
 @pytest.mark.parametrize("base_url", ["https://127.0.0.1:8000", "http://example.test:8000"])
@@ -120,7 +120,7 @@ def test_existing_inference_server_must_be_loopback_http(base_url: str) -> None:
 def test_inference_scenario_requires_declared_server() -> None:
     with pytest.raises(ValidationError, match="unknown servers"):
         ProjectConfig.model_validate(
-            {"inference_scenarios": {"replay": {"server": "missing", "provider": "aiperf"}}}
+            {"inference_scenarios": {"benchmark": {"server": "missing", "provider": "aiperf"}}}
         )
 
 
@@ -164,7 +164,7 @@ def test_sglang_scenario_requires_random_workload_and_sglang_server() -> None:
             {
                 "inference_servers": {"local": {"mode": "existing_local", "model": "model"}},
                 "inference_scenarios": {
-                    "replay": {
+                    "benchmark": {
                         "server": "local",
                         "provider": "sglang_bench",
                         "random_input_len": 4,
@@ -213,24 +213,9 @@ def test_inference_scenario_rejects_speedup_when_provider_cannot_apply_it(
         )
 
 
-def test_sglang_config_rejects_non_cuda_v1_escape_hatches() -> None:
-    with pytest.raises(ValidationError, match="extra_forbidden"):
-        parse_inference_server_config(
-            {
-                "provider": "sglang",
-                "benchmark_python": "/opt/sglang/bin/python",
-                "mode": "existing_local",
-                "model": "model",
-                "rocm": True,
-            }
-        )
-
-
 def test_structured_inference_configuration_preserves_existing_sections(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    (tmp_path / "flameox.toml").write_text(
-        'schema_version = 1\n[workloads.serve]\nargv = ["python", "-c", "pass"]\n'
-    )
+    (tmp_path / "flameox.toml").write_text('[workloads.serve]\nargv = ["python", "-c", "pass"]\n')
     service = WorkloadService(workspace)
 
     server = service.configure_inference_server(
@@ -250,7 +235,7 @@ def test_structured_inference_configuration_preserves_existing_sections(tmp_path
     )
     scenario = service.configure_inference_scenario(
         ConfigureInferenceScenarioRequest(
-            name="replay",
+            name="benchmark",
             operation=ConfigurationOperation.CREATE,
             config=_scenario(
                 server="local",
@@ -271,11 +256,11 @@ def test_structured_inference_configuration_preserves_existing_sections(tmp_path
     assert loaded.inference_servers["local"].model_revision == "model-rev"
     assert loaded.inference_servers["local"].tokenizer_revision == "tokenizer-rev"
     assert loaded.inference_servers["local"].quantization == "none"
-    assert loaded.inference_scenarios["replay"].streaming is True
-    assert loaded.inference_scenarios["replay"].request_rate == 12.5
-    assert loaded.inference_scenarios["replay"].burstiness == 0.8
-    assert loaded.inference_scenarios["replay"].warmup_request_count == 3
-    assert loaded.inference_scenarios["replay"].seed == 17
+    assert loaded.inference_scenarios["benchmark"].streaming is True
+    assert loaded.inference_scenarios["benchmark"].request_rate == 12.5
+    assert loaded.inference_scenarios["benchmark"].burstiness == 0.8
+    assert loaded.inference_scenarios["benchmark"].warmup_request_count == 3
+    assert loaded.inference_scenarios["benchmark"].seed == 17
 
 
 def test_inference_semantic_oracle_requires_receipt_strength() -> None:
@@ -293,7 +278,7 @@ def test_inference_semantic_oracle_requires_receipt_strength() -> None:
                 },
                 "inference_servers": {"local": {"mode": "existing_local", "model": "model"}},
                 "inference_scenarios": {
-                    "replay": {
+                    "benchmark": {
                         "server": "local",
                         "provider": "aiperf",
                         "semantic_oracle_workload": "oracle",

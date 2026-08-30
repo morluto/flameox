@@ -4,9 +4,10 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated
 
-from pydantic import Field, JsonValue, StringConstraints, model_validator
+from pydantic import Field, StringConstraints, model_validator
 
 from flameox.domain.identity import digest_model
+from flameox.domain.models import Digest, EnvironmentRecord, SourceState
 from flameox.models import ContractModel
 
 ProjectionName = Annotated[
@@ -21,42 +22,19 @@ class ProjectionState(StrEnum):
     FAILED = "failed"
 
 
+class RunProjectionContext(ContractModel):
+    environment: EnvironmentRecord | None = None
+    source_state: SourceState | None = None
+
+
 class ProjectionIntentSpec(ContractModel):
-    """Immutable identity and replay recipe for one domain projection."""
+    """Immutable run-projection publication intent."""
 
-    intent_id: str
-    workspace_id: str
-    domain_kind: ProjectionName
-    domain_id: str
-    domain_revision: Annotated[int, Field(ge=0)]
-    domain_digest: str
-    projection_kind: ProjectionName
-    publisher: ProjectionName
-    publisher_version: Annotated[str, StringConstraints(min_length=1, max_length=100)]
-    input_run_ids: Annotated[tuple[str, ...], Field(max_length=100)] = ()
-    input_artifact_ids: Annotated[tuple[str, ...], Field(max_length=100)] = ()
-    expected_tables: Annotated[tuple[ProjectionName, ...], Field(min_length=1, max_length=64)]
-    operation_digest: str
-    replay_context: dict[str, JsonValue] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def identity_matches_content(self) -> ProjectionIntentSpec:
-        expected = projection_intent_id(
-            workspace_id=self.workspace_id,
-            domain_kind=self.domain_kind,
-            domain_id=self.domain_id,
-            domain_revision=self.domain_revision,
-            projection_kind=self.projection_kind,
-        )
-        if self.intent_id != expected:
-            raise ValueError("projection intent id must match its domain projection identity")
-        if len(set(self.input_run_ids)) != len(self.input_run_ids):
-            raise ValueError("projection input run ids must be unique")
-        if len(set(self.input_artifact_ids)) != len(self.input_artifact_ids):
-            raise ValueError("projection input artifact ids must be unique")
-        if len(set(self.expected_tables)) != len(self.expected_tables):
-            raise ValueError("projection tables must be unique")
-        return self
+    intent_id: Digest
+    run_id: str
+    run_revision: Annotated[int, Field(ge=0)]
+    run_digest: Digest
+    context: RunProjectionContext = Field(default_factory=RunProjectionContext)
 
 
 class ProjectionIntent(ProjectionIntentSpec):
@@ -88,17 +66,13 @@ class ProjectionIntent(ProjectionIntentSpec):
 def projection_intent_id(
     *,
     workspace_id: str,
-    domain_kind: str,
-    domain_id: str,
-    domain_revision: int,
-    projection_kind: str,
+    run_id: str,
+    run_revision: int,
 ) -> str:
     return digest_model(
         {
             "workspace_id": workspace_id,
-            "domain_kind": domain_kind,
-            "domain_id": domain_id,
-            "domain_revision": domain_revision,
-            "projection_kind": projection_kind,
+            "run_id": run_id,
+            "run_revision": run_revision,
         }
     )

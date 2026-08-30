@@ -23,7 +23,6 @@ from flameox.workers.v8_profiles_contract import (
 
 
 class V8CpuProfExtractionResult(ContractModel):
-    schema_version: int = 1
     run_id: str
     artifact_id: str
     node_count: int

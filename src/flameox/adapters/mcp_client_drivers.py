@@ -4,13 +4,13 @@ import json
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import ClassVar, Protocol
+from typing import ClassVar
 
 from packaging.version import InvalidVersion, Version
 
 from flameox.adapters.client_setup import ClientPlanAction, Launcher, SetupClient
 from flameox.command_binding import ExecutableResolver
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import DomainError, ErrorCode, process_exit_code
 from flameox.domain.executables import ResolvedExecutable
 from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
 
@@ -18,7 +18,6 @@ from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBrok
 class ClientManagementMechanism(StrEnum):
     OFFICIAL_CLI = "official_cli"
     QUALIFIED_CONFIG_FILE = "qualified_config_file"
-    MANUAL = "manual"
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,17 +31,6 @@ class ClientCommandPlan:
     mutation_argv: tuple[tuple[str, ...], ...]
     launcher: Launcher | None
     previous_launcher: Launcher | None
-    scope: str
-
-
-class ClientCommandDriver(Protocol):
-    client: SetupClient
-
-    def probe(self) -> tuple[ResolvedExecutable, str] | None: ...
-
-    def plan(self, launcher: Launcher, *, remove: bool) -> ClientCommandPlan: ...
-
-    async def apply(self, plan: ClientCommandPlan) -> None: ...
 
 
 class OfficialCliDriver:
@@ -76,7 +64,7 @@ class OfficialCliDriver:
         outcome = self.broker.run_sync(
             self._request(executable, (executable.requested_token, "--version"))
         )
-        if outcome.process.exit_code != 0:
+        if process_exit_code(outcome.process.termination) != 0:
             return None
         version = _extract_version(outcome.stdout.decode("utf-8", errors="replace"))
         return (executable, version) if version is not None else None
@@ -117,7 +105,6 @@ class OfficialCliDriver:
             mutation_argv=mutations,
             launcher=expected,
             previous_launcher=current,
-            scope="user",
         )
 
     async def apply(self, plan: ClientCommandPlan) -> None:
@@ -183,7 +170,7 @@ class OfficialCliDriver:
         return (token, "mcp", "remove", "--scope", "user", "flameox")
 
     def _current_launcher(self, outcome: ExecutionOutcome) -> Launcher | None:
-        if outcome.process.exit_code != 0:
+        if process_exit_code(outcome.process.termination) != 0:
             return None
         text = outcome.stdout.decode("utf-8", errors="replace")
         if self.client is SetupClient.CODEX:
@@ -225,14 +212,14 @@ class OfficialCliDriver:
         )
 
     def _require_success(self, outcome: ExecutionOutcome, operation: str) -> None:
-        if outcome.process.exit_code == 0:
+        if process_exit_code(outcome.process.termination) == 0:
             return
         raise DomainError(
             ErrorCode.EXECUTION_REFUSED,
             f"{self.client.display_name} MCP {operation} failed.",
             details={
                 "client": self.client.value,
-                "exit_code": outcome.process.exit_code,
+                "exit_code": process_exit_code(outcome.process.termination),
                 "diagnostic": outcome.stderr.decode("utf-8", errors="replace")[:4096],
             },
         )

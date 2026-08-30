@@ -136,7 +136,6 @@ type LifecycleItem = Annotated[
 class LifecycleQueryResult(CursorPageContract):
     page_items_field = "items"
 
-    schema_version: int = 1
     operation: str
     corpus_commit_id: str
     evidence_level: Literal["derived"] = "derived"
@@ -576,9 +575,7 @@ class LifecycleEvidenceService:
             evidence_status = EvidenceStatus.EMPTY
         else:
             evidence_status = EvidenceStatus.AVAILABLE
-        limitations = tuple(
-            sorted({str(item) for row in summary_rows for item in (row[2] or [])})
-        )
+        limitations = tuple(sorted({str(item) for row in summary_rows for item in (row[2] or [])}))
         if not summary_rows:
             limitations = ("no_process_snapshot_evidence",)
         next_action = (

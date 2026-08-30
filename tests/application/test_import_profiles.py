@@ -6,15 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import (
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportProfile,
     ImportService,
-    ProjectionCoordinator,
     QualifyArtifactImportRequest,
 )
+from flameox.application.projections import ProjectionCoordinator
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
-from flameox.storage import ProjectionIntentStore, Workspace
+from flameox.storage import ControlPlane, Workspace
 
 pytestmark = pytest.mark.integration
 
@@ -264,9 +264,9 @@ def test_profiled_import_durably_binds_published_artifact_if_projection_fails(
     artifact_id = f"sha256:{hashlib.sha256(trace.read_bytes()).hexdigest()}"
     assert runs[0].artifacts[0].artifact_id == artifact_id
     assert service.artifacts.get(artifact_id).content.artifact_id == artifact_id
-    intents = ProjectionIntentStore(workspace).list()
+    intents = ControlPlane(workspace).list_projection_intents()
     assert len(intents) == 1
-    assert intents[0].domain_revision == 0
+    assert intents[0].run_revision == 0
     assert intents[0].state.value == "pending"
 
 

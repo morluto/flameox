@@ -7,8 +7,10 @@ from pathlib import Path
 import pyperf
 import pytest
 
-from flameox.adapters import PytestExtractor, PythonStartupExtractor
-from flameox.application import CaptureService, ExecutionPolicy
+from flameox.adapters.pytest import PytestExtractor
+from flameox.adapters.python_startup import PythonStartupExtractor
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ExecutionStatus
 from flameox.storage import ArtifactStore, Workspace
@@ -47,7 +49,6 @@ async def test_python_startup_capture_preserves_native_pyperf_and_raw_importtime
     )
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.startup]
 argv = [{json.dumps(sys.executable)}, "startup_target.py"]
 cwd = "."
@@ -129,7 +130,6 @@ async def test_pytest_xdist_capture_attributes_repeated_fixture_cost_and_failure
     )
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.tests]
 argv = [{json.dumps(sys.executable)}, "-m", "pytest", "-q", "-n", "2", "test_example.py"]
 cwd = "."
@@ -148,7 +148,7 @@ timeout_seconds = 30
 
     assert captured.run.execution_status is ExecutionStatus.FAILED
     assert captured.run.semantics.configuration["collector_implementation_id"]
-    assert extracted.complete is True
+    assert extracted.completion == "complete"
     assert extracted.failed_count == 1
     assert extracted.fixture_setup_count >= 2
     assert not (tmp_path / "collector-mutated.txt").exists()
@@ -173,7 +173,6 @@ async def test_pytest_timeout_preserves_partial_and_unexecuted_evidence(tmp_path
     )
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.tests]
 argv = [{json.dumps(sys.executable)}, "-m", "pytest", "-q", "-p", "no:randomly", "test_timeout.py"]
 cwd = "."
@@ -192,7 +191,7 @@ timeout_seconds = 2
 
     assert captured.run.execution_status is ExecutionStatus.TIMED_OUT
     assert extracted.execution_status == "timed_out"
-    assert extracted.complete is False
+    assert extracted.completion != "complete"
     assert extracted.collected_count >= extracted.executed_count
     assert any("partial" in item for item in extracted.limitations)
 
@@ -223,7 +222,6 @@ async def test_pytest_worker_crash_preserves_partial_native_reportlog(tmp_path: 
     ]
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.tests]
 argv = {json.dumps(crash_argv)}
 cwd = "."
@@ -241,6 +239,6 @@ timeout_seconds = 30
     extracted = PytestExtractor(workspace).extract(captured.run.run_id)
 
     assert captured.run.execution_status is ExecutionStatus.FAILED
-    assert extracted.complete is False
+    assert extracted.completion != "complete"
     assert extracted.collected_count >= extracted.executed_count
     assert any("partial" in item for item in extracted.limitations)

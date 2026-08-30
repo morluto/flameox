@@ -23,6 +23,7 @@ from flameox.domain import (
     AcceleratorLinkKind,
     AcceleratorMigMode,
     DomainError,
+    process_exit_code,
 )
 from flameox.domain.identity import digest_model
 from flameox.domain.models import CapabilityExtra, EnvironmentRecord, IdentityQuality, utc_now
@@ -155,8 +156,8 @@ class _SystemMetalObserver:
                 executable_binding=executable,
             )
         )
-        if outcome.process.exit_code != 0:
-            raise ValueError(f"{name} returned {outcome.process.exit_code}")
+        if process_exit_code(outcome.process.termination) != 0:
+            raise ValueError(f"{name} returned {process_exit_code(outcome.process.termination)}")
         return outcome.stdout.decode(errors="replace").strip()
 
     async def _run_json(self, name: str, *arguments: str) -> object:

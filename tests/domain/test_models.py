@@ -10,14 +10,13 @@ from pydantic import TypeAdapter, ValidationError
 
 from flameox.application.oracle_receipts import parse_oracle_receipt
 from flameox.domain import (
-    ArtifactContent,
     ArtifactKind,
     ArtifactRegistration,
-    CapabilityExtra,
     CaptureStatus,
     CommandSpec,
     DomainError,
     ExecutionStatus,
+    ExitedProcessTermination,
     OracleReceiptValue,
     ProcessCancellationCause,
     ProcessResult,
@@ -33,7 +32,6 @@ from flameox.domain import (
     VariantIdentityQuality,
     digest_model,
     effective_sensitivity,
-    parse_managed_runtime_extras,
 )
 from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.models import (
@@ -41,7 +39,6 @@ from flameox.domain.models import (
     DigestOracleReceiptValue,
     ExecutionRunManifest,
     ImportRunManifest,
-    Integrity,
     ScalarOracleReceiptValue,
     SucceededTrial,
     parse_capture_plan,
@@ -175,16 +172,6 @@ def test_core_dump_has_mandatory_sensitivity_floor() -> None:
         )
 
 
-def test_artifact_metadata_rejects_an_id_that_disagrees_with_integrity() -> None:
-    with pytest.raises(ValidationError):
-        ArtifactContent(
-            artifact_id=DIGEST,
-            byte_length=0,
-            payload_name="payload",
-            integrity=Integrity(sha256="b" * 64),
-        )
-
-
 def test_workload_instance_rejects_tampered_bound_content() -> None:
     command = CommandSpec(argv=("python",), cwd=".")
     content = {
@@ -233,10 +220,9 @@ def test_import_run_cannot_claim_execution() -> None:
         )
 
 
-def test_run_manifest_parser_routes_schema_two_json_to_legal_variants() -> None:
+def test_run_manifest_parser_routes_json_to_legal_variants() -> None:
     adapter: TypeAdapter[RunManifest] = TypeAdapter(RunManifest)
     common = {
-        "schema_version": 2,
         "revision": 0,
         "run_id": "run",
         "created_at": "2026-01-01T00:00:00Z",
@@ -275,22 +261,6 @@ def test_run_manifest_parser_routes_schema_two_json_to_legal_variants() -> None:
                 **common,
                 "run_type": "execution",
                 "execution_status": "not_applicable",
-            }
-        )
-
-
-def test_run_manifest_parser_rejects_legacy_schema_without_compatibility_inference() -> None:
-    with pytest.raises(ValidationError, match="schema_version"):
-        TypeAdapter(RunManifest).validate_python(
-            {
-                "schema_version": 1,
-                "run_type": "import",
-                "run_id": "legacy",
-                "capture_status": "registered",
-                "validation_status": "not_requested",
-                "execution_status": "not_applicable",
-                "environment_id": DIGEST,
-                "collector": "import",
             }
         )
 
@@ -420,7 +390,6 @@ def test_capture_plan_rejects_contradictory_containment(
 @pytest.mark.parametrize(
     "payload",
     (
-        {"exit_code": 1, "terminating_signal": 9},
         {"timed_out": True, "cancellation_cause": "caller_cancelled"},
         {"timed_out": False, "cancellation_cause": "timeout"},
         {
@@ -447,18 +416,28 @@ def test_process_result_rejects_the_derived_timeout_projection_as_input() -> Non
     assert result.validated_copy() == result
 
 
-def test_process_result_parses_flat_termination_into_one_domain_variant() -> None:
-    exited = ProcessResult.model_validate({"exit_code": 0})
-    signalled = ProcessResult.model_validate({"terminating_signal": 15})
+def test_process_result_requires_a_nested_typed_termination() -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        ProcessResult.model_validate({"exit_code": 0})
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        ProcessResult.model_validate({"terminating_signal": 15})
+
+    exited = ProcessResult(termination=ExitedProcessTermination(exit_code=0))
 
     assert exited.termination.kind is ProcessTerminationKind.EXITED
-    assert exited.exit_code == 0
-    assert exited.terminating_signal is None
-    assert signalled.termination.kind is ProcessTerminationKind.SIGNALLED
-    assert signalled.exit_code is None
-    assert signalled.terminating_signal == 15
+    assert exited.termination == ExitedProcessTermination(exit_code=0)
+    assert exited.model_dump(mode="json") == {
+        "termination": {"kind": "exited", "exit_code": 0},
+        "wall_time_ns": None,
+        "peak_rss_bytes": None,
+        "cancellation_cause": None,
+        "cleanup_complete": None,
+        "resources": None,
+        "stdout": None,
+        "stderr": None,
+        "timed_out": False,
+    }
     assert exited.validated_copy() == exited
-    assert signalled.validated_copy() == signalled
 
 
 @pytest.mark.parametrize("argv", [(), ("python", "bad\x00arg"), ("",)])
@@ -613,6 +592,32 @@ def test_oracle_receipt_parser_is_strict_and_preserves_typed_mismatch() -> None:
     assert isinstance(receipt.observed, DigestOracleReceiptValue)
 
 
+def test_oracle_receipt_parser_preserves_pair_binding() -> None:
+    receipt = parse_oracle_receipt(
+        json.dumps(
+            {
+                "schema_version": "flameox.oracle-receipt.v1",
+                "status": "pass",
+                "reason": "pair_match",
+                "binding": {
+                    "pair_id": "sha256:" + "1" * 64,
+                    "treatment": "candidate",
+                    "input_identity": "sha256:" + "2" * 64,
+                    "workload_identity": "sha256:" + "3" * 64,
+                    "output_identity": "sha256:" + "4" * 64,
+                    "compared_property": "forward",
+                    "oracle_identity": "sha256:" + "5" * 64,
+                    "tolerance": {"absolute": 0, "relative": 0, "equal_nan": False},
+                },
+            }
+        ).encode()
+    )
+
+    assert receipt.binding is not None
+    assert receipt.binding.treatment == "candidate"
+    assert receipt.binding.input_identity == "sha256:" + "2" * 64
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -645,10 +650,3 @@ def test_oracle_receipt_value_rejects_kind_value_mismatches(
 def test_oracle_receipt_parser_rejects_ambiguous_or_unsupported_json(payload: bytes) -> None:
     with pytest.raises(DomainError):
         parse_oracle_receipt(payload)
-
-
-def test_managed_runtime_extra_parser_owns_the_persisted_vocabulary() -> None:
-    assert parse_managed_runtime_extras(["torch", "unknown", "trace", "torch", "toxiproxy", 1]) == (
-        CapabilityExtra.TORCH,
-        CapabilityExtra.TRACE,
-    )

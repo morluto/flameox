@@ -10,12 +10,17 @@ from statsmodels.api import OLS
 from statsmodels.stats.multitest import multipletests
 from statsmodels.stats.stattools import durbin_watson
 
+from flameox.action_graph import ActionId, next_action_for_action
 from flameox.analysis.recipe_context import RecipeContext
 from flameox.analysis.recipe_models import (
     ScalingAnalysisResult,
+    ScalingAnalysisSufficiency,
     ScalingCorrelatedHotspot,
     ScalingFit,
+    ScalingMissingRequirement,
     ScalingPoint,
+    ScalingRequirementKind,
+    ScalingSufficiencyStatus,
     ScalingTrialSummary,
 )
 from flameox.domain import ConfidenceInterval, DomainError, ErrorCode
@@ -29,6 +34,9 @@ from flameox.evidence_status import (
 
 
 class ScalingRecipes(RecipeContext):
+    _MINIMUM_DISTINCT_INPUT_VALUES = 4
+    _MINIMUM_REPLICATIONS = 2
+
     @staticmethod
     def _input_identity(
         integer_value: object,
@@ -69,6 +77,16 @@ class ScalingRecipes(RecipeContext):
                 (experiment_id,),
             ).fetchone()
             assert trial_row is not None
+            trial_design_rows = snapshot.execute(
+                "SELECT DISTINCT t.trial_id, v.name, t.block_id, t.outcome, "
+                "t.parameter_name, t.parameter_value_int, t.parameter_value_float "
+                "FROM trials t "
+                "JOIN (SELECT DISTINCT variant_id, name FROM variants) v "
+                "ON v.variant_id = t.variant_id "
+                "WHERE t.experiment_id = ? "
+                "ORDER BY t.block_id, v.name, t.trial_id",
+                (experiment_id,),
+            ).fetchall()
             rows = snapshot.execute(
                 "SELECT t.trial_id, v.name, t.block_id, t.parameter_value_int, "
                 "t.parameter_value_float, r.environment_id, "
@@ -105,11 +123,13 @@ class ScalingRecipes(RecipeContext):
             complete_row = snapshot.execute(
                 "WITH expected AS (SELECT count(DISTINCT variant_id) AS n "
                 "FROM variants WHERE experiment_id = ?), "
-                "blocks AS (SELECT block_id, count(DISTINCT variant_id) AS n "
-                "FROM trials WHERE experiment_id = ? AND outcome = 'succeeded' "
-                "GROUP BY block_id) "
-                "SELECT count(*) FROM blocks, expected "
-                "WHERE blocks.n = expected.n",
+                "blocks AS (SELECT block_id, count(DISTINCT variant_id) "
+                "FILTER (WHERE outcome = 'succeeded') AS succeeded_variants "
+                "FROM (SELECT DISTINCT trial_id, variant_id, block_id, outcome "
+                "FROM trials WHERE experiment_id = ?) "
+                "WHERE block_id IS NOT NULL GROUP BY block_id) "
+                "SELECT count(*), count(*) FILTER (WHERE succeeded_variants = expected.n) "
+                "FROM blocks CROSS JOIN expected",
                 (experiment_id, experiment_id),
             ).fetchone()
             assert complete_row is not None
@@ -253,12 +273,21 @@ class ScalingRecipes(RecipeContext):
                 + ", ".join(sorted(mixed_input_kind_variants))
                 + "."
             )
-        environment_stable = all(point.environment_count == 1 for point in points)
-        if not environment_stable:
+        if any(point.environment_count != 1 for point in points):
             warnings.append("Environment identity varies within at least one scaling point.")
         attempted_trials = int(trial_row[0])
         succeeded_trials = int(trial_row[1])
         failed_trials = int(trial_row[2])
+        complete_blocks = int(complete_row[1])
+        sufficiency = self._scaling_sufficiency(
+            experiment_id=experiment_id,
+            points=points,
+            trials=tuple(trials),
+            trial_design_rows=trial_design_rows,
+            succeeded_trials=succeeded_trials,
+            complete_blocks=complete_blocks,
+            total_blocks=int(complete_row[0]),
+        )
         evidence, measurement_warning = self._scaling_evidence(
             points,
             attempted_trials=attempted_trials,
@@ -276,12 +305,185 @@ class ScalingRecipes(RecipeContext):
             attempted_trials=attempted_trials,
             succeeded_trials=succeeded_trials,
             failed_trials=failed_trials,
-            complete_blocks=int(complete_row[0]),
+            complete_blocks=complete_blocks,
             fits=fits,
             correlated_hotspots=correlated_hotspots,
             conclusion=conclusion,
             warnings=tuple(warnings),
+            sufficiency=sufficiency,
             evidence=evidence,
+        )
+
+    @classmethod
+    def _scaling_sufficiency(
+        cls,
+        *,
+        experiment_id: str,
+        points: tuple[ScalingPoint, ...],
+        trials: tuple[ScalingTrialSummary, ...],
+        trial_design_rows: list[tuple[object, ...]],
+        succeeded_trials: int,
+        complete_blocks: int,
+        total_blocks: int,
+    ) -> ScalingAnalysisSufficiency:
+        requirements: list[ScalingMissingRequirement] = []
+        variants = tuple(sorted({str(row[1]) for row in trial_design_rows}))
+        measured_trial_ids = {trial.trial_id for trial in trials}
+        succeeded_rows = tuple(row for row in trial_design_rows if row[3] == "succeeded")
+        if succeeded_trials == 0:
+            requirements.append(
+                ScalingMissingRequirement(
+                    kind=ScalingRequirementKind.SUCCEEDED_TRIALS,
+                    observed=0,
+                    required=1,
+                    detail=(
+                        "At least one trial must succeed before scaling measurements can be "
+                        "analyzed."
+                    ),
+                )
+            )
+        missing_measurement_rows = tuple(
+            row for row in succeeded_rows if str(row[0]) not in measured_trial_ids
+        )
+        if missing_measurement_rows:
+            requirements.append(
+                ScalingMissingRequirement(
+                    kind=ScalingRequirementKind.PRIMARY_MEASUREMENTS,
+                    variants=tuple(sorted({str(row[1]) for row in missing_measurement_rows})),
+                    observed=len(measured_trial_ids),
+                    required=succeeded_trials,
+                    detail=(
+                        "Every succeeded trial needs a finite measurement for the experiment's "
+                        "primary metric."
+                    ),
+                )
+            )
+        if total_blocks and complete_blocks < total_blocks:
+            requirements.append(
+                ScalingMissingRequirement(
+                    kind=ScalingRequirementKind.COMPLETE_BLOCKS,
+                    variants=variants,
+                    observed=complete_blocks,
+                    required=total_blocks,
+                    detail=(
+                        "Every planned block needs a succeeded trial for each treatment variant."
+                    ),
+                )
+            )
+
+        points_by_variant: dict[str, list[ScalingPoint]] = {}
+        for point in points:
+            points_by_variant.setdefault(point.variant, []).append(point)
+        factor_names_by_variant: dict[str, set[str]] = {}
+        for row in succeeded_rows:
+            parameter_name = row[4]
+            if parameter_name is not None:
+                factor_names_by_variant.setdefault(str(row[1]), set()).add(str(parameter_name))
+        for variant, variant_points in sorted(points_by_variant.items()):
+            valid_points = [
+                point
+                for point in variant_points
+                if point.input_value is not None
+                and point.input_value > 0
+                and math.isfinite(point.input_value)
+            ]
+            if len(valid_points) != len(variant_points):
+                factor_names = factor_names_by_variant.get(variant, set())
+                requirements.append(
+                    ScalingMissingRequirement(
+                        kind=ScalingRequirementKind.NUMERIC_INPUT_FACTOR,
+                        variants=(variant,),
+                        factor=next(iter(factor_names)) if len(factor_names) == 1 else None,
+                        observed=len(valid_points),
+                        required=len(variant_points),
+                        detail=(
+                            "Each measured scaling point needs one positive finite numeric input "
+                            "value from a declared non-treatment factor."
+                        ),
+                    )
+                )
+            input_kinds = tuple(
+                sorted({point.input_kind for point in valid_points if point.input_kind})
+            )
+            if len(input_kinds) > 1:
+                requirements.append(
+                    ScalingMissingRequirement(
+                        kind=ScalingRequirementKind.CONSISTENT_INPUT_KIND,
+                        variants=(variant,),
+                        input_kinds=input_kinds,
+                        observed=len(input_kinds),
+                        required=1,
+                        detail=(
+                            "One scaling axis cannot mix integer and floating representations; "
+                            "declare one canonical numeric factor."
+                        ),
+                    )
+                )
+            distinct_values = {point.input_value for point in valid_points}
+            if valid_points and len(distinct_values) < cls._MINIMUM_DISTINCT_INPUT_VALUES:
+                requirements.append(
+                    ScalingMissingRequirement(
+                        kind=ScalingRequirementKind.DISTINCT_INPUT_VALUES,
+                        variants=(variant,),
+                        observed=len(distinct_values),
+                        required=cls._MINIMUM_DISTINCT_INPUT_VALUES,
+                        detail=(
+                            "Model selection needs at least four distinct positive input values "
+                            "for each variant."
+                        ),
+                    )
+                )
+            if valid_points:
+                minimum_replication = min(point.sample_count for point in valid_points)
+                if minimum_replication < cls._MINIMUM_REPLICATIONS:
+                    requirements.append(
+                        ScalingMissingRequirement(
+                            kind=ScalingRequirementKind.REPLICATION,
+                            variants=(variant,),
+                            observed=minimum_replication,
+                            required=cls._MINIMUM_REPLICATIONS,
+                            detail=(
+                                "Each numeric input value needs measurements from at least two "
+                                "completed blocks."
+                            ),
+                        )
+                    )
+
+        if not requirements:
+            return ScalingAnalysisSufficiency(
+                status=ScalingSufficiencyStatus.SUFFICIENT,
+                missing_requirements=(),
+            )
+        incompatible = any(
+            requirement.kind
+            in {
+                ScalingRequirementKind.PRIMARY_MEASUREMENTS,
+                ScalingRequirementKind.NUMERIC_INPUT_FACTOR,
+                ScalingRequirementKind.CONSISTENT_INPUT_KIND,
+            }
+            for requirement in requirements
+        )
+        if incompatible:
+            instruction = (
+                f"Inspect the declared experiment that produced {experiment_id}; correct its "
+                "measurement protocol or numeric-factor definition before running a replacement. "
+                "Do not extend this incompatible run population."
+            )
+            status = ScalingSufficiencyStatus.INCOMPATIBLE
+        else:
+            instruction = (
+                f"Inspect the declared experiment that produced {experiment_id}, then run a "
+                "replacement with the missing scaling values, completed blocks, or replications."
+            )
+            status = ScalingSufficiencyStatus.INSUFFICIENT
+        return ScalingAnalysisSufficiency(
+            status=status,
+            missing_requirements=tuple(requirements),
+            next_action=next_action_for_action(
+                ActionId.GET_DECLARED_WORKFLOW,
+                context={"kind": "experiment"},
+                instruction=instruction,
+            ),
         )
 
     @staticmethod

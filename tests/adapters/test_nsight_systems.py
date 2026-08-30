@@ -7,9 +7,13 @@ from pathlib import Path
 import pytest
 
 from flameox.action_graph import ActionId, ToolAction
-from flameox.adapters import NsightSystemsExtractor
+from flameox.adapters.nsight_systems import NsightSystemsExtractor
 from flameox.analysis import RecipeService
-from flameox.application import ImportArtifactRequest, ImportService, TraceWindowService
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
+from flameox.application.trace_windows import TraceWindowService
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import Workspace

@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import (
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.experiments import ExperimentService
+from flameox.application.records import (
     CreateInvestigationRequest,
-    ExecutionPolicy,
-    ExperimentService,
     InvestigationService,
 )
 from flameox.domain import TrialOutcome, ValidationStatus
@@ -76,7 +76,8 @@ async def test_semantic_matrix_preserves_typed_categorical_evidence(tmp_path: Pa
     assert all(trial.outcome is TrialOutcome.UNSUPPORTED for trial in unsupported)
     assert result.outcome is not None
     assert result.outcome.disposition != "all_clean"
-    assert result.outcome.first_failure_trial_id == mismatch.trial_id
+    assert result.outcome.first_failure is not None
+    assert result.outcome.first_failure.trial_id == mismatch.trial_id
     persisted = service.get_trial(mismatch.trial_id, experiment_id=result.experiment.experiment_id)
     assert persisted.factors == mismatch.factors
     assert persisted.oracle_receipt == mismatch.oracle_receipt

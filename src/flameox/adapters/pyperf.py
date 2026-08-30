@@ -7,7 +7,6 @@ from typing import Any
 
 import pyperf
 
-from flameox.adapters.compatibility import require_supported_producer_major
 from flameox.domain.errors import DomainError, ErrorCode, missing_artifact_input
 from flameox.domain.identity import digest_model
 from flameox.domain.models import ArtifactKind, RunManifest
@@ -72,7 +71,6 @@ def iter_pyperf_samples(suite: pyperf.BenchmarkSuite) -> Iterator[PyPerfSample]:
 
 
 class PyPerfExtractionResult(ContractModel):
-    schema_version: int = 1
     run_id: str
     artifact_id: str
     benchmark_names: tuple[str, ...]
@@ -95,11 +93,6 @@ class PyPerfExtractor:
     def extract(self, run_id: str) -> PyPerfExtractionResult:
         run = self.runs.read(run_id)
         registration = self._benchmark_registration(run)
-        compatibility_limitations = require_supported_producer_major(
-            registration,
-            package="pyperf",
-            producer_tokens=("pyperf",),
-        )
         stored = self.artifacts.get(registration.artifact_id)
         suite = load_pyperf_suite(stored.payload_path)
         rows: list[dict[str, Any]] = []
@@ -139,7 +132,7 @@ class PyPerfExtractor:
             benchmark_names=tuple(suite.get_benchmark_names()),
             measurement_count=measured_count,
             warmup_count=warmup_count,
-            limitations=compatibility_limitations,
+            limitations=(),
             corpus_commit_id=published.commit.commit_id,
         )
 

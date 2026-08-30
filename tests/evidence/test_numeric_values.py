@@ -8,7 +8,6 @@ from flameox.evidence import (
     numeric_value_from_columns,
     numeric_value_to_columns,
     tagged_numeric_value_from_columns,
-    tagged_numeric_value_to_columns,
 )
 
 pytestmark = pytest.mark.unit
@@ -52,9 +51,8 @@ def test_numeric_value_columns_report_invalid_persisted_values(
 @pytest.mark.parametrize("value", (2**63, 2**63 + 1, 2**64 - 1))
 def test_tagged_unsigned_numeric_values_round_trip_exactly(value: int) -> None:
     expected = UnsignedIntegerValue(value=value)
-    columns = tagged_numeric_value_to_columns(expected)
+    columns = (None, None, value, "unsigned_integer")
 
-    assert columns == (None, None, value, "unsigned_integer")
     assert tagged_numeric_value_from_columns(*columns, field_name="metric") == expected
 
 

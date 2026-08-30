@@ -10,7 +10,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, computed_field, model_validator
+from pydantic import Field, model_validator
 
 from flameox.action_graph import ActionId
 from flameox.adapters.artifact_workers import IsolatedWorkerHarness
@@ -38,6 +38,7 @@ from flameox.domain import (
     ErrorCode,
     RunManifest,
     digest_model,
+    process_exit_code,
 )
 from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.models import CommandSpec, Digest, utc_now
@@ -116,11 +117,6 @@ class ReductionPlan(ContractModel):
     predicate_bridge_digest: str
     limits: ReductionExecutionLimits
     created_at: datetime = Field(default_factory=utc_now)
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def request_digest(self) -> Digest:
-        return self.plan_id
 
 
 class ReductionAttemptSummary(ContractModel):
@@ -228,7 +224,6 @@ class ReductionService:
             kind="reduction_plans",
             model=ReductionPlan,
             id_field="plan_id",
-            output_only_fields={"request_digest"},
         )
         self.results = ControlRecordStore(
             workspace,
@@ -620,10 +615,10 @@ class ReductionService:
                         repetition=repetition,
                         classification=(
                             PredicateClassification.INTERESTING
-                            if outcome.process.exit_code == 0
+                            if process_exit_code(outcome.process.termination) == 0
                             else PredicateClassification.NOT_INTERESTING
                         ),
-                        exit_code=outcome.process.exit_code,
+                        exit_code=process_exit_code(outcome.process.termination),
                         duration_ms=(time.monotonic() - started) * 1_000,
                     )
                 )

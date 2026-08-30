@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from pydantic import (
     ConfigDict,
@@ -19,6 +18,7 @@ from pydantic import (
 )
 
 from flameox.action_graph import ManualAction, NextAction, ToolAction
+from flameox.domain.compiler_build import CompilerIdentity, CompilerQualification
 from flameox.domain.executables import ResolvedExecutable
 from flameox.domain.identity import canonical_json_bytes, digest_model
 from flameox.domain.scalars import NumericValue
@@ -190,14 +190,6 @@ class ValidationStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
-class GenerationStatus(StrEnum):
-    STAGED = "staged"
-    PUBLISHED = "published"
-    FAILED = "failed"
-    SUPERSEDED = "superseded"
-    QUARANTINED = "quarantined"
-
-
 class ExperimentOutcomeMethod(StrEnum):
     FIXED_ATTEMPTS_V1 = "fixed_attempts_v1"
     ABSENCE_OF_FAILURE_FIXED_ATTEMPTS_V1 = "absence_of_failure_fixed_attempts_v1"
@@ -305,6 +297,19 @@ class OracleTolerance(ContractModel):
         return value
 
 
+class OracleReceiptBinding(ContractModel):
+    """The per-run facts needed to form a pair-bound oracle decision."""
+
+    pair_id: Digest
+    treatment: Identifier
+    input_identity: Digest
+    workload_identity: Digest
+    output_identity: Digest
+    compared_property: Identifier
+    oracle_identity: Digest
+    tolerance: OracleTolerance
+
+
 class OracleReceiptV1(ContractModel):
     schema_version: Literal["flameox.oracle-receipt.v1"]
     status: OracleStatus
@@ -320,6 +325,7 @@ class OracleReceiptV1(ContractModel):
     absolute_error: Annotated[float, Field(ge=0)] | None = None
     relative_error: Annotated[float, Field(ge=0)] | None = None
     tolerance: OracleTolerance | None = None
+    binding: OracleReceiptBinding | None = None
     diagnostic_roles: Annotated[tuple[Identifier, ...], Field(max_length=8)] = ()
     limitations: Annotated[
         tuple[Annotated[str, StringConstraints(max_length=500)], ...],
@@ -406,6 +412,7 @@ class EvidenceReferenceType(StrEnum):
     OBSERVATION = "observation"
     RUN = "run"
     RUN_SET = "run_set"
+    STATIC_CANDIDATE = "static_candidate"
     TRIAL = "trial"
 
 
@@ -449,7 +456,6 @@ class MeasurementSeriesSelector(ContractModel):
 class ComparisonMetricContract(ContractModel):
     """A closed contract for the population and transform used by a comparison."""
 
-    schema_version: Literal[1] = 1
     source: MetricSource
     metric: Identifier
     unit: Identifier
@@ -487,91 +493,13 @@ class ConfidenceInterval(ContractModel):
         return self
 
 
-_CONFIDENCE_PROJECTION_FIELDS = ("confidence_low", "confidence_high", "confidence_level")
-
-
-def _advertise_confidence_interval_projections(schema: dict[str, Any]) -> None:
-    properties = schema.setdefault("properties", {})
-    assert isinstance(properties, dict)
-    properties.pop("confidence_interval", None)
-    for field_name in _CONFIDENCE_PROJECTION_FIELDS:
-        properties[field_name] = {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
-            "default": None,
-            "readOnly": True,
-            "title": field_name.replace("_", " ").title(),
-        }
-
-
-class ConfidenceIntervalFields(ContractModel):
-    """Optional confidence interval with flattened compatibility projections."""
-
-    model_config = ConfigDict(json_schema_extra=_advertise_confidence_interval_projections)
-
-    confidence_interval: ConfidenceInterval | None = Field(default=None, exclude=True)
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_flat_confidence_interval(cls, value: object) -> object:
-        if not isinstance(value, Mapping):
-            return value
-        supplied = tuple(name for name in _CONFIDENCE_PROJECTION_FIELDS if name in value)
-        if not supplied:
-            return value
-        if "confidence_interval" in value:
-            raise ValueError(
-                "use either confidence_interval or flattened confidence fields, not both"
-            )
-        parsed = dict(value)
-        low = parsed.pop("confidence_low", None)
-        high = parsed.pop("confidence_high", None)
-        level = parsed.pop("confidence_level", None)
-        observed = (low, high, level)
-        if all(item is None for item in observed):
-            parsed["confidence_interval"] = None
-        elif any(item is None for item in observed):
-            raise ValueError("confidence bounds and level must appear together")
-        else:
-            parsed["confidence_interval"] = {"low": low, "high": high, "level": level}
-        return parsed
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def confidence_low(self) -> float | None:
-        return self.confidence_interval.low if self.confidence_interval is not None else None
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def confidence_high(self) -> float | None:
-        return self.confidence_interval.high if self.confidence_interval is not None else None
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def confidence_level(self) -> float | None:
-        return self.confidence_interval.level if self.confidence_interval is not None else None
-
-
-class Integrity(ContractModel):
-    sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
-    hashed_at: datetime = Field(default_factory=utc_now)
-
-
 class ArtifactContent(ContractModel):
-    schema_version: Literal[1] = 1
     artifact_id: Digest
     byte_length: Annotated[int, Field(ge=0)]
     payload_name: Identifier
-    integrity: Integrity
-
-    @model_validator(mode="after")
-    def content_id_matches_integrity(self) -> ArtifactContent:
-        if self.artifact_id != f"sha256:{self.integrity.sha256}":
-            raise ValueError("artifact id must match its integrity digest")
-        return self
 
 
 class ArtifactRegistration(ContractModel):
-    schema_version: Literal[1] = 1
     registration_id: Identifier
     run_id: Identifier
     artifact_id: Digest
@@ -613,7 +541,6 @@ class CommandSpec(ContractModel):
 
 
 class EnvironmentRecord(ContractModel):
-    schema_version: Literal[1] = 1
     environment_id: Digest
     observed_at: datetime = Field(default_factory=utc_now)
     identity_quality: IdentityQuality
@@ -690,7 +617,6 @@ class AcceleratorIdentityFacet(ContractModel):
 
 
 class SourceState(ContractModel):
-    schema_version: Literal[1] = 1
     source_state_id: Digest
     identity_quality: IdentityQuality
     repository_root: str | None = None
@@ -727,7 +653,6 @@ class WorkloadExecutionProtocol(StrEnum):
 
 
 class WorkloadDefinition(ContractModel):
-    schema_version: Literal[1] = 1
     workload_definition_id: Digest
     name: Identifier
     command_template: tuple[str, ...]
@@ -737,7 +662,6 @@ class WorkloadDefinition(ContractModel):
 
 
 class WorkloadInstance(ContractModel):
-    schema_version: Literal[1] = 1
     workload_instance_id: Digest
     workload_definition_id: Digest
     command: CommandSpec
@@ -839,27 +763,6 @@ class CapabilityExtra(StrEnum):
     TOXIPROXY = "toxiproxy"
 
 
-_MANAGED_RUNTIME_EXTRAS = frozenset(CapabilityExtra) - {CapabilityExtra.TOXIPROXY}
-
-
-def parse_managed_runtime_extras(value: object) -> tuple[CapabilityExtra, ...]:
-    """Parse the package extras that may be carried into a versioned runtime."""
-
-    if not isinstance(value, (list, tuple)):
-        return ()
-    extras: set[CapabilityExtra] = set()
-    for item in value:
-        if not isinstance(item, str):
-            continue
-        try:
-            extra = CapabilityExtra(item)
-        except ValueError:
-            continue
-        if extra in _MANAGED_RUNTIME_EXTRAS:
-            extras.add(extra)
-    return tuple(sorted(extras, key=str))
-
-
 class CapabilitySetup(ContractModel):
     """The bounded setup action FlameOx can take for one capability."""
 
@@ -880,7 +783,6 @@ class AdapterSetup(ContractModel):
 
 
 class CapabilityReport(ContractModel):
-    schema_version: Literal[1] = 1
     adapter: Identifier
     status: CapabilityStatus
     provisioning: CapabilityProvisioning = CapabilityProvisioning.HOST
@@ -917,7 +819,6 @@ class RequirementResult(ContractModel):
 
 
 class PreflightReport(ContractModel):
-    schema_version: Literal[1] = 1
     preflight_id: Digest
     mode: ProbeKind
     disposition: PreflightDisposition
@@ -1001,7 +902,6 @@ class ExecutionIdentityInput(ContractModel):
 
 
 class WorkloadExecutionIdentity(ContractModel):
-    schema_version: Literal[1] = 1
     identity_id: Digest
     quality: ExecutionIdentityQuality
     inputs: tuple[ExecutionIdentityInput, ...]
@@ -1190,7 +1090,9 @@ class _CapturePlan(ContractModel):
     adapter_capability: CapabilityReport | None = None
     adapter_workload_qualification: AdapterWorkloadQualification | None = None
     adapter_package_identity: str | None = None
+    compiler_identity: CompilerIdentity | None = None
     execution_limits: CaptureExecutionLimits
+    alternative_action: ToolAction | None = None
     warnings: tuple[str, ...] = ()
     limitation_details: tuple[LimitationDetail, ...] = ()
     created_at: datetime = Field(default_factory=utc_now)
@@ -1313,80 +1215,12 @@ def process_termination_from_returncode(returncode: int | None) -> ProcessTermin
     return SignalledProcessTermination(signal=-returncode)
 
 
-def _advertise_process_termination_projections(schema: dict[str, Any]) -> None:
-    properties = schema.setdefault("properties", {})
-    assert isinstance(properties, dict)
-    properties.pop("termination", None)
-    properties.update(
-        {
-            "exit_code": {
-                "anyOf": [{"minimum": 0, "type": "integer"}, {"type": "null"}],
-                "default": None,
-                "title": "Exit Code",
-            },
-            "terminating_signal": {
-                "anyOf": [{"exclusiveMinimum": 0, "type": "integer"}, {"type": "null"}],
-                "default": None,
-                "title": "Terminating Signal",
-            },
-        }
-    )
+def process_exit_code(termination: ProcessTermination) -> int | None:
+    """Return an exit status only when the typed termination was a normal exit."""
 
-
-class ProcessTerminationFields(ContractModel):
-    """Canonical process termination with flattened compatibility projections."""
-
-    model_config = ConfigDict(json_schema_extra=_advertise_process_termination_projections)
-
-    termination: ProcessTermination = Field(
-        default_factory=UnreportedProcessTermination,
-        exclude=True,
-    )
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_flat_termination(cls, value: object) -> object:
-        if not isinstance(value, Mapping):
-            return value
-        has_exit_code = "exit_code" in value
-        has_signal = "terminating_signal" in value
-        if not has_exit_code and not has_signal:
-            return value
-        if "termination" in value:
-            raise ValueError("use either termination or flattened termination fields, not both")
-        parsed = dict(value)
-        exit_code = parsed.pop("exit_code", None)
-        signal = parsed.pop("terminating_signal", None)
-        if exit_code is not None and signal is not None:
-            raise ValueError("a process cannot have both an exit code and a terminating signal")
-        if exit_code is not None:
-            termination: dict[str, object] = {
-                "kind": ProcessTerminationKind.EXITED,
-                "exit_code": exit_code,
-            }
-        elif signal is not None:
-            termination = {
-                "kind": ProcessTerminationKind.SIGNALLED,
-                "signal": signal,
-            }
-        else:
-            termination = {"kind": ProcessTerminationKind.UNREPORTED}
-        parsed["termination"] = termination
-        return parsed
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def exit_code(self) -> int | None:
-        if isinstance(self.termination, ExitedProcessTermination):
-            return self.termination.exit_code
-        return None
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def terminating_signal(self) -> int | None:
-        if isinstance(self.termination, SignalledProcessTermination):
-            return self.termination.signal
-        return None
+    if isinstance(termination, ExitedProcessTermination):
+        return termination.exit_code
+    return None
 
 
 type ResourcePolicyCancellationCause = Literal[
@@ -1396,9 +1230,10 @@ type ResourcePolicyCancellationCause = Literal[
 ]
 
 
-class ProcessResult(ProcessTerminationFields):
+class ProcessResult(ContractModel):
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
+    termination: ProcessTermination = Field(default_factory=UnreportedProcessTermination)
     wall_time_ns: Annotated[int, Field(ge=0)] | None = None
     peak_rss_bytes: Annotated[int, Field(ge=0)] | None = None
     cancellation_cause: ProcessCancellationCause | None = None
@@ -1448,7 +1283,6 @@ class CaptureLease(ContractModel):
 
 
 class _RunManifest(ContractModel):
-    schema_version: Literal[2] = 2
     revision: Annotated[int, Field(ge=0)] = 0
     run_id: Identifier
     created_at: datetime = Field(default_factory=utc_now)
@@ -1473,6 +1307,7 @@ class _RunManifest(ContractModel):
     writable_roots: tuple[WritableRootBinding, ...] = ()
     external_context: ExternalExecutionContext | None = None
     execution_identity: WorkloadExecutionIdentity | None = None
+    compiler_qualification: CompilerQualification | None = None
     oracle_receipt: OracleReceiptRecord | None = None
     inference_protocol_identity_id: Digest | None = None
     inference_protocol_identity_json: str | None = None
@@ -1504,6 +1339,7 @@ class ImportRunManifest(_RunManifest):
     writable_roots: tuple[()] = ()
     external_context: Literal[None] = None
     execution_identity: Literal[None] = None
+    compiler_qualification: Literal[None] = None
     oracle_receipt: Literal[None] = None
 
 
@@ -1562,7 +1398,6 @@ def parse_run_manifest_json(value: str | bytes) -> RunManifest:
 
 
 class Investigation(ContractModel):
-    schema_version: Literal[1] = 1
     investigation_id: Identifier
     question: ShortText
     symptom: str | None = None
@@ -1573,7 +1408,6 @@ class Investigation(ContractModel):
 
 
 class Hypothesis(ContractModel):
-    schema_version: Literal[1] = 1
     hypothesis_id: Identifier
     investigation_id: Identifier
     revision: Annotated[int, Field(ge=1)] = 1
@@ -1586,7 +1420,6 @@ class Hypothesis(ContractModel):
 
 
 class Experiment(ContractModel):
-    schema_version: Literal[1, 2] = 2
     experiment_id: Identifier
     investigation_id: Identifier
     hypothesis_id: Identifier | None = None
@@ -1616,11 +1449,9 @@ class VariantIdentityQuality(StrEnum):
     EXACT_UNIFORM = "exact_uniform"
     HETEROGENEOUS = "heterogeneous"
     INCOMPLETE = "incomplete"
-    LEGACY_REPRESENTATIVE = "legacy_representative"
 
 
 class Variant(ContractModel):
-    schema_version: Literal[1, 2] = 2
     variant_id: Identifier
     experiment_id: Identifier
     name: VariantName
@@ -1639,31 +1470,6 @@ class Variant(ContractModel):
     parameters: dict[str, JsonValue] = Field(default_factory=dict)
     varying_factors: dict[str, tuple[JsonValue, ...]] = Field(default_factory=dict)
     limitations: tuple[str, ...] = ()
-
-    @model_validator(mode="before")
-    @classmethod
-    def migrate_legacy_representative(cls, value: Any) -> Any:
-        if isinstance(value, Mapping) and value.get("schema_version", 2) == 1:
-            migrated = dict(value)
-            migrated.setdefault("identity_quality", VariantIdentityQuality.LEGACY_REPRESENTATIVE)
-            source_state_id = migrated.get("source_state_id")
-            workload_instance_id = migrated.get("workload_instance_id")
-            migrated.setdefault(
-                "source_state_ids", (source_state_id,) if source_state_id is not None else ()
-            )
-            migrated.setdefault(
-                "workload_instance_ids",
-                (workload_instance_id,) if workload_instance_id is not None else (),
-            )
-            migrated.setdefault(
-                "limitations",
-                (
-                    "schema-v1 variant identities are representative-only and do not prove "
-                    "cohort uniformity",
-                ),
-            )
-            return migrated
-        return value
 
     @model_validator(mode="after")
     def cohort_identity_is_coherent(self) -> Variant:
@@ -1723,16 +1529,10 @@ class Variant(ContractModel):
             raise ValueError("an exact-uniform variant cannot contain heterogeneous identities")
         if self.identity_quality is VariantIdentityQuality.HETEROGENEOUS and not heterogeneous:
             raise ValueError("a heterogeneous variant must expose its varying cohort identity")
-        if self.identity_quality is VariantIdentityQuality.LEGACY_REPRESENTATIVE:
-            if self.schema_version != 1:
-                raise ValueError("legacy representative quality is reserved for schema v1")
-        elif self.schema_version != 2:
-            raise ValueError("schema-v1 variants must be marked legacy representative")
         return self
 
 
 class _Trial(ContractModel):
-    schema_version: Literal[2] = 2
     trial_id: Identifier
     experiment_id: Identifier
     variant_id: Identifier
@@ -1838,10 +1638,6 @@ def parse_trial(value: object) -> Trial:
     return _TRIAL_ADAPTER.validate_python(value)
 
 
-def parse_trial_json(value: str | bytes) -> Trial:
-    return _TRIAL_ADAPTER.validate_json(value)
-
-
 class _RunSetMember(ContractModel):
     run_id: Identifier
     trial_id: Identifier | None = None
@@ -1865,7 +1661,6 @@ type RunSetMember = Annotated[
 
 
 class RunSet(ContractModel):
-    schema_version: Literal[1] = 1
     run_set_id: Digest
     corpus_commit_id: Digest
     created_at: datetime = Field(default_factory=utc_now)
@@ -1905,7 +1700,6 @@ class RunSet(ContractModel):
 
 
 class AnalysisRecord(ContractModel):
-    schema_version: Literal[1] = 1
     analysis_id: Identifier
     recipe: Identifier
     recipe_version: Identifier
@@ -1932,7 +1726,6 @@ class AnalysisRecord(ContractModel):
 
 
 class EvidenceReference(ContractModel):
-    schema_version: Literal[2] = 2
     owner_type: Literal["analysis", "finding", "hypothesis"]
     owner_id: Identifier
     owner_revision: Annotated[int, Field(ge=1)] | None = None
@@ -1948,10 +1741,8 @@ class EvidenceReference(ContractModel):
         return self
 
 
-class Comparison(ConfidenceIntervalFields):
-    # This is the public result envelope, not the durable comparison format. Persisted
-    # comparisons retain the separate schema-v1 Parquet projection in evidence/schemas.py.
-    schema_version: Literal[2] = 2
+class Comparison(ContractModel):
+    # This is the public result envelope; persisted comparisons use a separate Parquet projection.
     comparison_id: Identifier
     experiment_id: Identifier | None = None
     baseline_run_set_id: Digest
@@ -1971,6 +1762,7 @@ class Comparison(ConfidenceIntervalFields):
     candidate_value: NumericValue | None = None
     absolute_change: NumericValue | None = None
     relative_change: Annotated[float, Field(allow_inf_nan=False)] | None = None
+    confidence_interval: ConfidenceInterval | None = None
     # ``effect_size`` holds the relative median effect (exp(median(log(
     # candidate/baseline))) - 1), a dimensionless ratio, not a standardized
     # mean difference such as Cohen's d. See ``estimand`` for the exact
@@ -1997,11 +1789,6 @@ class Comparison(ConfidenceIntervalFields):
     validity: ComparisonValidity
     mismatches: tuple[str, ...] = ()
 
-    @computed_field(return_type=bool)  # type: ignore[prop-decorator]
-    @property
-    def paired(self) -> bool:
-        return self.complete_pair_n is not None
-
     @model_validator(mode="after")
     def statistical_state_is_coherent(self) -> Comparison:
         if self.complete_pair_n is not None and self.complete_pair_n > min(
@@ -2014,9 +1801,15 @@ class Comparison(ConfidenceIntervalFields):
                 raise ValueError("valid comparisons cannot retain compatibility mismatches")
             if self.confidence_interval is None:
                 raise ValueError("valid comparisons require a finite confidence interval")
-            if self.paired and self.complete_pair_n != self.baseline_eligible_n:
+            if (
+                self.complete_pair_n is not None
+                and self.complete_pair_n != self.baseline_eligible_n
+            ):
                 raise ValueError("valid paired comparisons require complete baseline coverage")
-            if self.paired and self.complete_pair_n != self.candidate_eligible_n:
+            if (
+                self.complete_pair_n is not None
+                and self.complete_pair_n != self.candidate_eligible_n
+            ):
                 raise ValueError("valid paired comparisons require complete candidate coverage")
         elif self.decision not in {
             ComparisonDecision.INCONCLUSIVE,
@@ -2027,7 +1820,6 @@ class Comparison(ConfidenceIntervalFields):
 
 
 class Finding(ContractModel):
-    schema_version: Literal[1] = 1
     finding_id: Identifier
     revision: Annotated[int, Field(ge=1)]
     created_at: datetime = Field(default_factory=utc_now)

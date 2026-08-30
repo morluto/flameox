@@ -37,14 +37,14 @@ from flameox.adapters.nsight_compute import find_ncu_report_interface
 from flameox.adapters.registry import AdapterRegistry
 from flameox.adapters.setup_runtime import install_trace_processor
 from flameox.adapters.toxiproxy import ToxiproxyClient, ToxiproxyToolManager, ToxiproxyToolReceipt
-from flameox.application.concurrency import race_with_cancellation
+from flameox.application.concurrency import run_brokered_from_worker
 from flameox.application.operations import (
     OperationAdapter,
     OperationFailure,
     OperationRunner,
     OperationStatus,
 )
-from flameox.application.provider_catalog import MANAGED_PROVIDERS, managed_provider
+from flameox.application.provider_catalog import MANAGED_PROVIDERS
 from flameox.application.provider_runtime import ProviderRuntime, ProviderRuntimeManager
 from flameox.application.task_supervisor import TaskSupervisor
 from flameox.atomic import atomic_write_json
@@ -61,6 +61,7 @@ from flameox.domain import (
     DomainError,
     ErrorCode,
     ProbeKind,
+    process_exit_code,
 )
 from flameox.domain.models import utc_now
 from flameox.execution import ExecutionOutcome, ExecutionRequest, ResourcePolicy, SubprocessBroker
@@ -152,7 +153,6 @@ _CAPABILITY_SETUP_RECEIPT_ADAPTER: TypeAdapter[CapabilitySetupReceipt] = TypeAda
 class CapabilityList(ContractModel):
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
-    schema_version: int = 1
     capabilities: tuple[CapabilityReport, ...]
     recommendation_scope: str | None = None
     latest_setup: CapabilitySetupReceipt | None = None
@@ -227,7 +227,6 @@ class SetupVerification(ContractModel):
 class CapabilitySetupResult(ContractModel):
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
-    schema_version: int = 1
     requested: tuple[str, ...]
     already_available: tuple[str, ...]
     provider_environment_ids: dict[str, str] = Field(default_factory=dict, max_length=16)
@@ -256,7 +255,6 @@ class CapabilitySetupResult(ContractModel):
 class AdapterPreparationResult(ContractModel):
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
-    schema_version: int = 1
     adapter: str
     distribution: str
     version: str
@@ -600,7 +598,7 @@ class CapabilityService:
         reports: list[CapabilityReport] = []
         for report in passive.capabilities:
             definition = builtin_adapter(report.adapter)
-            provider = managed_provider(report.adapter)
+            provider = MANAGED_PROVIDERS.get(report.adapter)
             version_args = (
                 definition.version_args
                 if definition is not None
@@ -627,7 +625,7 @@ class CapabilityService:
         if passive.executable is None or passive.status is not CapabilityStatus.AVAILABLE:
             return passive
         definition = builtin_adapter(adapter)
-        provider = managed_provider(adapter)
+        provider = MANAGED_PROVIDERS.get(adapter)
         version_args = (
             definition.version_args
             if definition is not None
@@ -692,7 +690,7 @@ class CapabilityService:
         )
         output = (outcome.stdout + b"\n" + outcome.stderr).decode("utf-8", errors="replace")
         version = next((line.strip() for line in output.splitlines() if line.strip()), None)
-        if outcome.process.exit_code != 0 or version is None:
+        if process_exit_code(outcome.process.termination) != 0 or version is None:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 "The declared Node.js executable did not return a version.",
@@ -735,7 +733,7 @@ class CapabilityService:
                 ),
                 lines[0] if lines else None,
             )
-            succeeded = outcome.process.exit_code == 0
+            succeeded = process_exit_code(outcome.process.termination) == 0
             return passive.validated_copy(
                 update={
                     "status": CapabilityStatus.AVAILABLE
@@ -745,7 +743,10 @@ class CapabilityService:
                     "limitations": (
                         ()
                         if succeeded
-                        else (f"Active version probe exited with {outcome.process.exit_code}.",)
+                        else (
+                            "Active version probe exited with "
+                            f"{process_exit_code(outcome.process.termination)}.",
+                        )
                     ),
                     "probe_kind": ProbeKind.ACTIVE,
                     "setup_verification": CapabilitySetupVerification.ACTIVE,
@@ -832,7 +833,7 @@ class CapabilityService:
         diagnostic = self._bounded_diagnostic(
             (outcome.stdout + b"\n" + outcome.stderr).decode("utf-8", errors="replace")
         )
-        if outcome.process.exit_code == 0:
+        if process_exit_code(outcome.process.termination) == 0:
             return passive.validated_copy(
                 update={
                     "status": CapabilityStatus.AVAILABLE,
@@ -938,7 +939,7 @@ class CapabilityService:
         )
         if "ERR_NVGPUCTRPERM" in diagnostic:
             return self._nsight_compute_permission_failure(passive, diagnostic)
-        if outcome.process.exit_code != 0:
+        if process_exit_code(outcome.process.termination) != 0:
             return self._nsight_compute_probe_failure(passive, diagnostic)
         return passive.validated_copy(
             update={
@@ -1201,9 +1202,7 @@ class CapabilityService:
                     self._prepare_provider(
                         adapter,
                         capability_setup,
-                        requirement_override=(
-                            memray_requirement if adapter == "memray" else None
-                        ),
+                        requirement_override=(memray_requirement if adapter == "memray" else None),
                         cancel_event=cancel_event,
                     )
                 next_phase: CapabilitySetupProgressPhase | None = (
@@ -1425,7 +1424,7 @@ class CapabilityService:
         if setup.requirement is None:
             return
         definition = builtin_adapter(adapter)
-        provider = managed_provider(adapter)
+        provider = MANAGED_PROVIDERS.get(adapter)
         executable_name = (
             definition.dependency
             if definition is not None
@@ -1437,7 +1436,7 @@ class CapabilityService:
             executable_name = provider.executable
 
         def run(request: ExecutionRequest) -> ExecutionOutcome:
-            return _run_brokered_sync(
+            return run_brokered_from_worker(
                 self.broker,
                 request,
                 cancel_event=cancel_event,
@@ -2028,78 +2027,3 @@ def _free_loopback_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
-
-
-async def _run_brokered(
-    broker: SubprocessBroker,
-    request: ExecutionRequest,
-    *,
-    cancel_event: threading.Event | None,
-    cancellation_message: str,
-    cancellation_details: dict[str, str],
-    cancellation_next_action: NextAction,
-) -> ExecutionOutcome:
-    if cancel_event is None:
-        return await broker.run(request)
-    return await race_with_cancellation(
-        broker.run(request),
-        lambda: _wait_for_cancellation(cancel_event),
-        lambda: DomainError(
-            ErrorCode.PROCESS_CANCELLED,
-            cancellation_message,
-            retryable=True,
-            details=cancellation_details,
-            next_action=cancellation_next_action,
-        ),
-    )
-
-
-async def _wait_for_cancellation(cancel_event: threading.Event) -> None:
-    while not cancel_event.is_set():
-        await asyncio.sleep(0.05)
-
-
-def _run_brokered_sync(
-    broker: SubprocessBroker,
-    request: ExecutionRequest,
-    *,
-    cancel_event: threading.Event | None,
-    cancellation_message: str,
-    cancellation_details: dict[str, str],
-    cancellation_next_action: NextAction,
-) -> ExecutionOutcome:
-    coroutine = _run_brokered(
-        broker,
-        request,
-        cancel_event=cancel_event,
-        cancellation_message=cancellation_message,
-        cancellation_details=cancellation_details,
-        cancellation_next_action=cancellation_next_action,
-    )
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coroutine)
-
-    result: list[ExecutionOutcome] = []
-    error: list[BaseException] = []
-
-    def run() -> None:
-        try:
-            result.append(asyncio.run(coroutine))
-        except BaseException as exc:
-            error.append(exc)
-
-    thread = threading.Thread(target=run, name="flameox-broker-bridge")
-    thread.start()
-    thread.join()
-    if error:
-        raise error[0]
-    return result[0]
-
-
-def _output_detail(outcome: ExecutionOutcome) -> str:
-    return (
-        outcome.stderr.decode("utf-8", errors="replace").strip()
-        or outcome.stdout.decode("utf-8", errors="replace").strip()
-    )

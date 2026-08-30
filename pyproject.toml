@@ -12,6 +12,7 @@ requires-python = ">=3.12"
 dependencies = [
     "anyio>=4.9,<5",
     "concurrent-log-handler>=0.9.28,<0.10",
+    "coverage>=7.14,<8",
     "duckdb>=1.5.4,<1.6",
     "defusedxml>=0.7.1,<0.8",
     "ijson>=3.4,<4",
@@ -24,7 +25,6 @@ dependencies = [
     "platformdirs>=4.3,<5",
     "python-json-logger>=3.3,<4",
     "pyperf>=2.10,<2.11",
-    "pytz>=2024.2",
     "pyarrow>=20,<26",
     "pydantic>=2.13.4,<2.14",
     "questionary>=2.1,<3",
@@ -43,17 +43,14 @@ Repository = "https://github.com/morluto/flameox"
 Issues = "https://github.com/morluto/flameox/issues"
 
 [project.optional-dependencies]
-python = ["pyperf>=2.10,<2.11"]
 memory = ["memray>=1.17"]
 torch = ["torch>=2.7"]
-execution = ["coverage>=7.14,<8"]
 hardware = ["nvidia-ml-py==13.610.43"]
 inference = ["aiperf>=0.12,<0.13"]
 test = ["pytest>=8.3", "pytest-reportlog>=1,<2", "pytest-xdist>=3.6"]
 trace = ["perfetto>=0.57,<0.58", "opentelemetry-proto>=1.44,<1.45", "protobuf>=5,<7"]
 cpu = ["py-spy>=0.4.2,<0.5"]
 all = [
-    "coverage>=7.14,<8",
     "aiperf>=0.12,<0.13",
     "memray>=1.17",
     "nvidia-ml-py==13.610.43",
@@ -61,7 +58,6 @@ all = [
     "opentelemetry-proto>=1.44,<1.45",
     "protobuf>=5,<7",
     "py-spy>=0.4.2,<0.5",
-    "pyperf>=2.10,<2.11",
     "pytest>=8.3",
     "pytest-reportlog>=1,<2",
     "pytest-xdist>=3.6",
@@ -103,7 +99,6 @@ markers = [
     "optional: tests requiring a provider or host capability outside the core install",
     "performance: representative local corpus performance acceptance checks",
     "serial: tests that must not share a process or host resource with another test",
-    "requires_coverage: requires the optional coverage.py provider",
     "requires_bwrap: requires the Bubblewrap executable",
     "requires_cargo: requires the Cargo executable",
     "requires_memray: requires the optional Memray provider",

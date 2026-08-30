@@ -21,7 +21,7 @@ from flameox.domain import (
 )
 from flameox.domain.models import utc_now
 from flameox.models import ContractModel
-from flameox.storage import ProjectionIntentStore, RunStore, Workspace
+from flameox.storage import ControlPlane, RunStore, Workspace
 
 
 class LeaseState(StrEnum):
@@ -31,7 +31,6 @@ class LeaseState(StrEnum):
 
 
 class RecoveryInspection(ContractModel):
-    schema_version: int = 1
     active_run_ids: tuple[str, ...]
     recoverable_run_ids: tuple[str, ...]
     indeterminate_run_ids: tuple[str, ...]
@@ -41,7 +40,6 @@ class RecoveryInspection(ContractModel):
 
 
 class RecoveryResult(ContractModel):
-    schema_version: int = 1
     recovered_runs: tuple[RunManifest, ...]
     resumed_trash_manifests: tuple[str, ...] = ()
     resumed_quarantine_manifests: tuple[str, ...] = ()
@@ -54,7 +52,7 @@ class RecoveryService:
         self.workspace = workspace
         self.runs = RunStore(workspace)
         self.projections = ProjectionCoordinator(workspace)
-        self.projection_intents = ProjectionIntentStore(workspace)
+        self.control = ControlPlane(workspace)
         self.garbage = GarbageCollector(workspace)
         self.quarantine = QuarantineService(workspace)
 
@@ -88,11 +86,11 @@ class RecoveryService:
             staging_paths=staging_paths,
             pending_projection_intent_ids=tuple(
                 intent.intent_id
-                for intent in self.projection_intents.list(state=ProjectionState.PENDING)
+                for intent in self.control.list_projection_intents(state=ProjectionState.PENDING)
             ),
             failed_projection_intent_ids=tuple(
                 intent.intent_id
-                for intent in self.projection_intents.list(state=ProjectionState.FAILED)
+                for intent in self.control.list_projection_intents(state=ProjectionState.FAILED)
             ),
         )
 
@@ -103,7 +101,7 @@ class RecoveryService:
         resumed_quarantine = self.quarantine.moving_manifests()
         for quarantine_id in resumed_quarantine:
             self.quarantine.resume(quarantine_id)
-        projection_reconciliation = self.projections.reconcile(include_failed=True)
+        projection_reconciliation = self.projections.reconcile()
         inspection = self.inspect()
         recovered: list[RunManifest] = []
         for run_id in inspection.recoverable_run_ids:

@@ -584,7 +584,7 @@ class SubprocessBroker:
 
         cwd = self._resolve_cwd(request.cwd, request.allowed_working_roots)
         environment = self._build_environment(request)
-        binding = self._bound_executable(request, cwd, environment)
+        binding = self._bound_executable(request)
         executable = binding.invocation_path
         argv = (str(executable), *request.argv[1:])
         started = time.monotonic_ns()
@@ -1136,7 +1136,7 @@ class SubprocessBroker:
 
         cwd = self._resolve_cwd(request.cwd, request.allowed_working_roots)
         environment = self._build_environment(request)
-        binding = self._bound_executable(request, cwd, environment)
+        binding = self._bound_executable(request)
         executable = binding.invocation_path
         argv = (str(executable), *request.argv[1:])
         started = time.monotonic_ns()
@@ -1926,8 +1926,6 @@ class SubprocessBroker:
     def _bound_executable(
         self,
         request: ExecutionRequest,
-        cwd: Path,
-        environment: dict[str, str],
     ) -> ResolvedExecutable:
         resolver = ExecutableResolver()
         binding = request.executable_binding
@@ -2137,7 +2135,7 @@ class ManagedSidecarLease:
                 ) from error
         cwd = broker._resolve_cwd(request.cwd, request.allowed_working_roots)
         environment = broker._build_environment(request)
-        executable = broker._bound_executable(request, cwd, environment).invocation_path
+        executable = broker._bound_executable(request).invocation_path
         argv = (str(executable), *request.argv[1:])
         process = await asyncio.create_subprocess_exec(
             *argv,

@@ -7,7 +7,7 @@ import pytest
 
 import flameox.application.proc as proc
 from flameox.analysis import RecipeService
-from flameox.application import RecoveryService
+from flameox.application.recovery import RecoveryService
 from flameox.catalog import Catalog
 from flameox.domain import (
     CaptureLease,

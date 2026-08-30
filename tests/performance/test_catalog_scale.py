@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import CompactionService, workspace_status
+from flameox.application.status import workspace_status
 from flameox.catalog import Catalog
 from flameox.evidence import GenerationPublisher
 from flameox.storage import ArtifactStore, Workspace
@@ -33,7 +33,6 @@ def _run_row(index: int) -> dict[str, object]:
         "run_semantic_id": "sha256:" + "f" * 64,
         "exit_code": None,
         "wall_time_ns": None,
-        "manifest_path": "synthetic",
     }
 
 
@@ -81,8 +80,7 @@ def _measurement_row(index: int) -> dict[str, object]:
     ),
 )
 @pytest.mark.performance
-@pytest.mark.anyio
-async def test_catalog_scale_budget_matrix(
+def test_catalog_scale_budget_matrix(
     tmp_path: Path,
     run_count: int,
     publication_budget: float,
@@ -108,9 +106,6 @@ async def test_catalog_scale_budget_matrix(
             publisher_version="1",
         )
     publication_seconds = time.perf_counter() - started
-
-    compacted = await CompactionService(workspace).compact()
-    assert compacted.reachable_file_count_after == 2
 
     catalog = Catalog(workspace)
     started = time.perf_counter()

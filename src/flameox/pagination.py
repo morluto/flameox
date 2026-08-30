@@ -1,40 +1,16 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from pydantic import ConfigDict, computed_field, model_validator
 
 from flameox.models import ContractModel
 
 
-def _advertise_collection_projections(schema: dict[str, Any]) -> None:
-    """Expose read-only projections in validation-mode protocol schemas."""
-
-    properties = schema.get("properties")
-    if not isinstance(properties, dict):
-        return
-    properties.setdefault(
-        "returned",
-        {"readOnly": True, "title": "Returned", "type": "integer"},
-    )
-    properties.setdefault(
-        "truncated",
-        {"readOnly": True, "title": "Truncated", "type": "boolean"},
-    )
-    required = schema.setdefault("required", [])
-    if isinstance(required, list):
-        for field in ("returned", "truncated"):
-            if field not in required:
-                required.append(field)
-
-
 class CollectionResultContract(ContractModel):
     """A result whose returned count is derived from its authoritative item tuple."""
 
-    # MCP 2.0 asks Pydantic for a validation-mode schema even though this model is
-    # an output. Advertising the computed projections explicitly avoids mixing
-    # validation and serialization $defs for nested result models.
-    model_config = ConfigDict(json_schema_extra=_advertise_collection_projections)
+    model_config = ConfigDict(json_schema_mode_override="serialization")
 
     page_items_field: ClassVar[str]
 

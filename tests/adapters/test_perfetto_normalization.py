@@ -4,9 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from flameox.adapters import PerfettoExtractor
+from flameox.adapters.perfetto import PerfettoExtractor
 from flameox.analysis import RecipeService
-from flameox.application import ImportArtifactRequest, ImportService
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.domain import ArtifactKind
 from flameox.storage import Workspace
 from flameox.workers.perfetto_contract import (

@@ -2,28 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Literal, assert_never
 
-from pydantic import JsonValue, ValidationError
+from pydantic import ValidationError
 
 from flameox.adapters.kernel_build import (
-    ArtifactKernelBuildStage,
-    ArtifactlessKernelBuildStage,
     KernelBuildArtifact,
-    KernelBuildCacheStatus,
-    KernelBuildContext,
+    KernelBuildArtifactGroup,
     KernelBuildManifest,
-    KernelBuildManifestV1,
-    KernelBuildManifestV2,
-    KernelBuildOutcome,
     KernelBuildProducer,
-    KernelBuildStage,
-    KernelBuildStageStatus,
-    KernelBuildTarget,
-    parse_kernel_build_manifest,
 )
 from flameox.application.imports import (
     BundleMember,
@@ -31,31 +21,42 @@ from flameox.application.imports import (
     ImportService,
 )
 from flameox.application.pipelines import (
-    ArtifactPipeline,
     ArtifactPipelineService,
+    PipelineExtractorProfile,
     PipelineStageDeclaration,
+    PipelineStageStatus,
     RegisteredPipelineStageDeclaration,
     RegisterPipelineRequest,
-    UnregisteredPipelineStageDeclaration,
 )
 from flameox.atomic import atomic_write_json
 from flameox.domain import (
+    AcceleratorIdentityFacet,
+    AcceleratorIdentityStatus,
     ArtifactKind,
+    CompilerIdentity,
+    CompilerTarget,
+    CompilerTargetIdentity,
     DomainError,
     ErrorCode,
     RunManifest,
     Sensitivity,
-    WorkloadInstance,
-    digest_model,
+    compiler_identity_id,
+    compiler_target_identity_id,
 )
 from flameox.models import ContractModel
 from flameox.storage import Workspace
 
 _MAX_KERNEL_BUILD_MEMBERS = 100
 _MAX_KERNEL_BUILD_MANIFEST_BYTES = 1024 * 1024
+_MAX_TRITON_COMPILER_EVENTS = 128
+_MAX_TRITON_COMPILER_EVENT_BYTES = 64 * 1024
+_MAX_PTX_METADATA_BYTES = 1024 * 1024
+_PTX_TARGET = re.compile(rb"(?m)^\s*\.target\s+(sm_[0-9]{2,3}a?)\b")
+_PTX_VERSION = re.compile(rb"(?m)^\s*\.version\s+([0-9]+\.[0-9]+)\b")
 
-# Triton dump extensions: NVIDIA (ttir/ttgir/llir/ptx/cubin/sass) and
-# AMD (amdgcn/hsaco) targets, plus metadata files emitted alongside IR.
+# Triton stage extensions: NVIDIA (ttir/ttgir/llir/ptx/cubin/sass) and AMD
+# (amdgcn/hsaco). JSON and .metadata are preserved when declared but are never
+# compiler stages.
 _TRITON_EXTENSION_MAP: dict[str, tuple[str, str, str]] = {
     ".ttir": ("ttir", "triton-ttir", "text/plain"),
     ".ttgir": ("ttgir", "triton-ttgir", "text/plain"),
@@ -99,12 +100,27 @@ _CUTE_EXTENSION_INFO: dict[str, tuple[str, str, str]] = {
     ".llvm": ("llvm", "llvm-ir", "text/plain"),
 }
 
-# Reproducer file format info (lives outside dump_dir, in output_root).
-_REPRODUCER_FORMAT_INFO: tuple[str, str, str] = (
-    "reproducer",
-    "triton-reproducer-mlir",
-    "text/plain",
-)
+# The reproducer lives outside dump_dir, in output_root.
+_REPRODUCER_MEDIA_TYPE = "text/plain"
+
+_STAGE_PRIORITY: dict[str, int] = {
+    ".ttir": 0,
+    ".ttgir": 1,
+    ".mlir": 0,
+    ".cute_dsl_ir": 0,
+    ".mlir.debug": 0,
+    ".cute_dsl_ir.debug": 0,
+    ".llir": 2,
+    ".ll": 2,
+    ".llvm": 2,
+    ".ptx": 3,
+    ".amdgcn": 3,
+    ".cubin": 4,
+    ".hsaco": 4,
+    ".sass": 5,
+}
+
+_LINEAGE_EXTENSIONS = frozenset(_STAGE_PRIORITY)
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,9 +129,6 @@ class KernelBuildInventoryEntry:
     relative_path: str
     byte_length: int
     sha256: str
-    extension: str
-    format: str
-    format_schema: str
     media_type: str
 
 
@@ -126,123 +139,297 @@ class KernelBuildInventory:
     dump_dir: Path | None
 
 
-def managed_kernel_build_context(
-    *,
-    workload_instance: WorkloadInstance,
-    adapter: str,
-    producer_version: str | None,
-    adapter_options: dict[str, JsonValue],
-) -> KernelBuildContext:
-    """Bind one compiler invocation to its exact managed workload and protocol inputs."""
+class _TritonCompilerEvent(ContractModel):
+    cache_hit: bool
+    target: CompilerTarget
+    triton_version: str
 
-    raw_target = adapter_options.get("target")
-    target = KernelBuildTarget.model_validate(raw_target) if raw_target is not None else None
-    return KernelBuildContext(
-        workload_definition_id=workload_instance.workload_definition_id,
-        workload_instance_id=workload_instance.workload_instance_id,
-        command_digest=digest_model(workload_instance.command.model_dump(mode="json")),
-        parameters_digest=digest_model(workload_instance.parameters),
-        compiler_identity_id=digest_model(
-            {
-                "adapter": adapter,
-                "producer_version": producer_version or "unknown",
-            }
+
+def qualify_triton_compiler_target(
+    *,
+    events_path: Path,
+    native_paths: tuple[Path, ...],
+    compiler: CompilerIdentity,
+    environment_id: str,
+    accelerator: AcceleratorIdentityFacet | None,
+    target_intent: object | None,
+) -> tuple[CompilerTargetIdentity | None, tuple[str, ...]]:
+    """Derive one exact target without inferring identity from Triton's cache.
+
+    Triton's current compilation listener reports the same target metadata for
+    fresh compiles and cache hits.  Native PTX directives, when produced, are
+    checked against that callback.  The callback does not identify a dump
+    group, so mixed targets are deliberately not assigned to individual
+    pipelines.
+    """
+
+    events, limitations = _triton_compiler_events(events_path)
+    if not events:
+        return None, limitations
+    versions = {event.triton_version for event in events}
+    if versions != {compiler.version}:
+        raise DomainError(
+            ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+            "Triton compiler listener version contradicts the plan-bound distribution.",
+        )
+    targets = {
+        (
+            event.target.backend,
+            event.target.architecture,
+            event.target.warp_size,
+        )
+        for event in events
+    }
+    if len(targets) != 1:
+        raise DomainError(
+            ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+            "Triton listener reported multiple compiler targets without dump-group linkage.",
+        )
+    backend, architecture, warp_size = next(iter(targets))
+    if backend != "cuda" or warp_size != 32:
+        return None, (
+            *limitations,
+            "Triton listener target is not a supported CUDA warp-32 compilation target.",
+        )
+
+    ptx_architecture, ptx_version, ptx_limitations = _ptx_target_metadata(native_paths)
+    limitations = (*limitations, *ptx_limitations)
+    if ptx_architecture is not None and ptx_architecture != architecture:
+        raise DomainError(
+            ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+            "Emitted PTX target contradicts Triton's compilation listener target.",
+        )
+    if ptx_architecture is None and any(path.suffix.casefold() == ".ptx" for path in native_paths):
+        return None, limitations
+
+    if accelerator is None or accelerator.provider != "cuda":
+        return None, (*limitations, "Observed CUDA environment identity was unavailable.")
+    if (
+        accelerator.status is not AcceleratorIdentityStatus.AVAILABLE
+        or accelerator.driver_version is None
+        or accelerator.runtime_version is None
+        or not accelerator.devices
+    ):
+        return None, (
+            *limitations,
+            "Observed CUDA driver, runtime, or device identity was incomplete.",
+        )
+    observed_architectures = {
+        f"sm_{device.compute_capability.replace('.', '')}"
+        for device in accelerator.devices
+        if device.compute_capability is not None
+    }
+    if not observed_architectures:
+        return None, (*limitations, "Observed CUDA devices did not report compute capability.")
+
+    intent = CompilerTarget.model_validate(target_intent) if target_intent is not None else None
+    if intent is not None:
+        if (
+            intent.backend != backend
+            or intent.architecture != architecture
+            or (intent.warp_size is not None and intent.warp_size != warp_size)
+        ):
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Explicit cross-compilation intent contradicts the emitted Triton target.",
+            )
+    elif len(observed_architectures) != 1 or architecture not in observed_architectures:
+        return None, (
+            *limitations,
+            "Triton target could not be uniquely validated against the observed CUDA device.",
+        )
+    return (
+        CompilerTargetIdentity(
+            backend="cuda",
+            architecture=architecture,
+            warp_size=32,
+            ptx_version=ptx_version,
+            environment_id=environment_id,
         ),
-        build_protocol_id=digest_model(
-            {
-                "schema_version": "flameox.kernel-build-protocol.v1",
-                "adapter": adapter,
-                "producer_version": producer_version or "unknown",
-                "adapter_options": adapter_options,
-            }
-        ),
-        target=target,
-        target_identity_id=(
-            digest_model(target.model_dump(mode="json")) if target is not None else None
-        ),
+        limitations,
     )
 
 
-def kernel_build_pipeline_request(
+def _triton_compiler_events(path: Path) -> tuple[tuple[_TritonCompilerEvent, ...], tuple[str, ...]]:
+    if not path.is_file():
+        return (), ("Triton compiler listener output was unavailable after capture.",)
+    events: list[_TritonCompilerEvent] = []
+    limitations: list[str] = []
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                if len(events) == _MAX_TRITON_COMPILER_EVENTS:
+                    return (), (
+                        "Triton compiler listener exceeded the bounded event limit; target "
+                        "identity is unavailable.",
+                    )
+                if len(line.encode("utf-8")) > _MAX_TRITON_COMPILER_EVENT_BYTES:
+                    return (), (
+                        "Triton compiler listener emitted an oversized event; target identity "
+                        "is unavailable.",
+                    )
+                if not line.strip():
+                    continue
+                value = json.loads(line)
+                if isinstance(value, dict) and set(value) == {"listener_unavailable"}:
+                    reason = value["listener_unavailable"]
+                    if isinstance(reason, str) and reason:
+                        return (), (reason,)
+                    return (), ("Triton compiler listener output was invalid.",)
+                events.append(_TritonCompilerEvent.model_validate(value))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError):
+        return (), ("Triton compiler listener output was invalid or unreadable.",)
+    if not events:
+        return (), ("Triton did not report a compiler target in the root interpreter.",)
+    return tuple(events), tuple(limitations)
+
+
+def _ptx_target_metadata(
+    native_paths: tuple[Path, ...],
+) -> tuple[str | None, str | None, tuple[str, ...]]:
+    targets: set[str] = set()
+    versions: set[str] = set()
+    for path in native_paths:
+        if path.suffix.casefold() != ".ptx":
+            continue
+        try:
+            with path.open("rb") as stream:
+                payload = stream.read(_MAX_PTX_METADATA_BYTES + 1)
+        except OSError:
+            return None, None, ("Emitted PTX could not be read for target validation.",)
+        if len(payload) > _MAX_PTX_METADATA_BYTES:
+            return None, None, ("Emitted PTX exceeded the metadata validation bound.",)
+        target = _PTX_TARGET.search(payload)
+        version = _PTX_VERSION.search(payload)
+        if target is None or version is None:
+            return None, None, ("Emitted PTX omitted a parseable target or version directive.",)
+        targets.add(target.group(1).decode("ascii"))
+        versions.add(version.group(1).decode("ascii"))
+    if not targets:
+        return None, None, ()
+    if len(targets) != 1 or len(versions) != 1:
+        raise DomainError(
+            ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+            "Emitted PTX files disagree on their compilation target or PTX version.",
+        )
+    return next(iter(targets)), next(iter(versions)), ()
+
+
+def kernel_build_pipeline_requests(
     manifest: KernelBuildManifest,
     *,
     run_id: str,
     registration_ids_by_path: dict[str, str],
-) -> RegisterPipelineRequest:
-    """Translate a parsed provider manifest into the application pipeline contract."""
+    run: RunManifest | None = None,
+) -> tuple[RegisterPipelineRequest, ...]:
+    """Build one normalized lineage request for every provider-native dump group."""
 
-    declarations: list[PipelineStageDeclaration] = []
-    for stage in manifest.stages:
-        if isinstance(stage, ArtifactKernelBuildStage):
-            registration_id = registration_ids_by_path.get(stage.artifact.path)
-            if registration_id is None:
-                raise ValueError(f"missing registration for {stage.artifact.path!r}")
-            declarations.append(
-                RegisteredPipelineStageDeclaration.model_validate(
-                    {
-                        **stage.model_dump(exclude={"artifact", "elapsed_ns"}),
-                        "registration_id": registration_id,
-                        "extractor_profile": (
-                            "text-lines-v1"
-                            if stage.artifact.media_type.startswith("text/")
-                            or stage.artifact.media_type == "application/json"
-                            else None
-                        ),
-                    }
-                )
+    compiler = None
+    target = None
+    limitations: tuple[str, ...] = ()
+    if run is not None:
+        compiler = compiler_identity_id(run.compiler_qualification)
+        target = compiler_target_identity_id(run.compiler_qualification)
+        if compiler is None:
+            target = None
+            limitations = (
+                "Compiler identity is unavailable because the run lacks an exact managed "
+                "compiler distribution.",
             )
-        elif isinstance(stage, ArtifactlessKernelBuildStage):
-            declarations.append(
-                UnregisteredPipelineStageDeclaration.model_validate(
-                    stage.model_dump(exclude={"artifact", "elapsed_ns"})
-                )
+        elif target is None:
+            limitations = ("Compiler target identity was unavailable after capture.",)
+    requests: list[RegisterPipelineRequest] = []
+    for group in manifest.native_groups:
+        stages = _group_pipeline_stages(
+            manifest.producer,
+            group,
+            registration_ids_by_path=registration_ids_by_path,
+        )
+        requests.append(
+            RegisterPipelineRequest(
+                run_id=run_id,
+                pipeline_name=f"{manifest.producer.value}.compiler",
+                producer=manifest.producer,
+                compiler_identity_id=compiler,
+                target_identity_id=target,
+                stages=stages,
+                limitations=limitations,
             )
-        else:
-            assert_never(stage)
-    derived: list[str] = []
-    if manifest.diagnostics:
-        derived.append("compiler diagnostics are preserved in the kernel-build manifest")
-    if isinstance(manifest, KernelBuildManifestV1):
-        workload_label = manifest.workload_identity
-        device_label = manifest.device_identity
-        context: KernelBuildContext | None = None
-        if device_label is None:
-            derived.append("device identity was not supplied by the producer")
-    else:
-        workload_label = manifest.workload_label
-        context = manifest.build_context
-        if context.target is None:
-            device_label = None
-            derived.append("compiler target identity was not supplied by the producer")
-        else:
-            warp = f":warp{context.target.warp_size}" if context.target.warp_size else ""
-            device_label = f"{context.target.backend}:{context.target.architecture}{warp}"
-    limitations = list(dict.fromkeys((*derived, *manifest.limitations)))
-    if len(limitations) > 20:
-        retained = 19 - len(derived)
-        limitations = [
-            *derived,
-            *tuple(dict.fromkeys(manifest.limitations))[:retained],
-            "Additional limitations remain available in the kernel-build manifest.",
-        ]
-    return RegisterPipelineRequest(
-        run_id=run_id,
-        pipeline_name=f"{manifest.producer.value}.compiler",
-        pipeline_schema=manifest.schema_version,
-        producer=manifest.producer,
-        producer_version=manifest.producer_version,
-        workload_identity=workload_label,
-        device_identity=device_label,
-        workload_definition_id=(context.workload_definition_id if context is not None else None),
-        workload_instance_id=(context.workload_instance_id if context is not None else None),
-        command_digest=(context.command_digest if context is not None else None),
-        parameters_digest=(context.parameters_digest if context is not None else None),
-        compiler_identity_id=(context.compiler_identity_id if context is not None else None),
-        build_protocol_id=(context.build_protocol_id if context is not None else None),
-        target_identity_id=(context.target_identity_id if context is not None else None),
-        stages=tuple(declarations),
-        limitations=tuple(dict.fromkeys(limitations)),
+        )
+    return tuple(requests)
+
+
+def _group_pipeline_stages(
+    producer: KernelBuildProducer,
+    group: KernelBuildArtifactGroup,
+    *,
+    registration_ids_by_path: dict[str, str],
+) -> tuple[PipelineStageDeclaration, ...]:
+    """Derive deterministic, within-group compiler lineage from native file kinds."""
+
+    ordered = sorted(
+        (artifact for artifact in group.artifacts if _is_lineage_artifact(producer, artifact.path)),
+        key=lambda artifact: (
+            _STAGE_PRIORITY[_artifact_extension(producer, artifact.path)],
+            artifact.path,
+        ),
     )
+    names: dict[str, int] = {}
+    previous: str | None = None
+    declarations: list[PipelineStageDeclaration] = []
+    for ordinal, artifact in enumerate(ordered):
+        format, format_schema = _artifact_format(producer, artifact.path)
+        count = names.get(format, 0) + 1
+        names[format] = count
+        name = format if count == 1 else f"{format}_{count}"
+        registration_id = registration_ids_by_path.get(artifact.path)
+        if registration_id is None:
+            raise ValueError(f"missing registration for {artifact.path!r}")
+        declarations.append(
+            RegisteredPipelineStageDeclaration(
+                name=name,
+                ordinal=ordinal,
+                predecessor=previous,
+                status=PipelineStageStatus.AVAILABLE,
+                format=format,
+                format_schema=format_schema,
+                registration_id=registration_id,
+                extractor_profile=(
+                    PipelineExtractorProfile.TEXT_LINES_V1
+                    if artifact.media_type.startswith("text/")
+                    else None
+                ),
+            )
+        )
+        previous = name
+    return tuple(declarations)
+
+
+def _artifact_extension(producer: KernelBuildProducer, path: str) -> str:
+    extension = next(
+        (
+            candidate
+            for candidate in sorted(_extension_map(producer), key=len, reverse=True)
+            if path.casefold().endswith(candidate)
+        ),
+        None,
+    )
+    if extension is None:
+        raise ValueError(f"unsupported {producer.value} compiler artifact {path!r}")
+    return extension
+
+
+def _artifact_format(producer: KernelBuildProducer, path: str) -> tuple[str, str]:
+    format, format_schema, _ = _extension_map(producer)[_artifact_extension(producer, path)]
+    return format, format_schema
+
+
+def _is_lineage_artifact(producer: KernelBuildProducer, path: str) -> bool:
+    return _artifact_extension(producer, path) in _LINEAGE_EXTENSIONS
+
+
+def _extension_map(producer: KernelBuildProducer) -> dict[str, tuple[str, str, str]]:
+    return _TRITON_EXTENSION_MAP if producer is KernelBuildProducer.TRITON else _CUTE_EXTENSION_INFO
 
 
 class KernelBuildCaptureCollector:
@@ -251,8 +438,8 @@ class KernelBuildCaptureCollector:
     This collector walks the dump directory produced by the compiler's env-var
     controls, filters to a fixed extension allowlist, enforces hard
     member/byte/containment/symlink bounds, preserves files unchanged, and
-    builds a ``flameox.kernel-build.v2`` manifest. It does not parse or rewrite
-    compiler files.
+    records native dump membership in a strict kernel-build manifest.
+    It does not parse or rewrite compiler files or store pipeline lineage.
     """
 
     def __init__(self, workspace: Workspace) -> None:
@@ -264,14 +451,10 @@ class KernelBuildCaptureCollector:
         adapter: str,
         dump_dir: Path,
         output_root: Path,
-        workload_label: str,
-        build_context: KernelBuildContext,
         exit_code: int,
-        producer_version: str | None,
-        source_environment: dict[str, str],
         cute_keep_allowlist: tuple[str, ...] | None = None,
         reproducer_path: Path | None = None,
-    ) -> tuple[KernelBuildManifestV2, Path, tuple[Path, ...]]:
+    ) -> tuple[KernelBuildManifest, Path, tuple[Path, ...], tuple[str, ...]]:
         if adapter == "triton.compiler":
             extension_map = _TRITON_EXTENSION_MAP
         elif adapter == "cute.compiler":
@@ -282,7 +465,7 @@ class KernelBuildCaptureCollector:
                 f"Unsupported kernel-build adapter {adapter!r}.",
             )
         inventory = self._inventory(dump_dir, output_root, extension_map)
-        entries = list(inventory.entries)
+        native_entries = tuple(inventory.entries)
         limitations: list[str] = list(inventory.limitations)
         # The reproducer file lives outside dump_dir (in output_root) and is
         # inventoried explicitly if it exists.
@@ -291,74 +474,58 @@ class KernelBuildCaptureCollector:
             reproducer_entry = self._inspect_single_file(
                 reproducer_path,
                 output_root,
-                _REPRODUCER_FORMAT_INFO,
+                _REPRODUCER_MEDIA_TYPE,
             )
             if reproducer_entry is not None:
-                if len(entries) >= _MAX_KERNEL_BUILD_MEMBERS - 1:
+                if len(native_entries) >= _MAX_KERNEL_BUILD_MEMBERS - 1:
                     limitations.append(
                         f"Kernel-build member count is limited to {_MAX_KERNEL_BUILD_MEMBERS} "
                         "including the manifest; the reproducer was skipped."
                     )
+                    reproducer_entry = None
                 elif (
-                    sum(entry.byte_length for entry in entries) + reproducer_entry.byte_length
+                    sum(entry.byte_length for entry in native_entries)
+                    + reproducer_entry.byte_length
                     > self.workspace.config.storage.max_staging_bytes
                 ):
                     limitations.append(
                         "The reproducer would exceed the total kernel-build staging budget; "
                         "it was skipped."
                     )
-                else:
-                    entries.append(reproducer_entry)
+                    reproducer_entry = None
             else:
                 limitations.append(
                     f"Reproducer file {reproducer_path.name!r} was not a valid regular file."
                 )
-        entries_tuple = tuple(entries)
-        if entries_tuple:
-            limitations.append(
-                "Compiler artifact predecessor lineage is not declared by the provider output."
-            )
-        outcome: KernelBuildOutcome
-        if exit_code == 0 and entries_tuple:
-            outcome = KernelBuildOutcome.SUCCEEDED
-        elif exit_code != 0:
-            outcome = KernelBuildOutcome.FAILED
-        else:
-            outcome = KernelBuildOutcome.INCONCLUSIVE
-        stages = self._build_stages(entries_tuple, outcome=outcome)
-        if not entries_tuple and exit_code != 0:
+        attachments = (reproducer_entry,) if reproducer_entry is not None else ()
+        native_groups = self._native_groups(
+            adapter=adapter,
+            entries=native_entries,
+            dump_dir=dump_dir,
+            output_root=output_root,
+        )
+        if not native_groups and exit_code != 0:
             limitations.append("No allowlisted native artifacts were found after compiler failure.")
-        if outcome is KernelBuildOutcome.INCONCLUSIVE:
+        if exit_code == 0 and not native_groups:
             limitations.append(
                 "Compiler exited successfully but produced no allowlisted native artifacts."
             )
-        if build_context.target is None:
-            limitations.append(
-                "Compiler target was not declared; exact compatibility cannot be established."
-            )
-        if producer_version is None or producer_version.casefold() == "unknown":
-            limitations.append(
-                "Compiler version was unavailable; exact compatibility cannot be established."
-            )
-        manifest = KernelBuildManifestV2(
+        manifest = KernelBuildManifest(
             producer=(
                 KernelBuildProducer.TRITON
                 if adapter == "triton.compiler"
                 else KernelBuildProducer.CUTE
             ),
-            producer_version=producer_version or "unknown",
-            workload_label=workload_label,
-            build_context=build_context,
-            outcome=outcome,
-            cache_status=KernelBuildCacheStatus.UNKNOWN,
-            stages=stages,
-            source_environment=self._normalized_environment(source_environment, output_root),
-            limitations=tuple(dict.fromkeys(limitations)),
+            native_groups=native_groups,
+            attachments=tuple(self._manifest_artifact(entry) for entry in attachments),
         )
         manifest_path = output_root / "kernel-build.json"
         atomic_write_json(manifest_path, manifest.model_dump(mode="json"))
-        native_paths = tuple(entry.path for entry in entries_tuple)
-        return manifest, manifest_path, native_paths
+        native_paths = (
+            *tuple(entry.path for entry in native_entries),
+            *tuple(entry.path for entry in attachments),
+        )
+        return manifest, manifest_path, native_paths, tuple(dict.fromkeys(limitations))
 
     @staticmethod
     def _cute_extension_map(
@@ -376,7 +543,7 @@ class KernelBuildCaptureCollector:
         self,
         path: Path,
         output_root: Path,
-        format_info: tuple[str, str, str],
+        media_type: str,
     ) -> KernelBuildInventoryEntry | None:
         """Inspect a single file outside the dump directory (e.g. reproducer)."""
         try:
@@ -399,34 +566,13 @@ class KernelBuildCaptureCollector:
                 digest = hashlib.file_digest(stream, "sha256").hexdigest()
         except OSError:
             return None
-        fmt, fmt_schema, media_type = format_info
         return KernelBuildInventoryEntry(
             path=path,
             relative_path=relative,
             byte_length=metadata.st_size,
             sha256=digest,
-            extension=path.suffix.lower(),
-            format=fmt,
-            format_schema=fmt_schema,
             media_type=media_type,
         )
-
-    @staticmethod
-    def _normalized_environment(environment: dict[str, str], output_root: Path) -> dict[str, str]:
-        normalized: dict[str, str] = {}
-        resolved_root = output_root.resolve()
-        for key, value in environment.items():
-            candidate = Path(value)
-            if candidate.is_absolute():
-                try:
-                    relative = candidate.resolve().relative_to(resolved_root).as_posix()
-                except (OSError, ValueError):
-                    normalized[key] = value
-                else:
-                    normalized[key] = f"<staging>/{relative}"
-            else:
-                normalized[key] = value
-        return normalized
 
     def _inventory(
         self,
@@ -491,7 +637,7 @@ class KernelBuildCaptureCollector:
             except OSError as exc:
                 limitations.append(f"File {path.name!r} could not be read: {exc}.")
                 continue
-            fmt, fmt_schema, media_type = extension_map[extension]
+            _, _, media_type = extension_map[extension]
             total_bytes += metadata.st_size
             raw_entries.append(
                 KernelBuildInventoryEntry(
@@ -499,9 +645,6 @@ class KernelBuildCaptureCollector:
                     relative_path=relative,
                     byte_length=metadata.st_size,
                     sha256=digest,
-                    extension=extension,
-                    format=fmt,
-                    format_schema=fmt_schema,
                     media_type=media_type,
                 )
             )
@@ -527,92 +670,50 @@ class KernelBuildCaptureCollector:
         )
 
     @staticmethod
-    def _build_stages(
-        entries: tuple[KernelBuildInventoryEntry, ...],
-        *,
-        outcome: KernelBuildOutcome,
-    ) -> tuple[KernelBuildStage, ...]:
-        priority = {
-            ".ttir": 0,
-            ".ttgir": 1,
-            ".mlir": 0,
-            ".cute_dsl_ir": 0,
-            ".mlir.debug": 0,
-            ".cute_dsl_ir.debug": 0,
-            ".llir": 2,
-            ".ll": 2,
-            ".llvm": 2,
-            ".ptx": 3,
-            ".amdgcn": 3,
-            ".cubin": 4,
-            ".hsaco": 4,
-            ".sass": 5,
-            ".metadata": 6,
-            ".json": 6,
-        }
-        stages: list[KernelBuildStage] = []
-        name_counts: dict[str, int] = {}
-        ordered_entries = sorted(
-            entries,
-            key=lambda entry: (priority.get(entry.extension, 99), entry.relative_path),
+    def _manifest_artifact(entry: KernelBuildInventoryEntry) -> KernelBuildArtifact:
+        return KernelBuildArtifact(
+            path=entry.relative_path,
+            byte_length=entry.byte_length,
+            sha256=entry.sha256,
+            media_type=entry.media_type,
         )
-        for ordinal, entry in enumerate(ordered_entries):
-            base_name = entry.format
-            count = name_counts.get(base_name, 0)
-            name_counts[base_name] = count + 1
-            stage_name = base_name if count == 0 else f"{base_name}_{count + 1}"
-            stages.append(
-                ArtifactKernelBuildStage(
-                    name=stage_name,
-                    ordinal=ordinal,
-                    predecessor=None,
-                    status=KernelBuildStageStatus.AVAILABLE,
-                    format=entry.format,
-                    format_schema=entry.format_schema,
-                    artifact=KernelBuildArtifact(
-                        path=entry.relative_path,
-                        byte_length=entry.byte_length,
-                        sha256=entry.sha256,
-                        media_type=entry.media_type,
-                    ),
-                )
+
+    def _native_groups(
+        self,
+        *,
+        adapter: str,
+        entries: tuple[KernelBuildInventoryEntry, ...],
+        dump_dir: Path,
+        output_root: Path,
+    ) -> tuple[KernelBuildArtifactGroup, ...]:
+        """Keep each immediate Triton dump parent as one source-hash build group.
+
+        Current Triton creates a dump manager per source hash and writes that
+        compilation's ordered stage files into its directory. Nested paths are
+        therefore separate groups, never evidence of a cross-group stage order.
+        """
+
+        grouped: dict[str, list[KernelBuildInventoryEntry]] = {}
+        for entry in entries:
+            group_root = entry.path.parent if adapter == "triton.compiler" else dump_dir
+            group_path = group_root.relative_to(output_root).as_posix()
+            grouped.setdefault(group_path, []).append(entry)
+        return tuple(
+            KernelBuildArtifactGroup(
+                path=group_path,
+                artifacts=tuple(
+                    self._manifest_artifact(entry)
+                    for entry in sorted(entries, key=lambda item: item.relative_path)
+                ),
             )
-        if not stages:
-            empty_status: Literal[
-                KernelBuildStageStatus.FAILED,
-                KernelBuildStageStatus.UNAVAILABLE,
-            ] = (
-                KernelBuildStageStatus.FAILED
-                if outcome is KernelBuildOutcome.FAILED
-                else KernelBuildStageStatus.UNAVAILABLE
-            )
-            stages.append(
-                ArtifactlessKernelBuildStage(
-                    name="empty",
-                    ordinal=0,
-                    status=empty_status,
-                    format="unknown",
-                    format_schema="unknown",
-                )
-            )
-        elif outcome is KernelBuildOutcome.FAILED:
-            stages.append(
-                ArtifactlessKernelBuildStage(
-                    name="build_failed",
-                    ordinal=len(stages),
-                    predecessor=None,
-                    status=KernelBuildStageStatus.FAILED,
-                    format="unknown",
-                    format_schema="unknown",
-                )
-            )
-        return tuple(stages)
+            for group_path, entries in sorted(grouped.items())
+        )
 
 
 class KernelBuildImportResult(ContractModel):
     run: RunManifest
     manifest_artifact_id: str
-    pipeline: ArtifactPipeline
+    pipeline_ids: tuple[str, ...]
     corpus_commit_id: str
 
 
@@ -636,19 +737,34 @@ class KernelBuildImportService:
             manifest, _, _ = self._load_manifest(snapshot.payload_path)
             manifest_bytes = snapshot.byte_length
             manifest_sha256 = snapshot.sha256
+        try:
+            for group in manifest.native_groups:
+                for artifact in group.artifacts:
+                    _artifact_format(manifest.producer, artifact.path)
+        except ValueError as error:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Kernel-build manifest declares an unsupported compiler artifact.",
+                details={"validation_error": str(error)},
+            ) from error
+        native_paths = {
+            artifact.path for group in manifest.native_groups for artifact in group.artifacts
+        }
         members: list[BundleMember] = []
-        for stage in manifest.stages:
-            if stage.artifact is None:
-                continue
-            path = manifest_path.parent / stage.artifact.path
+        for artifact in manifest.artifacts:
+            path = manifest_path.parent / artifact.path
             members.append(
                 BundleMember(
                     path=path,
-                    role=stage.artifact.role,
-                    media_type=stage.artifact.media_type,
-                    display_name=stage.artifact.path,
-                    expected_byte_length=stage.artifact.byte_length,
-                    expected_sha256=stage.artifact.sha256,
+                    role=(
+                        "compiler_output"
+                        if artifact.path in native_paths
+                        else "compiler_attachment"
+                    ),
+                    media_type=artifact.media_type,
+                    display_name=artifact.path,
+                    expected_byte_length=artifact.byte_length,
+                    expected_sha256=artifact.sha256,
                 )
             )
         if len(members) > _MAX_KERNEL_BUILD_MEMBERS - 1:
@@ -669,20 +785,19 @@ class KernelBuildImportService:
                 kind=ArtifactKind.KERNEL_BUILD,
                 sensitivity=sensitivity,
                 producer=manifest.producer,
-                producer_version=manifest.producer_version,
                 allow_external_path=allow_external_path,
             )
         )
         registrations = imported.run.artifacts[1:]
-        artifact_paths = [
-            stage.artifact.path for stage in manifest.stages if stage.artifact is not None
-        ]
+        artifact_paths = [artifact.path for artifact in manifest.artifacts]
         registration_ids_by_path = {
             path: registration.registration_id
             for path, registration in zip(artifact_paths, registrations, strict=True)
         }
-        pipeline = ArtifactPipelineService(self.workspace).register_imported(
-            kernel_build_pipeline_request(
+        pipeline_service = ArtifactPipelineService(self.workspace)
+        pipelines = tuple(
+            pipeline_service.register_imported(request)
+            for request in kernel_build_pipeline_requests(
                 manifest,
                 run_id=imported.run.run_id,
                 registration_ids_by_path=registration_ids_by_path,
@@ -691,7 +806,7 @@ class KernelBuildImportService:
         return KernelBuildImportResult(
             run=imported.run,
             manifest_artifact_id=imported.primary_artifact_id,
-            pipeline=pipeline,
+            pipeline_ids=tuple(pipeline.pipeline_id for pipeline in pipelines),
             corpus_commit_id=imported.corpus_commit_id,
         )
 
@@ -712,7 +827,7 @@ class KernelBuildImportService:
                 )
             payload = json.loads(raw.decode("utf-8"))
             return (
-                parse_kernel_build_manifest(payload),
+                KernelBuildManifest.model_validate(payload),
                 len(raw),
                 hashlib.sha256(raw).hexdigest(),
             )

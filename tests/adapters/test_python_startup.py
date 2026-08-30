@@ -5,9 +5,11 @@ from pathlib import Path
 import pyperf
 import pytest
 
-from flameox.adapters import PythonStartupExtractor
-from flameox.adapters.python_startup import _group_imports
-from flameox.application import ImportArtifactRequest, ImportService
+from flameox.adapters.python_startup import PythonStartupExtractor, _group_imports
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,

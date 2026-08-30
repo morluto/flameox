@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import errno
 import json
+import os
+import sqlite3
+import stat
 import threading
 from pathlib import Path
 
@@ -9,7 +12,8 @@ import pytest
 
 from flameox.config import WorkspaceConfig
 from flameox.domain import DomainError, ErrorCode
-from flameox.storage import CorpusCommit, Workspace
+from flameox.storage import Workspace
+from flameox.storage.control_plane import ControlPlane
 from flameox.storage.locks import (
     CATALOG_SHARED,
     RETENTION_EXCLUSIVE,
@@ -29,7 +33,7 @@ def test_initialize_creates_static_identity_and_empty_corpus(tmp_path: Path) -> 
 
     assert same_workspace.identity == first_identity
     assert head.parent_commit_id is None
-    assert head.generation_manifests == ()
+    assert head.generation_ids == ()
     assert workspace.paths.config.is_file()
     assert WorkspaceConfig.from_path(workspace.paths.config) == WorkspaceConfig()
 
@@ -39,7 +43,6 @@ def test_removed_ad_hoc_command_setting_is_rejected(tmp_path: Path) -> None:
     path = workspace.paths.config
     path.write_text(
         "# Preserve this project note.\n"
-        "schema_version = 1\n\n"
         "[execution]\n"
         "# Preserve this execution note.\n"
         "allow_mcp_ad_hoc_commands = true\n",
@@ -100,6 +103,68 @@ def test_discovery_selects_nearest_workspace(tmp_path: Path) -> None:
     assert Workspace.discover(tmp_path).identity.workspace_id == outer.identity.workspace_id
 
 
+@pytest.mark.parametrize(
+    ("stored_format", "expected_details"),
+    [
+        (
+            "other.control-plane",
+            {
+                "required_format": ControlPlane.FORMAT,
+                "stored_format": "other.control-plane",
+            },
+        ),
+        (None, {"required_format": ControlPlane.FORMAT}),
+    ],
+)
+def test_discovery_rejects_current_identity_without_the_current_control_plane_format(
+    tmp_path: Path,
+    stored_format: str | None,
+    expected_details: dict[str, str],
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    with sqlite3.connect(workspace.paths.control_plane) as connection:
+        if stored_format is None:
+            connection.execute("DROP TABLE control_plane_format")
+        else:
+            connection.execute("UPDATE control_plane_format SET format = ?", (stored_format,))
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    with pytest.raises(DomainError) as error:
+        Workspace.discover(tmp_path)
+
+    assert error.value.code is ErrorCode.WORKSPACE_INVALID
+    assert error.value.details == expected_details
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions are required")
+@pytest.mark.parametrize("explicit", [False, True])
+def test_discovery_validates_control_plane_without_writing_to_workspace(
+    tmp_path: Path,
+    explicit: bool,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    with sqlite3.connect(workspace.paths.control_plane) as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    for suffix in ("-wal", "-shm"):
+        workspace.paths.control_plane.with_name(
+            workspace.paths.control_plane.name + suffix
+        ).unlink(missing_ok=True)
+    before = {path.name for path in workspace.paths.root.iterdir()}
+    original_mode = stat.S_IMODE(workspace.paths.root.stat().st_mode)
+    workspace.paths.root.chmod(0o555)
+    try:
+        discovered = Workspace.discover(
+            tmp_path,
+            explicit=workspace.paths.root if explicit else None,
+        )
+    finally:
+        workspace.paths.root.chmod(original_mode)
+
+    assert discovered.identity.workspace_id == workspace.identity.workspace_id
+    assert {path.name for path in workspace.paths.root.iterdir()} == before
+
+
 def test_explicit_workspace_rejects_a_different_project_root(tmp_path: Path) -> None:
     first = tmp_path / "first"
     second = tmp_path / "second"
@@ -121,7 +186,7 @@ def test_explicit_workspace_rejects_a_different_project_root(tmp_path: Path) -> 
 
 def test_config_rejects_unknown_keys(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    workspace.paths.config.write_text("schema_version = 1\nunknown = true\n")
+    workspace.paths.config.write_text("unknown = true\n")
 
     with pytest.raises(DomainError) as error:
         _ = workspace.config
@@ -144,29 +209,13 @@ def test_commit_digest_detects_tampering(tmp_path: Path) -> None:
     head = workspace.corpus.read_head()
     path = workspace.corpus.commit_path(head.commit_id)
     payload = json.loads(path.read_text())
-    payload["generation_manifests"] = ["generations/fake/manifest.json"]
+    payload["generation_ids"] = ["sha256:" + ("a" * 64)]
     path.write_text(json.dumps(payload))
 
     with pytest.raises(DomainError) as error:
         workspace.corpus.read_head()
 
     assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
-
-
-def test_corpus_commit_rejects_contradictory_persisted_digest_projections(
-    tmp_path: Path,
-) -> None:
-    commit = Workspace.initialize(tmp_path).corpus.read_head()
-    payload = commit.model_dump(mode="json")
-
-    payload["inventory_digest"] = "sha256:" + ("a" * 64)
-    with pytest.raises(ValueError, match="inventory digest"):
-        CorpusCommit.model_validate(payload)
-
-    payload = commit.model_dump(mode="json")
-    payload["commit_id"] = "sha256:" + ("b" * 64)
-    with pytest.raises(ValueError, match="commit digest"):
-        CorpusCommit.model_validate(payload)
 
 
 def test_reentrant_workspace_lock_is_rejected_before_blocking(tmp_path: Path) -> None:

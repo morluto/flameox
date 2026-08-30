@@ -5,8 +5,6 @@ from collections import defaultdict
 from enum import StrEnum
 from typing import Any
 
-from pydantic import ConfigDict, Field, computed_field
-
 from flameox.domain.errors import DomainError, ErrorCode, missing_artifact_input
 from flameox.domain.identity import digest_model
 from flameox.domain.models import ArtifactKind, ExecutionStatus, RunManifest
@@ -22,12 +20,9 @@ class PytestCompletionState(StrEnum):
 
 
 class PytestExtractionResult(ContractModel):
-    model_config = ConfigDict(json_schema_mode_override="serialization")
-
-    schema_version: int = 2
     run_id: str
     artifact_id: str
-    completion: PytestCompletionState = Field(exclude=True)
+    completion: PytestCompletionState
     execution_status: ExecutionStatus
     collected_count: int
     executed_count: int
@@ -46,16 +41,6 @@ class PytestExtractionResult(ContractModel):
     measurement_count: int
     corpus_commit_id: str
     limitations: tuple[str, ...] = ()
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def complete(self) -> bool:
-        return self.completion is PytestCompletionState.COMPLETE
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def interrupted(self) -> bool:
-        return self.completion is PytestCompletionState.INTERRUPTED
 
 
 class PytestExtractor:

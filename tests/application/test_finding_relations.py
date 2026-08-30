@@ -5,14 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import (
+from flameox.application.evidence_lookup import EvidenceLookupService
+from flameox.application.records import (
     EvidenceInput,
-    EvidenceSummaryRequest,
-    EvidenceSummaryService,
     FindingService,
     RecordFindingRequest,
 )
-from flameox.application.evidence_lookup import EvidenceLookupService
+from flameox.application.summaries import (
+    EvidenceSummaryRequest,
+    EvidenceSummaryService,
+)
 from flameox.domain import (
     DomainError,
     ErrorCode,

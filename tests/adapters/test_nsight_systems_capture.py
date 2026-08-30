@@ -6,11 +6,13 @@ from typing import cast
 
 import pytest
 
-from flameox.adapters import NsightSystemsExtractor
 from flameox.adapters.builtins import build_capture_invocation
+from flameox.adapters.nsight_systems import NsightSystemsExtractor
 from flameox.adapters.options import bind_adapter_options
 from flameox.analysis import RecipeService
-from flameox.application import CapabilityService, CaptureService, ExecutionPolicy
+from flameox.application.capabilities import CapabilityService
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
 from flameox.domain import (
     ArtifactKind,
     CapabilityStatus,
@@ -97,11 +99,7 @@ async def test_declared_workload_capture_preserves_native_and_extracts_sqlite(
     monkeypatch.setenv("PATH", f"{executable_directory}{os.pathsep}{os.environ['PATH']}")
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n"
-        "[workloads.probe]\n"
-        "argv = ['/bin/true']\n"
-        "cwd = '.'\n"
-        "timeout_seconds = 5\n"
+        "[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\ntimeout_seconds = 5\n"
     )
     disable_containment(workspace)
     capabilities = CapabilityService(workspace)
@@ -171,11 +169,7 @@ async def test_failed_nsight_outputs_remain_partial_evidence(
     monkeypatch.setenv("PATH", f"{executable_directory}{os.pathsep}{os.environ['PATH']}")
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n"
-        "[workloads.probe]\n"
-        "argv = ['/bin/true']\n"
-        "cwd = '.'\n"
-        "timeout_seconds = 5\n"
+        "[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\ntimeout_seconds = 5\n"
     )
     disable_containment(workspace)
     service = CaptureService(workspace)
@@ -189,9 +183,7 @@ async def test_failed_nsight_outputs_remain_partial_evidence(
 
     assert captured.run.execution_status is ExecutionStatus.FAILED
     trace_roles = {
-        item.role
-        for item in captured.run.artifacts
-        if item.kind is ArtifactKind.EXECUTION_TRACE
+        item.role for item in captured.run.artifacts if item.kind is ArtifactKind.EXECUTION_TRACE
     }
     assert trace_roles <= {"partial_native_report", "partial_sqlite_export"}
     assert "sqlite_export" not in trace_roles
@@ -212,18 +204,12 @@ async def test_sqlite_registration_failure_retains_native_report(
     workspace = Workspace.initialize(tmp_path)
     constrained = workspace.config.validated_copy(
         update={
-            "capture": workspace.config.capture.validated_copy(
-                update={"max_artifact_bytes": 1_024}
-            )
+            "capture": workspace.config.capture.validated_copy(update={"max_artifact_bytes": 1_024})
         }
     )
     workspace.paths.config.write_text(constrained.to_toml())
     (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n"
-        "[workloads.probe]\n"
-        "argv = ['/bin/true']\n"
-        "cwd = '.'\n"
-        "timeout_seconds = 5\n"
+        "[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\ntimeout_seconds = 5\n"
     )
     disable_containment(workspace)
     service = CaptureService(workspace)
@@ -251,27 +237,22 @@ def _write_fake_nsys(
     emit_native: bool = True,
 ) -> None:
     sqlite_command = (
-        f"cp {fixture} \"${{output}}.sqlite\"\n"
+        f'cp {fixture} "${{output}}.sqlite"\n'
         if valid_sqlite
         else "printf 'not-sqlite' > \"${output}.sqlite\"\n"
     )
-    native_command = (
-        "printf 'native-report' > \"${output}.nsys-rep\"\n" if emit_native else ""
-    )
+    native_command = "printf 'native-report' > \"${output}.nsys-rep\"\n" if emit_native else ""
     path.write_text(
         "#!/bin/sh\n"
-        "if [ \"$1\" = \"--version\" ]; then\n"
+        'if [ "$1" = "--version" ]; then\n'
         "  printf 'NVIDIA Nsight Systems version 2025.5.2.266-255236693005v0\\n'\n"
         "  exit 0\n"
         "fi\n"
         "output=''\n"
         "previous=''\n"
-        "for argument in \"$@\"; do\n"
-        "  if [ \"$previous\" = \"--output\" ]; then output=$argument; fi\n"
+        'for argument in "$@"; do\n'
+        '  if [ "$previous" = "--output" ]; then output=$argument; fi\n'
         "  previous=$argument\n"
-        "done\n"
-        + native_command
-        + sqlite_command
-        + f"exit {exit_code}\n"
+        "done\n" + native_command + sqlite_command + f"exit {exit_code}\n"
     )
     path.chmod(0o755)

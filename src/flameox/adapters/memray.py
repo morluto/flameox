@@ -3,7 +3,6 @@ from __future__ import annotations
 import shutil
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from datetime import datetime
 from pathlib import Path
 
 from packaging.version import InvalidVersion, Version
@@ -92,7 +91,6 @@ class MemrayExtractionResult(ContractModel):
     peak_memory_bytes: int
     retained_end_bytes: int
     temporary_allocated_bytes: int | None
-    temporary_allocation_threshold: int
     allocation_operations: int | None
     total_allocated_bytes: int | None
     capture_records: int
@@ -187,8 +185,6 @@ class MemrayExtractor:
 
         async def prepare(
             root: Path,
-            generation_id: str,
-            published_at: datetime,
         ) -> dict[str, Path]:
             if progress is not None:
                 await progress("reading_profile", 0, None)
@@ -225,8 +221,6 @@ class MemrayExtractor:
                             if run.semantics.scope.workload_cwd is not None
                             else None
                         ),
-                        generation_id=generation_id,
-                        published_at=published_at,
                         limits=limits,
                     ),
                     consume=consume,
@@ -320,7 +314,6 @@ class MemrayExtractor:
             peak_memory_bytes=worker.peak_memory_bytes,
             retained_end_bytes=worker.retained_end_bytes,
             temporary_allocated_bytes=worker.temporary_allocated_bytes,
-            temporary_allocation_threshold=worker.temporary_allocation_threshold,
             allocation_operations=worker.allocation_operations,
             total_allocated_bytes=worker.total_allocated_bytes,
             capture_records=worker.capture_records,

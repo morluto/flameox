@@ -10,14 +10,19 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal, cast
+from typing import Annotated, Literal, cast
 
-from pydantic import Field, JsonValue, TypeAdapter, computed_field
+from pydantic import Field, JsonValue, TypeAdapter, ValidationError
 
 from flameox.action_graph import ActionId, ManualAction, manual_action
 from flameox.adapters.toxiproxy import ToxiproxyApiError, ToxiproxyClient, ToxiproxyToolManager
 from flameox.application.async_work import run_atomic_thread
 from flameox.application.capture import CaptureService
+from flameox.application.comparisons import (
+    ComparisonResult,
+    ComparisonService,
+    MeasurementCompareRunSetsRequest,
+)
 from flameox.application.environment import collect_environment
 from flameox.application.evidence_rows import (
     artifact_registration_row,
@@ -54,6 +59,7 @@ from flameox.domain import (
     ArtifactRegistration,
     CapturePlan,
     CaptureStatus,
+    ComparisonValidity,
     DomainError,
     ErrorCode,
     ExecutionStatus,
@@ -62,9 +68,14 @@ from flameox.domain import (
     ExperimentRole,
     Hypothesis,
     Investigation,
+    MeasurementSeriesSelector,
+    MetricPolarity,
     MetricSource,
+    MetricValueDomain,
+    MetricZeroPolicy,
     RunManifest,
     RunSemantics,
+    RunSet,
     Sensitivity,
     Trial,
     TrialFailureClass,
@@ -84,20 +95,28 @@ from flameox.execution import (
     SubprocessBroker,
 )
 from flameox.models import ContractModel
-from flameox.storage import AuthorizedPlanStore, ControlRecordStore, RunStore, Workspace
+from flameox.storage import (
+    ArtifactStore,
+    AuthorizedPlanStore,
+    ControlRecordStore,
+    RunStore,
+    Workspace,
+)
 
 _BASELINE = "baseline"
+_FAULT_CLIENT_ELAPSED = "fault.client_elapsed"
+_FAULT_CLIENT_ELAPSED_UNIT = "ns"
 type FaultFailurePhase = Literal[
     "sidecar_readiness",
     "proxy_creation",
     "treatment_configuration",
     "workload_planning",
     "capture_execution",
+    "measurement_receipt",
 ]
 
 
 class FaultExperimentPlan(ContractModel):
-    schema_version: Literal[2] = 2
     plan_token: str
     plan_id: Digest
     workspace_id: str
@@ -119,11 +138,6 @@ class FaultExperimentPlan(ContractModel):
     workload_containment: ExecutionPolicy = ExecutionPolicy.TRUSTED_LOCAL
     limitations: tuple[str, ...] = ()
 
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def request_digest(self) -> Digest:
-        return self.plan_id
-
 
 class FaultTrialDiagnostic(ContractModel):
     phase: FaultFailurePhase
@@ -133,15 +147,25 @@ class FaultTrialDiagnostic(ContractModel):
     next_action: ManualAction | None = None
 
 
+class _FaultElapsedReceipt(ContractModel):
+    """The complete stdout contract for numeric fault-experiment observations."""
+
+    elapsed_ns: Annotated[int, Field(strict=True, gt=0)]
+    outcome: Literal["completed"]
+
+
 class FaultExperimentResult(ContractModel):
-    schema_version: Literal[3] = 3
     result_id: str
     plan_id: str
     experiment: Experiment
     trials: tuple[Trial, ...]
+    variants: tuple[Variant, ...]
+    run_sets: tuple[RunSet, ...] = ()
+    comparisons: tuple[ComparisonResult, ...] = ()
     block_treatment_orders: tuple[tuple[str, ...], ...] = ()
     trial_artifacts: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     trial_diagnostics: dict[str, FaultTrialDiagnostic] = Field(default_factory=dict)
+    measurement_recovery: ManualAction | None = None
     corpus_commit_id: str
     limitations: tuple[str, ...] = ()
 
@@ -241,7 +265,6 @@ class FaultExperimentService:
             workspace,
             family="fault_experiment",
             model=TypeAdapter(FaultExperimentPlan),
-            output_only_fields={"request_digest"},
         )
         self.results = ControlRecordStore(
             workspace,
@@ -293,6 +316,20 @@ class FaultExperimentService:
             )
         treatments = (_BASELINE, *tuple(config.scenarios))
         config_digest = digest_model(config.model_dump(mode="json"))
+        measurement = config.measurement
+        metric_source = MetricSource.MEASUREMENT if measurement is not None else None
+        primary_metric = _FAULT_CLIENT_ELAPSED if measurement is not None else "categorical_outcome"
+        primary_metric_unit = _FAULT_CLIENT_ELAPSED_UNIT if measurement is not None else None
+        measurement_series = (
+            MeasurementSeriesSelector(
+                scope="workload",
+                aggregation="single",
+                phase="receipt",
+                dimensions={"source": "stdout_json"},
+            )
+            if measurement is not None
+            else None
+        )
         experiment = Experiment(
             experiment_id=new_id(),
             investigation_id=investigation_id,
@@ -303,25 +340,34 @@ class FaultExperimentService:
             experiment_design_id=digest_model(
                 {"name": experiment_name, "config": config.model_dump(mode="json")}
             ),
-            measurement_protocol_id=digest_model({"adapter": "command"}),
+            measurement_protocol_id=digest_model(
+                {
+                    "adapter": "command",
+                    "measurement": (
+                        measurement.model_dump(mode="json") if measurement is not None else None
+                    ),
+                }
+            ),
             validation_spec_id=definition.validation_spec_id,
-            primary_metric=config.primary_metric,
-            metric_source=(
-                MetricSource.RUNTIME_RESOURCE
-                if config.primary_metric.startswith("runtime_resource.")
-                else MetricSource.MEASUREMENT
+            primary_metric=primary_metric,
+            metric_source=metric_source,
+            primary_metric_unit=primary_metric_unit,
+            measurement_series=measurement_series,
+            value_domain=(MetricValueDomain.STRICTLY_POSITIVE if measurement is not None else None),
+            zero_policy=(MetricZeroPolicy.REJECT if measurement is not None else None),
+            polarity=(
+                MetricPolarity.LOWER_IS_BETTER
+                if measurement is not None
+                else MetricPolarity.NEUTRAL
             ),
-            primary_metric_unit=(
-                "bytes" if config.primary_metric.startswith("runtime_resource.") else None
+            estimand=(
+                "median_paired_log_ratio" if measurement is not None else "categorical_outcome"
             ),
-            polarity=config.polarity,
-            estimand=config.estimand,
-            practical_threshold=config.practical_threshold,
-            confidence_level=config.confidence_level,
+            practical_threshold=(measurement.practical_threshold if measurement is not None else 0),
+            confidence_level=(measurement.confidence_level if measurement is not None else 0.95),
             stopping_rule={
                 "method": ExperimentOutcomeMethod.FIXED_ATTEMPTS_V1,
-                "blocks": config.blocks,
-                "repetitions": config.repetitions,
+                "fixed_blocks": config.blocks * config.repetitions,
             },
             random_seed=config.random_seed,
             role=ExperimentRole.EXPLORATORY,
@@ -364,11 +410,7 @@ class FaultExperimentService:
             experiment_name=experiment_name,
             experiment=experiment,
             adapter="command",
-            metric_source=(
-                MetricSource.RUNTIME_RESOURCE
-                if config.primary_metric.startswith("runtime_resource.")
-                else MetricSource.MEASUREMENT
-            ),
+            metric_source=metric_source or MetricSource.MEASUREMENT,
             execution_policy=execution_policy,
             variant_parameter="scenario",
             variants=treatments,
@@ -422,7 +464,7 @@ class FaultExperimentService:
         )
         self.plans.issue(
             plan.plan_token,
-            plan.request_digest,
+            plan.plan_id,
             plan,
             expires_at=plan.experiment_plan.expires_at,
         )
@@ -664,20 +706,39 @@ class FaultExperimentService:
                     trials.append(unattempted)
                 self._publish_fault_variants(plan, trials)
                 raise cancellation
-        self._publish_fault_variants(plan, trials)
+        variants = self._publish_fault_variants(plan, trials)
+        if plan.experiment_plan.experiment.primary_metric == _FAULT_CLIENT_ELAPSED:
+            self._publish_measurement_receipts(trials, trial_diagnostics)
+        run_sets, comparisons, measurement_recovery = self._finalize_measurement_comparisons(
+            plan,
+            trials,
+        )
         result = FaultExperimentResult(
             result_id=new_id(),
             plan_id=plan.plan_id,
             experiment=plan.experiment_plan.experiment,
             trials=tuple(trials),
+            variants=variants,
+            run_sets=run_sets,
+            comparisons=comparisons,
             block_treatment_orders=tuple(block.order for block in plan.experiment_plan.blocks),
             trial_artifacts={name: tuple(values) for name, values in artifact_ids.items()},
             trial_diagnostics=trial_diagnostics,
+            measurement_recovery=measurement_recovery,
             corpus_commit_id=self.workspace.corpus.read_head().commit_id,
             limitations=(
                 *plan.limitations,
-                "Fault results are descriptive unless normal measurement and oracle evidence "
-                "support a comparison.",
+                *(
+                    (
+                        "Only successful trials with a valid positive elapsed_ns stdout receipt "
+                        "are eligible for numeric comparison.",
+                    )
+                    if plan.experiment_plan.experiment.primary_metric == _FAULT_CLIENT_ELAPSED
+                    else (
+                        "Categorical fault mode records trial outcomes only; it does not publish "
+                        "numeric measurements or comparisons.",
+                    )
+                ),
             ),
         )
         self.results.create(result)
@@ -713,6 +774,171 @@ class FaultExperimentService:
             input_run_ids=tuple(item.run_id for item in trials if item.run_id is not None),
         )
         return tuple(variants)
+
+    def _publish_measurement_receipts(
+        self,
+        trials: list[Trial],
+        diagnostics: dict[str, FaultTrialDiagnostic],
+    ) -> None:
+        """Publish one receipt-owned measurement per successful fault trial.
+
+        The stdout artifact is already captured immutably by ``CaptureService``.  This method
+        only interprets its exact bytes under the declared receipt contract; failures remain
+        categorical trial outcomes and never acquire a synthetic numeric value.
+        """
+
+        successful = [
+            trial
+            for trial in trials
+            if trial.outcome is TrialOutcome.SUCCEEDED and trial.run_id is not None
+        ]
+        if not successful:
+            return
+        artifacts = ArtifactStore(self.workspace)
+        runs = RunStore(self.workspace)
+        rows: list[dict[str, object]] = []
+        artifact_ids: list[str] = []
+        for trial in successful:
+            assert trial.run_id is not None
+            run = runs.read(trial.run_id)
+            stdout = next((item for item in run.artifacts if item.role == "stdout"), None)
+            if stdout is None:
+                diagnostics[trial.trial_id] = self._receipt_diagnostic(
+                    "stdout artifact is absent.",
+                    error_code=ErrorCode.ARTIFACT_NOT_FOUND,
+                )
+                continue
+            try:
+                stored = artifacts.get(stdout.artifact_id)
+                content, payload = artifacts.read_range(
+                    stdout.artifact_id,
+                    offset=0,
+                    max_bytes=stored.content.byte_length,
+                )
+                if len(payload) != content.byte_length:
+                    raise ValueError("stdout artifact was not read completely")
+                receipt = _FaultElapsedReceipt.model_validate_json(payload)
+            except (DomainError, ValidationError, ValueError) as error:
+                diagnostics[trial.trial_id] = self._receipt_diagnostic(
+                    f"stdout does not contain one valid elapsed-time receipt: {error}"
+                )
+                continue
+            rows.append(
+                {
+                    "measurement_id": digest_model(
+                        {
+                            "run_id": trial.run_id,
+                            "artifact_id": stdout.artifact_id,
+                            "name": _FAULT_CLIENT_ELAPSED,
+                        }
+                    ),
+                    "run_id": trial.run_id,
+                    "artifact_id": stdout.artifact_id,
+                    "name": _FAULT_CLIENT_ELAPSED,
+                    "value_int": receipt.elapsed_ns,
+                    "value_float": None,
+                    "value_uint": None,
+                    "value_kind": "integer",
+                    "unit": _FAULT_CLIENT_ELAPSED_UNIT,
+                    "aggregation": "single",
+                    "scope": "workload",
+                    "trial_id": trial.trial_id,
+                    "worker_id": None,
+                    "worker_run_index": None,
+                    "value_index": None,
+                    "loop_count": None,
+                    "is_warmup": False,
+                    "block_id": trial.block_id,
+                    "variant_id": trial.variant_id,
+                    "order_in_block": trial.order_in_block,
+                    "phase": "receipt",
+                    "dimensions": {"source": "stdout_json"},
+                    "evidence_level": "observed",
+                }
+            )
+            artifact_ids.append(stdout.artifact_id)
+        if rows:
+            self.publisher.publish_rows(
+                {"measurements": rows},
+                publisher="flameox.faults",
+                publisher_version="1",
+                input_run_ids=tuple(
+                    trial.run_id for trial in successful if trial.run_id is not None
+                ),
+                input_artifact_ids=tuple(artifact_ids),
+            )
+
+    @staticmethod
+    def _receipt_diagnostic(
+        detail: str,
+        *,
+        error_code: ErrorCode = ErrorCode.ARTIFACT_PARSE_FAILED,
+    ) -> FaultTrialDiagnostic:
+        return FaultTrialDiagnostic(
+            phase="measurement_receipt",
+            error_code=error_code,
+            message=detail[:1_000],
+            retryable=False,
+        )
+
+    def _finalize_measurement_comparisons(
+        self,
+        plan: FaultExperimentPlan,
+        trials: list[Trial],
+    ) -> tuple[tuple[RunSet, ...], tuple[ComparisonResult, ...], ManualAction | None]:
+        experiment = plan.experiment_plan.experiment
+        if experiment.primary_metric != _FAULT_CLIENT_ELAPSED:
+            return (), (), None
+        helper = ExperimentService(self.workspace, captures=self.captures)
+        trials_by_treatment = {
+            name: [trial for trial in trials if trial.factors.get("scenario") == name]
+            for name in plan.experiment_plan.variants
+        }
+        run_sets = helper._freeze_run_sets(plan.experiment_plan, trials_by_treatment)
+        by_treatment = {
+            str(run_set.selection["variant"]): run_set
+            for run_set in run_sets
+            if isinstance(run_set.selection.get("variant"), str)
+        }
+        baseline = by_treatment.get(_BASELINE)
+        candidates = tuple(
+            run_set for treatment, run_set in by_treatment.items() if treatment != _BASELINE
+        )
+        if baseline is None or not candidates:
+            return run_sets, (), self._measurement_recovery()
+        comparisons = tuple(
+            ComparisonService(self.workspace).record(
+                MeasurementCompareRunSetsRequest(
+                    baseline_run_set_id=baseline.run_set_id,
+                    candidate_run_set_id=candidate.run_set_id,
+                    experiment_id=experiment.experiment_id,
+                    metric=experiment.primary_metric,
+                    unit=experiment.primary_metric_unit or "ns",
+                    series=experiment.measurement_series,
+                    polarity=experiment.polarity,
+                    estimand="median_paired_log_ratio",
+                    practical_threshold=experiment.practical_threshold,
+                    confidence_level=experiment.confidence_level,
+                    random_seed=experiment.random_seed,
+                )
+            )
+            for candidate in candidates
+        )
+        has_invalid_comparison = any(
+            comparison.comparison.validity is ComparisonValidity.INVALID
+            for comparison in comparisons
+        )
+        recovery = self._measurement_recovery() if has_invalid_comparison else None
+        return run_sets, comparisons, recovery
+
+    @staticmethod
+    def _measurement_recovery() -> ManualAction:
+        return manual_action(
+            "Inspect measurement diagnostics and stdout receipts, then plan a changed fault "
+            "experiment with one completed positive elapsed_ns receipt per paired block.",
+            suggested_action=ActionId.PLAN_FAULT_EXPERIMENT,
+            missing_arguments=("experiment_name", "investigation_id"),
+        )
 
     def _config(self, name: str) -> FaultExperimentConfig:
         try:

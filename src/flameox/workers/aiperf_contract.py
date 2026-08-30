@@ -28,7 +28,6 @@ type AIPerfErrorCategory = Literal[
 
 
 class AIPerfWorkerRequest(ContractModel):
-    schema_version: Literal[1] = 1
     artifact_path: str = Field(min_length=1, max_length=4_096)
     max_rows: Annotated[int, Field(gt=0, le=1_000_000)]
     max_line_bytes: Annotated[int, Field(gt=0, le=4 * 1024 * 1024)]
@@ -37,7 +36,6 @@ class AIPerfWorkerRequest(ContractModel):
 class AIPerfProjectionRow(ContractModel):
     """The complete prompt-free information allowed to leave the provider worker."""
 
-    schema_version: Literal[1] = 1
     line_index: Annotated[int, Field(ge=0)]
     source_request_id: str = Field(min_length=1, max_length=500)
     provider_request_id: str | None = Field(default=None, max_length=500)
@@ -57,7 +55,6 @@ class AIPerfProjectionRow(ContractModel):
 
 
 class AIPerfWorkerResult(ContractModel):
-    schema_version: Literal[1] = 1
     output: WorkerOutputFile
     row_count: Annotated[int, Field(ge=0)]
     truncated: bool

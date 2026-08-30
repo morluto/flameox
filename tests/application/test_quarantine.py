@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import QuarantineService
+from flameox.application.quarantine import QuarantineService
 from flameox.domain import DomainError, ErrorCode
 from flameox.storage import Workspace
 
@@ -102,23 +102,6 @@ def test_quarantine_rejects_recovery_options_that_disagree_with_state(
     manifest_path = workspace.paths.quarantine / quarantined.quarantine_id / "manifest.json"
     serialized = quarantined.model_dump(mode="json")
     serialized["recovery_options"] = []
-    manifest_path.write_text(json.dumps(serialized))
-
-    with pytest.raises(DomainError) as error:
-        service.restore(quarantined.quarantine_id)
-
-    assert error.value.code is ErrorCode.WORKSPACE_INVALID
-
-
-def test_quarantine_rejects_version_one_manifests(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    source = workspace.paths.staging / "partial.bin"
-    source.write_bytes(b"partial")
-    service = QuarantineService(workspace)
-    quarantined = service.quarantine(source, reason="fixture", operation="test")
-    manifest_path = workspace.paths.quarantine / quarantined.quarantine_id / "manifest.json"
-    serialized = quarantined.model_dump(mode="json")
-    serialized["schema_version"] = 1
     manifest_path.write_text(json.dumps(serialized))
 
     with pytest.raises(DomainError) as error:

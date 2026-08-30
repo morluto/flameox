@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import ConfigDict, Field, computed_field, model_validator
+from pydantic import Field, model_validator
 
 from flameox.action_graph import ActionId, NextAction, next_action_for_action
 from flameox.application.capture import CaptureService
@@ -26,7 +26,12 @@ from flameox.domain import (
 )
 from flameox.domain.models import utc_now
 from flameox.models import ContractModel
-from flameox.storage import ControlRecordStore, RunStore, Workspace
+from flameox.storage import RunStore, Workspace
+
+_CANCELLATION_PENDING_LIMITATION = (
+    "Cancellation was requested; owned cleanup is still in progress. Poll this run for its "
+    "terminal status."
+)
 
 
 class DetachedProgress(ContractModel):
@@ -47,120 +52,15 @@ class DetachedFailure(ContractModel):
     message: str
 
 
-def _advertise_detached_failure_projections(schema: dict[str, Any]) -> None:
-    properties = schema.setdefault("properties", {})
-    assert isinstance(properties, dict)
-    properties.pop("failure", None)
-    properties.update(
-        {
-            "failure_code": {
-                "anyOf": [{"type": "string"}, {"type": "null"}],
-                "default": None,
-                "title": "Failure Code",
-            },
-            "failure_message": {
-                "anyOf": [{"type": "string"}, {"type": "null"}],
-                "default": None,
-                "title": "Failure Message",
-            },
-        }
-    )
-    required = schema.setdefault("required", [])
-    assert isinstance(required, list)
-    for field_name in ("failure", "failure_code", "failure_message"):
-        if field_name in required:
-            required.remove(field_name)
-
-
-class _DetachedFailureFields(ContractModel):
-    model_config = ConfigDict(json_schema_extra=_advertise_detached_failure_projections)
-
-    failure: DetachedFailure | None = Field(default=None, exclude=True)
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_failure_projections(cls, value: Any) -> Any:
-        if not isinstance(value, dict):
-            return value
-        has_code = "failure_code" in value
-        has_message = "failure_message" in value
-        if not has_code and not has_message:
-            return value
-        if "failure" in value:
-            raise ValueError("use either failure or flattened detached-failure fields")
-        if has_code != has_message:
-            raise ValueError("detached capture failure code and message must appear together")
-        parsed = dict(value)
-        code = parsed.pop("failure_code")
-        message = parsed.pop("failure_message")
-        if (code is None) != (message is None):
-            raise ValueError("detached capture failure code and message must appear together")
-        parsed["failure"] = None if code is None else {"code": code, "message": message}
-        return parsed
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def failure_code(self) -> str | None:
-        return self.failure.code if self.failure is not None else None
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def failure_message(self) -> str | None:
-        return self.failure.message if self.failure is not None else None
-
-
-class DetachedCaptureRecord(_DetachedFailureFields):
-    schema_version: Literal[1] = 1
-    run_id: str
-    revision: Annotated[int, Field(ge=0)] = 0
-    idempotency_digest: str
-    plan_digest: str
-    plan_request: dict[str, object] = Field(default_factory=dict)
-    progress: Annotated[tuple[DetachedProgress, ...], Field(max_length=16)] = ()
-    created_at: datetime = Field(default_factory=utc_now)
-    updated_at: datetime = Field(default_factory=utc_now)
-
-    def with_progress(self, progress: DetachedProgress) -> Self:
-        return self.__class__.model_validate(
-            {
-                **self.model_dump(mode="python"),
-                "revision": self.revision + 1,
-                "progress": (*self.progress[-15:], progress),
-                "updated_at": utc_now(),
-            }
-        )
-
-    def with_failure(self, *, code: str, message: str) -> Self:
-        payload = self.model_dump(mode="python")
-        payload.pop("failure_code", None)
-        payload.pop("failure_message", None)
-        return self.__class__.model_validate(
-            {
-                **payload,
-                "revision": self.revision + 1,
-                "failure": DetachedFailure(code=code, message=message),
-                "updated_at": utc_now(),
-            }
-        )
-
-
-class DetachedRecovery(ContractModel):
-    action: Literal["replan"] = "replan"
-    next_action: NextAction
-
-
-def _replan_recovery(arguments: dict[str, object]) -> DetachedRecovery:
-    return DetachedRecovery(
-        next_action=next_action_for_action(
-            ActionId.PLAN_CAPTURE,
-            context=arguments,
-            instruction="Supply the complete inputs required to plan this capture again.",
-        )
+def _replan_recovery(arguments: dict[str, object]) -> NextAction:
+    return next_action_for_action(
+        ActionId.PLAN_CAPTURE,
+        context=arguments,
+        instruction="Supply the complete inputs required to plan this capture again.",
     )
 
 
-class DetachedCaptureStatus(_DetachedFailureFields):
-    schema_version: Literal[1] = 1
+class DetachedCaptureStatus(ContractModel):
     run_id: str
     state: Literal[
         "starting",
@@ -173,8 +73,9 @@ class DetachedCaptureStatus(_DetachedFailureFields):
     capture_status: CaptureStatus | None = None
     artifact_count: Annotated[int, Field(ge=0)] = 0
     progress: tuple[DetachedProgress, ...] = ()
+    failure: DetachedFailure | None = None
     limitations: tuple[str, ...] = ()
-    recovery: DetachedRecovery | None = None
+    recovery: NextAction | None = None
 
     @model_validator(mode="after")
     def projected_state_is_coherent(self) -> Self:
@@ -224,15 +125,6 @@ class DetachedCaptureManager:
             workspace,
             self._ADAPTER,
             supervisor=supervisor,
-        )
-        # Version-one records are read-only migration input. New captures write only
-        # the shared operation envelope and authoritative run manifest.
-        self.records = ControlRecordStore(
-            workspace,
-            kind="detached_captures",
-            model=DetachedCaptureRecord,
-            id_field="run_id",
-            revision_field="revision",
         )
 
     async def start(self, plan_token: str, idempotency_key: str) -> DetachedCaptureStatus:
@@ -312,7 +204,11 @@ class DetachedCaptureManager:
             subject_id=run_id,
         )
         if record is None:
-            return self._legacy_status(self.records.read(run_id))
+            raise DomainError(
+                ErrorCode.RUN_NOT_FOUND,
+                "No detached capture operation exists for this run.",
+                run_id=run_id,
+            )
         return self._project(record)
 
     def _project(self, record: OperationRecord) -> DetachedCaptureStatus:
@@ -337,19 +233,24 @@ class DetachedCaptureManager:
             run = self.runs.read(run_id)
         except DomainError:
             managed = operation.operation_id in self.runner.tasks
+            startup_limitations = (
+                (_CANCELLATION_PENDING_LIMITATION,)
+                if managed and operation.cancellation_requested
+                else (
+                    (
+                        "The server stopped before publishing a run manifest. Re-plan the "
+                        "capture and start it with a new idempotency key."
+                    ),
+                )
+                if not managed
+                else ()
+            )
             return DetachedCaptureStatus(
                 run_id=run_id,
                 state="starting" if managed else "failed_to_start",
                 progress=progress,
                 failure=self._failure(operation),
-                limitations=(
-                    (
-                        "The server stopped before publishing a run manifest. Re-plan the "
-                        "capture and start it with a new idempotency key.",
-                    )
-                    if not managed
-                    else ()
-                ),
+                limitations=startup_limitations,
                 recovery=(
                     _replan_recovery(self._plan_request(record))
                     if not managed and self._plan_request(record)
@@ -389,6 +290,8 @@ class DetachedCaptureManager:
             state = "starting"
         else:
             state = "failed_to_start"
+        if managed and operation.cancellation_requested:
+            limitations = (_CANCELLATION_PENDING_LIMITATION,)
         return DetachedCaptureStatus(
             run_id=run_id,
             state=state,
@@ -411,14 +314,7 @@ class DetachedCaptureManager:
             subject_id=run_id,
         )
         if record is None:
-            status = self.status(run_id)
-            if status.state == "terminal":
-                return status
-            raise DomainError(
-                ErrorCode.CAPABILITY_UNAVAILABLE,
-                "This server does not own the legacy detached capture task.",
-                run_id=run_id,
-            )
+            return self.status(run_id)
         await self.runner.cancel(record.operation_id)
         return self.status(run_id)
 
@@ -469,49 +365,3 @@ class DetachedCaptureManager:
     def _plan_request(record: OperationRecord) -> dict[str, object]:
         value = record.request.get("plan_request")
         return value if isinstance(value, dict) else {}
-
-    def _legacy_status(self, record: DetachedCaptureRecord) -> DetachedCaptureStatus:
-        try:
-            run = self.runs.read(record.run_id)
-        except DomainError:
-            return DetachedCaptureStatus(
-                run_id=record.run_id,
-                state="failed_to_start",
-                progress=record.progress,
-                failure=record.failure,
-                limitations=(
-                    "This version-one detached record has no run manifest and cannot resume.",
-                ),
-                recovery=(_replan_recovery(record.plan_request) if record.plan_request else None),
-            )
-        terminal = run.execution_status in {
-            ExecutionStatus.SUCCEEDED,
-            ExecutionStatus.FAILED,
-            ExecutionStatus.TIMED_OUT,
-            ExecutionStatus.CANCELLED,
-        }
-        return DetachedCaptureStatus(
-            run_id=record.run_id,
-            state=(
-                "terminal"
-                if terminal
-                else (
-                    "unmanaged_after_restart"
-                    if run.execution_status is ExecutionStatus.RUNNING
-                    else "failed_to_start"
-                )
-            ),
-            execution_status=run.execution_status,
-            capture_status=run.capture_status,
-            artifact_count=len(run.artifacts),
-            progress=record.progress,
-            failure=record.failure,
-            limitations=("Legacy detached lifecycle state is read-only after migration.",),
-            recovery=(
-                _replan_recovery(record.plan_request)
-                if not terminal
-                and run.execution_status is not ExecutionStatus.RUNNING
-                and record.plan_request
-                else None
-            ),
-        )

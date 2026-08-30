@@ -21,7 +21,6 @@ UNRESOLVED_EXIT_CODE: Literal[101] = 101
 
 
 class ReductionPredicateConfig(ContractModel):
-    schema_version: Literal[1] = 1
     operation_root: str = Field(min_length=1, max_length=4_096)
     receipt_root: str = Field(min_length=1, max_length=4_096)
     counter_path: str = Field(min_length=1, max_length=4_096)
@@ -43,22 +42,18 @@ class ReductionPredicateConfig(ContractModel):
 
 
 class ShrinkRayWorkerRequest(ContractModel):
-    schema_version: Literal[1] = 1
     artifact_path: str = Field(min_length=1, max_length=4_096)
     shrinkray_executable: str = Field(min_length=1, max_length=4_096)
     shrinkray_executable_binding: ResolvedExecutable
     predicate_bridge_executable: str = Field(min_length=1, max_length=4_096)
     predicate_bridge_binding: ResolvedExecutable
     predicate_config: ReductionPredicateConfig
-    seed: int = 0
-    parallelism: Literal[1] = 1
     wall_time_seconds: Annotated[float, Field(gt=0, le=86_400)]
     max_staging_bytes: Annotated[int, Field(gt=0)]
     max_staging_files: Annotated[int, Field(ge=8, le=100_000)]
 
 
 class ShrinkRayWorkerResult(ContractModel):
-    schema_version: Literal[1] = 1
     disposition: ReductionDisposition
     tool_completed: bool
     final_classification: PredicateClassification

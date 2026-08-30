@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from flameox.application import (
+from flameox.application.comparisons import (
     ExcludedFreezeRunSetMember,
     FreezeRunIdsRequest,
     FreezeRunMembersRequest,

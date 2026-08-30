@@ -192,6 +192,53 @@ class ImportService:
         ) as snapshot:
             yield snapshot
 
+    @contextmanager
+    def snapshot_provider_document(
+        self,
+        path: Path,
+        *,
+        allow_external_path: bool,
+        max_bytes: int,
+    ) -> Iterator[ArtifactSnapshot]:
+        """Provide an immutable provider snapshot for a typed import adapter."""
+        with self._snapshot_provider_document(
+            path,
+            allow_external_path=allow_external_path,
+            max_bytes=max_bytes,
+        ) as snapshot:
+            yield snapshot
+
+    def import_snapshot(
+        self,
+        snapshot: ArtifactSnapshot,
+        *,
+        kind: ArtifactKind,
+        sensitivity: Sensitivity,
+        display_name: str,
+        media_type: str | None,
+        role: str,
+        producer: str | None,
+        producer_version: str | None,
+        semantics: RunSemantics,
+        limitations: tuple[str, ...],
+        source_state: SourceState,
+    ) -> ImportResult:
+        """Register one validated immutable provider payload with typed run semantics."""
+        return self._import_profiled_snapshot(
+            snapshot,
+            kind=kind,
+            sensitivity=sensitivity,
+            display_name=display_name,
+            media_type=media_type,
+            role=role,
+            producer=producer,
+            producer_version=producer_version,
+            semantics=semantics,
+            limitations=limitations,
+            terminal_error=None,
+            source_state=source_state,
+        )
+
     def import_artifact(self, request: ImportArtifactRequest) -> ImportResult:
         self._validate_import_sensitivity(
             kind=request.kind,
@@ -447,11 +494,12 @@ class ImportService:
         semantics: RunSemantics,
         limitations: tuple[str, ...],
         terminal_error: DomainError | None,
+        source_state: SourceState | None = None,
     ) -> ImportResult:
         """Publish immutable bytes before assigning them semantic ownership."""
 
         environment = collect_environment()
-        source_state = collect_partial_source_state(self.workspace)
+        source_state = source_state or collect_partial_source_state(self.workspace)
         run_id = new_id()
         try:
             stored = self.artifacts.import_snapshot(snapshot, display_name=display_name)
@@ -521,7 +569,8 @@ class ImportService:
             run_id=run_id,
             artifact_id=stored.content.artifact_id,
             display_name=display_name,
-            media_type=media_type or mimetypes.guess_type(display_name)[0]
+            media_type=media_type
+            or mimetypes.guess_type(display_name)[0]
             or "application/octet-stream",
             kind=kind,
             role=role,

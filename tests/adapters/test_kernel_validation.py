@@ -15,7 +15,10 @@ from flameox.adapters.kernel_validation import (
     KernelValidationV2,
     kernel_validation_json_schema,
 )
-from flameox.application import ImportArtifactRequest, ImportService
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import Workspace
@@ -481,7 +484,7 @@ def test_psnr_profile_changes_metric_identity(tmp_path: Path) -> None:
     assert len(set(identities)) == 2
 
 
-def test_v1_finite_psnr_is_migrated_as_legacy_unqualified(tmp_path: Path) -> None:
+def test_v1_kernel_validation_is_rejected(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     payload = _document()
     payload["schema_version"] = "flameox.kernel-validation.v1"
@@ -498,12 +501,7 @@ def test_v1_finite_psnr_is_migrated_as_legacy_unqualified(tmp_path: Path) -> Non
     source = tmp_path / "legacy-psnr.json"
     source.write_text(json.dumps(payload))
 
-    result = KernelValidationExtractor(workspace).extract(_import(workspace, source))
+    with pytest.raises(DomainError) as error:
+        KernelValidationExtractor(workspace).extract(_import(workspace, source))
 
-    assert result.source_schema_version == "flameox.kernel-validation.v1"
-    with Catalog(workspace).open_snapshot() as snapshot:
-        row = snapshot.execute(
-            "SELECT metric_profile_json FROM kernel_validation_metrics WHERE metric_name = 'psnr'"
-        ).fetchone()
-    assert row is not None
-    assert json.loads(row[0])["identity_quality"] == "legacy_unqualified"
+    assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED

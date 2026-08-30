@@ -38,7 +38,6 @@ _UINT64_MAX = 2**64 - 1
 
 
 class NsightComputeExtractionResult(ContractModel):
-    schema_version: int = 1
     run_id: str
     artifact_id: str
     producer_version: str | None
@@ -47,7 +46,7 @@ class NsightComputeExtractionResult(ContractModel):
     action_count: int
     metric_count: int
     observation_count: int
-    roofline_present: bool
+    truncated: bool
     report_interface_sha256: str
     schema_fingerprint: str
     corpus_commit_id: str
@@ -222,9 +221,11 @@ class NsightComputeExtractor:
                         "producer_version": registration.producer_version,
                         "report_interface_sha256": report_interface_sha256,
                         "report_version": report_version,
-                        "roofline_present": response.roofline_present,
                         "schema_fingerprint": schema_fingerprint,
                         "section_ids": section_ids,
+                        "range_count": response.range_count,
+                        "action_count": response.action_count,
+                        "truncated": response.truncated,
                     },
                 },
             )
@@ -253,7 +254,7 @@ class NsightComputeExtractor:
             action_count=response.action_count,
             metric_count=len(measurements),
             observation_count=len(observations),
-            roofline_present=response.roofline_present,
+            truncated=response.truncated,
             report_interface_sha256=report_interface_sha256,
             schema_fingerprint=schema_fingerprint,
             corpus_commit_id=published.commit.commit_id,

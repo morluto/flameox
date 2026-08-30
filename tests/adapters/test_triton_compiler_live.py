@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import CaptureService, ExecutionPolicy
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
 from flameox.domain import ArtifactKind, CaptureStatus, ExecutionStatus
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
@@ -24,7 +25,6 @@ pytestmark = [
 def _write_triton_workload(project: Path, *, python: str, script: str) -> None:
     (project / "flameox.toml").write_text(
         f"""
-schema_version = 1
 
 [workloads.compile]
 argv = ["{python}", "{script}"]
@@ -59,7 +59,7 @@ async def test_triton_compiler_live_capture_emits_manifest_with_ir(tmp_path: Pat
     manifest_regs = [reg for reg in result.run.artifacts if reg.role == "kernel_build_manifest"]
     assert len(manifest_regs) == 1
     assert manifest_regs[0].kind is ArtifactKind.KERNEL_BUILD
-    native_regs = [reg for reg in result.run.artifacts if reg.role.startswith("compiler_stage")]
+    native_regs = [reg for reg in result.run.artifacts if reg.role == "compiler_output"]
     assert len(native_regs) >= 1
     extensions = {reg.display_name.rsplit(".", 1)[1] for reg in native_regs}
     assert "ttir" in extensions or "ptx" in extensions or "cubin" in extensions

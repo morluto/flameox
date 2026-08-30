@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import (
+from flameox.application.evidence_lookup import EvidenceLookupService
+from flameox.application.records import (
     EvidenceInput,
-    EvidenceLookupService,
     FindingService,
     RecordFindingRequest,
 )
@@ -34,16 +34,16 @@ def test_manifest_ids_reject_current_and_parent_directory(value: str) -> None:
 
 
 @pytest.mark.parametrize("ref_id", [".", "..", "../outside", r"..\outside", "D:outside"])
-def test_generation_lookup_rejects_non_local_reference(tmp_path: Path, ref_id: str) -> None:
+def test_generation_lookup_rejects_malformed_digest(tmp_path: Path, ref_id: str) -> None:
     workspace = Workspace.initialize(tmp_path)
 
     with pytest.raises(DomainError) as error:
         EvidenceLookupService(workspace).get(EvidenceReferenceType.GENERATION, ref_id)
 
-    assert error.value.code is ErrorCode.EXECUTION_REFUSED
+    assert error.value.code is ErrorCode.INVALID_ARGUMENTS
 
 
-def test_finding_rejects_non_local_generation_reference(tmp_path: Path) -> None:
+def test_finding_rejects_malformed_generation_digest(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     request = RecordFindingRequest(
         kind="performance",
@@ -64,4 +64,4 @@ def test_finding_rejects_non_local_generation_reference(tmp_path: Path) -> None:
     with pytest.raises(DomainError) as error:
         FindingService(workspace).record(request)
 
-    assert error.value.code is ErrorCode.EXECUTION_REFUSED
+    assert error.value.code is ErrorCode.INVALID_ARGUMENTS

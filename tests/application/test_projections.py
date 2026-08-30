@@ -26,7 +26,7 @@ from flameox.domain import (
     digest_model,
 )
 from flameox.domain.models import ImportRunManifest
-from flameox.storage import ArtifactStore, ProjectionIntentStore, RunStore, Workspace
+from flameox.storage import ArtifactStore, RunStore, Workspace
 from flameox.storage.control_plane import ControlPlane
 
 pytestmark = pytest.mark.integration
@@ -66,6 +66,23 @@ def _crash_at(target: str) -> Callable[[str, object], None]:
     return inject
 
 
+def test_projection_intent_binds_one_run_revision_and_publication_context(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    environment = _environment()
+    spec = ProjectionCoordinator(workspace).run_projection_spec(
+        _run("one-kind", environment),
+        environment=environment,
+        source_state=None,
+    )
+
+    assert spec.run_id == "one-kind"
+    assert spec.run_revision == 0
+    assert spec.context.environment == environment
+    assert spec.context.source_state is None
+
+
 def test_run_revision_and_projection_intent_commit_atomically(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -87,10 +104,10 @@ def test_run_revision_and_projection_intent_commit_atomically(
         )
 
     assert RunStore(workspace).list() == ()
-    assert ProjectionIntentStore(workspace).list() == ()
+    assert ControlPlane(workspace).list_projection_intents() == ()
 
 
-def test_crash_after_domain_commit_replays_exact_run_projection(tmp_path: Path) -> None:
+def test_crash_after_domain_commit_recovers_exact_run_projection(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     environment = _environment()
     output = tmp_path / "stderr.bin"
@@ -123,10 +140,10 @@ def test_crash_after_domain_commit_replays_exact_run_projection(tmp_path: Path) 
             fault_injector=_crash_at("after_domain_commit"),
         ).create_run(run, environment=environment, source_state=None)
 
-    [pending] = ProjectionIntentStore(workspace).list(state=ProjectionState.PENDING)
-    assert pending.domain_revision == 0
-    assert pending.domain_digest == digest_model(run.model_dump(mode="json"))
-    assert workspace.corpus.read_head().generation_manifests == ()
+    [pending] = ControlPlane(workspace).list_projection_intents(state=ProjectionState.PENDING)
+    assert pending.run_revision == 0
+    assert pending.run_digest == digest_model(run.model_dump(mode="json"))
+    assert workspace.corpus.read_head().generation_ids == ()
     pending_view = RunProjectionService(workspace).get(run.run_id)
     assert pending_view.manifest_source == "control_plane"
     assert pending_view.projection.state is ProjectionVisibilityState.PENDING
@@ -145,7 +162,7 @@ def test_crash_after_domain_commit_replays_exact_run_projection(tmp_path: Path) 
         assert snapshot.execute(
             "SELECT run_revision, run_manifest_digest FROM current_runs WHERE run_id = ?",
             (run.run_id,),
-        ).fetchone() == (0, pending.domain_digest)
+        ).fetchone() == (0, pending.run_digest)
 
 
 def test_crash_after_head_publication_finalizes_without_duplicate_generation(
@@ -161,9 +178,9 @@ def test_crash_after_head_publication_finalizes_without_duplicate_generation(
             fault_injector=_crash_at("after_corpus_publish"),
         ).create_run(run, environment=environment, source_state=None)
 
-    [pending] = ProjectionIntentStore(workspace).list(state=ProjectionState.PENDING)
+    [pending] = ControlPlane(workspace).list_projection_intents(state=ProjectionState.PENDING)
     first_head = workspace.corpus.read_head()
-    assert len(first_head.generation_manifests) == 1
+    assert len(first_head.generation_ids) == 1
 
     reconciled = ProjectionCoordinator(workspace).reconcile_intent(pending.intent_id)
 
@@ -198,14 +215,14 @@ def test_head_failure_leaves_typed_retryable_projection_and_converges(
             source_state=None,
         )
 
-    [failed] = ProjectionIntentStore(workspace).list(state=ProjectionState.FAILED)
+    [failed] = ControlPlane(workspace).list_projection_intents(state=ProjectionState.FAILED)
     assert failed.failure_code == "publication_failed"
-    assert workspace.corpus.read_head().generation_manifests == ()
+    assert workspace.corpus.read_head().generation_ids == ()
 
     reconciled = ProjectionCoordinator(workspace).reconcile_intent(failed.intent_id)
 
     assert reconciled.state is ProjectionState.PUBLISHED
-    assert len(workspace.corpus.read_head().generation_manifests) == 1
+    assert len(workspace.corpus.read_head().generation_ids) == 1
 
 
 def test_crash_after_intent_completion_is_already_converged(tmp_path: Path) -> None:
@@ -219,6 +236,6 @@ def test_crash_after_intent_completion_is_already_converged(tmp_path: Path) -> N
             fault_injector=_crash_at("after_intent_commit"),
         ).create_run(run, environment=environment, source_state=None)
 
-    [published] = ProjectionIntentStore(workspace).list(state=ProjectionState.PUBLISHED)
+    [published] = ControlPlane(workspace).list_projection_intents(state=ProjectionState.PUBLISHED)
     assert ProjectionCoordinator(workspace).reconcile_intent(published.intent_id) == published
-    assert len(workspace.corpus.read_head().generation_manifests) == 1
+    assert len(workspace.corpus.read_head().generation_ids) == 1

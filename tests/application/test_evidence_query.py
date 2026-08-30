@@ -6,12 +6,14 @@ import pyperf
 import pytest
 from pydantic import ValidationError
 
-from flameox.adapters import PyPerfExtractor
-from flameox.application import (
-    CreateInvestigationRequest,
-    EvidenceQueryService,
+from flameox.adapters.pyperf import PyPerfExtractor
+from flameox.application.evidence_query import EvidenceQueryService
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportService,
+)
+from flameox.application.records import (
+    CreateInvestigationRequest,
     InvestigationService,
 )
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
@@ -22,7 +24,7 @@ from tests.support.analysis import run_row
 pytestmark = pytest.mark.integration
 
 
-def test_inference_request_projection_rejects_contradictory_outcomes() -> None:
+def test_inference_request_projection_requires_one_typed_outcome() -> None:
     request = {
         "request_id": "request",
         "run_id": "run",
@@ -37,10 +39,7 @@ def test_inference_request_projection_rejects_contradictory_outcomes() -> None:
         "latency_ns": None,
         "tpot_ns": None,
         "mean_itl_ns": None,
-        "success": True,
-        "cancelled": False,
-        "error_type": None,
-        "error_code": None,
+        "outcome": {"kind": "succeeded"},
         "queue_ns": None,
         "prefill_ns": None,
         "decode_ns": None,
@@ -49,18 +48,17 @@ def test_inference_request_projection_rejects_contradictory_outcomes() -> None:
         "evidence_level": "observed",
     }
 
-    assert InferenceRequestItem.model_validate(request).success is True
-    with pytest.raises(ValidationError, match="do not describe a supported outcome"):
-        InferenceRequestItem.model_validate({**request, "cancelled": True})
+    assert InferenceRequestItem.model_validate(request).outcome.kind == "succeeded"
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        InferenceRequestItem.model_validate({**request, "success": True})
 
-    unreported = InferenceRequestItem.model_validate(
-        {**request, "success": None, "cancelled": None}
-    )
-    assert unreported.success is None
-    assert unreported.cancelled is None
+    unreported = InferenceRequestItem.model_validate({**request, "outcome": {"kind": "unreported"}})
+    assert unreported.outcome.kind == "unreported"
 
-    with pytest.raises(ValidationError, match="do not describe a supported outcome"):
-        InferenceRequestItem.model_validate({**request, "success": None})
+    with pytest.raises(ValidationError, match="Field required"):
+        InferenceRequestItem.model_validate(
+            {key: value for key, value in request.items() if key != "outcome"}
+        )
 
 
 def test_measurement_query_uses_bounded_snapshot_cursors(tmp_path: Path) -> None:
@@ -91,7 +89,6 @@ def test_measurement_query_uses_bounded_snapshot_cursors(tmp_path: Path) -> None
     )
     assert first.returned == 2
     assert first.total == 3
-    assert first.schema_version == 3
     assert all(
         item.value is not None and item.value.kind == "integer" for item in first.measurements
     )

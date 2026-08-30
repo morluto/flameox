@@ -4,7 +4,6 @@ import tempfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
@@ -35,6 +34,7 @@ from pydantic.json_schema import GenerateJsonSchema, JsonSchemaMode
 
 from flameox import __version__
 from flameox.action_graph import (
+    ACTION_BY_TOOL_NAME,
     ACTION_REGISTRY,
     ARTIFACT_PREVIEW_MAX_BYTES,
     ARTIFACT_PREVIEW_MAX_LINES,
@@ -47,37 +47,67 @@ from flameox.action_graph import (
     manual_action,
     tool_action,
 )
-from flameox.adapters import (
+from flameox.adapters.benchmark_samples import (
     BenchmarkSamplesExtractionResult,
     BenchmarkSamplesExtractor,
-    ComputeSanitizerCaptureOptions,
+)
+from flameox.adapters.compute_sanitizer import (
     ComputeSanitizerExtractionResult,
     ComputeSanitizerExtractor,
+)
+from flameox.adapters.coverage import (
     CoverageExtractionResult,
     CoverageExtractor,
+)
+from flameox.adapters.inference import (
     InferenceArtifactExtractor,
     InferenceExtractionResult,
+)
+from flameox.adapters.kernel_validation import (
     KernelValidationExtractionResult,
     KernelValidationExtractor,
+)
+from flameox.adapters.memray_options import MemrayCaptureOptions
+from flameox.adapters.nsight_compute import (
     NsightComputeExtractionResult,
     NsightComputeExtractor,
+)
+from flameox.adapters.nsight_compute_options import NsightComputeOptions
+from flameox.adapters.nsight_systems import (
     NsightSystemsExtractionResult,
     NsightSystemsExtractor,
+)
+from flameox.adapters.nvbench import (
     NvbenchExtractionResult,
     NvbenchExtractor,
+)
+from flameox.adapters.observations import (
     ObservationExtractionResult,
     ObservationExtractor,
+)
+from flameox.adapters.options import ComputeSanitizerCaptureOptions
+from flameox.adapters.perfetto import (
     PerfettoExtractionResult,
     PerfettoExtractor,
+)
+from flameox.adapters.pyperf import (
     PyPerfExtractionResult,
     PyPerfExtractor,
+)
+from flameox.adapters.pytest import (
     PytestExtractionResult,
     PytestExtractor,
+)
+from flameox.adapters.python_startup import (
     PythonStartupExtractionResult,
     PythonStartupExtractor,
-    TorchProfilerCaptureOptions,
+)
+from flameox.adapters.torch_profiler import TorchProfilerCaptureOptions
+from flameox.adapters.v8_cpu_prof import (
     V8CpuProfExtractionResult,
     V8CpuProfExtractor,
+)
+from flameox.adapters.v8_heap_prof import (
     V8HeapProfExtractionResult,
     V8HeapProfExtractor,
 )
@@ -90,145 +120,223 @@ from flameox.analysis import (
     HotspotResult,
     MemoryAnalysisResult,
     MemoryFrameQuery,
+    NsightComputeAnalysisResult,
     PyTorchAnalysisResult,
     RecipeService,
     ScalingAnalysisResult,
 )
 from flameox.analysis.recipe_execution import execution_query_scope_digest
-from flameox.application import (
-    AdapterPreparationResult,
-    AgentRunProjection,
+from flameox.application.analysis_records import (
     AnalysisMaterializationService,
+    MaterializeAnalysisRequest,
+)
+from flameox.application.artifacts import (
     ArtifactListResult,
     ArtifactMetadataResult,
-    ArtifactPipeline,
-    ArtifactPipelineService,
     ArtifactReductionListResult,
     ArtifactService,
     ArtifactTextPreview,
-    CallEdgeResult,
+)
+from flameox.application.async_work import run_atomic_thread
+from flameox.application.capabilities import (
+    AdapterPreparationResult,
     CapabilityList,
     CapabilityService,
     CapabilitySetupManager,
+    managed_setup_adapter_names,
+)
+from flameox.application.capture import (
     CapturePlanRegistry,
     CaptureService,
+)
+from flameox.application.comparisons import (
     CompareRunSetsRequest,
     ComparisonResult,
     ComparisonService,
-    ConfigurationOperation,
-    ConfigureInferenceScenarioRequest,
-    ConfigureInferenceServerRequest,
-    ConfigureWorkloadRequest,
-    CreateInvestigationRequest,
-    DeclaredWorkflowDetail,
-    DeclaredWorkflowKind,
-    DeclaredWorkflowList,
+    FreezeRunSetRequest,
+    RunSetService,
+)
+from flameox.application.dependencies import (
+    WorkloadDependencyService,
+    WorkloadDependencySetupResult,
+)
+from flameox.application.detached import (
     DetachedCaptureManager,
     DetachedCaptureStatus,
+)
+from flameox.application.discovery import (
+    RunDiscoveryService,
+    RunFilter,
+    RunListResult,
+)
+from flameox.application.drilldown import (
+    CallEdgeResult,
     DrilldownService,
+    StackExamplesResult,
+)
+from flameox.application.evidence_lookup import (
     EvidenceLookupResult,
     EvidenceLookupService,
+)
+from flameox.application.evidence_query import (
     EvidenceQueryService,
-    EvidenceSummaryBundle,
-    EvidenceSummaryRequest,
-    EvidenceSummaryService,
-    ExecutionPolicy,
+    InferenceRequestQueryResult,
+    MeasurementQueryResult,
+)
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.experiments import (
     ExperimentPlan,
     ExperimentPlanRegistry,
     ExperimentService,
+    ExperimentStatus,
     ExperimentTrialCollection,
-    ExtractionManager,
+)
+from flameox.application.extractions import ExtractionManager
+from flameox.application.faults import (
     FaultExperimentPlan,
     FaultExperimentResult,
     FaultExperimentService,
-    FindingListResult,
-    FindingResult,
-    FindingService,
-    FreezeRunSetRequest,
+)
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportProfile,
     ImportService,
-    InferenceConfigurationList,
-    InferenceConfigurationResult,
-    InferenceEndpointType,
+    QualifyArtifactImportRequest,
+)
+from flameox.application.inference import (
+    InferenceScenarioPlan,
+    InferenceScenarioResult,
+    InferenceScenarioService,
+)
+from flameox.application.inference_profiling import (
     InferenceProfilingPlan,
     InferenceProfilingResult,
     InferenceProfilingService,
-    InferenceReplayPlan,
-    InferenceReplayResult,
-    InferenceReplayService,
-    InferenceRequestQueryResult,
+    SupportedInferenceProfiler,
+)
+from flameox.application.inference_providers import (
+    InferenceEndpointType,
     InferenceScenarioProvider,
     InferenceServerMode,
     InferenceServerProvider,
+)
+from flameox.application.integrity import (
     IntegrityLevel,
     IntegrityResult,
     IntegrityService,
-    InvestigationListResult,
-    InvestigationService,
+)
+from flameox.application.kernel_builds import (
     KernelBuildImportResult,
     KernelBuildImportService,
+)
+from flameox.application.kernel_validation import (
+    KernelValidationRegistrationService,
+    RegisterKernelValidationRequest,
+    RegisterKernelValidationResult,
+)
+from flameox.application.kernel_validation_comparisons import (
     KernelValidationCompareRequest,
     KernelValidationComparisonResult,
     KernelValidationComparisonService,
-    KernelValidationRegistrationService,
+)
+from flameox.application.lifecycle import (
     LifecycleEvidenceService,
     LifecycleQueryResult,
-    MaterializeAnalysisRequest,
-    MeasurementQueryResult,
-    NativeViewerPlan,
-    NativeViewerService,
+    ProcessSnapshotQueryResult,
+)
+from flameox.application.nvbench_imports import (
     NvbenchImportResult,
     NvbenchImportService,
+)
+from flameox.application.operations import OperationStatus
+from flameox.application.otlp import (
     OtlpExtractionResult,
     OtlpTraceService,
+)
+from flameox.application.pipelines import (
+    ArtifactPipeline,
+    ArtifactPipelineService,
     PipelineComparison,
     PipelineDetail,
     PipelineFilter,
     PipelineListResult,
-    PlanReductionRequest,
-    ProcessSnapshotQueryResult,
-    QualifyArtifactImportRequest,
+    RegisterPipelineRequest,
+)
+from flameox.application.records import (
+    CreateInvestigationRequest,
+    FindingListResult,
+    FindingResult,
+    FindingService,
+    InvestigationListResult,
+    InvestigationService,
     RecordFindingRequest,
     RecordHypothesisRequest,
+)
+from flameox.application.reductions import (
+    PlanReductionRequest,
     ReductionPlan,
     ReductionResult,
     ReductionService,
-    RegisterKernelValidationRequest,
-    RegisterKernelValidationResult,
-    RegisterPipelineRequest,
-    RunDiscoveryService,
-    RunFilter,
-    RunListResult,
+)
+from flameox.application.run_projection import (
+    AgentRunProjection,
     RunProjectionService,
-    RunSetService,
-    Scalar,
-    StackExamplesResult,
-    SupportedInferenceProfiler,
+)
+from flameox.application.static_analysis import (
+    ImportStaticAnalysisRequest,
+    StaticAnalysisCoverage,
+    StaticAnalysisSemanticsProjection,
+    StaticAnalysisService,
+    StaticCandidateQueryResult,
+)
+from flameox.application.status import (
+    WorkspaceStatus,
+    workspace_status,
+)
+from flameox.application.summaries import (
+    EvidenceSummaryBundle,
+    EvidenceSummaryRequest,
+    EvidenceSummaryService,
+)
+from flameox.application.task_supervisor import TaskSupervisor
+from flameox.application.trace_windows import (
     TraceWindowResult,
     TraceWindowService,
+)
+from flameox.application.triton_autotune import (
+    TritonAutotuneSelectionQueryResult,
+    TritonAutotuneService,
+)
+from flameox.application.viewers import (
+    NativeViewerPlan,
+    NativeViewerService,
+)
+from flameox.application.workloads import (
+    ConfigurationOperation,
+    ConfigureInferenceScenarioRequest,
+    ConfigureInferenceServerRequest,
+    ConfigureWorkloadRequest,
+    DeclaredWorkflowDetail,
+    DeclaredWorkflowKind,
+    DeclaredWorkflowList,
+    InferenceConfigurationList,
+    InferenceConfigurationResult,
+    Scalar,
     WorkloadConfig,
     WorkloadConfigurationResult,
     WorkloadConfigurationStatus,
-    WorkloadDependencyService,
-    WorkloadDependencySetupResult,
     WorkloadIdentityConfig,
     WorkloadOracleConfig,
     WorkloadRequirementsConfig,
     WorkloadService,
-    WorkspaceStatus,
+    parse_inference_scenario_config,
+    parse_inference_server_config,
+)
+from flameox.application.xctrace import (
     XctraceImportRequest,
     XctraceImportResult,
     XctraceService,
-    managed_setup_adapter_names,
-    parse_inference_scenario_config,
-    parse_inference_server_config,
-    safe_run_semantics,
-    workspace_status,
 )
-from flameox.application.async_work import run_atomic_thread
-from flameox.application.operations import OperationStatus
-from flameox.application.task_supervisor import TaskSupervisor
 from flameox.catalog import Catalog
 from flameox.domain import (
     ArtifactKind,
@@ -238,11 +346,9 @@ from flameox.domain import (
     ErrorCode,
     EvidenceReferenceType,
     ExecutionStatus,
-    Experiment,
     ExperimentOutcomeDisposition,
     ExperimentOutcomeMethod,
     ExternalExecutionContext,
-    Finding,
     Hypothesis,
     Investigation,
     LimitationDetail,
@@ -256,7 +362,7 @@ from flameox.domain import (
 )
 from flameox.mcp.resources import register_resources
 from flameox.models import ContractModel
-from flameox.storage import Workspace
+from flameox.storage import RunStore, Workspace
 
 _MANAGED_SETUP_ADAPTERS = managed_setup_adapter_names()
 _DEFAULT_MEMORY_QUERY = MemoryFrameQuery()
@@ -332,114 +438,60 @@ def _action_tool[Handler: Callable[..., Any]](
     )
 
 
-class WorkspaceValidationMode(StrEnum):
-    STANDARD = "standard"
-    FULL = "full"
-
-
-class RepeatSameCallRecovery(ContractModel):
-    kind: Literal["repeat_same_call"]
+class RetryRecovery(ContractModel):
+    kind: Literal["repeat_same_call", "wait_then_repeat"]
     safe_to_repeat_same_call: Literal[True] = True
     retry_after_ms: int = Field(ge=0)
-    next_tool: None = None
-
-
-class WaitThenRepeatRecovery(ContractModel):
-    kind: Literal["wait_then_repeat"]
-    safe_to_repeat_same_call: Literal[True] = True
-    retry_after_ms: int = Field(ge=0)
-    next_tool: None = None
 
 
 class RecoveryToolAction(ContractModel):
-    """Transport projection of a validated domain tool action."""
+    """One executable MCP recovery action with a concrete tool name."""
 
     kind: Literal["tool"] = "tool"
-    action: ActionId
+    safe_to_repeat_same_call: Literal[False] = False
+    retry_after_ms: None = None
+    tool_name: ToolName
     arguments: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def arguments_match_registered_action(self) -> RecoveryToolAction:
-        ACTION_REGISTRY[self.action].validate_arguments(self.arguments)
+        ACTION_REGISTRY[ACTION_BY_TOOL_NAME[self.tool_name]].validate_arguments(self.arguments)
         return self
-
-    @property
-    def tool_name(self) -> ToolName:
-        return ACTION_REGISTRY[self.action].tool_name
 
     @classmethod
     def from_domain(cls, action: ToolAction) -> RecoveryToolAction:
-        return cls(action=action.action, arguments=action.arguments)
+        return cls(
+            tool_name=ACTION_REGISTRY[action.action].tool_name,
+            arguments=action.arguments,
+        )
 
 
 class RecoveryManualAction(ContractModel):
     kind: Literal["manual"] = "manual"
+    safe_to_repeat_same_call: Literal[False] = False
+    retry_after_ms: None = None
     instruction: str = Field(min_length=1, max_length=500)
-    suggested_action: ActionId | None = None
     missing_arguments: tuple[str, ...] = ()
 
     @classmethod
     def from_domain(cls, action: ManualAction) -> RecoveryManualAction:
-        return cls.model_validate(action.model_dump(mode="json"))
+        return cls(instruction=action.instruction, missing_arguments=action.missing_arguments)
 
 
 class RecoveryExternalAction(ContractModel):
     kind: Literal["external"] = "external"
+    safe_to_repeat_same_call: Literal[False] = False
+    retry_after_ms: None = None
     instruction: str = Field(min_length=1, max_length=500)
     system: str = Field(min_length=1, max_length=100)
 
     @classmethod
     def from_domain(cls, action: ExternalAction) -> RecoveryExternalAction:
-        return cls.model_validate(action.model_dump(mode="json"))
-
-
-class ToolActionRecovery(ContractModel):
-    kind: Literal["tool_action"] = "tool_action"
-    safe_to_repeat_same_call: Literal[False] = False
-    retry_after_ms: None = None
-    action: RecoveryToolAction
-    next_tool: ToolName
-    next_arguments: dict[str, Any]
-
-    @model_validator(mode="after")
-    def projections_match_action(self) -> ToolActionRecovery:
-        if self.next_tool is not self.action.tool_name:
-            raise ValueError("recovery tool projection does not match action registry")
-        if self.next_arguments != self.action.arguments:
-            raise ValueError("recovery argument projection does not match validated action")
-        return self
-
-    @classmethod
-    def from_action(cls, action: ToolAction) -> ToolActionRecovery:
-        projected = RecoveryToolAction.from_domain(action)
-        return cls(
-            action=projected,
-            next_tool=projected.tool_name,
-            next_arguments=projected.arguments,
-        )
-
-
-class ManualRecovery(ContractModel):
-    kind: Literal["manual"]
-    safe_to_repeat_same_call: Literal[False] = False
-    retry_after_ms: None = None
-    next_tool: None = None
-    action: RecoveryManualAction | RecoveryExternalAction | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-
-    @classmethod
-    def from_action(cls, action: ManualAction | ExternalAction) -> ManualRecovery:
-        projected: RecoveryManualAction | RecoveryExternalAction
-        if isinstance(action, ManualAction):
-            projected = RecoveryManualAction.from_domain(action)
-        else:
-            projected = RecoveryExternalAction.from_domain(action)
-        return cls(kind="manual", action=projected)
+        return cls(instruction=action.instruction, system=action.system)
 
 
 type RecoveryAction = Annotated[
-    RepeatSameCallRecovery | WaitThenRepeatRecovery | ToolActionRecovery | ManualRecovery,
+    RetryRecovery | RecoveryToolAction | RecoveryManualAction | RecoveryExternalAction,
     Field(discriminator="kind"),
 ]
 
@@ -478,7 +530,6 @@ class ToolPayload[T: BaseModel](
 
     model_config = ConfigDict(
         json_schema_extra={"type": "object"},
-        json_schema_mode_override="serialization",
     )
 
     @classmethod
@@ -491,7 +542,7 @@ class ToolPayload[T: BaseModel](
         *,
         union_format: Literal["any_of", "primitive_type_array"] = "any_of",
     ) -> dict[str, Any]:
-        """Expose this response-only contract in serialization mode to the MCP SDK."""
+        """Use the response schema when MCP asks Pydantic for a validation schema."""
 
         del mode
         return super().model_json_schema(
@@ -522,7 +573,7 @@ class CaptureReceipt(ContractModel):
     corpus_commit_id: str
     resource_uri: str
     semantics: RunSemanticsProjection
-    recovery: NextAction | None = None
+    recovery: RecoveryAction | None = None
 
 
 class ImportReceipt(ContractModel):
@@ -532,6 +583,22 @@ class ImportReceipt(ContractModel):
     run_resource_uri: str
     artifact_resource_uri: str
     semantics: RunSemanticsProjection
+
+
+class StaticAnalysisImportReceipt(ContractModel):
+    """Bounded SARIF import result; run and artifact resources remain authoritative."""
+
+    run_id: str
+    artifact_id: str
+    corpus_commit_id: str
+    source_state_id: str | None
+    coverage: StaticAnalysisCoverage
+    limitations: tuple[str, ...]
+    first_page: StaticCandidateQueryResult
+    run_resource_uri: str
+    artifact_resource_uri: str
+    candidates_resource_uri: str
+    semantics: StaticAnalysisSemanticsProjection
 
 
 class ExperimentReceipt(ContractModel):
@@ -656,8 +723,8 @@ def _success[T: BaseModel](
 def _failure(error: DomainError) -> CallToolResult:
     recovery = _recovery_for(error)
     visible_message = error.message
-    if recovery.next_tool is not None:
-        visible_message += f" Next tool: {recovery.next_tool}."
+    if isinstance(recovery, RecoveryToolAction):
+        visible_message += f" Next tool: {recovery.tool_name}."
     if error.remediation:
         visible_message += f" {error.remediation[0]}"
     payload = FailurePayload(
@@ -704,7 +771,7 @@ def _invalid_arguments(
             details={"fields": list(fields)},
             remediation=remediation,
             run_id=None,
-            recovery=ManualRecovery.from_action(manual_action(remediation[0])),
+            recovery=RecoveryManualAction.from_domain(manual_action(remediation[0])),
         ),
     )
     return CallToolResult(
@@ -715,18 +782,16 @@ def _invalid_arguments(
 
 
 def _recovery_for(error: DomainError) -> RecoveryAction:
-    if isinstance(error.next_action, ToolAction):
-        return ToolActionRecovery.from_action(error.next_action)
-    if isinstance(error.next_action, (ManualAction, ExternalAction)):
-        return ManualRecovery.from_action(error.next_action)
+    if error.next_action is not None:
+        return _recovery_from_domain_action(error.next_action)
     if error.code is ErrorCode.RUN_NOT_FOUND or error.details.get("missing_entity") == "run":
-        return ToolActionRecovery.from_action(tool_action(ActionId.LIST_RUNS))
+        return RecoveryToolAction.from_domain(tool_action(ActionId.LIST_RUNS))
     if error.details.get("missing_entity") == "artifact":
-        return ToolActionRecovery.from_action(tool_action(ActionId.LIST_ARTIFACTS))
+        return RecoveryToolAction.from_domain(tool_action(ActionId.LIST_ARTIFACTS))
     if error.code is ErrorCode.WORKSPACE_NOT_FOUND:
-        return ToolActionRecovery.from_action(tool_action(ActionId.INITIALIZE_WORKSPACE))
+        return RecoveryToolAction.from_domain(tool_action(ActionId.INITIALIZE_WORKSPACE))
     if error.code is ErrorCode.CAPABILITY_UNAVAILABLE:
-        return ToolActionRecovery.from_action(tool_action(ActionId.INSPECT_CAPABILITIES))
+        return RecoveryToolAction.from_domain(tool_action(ActionId.INSPECT_CAPABILITIES))
     if error.code in {
         ErrorCode.INVALID_CAPTURE_PLAN,
         ErrorCode.PLAN_TOKEN_UNKNOWN,
@@ -734,7 +799,7 @@ def _recovery_for(error: DomainError) -> RecoveryAction:
         ErrorCode.PLAN_TOKEN_CONSUMED,
         ErrorCode.PROCESS_TIMEOUT,
     }:
-        return ManualRecovery.from_action(
+        return RecoveryManualAction.from_domain(
             manual_action(
                 "Inspect the declared workload and supply a complete capture plan request.",
                 suggested_action=ActionId.PLAN_CAPTURE,
@@ -742,24 +807,24 @@ def _recovery_for(error: DomainError) -> RecoveryAction:
             )
         )
     if error.code is ErrorCode.WRITE_LOCK_TIMEOUT:
-        return WaitThenRepeatRecovery(
-            kind="wait_then_repeat",
-            safe_to_repeat_same_call=True,
-            retry_after_ms=100,
-        )
+        return RetryRecovery(kind="wait_then_repeat", retry_after_ms=100)
     if error.retryable:
-        return RepeatSameCallRecovery(
-            kind="repeat_same_call",
-            safe_to_repeat_same_call=True,
-            retry_after_ms=250,
-        )
-    return ManualRecovery.from_action(
+        return RetryRecovery(kind="repeat_same_call", retry_after_ms=250)
+    return RecoveryManualAction.from_domain(
         manual_action(
             error.remediation[0]
             if error.remediation
             else "Inspect the failure details and choose a safe next step.",
         )
     )
+
+
+def _recovery_from_domain_action(action: NextAction) -> RecoveryAction:
+    if isinstance(action, ToolAction):
+        return RecoveryToolAction.from_domain(action)
+    if isinstance(action, ManualAction):
+        return RecoveryManualAction.from_domain(action)
+    return RecoveryExternalAction.from_domain(action)
 
 
 def _safe_import_path(
@@ -803,6 +868,38 @@ def _safe_import_path(
             ),
         ) from exc
     return candidate
+
+
+def _safe_project_directory(project_root: Path, value: str) -> Path:
+    if "\x00" in value:
+        raise DomainError(
+            code=ErrorCode.EXECUTION_REFUSED,
+            message="MCP source-root paths cannot contain NUL bytes.",
+            remediation=("Provide an existing directory beneath the fixed project root.",),
+        )
+    root = project_root.resolve()
+    raw = Path(value)
+    candidate = raw if raw.is_absolute() else root / raw
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root)
+    except (OSError, ValueError) as error:
+        raise DomainError(
+            code=ErrorCode.EXECUTION_REFUSED,
+            message=(
+                "The declared source root must be an existing directory inside the project root."
+            ),
+            remediation=(
+                "Provide a project-relative source_root without traversal or symlink escape.",
+            ),
+        ) from error
+    if not resolved.is_dir():
+        raise DomainError(
+            code=ErrorCode.INVALID_ARGUMENTS,
+            message="The declared source root must be a directory.",
+            remediation=("Provide an existing project-relative directory for source_root.",),
+        )
+    return resolved
 
 
 def create_server(
@@ -1102,11 +1199,18 @@ def create_server(
         provider: InferenceServerProvider = InferenceServerProvider.VLLM,
         benchmark_python: Annotated[
             str | None,
-            Field(description="Absolute SGLang Python launcher; required only for sglang."),
+            Field(
+                description=(
+                    "Absolute Python launcher for sglang.benchmark.serving; it may differ from "
+                    "the server runtime and is required only for sglang."
+                )
+            ),
         ] = None,
         workload: Annotated[
             str | None,
-            Field(description="Declared workload that starts vLLM; required for managed mode."),
+            Field(
+                description="Declared workload that starts the server; required for managed mode."
+            ),
         ] = None,
         base_url: Annotated[
             str,
@@ -1120,7 +1224,7 @@ def create_server(
             str | None, Field(pattern=r"^sha256:[0-9a-f]{64}$")
         ] = None,
     ) -> Annotated[CallToolResult, ToolPayload[InferenceConfigurationResult]]:
-        """Create or replace one validated vLLM server declaration without starting it."""
+        """Create or replace a local inference-server declaration without starting it."""
         try:
             result = WorkloadService(
                 ctx.request_context.lifespan_context.require_workspace()
@@ -1192,7 +1296,7 @@ def create_server(
             str | None, Field(pattern=r"^sha256:[0-9a-f]{64}$")
         ] = None,
     ) -> Annotated[CallToolResult, ToolPayload[InferenceConfigurationResult]]:
-        """Create or replace one typed inference replay scenario without executing it."""
+        """Create a bounded generic benchmark scenario, not a provider rollout replay engine."""
         try:
             result = WorkloadService(
                 ctx.request_context.lifespan_context.require_workspace()
@@ -1248,10 +1352,10 @@ def create_server(
         scenario_name: Annotated[str, Field(min_length=1, max_length=100)],
         ctx: Context[AppContext],
         timeout_seconds: Annotated[StrictFloat | None, Field(gt=0, le=86_400)] = None,
-    ) -> Annotated[CallToolResult, ToolPayload[InferenceReplayPlan]]:
-        """Preflight a managed or existing-local server and construct a typed replay plan."""
+    ) -> Annotated[CallToolResult, ToolPayload[InferenceScenarioPlan]]:
+        """Qualify one benchmark launcher and construct a typed execution plan."""
         try:
-            result = InferenceReplayService(
+            result = InferenceScenarioService(
                 ctx.request_context.lifespan_context.require_workspace()
             ).plan(scenario_name, timeout_seconds=timeout_seconds)
             return _success(
@@ -1268,10 +1372,10 @@ def create_server(
         plan_token: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
         ctx: Context[AppContext],
         expected_plan_id: Annotated[str | None, Field(pattern=r"^sha256:[0-9a-f]{64}$")] = None,
-    ) -> Annotated[CallToolResult, ToolPayload[InferenceReplayResult]]:
-        """Plan and execute one bounded replay against a managed or existing-local server."""
+    ) -> Annotated[CallToolResult, ToolPayload[InferenceScenarioResult]]:
+        """Execute one qualified generic benchmark against a managed or existing-local server."""
         try:
-            service = InferenceReplayService(
+            service = InferenceScenarioService(
                 ctx.request_context.lifespan_context.require_workspace()
             )
             result = await service.run(
@@ -1289,7 +1393,7 @@ def create_server(
         limit: Annotated[StrictInt | None, Field(ge=1, le=1_000)] = None,
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[InferenceRequestQueryResult]]:
-        """Page through bounded normalized inference requests without prompt or error text."""
+        """Page through prompt-free requests with one typed outcome and no derived status fields."""
         try:
             result = EvidenceQueryService(
                 ctx.request_context.lifespan_context.require_workspace()
@@ -1615,6 +1719,8 @@ def create_server(
         capture_mode: Literal["auto", "managed", "trusted_local"] = "auto",
         external_context: ExternalExecutionContext | None = None,
         compute_sanitizer_options: ComputeSanitizerCaptureOptions | None = None,
+        nsight_compute_options: NsightComputeOptions | None = None,
+        memray_options: MemrayCaptureOptions | None = None,
         torch_profiler_options: TorchProfilerCaptureOptions | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[CapturePlan]]:
         """Bind one current capture without running it.
@@ -1631,11 +1737,45 @@ def create_server(
                     ErrorCode.INVALID_CAPTURE_PLAN,
                     "compute_sanitizer_options require adapter='compute-sanitizer'.",
                 )
-            if compute_sanitizer_options is not None and torch_profiler_options is not None:
+            if nsight_compute_options is not None and adapter != "nsight.compute":
+                raise DomainError(
+                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    "nsight_compute_options require adapter='nsight.compute'.",
+                )
+            if memray_options is not None and adapter != "memray":
+                raise DomainError(
+                    ErrorCode.INVALID_CAPTURE_PLAN,
+                    "memray_options require adapter='memray'.",
+                )
+            if (
+                sum(
+                    option is not None
+                    for option in (
+                        compute_sanitizer_options,
+                        nsight_compute_options,
+                        memray_options,
+                        torch_profiler_options,
+                    )
+                )
+                > 1
+            ):
                 raise DomainError(
                     ErrorCode.INVALID_CAPTURE_PLAN,
                     "Select options for exactly one capture adapter.",
                 )
+            adapter_options = next(
+                (
+                    option
+                    for option in (
+                        compute_sanitizer_options,
+                        nsight_compute_options,
+                        memray_options,
+                        torch_profiler_options,
+                    )
+                    if option is not None
+                ),
+                None,
+            )
             execution_policy = (
                 ExecutionPolicy.APPROVED_AGENT
                 if capture_mode == "managed"
@@ -1649,13 +1789,7 @@ def create_server(
                 preflight_mode=preflight_mode,
                 external_context=external_context,
                 adapter_options=(
-                    compute_sanitizer_options.model_dump(mode="json")
-                    if compute_sanitizer_options is not None
-                    else (
-                        torch_profiler_options.model_dump(mode="json")
-                        if torch_profiler_options is not None
-                        else None
-                    )
+                    adapter_options.model_dump(mode="json") if adapter_options is not None else None
                 ),
             )
             return _success(
@@ -1683,6 +1817,16 @@ def create_server(
                     compute_sanitizer_options=(
                         compute_sanitizer_options.model_dump(mode="json")
                         if compute_sanitizer_options is not None
+                        else None
+                    ),
+                    nsight_compute_options=(
+                        nsight_compute_options.model_dump(mode="json")
+                        if nsight_compute_options is not None
+                        else None
+                    ),
+                    memray_options=(
+                        memray_options.model_dump(mode="json")
+                        if memray_options is not None
                         else None
                     ),
                     torch_profiler_options=(
@@ -1741,8 +1885,12 @@ def create_server(
                 ),
                 corpus_commit_id=result.corpus_commit_id,
                 resource_uri=resource_uri,
-                semantics=safe_run_semantics(result.run),
-                recovery=result.recovery,
+                semantics=RunSemanticsProjection.from_semantics(result.run.semantics),
+                recovery=(
+                    _recovery_from_domain_action(result.recovery)
+                    if result.recovery is not None
+                    else None
+                ),
             )
             return _success(
                 receipt,
@@ -1762,6 +1910,21 @@ def create_server(
                             mime_type="application/json",
                         )
                         for pipeline_id in result.pipeline_ids[:20]
+                    ),
+                    *(
+                        (
+                            ResourceLink(
+                                name=f"Triton autotune selections for {result.run.run_id}",
+                                uri=(f"flameox://triton-autotune/{result.run.run_id}/selections"),
+                                description=(
+                                    "Bounded provider-reported autotune candidates and selected "
+                                    "configuration."
+                                ),
+                                mime_type="application/json",
+                            ),
+                        )
+                        if result.run.semantics.adapter == "triton.compiler"
+                        else ()
                     ),
                 ),
             )
@@ -1880,8 +2043,8 @@ def create_server(
             attempted_trials = sum(trial.outcome != "unattempted" for trial in result.trials)
             trial_collection_uri = f"{resource_uri}/trials"
             first_failure_trial_id = (
-                result.outcome.first_failure_trial_id
-                if result.outcome is not None
+                result.outcome.first_failure.trial_id
+                if result.outcome is not None and result.outcome.first_failure is not None
                 else next(
                     (
                         trial.trial_id
@@ -2099,13 +2262,13 @@ def create_server(
     async def get_experiment_tool(
         experiment_id: str,
         ctx: Context[AppContext],
-    ) -> Annotated[CallToolResult, ToolPayload[Experiment]]:
-        """Return one immutable experiment protocol."""
+    ) -> Annotated[CallToolResult, ToolPayload[ExperimentStatus]]:
+        """Reconstruct one bounded experiment outcome from durable evidence."""
         try:
             result = ExperimentService(
                 ctx.request_context.lifespan_context.require_workspace()
-            ).experiments.read(experiment_id)
-            return _success(result, f"Loaded experiment {experiment_id}.")
+            ).status(experiment_id)
+            return _success(result, f"Reconstructed experiment {experiment_id}.")
         except DomainError as error:
             return _failure(error)
 
@@ -2241,6 +2404,167 @@ def create_server(
                         name=f"Artifact {result.artifact_id}",
                         uri=artifact_uri,
                         description="Imported artifact metadata.",
+                        mime_type="application/json",
+                    ),
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="import_static_analysis", annotations=ADDITIVE)
+    async def import_static_analysis_tool(
+        path: Annotated[
+            str,
+            Field(
+                description=(
+                    "SARIF report path relative to the fixed project root, or an absolute path "
+                    "already inside it."
+                )
+            ),
+        ],
+        ctx: Context[AppContext],
+        source_root: Annotated[
+            str,
+            Field(
+                description=(
+                    "Existing source directory relative to the fixed project root. Every "
+                    "normalized SARIF location is validated against this exact root."
+                ),
+                min_length=1,
+                max_length=4_096,
+            ),
+        ] = ".",
+        include_paths: Annotated[tuple[str, ...], Field(max_length=128)] = (),
+        exclude_paths: Annotated[tuple[str, ...], Field(max_length=128)] = (),
+        sensitivity: Sensitivity = Sensitivity.INTERNAL,
+    ) -> Annotated[CallToolResult, ToolPayload[StaticAnalysisImportReceipt]]:
+        """Preserve one native SARIF 2.1.0 report and project bounded static candidates.
+
+        The native report remains an immutable analysis-result artifact. Static candidates are
+        source-scoped analyzer output, not Findings or confirmation of runtime behavior.
+        """
+        try:
+            state = ctx.request_context.lifespan_context
+            workspace = state.require_workspace()
+            result = await run_atomic_thread(
+                lambda: StaticAnalysisService(workspace).import_sarif(
+                    ImportStaticAnalysisRequest(
+                        path=_safe_import_path(state.project_root, path, "project"),
+                        source_root=_safe_project_directory(state.project_root, source_root),
+                        include_paths=include_paths,
+                        exclude_paths=exclude_paths,
+                        sensitivity=sensitivity,
+                    )
+                )
+            )
+            run = RunStore(workspace).read(result.run_id)
+            run_uri = f"flameox://runs/{result.run_id}"
+            artifact_uri = f"flameox://artifacts/{result.artifact_id}"
+            candidates_uri = f"flameox://static-analysis/{result.run_id}/candidates"
+            receipt = StaticAnalysisImportReceipt(
+                run_id=result.run_id,
+                artifact_id=result.artifact_id,
+                corpus_commit_id=result.corpus_commit_id,
+                source_state_id=run.source_state_id,
+                coverage=result.coverage,
+                limitations=result.limitations,
+                first_page=result.first_page,
+                run_resource_uri=run_uri,
+                artifact_resource_uri=artifact_uri,
+                candidates_resource_uri=candidates_uri,
+                semantics=result.semantics,
+            )
+            return _success(
+                receipt,
+                f"Imported SARIF artifact {result.artifact_id} with "
+                f"{result.coverage.normalized_count} static candidates.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Run {result.run_id}",
+                        uri=run_uri,
+                        description="Authoritative static-analysis import run semantics.",
+                        mime_type="application/json",
+                    ),
+                    ResourceLink(
+                        name=f"Artifact {result.artifact_id}",
+                        uri=artifact_uri,
+                        description="Immutable provider-native SARIF artifact metadata.",
+                        mime_type="application/json",
+                    ),
+                    ResourceLink(
+                        name=f"Static candidates for {result.run_id}",
+                        uri=candidates_uri,
+                        description=(
+                            "Bounded static-candidate collection with an opaque next cursor."
+                        ),
+                        mime_type="application/json",
+                    ),
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="query_static_candidates", annotations=READ_ONLY)
+    async def query_static_candidates_tool(
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        limit: Annotated[StrictInt, Field(ge=1, le=1_000)],
+        ctx: Context[AppContext],
+        cursor: Annotated[str | None, Field(max_length=4_096)] = None,
+    ) -> Annotated[CallToolResult, ToolPayload[StaticCandidateQueryResult]]:
+        """Return one cursor-bounded page of source-scoped static candidates."""
+        try:
+            workspace = ctx.request_context.lifespan_context.require_workspace()
+            result = await run_atomic_thread(
+                lambda: StaticAnalysisService(workspace).candidates(
+                    run_id=run_id,
+                    limit=limit,
+                    cursor=cursor,
+                )
+            )
+            resource_uri = f"flameox://static-analysis/{run_id}/candidates"
+            return _success(
+                result,
+                f"Returned {result.returned} static candidates for run {run_id}.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Static candidates for {run_id}",
+                        uri=resource_uri,
+                        description=(
+                            "Bounded static-candidate collection from the current snapshot."
+                        ),
+                        mime_type="application/json",
+                    ),
+                ),
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @server.tool(name="query_triton_autotune_selections", annotations=READ_ONLY)
+    async def query_triton_autotune_selections_tool(
+        run_id: Annotated[str, Field(min_length=1, max_length=200)],
+        limit: Annotated[StrictInt, Field(ge=1, le=64)],
+        ctx: Context[AppContext],
+        cursor: Annotated[str | None, Field(max_length=4_096)] = None,
+    ) -> Annotated[CallToolResult, ToolPayload[TritonAutotuneSelectionQueryResult]]:
+        """Return one cursor-bounded page of provider-reported Triton autotune selections."""
+        try:
+            workspace = ctx.request_context.lifespan_context.require_workspace()
+            result = await run_atomic_thread(
+                lambda: TritonAutotuneService(workspace).selections(
+                    run_id=run_id,
+                    limit=limit,
+                    cursor=cursor,
+                )
+            )
+            resource_uri = f"flameox://triton-autotune/{run_id}/selections"
+            return _success(
+                result,
+                f"Returned {result.returned} Triton autotune selections for run {run_id}.",
+                resource_links=(
+                    ResourceLink(
+                        name=f"Triton autotune selections for {run_id}",
+                        uri=resource_uri,
+                        description="Bounded provider-reported selection evidence.",
                         mime_type="application/json",
                     ),
                 ),
@@ -2424,7 +2748,7 @@ def create_server(
         ctx: Context[AppContext],
         source_root: Literal["project", "temp"] = "project",
     ) -> Annotated[CallToolResult, ToolPayload[KernelBuildImportResult]]:
-        """Import declared native compiler files and register the existing pipeline model."""
+        """Import native compiler evidence and register one lineage per dump group."""
         try:
             state = ctx.request_context.lifespan_context
             result = await run_atomic_thread(
@@ -2436,7 +2760,7 @@ def create_server(
             )
             return _success(
                 result,
-                f"Imported kernel-build pipeline {result.pipeline.pipeline_id}.",
+                f"Imported kernel-build evidence with {len(result.pipeline_ids)} pipeline(s).",
                 resource_links=(
                     ResourceLink(
                         name=f"Run {result.run.run_id}",
@@ -2444,11 +2768,14 @@ def create_server(
                         description="Immutable kernel-build import run.",
                         mime_type="application/json",
                     ),
-                    ResourceLink(
-                        name=f"Pipeline {result.pipeline.pipeline_id}",
-                        uri=f"flameox://pipelines/{result.pipeline.pipeline_id}",
-                        description="Immutable compiler artifact pipeline.",
-                        mime_type="application/json",
+                    *(
+                        ResourceLink(
+                            name=f"Pipeline {pipeline_id}",
+                            uri=f"flameox://pipelines/{pipeline_id}",
+                            description="Immutable compiler artifact pipeline.",
+                            mime_type="application/json",
+                        )
+                        for pipeline_id in result.pipeline_ids
                     ),
                 ),
             )
@@ -2647,13 +2974,12 @@ def create_server(
         ctx: Context[AppContext],
         run_id: str | None = None,
         pipeline_name: str | None = None,
-        pipeline_schema: str | None = None,
         producer: str | None = None,
         source_artifact_id: str | None = None,
         limit: Annotated[StrictInt, Field(ge=1, le=100)] = 20,
         cursor: str | None = None,
     ) -> Annotated[CallToolResult, ToolPayload[PipelineListResult]]:
-        """Discover bounded immutable pipelines by run, producer, schema, or artifact."""
+        """Discover bounded immutable pipelines by run, name, producer, or artifact."""
         try:
             result = ArtifactPipelineService(
                 ctx.request_context.lifespan_context.require_workspace()
@@ -2661,7 +2987,6 @@ def create_server(
                 filter=PipelineFilter(
                     run_id=run_id,
                     pipeline_name=pipeline_name,
-                    pipeline_schema=pipeline_schema,
                     producer=producer,
                     source_artifact_id=source_artifact_id,
                 ),
@@ -2727,7 +3052,7 @@ def create_server(
             comparison = service.compare(baseline.pipeline_id, candidate.pipeline_id)
             return _success(
                 comparison,
-                f"Compared artifact pipelines as {comparison.result_digest}.",
+                f"Compared artifact pipelines as {comparison.comparison_id}.",
             )
         except DomainError as error:
             return _failure(error)
@@ -2872,13 +3197,16 @@ def create_server(
     async def get_finding_tool(
         finding_id: str,
         ctx: Context[AppContext],
-    ) -> Annotated[CallToolResult, ToolPayload[Finding]]:
-        """Return the current finding revision."""
+    ) -> Annotated[CallToolResult, ToolPayload[FindingResult]]:
+        """Return the current finding revision with its exact evidence edges."""
         try:
-            result = FindingService(
-                ctx.request_context.lifespan_context.require_workspace()
-            ).findings.read(finding_id)
-            return _success(result, f"Finding {finding_id} is revision {result.revision}.")
+            result = FindingService(ctx.request_context.lifespan_context.require_workspace()).get(
+                finding_id
+            )
+            return _success(
+                result,
+                f"Finding {finding_id} is revision {result.finding.revision}.",
+            )
         except DomainError as error:
             return _failure(error)
 
@@ -3154,6 +3482,45 @@ def create_server(
             return _success(
                 result,
                 f"Returned {len(result.measurements)} memory measurements.",
+            )
+        except DomainError as error:
+            return _failure(error)
+
+    @_action_tool(server, ActionId.ANALYZE_NSIGHT_COMPUTE)
+    async def analyze_nsight_compute_tool(
+        run_or_artifact: Annotated[
+            str,
+            Field(
+                min_length=1,
+                description="Run or artifact ID; discover one with list_runs or list_artifacts.",
+            ),
+        ],
+        limit: Annotated[
+            StrictInt,
+            Field(ge=1, le=1_000, description="Maximum provider rule findings to return."),
+        ],
+        ctx: Context[AppContext],
+    ) -> Annotated[CallToolResult, ToolPayload[NsightComputeAnalysisResult]]:
+        """Analyze persisted Nsight Compute rule facts without reopening the native .ncu-rep.
+
+        The bounded result includes target qualification, coverage, provider provenance, and a
+        concrete recapture selection when more evidence is needed.
+        """
+        try:
+            workspace = ctx.request_context.lifespan_context.require_workspace()
+            await ctx.report_progress(0, 2, "Nsight Compute analysis snapshot pinned")
+            result = await Catalog(workspace).run_interruptible(
+                lambda snapshot: RecipeService(
+                    workspace,
+                    snapshot=snapshot,
+                ).nsight_compute(run_or_artifact, limit=limit),
+                query_name="analyze_nsight_compute",
+            )
+            await ctx.report_progress(1, 2, "Nsight Compute rule facts projected")
+            await ctx.report_progress(2, 2, "Nsight Compute analysis ready")
+            return _success(
+                result,
+                f"Returned {result.returned} of {result.total} Nsight Compute rule findings.",
             )
         except DomainError as error:
             return _failure(error)
@@ -3704,21 +4071,14 @@ def create_server(
     @server.tool(name="validate_workspace", annotations=READ_ONLY)
     async def validate_workspace_tool(
         ctx: Context[AppContext],
-        mode: Literal[
-            WorkspaceValidationMode.STANDARD,
-            WorkspaceValidationMode.FULL,
-        ] = WorkspaceValidationMode.STANDARD,
+        mode: Literal["standard", "full"] = "standard",
     ) -> Annotated[CallToolResult, ToolPayload[IntegrityResult]]:
         """Validate manifests and schemas; optionally hash every payload."""
         try:
             result = await run_atomic_thread(
                 lambda: IntegrityService(
                     ctx.request_context.lifespan_context.require_workspace()
-                ).validate(
-                    IntegrityLevel.FULL
-                    if mode is WorkspaceValidationMode.FULL
-                    else IntegrityLevel.QUICK
-                )
+                ).validate(IntegrityLevel.FULL if mode == "full" else IntegrityLevel.QUICK)
             )
             outcome = "passed" if result.valid else "failed"
             issue_suffix = f" with {len(result.issues)} reported issues" if result.issues else ""

@@ -13,13 +13,11 @@ from typing import Any, cast
 import pytest
 
 from flameox.analysis import RecipeService
-from flameox.application import (
-    CaptureService,
-    ExecutionPolicy,
-    RunProjectionService,
-)
+from flameox.application.capture import CaptureService
 from flameox.application.capture_admission import CaptureAdmissionService
+from flameox.application.execution_policy import ExecutionPolicy
 from flameox.application.proc import read_boot_id
+from flameox.application.run_projection import RunProjectionService
 from flameox.catalog import Catalog
 from flameox.domain import (
     CaptureLease,
@@ -37,7 +35,7 @@ from flameox.storage import (
     ArtifactStore,
     CaptureAdmissionRecord,
     CaptureAdmissionStore,
-    ProjectionIntentStore,
+    ControlPlane,
     RunStore,
     Workspace,
 )
@@ -164,7 +162,6 @@ async def test_capture_publishes_project_relative_writable_root_growth(
     (tmp_path / "target").mkdir()
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.build]
 argv = ["python", "-c", "from pathlib import Path; Path('target/output.bin').write_bytes(b'build')"]
 writable_paths = ["target"]
@@ -223,7 +220,6 @@ print(\"oracle diagnostic\")
     )
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.semantic]
 argv = ["python", "-c", "print('workload')"]
 [workloads.semantic.oracle]
@@ -253,7 +249,7 @@ receipt_schema = "flameox.oracle-receipt.v1"
     assert json.loads(receipt_payload.payload_path.read_text())["reason"] == "contract_mismatch"
     assert {item.role for item in result.run.artifacts} >= {
         "validation_receipt",
-        "validation_contract_check",
+        "validation_stdout",
     }
 
 
@@ -335,7 +331,6 @@ async def test_capture_admission_limit_is_shared_by_independent_services(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.wait]
 argv = ["python", "-c", "import time; time.sleep(0.75)"]
 cwd = "."
@@ -439,7 +434,6 @@ async def test_capture_cancellation_leaves_terminal_run_revision(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.wait]
 argv = ["python", "-c", "import os,time;os.write(1,bytes([255])+b'x');time.sleep(10)"]
 cwd = "."
@@ -679,11 +673,7 @@ async def test_publication_failure_preserves_succeeded_run_and_cleans_staging(
     terminal = RunStore(workspace).read(plan.run_id)
     assert terminal.execution_status is ExecutionStatus.SUCCEEDED
     assert terminal.capture_status is CaptureStatus.REGISTERED
-    intent = ProjectionIntentStore(workspace).latest(
-        domain_kind="run",
-        domain_id=plan.run_id,
-        projection_kind="run.core",
-    )
+    intent = ControlPlane(workspace).latest_projection_intent(run_id=plan.run_id)
     assert intent is not None
     assert intent.state is ProjectionState.FAILED
     assert not any((workspace.paths.staging / "captures").iterdir())

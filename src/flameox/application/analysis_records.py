@@ -43,7 +43,6 @@ from flameox.models import ContractModel
 from flameox.storage import (
     ArtifactStore,
     CompletedRetentionIntent,
-    GenerationManifest,
     RetentionIntent,
     RetentionIntentStore,
     Workspace,
@@ -118,7 +117,6 @@ type MaterializeAnalysisRequest = Annotated[
 
 
 class MaterializedAnalysisResult(ContractModel):
-    schema_version: int = 1
     result: AnalysisValue
     analysis: AnalysisRecord
     evidence: tuple[EvidenceReference, ...]
@@ -375,13 +373,7 @@ class AnalysisMaterializationService:
             return tuple(str(row[0]) for row in rows), (), ()
         if isinstance(request, FailureAnalysisRequest):
             commit = self.workspace.corpus.read_commit(snapshot.commit.commit_id)
-            generations = tuple(
-                GenerationManifest.model_validate_json(
-                    (self.workspace.paths.root / path).read_text()
-                ).generation_id
-                for path in commit.generation_manifests
-            )
-            return (), (), generations
+            return (), (), commit.generation_ids
         if not isinstance(request, _InputAnalysisRequest):
             assert_never(request)
         comparison_input_id = (

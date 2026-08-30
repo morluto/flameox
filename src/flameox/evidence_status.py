@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import Field, TypeAdapter
+from pydantic import Field
 
 from flameox.action_graph import ToolAction
 from flameox.models import ContractModel
@@ -66,14 +66,6 @@ type EvidenceAvailability = (
     | RecoverableUnavailableEvidence
     | UnavailableEvidence
 )
-
-_EVIDENCE_AVAILABILITY_ADAPTER: TypeAdapter[EvidenceAvailability] = TypeAdapter(
-    EvidenceAvailability
-)
-
-
-def parse_evidence_availability(value: object) -> EvidenceAvailability:
-    return _EVIDENCE_AVAILABILITY_ADAPTER.validate_python(value)
 
 
 def available_availability(reason: str = "evidence_present") -> EvidenceAvailability:

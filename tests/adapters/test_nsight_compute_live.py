@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 
 from flameox.adapters.nsight_compute import NsightComputeExtractor, find_ncu_report_interface
-from flameox.application import (
-    CapabilityService,
-    CaptureService,
-    ExecutionPolicy,
+from flameox.application.capabilities import CapabilityService
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportService,
 )
@@ -42,7 +42,6 @@ async def test_managed_capture_collects_and_extracts_live_counters(tmp_path: Pat
     disable_containment(workspace)
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.profile]
 argv = [{json.dumps(workload)}, "--timeout", "0.1", "--min-time", "1e-5"]
 timeout_seconds = 120

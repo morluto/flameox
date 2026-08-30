@@ -8,7 +8,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from flameox.analysis import ExecutionAnalysisResult, FailureAnalysisResult, RecipeService
-from flameox.application import (
+from flameox.application.analysis_records import (
     AcceleratorLaunchAnalysisRequest,
     AnalysisMaterializationService,
     ExecutionAnalysisRequest,

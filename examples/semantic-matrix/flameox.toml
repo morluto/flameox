@@ -1,5 +1,3 @@
-schema_version = 1
-
 [workloads.semantic]
 argv = [
   "python", "semantic_workload.py", "{treatment}", "{backend}", "{dtype}",

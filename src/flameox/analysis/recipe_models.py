@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, ClassVar, Literal
 
 from pydantic import ConfigDict, Field, TypeAdapter, computed_field, model_validator
 
+from flameox.action_graph import NextAction
 from flameox.domain import (
     CaptureStatus,
-    ConfidenceIntervalFields,
+    ConfidenceInterval,
     EvidenceLevel,
     ExecutionStatus,
     ProcessCancellationCause,
@@ -22,6 +23,7 @@ from flameox.evidence_status import (
 )
 from flameox.memory_query import MemoryFrameQuery
 from flameox.models import ContractModel
+from flameox.nsight_compute import NsightComputeProviderRuleFact, NsightComputeReportLocation
 from flameox.pagination import BoundedCollectionContract, CursorPageContract
 
 
@@ -40,7 +42,6 @@ class Hotspot(ContractModel):
 class HotspotResult(BoundedCollectionContract):
     page_items_field: ClassVar[str] = "hotspots"
 
-    schema_version: int = 1
     corpus_commit_id: str
     input_id: str
     hotspots: tuple[Hotspot, ...]
@@ -280,7 +281,6 @@ class OperatorSummary(ContractModel):
 class PyTorchAnalysisResult(BoundedCollectionContract):
     page_items_field: ClassVar[str] = "operators"
 
-    schema_version: int = 1
     corpus_commit_id: str
     input_id: str
     operators: tuple[OperatorSummary, ...]
@@ -313,18 +313,8 @@ class AcceleratorStreamSummary(ContractModel):
     idle_gap_max_ns: int
 
 
-def _advertise_stream_truncation(schema: dict[str, Any]) -> None:
-    properties = schema.setdefault("properties", {})
-    assert isinstance(properties, dict)
-    properties["streams_truncated"] = {"type": "boolean", "readOnly": True}
-    required = schema.setdefault("required", [])
-    assert isinstance(required, list)
-    if "streams_truncated" not in required:
-        required.append("streams_truncated")
-
-
 class AcceleratorLaunchRegion(ContractModel):
-    model_config = ConfigDict(json_schema_extra=_advertise_stream_truncation)
+    model_config = ConfigDict(json_schema_mode_override="serialization")
 
     region: str
     region_start_ns: int
@@ -348,23 +338,6 @@ class AcceleratorLaunchRegion(ContractModel):
     idle_gap_max_ns: int
     stream_count: int
     streams: tuple[AcceleratorStreamSummary, ...]
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_stream_truncation_projection(cls, value: object) -> object:
-        if not isinstance(value, dict) or "streams_truncated" not in value:
-            return value
-        parsed = dict(value)
-        supplied = parsed.pop("streams_truncated")
-        stream_count = parsed.get("stream_count")
-        streams = parsed.get("streams")
-        if (
-            isinstance(stream_count, int)
-            and isinstance(streams, (list, tuple))
-            and supplied != (stream_count > len(streams))
-        ):
-            raise ValueError("stream truncation must agree with the stream total")
-        return parsed
 
     @model_validator(mode="after")
     def stream_count_is_coherent(self) -> AcceleratorLaunchRegion:
@@ -391,7 +364,6 @@ class AcceleratorLaunchComparison(ContractModel):
 class AcceleratorLaunchAnalysisResult(BoundedCollectionContract):
     page_items_field: ClassVar[str] = "regions"
 
-    schema_version: int = 1
     corpus_commit_id: str
     input_id: str
     comparison_input_id: str | None = None
@@ -402,6 +374,75 @@ class AcceleratorLaunchAnalysisResult(BoundedCollectionContract):
     total: int
     coverage: dict[str, bool]
     comparison_coverage: dict[str, bool] | None = None
+    limitations: tuple[str, ...]
+    evidence: EvidenceAvailability = Field(default_factory=available_availability)
+
+
+class NsightComputeRuleProvenance(ContractModel):
+    """One immutable report artifact and the exact rule fact read from it."""
+
+    artifact_id: str = Field(min_length=1, max_length=200)
+    rule: NsightComputeProviderRuleFact
+
+
+class NsightComputeTargetStatus(StrEnum):
+    UNQUALIFIED = "unqualified"
+    MATCHED = "matched"
+    MISMATCH = "mismatch"
+    INDETERMINATE = "indeterminate"
+
+
+class NsightComputeTargetQualification(ContractModel):
+    requested_kernel_name: str | None = Field(default=None, max_length=500)
+    status: NsightComputeTargetStatus
+    reason: str = Field(min_length=1, max_length=2_000)
+    observed_actions: tuple[NsightComputeReportLocation, ...] = Field(default=(), max_length=1_000)
+    observed_action_total: Annotated[int, Field(ge=0)]
+
+    @model_validator(mode="after")
+    def action_total_is_coherent(self) -> NsightComputeTargetQualification:
+        if self.observed_action_total < len(self.observed_actions):
+            raise ValueError("observed action total cannot be smaller than returned actions")
+        return self
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def observed_actions_truncated(self) -> bool:
+        return self.observed_action_total > len(self.observed_actions)
+
+
+class NsightComputeAnalysisCoverage(ContractModel):
+    section_count: Annotated[int, Field(ge=0)]
+    global_runtime_reduction_findings: Annotated[int, Field(ge=0)]
+    local_hardware_efficiency_findings: Annotated[int, Field(ge=0)]
+    roofline_collected: bool
+    normalized_evidence_truncated: bool
+
+
+class NsightComputeRecaptureSelection(ContractModel):
+    kernel_name: str | None = Field(default=None, min_length=1, max_length=500)
+    sections: tuple[str, ...] = Field(default=(), max_length=32)
+    replay_mode: Literal["kernel", "application", "range", "app-range"] | None = None
+
+
+class NsightComputeRecaptureGuidance(ContractModel):
+    reason: str = Field(min_length=1, max_length=2_000)
+    selection: NsightComputeRecaptureSelection
+    next_action: NextAction
+
+
+class NsightComputeAnalysisResult(BoundedCollectionContract):
+    """Bounded guided-analysis projection over extracted Nsight Compute facts."""
+
+    page_items_field: ClassVar[str] = "findings"
+
+    corpus_commit_id: str
+    input_id: str
+    findings: tuple[NsightComputeRuleProvenance, ...]
+    total: Annotated[int, Field(ge=0)]
+    target: NsightComputeTargetQualification
+    coverage: NsightComputeAnalysisCoverage
+    recapture: NsightComputeRecaptureGuidance | None = None
     limitations: tuple[str, ...]
     evidence: EvidenceAvailability = Field(default_factory=available_availability)
 
@@ -439,7 +480,6 @@ class FailureAnalysisResult(BoundedCollectionContract):
     page_items_field: ClassVar[str] = "failures"
     total_items_field: ClassVar[str] = "total_clusters"
 
-    schema_version: int = 1
     corpus_commit_id: str
     cohort_id: str
     filters_applied: tuple[str, ...]
@@ -477,13 +517,14 @@ class FailureAnalysisResult(BoundedCollectionContract):
         return "no_failures" if self.failed_runs == 0 else None
 
 
-class ScalingPoint(ConfidenceIntervalFields):
+class ScalingPoint(ContractModel):
     variant: str
     block_id: str | None
     input_value: float | None
     input_kind: Literal["integer", "floating"] | None = None
     value: float
     dispersion: float
+    confidence_interval: ConfidenceInterval | None = None
     unit: str
     sample_count: int
     raw_sample_count: int = 0
@@ -539,20 +580,57 @@ class ScalingFit(ContractModel):
     supported_max: float
 
 
-def _advertise_environment_stability(schema: dict[str, Any]) -> None:
-    properties = schema.setdefault("properties", {})
-    assert isinstance(properties, dict)
-    properties["environment_stable"] = {"type": "boolean", "readOnly": True}
-    required = schema.setdefault("required", [])
-    assert isinstance(required, list)
-    if "environment_stable" not in required:
-        required.append("environment_stable")
+class ScalingRequirementKind(StrEnum):
+    """A known reason the published rows cannot support scaling model selection."""
+
+    SUCCEEDED_TRIALS = "succeeded_trials"
+    PRIMARY_MEASUREMENTS = "primary_measurements"
+    NUMERIC_INPUT_FACTOR = "numeric_input_factor"
+    DISTINCT_INPUT_VALUES = "distinct_input_values"
+    COMPLETE_BLOCKS = "complete_blocks"
+    REPLICATION = "replication"
+    CONSISTENT_INPUT_KIND = "consistent_input_kind"
+
+
+class ScalingMissingRequirement(ContractModel):
+    """One bounded, inspectable scaling-design requirement that is not met."""
+
+    kind: ScalingRequirementKind
+    variants: tuple[str, ...] = Field(default=(), max_length=128)
+    factor: str | None = Field(default=None, max_length=200)
+    observed: int | None = Field(default=None, ge=0)
+    required: int | None = Field(default=None, ge=0)
+    input_kinds: tuple[Literal["integer", "floating"], ...] = Field(
+        default=(),
+        max_length=2,
+    )
+    detail: str = Field(min_length=1, max_length=1_000)
+
+
+class ScalingSufficiencyStatus(StrEnum):
+    SUFFICIENT = "sufficient"
+    INSUFFICIENT = "insufficient"
+    INCOMPATIBLE = "incompatible"
+
+
+class ScalingAnalysisSufficiency(ContractModel):
+    """Whether available rows satisfy the recipe's model-selection contract."""
+
+    status: ScalingSufficiencyStatus
+    missing_requirements: tuple[ScalingMissingRequirement, ...] = Field(max_length=32)
+    next_action: NextAction | None = None
+
+    @model_validator(mode="after")
+    def requirements_match_status(self) -> ScalingAnalysisSufficiency:
+        if self.status is ScalingSufficiencyStatus.SUFFICIENT:
+            if self.missing_requirements or self.next_action is not None:
+                raise ValueError("sufficient scaling analysis cannot have recovery requirements")
+        elif not self.missing_requirements or self.next_action is None:
+            raise ValueError("incomplete scaling analysis requires bounded recovery guidance")
+        return self
 
 
 class ScalingAnalysisResult(ContractModel):
-    model_config = ConfigDict(json_schema_extra=_advertise_environment_stability)
-
-    schema_version: int = 1
     corpus_commit_id: str
     experiment_id: str
     metric: str
@@ -566,33 +644,8 @@ class ScalingAnalysisResult(ContractModel):
     correlated_hotspots: tuple[ScalingCorrelatedHotspot, ...]
     conclusion: str
     warnings: tuple[str, ...]
+    sufficiency: ScalingAnalysisSufficiency
     limitations: tuple[str, ...] = (
         "Points are per-trial medians; statistical decisions belong to frozen run-set comparisons.",
     )
     evidence: EvidenceAvailability = Field(default_factory=available_availability)
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_environment_stability_projection(cls, value: object) -> object:
-        if not isinstance(value, dict) or "environment_stable" not in value:
-            return value
-        parsed = dict(value)
-        supplied = parsed.pop("environment_stable")
-        points = parsed.get("points")
-        if isinstance(points, (list, tuple)):
-            counts = tuple(
-                point.get("environment_count")
-                if isinstance(point, dict)
-                else getattr(point, "environment_count", None)
-                for point in points
-            )
-            if all(isinstance(count, int) for count in counts) and supplied != all(
-                count == 1 for count in counts
-            ):
-                raise ValueError("environment stability must derive from scaling points")
-        return parsed
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def environment_stable(self) -> bool:
-        return all(point.environment_count == 1 for point in self.points)

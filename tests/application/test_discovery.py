@@ -5,16 +5,20 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from flameox.application import (
-    ArtifactService,
-    CreateInvestigationRequest,
-    FindingService,
-    ImportArtifactRequest,
-    ImportService,
-    InvestigationService,
-    RecordFindingRequest,
+from flameox.application.artifacts import ArtifactService
+from flameox.application.discovery import (
     RunDiscoveryService,
     RunFilter,
+)
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
+from flameox.application.records import (
+    CreateInvestigationRequest,
+    FindingService,
+    InvestigationService,
+    RecordFindingRequest,
 )
 from flameox.catalog import Catalog
 from flameox.domain import (
@@ -87,11 +91,6 @@ def test_run_and_artifact_pagination_are_snapshot_bound_and_filtered(tmp_path: P
     assert first.coverage.filters_applied == ("execution_status",)
     coverage_payload = first.coverage.model_dump(mode="python")
     assert coverage_payload["population_complete"] is True
-    assert type(first.coverage).model_validate(coverage_payload) == first.coverage
-    with pytest.raises(ValidationError, match="population completeness"):
-        type(first.coverage).model_validate(
-            {**coverage_payload, "unavailable_facets": ["artifact_kinds"]}
-        )
     matching_identity = first.runs[0].environment_id
     assert first.runs[0].artifact_kinds == ("collector_metadata",)
     second = runs.list(

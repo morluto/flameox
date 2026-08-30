@@ -1,17 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
-from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated
 
 from pydantic import (
     Field,
-    ModelWrapValidatorHandler,
     StringConstraints,
     ValidationError,
-    computed_field,
     model_validator,
 )
 
@@ -24,19 +22,23 @@ from flameox.models import ContractModel
 Digest = Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 class GenerationFile(ContractModel):
     path: str
     sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
     byte_length: Annotated[int, Field(ge=0)]
     row_count: Annotated[int, Field(ge=0)]
     table: str
-    schema_major: Annotated[int, Field(ge=1)]
-    schema_minor: Annotated[int, Field(ge=0)]
 
 
 class GenerationManifest(ContractModel):
-    schema_version: Literal[1] = 1
-    generation_id: str
     created_at: datetime
     input_corpus_commit_id: Digest
     input_run_ids: tuple[str, ...] = ()
@@ -46,7 +48,7 @@ class GenerationManifest(ContractModel):
     publisher_version: str
     operation_digest: Digest | None = None
     files: tuple[GenerationFile, ...]
-    supersedes: tuple[str, ...] = ()
+    supersedes: tuple[Digest, ...] = ()
 
     @model_validator(mode="after")
     def run_semantic_ids_align_with_runs(self) -> GenerationManifest:
@@ -54,64 +56,46 @@ class GenerationManifest(ContractModel):
             raise ValueError("input run and semantic identities must be positionally aligned")
         return self
 
+    @property
+    def generation_id(self) -> Digest:
+        """Content identity for this exact current manifest payload.
 
-class _CorpusCommitIntegrityError(ValueError):
-    """A persisted commit projection contradicts its canonical content."""
+        The identifier is deliberately not serialized.  A persisted manifest is
+        authoritative only when its strict payload hashes to the generation ID
+        named by a corpus commit.
+        """
+
+        return digest_model(self.model_dump(mode="json"))
 
 
 class CorpusCommit(ContractModel):
-    schema_version: Literal[1] = 1
     parent_commit_id: Digest | None
     created_at: datetime
-    generation_manifests: tuple[str, ...]
+    generation_ids: tuple[Digest, ...]
 
-    @model_validator(mode="wrap")
-    @classmethod
-    def parse_digest_projections(
-        cls,
-        value: Any,
-        handler: ModelWrapValidatorHandler[CorpusCommit],
-    ) -> CorpusCommit:
-        if not isinstance(value, Mapping):
-            return handler(value)
-        payload = dict(value)
-        supplied_inventory = payload.pop("inventory_digest", None)
-        supplied_commit = payload.pop("commit_id", None)
-        commit = handler(payload)
-        if supplied_inventory is not None and supplied_inventory != commit.inventory_digest:
-            raise _CorpusCommitIntegrityError(
-                "corpus inventory digest does not match its generation manifests"
-            )
-        if supplied_commit is not None and supplied_commit != commit.commit_id:
-            raise _CorpusCommitIntegrityError("corpus commit digest does not match its content")
-        return commit
+    @model_validator(mode="after")
+    def generation_ids_are_canonical(self) -> CorpusCommit:
+        if self.generation_ids != tuple(sorted(set(self.generation_ids))):
+            raise ValueError("generation IDs must be unique and sorted")
+        return self
 
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def inventory_digest(self) -> Digest:
-        return digest_model({"generation_manifests": self.generation_manifests})
-
-    @computed_field  # type: ignore[prop-decorator]
     @property
     def commit_id(self) -> Digest:
-        return digest_model(self.content_without_id())
-
-    def content_without_id(self) -> dict[str, object]:
-        return self.model_dump(mode="json", exclude={"commit_id"})
+        return digest_model(self.model_dump(mode="json"))
 
 
 def build_commit(
     *,
     parent_commit_id: str | None,
-    generation_manifests: tuple[str, ...],
+    generation_ids: tuple[str, ...],
     created_at: datetime | None = None,
 ) -> CorpusCommit:
-    generation_manifests = tuple(sorted(set(generation_manifests)))
+    generation_ids = tuple(sorted(set(generation_ids)))
     timestamp = created_at or utc_now()
     return CorpusCommit(
         parent_commit_id=parent_commit_id,
         created_at=timestamp,
-        generation_manifests=generation_manifests,
+        generation_ids=generation_ids,
     )
 
 
@@ -126,16 +110,29 @@ class CorpusStore:
         self.commits_root.mkdir(parents=True, exist_ok=True)
         if self.head_path.exists():
             return self.read_head()
-        commit = build_commit(parent_commit_id=None, generation_manifests=())
+        commit = build_commit(parent_commit_id=None, generation_ids=())
         self.write_commit(commit)
         self.publish_head(commit.commit_id)
         return commit
 
     def commit_path(self, commit_id: str) -> Path:
-        digest = commit_id.removeprefix("sha256:")
-        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
-            raise DomainError(ErrorCode.WORKSPACE_INVALID, "Invalid corpus commit identifier.")
+        digest = self._digest_component(commit_id, kind="corpus commit")
         return self.commits_root / f"{digest}.json"
+
+    def generation_path(self, generation_id: str) -> Path:
+        digest = self._digest_component(generation_id, kind="generation")
+        return self.workspace_root / "generations" / f"{digest}.json"
+
+    @staticmethod
+    def _digest_component(identifier: str, *, kind: str) -> str:
+        digest = identifier.removeprefix("sha256:")
+        if (
+            not identifier.startswith("sha256:")
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise DomainError(ErrorCode.WORKSPACE_INVALID, f"Invalid {kind} identifier.")
+        return digest
 
     def write_commit(self, commit: CorpusCommit) -> None:
         path = self.commit_path(commit.commit_id)
@@ -170,16 +167,8 @@ class CorpusStore:
             payload = json.loads(path.read_text())
             commit = CorpusCommit.model_validate(payload)
         except ValidationError as exc:
-            integrity_failure = any(
-                isinstance(error.get("ctx", {}).get("error"), _CorpusCommitIntegrityError)
-                for error in exc.errors(include_url=False)
-            )
             raise DomainError(
-                (
-                    ErrorCode.ARTIFACT_INTEGRITY_FAILED
-                    if integrity_failure
-                    else ErrorCode.WORKSPACE_INVALID
-                ),
+                ErrorCode.WORKSPACE_INVALID,
                 f"Corpus commit {commit_id!r} is missing or invalid.",
             ) from exc
         except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
@@ -187,4 +176,25 @@ class CorpusStore:
                 ErrorCode.WORKSPACE_INVALID,
                 f"Corpus commit {commit_id!r} is missing or invalid.",
             ) from exc
+        if commit.commit_id != commit_id:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                f"Corpus commit {commit_id!r} does not match its content.",
+            )
         return commit
+
+    def read_generation(self, generation_id: str) -> GenerationManifest:
+        path = self.generation_path(generation_id)
+        try:
+            manifest = GenerationManifest.model_validate_json(path.read_text())
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                f"Generation {generation_id!r} is missing or invalid.",
+            ) from exc
+        if manifest.generation_id != generation_id:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                f"Generation {generation_id!r} does not match its manifest content.",
+            )
+        return manifest

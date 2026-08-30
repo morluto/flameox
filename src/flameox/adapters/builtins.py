@@ -10,6 +10,7 @@ from pathlib import Path
 
 from packaging.version import InvalidVersion, Version
 
+from flameox.adapters.memray_options import memray_capture_options
 from flameox.adapters.options import (
     adapter_accepts_options,
     compute_sanitizer_options,
@@ -21,6 +22,7 @@ from flameox.adapters.options import (
     rocprofv3_options,
     triton_compiler_options,
 )
+from flameox.adapters.torch_benchmark import torch_benchmark_options
 from flameox.adapters.torch_profiler import SdkTorchProfilerOptions, torch_profiler_options
 from flameox.domain import ArtifactKind, CapabilityExtra, DomainError, ErrorCode
 from flameox.startup_profile import PYTHON_STARTUP_PROFILE
@@ -182,7 +184,7 @@ BUILTIN_ADAPTERS = {
             dependency="aiperf",
             supported_modes=("profile",),
             supported_formats=("aiperf-profile-export-jsonl",),
-            features=("inference_replay", "per_request_metrics", "fixed_schedule"),
+            features=("inference_benchmark", "per_request_metrics", "fixed_schedule"),
             remediation=(
                 "Call start_capability_setup with adapter='aiperf' to create a verified "
                 "provider environment.",
@@ -237,9 +239,40 @@ BUILTIN_ADAPTERS = {
                 "and one warm-up per worker."
             ),
             capture_limitations=(
-                "Experiment-level treatment randomization is separate from "
-                "pyperf's worker hierarchy.",
+                "Every measured value is a fresh interpreter process and includes Python "
+                "startup, imports, framework initialization, and workload setup.",
+                "Use torch.benchmark for an SDK-marked in-process PyTorch operation; use "
+                "benchmark-samples for another explicit synchronized producer.",
+                "Experiment-level treatment randomization is separate from pyperf's worker "
+                "hierarchy.",
             ),
+        ),
+        BuiltinAdapter(
+            name="torch.benchmark",
+            dependency_kind=AdapterDependencyKind.PACKAGE,
+            dependency="torch",
+            supported_modes=("sdk_callable",),
+            supported_formats=("flameox.benchmark-samples.v1",),
+            features=(
+                "in_process_operation",
+                "timer_wall_time",
+                "optional_cuda_event_time",
+                "raw_samples",
+            ),
+            output_filename="benchmark-samples.json",
+            artifact_kinds=(ArtifactKind.BENCHMARK_SAMPLES,),
+            expected_overhead=(
+                "torch.utils.benchmark.Timer controls warm-up, threadpool size, CUDA "
+                "synchronization, and host wall-time sampling for SDK-marked callables."
+            ),
+            capture_limitations=(
+                "The workload constructs inputs, completes lazy initialization, and runs "
+                "correctness checks outside flameox.sdk.torch_benchmark().",
+                "CUDA-event timing is opt-in and emitted as a separate device-time metric; "
+                "it is never substituted for Timer host wall time.",
+            ),
+            managed_extra=CapabilityExtra.TORCH,
+            managed_requirement="torch>=2.7",
         ),
         BuiltinAdapter(
             name="python-startup",
@@ -291,7 +324,7 @@ BUILTIN_ADAPTERS = {
             name="torch.profiler",
             dependency_kind=AdapterDependencyKind.PACKAGE,
             dependency="torch",
-            supported_modes=("trace_import", "whole_entrypoint", "sdk"),
+            supported_modes=("whole_entrypoint", "sdk"),
             supported_formats=("chrome-trace",),
             features=(
                 "operators",
@@ -304,11 +337,14 @@ BUILTIN_ADAPTERS = {
             output_filename="torch-trace.json",
             artifact_kinds=(ArtifactKind.EXECUTION_TRACE,),
             expected_overhead=(
-                "Operator tracing with shapes, memory, and Python stacks has substantial overhead."
+                "Operator timing is conservative by default; shapes, memory, stacks, FLOPs, "
+                "and modules add collection overhead when explicitly enabled."
             ),
             capture_limitations=(
                 "Evidence coverage and overhead depend on the feature flags bound into the "
                 "capture plan.",
+                "Whole-entrypoint capture cannot identify setup, compilation, warm-up, or "
+                "steady state in an unmodified workload.",
                 "Scheduled SDK mode requires explicit workload step boundaries.",
             ),
             managed_extra=CapabilityExtra.TORCH,
@@ -464,11 +500,11 @@ BUILTIN_ADAPTERS = {
         ),
         BuiltinAdapter(
             name="triton.compiler",
-            dependency_kind=AdapterDependencyKind.INTERNAL,
-            dependency=None,
-            supported_modes=("env_dump",),
+            dependency_kind=AdapterDependencyKind.PACKAGE,
+            dependency="triton",
+            supported_modes=("env_dump", "autotune_listener"),
             supported_formats=("ttir", "ttgir", "llir", "ptx", "cubin"),
-            features=("compiler_ir", "ptx", "cubin"),
+            features=("compiler_ir", "ptx", "cubin", "autotune_selection"),
             remediation=(
                 "Install Triton and ensure the workload invokes triton.compile or "
                 "@triton.jit kernels.",
@@ -476,12 +512,16 @@ BUILTIN_ADAPTERS = {
             output_filename="kernel-build.json",
             artifact_kinds=(ArtifactKind.KERNEL_BUILD,),
             expected_overhead=(
-                "Env-var dump adds per-kernel IR emission overhead; no separate process is "
-                "launched."
+                "Env-var dump adds per-kernel IR emission overhead; a root-interpreter "
+                "autotune listener records bounded provider selection facts."
             ),
             capture_limitations=(
-                "Only TRITON_DUMP_DIR, TRITON_KERNEL_DUMP, and TRITON_REPRODUCER_PATH are set; "
-                "the broker runs the workload directly.",
+                "Triton compiler capture requires a declared Python script or python -m module; "
+                "the listener runs in that same interpreter.",
+                "Only multi-configuration autotune decisions in the root Python interpreter are "
+                "observed.",
+                "Triton's listener does not identify a compiler dump group or cache file, so "
+                "selection facts are not linked to an artifact pipeline.",
                 "Only allowlisted native extensions are inventoried; unknown files are ignored.",
                 "The manifest is emitted after success or compiler nonzero exit.",
             ),
@@ -589,36 +629,25 @@ def build_capture_invocation(  # noqa: C901 - provider routing is intentionally 
             "--",
             *workload_argv,
         )
-    elif adapter_name in {"coverage", "memray"}:
+    elif adapter_name == "coverage":
         python, target = _python_target(workload_argv)
-        if adapter_name == "coverage":
-            argv = (
-                python,
-                "-m",
-                "coverage",
-                "run",
-                "--branch",
-                f"--data-file={output}",
-                *target,
-            )
-        elif adapter_name == "memray":
-            argv = (
-                python,
-                "-m",
-                "memray",
-                "run",
-                "--output",
-                output,
-                *target,
-            )
+        argv = (
+            python,
+            "-m",
+            "coverage",
+            "run",
+            "--branch",
+            f"--data-file={output}",
+            *target,
+        )
+    elif adapter_name == "memray":
+        return _memray_capture_invocation(adapter, workload_argv, output, options=options)
     elif adapter_name in {"node-cpu-prof", "node-heap-prof"}:
         return _node_v8_capture_invocation(
             adapter_name,
             adapter,
             workload_argv,
-            output_root,
             output,
-            executable=executable,
             workload_executable=workload_executable,
         )
     elif adapter_name == "torch.profiler":
@@ -626,6 +655,13 @@ def build_capture_invocation(  # noqa: C901 - provider routing is intentionally 
             adapter,
             workload_argv,
             output_root,
+            output,
+            options=options,
+        )
+    elif adapter_name == "torch.benchmark":
+        return _torch_benchmark_capture_invocation(
+            adapter,
+            workload_argv,
             output,
             options=options,
         )
@@ -643,7 +679,6 @@ def build_capture_invocation(  # noqa: C901 - provider routing is intentionally 
             adapter,
             workload_argv,
             output,
-            executable=executable,
             options=options,
         )
     elif adapter_name == "rocprofv3":
@@ -746,6 +781,74 @@ def build_capture_invocation(  # noqa: C901 - provider routing is intentionally 
     )
 
 
+def _memray_capture_invocation(
+    adapter: BuiltinAdapter,
+    workload_argv: tuple[str, ...],
+    output: str,
+    *,
+    options: dict[str, object] | None,
+) -> CaptureInvocation:
+    python, target = _python_target(workload_argv)
+    selected = memray_capture_options(options)
+    assert adapter.expected_overhead is not None
+    if selected.mode == "sdk":
+        return CaptureInvocation(
+            argv=workload_argv,
+            artifact_kinds=adapter.artifact_kinds,
+            expected_overhead=(
+                "Allocation tracing is active only during the declared SDK region."
+                + (" Native stacks are enabled." if selected.native_traces else "")
+                + (
+                    " Python allocator events are enabled."
+                    if selected.trace_python_allocators
+                    else ""
+                )
+            ),
+            limitations=(
+                "The Memray tracker records every thread in the workload process while the "
+                "declared region is active; it is not a thread filter.",
+                "The workload must perform setup and warm-up before entering exactly one "
+                "flameox.sdk.memray_region() context.",
+                "Nested, concurrent, or repeated Memray SDK regions are rejected. Forked "
+                "children are not tracked.",
+            ),
+            environment={
+                "FLAMEOX_MEMRAY_CONFIG": json.dumps(
+                    selected.model_dump(mode="json"),
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                "FLAMEOX_MEMRAY_OUTPUT": output,
+            },
+        )
+    return CaptureInvocation(
+        argv=(
+            python,
+            "-m",
+            "memray",
+            "run",
+            *(("--native",) if selected.native_traces else ()),
+            *(("--trace-python-allocators",) if selected.trace_python_allocators else ()),
+            "--output",
+            output,
+            *target,
+        ),
+        artifact_kinds=adapter.artifact_kinds,
+        expected_overhead=(
+            adapter.expected_overhead
+            + (" Native stacks are enabled." if selected.native_traces else "")
+            + (" Python allocator events are enabled." if selected.trace_python_allocators else "")
+        ),
+        limitations=(
+            *adapter.capture_limitations,
+            "Whole-entrypoint mode includes setup, imports, and warm-up. Use the SDK mode "
+            "for one declared operation region.",
+        ),
+        environment={},
+    )
+
+
 def _torch_capture_invocation(
     adapter: BuiltinAdapter,
     workload_argv: tuple[str, ...],
@@ -757,13 +860,13 @@ def _torch_capture_invocation(
     python, target = _torch_python_target(workload_argv)
     selected = torch_profiler_options(options)
     config = selected.model_dump(mode="json")
-    config["expected_cycles"] = selected.expected_cycles
     encoded_config = json.dumps(
         config,
         allow_nan=False,
         separators=(",", ":"),
         sort_keys=True,
     )
+
     feature_limitations = tuple(
         message
         for enabled, message in (
@@ -799,10 +902,12 @@ def _torch_capture_invocation(
         )
         if enabled
     )
+    selected_activities = ", ".join(selected.activities)
     expected_overhead = (
-        "Operator tracing with enabled expensive features: " + ", ".join(expensive_features) + "."
+        "Selected activities: "
+        f"{selected_activities}. High-cardinality options: {', '.join(expensive_features)}."
         if expensive_features
-        else "Operator tracing without shapes, memory, stacks, FLOPs, or modules."
+        else (f"Selected activities: {selected_activities}. High-cardinality options: none.")
     )
     if isinstance(selected, SdkTorchProfilerOptions):
         return CaptureInvocation(
@@ -815,6 +920,7 @@ def _torch_capture_invocation(
                 "The workload environment must be able to import flameox.sdk.",
                 "Schedule state is driven only by explicit workload step calls; Flameox does "
                 "not infer iteration boundaries.",
+                f"Selected activities: {selected_activities}.",
                 *feature_limitations,
             ),
             environment={
@@ -846,11 +952,57 @@ def _torch_capture_invocation(
         artifact_kinds=adapter.artifact_kinds,
         expected_overhead=expected_overhead,
         limitations=(
-            "Whole-entrypoint mode cannot distinguish application-specific warm-up and "
-            "steady-state phases.",
+            "Whole-entrypoint mode captures the complete Python entrypoint. Flameox cannot "
+            "separate setup, compilation, warm-up, or steady-state work in an unmodified "
+            "workload.",
+            "Tighter operation windows require workload instrumentation with "
+            "flameox.sdk.torch_profiler() and explicit step boundaries.",
+            f"Selected activities: {selected_activities}.",
             *feature_limitations,
         ),
         environment={},
+    )
+
+
+def _torch_benchmark_capture_invocation(
+    adapter: BuiltinAdapter,
+    workload_argv: tuple[str, ...],
+    output: str,
+    *,
+    options: dict[str, object] | None,
+) -> CaptureInvocation:
+    _torch_python_target(workload_argv)
+    selected = torch_benchmark_options(options)
+    encoded_config = json.dumps(
+        selected.model_dump(mode="json"),
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    event_clause = (
+        "CUDA event timing is enabled as a separate device metric."
+        if selected.cuda_event_timing
+        else "CUDA event timing is disabled."
+    )
+    return CaptureInvocation(
+        argv=workload_argv,
+        artifact_kinds=adapter.artifact_kinds,
+        expected_overhead=(
+            "Torch Timer minimum measurement window: "
+            f"{selected.min_run_time_seconds:g} seconds; retained samples: at most "
+            f"{selected.max_samples}; Torch threads: {selected.num_threads}. {event_clause}"
+        ),
+        limitations=(
+            "The workload must call flameox.sdk.torch_benchmark() around an already "
+            "constructed callable.",
+            "Timer records host-observed operation time after provider-owned warm-up; it does "
+            "not measure interpreter startup or input construction.",
+            *adapter.capture_limitations,
+        ),
+        environment={
+            "FLAMEOX_BENCHMARK_OUTPUT": output,
+            "FLAMEOX_TORCH_BENCHMARK_CONFIG": encoded_config,
+        },
     )
 
 
@@ -858,10 +1010,8 @@ def _node_v8_capture_invocation(
     adapter_name: str,
     adapter: BuiltinAdapter,
     workload_argv: tuple[str, ...],
-    output_root: Path,
     output: str,
     *,
-    executable: str | None,
     workload_executable: str | None,
 ) -> CaptureInvocation:
     """Inject Node.js --cpu-prof or --heap-prof flags into a declared Node workload.
@@ -1007,7 +1157,6 @@ def _nvbench_capture_invocation(
     workload_argv: tuple[str, ...],
     output: str,
     *,
-    executable: str | None,
     options: dict[str, object] | None,
 ) -> CaptureInvocation:
     """Inject the official output flag into the declared benchmark argv.
@@ -1199,8 +1348,10 @@ def _triton_compiler_capture_invocation(
     *,
     options: dict[str, object] | None,
 ) -> CaptureInvocation:
-    """Set Triton env-var dump controls; the broker runs the workload directly."""
+    """Capture native dumps and provider-owned autotune decisions in one interpreter."""
     selected = triton_compiler_options(options)
+    python, target = _triton_python_target(workload_argv)
+    launcher, implementation_id = _collector_source("triton.compiler")
     dump_dir = output_root / selected.dump_subdir
     environment: dict[str, str] = {
         "TRITON_DUMP_DIR": str(dump_dir),
@@ -1209,11 +1360,22 @@ def _triton_compiler_capture_invocation(
     if selected.reproducer_filename is not None:
         environment["TRITON_REPRODUCER_PATH"] = str(output_root / selected.reproducer_filename)
     return CaptureInvocation(
-        argv=workload_argv,
+        argv=(
+            python,
+            "-c",
+            launcher,
+            "--events",
+            str(output_root / "triton-autotune.jsonl"),
+            "--compiler-events",
+            str(output_root / "triton-compiler.jsonl"),
+            "--",
+            *target,
+        ),
         artifact_kinds=adapter.artifact_kinds,
         expected_overhead=adapter.expected_overhead or "",
         limitations=adapter.capture_limitations,
         environment=environment,
+        implementation_id=implementation_id,
     )
 
 
@@ -1257,6 +1419,19 @@ def _python_target(
             remediation=("Declare a script or `python -m module` workload.",),
         )
     return workload_argv[0], arguments
+
+
+def _triton_python_target(workload_argv: tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
+    python, arguments = _python_target(workload_argv)
+    if arguments[0] == "-m" and len(arguments) >= 2:
+        return python, arguments
+    if arguments[0].startswith("-"):
+        raise DomainError(
+            ErrorCode.INVALID_CAPTURE_PLAN,
+            "Triton compiler capture supports only a Python script or `python -m module`.",
+            remediation=("Declare a script or `python -m module` workload.",),
+        )
+    return python, arguments
 
 
 def _torch_python_target(
@@ -1336,6 +1511,7 @@ _COLLECTOR_FILES = {
         "pytest_launcher.py",
         "pytest_plugin.py",
     ),
+    "triton.compiler": ("triton_autotune.py",),
 }
 
 

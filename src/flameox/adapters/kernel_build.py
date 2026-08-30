@@ -1,20 +1,27 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from pathlib import Path, PurePosixPath
-from typing import Annotated, Final, Literal
+from pathlib import PurePosixPath
+from typing import Annotated, Literal
 
-from pydantic import Field, TypeAdapter, model_validator
+from pydantic import Field, model_validator
 
-from flameox.domain import digest_model
 from flameox.models import ContractModel
 
-KERNEL_BUILD_SCHEMA_VERSION_V1: Final[Literal["flameox.kernel-build.v1"]] = (
-    "flameox.kernel-build.v1"
-)
-KERNEL_BUILD_SCHEMA_VERSION: Final[Literal["flameox.kernel-build.v2"]] = "flameox.kernel-build.v2"
 
-_Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+def _relative_posix_path(value: str, *, subject: str) -> PurePosixPath:
+    path = PurePosixPath(value)
+    if (
+        "\\" in value
+        or "\x00" in value
+        or path.is_absolute()
+        or value in {".", ".."}
+        or ".." in path.parts
+    ):
+        raise ValueError(f"kernel-build {subject} paths must be contained relative POSIX paths")
+    if value != path.as_posix():
+        raise ValueError(f"kernel-build {subject} paths must be normalized")
+    return path
 
 
 class KernelBuildProducer(StrEnum):
@@ -22,204 +29,73 @@ class KernelBuildProducer(StrEnum):
     CUTE = "cute"
 
 
-class KernelBuildOutcome(StrEnum):
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    INCONCLUSIVE = "inconclusive"
-
-
-class KernelBuildCacheStatus(StrEnum):
-    HIT = "hit"
-    MISS = "miss"
-    MIXED = "mixed"
-    UNKNOWN = "unknown"
-
-
-class KernelBuildStageStatus(StrEnum):
-    AVAILABLE = "available"
-    CACHED = "cached"
-    SKIPPED = "skipped"
-    UNAVAILABLE = "unavailable"
-    FAILED = "failed"
-
-
 class KernelBuildArtifact(ContractModel):
+    """One provider-native file, identified without assigning it pipeline state."""
+
     path: Annotated[str, Field(min_length=1, max_length=500)]
     byte_length: Annotated[int, Field(ge=0)]
     sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
     media_type: Annotated[str, Field(min_length=1, max_length=100)] = "application/octet-stream"
-    role: Annotated[str, Field(min_length=1, max_length=100)] = "compiler_stage"
 
     @model_validator(mode="after")
     def relative_contained_path(self) -> KernelBuildArtifact:
-        path = PurePosixPath(self.path)
-        if path.is_absolute() or self.path in {".", ".."} or ".." in path.parts:
-            raise ValueError("kernel-build artifact paths must be contained relative POSIX paths")
-        if any(part in {"", "."} for part in path.parts):
-            raise ValueError("kernel-build artifact paths must be normalized")
+        _relative_posix_path(self.path, subject="artifact")
         return self
 
 
-class _KernelBuildStage(ContractModel):
-    name: Annotated[str, Field(min_length=1, max_length=100)]
-    ordinal: Annotated[int, Field(ge=0, le=99)]
-    predecessor: Annotated[str, Field(min_length=1, max_length=100)] | None = None
-    format: Annotated[str, Field(min_length=1, max_length=100)]
-    format_schema: Annotated[str, Field(min_length=1, max_length=100)]
-    elapsed_ns: Annotated[int, Field(ge=0)] | None = None
-    limitations: Annotated[
-        tuple[Annotated[str, Field(min_length=1, max_length=500)], ...],
-        Field(max_length=20),
-    ] = ()
+class KernelBuildArtifactGroup(ContractModel):
+    """One native compiler dump directory, without a cross-group ordering claim."""
+
+    path: Annotated[str, Field(min_length=1, max_length=500)]
+    artifacts: Annotated[tuple[KernelBuildArtifact, ...], Field(min_length=1, max_length=99)]
+
+    @model_validator(mode="after")
+    def contained_artifacts(self) -> KernelBuildArtifactGroup:
+        _relative_posix_path(self.path, subject="group")
+        prefix = f"{self.path}/"
+        artifact_paths = [artifact.path for artifact in self.artifacts]
+        if len(artifact_paths) != len(set(artifact_paths)):
+            raise ValueError("kernel-build group artifact paths must be unique")
+        if any(not artifact_path.startswith(prefix) for artifact_path in artifact_paths):
+            raise ValueError(
+                "kernel-build group artifacts must remain below their native directory"
+            )
+        return self
 
 
-class ArtifactKernelBuildStage(_KernelBuildStage):
-    status: Literal[KernelBuildStageStatus.AVAILABLE, KernelBuildStageStatus.CACHED]
-    artifact: KernelBuildArtifact
+class KernelBuildManifest(ContractModel):
+    """Provider-native compiler evidence grouped by its original dump directories.
 
-
-class ArtifactlessKernelBuildStage(_KernelBuildStage):
-    status: Literal[
-        KernelBuildStageStatus.SKIPPED,
-        KernelBuildStageStatus.UNAVAILABLE,
-        KernelBuildStageStatus.FAILED,
-    ]
-    artifact: Literal[None] = None
-
-
-type KernelBuildStage = Annotated[
-    ArtifactKernelBuildStage | ArtifactlessKernelBuildStage,
-    Field(discriminator="status"),
-]
-
-
-class KernelBuildTarget(ContractModel):
-    """Compiler target selected for a managed build.
-
-    Triton exposes this shape as a backend, architecture, and warp size. Other
-    compiler adapters can use the same bounded vocabulary without claiming a
-    target when they cannot establish it.
+    The manifest is deliberately not a pipeline. It preserves raw group membership,
+    bytes, and provider provenance; ``ArtifactPipeline`` owns normalized stage
+    ordering and predecessor lineage. The authoritative run owns execution
+    semantics.
     """
 
-    backend: Annotated[str, Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")]
-    architecture: Annotated[
-        str,
-        Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.+-]+$"),
-    ]
-    warp_size: Annotated[int, Field(gt=0, le=1_024)] | None = None
-
-
-class KernelBuildContext(ContractModel):
-    """Exact identity claims about the input and protocol of one build."""
-
-    workload_definition_id: _Digest
-    workload_instance_id: _Digest
-    command_digest: _Digest
-    parameters_digest: _Digest
-    compiler_identity_id: _Digest
-    build_protocol_id: _Digest
-    target: KernelBuildTarget | None = None
-    target_identity_id: _Digest | None = None
-
-    @model_validator(mode="after")
-    def target_identity_matches_content(self) -> KernelBuildContext:
-        if self.target is None:
-            if self.target_identity_id is not None:
-                raise ValueError("target_identity_id requires a declared compiler target")
-            return self
-        expected = digest_model(self.target.model_dump(mode="json"))
-        if self.target_identity_id != expected:
-            raise ValueError("target identity must match the declared compiler target")
-        return self
-
-
-class _KernelBuildManifest(ContractModel):
     producer: Literal[KernelBuildProducer.TRITON, KernelBuildProducer.CUTE]
-    producer_version: Annotated[str, Field(min_length=1, max_length=100)]
-    outcome: KernelBuildOutcome
-    cache_status: KernelBuildCacheStatus = KernelBuildCacheStatus.UNKNOWN
-    stages: Annotated[tuple[KernelBuildStage, ...], Field(min_length=1, max_length=100)]
-    source_environment: dict[
-        Annotated[str, Field(min_length=1, max_length=100)],
-        Annotated[str, Field(max_length=500)],
-    ] = Field(default_factory=dict)
-    limitations: Annotated[
-        tuple[Annotated[str, Field(min_length=1, max_length=500)], ...],
-        Field(max_length=20),
-    ] = ()
-    diagnostics: Annotated[
-        tuple[Annotated[str, Field(min_length=1, max_length=2_000)], ...],
-        Field(max_length=50),
-    ] = ()
+    native_groups: Annotated[tuple[KernelBuildArtifactGroup, ...], Field(max_length=99)] = ()
+    attachments: Annotated[tuple[KernelBuildArtifact, ...], Field(max_length=20)] = ()
 
     @model_validator(mode="after")
-    def ordered_pipeline(self) -> _KernelBuildManifest:
-        if len(self.source_environment) > 20:
-            raise ValueError("source_environment is limited to 20 entries")
-        names = [stage.name for stage in self.stages]
-        ordinals = [stage.ordinal for stage in self.stages]
-        paths = [stage.artifact.path for stage in self.stages if stage.artifact is not None]
-        if len(names) != len(set(names)) or len(ordinals) != len(set(ordinals)):
-            raise ValueError("kernel-build stage names and ordinals must be unique")
-        if ordinals != sorted(ordinals):
-            raise ValueError("kernel-build stages must be declared in ordinal order")
-        if len(paths) != len(set(paths)):
-            raise ValueError("kernel-build artifact paths must be unique")
-        seen: set[str] = set()
-        for stage in self.stages:
-            if stage.predecessor is not None and stage.predecessor not in seen:
-                raise ValueError("stage predecessors must identify an earlier declared stage")
-            seen.add(stage.name)
-        if self.outcome is KernelBuildOutcome.SUCCEEDED and any(
-            stage.status in {KernelBuildStageStatus.FAILED, KernelBuildStageStatus.UNAVAILABLE}
-            for stage in self.stages
-        ):
-            raise ValueError("a successful build cannot contain failed or unavailable stages")
-        if self.outcome is KernelBuildOutcome.FAILED and not any(
-            stage.status is KernelBuildStageStatus.FAILED for stage in self.stages
-        ):
-            raise ValueError("a failed build requires a failed stage")
+    def grouped_provenance(self) -> KernelBuildManifest:
+        group_paths = [group.path for group in self.native_groups]
+        if len(group_paths) != len(set(group_paths)):
+            raise ValueError("kernel-build native group paths must be unique")
+        artifact_paths = [artifact.path for artifact in self.artifacts]
+        if len(artifact_paths) != len(set(artifact_paths)):
+            raise ValueError(
+                "kernel-build artifact paths must be unique across groups and attachments"
+            )
+        if len(artifact_paths) > 99:
+            raise ValueError("kernel-build manifest has at most 99 native artifacts")
         return self
 
-    def bundle_paths(self, manifest_path: Path) -> tuple[Path, ...]:
-        return tuple(
-            manifest_path.parent / stage.artifact.path
-            for stage in self.stages
-            if stage.artifact is not None
+    @property
+    def artifacts(self) -> tuple[KernelBuildArtifact, ...]:
+        return (
+            *(artifact for group in self.native_groups for artifact in group.artifacts),
+            *self.attachments,
         )
 
-
-class KernelBuildManifestV1(_KernelBuildManifest):
-    """Legacy provider manifest whose workload and device fields are labels only."""
-
-    schema_version: Literal["flameox.kernel-build.v1"] = KERNEL_BUILD_SCHEMA_VERSION_V1
-    workload_identity: Annotated[str, Field(min_length=1, max_length=200)]
-    device_identity: Annotated[str, Field(min_length=1, max_length=500)] | None = None
-
-
-class KernelBuildManifestV2(_KernelBuildManifest):
-    """Build manifest with an exact, independently verifiable input context."""
-
-    schema_version: Literal["flameox.kernel-build.v2"] = KERNEL_BUILD_SCHEMA_VERSION
-    workload_label: Annotated[str, Field(min_length=1, max_length=200)]
-    build_context: KernelBuildContext
-
-
-type KernelBuildManifest = Annotated[
-    KernelBuildManifestV1 | KernelBuildManifestV2,
-    Field(discriminator="schema_version"),
-]
-
-_KERNEL_BUILD_MANIFEST_ADAPTER: TypeAdapter[KernelBuildManifest] = TypeAdapter(KernelBuildManifest)
-
-
-def parse_kernel_build_manifest(value: object) -> KernelBuildManifest:
-    return _KERNEL_BUILD_MANIFEST_ADAPTER.validate_python(value)
-
-
-def kernel_build_v1_json_schema() -> dict[str, object]:
-    return KernelBuildManifestV1.model_json_schema()
-
-
 def kernel_build_json_schema() -> dict[str, object]:
-    return KernelBuildManifestV2.model_json_schema()
+    return KernelBuildManifest.model_json_schema()

@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import shutil
 import stat
-from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
 
 from flameox.domain import DomainError, ErrorCode
 from flameox.storage.workspace import Workspace
@@ -65,12 +63,6 @@ class StorageQuota:
                     "minimum_free_bytes": config.min_free_bytes,
                 },
             )
-
-    def require_generation_rows(
-        self,
-        rows_by_table: Mapping[str, Sequence[Mapping[str, Any]]],
-    ) -> None:
-        self.require_generation_row_count(sum(len(rows) for rows in rows_by_table.values()))
 
     def require_generation_row_count(self, row_count: int) -> None:
         limit = self.workspace.config.storage.max_rows_per_generation

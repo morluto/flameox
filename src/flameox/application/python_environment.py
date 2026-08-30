@@ -7,7 +7,7 @@ from pathlib import Path
 from packaging.requirements import Requirement
 
 from flameox.application.workloads import WorkloadService
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import DomainError, ErrorCode, process_exit_code
 from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.storage import Workspace
 
@@ -73,14 +73,14 @@ class PythonEnvironmentProbe:
                 max_output_bytes=64 * 1024,
             )
         )
-        if outcome.process.exit_code != 0:
+        if process_exit_code(outcome.process.termination) != 0:
             raise DomainError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 "The workload Python environment could not report distribution metadata.",
                 details={
                     "workload_name": workload_name,
                     "interpreter": str(interpreter),
-                    "exit_code": outcome.process.exit_code,
+                    "exit_code": process_exit_code(outcome.process.termination),
                 },
                 remediation=(
                     "Check that the declared interpreter can run isolated stdlib metadata "

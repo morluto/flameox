@@ -17,7 +17,7 @@ import psutil
 import pytest
 
 from flameox.command_binding import ExecutableResolver
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import DomainError, ErrorCode, ExitedProcessTermination
 from flameox.execution import (
     ExecutionRequest,
     ProcessCancelledError,
@@ -226,7 +226,7 @@ async def test_shell_metacharacters_remain_literal_arguments(tmp_path: Path) -> 
 
     assert outcome.stdout.decode().strip() == literal
     assert not marker.exists()
-    assert outcome.process.exit_code == 0
+    assert outcome.process.termination == ExitedProcessTermination(exit_code=0)
     assert any(item.snapshot_phase == "running" for item in outcome.process_observations)
     assert any(item.snapshot_phase == "post_root_exit" for item in outcome.process_observations)
 
@@ -399,7 +399,7 @@ async def test_broker_passes_bounded_stdin_to_jsonc_style_helpers(tmp_path: Path
     )
 
     assert outcome.stdout == b'{"operation":"modify"}'
-    assert outcome.process.exit_code == 0
+    assert outcome.process.termination == ExitedProcessTermination(exit_code=0)
 
 
 @pytest.mark.anyio
@@ -437,7 +437,7 @@ def test_observed_run_preserves_streams_exit_status_and_peak_rss(tmp_path: Path)
 
     assert outcome.stdout == b"observed stdout\n"
     assert outcome.stderr == b"observed stderr\n"
-    assert outcome.process.exit_code == 7
+    assert outcome.process.termination == ExitedProcessTermination(exit_code=7)
     assert outcome.process.peak_rss_bytes is not None
     assert any(item.snapshot_phase == "running" for item in outcome.process_observations)
     assert any(item.snapshot_phase == "post_root_exit" for item in outcome.process_observations)
@@ -568,7 +568,7 @@ def test_observed_run_cleans_up_descendants_after_parent_exits(tmp_path: Path) -
         request(tmp_path, "-c", code, str(pid_path), observation="child_peak_rss")
     )
 
-    assert outcome.process.exit_code == 0
+    assert outcome.process.termination == ExitedProcessTermination(exit_code=0)
     assert pid_path.is_file()
     child_pid = int(pid_path.read_text())
     for _ in range(100):
@@ -597,7 +597,7 @@ def test_observed_run_does_not_wait_for_an_escaped_output_writer(tmp_path: Path)
         )
         child_pid = int(pid_path.read_text())
 
-        assert outcome.process.exit_code == 0
+        assert outcome.process.termination == ExitedProcessTermination(exit_code=0)
         assert time.monotonic() - started < 0.7
         assert not any(
             thread.name.startswith("flameox-observed-") for thread in threading.enumerate()

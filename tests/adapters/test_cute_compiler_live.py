@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import CaptureService, ExecutionPolicy
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
 from flameox.domain import ArtifactKind, CaptureStatus, ExecutionStatus
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment
@@ -31,7 +32,6 @@ async def test_configured_cute_workload_emits_kernel_build(
     disable_containment(workspace)
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.compile]
 argv = [{json.dumps(workload)}]
 timeout_seconds = 120
@@ -48,7 +48,6 @@ timeout_seconds = 120
     assert result.run.execution_status is ExecutionStatus.SUCCEEDED
     assert result.run.capture_status is CaptureStatus.REGISTERED
     assert any(
-        registration.kind is ArtifactKind.KERNEL_BUILD
-        and registration.role.startswith("compiler_stage")
+        registration.kind is ArtifactKind.KERNEL_BUILD and registration.role == "compiler_output"
         for registration in result.run.artifacts
     )

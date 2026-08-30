@@ -5,11 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from flameox.adapters import (
+from flameox.adapters.inference import (
     InferenceArtifactExtractor,
     VllmResultParser,
 )
-from flameox.application import EvidenceQueryService, ImportArtifactRequest, ImportService
+from flameox.application.evidence_query import EvidenceQueryService
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 from flameox.storage import Workspace
 

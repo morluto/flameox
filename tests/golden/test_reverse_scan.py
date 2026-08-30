@@ -6,18 +6,20 @@ from pathlib import Path
 import pytest
 
 from flameox.analysis import RecipeService
-from flameox.application import (
+from flameox.application.analysis_records import (
     AnalysisMaterializationService,
-    CaptureService,
+    ScalingAnalysisRequest,
+)
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.experiments import ExperimentService
+from flameox.application.records import (
     CreateInvestigationRequest,
     EvidenceInput,
-    ExecutionPolicy,
-    ExperimentService,
     FindingService,
     InvestigationService,
     RecordFindingRequest,
     RecordHypothesisRequest,
-    ScalingAnalysisRequest,
 )
 from flameox.domain import (
     ComparisonDecision,
@@ -66,16 +68,39 @@ async def test_reverse_scan_investigation_proves_candidate_with_oracle(
         "print(total)\n"
     )
     (tmp_path / "validate.py").write_text(
-        "import subprocess, sys\n"
+        "import hashlib, json, os, subprocess, sys\n"
         "mode, length = sys.argv[1], int(sys.argv[2])\n"
         "actual = int(subprocess.check_output("
         "[sys.executable, 'scan.py', mode, str(length)], text=True))\n"
         "expected = length * (length - 1) // 2\n"
-        "assert actual == expected, (actual, expected)\n"
+        "if actual != expected:\n"
+        "    raise SystemExit(f'{actual} != {expected}')\n"
+        "outputs = {\n"
+        "    treatment: int(subprocess.check_output(\n"
+        "        [sys.executable, 'scan.py', treatment, str(length)], text=True))\n"
+        "    for treatment in ('baseline', 'candidate')\n"
+        "}\n"
+        "def digest(value):\n"
+        "    return 'sha256:' + hashlib.sha256(str(value).encode()).hexdigest()\n"
+        "payload = {\n"
+        "    'schema_version': 'flameox.oracle-receipt.v1',\n"
+        "    'status': 'pass', 'reason': 'pair_match',\n"
+        "    'binding': {\n"
+        "        'pair_id': digest(f'pair:{length}'),\n"
+        "        'treatment': mode,\n"
+        "        'input_identity': digest(f'input:{length}'),\n"
+        "        'workload_identity': os.environ['FLAMEOX_WORKLOAD_INSTANCE_ID'],\n"
+        "        'output_identity': digest(outputs.get(mode, actual)),\n"
+        "        'compared_property': 'forward',\n"
+        "        'oracle_identity': digest('reverse-scan-pair-oracle'),\n"
+        "        'tolerance': {'absolute': 0, 'relative': 0, 'equal_nan': False},\n"
+        "    },\n"
+        "}\n"
+        "with open(os.environ['FLAMEOX_ORACLE_RECEIPT'], 'w') as stream:\n"
+        "    json.dump(payload, stream)\n"
     )
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.reverse_scan]
 argv = ["python", "scan.py", "{mode}", "{length}"]
 cwd = "."
@@ -88,6 +113,7 @@ length = [32768, 65536, 131072]
 [workloads.reverse_scan.oracle]
 strength = "cross_treatment_equivalence"
 argv = ["python", "validate.py", "{mode}", "{length}"]
+receipt_schema = "flameox.oracle-receipt.v1"
 
 [experiments.reverse_scan_scaling]
 workload = "reverse_scan"

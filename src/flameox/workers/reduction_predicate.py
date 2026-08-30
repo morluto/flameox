@@ -17,7 +17,7 @@ from flameox.application.reduction_contracts import (
     collapse_predicate_observations,
 )
 from flameox.atomic import atomic_write_json
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import DomainError, ErrorCode, process_exit_code
 from flameox.domain.models import utc_now
 from flameox.execution import ExecutionRequest, ResourcePolicy, SubprocessBroker
 from flameox.filesystem import BoundedFileSystem
@@ -117,10 +117,10 @@ def _observe(
         repetition=repetition,
         classification=(
             PredicateClassification.INTERESTING
-            if outcome.process.exit_code == 0
+            if process_exit_code(outcome.process.termination) == 0
             else PredicateClassification.NOT_INTERESTING
         ),
-        exit_code=outcome.process.exit_code,
+        exit_code=process_exit_code(outcome.process.termination),
         duration_ms=(time.monotonic() - started) * 1_000,
     )
 

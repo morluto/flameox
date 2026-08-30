@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from flameox.domain import DomainError, ErrorCode
@@ -190,10 +189,10 @@ def main() -> int:
     return run_typed_worker(
         WorkerApplication(
             definition=PERFETTO_WORKER,
-            handler=lambda request, _context: _query(request),
+            handler=lambda request, _job_root: _query(request),
             invalid_failure=WorkerFailureKind.INVALID_REQUEST,
             invalid_message="Perfetto worker request is invalid",
-            caught=(OSError, ValueError, json.JSONDecodeError),
+            caught=(OSError, ValueError),
         )
     )
 

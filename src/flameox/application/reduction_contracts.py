@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
 
 from pydantic import Field, model_validator
 
@@ -34,7 +33,6 @@ class PredicateObservation(ContractModel):
 
 
 class ReductionAttemptReceipt(ContractModel):
-    schema_version: Literal[1] = 1
     attempt_id: str = Field(pattern=r"^attempt-[0-9]{8}$")
     candidate_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     candidate_size_bytes: int = Field(ge=0)

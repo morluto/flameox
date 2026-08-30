@@ -57,12 +57,6 @@ class DomainError(Exception):
         self.details = dict(details or {})
         self.remediation = remediation
         self.run_id = run_id
-        forbidden_recovery_fields = {"next_tool", "next_arguments"} & self.details.keys()
-        if forbidden_recovery_fields:
-            raise ValueError(
-                "Legacy recovery fields are not accepted; pass a validated next_action "
-                f"instead: {', '.join(sorted(forbidden_recovery_fields))}."
-            )
         self.next_action = next_action
 
     def to_detail(self) -> dict[str, Any]:

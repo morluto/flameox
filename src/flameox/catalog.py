@@ -11,18 +11,21 @@ from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import duckdb
 import pyarrow as pa
+import pyarrow.parquet as pq
 from pydantic import BaseModel
 
 from flameox.atomic import fsync_directory
 from flameox.domain.errors import DomainError, ErrorCode
+from flameox.domain.identity import new_id
 from flameox.domain.models import RunManifest, parse_run_manifest_json
-from flameox.evidence.schemas import SCHEMA_MAJOR, SCHEMA_MINOR, schema_for, table_names
+from flameox.evidence.schemas import UTC_TIMESTAMP, schema_for, table_names
 from flameox.observability import OperationLogger, elapsed_ms
-from flameox.storage.corpus import CorpusCommit, GenerationManifest
+from flameox.storage.corpus import CorpusCommit, GenerationFile, GenerationManifest, file_sha256
 from flameox.storage.locks import (
     CATALOG_EXCLUSIVE,
     CATALOG_SHARED,
@@ -41,6 +44,12 @@ _QUERY_ADMISSIONS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.
     weakref.WeakKeyDictionary()
 )
 _QUERY_ADMISSIONS_LOCK = threading.Lock()
+_MANIFEST_PROVENANCE_FIELDS: tuple[Any, ...] = (
+    pa.field("evidence_generation_id", pa.string(), nullable=False),
+    pa.field("published_at", UTC_TIMESTAMP, nullable=False),
+    pa.field("extractor_name", pa.string(), nullable=False),
+    pa.field("extractor_version", pa.string(), nullable=False),
+)
 
 
 def _query_admission() -> asyncio.Semaphore:
@@ -82,6 +91,11 @@ def _duckdb_type(data_type: pa.DataType) -> str:
         return f"{_duckdb_type(data_type.value_type)}[]"
     if pa.types.is_map(data_type):
         return f"MAP({_duckdb_type(data_type.key_type)}, {_duckdb_type(data_type.item_type)})"
+    if pa.types.is_struct(data_type):
+        fields = ", ".join(
+            f"{_sql_identifier(field.name)} {_duckdb_type(field.type)}" for field in data_type
+        )
+        return f"STRUCT({fields})"
     raise TypeError(f"Unsupported Arrow type for an empty DuckDB view: {data_type}")
 
 
@@ -94,6 +108,13 @@ class SnapshotHandle:
     @property
     def commit_id(self) -> str:
         return self.commit.commit_id
+
+
+@dataclass(frozen=True, slots=True)
+class _InventoryFile:
+    path: Path
+    manifest: GenerationManifest
+    evidence_file: GenerationFile
 
 
 class Snapshot:
@@ -154,10 +175,10 @@ class Catalog:
         self.workspace = workspace
 
     def rebuild(self) -> None:
-        operation_id = OperationLogger(self.workspace.paths.root).new_id()
+        operation_id = new_id()
         started = time.monotonic()
         head = self.workspace.corpus.read_head()
-        inventory = self._inventory(head)
+        inventory = self._inventory(head, verify_digests=True)
         temporary = self.workspace.paths.catalog.with_name(f".catalog.{uuid4().hex}.duckdb")
         connection = duckdb.connect(str(temporary))
         try:
@@ -171,19 +192,6 @@ class Catalog:
             connection.execute(
                 "INSERT INTO flameox_catalog_metadata VALUES (?)",
                 (datetime.now(UTC).isoformat(),),
-            )
-            connection.execute(
-                """
-                CREATE TABLE flameox_schema_registry (
-                    table_name VARCHAR PRIMARY KEY,
-                    schema_major INTEGER NOT NULL,
-                    schema_minor INTEGER NOT NULL
-                )
-                """
-            )
-            connection.executemany(
-                "INSERT INTO flameox_schema_registry VALUES (?, ?, ?)",
-                [(name, SCHEMA_MAJOR, SCHEMA_MINOR) for name in table_names()],
             )
             connection.execute("CHECKPOINT")
         finally:
@@ -356,7 +364,7 @@ class Catalog:
                 self._raise_if_cancelled(cancellation_requested)
                 return operation(snapshot)
 
-        operation_id = OperationLogger(self.workspace.paths.root).new_id()
+        operation_id = new_id()
         started = time.monotonic()
         name = query_name or getattr(operation, "__name__", "analysis")
         logger = OperationLogger(self.workspace.paths.root)
@@ -453,39 +461,79 @@ class Catalog:
         finally:
             admission.release()
 
-    def _inventory(self, commit: CorpusCommit) -> dict[str, list[Path]]:
-        inventory: dict[str, list[Path]] = {name: [] for name in table_names()}
-        for manifest_relative in commit.generation_manifests:
-            manifest_path = (self.workspace.paths.root / manifest_relative).resolve()
-            self._require_workspace_path(manifest_path)
-            try:
-                manifest = GenerationManifest.model_validate_json(manifest_path.read_text())
-            except (FileNotFoundError, ValueError) as exc:
-                raise DomainError(
-                    ErrorCode.WORKSPACE_INVALID,
-                    f"Generation manifest is missing or invalid: {manifest_relative}",
-                ) from exc
+    def _inventory(
+        self,
+        commit: CorpusCommit,
+        *,
+        verify_digests: bool = False,
+    ) -> dict[str, list[_InventoryFile]]:
+        inventory: dict[str, list[_InventoryFile]] = {name: [] for name in table_names()}
+        for generation_id in commit.generation_ids:
+            manifest = self.workspace.corpus.read_generation(generation_id)
             for file in manifest.files:
                 if file.table not in inventory:
                     raise DomainError(
                         ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
                         f"Unknown table in generation manifest: {file.table}",
                     )
-                if file.schema_major != SCHEMA_MAJOR:
-                    raise DomainError(
-                        ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
-                        "Evidence generation uses an unsupported schema major.",
-                        details={
-                            "table": file.table,
-                            "observed_schema_major": file.schema_major,
-                            "supported_schema_major": SCHEMA_MAJOR,
-                        },
-                    )
                 path = (self.workspace.paths.root / file.path).resolve()
                 self._require_workspace_path(path)
-                inventory[file.table].append(path)
+                if path.is_file():
+                    self._validate_inventory_file(
+                        path,
+                        file,
+                        verify_digest=verify_digests,
+                    )
+                inventory[file.table].append(
+                    _InventoryFile(path=path, manifest=manifest, evidence_file=file)
+                )
         self._validate_inventory_paths(inventory)
         return inventory
+
+    @staticmethod
+    def _validate_inventory_file(
+        path: Path,
+        evidence_file: GenerationFile,
+        *,
+        verify_digest: bool,
+    ) -> None:
+        expected_schema = schema_for(evidence_file.table)
+        try:
+            parquet_file = pq.ParquetFile(path)
+            parquet_schema = parquet_file.schema_arrow
+            row_count = parquet_file.metadata.num_rows
+        except (OSError, pa.ArrowException) as exc:
+            raise DomainError(
+                ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
+                f"Evidence Parquet file is unreadable: {path}",
+            ) from exc
+        if (
+            not parquet_schema.equals(expected_schema, check_metadata=False)
+            or parquet_schema.metadata != expected_schema.metadata
+        ):
+            raise DomainError(
+                ErrorCode.EVIDENCE_SCHEMA_MISMATCH,
+                "Evidence Parquet schema differs from the current normalized schema.",
+                details={"table": evidence_file.table, "path": str(path)},
+            )
+        if row_count != evidence_file.row_count:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Evidence Parquet row count differs from its generation manifest.",
+                details={"table": evidence_file.table, "path": str(path)},
+            )
+        if path.stat().st_size != evidence_file.byte_length:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Evidence Parquet byte length differs from its generation manifest.",
+                details={"table": evidence_file.table, "path": str(path)},
+            )
+        if verify_digest and file_sha256(path) != evidence_file.sha256:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Evidence Parquet bytes differ from their generation manifest digest.",
+                details={"table": evidence_file.table, "path": str(path)},
+            )
 
     def _require_workspace_path(self, path: Path) -> None:
         try:
@@ -496,9 +544,12 @@ class Catalog:
                 f"Corpus inventory escapes the workspace: {path}",
             ) from exc
 
-    def _validate_inventory_paths(self, inventory: dict[str, list[Path]]) -> None:
+    def _validate_inventory_paths(self, inventory: dict[str, list[_InventoryFile]]) -> None:
         missing = [
-            str(path) for paths in inventory.values() for path in paths if not path.is_file()
+            str(file.path)
+            for files in inventory.values()
+            for file in files
+            if not file.path.is_file()
         ]
         if missing:
             raise DomainError(
@@ -527,38 +578,40 @@ class Catalog:
     def _create_snapshot_views(
         self,
         connection: duckdb.DuckDBPyConnection,
-        inventory: dict[str, list[Path]],
+        inventory: dict[str, list[_InventoryFile]],
     ) -> None:
         for name in table_names():
             identifier = _sql_identifier(name)
-            paths = inventory[name]
-            if paths:
-                files = ", ".join(_sql_string(str(path)) for path in paths)
-                available_columns = {
-                    str(row[0])
-                    for row in connection.execute(
-                        f"DESCRIBE SELECT * FROM read_parquet([{files}], union_by_name=true)"
-                    ).fetchall()
-                }
-                projected_columns = ", ".join(
-                    (
-                        _sql_identifier(field.name)
-                        if field.name in available_columns
-                        else (
-                            f"CAST(NULL AS {_duckdb_type(field.type)}) AS "
-                            f"{_sql_identifier(field.name)}"
-                        )
-                    )
-                    for field in schema_for(name)
+            files = inventory[name]
+            if files:
+                schema = schema_for(name)
+                physical_names = set(schema.names)
+                provenance_columns = ", ".join(
+                    f"manifest.{_sql_identifier(field.name)} AS {_sql_identifier(field.name)}"
+                    for field in _MANIFEST_PROVENANCE_FIELDS
+                    if field.name not in physical_names
                 )
+                physical_columns = ", ".join(
+                    f"data.{_sql_identifier(field.name)}" for field in schema
+                )
+                select_columns = ", ".join(
+                    column for column in (provenance_columns, physical_columns) if column
+                )
+                paths = ", ".join(_sql_string(str(file.path)) for file in files)
+                manifest_rows = ", ".join(self._manifest_values_row(file) for file in files)
                 connection.execute(
                     f"CREATE TEMP VIEW {identifier} AS "
-                    f"SELECT {projected_columns} FROM read_parquet([{files}], union_by_name=true)"
+                    f"SELECT {select_columns} "
+                    f"FROM read_parquet([{paths}], filename=true) AS data "
+                    f"JOIN (VALUES {manifest_rows}) AS manifest("
+                    "file_path, evidence_generation_id, published_at, "
+                    "extractor_name, extractor_version"
+                    ") ON data.filename = manifest.file_path"
                 )
                 continue
             columns = ", ".join(
                 f"CAST(NULL AS {_duckdb_type(field.type)}) AS {_sql_identifier(field.name)}"
-                for field in schema_for(name)
+                for field in self._logical_fields(name)
             )
             connection.execute(f"CREATE TEMP VIEW {identifier} AS SELECT {columns} WHERE FALSE")
         conflict = connection.execute(
@@ -583,15 +636,38 @@ class Catalog:
             ") WHERE revision_order = 1"
         )
 
-    def _validated_metadata(self) -> dict[str, object]:
+    @staticmethod
+    def _logical_fields(table_name: str) -> tuple[Any, ...]:
+        schema = schema_for(table_name)
+        physical_names = set(schema.names)
+        return (
+            *(field for field in _MANIFEST_PROVENANCE_FIELDS if field.name not in physical_names),
+            *tuple(schema),
+        )
+
+    @staticmethod
+    def _manifest_values_row(file: _InventoryFile) -> str:
+        return (
+            "("
+            + ", ".join(
+                (
+                    _sql_string(str(file.path)),
+                    _sql_string(file.manifest.generation_id),
+                    f"CAST({_sql_string(file.manifest.created_at.isoformat())} AS TIMESTAMPTZ)",
+                    _sql_string(file.manifest.publisher),
+                    _sql_string(file.manifest.publisher_version),
+                )
+            )
+            + ")"
+        )
+
+    def status(self) -> dict[str, object]:
         if not self.workspace.paths.catalog.exists():
             raise DomainError(ErrorCode.WORKSPACE_INVALID, "The DuckDB catalog is missing.")
         try:
             connection = duckdb.connect(str(self.workspace.paths.catalog), read_only=True)
             try:
-                row = connection.execute(
-                    "SELECT built_at FROM flameox_catalog_metadata"
-                ).fetchone()
+                row = connection.execute("SELECT built_at FROM flameox_catalog_metadata").fetchone()
             finally:
                 connection.close()
         except duckdb.Error as exc:
@@ -603,6 +679,3 @@ class Catalog:
         if row is None:
             raise DomainError(ErrorCode.WORKSPACE_INVALID, "Catalog metadata is missing.")
         return {"built_at": row[0]}
-
-    def status(self) -> dict[str, object]:
-        return self._validated_metadata()

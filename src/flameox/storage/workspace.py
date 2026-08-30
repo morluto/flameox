@@ -10,12 +10,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from pydantic import Field
 
-from flameox import __version__
 from flameox.atomic import atomic_write_json, atomic_write_text
 from flameox.config import WorkspaceConfig
 from flameox.domain.errors import DomainError, ErrorCode
@@ -38,15 +37,9 @@ if TYPE_CHECKING:
 
 
 class WorkspaceIdentity(ContractModel):
-    schema_version: Literal[2] = 2
     workspace_id: str = Field(min_length=1)
     created_at: datetime
     project_root: str
-    flameox_version: str
-    identity_algorithm: Literal["rfc8785-sha256-v1"] = "rfc8785-sha256-v1"
-    identity_projection_registry: Literal["flameox.identity-projections/v1"] = (
-        "flameox.identity-projections/v1"
-    )
 
 
 def _workspace_initialization_error(error: OSError | ValueError) -> DomainError:
@@ -272,7 +265,6 @@ class Workspace:
                     workspace_id=str(uuid4()),
                     created_at=utc_now(),
                     project_root=relative_project_root,
-                    flameox_version=__version__,
                 )
                 atomic_write_json(
                     workspace.paths.identity,
@@ -304,6 +296,7 @@ class Workspace:
     ) -> Workspace:
         if explicit is not None:
             workspace = cls(explicit)
+            workspace._validate_open_format()
             if project_root is not None:
                 cls._validate_project_binding(workspace, project_root)
             return workspace
@@ -312,13 +305,19 @@ class Workspace:
             candidate = directory / ".diagnostics"
             if candidate.is_dir():
                 workspace = cls(candidate)
-                _ = workspace.identity
+                workspace._validate_open_format()
                 return workspace
         raise DomainError(
             ErrorCode.WORKSPACE_NOT_FOUND,
             "No .diagnostics workspace was found.",
             remediation=("Run `flameox init` from the project root.",),
         )
+
+    def _validate_open_format(self) -> None:
+        _ = self.identity
+        from flameox.storage.control_plane import ControlPlane
+
+        ControlPlane(self).validate_existing()
 
     @staticmethod
     def _validate_project_binding(workspace: Workspace, project_root: Path) -> None:

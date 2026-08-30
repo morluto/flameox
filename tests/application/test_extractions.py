@@ -95,7 +95,6 @@ def _result(
         peak_memory_bytes=100,
         retained_end_bytes=40,
         temporary_allocated_bytes=20,
-        temporary_allocation_threshold=1,
         allocation_operations=3,
         total_allocated_bytes=120,
         capture_records=5,

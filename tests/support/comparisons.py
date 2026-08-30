@@ -4,8 +4,11 @@ from pathlib import Path
 
 import pyperf
 
-from flameox.adapters import PyPerfExtractor
-from flameox.application import ImportArtifactRequest, ImportService
+from flameox.adapters.pyperf import PyPerfExtractor
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.domain import ArtifactKind
 from flameox.storage import Workspace
 

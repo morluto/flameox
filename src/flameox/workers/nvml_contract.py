@@ -9,7 +9,6 @@ from flameox.workers.protocol import WorkerDefinition, WorkerOperationId
 
 
 class NvmlWorkerRequest(ContractModel):
-    schema_version: Literal[1] = 1
     include_topology: bool = False
 
 
@@ -60,8 +59,6 @@ class NvmlPeerLink(ContractModel):
 
 
 class NvmlSnapshot(ContractModel):
-    schema_version: Literal[1] = 1
-    provider: Literal["nvidia_nvml"] = "nvidia_nvml"
     binding_version: str = Field(min_length=1, max_length=100)
     nvml_version: str | None = Field(default=None, max_length=100)
     driver_version: str | None = Field(default=None, max_length=100)

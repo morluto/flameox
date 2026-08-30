@@ -10,7 +10,7 @@ from typing import cast
 import httpx
 import pytest
 
-from flameox.application.inference import InferenceReplayService
+from flameox.application.inference import InferenceScenarioService
 from flameox.application.inference_profiling import (
     InferenceProfilerControlClient,
     InferenceProfilingPlan,
@@ -18,14 +18,12 @@ from flameox.application.inference_profiling import (
     NsightSystemsProfilingPlan,
     SglangProfileOptions,
     SglangTorchProfilingPlan,
-    VllmProfilerControlClient,
     VllmTorchProfilingPlan,
 )
 from flameox.application.inference_providers import (
-    AvailableInferenceToolDiscovery,
     InferenceServerProvider,
     InferenceTool,
-    InferenceToolDiscovery,
+    QualifiedInferenceTool,
 )
 from flameox.domain import (
     CaptureStatus,
@@ -58,7 +56,7 @@ def _workspace(tmp_path: Path, *, mode: str = "managed") -> Workspace:
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "serve.py").write_text("print('serve')")
     (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n"
+        ""
         '[workloads.serve]\nargv = ["python", "serve.py"]\n'
         '[inference_servers.local]\nprovider = "vllm"\n'
         f'mode = "{mode}"\n'
@@ -148,21 +146,18 @@ class _ProfilingBroker(SubprocessBroker):
 
 
 def _patch_capture_dependencies(monkeypatch: pytest.MonkeyPatch, executable: Path) -> None:
-    from flameox.application import inference as inference_module
+    import flameox.application.inference as inference_module
 
     def fake_discover(
         tool: InferenceTool,
         *,
         provider_runtime: object | None = None,
-    ) -> InferenceToolDiscovery:
+    ) -> QualifiedInferenceTool:
         del provider_runtime
-        return AvailableInferenceToolDiscovery(
+        return QualifiedInferenceTool(
             tool=tool,
-            executable=executable,
             executable_binding=executable_binding(executable),
             version="0.12.0",
-            executable_digest="sha256:" + "a" * 64,
-            available=True,
         )
 
     async def fake_environment(_self: object, _plan: object) -> object:
@@ -181,7 +176,7 @@ def _patch_capture_dependencies(monkeypatch: pytest.MonkeyPatch, executable: Pat
 
     monkeypatch.setattr(inference_module, "discover_inference_tool", fake_discover)
     monkeypatch.setattr(
-        "flameox.application.inference.InferenceReplayService._managed_environment",
+        "flameox.application.inference.InferenceScenarioService._managed_environment",
         fake_environment,
     )
     monkeypatch.setattr(InferenceProfilingService, "_extract_preserved", fake_extract)
@@ -189,20 +184,20 @@ def _patch_capture_dependencies(monkeypatch: pytest.MonkeyPatch, executable: Pat
     async def control_noop(_self: object, **_kwargs: object) -> None:
         return None
 
-    monkeypatch.setattr(VllmProfilerControlClient, "start_async", control_noop)
-    monkeypatch.setattr(VllmProfilerControlClient, "stop_async", control_noop)
+    monkeypatch.setattr(InferenceProfilerControlClient, "start_async", control_noop)
+    monkeypatch.setattr(InferenceProfilerControlClient, "stop_async", control_noop)
 
 
 async def _seed_measurement_run(workspace: Workspace) -> str:
-    replay = InferenceReplayService(workspace)
-    replay_plan = replay.plan("profile", timeout_seconds=5)
-    environment = await replay._managed_environment(replay_plan)
-    run, measurement_environment, source_state = replay._start_run(
-        replay_plan, environment=environment
+    scenario_service = InferenceScenarioService(workspace)
+    scenario_plan = scenario_service.plan("profile", timeout_seconds=5)
+    environment = await scenario_service._managed_environment(scenario_plan)
+    run, measurement_environment, source_state = scenario_service._start_run(
+        scenario_plan, environment=environment
     )
     evidence_path = workspace.project_root / "measurement.json"
     evidence_path.write_text("{}")
-    stored = replay.artifacts.import_path(
+    stored = scenario_service.artifacts.import_path(
         evidence_path,
         allowed_roots=(workspace.project_root,),
         max_bytes=workspace.config.capture.max_artifact_bytes,
@@ -227,7 +222,7 @@ async def _seed_measurement_run(workspace: Workspace) -> str:
             "artifacts": (registration,),
         }
     )
-    replay.projections.append_run(
+    scenario_service.projections.append_run(
         finished,
         expected_revision=0,
         environment=measurement_environment,
@@ -307,7 +302,7 @@ def test_sglang_torch_plan_has_stable_identity_and_derived_profile_id(
     launcher.chmod(0o755)
     (tmp_path / "serve.py").write_text("print('serve')")
     (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n"
+        ""
         '[workloads.serve]\nargv = ["python", "serve.py"]\n'
         "[inference_servers.local]\n"
         'provider = "sglang"\n'
@@ -319,13 +314,10 @@ def test_sglang_torch_plan_has_stable_identity_and_derived_profile_id(
         "random_input_len = 4\nrandom_output_len = 2\n"
     )
 
-    discovery = AvailableInferenceToolDiscovery(
+    discovery = QualifiedInferenceTool(
         tool=InferenceTool.SGLANG,
-        executable=launcher,
         executable_binding=executable_binding(launcher),
-        available=True,
-        version="0.5.16",
-        executable_digest="sha256:" + "b" * 64,
+        version="0.5.18",
     )
     monkeypatch.setattr(
         "flameox.application.inference_profiling.discover_sglang",
@@ -340,7 +332,7 @@ def test_sglang_torch_plan_has_stable_identity_and_derived_profile_id(
     assert first.plan_id == second.plan_id
     assert first.sglang_profile_id == second.sglang_profile_id
     assert first.sglang_profile_id == f"flameox-{first.plan_id[7:31]}"
-    assert first.benchmark_executable_digest == discovery.executable_digest
+    assert "benchmark_executable_digest" not in first.model_dump(mode="json")
 
 
 def test_nsight_plan_wraps_server_with_documented_cuda_capture_range(tmp_path: Path) -> None:
@@ -415,7 +407,7 @@ def test_profiler_control_uses_only_start_and_stop_endpoints() -> None:
         return httpx.Response(204, stream=httpx.ByteStream(b""))
 
     with BoundedHttpClient(sync_transport=httpx.MockTransport(handler)) as http_client:
-        client = VllmProfilerControlClient(
+        client = InferenceProfilerControlClient(
             "http://127.0.0.1:8000",
             http_client=http_client,
         )
@@ -595,7 +587,7 @@ async def test_capture_publishes_canonical_diagnostic_run_linked_to_measurement_
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("target", ("profile", "replay"))
+@pytest.mark.parametrize("target", ("profile", "scenario"))
 async def test_capture_refuses_operation_directory_replaced_after_planning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -608,8 +600,8 @@ async def test_capture_refuses_operation_directory_replaced_after_planning(
     _patch_capture_dependencies(monkeypatch, executable)
     service = InferenceProfilingService(workspace)
     plan, _measurement_run_id = await _authorized_profile(service, workspace)
-    assert plan.replay_plan is not None
-    selected = plan.output_root if target == "profile" else plan.replay_plan.output_root
+    assert plan.scenario_plan is not None
+    selected = plan.output_root if target == "profile" else plan.scenario_plan.output_root
     operation_root = workspace.paths.staging.joinpath(*selected.parts())
     parked = operation_root.with_name(f"{operation_root.name}-parked")
     outside = tmp_path / f"outside-{target}"
@@ -666,7 +658,7 @@ async def test_profiler_flush_failure_returns_partial_capture_and_failed_run(
     async def fail_stop(_self: object, **_kwargs: object) -> None:
         raise DomainError(ErrorCode.PROCESS_FAILED, "profiler flush failed")
 
-    monkeypatch.setattr(VllmProfilerControlClient, "stop_async", fail_stop)
+    monkeypatch.setattr(InferenceProfilerControlClient, "stop_async", fail_stop)
     service = InferenceProfilingService(workspace)
     plan, _measurement_run_id = await _authorized_profile(service, workspace)
     service.broker = _ProfilingBroker(plan.output_path / "worker.pt.trace.json")

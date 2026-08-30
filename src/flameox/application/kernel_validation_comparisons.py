@@ -23,6 +23,7 @@ from flameox.domain import (
     AnalysisRecord,
     ComparisonDecision,
     ComparisonValidity,
+    ConfidenceInterval,
     DomainError,
     ErrorCode,
     EvidenceReference,
@@ -118,7 +119,6 @@ class KernelValidationMetricSelector(ContractModel):
 
 
 class KernelValidationComparisonProtocol(ContractModel):
-    schema_version: Literal[1] = 1
     reference_name: str
     reference_version: str | None = None
     reference_identity: str
@@ -266,7 +266,6 @@ class KernelValidationMetricAggregate(ContractModel):
 
 
 class KernelValidationComparison(ContractModel):
-    schema_version: Literal[1] = 1
     comparison_id: str
     baseline_run_set_id: str
     candidate_run_set_id: str
@@ -279,9 +278,7 @@ class KernelValidationComparison(ContractModel):
     estimand: Literal["median_blockwise_median_difference"] | None = None
     practical_threshold: float | None = None
     estimate: float | None = None
-    confidence_low: float | None = None
-    confidence_high: float | None = None
-    confidence_level: float | None = None
+    confidence_interval: ConfidenceInterval | None = None
     method: str
     independent_unit: Literal["randomized_block", "single_run"]
     complete_pair_n: int
@@ -306,7 +303,6 @@ class KernelValidationComparison(ContractModel):
 
 
 class KernelValidationComparisonResult(ContractModel):
-    schema_version: Literal[1] = 1
     comparison: KernelValidationComparison
     baseline_run_set: RunSet
     candidate_run_set: RunSet
@@ -413,7 +409,7 @@ class KernelValidationComparisonService:
             )
         )
         rows = provenance.rows()
-        rows.update(self._comparison_rows(comparison, result_digest=result_digest))
+        rows.update(self._comparison_rows(comparison))
         published = self.publisher.publish_rows_idempotent(
             rows,
             publisher="flameox.kernel_validation_comparisons",
@@ -452,8 +448,6 @@ class KernelValidationComparisonService:
     @staticmethod
     def _comparison_rows(
         comparison: KernelValidationComparison,
-        *,
-        result_digest: str,
     ) -> dict[str, list[dict[str, object]]]:
         summary: dict[str, object] = {
             "comparison_id": comparison.comparison_id,
@@ -468,9 +462,21 @@ class KernelValidationComparisonService:
             "estimand": comparison.estimand,
             "practical_threshold": comparison.practical_threshold,
             "estimate": comparison.estimate,
-            "confidence_low": comparison.confidence_low,
-            "confidence_high": comparison.confidence_high,
-            "confidence_level": comparison.confidence_level,
+            "confidence_low": (
+                comparison.confidence_interval.low
+                if comparison.confidence_interval is not None
+                else None
+            ),
+            "confidence_high": (
+                comparison.confidence_interval.high
+                if comparison.confidence_interval is not None
+                else None
+            ),
+            "confidence_level": (
+                comparison.confidence_interval.level
+                if comparison.confidence_interval is not None
+                else None
+            ),
             "method": comparison.method,
             "independent_unit": comparison.independent_unit,
             "complete_pair_n": comparison.complete_pair_n,
@@ -483,7 +489,6 @@ class KernelValidationComparisonService:
             "candidate_only_count": len(comparison.candidate_only),
             "mismatches": list(comparison.mismatches),
             "input_artifact_ids": list(comparison.input_artifact_ids),
-            "result_digest": result_digest,
         }
         pair_rows: list[dict[str, object]] = [
             {
@@ -681,9 +686,19 @@ class KernelValidationComparisonService:
             ),
             practical_threshold=practical_threshold,
             estimate=estimate.estimate,
-            confidence_low=estimate.confidence_low,
-            confidence_high=estimate.confidence_high,
-            confidence_level=(experiment.confidence_level if experiment is not None else None),
+            confidence_interval=(
+                ConfidenceInterval(
+                    low=estimate.confidence_low,
+                    high=estimate.confidence_high,
+                    level=experiment.confidence_level,
+                )
+                if (
+                    estimate.confidence_low is not None
+                    and estimate.confidence_high is not None
+                    and experiment is not None
+                )
+                else None
+            ),
             method=estimate.method,
             independent_unit="randomized_block" if randomized else "single_run",
             complete_pair_n=len({pair.independent_unit_id for pair in pairs}),

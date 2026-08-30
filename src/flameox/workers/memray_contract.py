@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Annotated, Literal
 
 from pydantic import Field, TypeAdapter, model_validator
@@ -121,8 +120,6 @@ class MemrayWorkerRequest(ContractModel):
         default=None,
         pattern=r"^sha256:[0-9a-f]{64}$",
     )
-    generation_id: str = Field(min_length=1, max_length=200)
-    published_at: datetime
     limits: MemrayExtractionLimits
 
 
@@ -131,7 +128,6 @@ class MemrayWorkerResult(ContractModel):
     peak_memory_bytes: int = Field(ge=0)
     retained_end_bytes: int = Field(ge=0)
     temporary_allocated_bytes: int | None = Field(default=None, ge=0)
-    temporary_allocation_threshold: int = Field(ge=0, le=1_000)
     allocation_operations: int | None = Field(default=None, ge=0)
     total_allocated_bytes: int | None = Field(default=None, ge=0)
     capture_records: int = Field(ge=0)

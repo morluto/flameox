@@ -30,6 +30,7 @@ from flameox.application.analysis_provenance import (
     context_references,
 )
 from flameox.application.async_work import run_atomic_thread
+from flameox.application.oracle_receipts import parse_oracle_receipt
 from flameox.application.progress import ProgressReporter
 from flameox.application.runtime_resources import (
     RuntimeResourceMetric,
@@ -49,6 +50,8 @@ from flameox.domain import (
     MeasurementSeriesSelector,
     MetricPolarity,
     MetricSource,
+    OracleReceiptBinding,
+    OracleStatus,
     RunSet,
     RunSetMember,
     ValidationStatus,
@@ -63,6 +66,7 @@ from flameox.domain.models import (
 from flameox.evidence import GenerationPublisher, numeric_value_to_columns
 from flameox.models import ContractModel
 from flameox.storage import (
+    ArtifactStore,
     CompletedRetentionIntent,
     ControlRecordStore,
     RetentionIntentStore,
@@ -216,7 +220,6 @@ def parse_compare_run_sets_request(value: Any) -> CompareRunSetsRequest:
 
 
 class ComparisonResult(ContractModel):
-    schema_version: Literal[2] = 2
     comparison: Comparison
     baseline_run_set: RunSet
     candidate_run_set: RunSet
@@ -516,6 +519,7 @@ class ComparisonService:
             id_field="run_set_id",
         )
         self.publisher = GenerationPublisher(workspace)
+        self.artifacts = ArtifactStore(workspace)
 
     def compare(self, request: CompareRunSetsRequest) -> ComparisonResult:
         baseline_set, candidate_set, handle = self._comparison_inputs(request)
@@ -724,29 +728,14 @@ class ComparisonService:
                 metric_source=request.metric_source,
                 measurement_series=measurement_series,
             )
-        series_ids = baseline.series_identities | candidate.series_identities
-        series_id = next(iter(series_ids)) if len(series_ids) == 1 else None
         effective_estimand = (
             "median_paired_log_ratio" if assessment.paired else "difference_in_median_logs"
-        )
-        metric_contract_id = digest_model(
-            {
-                "schema_version": 1,
-                "source": request.metric_source,
-                "metric": request.metric,
-                "unit": request.unit,
-                "polarity": request.polarity,
-                "estimand": effective_estimand,
-                "value_domain": "strictly_positive",
-                "zero_policy": "reject",
-                "measurement_series_id": series_id,
-            }
         )
         protocol_identity_id = (
             digest_model(
                 {
                     "experiment": experiment.model_dump(mode="json"),
-                    "metric_contract_id": metric_contract_id,
+                    "metric_contract_id": comparison.metric_contract_id,
                     "baseline_membership": baseline_set.membership_digest,
                     "candidate_membership": candidate_set.membership_digest,
                 }
@@ -757,8 +746,7 @@ class ComparisonService:
         comparison = comparison.validated_copy(
             update={
                 "estimand": effective_estimand,
-                "metric_contract_id": metric_contract_id,
-                "measurement_series_id": series_id,
+                "measurement_series_id": comparison.measurement_series_id,
                 "protocol_identity_id": protocol_identity_id,
                 "baseline_attempted_n": baseline.attempted,
                 "baseline_eligible_n": baseline.eligible,
@@ -1639,7 +1627,7 @@ class ComparisonService:
 
         Invalidating reasons make the comparison INVALID. Exploratory reasons
         make it EXPLORATORY — missing evidence is a limitation, not a verdict.
-        Inference replay runs use their persisted typed protocol for trace,
+        Inference benchmark runs use their persisted typed protocol for trace,
         provider, server, hardware, profiler, and semantic-oracle provenance.
         Incomplete protocol identity is exploratory; conflicting identity is
         invalidating.
@@ -1662,7 +1650,7 @@ class ComparisonService:
             "workload_definition_id, validation_status, adapter, "
             "adapter_version, measurement_protocol_id, execution_identity_id, "
             "execution_identity_quality, execution_identity_json, "
-            "inference_protocol_identity_json FROM current_runs "
+            "inference_protocol_identity_json, run_semantic_id FROM current_runs "
             f"WHERE run_id IN ({run_placeholders})",
             run_ids,
         ).fetchall()
@@ -1685,7 +1673,7 @@ class ComparisonService:
         mixed_inference = bool(inference_run_ids) and not all_inference
 
         if mixed_inference:
-            invalidating.append("cannot compare inference replay runs with non-inference runs")
+            invalidating.append("cannot compare inference benchmark runs with non-inference runs")
         environments = {str(run[1]) for run in all_runs}
         invalidating.extend(self._environment_identity_mismatches(snapshot, environments))
         exec_mismatches = self._execution_identity_mismatches(all_runs)
@@ -1729,6 +1717,9 @@ class ComparisonService:
         }
         if len(run_semantic_configurations) > 1:
             invalidating.append("adapter version or measurement protocol differs")
+        run_semantic_ids = {str(run[12]) if run[12] is not None else None for run in all_runs}
+        if len(run_semantic_ids) > 1:
+            invalidating.append("run semantics differ across treatments")
         artifact_configurations: dict[str, set[tuple[str, str | None, str | None, str]]] = {
             "baseline": set(),
             "candidate": set(),
@@ -1795,8 +1786,8 @@ class ComparisonService:
                 msg = "source identity is partial or unavailable"
                 invalidating.append(msg)
 
-    @staticmethod
     def _validation_checks(
+        self,
         snapshot: Snapshot,
         all_runs: tuple[tuple[object, ...], ...],
         baseline: RunSet,
@@ -1820,33 +1811,149 @@ class ComparisonService:
             return
         validation_rows = snapshot.execute(
             "SELECT run_id, artifact_id FROM artifact_registrations "
-            f"WHERE run_id IN ({run_placeholders}) "
-            "AND role = 'validation_cross_treatment_equivalence'",
+            f"WHERE run_id IN ({run_placeholders}) AND role = 'validation_receipt'",
             run_ids,
         ).fetchall()
-        validation_by_run: dict[str, set[str]] = {}
+        validation_by_run: dict[str, list[str]] = {}
         for run_id, artifact_id in validation_rows:
-            validation_by_run.setdefault(str(run_id), set()).add(str(artifact_id))
-        baseline_validation = {
-            artifact_id
-            for member in baseline.members
-            if member.included
-            for artifact_id in validation_by_run.get(member.run_id, set())
+            validation_by_run.setdefault(str(run_id), []).append(str(artifact_id))
+        workload_rows = snapshot.execute(
+            "SELECT run_id, workload_instance_id FROM current_runs "
+            f"WHERE run_id IN ({run_placeholders})",
+            run_ids,
+        ).fetchall()
+        workload_by_run = {
+            str(run_id): str(workload_instance_id)
+            for run_id, workload_instance_id in workload_rows
+            if workload_instance_id is not None
         }
-        candidate_validation = {
-            artifact_id
-            for member in candidate.members
-            if member.included
-            for artifact_id in validation_by_run.get(member.run_id, set())
-        }
-        if not baseline_validation and not candidate_validation:
-            msg = "cross-treatment validation outputs are missing"
-            if all_inference:
-                exploratory.append(msg)
+        baseline_bindings, baseline_seen = self._pair_bindings_for_label(
+            snapshot,
+            label="baseline",
+            run_set=baseline,
+            validation_by_run=validation_by_run,
+            workload_by_run=workload_by_run,
+            invalidating=invalidating,
+        )
+        candidate_bindings, candidate_seen = self._pair_bindings_for_label(
+            snapshot,
+            label="candidate",
+            run_set=candidate,
+            validation_by_run=validation_by_run,
+            workload_by_run=workload_by_run,
+            invalidating=invalidating,
+        )
+        by_block = {"baseline": baseline_bindings, "candidate": candidate_bindings}
+        pair_evidence_seen = baseline_seen or candidate_seen
+        if not pair_evidence_seen:
+            exploratory.append(
+                "pair-bound cross-treatment validation evidence is unavailable; "
+                "per-treatment checks cannot establish equivalence"
+            )
+            return
+        declared_blocks: set[str] = set()
+        for run_set in (baseline, candidate):
+            for member in run_set.members:
+                if not member.included:
+                    continue
+                trial = self._trial_evidence(snapshot, run_set, member)
+                if trial is not None and trial.block_id is not None:
+                    declared_blocks.add(trial.block_id)
+        self._check_pair_coverage(by_block, declared_blocks, invalidating)
+
+    def _pair_bindings_for_label(
+        self,
+        snapshot: Snapshot,
+        *,
+        label: str,
+        run_set: RunSet,
+        validation_by_run: dict[str, list[str]],
+        workload_by_run: dict[str, str],
+        invalidating: list[str],
+    ) -> tuple[dict[str, OracleReceiptBinding], bool]:
+        expected_treatment = run_set.selection.get("variant")
+        if not isinstance(expected_treatment, str):
+            invalidating.append(f"{label} run set has no declared treatment identity")
+            return {}, False
+        bindings: dict[str, OracleReceiptBinding] = {}
+        seen = False
+        for member in run_set.members:
+            if not member.included:
+                continue
+            receipt_ids = validation_by_run.get(member.run_id, [])
+            if len(receipt_ids) > 1:
+                invalidating.append(
+                    f"{label} run {member.run_id} has more than one validation receipt"
+                )
+                continue
+            if not receipt_ids:
+                continue
+            trial = self._trial_evidence(snapshot, run_set, member)
+            if trial is None or trial.block_id is None:
+                continue
+            try:
+                stored = self.artifacts.get(receipt_ids[0])
+                receipt = parse_oracle_receipt(stored.payload_path.read_bytes())
+            except DomainError as error:
+                invalidating.append(
+                    f"{label} run {member.run_id} has an invalid validation receipt: "
+                    f"{error.message}"
+                )
+                continue
+            binding = receipt.binding
+            if binding is None:
+                continue
+            seen = True
+            if receipt.status is not OracleStatus.PASS:
+                invalidating.append(f"{label} run {member.run_id} has a non-passing pair receipt")
+            if binding.treatment != expected_treatment:
+                invalidating.append(
+                    f"{label} pair receipt names {binding.treatment!r}, not {expected_treatment!r}"
+                )
+            workload_identity = workload_by_run.get(member.run_id)
+            if workload_identity is None or binding.workload_identity != workload_identity:
+                invalidating.append(f"{label} pair receipt is not bound to its workload instance")
+            if trial.block_id in bindings:
+                invalidating.append(
+                    f"{label} has more than one pair receipt for block {trial.block_id}"
+                )
             else:
-                invalidating.append(msg)
-        elif baseline_validation != candidate_validation:
-            invalidating.append("cross-treatment validation outputs differ")
+                bindings[trial.block_id] = binding
+        return bindings, seen
+
+    @classmethod
+    def _check_pair_coverage(
+        cls,
+        by_block: dict[str, dict[str, OracleReceiptBinding]],
+        declared_blocks: set[str],
+        invalidating: list[str],
+    ) -> None:
+        covered_blocks = set(by_block["baseline"]) | set(by_block["candidate"])
+        for block_id in sorted(declared_blocks | covered_blocks):
+            baseline_binding = by_block["baseline"].get(block_id)
+            candidate_binding = by_block["candidate"].get(block_id)
+            if baseline_binding is None or candidate_binding is None:
+                invalidating.append(
+                    f"pair-bound validation does not cover both treatments in block {block_id}"
+                )
+                continue
+            if cls._pair_contract_signature(baseline_binding) != cls._pair_contract_signature(
+                candidate_binding
+            ):
+                invalidating.append(
+                    f"pair-bound validation contract differs across treatments in block {block_id}"
+                )
+
+    @staticmethod
+    def _pair_contract_signature(binding: OracleReceiptBinding) -> tuple[object, ...]:
+        """Return shared pair fields, excluding each treatment's own identities."""
+        return (
+            binding.pair_id,
+            binding.input_identity,
+            binding.compared_property,
+            binding.oracle_identity,
+            binding.tolerance.model_dump(mode="json"),
+        )
 
     @staticmethod
     def _parse_protocol_identity(
@@ -2160,11 +2267,25 @@ class ComparisonService:
                 "candidate_value_float": candidate_value_float,
                 "absolute_change_int": absolute_change_int,
                 "absolute_change_float": absolute_change_float,
+                "paired": value.complete_pair_n is not None,
+                "confidence_low": (
+                    value.confidence_interval.low if value.confidence_interval is not None else None
+                ),
+                "confidence_high": (
+                    value.confidence_interval.high
+                    if value.confidence_interval is not None
+                    else None
+                ),
+                "confidence_level": (
+                    value.confidence_interval.level
+                    if value.confidence_interval is not None
+                    else None
+                ),
             }
         )
         row.pop("multiplicity")
         row.pop("baseline_value")
         row.pop("candidate_value")
         row.pop("absolute_change")
-        row.pop("schema_version")
+        row.pop("confidence_interval")
         return row

@@ -16,7 +16,6 @@ from flameox.storage.locks import (
     WorkspaceLockResource,
 )
 from flameox.storage.plans import AuthorizedPlanStore
-from flameox.storage.projections import ProjectionIntentStore
 from flameox.storage.quotas import StorageQuota, tree_bytes
 from flameox.storage.records import ControlRecordStore
 from flameox.storage.retention import (
@@ -49,7 +48,6 @@ __all__ = [
     "GenerationFile",
     "GenerationManifest",
     "PendingRetentionIntent",
-    "ProjectionIntentStore",
     "RetentionIntent",
     "RetentionIntentStore",
     "RunStore",

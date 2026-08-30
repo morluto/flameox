@@ -9,11 +9,13 @@ from pathlib import Path
 import httpx
 import pytest
 
+import flameox.adapters.setup_runtime as _setup_runtime
 from flameox.action_graph import ActionId, manual_action, tool_action
-from flameox.adapters import ManagedRuntime, install_trace_processor
-from flameox.adapters import setup_runtime as _setup_runtime
-from flameox.application import CapabilityList
-from flameox.application.capabilities import CapabilityService
+from flameox.adapters.setup_runtime import (
+    ManagedRuntime,
+    install_trace_processor,
+)
+from flameox.application.capabilities import CapabilityList, CapabilityService
 from flameox.domain import (
     CapabilityExtra,
     CapabilityReport,

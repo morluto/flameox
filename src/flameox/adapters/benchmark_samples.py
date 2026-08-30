@@ -38,7 +38,7 @@ DimensionValue = Annotated[str, StringConstraints(max_length=200)]
 SampleValue = StrictInt | StrictFloat
 
 
-class AcceleratorDevice(ContractModel):
+class BenchmarkDevice(ContractModel):
     type: Literal["cuda", "hip", "xpu", "mps", "other"]
     index: Annotated[int, Field(ge=0)] | None = None
     stream: Annotated[str, StringConstraints(max_length=200)] | None = None
@@ -71,7 +71,7 @@ class BenchmarkSeries(ContractModel):
     block_id: Annotated[str, StringConstraints(max_length=200)] | None = None
     variant_id: Annotated[str, StringConstraints(max_length=200)] | None = None
     order_in_block: Annotated[int, Field(ge=0)] | None = None
-    device: AcceleratorDevice | None = None
+    device: BenchmarkDevice | None = None
     dimensions: dict[MetricName, DimensionValue] = Field(default_factory=dict, max_length=32)
     warmups: Annotated[tuple[SampleValue, ...], Field(max_length=1_000_000)] = ()
     samples: Annotated[
@@ -115,9 +115,21 @@ class BenchmarkSamplesV1(ContractModel):
     producer_version: Annotated[str, StringConstraints(max_length=200)] | None = None
     benchmarks: Annotated[tuple[BenchmarkSeries, ...], Field(min_length=1, max_length=1_000)]
 
+    @model_validator(mode="after")
+    def metric_names_do_not_mix_timing_semantics(self) -> BenchmarkSamplesV1:
+        semantics_by_name: dict[str, tuple[str, str, str]] = {}
+        for series in self.benchmarks:
+            semantics = (series.unit, series.measurement_clock, series.synchronization)
+            prior = semantics_by_name.setdefault(series.name, semantics)
+            if prior != semantics:
+                raise ValueError(
+                    "a benchmark metric name cannot mix timing clocks or synchronization; "
+                    "emit host and device timing under distinct names"
+                )
+        return self
+
 
 class BenchmarkSamplesExtractionResult(ContractModel):
-    schema_version: int = 1
     run_id: str
     artifact_id: str
     producer: str

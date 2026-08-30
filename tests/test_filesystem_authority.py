@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import DomainError, ErrorCode, ExitedProcessTermination
 from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.filesystem_authority import BoundDirectoryReference, TrustedRoot
 from tests.support.execution import executable_binding
@@ -96,7 +96,7 @@ def test_subprocess_can_only_write_through_explicit_inherited_directory(
 
         outcome = SubprocessBroker().run_sync(request)
 
-    assert outcome.process.exit_code == 0
+    assert outcome.process.termination == ExitedProcessTermination(exit_code=0)
     assert (parked / "result.json").read_bytes() == b"child"
     assert not (outside / "result.json").exists()
 

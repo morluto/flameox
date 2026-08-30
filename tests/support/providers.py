@@ -8,7 +8,6 @@ from functools import cache
 from pathlib import Path
 
 PACKAGE_PROVIDERS = {
-    "requires_coverage": "coverage",
     "requires_memray": "memray",
     "requires_torch": "torch",
     "requires_triton": "triton",

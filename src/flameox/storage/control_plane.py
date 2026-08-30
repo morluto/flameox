@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -7,7 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, NoReturn, cast
 
 from flameox.domain import DomainError, ErrorCode
 from flameox.domain.models import utc_now
@@ -40,7 +41,7 @@ class CursorControlRecord:
 _SCHEMA = (
     """
     CREATE TABLE control_plane_format (
-        format TEXT PRIMARY KEY CHECK (format = 'flameox.control-plane')
+        format TEXT PRIMARY KEY
     ) STRICT
     """,
     """
@@ -79,7 +80,6 @@ _SCHEMA = (
     CREATE TABLE IF NOT EXISTS operations (
         operation_id TEXT PRIMARY KEY,
         kind TEXT NOT NULL,
-        state TEXT NOT NULL,
         revision INTEGER NOT NULL CHECK (revision >= 0),
         plan_token TEXT REFERENCES authorized_plans(token),
         run_id TEXT,
@@ -169,13 +169,10 @@ _SCHEMA = (
     """
     CREATE TABLE IF NOT EXISTS projection_intents (
         intent_id TEXT PRIMARY KEY,
-        domain_kind TEXT NOT NULL,
-        domain_id TEXT NOT NULL,
-        domain_revision INTEGER NOT NULL CHECK (domain_revision >= 0),
-        domain_digest TEXT NOT NULL,
-        projection_kind TEXT NOT NULL,
-        operation_digest TEXT NOT NULL UNIQUE,
-        spec_json TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        run_revision INTEGER NOT NULL CHECK (run_revision >= 0),
+        run_digest TEXT NOT NULL,
+        context_json TEXT NOT NULL,
         state TEXT NOT NULL CHECK (state IN ('pending', 'published', 'failed')),
         generation_id TEXT,
         corpus_commit_id TEXT,
@@ -183,10 +180,7 @@ _SCHEMA = (
         failure_message TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        UNIQUE (
-            domain_kind, domain_id, domain_revision,
-            projection_kind
-        ),
+        UNIQUE (run_id, run_revision),
         CHECK (
             (state = 'pending' AND generation_id IS NULL AND corpus_commit_id IS NULL
                 AND failure_code IS NULL AND failure_message IS NULL)
@@ -205,7 +199,7 @@ _SCHEMA = (
     """,
     """
     CREATE INDEX IF NOT EXISTS projection_intents_domain
-    ON projection_intents(domain_kind, domain_id, domain_revision DESC)
+    ON projection_intents(run_id, run_revision DESC)
     """,
     """
     CREATE TABLE IF NOT EXISTS records (
@@ -272,12 +266,17 @@ _SCHEMA = (
 )
 
 
+def _schema_identity() -> str:
+    normalized = "\n".join(" ".join(statement.split()) for statement in _SCHEMA)
+    return f"flameox.control-plane:sha256:{hashlib.sha256(normalized.encode()).hexdigest()}"
+
+
 class ControlPlane:
     """The transactional authority for mutable workspace control state."""
 
-    FORMAT = "flameox.control-plane"
+    FORMAT = _schema_identity()
     MAX_OPERATION_REVISIONS = 64
-    MAX_PROJECTION_SPEC_BYTES = 256 * 1024
+    MAX_PROJECTION_CONTEXT_BYTES = 256 * 1024
 
     def __init__(self, workspace: Workspace) -> None:
         self.path = workspace.paths.control_plane
@@ -304,8 +303,19 @@ class ControlPlane:
             except BaseException:
                 connection.rollback()
                 raise
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         with suppress(OSError):
             os.chmod(self.path, 0o600)
+
+    def validate_existing(self) -> None:
+        """Reject a missing or incompatible control plane without creating one."""
+        try:
+            with self._connect(readonly=True) as connection:
+                stored_format = self._stored_format(connection)
+        except sqlite3.DatabaseError:
+            self._raise_incompatible_format(None)
+        if stored_format != self.FORMAT:
+            self._raise_incompatible_format(stored_format)
 
     @staticmethod
     def _has_user_tables(connection: sqlite3.Connection) -> bool:
@@ -336,7 +346,7 @@ class ControlPlane:
         return str(rows[0][0])
 
     @classmethod
-    def _raise_incompatible_format(cls, stored_format: str | None) -> None:
+    def _raise_incompatible_format(cls, stored_format: str | None) -> NoReturn:
         details = {"required_format": cls.FORMAT}
         if stored_format is not None:
             details["stored_format"] = stored_format
@@ -926,13 +936,6 @@ class ControlPlane:
                 "An immutable run revision already contains different data.",
             ) from exc
 
-    def create_projection_intent(self, spec: ProjectionIntentSpec) -> ProjectionIntent:
-        observed_at = utc_now().isoformat()
-        with self.transaction() as connection:
-            self._insert_projection_intent(connection, spec, observed_at=observed_at)
-            row = self._projection_intent_row(connection, spec.intent_id)
-        return self._projection_intent(row)
-
     def read_projection_intent(self, intent_id: str) -> ProjectionIntent:
         with self._connect() as connection:
             row = self._projection_intent_row(connection, intent_id)
@@ -961,18 +964,16 @@ class ControlPlane:
     def latest_projection_intent(
         self,
         *,
-        domain_kind: str,
-        domain_id: str,
-        projection_kind: str,
+        run_id: str,
     ) -> ProjectionIntent | None:
         with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT * FROM projection_intents
-                WHERE domain_kind = ? AND domain_id = ? AND projection_kind = ?
-                ORDER BY domain_revision DESC, created_at DESC LIMIT 1
+                WHERE run_id = ?
+                ORDER BY run_revision DESC, created_at DESC LIMIT 1
                 """,
-                (domain_kind, domain_id, projection_kind),
+                (run_id,),
             ).fetchone()
         return self._projection_intent(row) if row is not None else None
 
@@ -1058,7 +1059,6 @@ class ControlPlane:
         *,
         operation_id: str,
         kind: str,
-        state: str,
         revision: int,
         idempotency_digest: str,
         intent_digest: str,
@@ -1071,14 +1071,13 @@ class ControlPlane:
                 connection.execute(
                     """
                     INSERT INTO operations(
-                        operation_id, kind, state, revision, run_id, payload_json, created_at,
+                        operation_id, kind, revision, run_id, payload_json, created_at,
                         updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         operation_id,
                         kind,
-                        state,
                         revision,
                         run_id,
                         payload_json,
@@ -1241,7 +1240,6 @@ class ControlPlane:
         self,
         *,
         operation_id: str,
-        state: str,
         expected_revision: int,
         next_revision: int,
         payload_json: str,
@@ -1256,11 +1254,10 @@ class ControlPlane:
             changed = connection.execute(
                 """
                 UPDATE operations
-                SET state = ?, revision = ?, payload_json = ?, updated_at = ?
+                SET revision = ?, payload_json = ?, updated_at = ?
                 WHERE operation_id = ? AND revision = ?
                 """,
                 (
-                    state,
                     next_revision,
                     payload_json,
                     observed_at,
@@ -1310,12 +1307,19 @@ class ControlPlane:
                 ),
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
+        database = str(self.path)
+        if readonly:
+            # The sentinel is immutable after initialization. SQLite's ordinary
+            # read-only WAL path may still create -wal/-shm files, so validate the
+            # checkpointed base database without mutating the workspace directory.
+            database = f"{self.path.as_uri()}?mode=ro&immutable=1"
         connection = sqlite3.connect(
-            self.path,
+            database,
             timeout=30,
             isolation_level=None,
             check_same_thread=False,
+            uri=readonly,
         )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -1416,11 +1420,7 @@ class ControlPlane:
         run_id: str,
         revision: int,
     ) -> None:
-        if (
-            spec.domain_kind != "run"
-            or spec.domain_id != run_id
-            or spec.domain_revision != revision
-        ):
+        if spec.run_id != run_id or spec.run_revision != revision:
             raise DomainError(
                 ErrorCode.INVALID_ARGUMENTS,
                 "A run revision can only commit its own exact projection intent.",
@@ -1433,31 +1433,27 @@ class ControlPlane:
         *,
         observed_at: str,
     ) -> bool:
-        spec_json = canonical_json(spec.model_dump(mode="json"))
-        if len(spec_json.encode("utf-8")) > self.MAX_PROJECTION_SPEC_BYTES:
+        context_json = _serialize_control_payload(spec.context.model_dump(mode="json"))
+        if len(context_json.encode("utf-8")) > self.MAX_PROJECTION_CONTEXT_BYTES:
             raise DomainError(
                 ErrorCode.STORAGE_QUOTA_EXCEEDED,
-                "Projection replay context exceeds the bounded control-plane limit.",
-                details={"max_projection_spec_bytes": self.MAX_PROJECTION_SPEC_BYTES},
+                "Projection context exceeds the bounded control-plane limit.",
+                details={"max_projection_context_bytes": self.MAX_PROJECTION_CONTEXT_BYTES},
             )
         try:
             connection.execute(
                 """
                 INSERT INTO projection_intents(
-                    intent_id, domain_kind, domain_id, domain_revision, domain_digest,
-                    projection_kind, operation_digest, spec_json,
+                    intent_id, run_id, run_revision, run_digest, context_json,
                     state, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
                 """,
                 (
                     spec.intent_id,
-                    spec.domain_kind,
-                    spec.domain_id,
-                    spec.domain_revision,
-                    spec.domain_digest,
-                    spec.projection_kind,
-                    spec.operation_digest,
-                    spec_json,
+                    spec.run_id,
+                    spec.run_revision,
+                    spec.run_digest,
+                    context_json,
                     observed_at,
                     observed_at,
                 ),
@@ -1465,23 +1461,24 @@ class ControlPlane:
         except sqlite3.IntegrityError as exc:
             row = connection.execute(
                 """
-                SELECT spec_json FROM projection_intents
-                WHERE intent_id = ? OR operation_digest = ? OR (
-                    domain_kind = ? AND domain_id = ? AND domain_revision = ?
-                    AND projection_kind = ?
-                )
+                SELECT intent_id, run_id, run_revision, run_digest, context_json
+                FROM projection_intents
+                WHERE intent_id = ? OR (run_id = ? AND run_revision = ?)
                 LIMIT 1
                 """,
                 (
                     spec.intent_id,
-                    spec.operation_digest,
-                    spec.domain_kind,
-                    spec.domain_id,
-                    spec.domain_revision,
-                    spec.projection_kind,
+                    spec.run_id,
+                    spec.run_revision,
                 ),
             ).fetchone()
-            if row is not None and str(row["spec_json"]) == spec_json:
+            if row is not None and (
+                str(row["intent_id"]) == spec.intent_id
+                and str(row["run_id"]) == spec.run_id
+                and int(row["run_revision"]) == spec.run_revision
+                and str(row["run_digest"]) == spec.run_digest
+                and str(row["context_json"]) == context_json
+            ):
                 return False
             raise DomainError(
                 ErrorCode.ARTIFACT_INTEGRITY_FAILED,
@@ -1509,10 +1506,13 @@ class ControlPlane:
     @staticmethod
     def _projection_intent(row: sqlite3.Row) -> ProjectionIntent:
         try:
-            spec = ProjectionIntentSpec.model_validate_json(str(row["spec_json"]))
             return ProjectionIntent.model_validate(
                 {
-                    **spec.model_dump(mode="python"),
+                    "intent_id": row["intent_id"],
+                    "run_id": row["run_id"],
+                    "run_revision": row["run_revision"],
+                    "run_digest": row["run_digest"],
+                    "context": json.loads(str(row["context_json"])),
                     "state": row["state"],
                     "generation_id": row["generation_id"],
                     "corpus_commit_id": row["corpus_commit_id"],
@@ -1559,5 +1559,5 @@ class ControlPlane:
         )
 
 
-def canonical_json(value: object) -> str:
+def _serialize_control_payload(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)

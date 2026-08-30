@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import Field, JsonValue, TypeAdapter
 
@@ -9,13 +9,11 @@ from flameox.workers.protocol import WorkerDefinition, WorkerOperationId
 
 
 class NsightSystemsWorkerRequest(ContractModel):
-    schema_version: Literal[1] = 1
     artifact_path: str = Field(min_length=1, max_length=4_096)
     max_rows_per_table: Annotated[int, Field(gt=0, le=100_000_000)]
 
 
 class NsightSystemsWorkerResult(ContractModel):
-    schema_version: Literal[1] = 1
     schema_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     tables: tuple[str, ...] = Field(max_length=1_024)
     events: tuple[dict[str, JsonValue], ...]

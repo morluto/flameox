@@ -3,14 +3,14 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Self
 
 from pydantic import model_validator
 
 from flameox.domain import CaptureLease, DomainError, ErrorCode
 from flameox.domain.models import utc_now
 from flameox.models import ContractModel
-from flameox.storage.control_plane import ControlPlane, canonical_json
+from flameox.storage.control_plane import ControlPlane, _serialize_control_payload
 from flameox.storage.workspace import Workspace
 
 
@@ -20,7 +20,6 @@ class StagingOwnerState(StrEnum):
 
 
 class StagingOwnerRecord(ContractModel):
-    schema_version: Literal[1] = 1
     path: str
     owner_kind: str
     owner_id: str
@@ -49,7 +48,7 @@ class StagingOwnershipStore:
 
     def acquire(self, record: StagingOwnerRecord) -> StagingOwnerRecord:
         lease = record.process_lease
-        payload = canonical_json(record.model_dump(mode="json"))
+        payload = _serialize_control_payload(record.model_dump(mode="json"))
         try:
             with self.control_plane.transaction() as connection:
                 connection.execute(
@@ -109,7 +108,7 @@ class StagingOwnershipStore:
                   AND process_id = ? AND process_start_identity = ? AND boot_id = ?
                 """,
                 (
-                    canonical_json(released.model_dump(mode="json")),
+                    _serialize_control_payload(released.model_dump(mode="json")),
                     released.updated_at.isoformat(),
                     record.path,
                     record.owner_id,

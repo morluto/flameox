@@ -7,23 +7,28 @@ from types import SimpleNamespace
 
 import pytest
 
-from flameox.adapters import MemrayExtractor
-from flameox.adapters.memray import memray_extraction_limits
-from flameox.application import (
+from flameox.adapters.memray import MemrayExtractor, memray_extraction_limits
+from flameox.application.analysis_records import (
     AnalysisMaterializationService,
+    MemoryAnalysisRequest,
+)
+from flameox.application.comparisons import (
     ComparisonService,
+    FreezeRunIdsRequest,
+    MeasurementCompareRunSetsRequest,
+    RunSetService,
+)
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
+from flameox.application.records import (
     CreateInvestigationRequest,
     EvidenceInput,
     FindingService,
-    FreezeRunIdsRequest,
-    ImportArtifactRequest,
-    ImportService,
     InvestigationService,
-    MeasurementCompareRunSetsRequest,
-    MemoryAnalysisRequest,
     RecordFindingRequest,
     RecordHypothesisRequest,
-    RunSetService,
 )
 from flameox.catalog import Catalog
 from flameox.domain import (

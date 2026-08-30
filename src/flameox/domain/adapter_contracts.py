@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, Final, Literal, Protocol
+from typing import Annotated, Literal, Protocol
 
 from pydantic import Field, JsonValue, StringConstraints, model_validator
 
 from flameox.domain.models import ArtifactKind, CommandSpec, Sensitivity
 from flameox.models import ContractModel
-
-ADAPTER_API_VERSION: Final[Literal[1]] = 1
 
 
 class AdapterProbeStatus(StrEnum):
@@ -18,12 +16,10 @@ class AdapterProbeStatus(StrEnum):
 
 
 class AdapterProbeContext(ContractModel):
-    api_version: Literal[1] = ADAPTER_API_VERSION
     project_root: str
 
 
 class AdapterProbeResult(ContractModel):
-    api_version: Literal[1] = ADAPTER_API_VERSION
     status: AdapterProbeStatus
     adapter_version: Annotated[str, StringConstraints(min_length=1, max_length=100)]
     limitations: Annotated[tuple[str, ...], Field(max_length=32)] = ()
@@ -31,7 +27,6 @@ class AdapterProbeResult(ContractModel):
 
 
 class AdapterPlanRequest(ContractModel):
-    api_version: Literal[1] = ADAPTER_API_VERSION
     project_root: str
     output_root: str
     workload: CommandSpec
@@ -55,7 +50,6 @@ class AdapterArtifactDeclaration(ContractModel):
 
 
 class AdapterExecutionPlan(ContractModel):
-    api_version: Literal[1] = ADAPTER_API_VERSION
     adapter: Annotated[str, StringConstraints(min_length=1, max_length=100)]
     argv_prefix: Annotated[tuple[str, ...], Field(min_length=1, max_length=256)]
     artifacts: Annotated[
@@ -77,14 +71,12 @@ class AdapterExecutionPlan(ContractModel):
 
 
 class AdapterValidationResult(ContractModel):
-    api_version: Literal[1] = ADAPTER_API_VERSION
     validator_version: Annotated[str, StringConstraints(min_length=1, max_length=100)]
     valid: bool
     limitations: Annotated[tuple[str, ...], Field(max_length=32)] = ()
 
 
 class AdapterExtractionResult(ContractModel):
-    api_version: Literal[1] = ADAPTER_API_VERSION
     extractor_version: Annotated[str, StringConstraints(min_length=1, max_length=100)]
     summary: dict[
         Annotated[str, StringConstraints(min_length=1, max_length=100)],

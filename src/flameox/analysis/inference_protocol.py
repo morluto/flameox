@@ -11,10 +11,10 @@ from flameox.domain.models import ComparisonValidity, OracleStatus
 from flameox.models import ContractModel
 
 # ---------------------------------------------------------------------------
-# Inference replay protocol identity
+# Inference benchmark protocol identity
 # ---------------------------------------------------------------------------
 #
-# Two inference replay runs are only comparable when they share the same
+# Two inference benchmark runs are only comparable when they share the same
 # protocol identity: the same trace input, schedule, model, server, hardware,
 # profiler, and oracle. This module defines that typed identity and a pure
 # comparator that returns the exact mismatched fields and exploratory reasons
@@ -22,7 +22,7 @@ from flameox.models import ContractModel
 # provider/parser modules.
 #
 # Optional facets can be genuinely inapplicable (for example, a full trace has
-# no replay-window bounds and an unprofiled run has no profiler version).
+# no benchmark-window bounds and an unprofiled run has no profiler version).
 # Confirmatory completeness is therefore checked explicitly below instead of
 # treating every pair of ``None`` values as missing evidence. A value declared
 # on only one side remains an exact mismatch.
@@ -33,9 +33,11 @@ _NonEmptyStr = Annotated[str, StringConstraints(min_length=1, max_length=500)]
 
 
 class TraceIdentity(ContractModel):
-    """Identity of the replayed inference trace input."""
+    """Identity of the inference benchmark input trace."""
 
-    format: Literal["mooncake", "aiperf", "vllm", "sglang.bench_serving", "custom"] | None = None
+    format: Literal["mooncake", "aiperf", "vllm", "sglang.benchmark.serving", "custom"] | None = (
+        None
+    )
     producer: _Identifier
     producer_version: _NonEmptyStr | None = None
     artifact_digest: _Digest | None = None
@@ -45,7 +47,7 @@ class TraceIdentity(ContractModel):
 
 
 class ScheduleIdentity(ContractModel):
-    """Replay timing and concurrency schedule."""
+    """Benchmark timing and concurrency schedule."""
 
     preserve_timing: bool
     time_scale: Annotated[float, Field(gt=0)] = 1.0
@@ -58,7 +60,7 @@ class ScheduleIdentity(ContractModel):
 
 
 class ModelIdentity(ContractModel):
-    """Model and tokenizer identity for the replayed workload."""
+    """Model and tokenizer identity for the benchmark workload."""
 
     model_id: _Identifier
     model_revision: _NonEmptyStr | None = None
@@ -85,7 +87,7 @@ class ServerConfigIdentity(ContractModel):
 
 
 class HardwareIdentity(ContractModel):
-    """Hardware facet for the replay run."""
+    """Hardware facet for the benchmark run."""
 
     accelerator_kind: Literal["cuda", "hip", "xpu", "mps", "cpu", "unknown"] = "unknown"
     accelerator_count: Annotated[int, Field(ge=0)] | None = None
@@ -96,7 +98,7 @@ class HardwareIdentity(ContractModel):
 
 
 class _ProfilerState(ContractModel):
-    """Profiler attachment state during the replay."""
+    """Profiler attachment state during the benchmark."""
 
     profiler_version: _NonEmptyStr | None = None
 
@@ -131,7 +133,7 @@ type InferenceProfilerState = Annotated[
 
 
 class OracleIdentity(ContractModel):
-    """Semantic oracle identity used for replay correctness assessment."""
+    """Semantic oracle identity used for benchmark correctness assessment."""
 
     kind: Literal["none", "execution_check", "contract_check", "cross_treatment_equivalence"]
     estimand: _NonEmptyStr | None = None
@@ -141,7 +143,7 @@ class OracleIdentity(ContractModel):
 
 
 class OracleResult(ContractModel):
-    """The observed oracle outcome for one replay run."""
+    """The observed oracle outcome for one benchmark run."""
 
     status: OracleStatus
     reason: _Identifier
@@ -150,14 +152,12 @@ class OracleResult(ContractModel):
 
 
 class InferenceProtocolIdentity(ContractModel):
-    """The complete typed protocol identity of one inference replay run."""
+    """The complete typed protocol identity of one inference benchmark run."""
 
-    schema_version: Literal[1] = 1
     provider: _Identifier
     provider_version: _NonEmptyStr | None = None
     provider_executable_digest: _Digest | None = None
     provider_environment_id: _Digest | None = None
-    provider_python_digest: _Digest | None = None
     trace: TraceIdentity
     schedule: ScheduleIdentity
     model: ModelIdentity
@@ -189,9 +189,8 @@ class ExploratoryReason(ContractModel):
 
 
 class InferenceProtocolComparison(ContractModel):
-    """The result of comparing two inference replay protocol identities."""
+    """The result of comparing two inference benchmark protocol identities."""
 
-    schema_version: Literal[1] = 1
     validity: ComparisonValidity
     mismatches: tuple[ProtocolMismatch, ...] = ()
     exploratory_reasons: tuple[ExploratoryReason, ...] = ()
@@ -228,10 +227,6 @@ def _facets() -> tuple[_FacetGetter, ...]:
         (
             "provider_environment_id",
             (lambda p: p.provider_environment_id, lambda p: p.provider_environment_id),
-        ),
-        (
-            "provider_python_digest",
-            (lambda p: p.provider_python_digest, lambda p: p.provider_python_digest),
         ),
         ("trace.format", (lambda p: p.trace.format, lambda p: p.trace.format)),
         ("trace.producer", (lambda p: p.trace.producer, lambda p: p.trace.producer)),
@@ -516,7 +511,7 @@ def compare_inference_protocols(
     baseline: InferenceProtocolIdentity,
     candidate: InferenceProtocolIdentity,
 ) -> InferenceProtocolComparison:
-    """Compare two inference replay protocol identities.
+    """Compare two inference benchmark protocol identities.
 
     Returns exact field mismatches and context-aware confirmatory-evidence
     gaps. Optional fields that are absent on both sides are inapplicable, not

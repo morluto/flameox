@@ -4,13 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import (
-    CaptureService,
-    ExecutionIdentityService,
-    ExecutionPolicy,
+from flameox.application.capture import CaptureService
+from flameox.application.discovery import (
     RunDiscoveryService,
     RunFilter,
 )
+from flameox.application.execution_identity import ExecutionIdentityService
+from flameox.application.execution_policy import ExecutionPolicy
 from flameox.catalog import Catalog
 from flameox.domain import (
     DomainError,
@@ -32,7 +32,6 @@ async def test_external_execution_context_is_bound_preserved_and_discoverable(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.fail]
 argv = ["python", "-c", "raise SystemExit(3)"]
 """
@@ -100,7 +99,6 @@ async def test_declared_module_and_native_file_identity_is_observed_and_revalida
     native.write_bytes(b"candidate-a")
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.identity]
 argv = ["python", "-c", "import project_module; print(project_module.VALUE)"]
 [workloads.identity.identity]
@@ -161,7 +159,6 @@ async def test_python_module_identity_never_executes_declared_module(tmp_path: P
     )
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.identity]
 argv = ["python", "-c", "print('workload does not import the declared module')"]
 [workloads.identity.identity]
@@ -188,7 +185,6 @@ async def test_python_module_identity_uses_interpreter_and_distribution_metadata
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.identity]
 argv = ["python", "-c", "print('ok')"]
 [workloads.identity.identity]
@@ -219,7 +215,6 @@ def test_missing_declared_native_identity_is_explicitly_partial(tmp_path: Path) 
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.identity]
 argv = ["python", "-c", "print('ok')"]
 [workloads.identity.identity]
@@ -241,7 +236,6 @@ async def test_declared_missing_accelerator_downgrades_captured_environment_iden
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.cuda]
 argv = ["python", "-c", "print('bounded')"]
 [workloads.cuda.identity.environment]

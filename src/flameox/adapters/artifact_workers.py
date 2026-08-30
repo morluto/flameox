@@ -15,7 +15,7 @@ from pydantic import JsonValue, ValidationError
 
 from flameox.atomic import atomic_write_json
 from flameox.command_binding import ExecutableResolver
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import DomainError, ErrorCode, process_exit_code
 from flameox.domain.executables import (
     ExecutableResolutionRequest,
     ExecutableTrustPolicy,
@@ -69,23 +69,9 @@ class IsolatedWorkerHarness:
         """Run one closed typed protocol and retain staged outputs during consumption."""
         job_root = self._job_root(definition.name)
         job_root.mkdir(parents=True, exist_ok=False)
-        request_path = job_root / "request.json"
-        response_path = job_root / "response.json"
-        request_id = secrets.token_hex(16)
-        payload = cast(
-            JsonValue,
-            definition.request.dump_python(
-                definition.request.validate_python(request),
-                mode="json",
-            ),
+        request_path, response_path, request_id = self._prepare_request(
+            definition, request, job_root
         )
-        envelope = WorkerRequestEnvelope(
-            request_id=request_id,
-            operation=definition.operation,
-            implementation=definition.implementation,
-            payload=payload,
-        )
-        atomic_write_json(request_path, envelope.model_dump(mode="json"))
         try:
             outcome = self.broker.run_sync(
                 self._execution_request(
@@ -97,7 +83,7 @@ class IsolatedWorkerHarness:
                 )
             )
             response = self._load_typed_response(
-                outcome.process.exit_code,
+                process_exit_code(outcome.process.termination),
                 outcome.stderr,
                 response_path,
                 definition=definition,
@@ -123,24 +109,8 @@ class IsolatedWorkerHarness:
         """Run a typed worker asynchronously when no staged output outlives the call."""
         job_root = self._job_root(definition.name)
         job_root.mkdir(parents=True, exist_ok=False)
-        request_path = job_root / "request.json"
-        response_path = job_root / "response.json"
-        request_id = secrets.token_hex(16)
-        payload = cast(
-            JsonValue,
-            definition.request.dump_python(
-                definition.request.validate_python(request),
-                mode="json",
-            ),
-        )
-        atomic_write_json(
-            request_path,
-            WorkerRequestEnvelope(
-                request_id=request_id,
-                operation=definition.operation,
-                implementation=definition.implementation,
-                payload=payload,
-            ).model_dump(mode="json"),
+        request_path, response_path, request_id = self._prepare_request(
+            definition, request, job_root
         )
         try:
             outcome = await self.broker.run(
@@ -153,7 +123,7 @@ class IsolatedWorkerHarness:
                 )
             )
             return self._load_typed_response(
-                outcome.process.exit_code,
+                process_exit_code(outcome.process.termination),
                 outcome.stderr,
                 response_path,
                 definition=definition,
@@ -177,24 +147,8 @@ class IsolatedWorkerHarness:
         """Keep typed worker outputs alive while one host-side consumer validates them."""
         job_root = job_root or self._job_root(definition.name)
         job_root.mkdir(parents=True, exist_ok=False)
-        request_path = job_root / "request.json"
-        response_path = job_root / "response.json"
-        request_id = secrets.token_hex(16)
-        payload = cast(
-            JsonValue,
-            definition.request.dump_python(
-                definition.request.validate_python(request),
-                mode="json",
-            ),
-        )
-        atomic_write_json(
-            request_path,
-            WorkerRequestEnvelope(
-                request_id=request_id,
-                operation=definition.operation,
-                implementation=definition.implementation,
-                payload=payload,
-            ).model_dump(mode="json"),
+        request_path, response_path, request_id = self._prepare_request(
+            definition, request, job_root
         )
         try:
             task = asyncio.create_task(
@@ -204,7 +158,11 @@ class IsolatedWorkerHarness:
                         request_path,
                         response_path,
                         job_root,
-                        timeout_seconds=timeout_seconds or definition.timeout_seconds,
+                        timeout_seconds=(
+                            definition.timeout_seconds
+                            if timeout_seconds is None
+                            else timeout_seconds
+                        ),
                         maximum_rss_bytes=maximum_rss_bytes,
                         maximum_writable_growth_bytes=maximum_writable_growth_bytes,
                     )
@@ -226,7 +184,7 @@ class IsolatedWorkerHarness:
             if heartbeat is not None:
                 await heartbeat(job_root)
             response = self._load_typed_response(
-                outcome.process.exit_code,
+                process_exit_code(outcome.process.termination),
                 outcome.stderr,
                 response_path,
                 definition=definition,
@@ -286,6 +244,33 @@ class IsolatedWorkerHarness:
 
     def _job_root(self, name: str) -> Path:
         return self.workspace.paths.staging / "artifact-workers" / f"{name}-{secrets.token_hex(16)}"
+
+    def _prepare_request(
+        self,
+        definition: WorkerDefinition[RequestT, ResponseT],
+        request: RequestT,
+        job_root: Path,
+    ) -> tuple[Path, Path, str]:
+        request_path = job_root / "request.json"
+        response_path = job_root / "response.json"
+        request_id = secrets.token_hex(16)
+        payload = cast(
+            JsonValue,
+            definition.request.dump_python(
+                definition.request.validate_python(request),
+                mode="json",
+            ),
+        )
+        atomic_write_json(
+            request_path,
+            WorkerRequestEnvelope(
+                request_id=request_id,
+                operation=definition.operation,
+                implementation=definition.implementation,
+                payload=payload,
+            ).model_dump(mode="json"),
+        )
+        return request_path, response_path, request_id
 
     def _execution_request(
         self,

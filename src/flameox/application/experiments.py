@@ -8,17 +8,16 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from functools import partial
 from itertools import product
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
-from pydantic import ConfigDict, Field, JsonValue, TypeAdapter, computed_field, model_validator
+from pydantic import Field, JsonValue, TypeAdapter
 from scipy.stats import beta
 
-from flameox.adapters import (
-    BenchmarkSamplesExtractor,
-    PyPerfExtractor,
-    PytestExtractor,
-    PythonStartupExtractor,
-)
+from flameox.action_graph import ManualAction, manual_action
+from flameox.adapters.benchmark_samples import BenchmarkSamplesExtractor
+from flameox.adapters.pyperf import PyPerfExtractor
+from flameox.adapters.pytest import PytestExtractor
+from flameox.adapters.python_startup import PythonStartupExtractor
 from flameox.application.async_work import run_atomic_thread
 from flameox.application.capture import CaptureService
 from flameox.application.comparisons import (
@@ -38,18 +37,19 @@ from flameox.application.workloads import (
     ExperimentConfig,
     Scalar,
     WorkloadService,
-    _FactorExperimentConfig,
     _OutcomeExperimentConfig,
-    _ScaledLegacyExperimentConfig,
     scalar_contains,
     scalar_equal,
     scalar_identity,
     scalar_identity_set,
     scalar_subset,
 )
-from flameox.catalog import Catalog
+from flameox.catalog import Catalog, Snapshot
 from flameox.domain import (
     ArtifactKind,
+    ComparisonDecision,
+    ComparisonValidity,
+    ConfidenceInterval,
     CursorNamespace,
     DomainError,
     ErrorCode,
@@ -91,7 +91,7 @@ from flameox.storage import AuthorizedPlanStore, ControlRecordStore, RunStore, W
 def _extract_adapter_measurements(workspace: Workspace, adapter: str, run_id: str) -> None:
     if adapter == "pyperf":
         PyPerfExtractor(workspace).extract(run_id)
-    elif adapter == "benchmark-samples":
+    elif adapter in {"benchmark-samples", "torch.benchmark"}:
         BenchmarkSamplesExtractor(workspace).extract(run_id)
     elif adapter == "python-startup":
         PythonStartupExtractor(workspace).extract(run_id)
@@ -110,6 +110,7 @@ def _has_extractable_artifact(run: RunManifest, adapter: str) -> bool:
         )
     expected = {
         "benchmark-samples": ArtifactKind.BENCHMARK_SAMPLES,
+        "torch.benchmark": ArtifactKind.BENCHMARK_SAMPLES,
         "pyperf": ArtifactKind.BENCHMARK_SAMPLES,
         "pytest": ArtifactKind.TEST_EXECUTION,
     }.get(adapter)
@@ -150,7 +151,6 @@ class ExperimentBlock(ContractModel):
 
 
 class ExperimentPlan(ContractModel):
-    schema_version: int = 1
     plan_token: str
     plan_id: str
     request_digest: str
@@ -172,7 +172,6 @@ class ExperimentPlan(ContractModel):
 
 
 class ExperimentRunResult(ContractModel):
-    schema_version: Literal[2] = 2
     experiment: Experiment
     variants: tuple[Variant, ...]
     trials: tuple[Trial, ...]
@@ -186,13 +185,77 @@ class ExperimentRunResult(ContractModel):
 class ExperimentTrialCollection(CursorPageContract):
     page_items_field = "trials"
 
-    schema_version: Literal[2] = 2
     experiment_id: str
     trials: tuple[Trial, ...]
     next_cursor: str | None = None
 
 
+class ExperimentResourceReference(ContractModel):
+    """A typed MCP resource link without inlining the referenced evidence."""
+
+    kind: Literal["trials", "run_set", "comparison", "analysis", "artifact"]
+    resource_id: str
+    uri: str
+
+
+class ExperimentTrialCounts(ContractModel):
+    observed: int = Field(ge=0)
+    attempted: int = Field(ge=0)
+    completed: int = Field(ge=0)
+    succeeded: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    excluded: int = Field(ge=0)
+    unattempted: int = Field(ge=0)
+
+
+class ExperimentBlockCoverage(ContractModel):
+    observed_blocks: int = Field(ge=0)
+    published_variant_count: int = Field(ge=0)
+    complete_blocks: int | None = Field(default=None, ge=0)
+    incomplete_blocks: int | None = Field(default=None, ge=0)
+
+
+class ExperimentValidationEvidence(ContractModel):
+    trial_id: str
+    run_id: str
+    role: Literal["validation_stdout", "validation_stderr"]
+    artifact: ExperimentResourceReference
+
+
+class ExperimentComparisonStatus(ContractModel):
+    comparison: ExperimentResourceReference
+    baseline_run_set: ExperimentResourceReference
+    candidate_run_set: ExperimentResourceReference
+    analysis: ExperimentResourceReference | None = None
+    validity: ComparisonValidity
+    decision: ComparisonDecision
+    effect_size: float | None = None
+    relative_change: float | None = None
+    confidence_interval: ConfidenceInterval | None = None
+    complete_pairs: int | None = Field(default=None, ge=0)
+    mismatches: tuple[str, ...] = Field(default=(), max_length=16)
+    mismatches_truncated: bool = False
+
+
+class ExperimentStatus(ContractModel):
+    """A bounded read-time projection over durable experiment evidence."""
+
+    protocol: Experiment
+    lifecycle: Literal["collecting_or_interrupted", "analyzing", "complete"]
+    trial_counts: ExperimentTrialCounts
+    block_coverage: ExperimentBlockCoverage
+    trials: ExperimentResourceReference
+    comparison: ExperimentComparisonStatus | None = None
+    outcome: OutcomeExperimentResult | None = None
+    validation_evidence: tuple[ExperimentValidationEvidence, ...] = Field(default=(), max_length=32)
+    validation_evidence_truncated: bool = False
+    corpus_commit_id: str
+    recovery: ManualAction | None = None
+    limitations: tuple[str, ...] = ()
+
+
 MAX_TRIAL_PAGE_SIZE = 1_000
+_STATUS_VALIDATION_EVIDENCE_LIMIT = 32
 _TRIAL_SELECT = (
     "SELECT trial_id, experiment_id, variant_id, run_id, combination_id, "
     "factors_json, block_id, order_in_block, parameter_name, "
@@ -227,45 +290,7 @@ class OutcomeFirstFailure(ContractModel):
     factors: dict[str, JsonValue]
 
 
-def _advertise_first_failure_projections(schema: dict[str, Any]) -> None:
-    properties = schema.setdefault("properties", {})
-    assert isinstance(properties, dict)
-    properties.pop("first_failure", None)
-    properties.update(
-        {
-            "first_failure_trial_id": {
-                "anyOf": [{"type": "string"}, {"type": "null"}],
-                "default": None,
-                "title": "First Failure Trial Id",
-            },
-            "first_failure_factors": {
-                "anyOf": [
-                    {
-                        "additionalProperties": {"$ref": "#/$defs/JsonValue"},
-                        "type": "object",
-                    },
-                    {"type": "null"},
-                ],
-                "default": None,
-                "title": "First Failure Factors",
-            },
-        }
-    )
-    required = schema.setdefault("required", [])
-    assert isinstance(required, list)
-    for field_name in (
-        "first_failure",
-        "first_failure_trial_id",
-        "first_failure_factors",
-    ):
-        if field_name in required:
-            required.remove(field_name)
-
-
 class OutcomeExperimentResult(ContractModel):
-    model_config = ConfigDict(json_schema_extra=_advertise_first_failure_projections)
-
-    schema_version: Literal[1] = 1
     experiment_id: str
     method: Literal[ExperimentOutcomeMethod.ABSENCE_OF_FAILURE_FIXED_ATTEMPTS_V1] = (
         ExperimentOutcomeMethod.ABSENCE_OF_FAILURE_FIXED_ATTEMPTS_V1
@@ -275,41 +300,8 @@ class OutcomeExperimentResult(ContractModel):
     counts: tuple[OutcomeCount, ...]
     complete_pairs: int
     unmatched_cells: int
-    first_failure: OutcomeFirstFailure | None = Field(default=None, exclude=True)
+    first_failure: OutcomeFirstFailure | None = None
     limitations: tuple[str, ...] = ()
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_first_failure_projections(cls, value: object) -> object:
-        if not isinstance(value, dict):
-            return value
-        has_trial = "first_failure_trial_id" in value
-        has_factors = "first_failure_factors" in value
-        if not has_trial and not has_factors:
-            return value
-        if "first_failure" in value:
-            raise ValueError("use either first_failure or flattened first-failure fields")
-        if has_trial != has_factors:
-            raise ValueError("first-failure trial and factors must appear together")
-        parsed = dict(value)
-        trial_id = parsed.pop("first_failure_trial_id")
-        factors = parsed.pop("first_failure_factors")
-        if (trial_id is None) != (factors is None):
-            raise ValueError("first-failure trial and factors must appear together")
-        parsed["first_failure"] = (
-            None if trial_id is None else {"trial_id": trial_id, "factors": factors}
-        )
-        return parsed
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def first_failure_trial_id(self) -> str | None:
-        return self.first_failure.trial_id if self.first_failure is not None else None
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def first_failure_factors(self) -> dict[str, JsonValue] | None:
-        return self.first_failure.factors if self.first_failure is not None else None
 
 
 class ExperimentPlanRegistry:
@@ -457,6 +449,325 @@ class ExperimentService:
             )
         trial = self._trial_from_row(row)
         return trial
+
+    def status(self, experiment_id: str) -> ExperimentStatus:
+        """Reconstruct bounded lifecycle evidence without recording a status object."""
+        protocol = self.experiments.read(experiment_id)
+        catalog = Catalog(self.workspace)
+        handle = catalog.pin()
+        with catalog.open_snapshot(handle) as snapshot:
+            trial_counts = self._status_trial_counts(snapshot, experiment_id)
+            variant_ids = self._status_variant_ids(snapshot, experiment_id)
+            block_coverage = self._status_block_coverage(
+                snapshot,
+                experiment_id,
+                published_variant_count=len(variant_ids),
+            )
+            outcome = self._status_outcome(snapshot, experiment_id)
+            comparison = self._status_comparison(snapshot, experiment_id)
+            validation_evidence, validation_evidence_truncated = self._status_validation_evidence(
+                snapshot,
+                experiment_id,
+            )
+            finalized_run_set_variants = self._status_run_set_variants(snapshot, experiment_id)
+
+        lifecycle, recovery, limitations = self._status_lifecycle(
+            variant_ids=variant_ids,
+            finalized_run_set_variants=finalized_run_set_variants,
+            comparison=comparison,
+            outcome=outcome,
+        )
+        return ExperimentStatus(
+            protocol=protocol,
+            lifecycle=lifecycle,
+            trial_counts=trial_counts,
+            block_coverage=block_coverage,
+            trials=self._resource("trials", experiment_id),
+            comparison=comparison,
+            outcome=outcome,
+            validation_evidence=validation_evidence,
+            validation_evidence_truncated=validation_evidence_truncated,
+            corpus_commit_id=handle.commit_id,
+            recovery=recovery,
+            limitations=limitations,
+        )
+
+    @staticmethod
+    def _latest_rows(table: str, identifier: str) -> str:
+        return (
+            f'(SELECT * FROM "{table}" QUALIFY row_number() OVER '
+            f'(PARTITION BY "{identifier}" ORDER BY published_at DESC) = 1)'
+        )
+
+    def _status_trial_counts(
+        self,
+        snapshot: Snapshot,
+        experiment_id: str,
+    ) -> ExperimentTrialCounts:
+        row = snapshot.execute(
+            "SELECT count(*), "
+            "count(*) FILTER (WHERE run_id IS NOT NULL), "
+            "count(*) FILTER (WHERE outcome != 'unattempted'), "
+            "count(*) FILTER (WHERE outcome = 'succeeded'), "
+            "count(*) FILTER (WHERE outcome NOT IN ('succeeded', 'unattempted', 'unsupported')), "
+            "count(*) FILTER (WHERE exclusion_reason IS NOT NULL), "
+            "count(*) FILTER (WHERE outcome = 'unattempted') "
+            "FROM " + self._latest_rows("trials", "trial_id") + " WHERE experiment_id = ?",
+            (experiment_id,),
+        ).fetchone()
+        assert row is not None
+        return ExperimentTrialCounts(
+            observed=int(row[0]),
+            attempted=int(row[1]),
+            completed=int(row[2]),
+            succeeded=int(row[3]),
+            failed=int(row[4]),
+            excluded=int(row[5]),
+            unattempted=int(row[6]),
+        )
+
+    def _status_variant_ids(self, snapshot: Snapshot, experiment_id: str) -> tuple[str, ...]:
+        rows = snapshot.execute(
+            "SELECT variant_id FROM "
+            + self._latest_rows("variants", "variant_id")
+            + " WHERE experiment_id = ? ORDER BY variant_id",
+            (experiment_id,),
+        ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
+    def _status_block_coverage(
+        self,
+        snapshot: Snapshot,
+        experiment_id: str,
+        *,
+        published_variant_count: int,
+    ) -> ExperimentBlockCoverage:
+        row = snapshot.execute(
+            "SELECT count(*) AS observed_blocks, "
+            "count(*) FILTER (WHERE variant_count = ?) AS complete_blocks "
+            "FROM (SELECT block_id, count(DISTINCT variant_id) AS variant_count FROM "
+            + self._latest_rows("trials", "trial_id")
+            + " WHERE experiment_id = ? AND block_id IS NOT NULL GROUP BY block_id)",
+            (published_variant_count, experiment_id),
+        ).fetchone()
+        assert row is not None
+        observed_blocks = int(row[0])
+        if published_variant_count == 0:
+            return ExperimentBlockCoverage(
+                observed_blocks=observed_blocks,
+                published_variant_count=0,
+            )
+        complete_blocks = int(row[1])
+        return ExperimentBlockCoverage(
+            observed_blocks=observed_blocks,
+            published_variant_count=published_variant_count,
+            complete_blocks=complete_blocks,
+            incomplete_blocks=observed_blocks - complete_blocks,
+        )
+
+    def _status_outcome(
+        self,
+        snapshot: Snapshot,
+        experiment_id: str,
+    ) -> OutcomeExperimentResult | None:
+        row = snapshot.execute(
+            "SELECT experiment_id, method, goal, disposition, counts_json, complete_pairs, "
+            "unmatched_cells, first_failure_trial_id, first_failure_factors_json, limitations FROM "
+            + self._latest_rows("experiment_outcomes", "experiment_id")
+            + " WHERE experiment_id = ?",
+            (experiment_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        first_failure = (
+            {"trial_id": row[7], "factors": json.loads(str(row[8]))}
+            if row[7] is not None and row[8] is not None
+            else None
+        )
+        return OutcomeExperimentResult.model_validate(
+            {
+                "experiment_id": row[0],
+                "method": row[1],
+                "goal": row[2],
+                "disposition": row[3],
+                "counts": json.loads(str(row[4])),
+                "complete_pairs": row[5],
+                "unmatched_cells": row[6],
+                "first_failure": first_failure,
+                "limitations": row[9],
+            }
+        )
+
+    def _status_comparison(
+        self,
+        snapshot: Snapshot,
+        experiment_id: str,
+    ) -> ExperimentComparisonStatus | None:
+        row = snapshot.execute(
+            "SELECT comparison_id, baseline_run_set_id, candidate_run_set_id, relative_change, "
+            "effect_size, confidence_low, confidence_high, confidence_level, complete_pair_n, "
+            "decision, validity, mismatches FROM "
+            + self._latest_rows("comparisons", "comparison_id")
+            + " WHERE experiment_id = ? ORDER BY published_at DESC, comparison_id DESC LIMIT 1",
+            (experiment_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        confidence_interval = (
+            ConfidenceInterval(low=float(row[5]), high=float(row[6]), level=float(row[7]))
+            if row[5] is not None and row[6] is not None and row[7] is not None
+            else None
+        )
+        mismatches = tuple(str(item) for item in row[11])
+        comparison_id = str(row[0])
+        analysis_id = self._status_comparison_analysis(
+            snapshot,
+            experiment_id=experiment_id,
+            baseline_run_set_id=str(row[1]),
+            candidate_run_set_id=str(row[2]),
+        )
+        return ExperimentComparisonStatus(
+            comparison=self._resource("comparison", comparison_id),
+            baseline_run_set=self._resource("run_set", str(row[1])),
+            candidate_run_set=self._resource("run_set", str(row[2])),
+            analysis=(self._resource("analysis", analysis_id) if analysis_id is not None else None),
+            validity=ComparisonValidity(str(row[10])),
+            decision=ComparisonDecision(str(row[9])),
+            effect_size=float(row[4]) if row[4] is not None else None,
+            relative_change=float(row[3]) if row[3] is not None else None,
+            confidence_interval=confidence_interval,
+            complete_pairs=int(row[8]) if row[8] is not None else None,
+            mismatches=mismatches[:16],
+            mismatches_truncated=len(mismatches) > 16,
+        )
+
+    def _status_comparison_analysis(
+        self,
+        snapshot: Snapshot,
+        *,
+        experiment_id: str,
+        baseline_run_set_id: str,
+        candidate_run_set_id: str,
+    ) -> str | None:
+        row = snapshot.execute(
+            "SELECT analysis_id FROM analyses WHERE recipe = 'compare_run_sets' "
+            "AND json_extract_string(parameters_json, '$.experiment_id') = ? "
+            "AND json_extract_string(parameters_json, '$.baseline_run_set_id') = ? "
+            "AND json_extract_string(parameters_json, '$.candidate_run_set_id') = ? "
+            "QUALIFY row_number() OVER (PARTITION BY analysis_id ORDER BY published_at DESC) = 1 "
+            "ORDER BY completed_at DESC, analysis_id DESC LIMIT 1",
+            (experiment_id, baseline_run_set_id, candidate_run_set_id),
+        ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def _status_validation_evidence(
+        self,
+        snapshot: Snapshot,
+        experiment_id: str,
+    ) -> tuple[tuple[ExperimentValidationEvidence, ...], bool]:
+        rows = snapshot.execute(
+            "WITH latest_trials AS "
+            + self._latest_rows("trials", "trial_id")
+            + ", unstructured_trials AS ("
+            "SELECT trial_id, run_id, block_id, order_in_block FROM latest_trials "
+            "WHERE experiment_id = ? AND run_id IS NOT NULL "
+            "AND oracle_receipt_artifact_id IS NULL"
+            ") SELECT trial_id, run_id, artifact_id, role FROM unstructured_trials "
+            "JOIN artifact_registrations USING (run_id) "
+            "WHERE role IN ('validation_stdout', 'validation_stderr') "
+            "QUALIFY row_number() OVER (PARTITION BY trial_id, artifact_id "
+            "ORDER BY published_at DESC) = 1 "
+            "ORDER BY block_id, order_in_block, role, artifact_id LIMIT ?",
+            (experiment_id, _STATUS_VALIDATION_EVIDENCE_LIMIT + 1),
+        ).fetchall()
+        truncated = len(rows) > _STATUS_VALIDATION_EVIDENCE_LIMIT
+        values = tuple(
+            ExperimentValidationEvidence(
+                trial_id=str(row[0]),
+                run_id=str(row[1]),
+                role=cast(Literal["validation_stdout", "validation_stderr"], str(row[3])),
+                artifact=self._resource("artifact", str(row[2])),
+            )
+            for row in rows[:_STATUS_VALIDATION_EVIDENCE_LIMIT]
+        )
+        return values, truncated
+
+    def _status_run_set_variants(self, snapshot: Snapshot, experiment_id: str) -> set[str]:
+        rows = snapshot.execute(
+            "SELECT DISTINCT json_extract_string(selection_json, '$.variant_id') FROM "
+            + self._latest_rows("run_sets", "run_set_id")
+            + " WHERE json_extract_string(selection_json, '$.experiment_id') = ? "
+            "AND json_extract_string(selection_json, '$.variant_id') IS NOT NULL",
+            (experiment_id,),
+        ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    @staticmethod
+    def _status_lifecycle(
+        *,
+        variant_ids: tuple[str, ...],
+        finalized_run_set_variants: set[str],
+        comparison: ExperimentComparisonStatus | None,
+        outcome: OutcomeExperimentResult | None,
+    ) -> tuple[
+        Literal["collecting_or_interrupted", "analyzing", "complete"],
+        ManualAction | None,
+        tuple[str, ...],
+    ]:
+        if not variant_ids:
+            return (
+                "collecting_or_interrupted",
+                manual_action(
+                    "Inspect the bounded trial resource. If no experiment call is still running, "
+                    "plan a new experiment rather than reusing its consumed plan token."
+                ),
+                (
+                    "No complete variant cohort is published, so durable evidence cannot "
+                    "distinguish an active execution from an interrupted one.",
+                ),
+            )
+        if outcome is not None:
+            return "complete", None, ()
+        run_sets_complete = set(variant_ids).issubset(finalized_run_set_variants)
+        if len(variant_ids) == 2:
+            if comparison is not None:
+                return "complete", None, ()
+            return (
+                "analyzing",
+                manual_action(
+                    "Inspect the frozen run sets and record a comparison with the declared "
+                    "metric contract if result publication was interrupted."
+                ),
+                (
+                    "The full trial cohort is published, but no terminal paired comparison is "
+                    "available.",
+                ),
+            )
+        if run_sets_complete:
+            return "complete", None, ()
+        return (
+            "analyzing",
+            manual_action(
+                "Inspect the bounded trial resource and frozen run sets; publish only the "
+                "missing analysis from their immutable evidence."
+            ),
+            ("The full trial cohort is published, but its frozen run-set evidence is incomplete.",),
+        )
+
+    @staticmethod
+    def _resource(
+        kind: Literal["trials", "run_set", "comparison", "analysis", "artifact"],
+        resource_id: str,
+    ) -> ExperimentResourceReference:
+        if kind == "trials":
+            uri = f"flameox://experiments/{resource_id}/trials"
+        elif kind == "run_set":
+            uri = f"flameox://run-sets/{resource_id}"
+        elif kind in {"comparison", "analysis"}:
+            uri = f"flameox://evidence/{kind}/{resource_id}"
+        else:
+            uri = f"flameox://artifacts/{resource_id}"
+        return ExperimentResourceReference(kind=kind, resource_id=resource_id, uri=uri)
 
     @staticmethod
     def _trial_from_row(row: tuple[object, ...]) -> Trial:
@@ -730,7 +1041,7 @@ class ExperimentService:
             variants=variants,
             baseline_variant=(
                 self._factor_label(config.baseline_value)
-                if isinstance(config, _FactorExperimentConfig) and config.baseline_value is not None
+                if config.baseline_value is not None
                 else None
             ),
             factors={
@@ -1169,35 +1480,8 @@ class ExperimentService:
         config: ExperimentConfig,
         workload_parameters: dict[str, tuple[Scalar, ...]],
     ) -> tuple[str, dict[str, tuple[Scalar, ...]], tuple[dict[str, Scalar], ...]]:
-        if isinstance(config, _FactorExperimentConfig):
-            treatment_factor = config.treatment_factor
-            factors = dict(config.factors)
-        else:
-            matches = [
-                name
-                for name, choices in workload_parameters.items()
-                if scalar_subset(list(config.variants), list(choices))
-            ]
-            if not matches:
-                raise DomainError(
-                    ErrorCode.WORKSPACE_INVALID,
-                    "Experiment variants must be declared choices of one workload parameter.",
-                )
-            if len(matches) > 1:
-                raise DomainError(
-                    ErrorCode.WORKSPACE_INVALID,
-                    "Experiment variants ambiguously match more than one workload parameter.",
-                    details={"parameters": matches},
-                )
-            treatment_factor = matches[0]
-            factors = {treatment_factor: config.variants}
-            if isinstance(config, _ScaledLegacyExperimentConfig):
-                if config.scaling_parameter == treatment_factor:
-                    raise DomainError(
-                        ErrorCode.WORKSPACE_INVALID,
-                        "The scaling parameter must differ from the treatment parameter.",
-                    )
-                factors[config.scaling_parameter] = config.scaling_values
+        treatment_factor = config.treatment_factor
+        factors = dict(config.factors)
 
         for name, values in factors.items():
             allowed = workload_parameters.get(name)
@@ -1471,14 +1755,16 @@ class ExperimentService:
             ),
             "complete_pairs": value.complete_pairs,
             "unmatched_cells": value.unmatched_cells,
-            "first_failure_trial_id": value.first_failure_trial_id,
+            "first_failure_trial_id": (
+                value.first_failure.trial_id if value.first_failure is not None else None
+            ),
             "first_failure_factors_json": (
                 json.dumps(
-                    value.first_failure_factors,
+                    value.first_failure.factors,
                     separators=(",", ":"),
                     sort_keys=True,
                 )
-                if value.first_failure_factors is not None
+                if value.first_failure is not None
                 else None
             ),
             "limitations": list(value.limitations),
@@ -1619,7 +1905,6 @@ class ExperimentService:
         )
         row.pop("stopping_rule")
         row.pop("measurement_series")
-        row.pop("schema_version")
         return row
 
     def _variant_for_treatment(
@@ -1836,5 +2121,4 @@ class ExperimentService:
         )
         row.pop("factors")
         row.pop("parameter_value")
-        row.pop("schema_version")
         return row

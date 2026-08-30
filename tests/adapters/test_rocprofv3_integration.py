@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from flameox.adapters import PerfettoExtractor
+from flameox.adapters.perfetto import PerfettoExtractor
 from flameox.analysis import RecipeService
-from flameox.application import (
-    CaptureService,
-    ExecutionPolicy,
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportService,
 )
@@ -35,11 +35,7 @@ async def test_rocprofv3_capture_preserves_partial_pftrace_on_nonzero_exit(
     monkeypatch.setenv("PATH", f"{executable_directory}{os.pathsep}{os.environ['PATH']}")
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n"
-        "[workloads.probe]\n"
-        "argv = ['/bin/true']\n"
-        "cwd = '.'\n"
-        "timeout_seconds = 5\n"
+        "[workloads.probe]\nargv = ['/bin/true']\ncwd = '.'\ntimeout_seconds = 5\n"
     )
     disable_containment(workspace)
     service = CaptureService(workspace)

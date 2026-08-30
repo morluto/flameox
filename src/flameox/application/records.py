@@ -88,7 +88,6 @@ class FindingResult(ContractModel):
 class InvestigationListResult(CursorPageContract):
     page_items_field = "investigations"
 
-    schema_version: int = 1
     corpus_commit_id: str
     investigations: tuple[Investigation, ...]
     total: int
@@ -97,7 +96,6 @@ class InvestigationListResult(CursorPageContract):
 class FindingListResult(CursorPageContract):
     page_items_field = "findings"
 
-    schema_version: int = 1
     corpus_commit_id: str
     findings: tuple[Finding, ...]
     total: int
@@ -271,6 +269,16 @@ class FindingService:
         )
 
     def record(self, request: RecordFindingRequest) -> FindingResult:
+        if any(
+            item.ref_type is EvidenceReferenceType.STATIC_CANDIDATE
+            and item.relation is not EvidenceRelation.CONTEXT
+            for item in request.evidence
+        ):
+            raise DomainError(
+                ErrorCode.WORKSPACE_INVALID,
+                "Static-analysis candidates can only provide context; measured evidence must "
+                "carry the supporting or contradicting relation.",
+            )
         relation_error = assessment_relation_error(
             request.assessment,
             tuple(item.relation for item in request.evidence),
@@ -382,10 +390,7 @@ class FindingService:
         published = self.publisher.publish_rows(
             {
                 "findings": [self._finding_row(finding)],
-                "evidence_refs": [
-                    reference.model_dump(mode="python", exclude={"schema_version"})
-                    for reference in references
-                ],
+                "evidence_refs": [reference.model_dump(mode="python") for reference in references],
             },
             publisher="flameox.findings",
             publisher_version="1",
@@ -394,6 +399,21 @@ class FindingService:
             finding=finding,
             evidence=references,
             corpus_commit_id=published.commit.commit_id,
+        )
+
+    def get(self, finding_id: str) -> FindingResult:
+        finding = self.findings.read(finding_id)
+        with self.evidence.session() as evidence:
+            references = evidence.references(
+                owner_type="finding",
+                owner_id=finding.finding_id,
+                owner_revision=finding.revision,
+            )
+            corpus_commit_id = evidence.commit_id
+        return FindingResult(
+            finding=finding,
+            evidence=references,
+            corpus_commit_id=corpus_commit_id,
         )
 
     def list(self, *, limit: int, cursor: str | None = None) -> FindingListResult:

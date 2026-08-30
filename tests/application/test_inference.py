@@ -14,10 +14,10 @@ from flameox.analysis.inference_protocol import InferenceProtocolIdentity
 from flameox.application.environment import collect_environment
 from flameox.application.evidence_query import EvidenceQueryService
 from flameox.application.inference import (
-    AIPerfReplayPlan,
-    InferenceReplayResult,
-    InferenceReplayService,
-    parse_inference_replay_plan,
+    AIPerfScenarioPlan,
+    InferenceScenarioResult,
+    InferenceScenarioService,
+    parse_inference_scenario_plan,
 )
 from flameox.application.inference_providers import (
     InferenceScenarioProvider,
@@ -35,6 +35,7 @@ from flameox.domain import (
     DomainError,
     ErrorCode,
     ExecutionStatus,
+    ExitedProcessTermination,
     ProcessResult,
     ValidationStatus,
     process_termination_from_returncode,
@@ -91,23 +92,22 @@ def _write_project(tmp_path: Path, *, server_mode: str = "existing_local") -> No
     workload = (
         'argv = ["python", "-c", "import time; time.sleep(60)"]'
         if server_mode == "managed"
-        else 'argv = ["python", "-c", "print(\'replay\')"]'
+        else 'argv = ["python", "-c", "print(\'benchmark\')"]'
     )
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 
-[workloads.replay]
+[workloads.server]
 {workload}
 
 [inference_servers.local]
 provider = "vllm"
 mode = "{server_mode}"
-{"workload = 'replay'" if server_mode == "managed" else ""}
+{"workload = 'server'" if server_mode == "managed" else ""}
 base_url = "http://127.0.0.1:8000"
 model = "test-model"
 
-[inference_scenarios.aiperf_replay]
+[inference_scenarios.aiperf_benchmark]
 server = "local"
 provider = "aiperf"
 endpoint_type = "chat"
@@ -116,7 +116,7 @@ num_prompts = 10
 concurrency = 2
 speedup_ratio = 1.0
 
-[inference_scenarios.vllm_bench_replay]
+[inference_scenarios.vllm_benchmark]
 server = "local"
 provider = "vllm_bench"
 endpoint_type = "completions"
@@ -134,10 +134,6 @@ class RecordingBroker(SubprocessBroker):
         self._stderr = stderr
 
     async def run(self, request: ExecutionRequest, **_: object) -> ExecutionOutcome:
-        self.requests.append(request)
-        return self._outcome(request)
-
-    def run_sync(self, request: ExecutionRequest, **_: object) -> ExecutionOutcome:
         self.requests.append(request)
         return self._outcome(request)
 
@@ -162,32 +158,39 @@ def _patch_providers(
     health_ready: bool = True,
     model_ids: tuple[str, ...] = ("test-model",),
 ) -> None:
-    from flameox.application import inference as inference_module
+    import flameox.application.inference as inference_module
     from flameox.application.inference_providers import (
         ExistingServerProbe,
-        InferenceToolDiscovery,
-        parse_inference_tool_discovery,
+        QualifiedInferenceTool,
     )
 
-    def fake_discover(tool: InferenceTool, **_: object) -> InferenceToolDiscovery:
-        payload: dict[str, object] = {
-            "tool": tool,
-            "executable": executable,
-            "available": executable is not None,
-            "remediation": () if executable else ("Install the inference extra.",),
-        }
-        if executable is not None:
-            payload["executable_binding"] = executable_binding(executable)
-            if tool is InferenceTool.AIPERF:
-                runtime = _test_aiperf_runtime()
-                payload.update(
-                    {
-                        "provider_environment_id": runtime.receipt.environment_id,
-                        "provider_python": runtime.python,
-                        "provider_python_sha256": runtime.receipt.python_sha256,
-                    }
-                )
-        return parse_inference_tool_discovery(payload)
+    def fake_discover(tool: InferenceTool, **_: object) -> QualifiedInferenceTool:
+        if executable is None:
+            raise DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "The inference benchmark tool is unavailable.",
+                remediation=("Install the inference extra and plan the scenario again.",),
+            )
+        if executable.is_file():
+            resolved_executable = executable
+        elif tool is InferenceTool.AIPERF:
+            runtime_executable = _test_aiperf_runtime().executable
+            assert runtime_executable is not None
+            resolved_executable = runtime_executable
+        else:
+            resolved_executable = Path(sys.executable)
+        runtime = (
+            _test_aiperf_runtime()
+            if resolved_executable == _test_aiperf_runtime().executable
+            else None
+        )
+        return QualifiedInferenceTool(
+            tool=tool,
+            executable_binding=executable_binding(resolved_executable),
+            provider_environment_id=(
+                runtime.receipt.environment_id if runtime is not None else None
+            ),
+        )
 
     def fake_probe(base_url: str, *, timeout_seconds: float = 2.0) -> ExistingServerProbe:
         del base_url, timeout_seconds
@@ -207,6 +210,12 @@ def _patch_providers(
         return fake_probe(base_url, timeout_seconds=timeout_seconds)
 
     monkeypatch.setattr(inference_module, "discover_inference_tool", fake_discover)
+
+    class AcceptedPlanBinding:
+        def revalidate(self, binding: object) -> object:
+            return binding
+
+    monkeypatch.setattr("flameox.application.inference.ExecutableResolver", AcceptedPlanBinding)
     monkeypatch.setattr(inference_module, "probe_existing_vllm_server", fake_probe)
     monkeypatch.setattr(inference_module, "probe_existing_vllm_server_async", fake_probe_async)
     monkeypatch.setattr(
@@ -227,17 +236,16 @@ def test_plan_existing_local_aiperf_builds_typed_argv_and_records_exploratory_re
     workspace = Workspace.initialize(tmp_path)
     _write_project(tmp_path)
     _patch_providers(monkeypatch, executable=Path("/tools/aiperf"))
-    service = InferenceReplayService(workspace, broker=RecordingBroker())
+    service = InferenceScenarioService(workspace, broker=RecordingBroker())
 
-    plan = service.plan("aiperf_replay")
+    plan = service.plan("aiperf_benchmark")
 
     assert plan.server_mode is InferenceServerMode.EXISTING_LOCAL
     assert plan.provider is InferenceScenarioProvider.AIPERF
-    assert plan.tool_available is True
-    assert plan.tool_executable == "/tools/aiperf"
-    assert plan.argv[0] == "/tools/aiperf"
+    assert plan.executable_binding.canonical_target == _test_aiperf_runtime().executable
+    assert plan.argv[0] == str(_test_aiperf_runtime().executable)
     assert "--fixed-schedule" not in plan.argv  # no trace_artifact_id
-    assert plan.exploratory_reason.startswith("Single replay run is exploratory")
+    assert plan.exploratory_reason.startswith("Single benchmark run is exploratory")
     assert plan.timeout_seconds == 1800.0  # aiperf default deadline
     assert plan.output_path is not None
     assert plan.configuration_id.startswith("sha256:")
@@ -250,14 +258,58 @@ def test_plan_existing_local_vllm_bench_uses_shorter_default_deadline(
     workspace = Workspace.initialize(tmp_path)
     _write_project(tmp_path)
     _patch_providers(monkeypatch, executable=Path("/tools/vllm"))
-    service = InferenceReplayService(workspace, broker=RecordingBroker())
+    service = InferenceScenarioService(workspace, broker=RecordingBroker())
 
-    plan = service.plan("vllm_bench_replay")
+    plan = service.plan("vllm_benchmark")
 
     assert plan.provider == "vllm_bench"
-    assert plan.argv[0] == "/tools/vllm"
+    assert plan.argv[0] == str(Path(sys.executable).resolve())
     assert "bench" in plan.argv and "serve" in plan.argv
     assert plan.timeout_seconds == 600.0  # vllm_bench default deadline
+
+
+@pytest.mark.anyio
+async def test_run_revalidates_the_qualified_provider_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    _write_project(tmp_path)
+    executable = tmp_path / "vllm"
+    executable.write_text("before", encoding="utf-8")
+    executable.chmod(0o755)
+
+    import flameox.application.inference as inference_module
+    from flameox.application.inference_providers import (
+        ExistingServerProbe,
+        QualifiedInferenceTool,
+    )
+
+    monkeypatch.setattr(
+        inference_module,
+        "discover_inference_tool",
+        lambda _tool, **_kwargs: QualifiedInferenceTool(
+            tool=InferenceTool.VLLM,
+            executable_binding=executable_binding(executable),
+        ),
+    )
+    monkeypatch.setattr(
+        inference_module,
+        "probe_existing_vllm_server",
+        lambda *_args, **_kwargs: ExistingServerProbe(
+            base_url="http://127.0.0.1:8000", health_ready=True, model_ids=("test-model",)
+        ),
+    )
+    broker = RecordingBroker()
+    service = InferenceScenarioService(workspace, broker=broker)
+    plan = service.plan("vllm_benchmark")
+    executable.write_text("after", encoding="utf-8")
+
+    with pytest.raises(DomainError, match="changed after planning") as exc_info:
+        await service.run(plan.plan_token)
+
+    assert exc_info.value.code is ErrorCode.REVISION_CONFLICT
+    assert broker.requests == []
 
 
 def test_sglang_protocol_identity_binds_random_shape_and_provenance(
@@ -268,28 +320,26 @@ def test_sglang_protocol_identity_binds_random_shape_and_provenance(
     launcher.write_text("launcher")
     launcher.chmod(0o755)
     (tmp_path / "flameox.toml").write_text(
-        "schema_version = 1\n"
+        ""
         "[inference_servers.local]\n"
         'provider = "sglang"\n'
         f'benchmark_python = "{launcher}"\n'
         'mode = "existing_local"\nbase_url = "http://127.0.0.1:8000"\nmodel = "model"\n'
-        "[inference_scenarios.replay]\n"
+        "[inference_scenarios.benchmark]\n"
         'server = "local"\nprovider = "sglang_bench"\n'
         "random_input_len = 4\nrandom_output_len = 2\n"
     )
-    from flameox.application import inference as inference_module
+    import flameox.application.inference as inference_module
     from flameox.application.inference_providers import (
-        AvailableInferenceToolDiscovery,
         ExistingServerProbe,
+        QualifiedInferenceTool,
     )
 
-    discovery = AvailableInferenceToolDiscovery(
+    discovery = QualifiedInferenceTool(
         tool=InferenceTool.SGLANG,
-        executable=launcher,
         executable_binding=executable_binding(launcher),
-        available=True,
-        version="0.5.16",
-        executable_digest="sha256:" + "c" * 64,
+        version="0.5.18",
+        benchmark_capabilities=("--backend", "--output-file"),
     )
     monkeypatch.setattr(inference_module, "discover_sglang", lambda _launcher, *, broker: discovery)
     monkeypatch.setattr(
@@ -299,30 +349,67 @@ def test_sglang_protocol_identity_binds_random_shape_and_provenance(
             base_url="http://127.0.0.1:8000", health_ready=True, model_ids=("model",)
         ),
     )
-    service = InferenceReplayService(workspace, broker=RecordingBroker())
-    plan = service.plan("replay")
+    service = InferenceScenarioService(workspace, broker=RecordingBroker())
+    plan = service.plan("benchmark")
     reshaped = plan.model_copy(update={"random_input_len": 8})
 
     identity = service._protocol_identity(plan, environment=collect_environment())
     reshaped_identity = service._protocol_identity(reshaped, environment=collect_environment())
 
-    assert identity.trace.producer == "sglang.bench_serving"
+    assert identity.trace.producer == "sglang.benchmark.serving"
     assert identity.server.cache_backend == "custom"
     assert plan.random_range_ratio == 1.0
+    assert plan.benchmark_capabilities == ("--backend", "--output-file")
     assert identity.trace.artifact_digest != reshaped_identity.trace.artifact_digest
 
 
-def test_each_replay_plan_uses_an_isolated_output_directory(
+def test_sglang_launcher_failure_returns_typed_reconfiguration(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    missing_launcher = tmp_path / "missing-sglang-python"
+    (tmp_path / "flameox.toml").write_text(
+        "[inference_servers.local]\n"
+        'provider = "sglang"\n'
+        f'benchmark_python = "{missing_launcher}"\n'
+        'mode = "existing_local"\nbase_url = "http://127.0.0.1:8000"\nmodel = "model"\n'
+        "[inference_scenarios.benchmark]\n"
+        'server = "local"\nprovider = "sglang_bench"\n'
+        "random_input_len = 4\nrandom_output_len = 2\n"
+    )
+
+    with pytest.raises(DomainError) as exc_info:
+        InferenceScenarioService(workspace).plan("benchmark")
+
+    error = exc_info.value
+    assert error.code is ErrorCode.CAPABILITY_UNAVAILABLE
+    assert error.details["benchmark_python"] == str(missing_launcher)
+    assert error.next_action is not None
+    assert error.next_action.kind == "tool"
+    assert error.next_action.action.value == "inference.server.configure"
+    assert error.next_action.arguments == {
+        "name": "local",
+        "operation": "replace",
+        "mode": "existing_local",
+        "model": "model",
+        "provider": "sglang",
+        "benchmark_python": str(missing_launcher),
+        "base_url": "http://127.0.0.1:8000",
+        "expected_configuration_id": error.next_action.arguments["expected_configuration_id"],
+    }
+
+
+def test_each_scenario_plan_uses_an_isolated_output_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     _write_project(tmp_path)
     _patch_providers(monkeypatch, executable=Path("/tools/aiperf"))
-    service = InferenceReplayService(workspace, broker=RecordingBroker())
+    service = InferenceScenarioService(workspace, broker=RecordingBroker())
 
-    first = service.plan("aiperf_replay")
-    second = service.plan("aiperf_replay")
+    first = service.plan("aiperf_benchmark")
+    second = service.plan("aiperf_benchmark")
 
     assert first.output_path != second.output_path
     assert first.output_path is not None
@@ -330,7 +417,8 @@ def test_each_replay_plan_uses_an_isolated_output_directory(
     assert Path(first.output_path).parent.parent == Path(second.output_path).parent.parent
 
 
-def test_run_refuses_output_directory_replaced_after_planning(
+@pytest.mark.anyio
+async def test_run_refuses_output_directory_replaced_after_planning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -338,8 +426,8 @@ def test_run_refuses_output_directory_replaced_after_planning(
     _write_project(tmp_path)
     _patch_providers(monkeypatch, executable=Path("/tools/vllm"))
     broker = RecordingBroker()
-    service = InferenceReplayService(workspace, broker=broker)
-    plan = service.plan("vllm_bench_replay")
+    service = InferenceScenarioService(workspace, broker=broker)
+    plan = service.plan("vllm_benchmark")
     output_root = Path(plan.output_path).parent
     parked = output_root.with_name(f"{output_root.name}-parked")
     outside = tmp_path / "outside"
@@ -348,40 +436,33 @@ def test_run_refuses_output_directory_replaced_after_planning(
     output_root.symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(DomainError) as caught:
-        service.run_sync(plan.plan_token)
+        await service.run(plan.plan_token)
 
     assert caught.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
     assert broker.requests == []
     assert list(outside.iterdir()) == []
 
 
-def test_replay_plan_parses_provider_specific_fields_once(
+def test_scenario_plan_parses_provider_specific_fields_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     _write_project(tmp_path)
     _patch_providers(monkeypatch, executable=Path("/tools/aiperf"))
-    plan = InferenceReplayService(workspace, broker=RecordingBroker()).plan("aiperf_replay")
+    plan = InferenceScenarioService(workspace, broker=RecordingBroker()).plan("aiperf_benchmark")
 
-    assert isinstance(plan, AIPerfReplayPlan)
+    assert isinstance(plan, AIPerfScenarioPlan)
     incompatible = plan.model_dump(mode="json") | {
         "provider": "vllm_bench",
         "trace_artifact_id": DIGEST,
     }
     with pytest.raises(ValueError):
-        parse_inference_replay_plan(incompatible)
+        parse_inference_scenario_plan(incompatible)
 
-    contradictory = plan.model_dump(mode="json")
-    contradictory["tool_compatible"] = False
-    with pytest.raises(ValueError, match="availability and compatibility must agree"):
-        parse_inference_replay_plan(contradictory)
-
-    unavailable_with_executable = plan.model_dump(mode="json")
-    del unavailable_with_executable["tool_compatible"]
-    unavailable_with_executable["tool_available"] = False
-    with pytest.raises(ValueError, match="availability must match executable argv"):
-        parse_inference_replay_plan(unavailable_with_executable)
+    serialized = plan.model_dump(mode="json")
+    assert "executable_binding" in serialized
+    assert "argv" in serialized
 
 
 def test_plan_accepts_managed_server_without_probing_before_execution(
@@ -391,12 +472,12 @@ def test_plan_accepts_managed_server_without_probing_before_execution(
     workspace = Workspace.initialize(tmp_path)
     _write_project(tmp_path, server_mode="managed")
     _patch_providers(monkeypatch)
-    service = InferenceReplayService(workspace, broker=RecordingBroker())
+    service = InferenceScenarioService(workspace, broker=RecordingBroker())
 
-    plan = service.plan("aiperf_replay")
+    plan = service.plan("aiperf_benchmark")
 
     assert plan.server_mode == "managed"
-    assert plan.tool_available is True
+    assert plan.argv[0] == str(_test_aiperf_runtime().executable)
 
 
 @pytest.mark.anyio
@@ -411,10 +492,10 @@ async def test_run_managed_server_cleans_up_lease(
     provider.chmod(0o755)
     _patch_providers(monkeypatch, executable=provider)
 
-    service = InferenceReplayService(workspace)
-    result = await service.run(service.plan("aiperf_replay", timeout_seconds=5).plan_token)
+    service = InferenceScenarioService(workspace)
+    result = await service.run(service.plan("aiperf_benchmark", timeout_seconds=5).plan_token)
 
-    assert result.exit_code == 0
+    assert result.termination == ExitedProcessTermination(exit_code=0)
     assert result.server_cleanup_complete is True
 
 
@@ -423,7 +504,7 @@ def test_plan_unknown_scenario_raises_workspace_invalid(
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     _write_project(tmp_path)
-    service = InferenceReplayService(workspace, broker=RecordingBroker())
+    service = InferenceScenarioService(workspace, broker=RecordingBroker())
 
     with pytest.raises(DomainError, match="not declared") as exc_info:
         service.plan("missing")
@@ -431,50 +512,35 @@ def test_plan_unknown_scenario_raises_workspace_invalid(
     assert exc_info.value.code is ErrorCode.WORKSPACE_INVALID
 
 
-def test_plan_unavailable_tool_records_remediation_and_empty_argv(
+def test_plan_refuses_unavailable_tool_before_output_allocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     _write_project(tmp_path)
     _patch_providers(monkeypatch, executable=None)
-    service = InferenceReplayService(workspace, broker=RecordingBroker())
+    service = InferenceScenarioService(workspace, broker=RecordingBroker())
 
-    plan = service.plan("vllm_bench_replay")
+    with pytest.raises(DomainError, match="unavailable") as exc_info:
+        service.plan("vllm_benchmark")
 
-    assert plan.tool_available is False
-    assert plan.tool_executable is None
-    assert plan.argv == ()
-    assert plan.tool_remediation == ("Install the inference extra.",)
+    assert exc_info.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
+    assert not (workspace.paths.staging / "inference-scenario").exists()
 
 
-def test_plan_incompatible_but_present_tool_returns_remediation_without_argv(
+def test_plan_refuses_incompatible_tool_before_output_allocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A tool that is installed but incompatible must still produce an actionable plan.
-
-    Regression: previously the plan built argv from the executable path even when
-    the discovery was unavailable, and the coherence validator rejected argv +
-    compatibility_reason, causing a ValidationError instead of a plan.
-    """
-    from flameox.application import inference as inference_module
+    import flameox.application.inference as inference_module
     from flameox.application.inference_providers import (
         ExistingServerProbe,
-        InferenceToolDiscovery,
     )
 
-    def fake_discover(tool: str, **_: object) -> InferenceToolDiscovery:
-        from flameox.application.inference_providers import (
-            UnavailableInferenceToolDiscovery,
-        )
-
-        return UnavailableInferenceToolDiscovery(
-            tool=InferenceTool.AIPERF,
-            executable=Path("/tools/aiperf"),
-            version="0.11.0",
-            executable_digest="sha256:" + "a" * 64,
-            compatibility_reason="AIPerf version is outside the supported >=0.12,<0.13 range.",
+    def fake_discover(tool: str, **_: object) -> None:
+        raise DomainError(
+            ErrorCode.CAPABILITY_UNAVAILABLE,
+            "AIPerf is outside Flameox's supported >=0.12,<0.13 range.",
             remediation=("Install a compatible AIPerf >=0.12,<0.13 in the Flameox runtime.",),
         )
 
@@ -491,16 +557,13 @@ def test_plan_incompatible_but_present_tool_returns_remediation_without_argv(
 
     workspace = Workspace.initialize(tmp_path)
     _write_project(tmp_path)
-    service = InferenceReplayService(workspace, broker=RecordingBroker())
+    service = InferenceScenarioService(workspace, broker=RecordingBroker())
 
-    plan = service.plan("aiperf_replay")
+    with pytest.raises(DomainError, match="outside Flameox") as exc_info:
+        service.plan("aiperf_benchmark")
 
-    assert plan.tool_available is False
-    assert plan.tool_compatible is False
-    assert plan.argv == ()
-    assert plan.tool_executable is not None
-    assert plan.tool_compatibility_reason is not None
-    assert plan.tool_remediation != ()
+    assert exc_info.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
+    assert not (workspace.paths.staging / "inference-scenario").exists()
 
 
 @pytest.mark.anyio
@@ -512,9 +575,9 @@ async def test_run_executes_through_broker_and_preserves_argv_and_output_path(
     _write_project(tmp_path)
     broker = RecordingBroker(exit_code=0, stdout=b'{"result": "ok"}')
     _patch_providers(monkeypatch, executable=Path("/tools/aiperf"))
-    service = InferenceReplayService(workspace, broker=broker)
+    service = InferenceScenarioService(workspace, broker=broker)
 
-    plan = service.plan("aiperf_replay")
+    plan = service.plan("aiperf_benchmark")
     assert plan.output_path is not None
     assert plan.plan_token
     output = Path(plan.output_path)
@@ -526,10 +589,8 @@ async def test_run_executes_through_broker_and_preserves_argv_and_output_path(
     assert mutated_preview.output_path != plan.output_path
     result = await service.run(plan.plan_token)
 
-    assert isinstance(result, InferenceReplayResult)
-    assert result.plan_id == plan.plan_id
-    assert result.argv == plan.argv
-    assert result.exit_code == 0
+    assert isinstance(result, InferenceScenarioResult)
+    assert result.termination == ExitedProcessTermination(exit_code=0)
     assert result.timed_out is False
     assert result.validated_copy() == result
     timed_out = result.validated_copy(update={"cancellation_cause": "timeout"})
@@ -557,25 +618,6 @@ async def test_run_executes_through_broker_and_preserves_argv_and_output_path(
 
 
 @pytest.mark.anyio
-async def test_run_refuses_unavailable_tool_before_broker(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    _write_project(tmp_path)
-    broker = RecordingBroker()
-    _patch_providers(monkeypatch, executable=None)
-    service = InferenceReplayService(workspace, broker=broker)
-
-    plan = service.plan("vllm_bench_replay")
-    with pytest.raises(DomainError, match="unavailable") as exc_info:
-        await service.run(plan.plan_token)
-
-    assert exc_info.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
-    assert len(broker.requests) == 0
-
-
-@pytest.mark.anyio
 async def test_run_preserves_partial_provider_artifacts_on_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -592,10 +634,10 @@ async def test_run_preserves_partial_provider_artifacts_on_failure(
             (nested / "profile_export.jsonl").write_text('{"partial":true}\n')
             raise DomainError(ErrorCode.PROCESS_FAILED, "provider failed")
 
-    service = InferenceReplayService(workspace, broker=FailingBroker())
+    service = InferenceScenarioService(workspace, broker=FailingBroker())
 
     with pytest.raises(DomainError) as caught:
-        await service.run(service.plan("aiperf_replay").plan_token)
+        await service.run(service.plan("aiperf_benchmark").plan_token)
 
     assert caught.value.code is ErrorCode.PROCESS_FAILED
     assert caught.value.run_id is not None
@@ -622,10 +664,10 @@ async def test_run_finalizes_canonical_run_after_unexpected_broker_failure(
             del request
             raise RuntimeError("broker implementation failed")
 
-    service = InferenceReplayService(workspace, broker=BrokenBroker())
+    service = InferenceScenarioService(workspace, broker=BrokenBroker())
 
     with pytest.raises(DomainError) as caught:
-        await service.run(service.plan("aiperf_replay").plan_token)
+        await service.run(service.plan("aiperf_benchmark").plan_token)
 
     assert caught.value.code is ErrorCode.INTERNAL_ERROR
     assert caught.value.run_id is not None
@@ -643,9 +685,9 @@ async def test_run_records_unhealthy_server_as_limitation_without_failing(
     _write_project(tmp_path)
     broker = RecordingBroker()
     _patch_providers(monkeypatch, executable=Path("/tools/vllm"), health_ready=False, model_ids=())
-    service = InferenceReplayService(workspace, broker=broker)
+    service = InferenceScenarioService(workspace, broker=broker)
 
-    plan = service.plan("vllm_bench_replay")
+    plan = service.plan("vllm_benchmark")
     result = await service.run(plan.plan_token)
 
     assert result.health_ready is False
@@ -654,7 +696,8 @@ async def test_run_records_unhealthy_server_as_limitation_without_failing(
     assert any("no model ids" in lim for lim in result.limitations)
 
 
-def test_run_sync_executes_and_returns_typed_result(
+@pytest.mark.anyio
+async def test_run_executes_and_returns_typed_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -662,18 +705,18 @@ def test_run_sync_executes_and_returns_typed_result(
     _write_project(tmp_path)
     broker = RecordingBroker(exit_code=0)
     _patch_providers(monkeypatch, executable=Path("/tools/vllm"))
-    service = InferenceReplayService(workspace, broker=broker)
+    service = InferenceScenarioService(workspace, broker=broker)
 
-    plan = service.plan("vllm_bench_replay")
-    result = service.run_sync(plan.plan_token)
+    plan = service.plan("vllm_benchmark")
+    result = await service.run(plan.plan_token)
 
-    assert isinstance(result, InferenceReplayResult)
-    assert result.exit_code == 0
-    assert result.argv == plan.argv
+    assert isinstance(result, InferenceScenarioResult)
+    assert result.termination == ExitedProcessTermination(exit_code=0)
     assert len(broker.requests) == 1
 
 
-def test_run_sync_executes_semantic_oracle_and_persists_safe_receipt_result(
+@pytest.mark.anyio
+async def test_run_executes_semantic_oracle_and_persists_safe_receipt_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -682,7 +725,7 @@ def test_run_sync_executes_semantic_oracle_and_persists_safe_receipt_result(
     config_path = tmp_path / "flameox.toml"
     config_path.write_text(
         config_path.read_text().replace(
-            "[inference_scenarios.vllm_bench_replay]",
+            "[inference_scenarios.vllm_benchmark]",
             """[workloads.semantic]
 argv = ["python", "-c", "pass"]
 
@@ -691,14 +734,14 @@ strength = "contract_check"
 argv = ["python", "-c", "pass"]
 receipt_schema = "flameox.oracle-receipt.v1"
 
-[inference_scenarios.vllm_bench_replay]""",
+[inference_scenarios.vllm_benchmark]""",
         )
         + '\nsemantic_oracle_workload = "semantic"\n'
     )
     _patch_providers(monkeypatch, executable=Path("/tools/vllm"))
 
     class OracleBroker(RecordingBroker):
-        def run_sync(self, request: ExecutionRequest, **_: object) -> ExecutionOutcome:
+        async def run(self, request: ExecutionRequest, **_: object) -> ExecutionOutcome:
             self.requests.append(request)
             receipt_path = request.environment_overrides.get("FLAMEOX_ORACLE_RECEIPT")
             if receipt_path is not None:
@@ -724,9 +767,9 @@ receipt_schema = "flameox.oracle-receipt.v1"
                 )
             return self._outcome(request)
 
-    service = InferenceReplayService(workspace, broker=OracleBroker())
-    plan = service.plan("vllm_bench_replay")
-    result = service.run_sync(plan.plan_token)
+    service = InferenceScenarioService(workspace, broker=OracleBroker())
+    plan = service.plan("vllm_benchmark")
+    result = await service.run(plan.plan_token)
 
     assert result.oracle_status == "pass"
     assert len(service.broker.requests) == 2  # type: ignore[attr-defined]
@@ -747,15 +790,16 @@ receipt_schema = "flameox.oracle-receipt.v1"
     )
 
 
-def test_run_sync_publishes_vllm_measurements_under_canonical_run(
+@pytest.mark.anyio
+async def test_run_publishes_vllm_measurements_under_canonical_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     _write_project(tmp_path)
     _patch_providers(monkeypatch, executable=Path("/tools/vllm"))
-    service = InferenceReplayService(workspace, broker=RecordingBroker(exit_code=0))
-    plan = service.plan("vllm_bench_replay")
+    service = InferenceScenarioService(workspace, broker=RecordingBroker(exit_code=0))
+    plan = service.plan("vllm_benchmark")
     assert plan.output_path is not None
     output = Path(plan.output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -790,7 +834,7 @@ def test_run_sync_publishes_vllm_measurements_under_canonical_run(
         )
     )
 
-    result = service.run_sync(plan.plan_token)
+    result = await service.run(plan.plan_token)
 
     measurements = EvidenceQueryService(workspace).measurements(run_id=result.run_id, limit=100)
     assert measurements.measurements
@@ -798,15 +842,16 @@ def test_run_sync_publishes_vllm_measurements_under_canonical_run(
     assert any(row.name == "vllm.request_throughput" for row in measurements.measurements)
 
 
-def test_run_sync_correlates_aiperf_outputs_under_canonical_run(
+@pytest.mark.anyio
+async def test_run_correlates_aiperf_outputs_under_canonical_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     _write_project(tmp_path)
     _patch_providers(monkeypatch, executable=Path("/tools/aiperf"))
-    service = InferenceReplayService(workspace, broker=RecordingBroker(exit_code=0))
-    plan = service.plan("aiperf_replay")
+    service = InferenceScenarioService(workspace, broker=RecordingBroker(exit_code=0))
+    plan = service.plan("aiperf_benchmark")
     assert plan.output_path is not None
     output_dir = Path(plan.output_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -849,7 +894,7 @@ def test_run_sync_correlates_aiperf_outputs_under_canonical_run(
         + "\n"
     )
 
-    result = service.run_sync(plan.plan_token)
+    result = await service.run(plan.plan_token)
 
     requests = EvidenceQueryService(workspace).inference_requests(run_id=result.run_id, limit=100)
     assert requests.returned == 1
@@ -885,15 +930,16 @@ def test_run_sync_correlates_aiperf_outputs_under_canonical_run(
     assert measurements_after.total == measurements.total
 
 
-def test_success_retains_staging_when_native_artifact_import_fails(
+@pytest.mark.anyio
+async def test_success_retains_staging_when_native_artifact_import_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     _write_project(tmp_path)
     _patch_providers(monkeypatch, executable=Path("/tools/vllm"))
-    service = InferenceReplayService(workspace, broker=RecordingBroker(exit_code=0))
-    plan = service.plan("vllm_bench_replay")
+    service = InferenceScenarioService(workspace, broker=RecordingBroker(exit_code=0))
+    plan = service.plan("vllm_benchmark")
     assert plan.output_path is not None
     output = Path(plan.output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -907,28 +953,29 @@ def test_success_retains_staging_when_native_artifact_import_fails(
         fail_import,
     )
 
-    result = service.run_sync(plan.plan_token)
+    result = await service.run(plan.plan_token)
 
     assert output.read_text() == "{}"
     assert result.output_path_retained is True
     assert any("staging was retained" in item for item in result.limitations)
 
 
-def test_output_preservation_uses_reviewed_provider_manifest(
+@pytest.mark.anyio
+async def test_output_preservation_uses_reviewed_provider_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     _write_project(tmp_path)
     _patch_providers(monkeypatch, executable=Path("/tools/aiperf"))
-    service = InferenceReplayService(workspace, broker=RecordingBroker(exit_code=0))
-    plan = service.plan("aiperf_replay")
+    service = InferenceScenarioService(workspace, broker=RecordingBroker(exit_code=0))
+    plan = service.plan("aiperf_benchmark")
     root = Path(plan.output_path).parent
     for index in range(129):
         (root / f"result-{index}.json").write_text("{}")
     (root / "profile_export.jsonl").write_text("{}\n")
 
-    result = service.run_sync(plan.plan_token)
+    result = await service.run(plan.plan_token)
 
     registrations = service.runs.read(result.run_id).artifacts
     assert {registration.display_name for registration in registrations} == {"profile_export.jsonl"}
@@ -941,9 +988,9 @@ def test_plan_honors_explicit_timeout_override(
     workspace = Workspace.initialize(tmp_path)
     _write_project(tmp_path)
     _patch_providers(monkeypatch, executable=Path("/tools/aiperf"))
-    service = InferenceReplayService(workspace, broker=RecordingBroker())
+    service = InferenceScenarioService(workspace, broker=RecordingBroker())
 
-    plan = service.plan("aiperf_replay", timeout_seconds=42.0)
+    plan = service.plan("aiperf_benchmark", timeout_seconds=42.0)
 
     assert plan.timeout_seconds == 42.0
 
@@ -955,27 +1002,28 @@ def test_plan_rejects_out_of_range_timeout(
     workspace = Workspace.initialize(tmp_path)
     _write_project(tmp_path)
     _patch_providers(monkeypatch)
-    service = InferenceReplayService(workspace, broker=RecordingBroker())
+    service = InferenceScenarioService(workspace, broker=RecordingBroker())
 
     with pytest.raises(DomainError, match="timeout_seconds") as exc_info:
-        service.plan("aiperf_replay", timeout_seconds=0.0)
+        service.plan("aiperf_benchmark", timeout_seconds=0.0)
 
     assert exc_info.value.code is ErrorCode.EXECUTION_REFUSED
 
 
-def test_run_sync_rejects_stale_inference_configuration(
+@pytest.mark.anyio
+async def test_run_rejects_stale_inference_configuration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
     _write_project(tmp_path)
     _patch_providers(monkeypatch, executable=Path("/tools/aiperf"))
-    service = InferenceReplayService(workspace, broker=RecordingBroker())
-    plan = service.plan("aiperf_replay")
+    service = InferenceScenarioService(workspace, broker=RecordingBroker())
+    plan = service.plan("aiperf_benchmark")
     config_path = tmp_path / "flameox.toml"
     config_path.write_text(config_path.read_text().replace("num_prompts = 10", "num_prompts = 11"))
 
     with pytest.raises(DomainError, match="changed after this plan") as caught:
-        service.run_sync(plan.plan_token)
+        await service.run(plan.plan_token)
 
     assert caught.value.code is ErrorCode.REVISION_CONFLICT

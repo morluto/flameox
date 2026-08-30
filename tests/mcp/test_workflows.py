@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -10,10 +11,12 @@ from mcp import Client
 from mcp_types import TextResourceContents
 from typer.testing import CliRunner
 
-from flameox.application import CaptureService, ExecutionPolicy, workspace_status
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.status import workspace_status
 from flameox.catalog import Catalog
 from flameox.cli import app
-from flameox.domain import DomainError
+from flameox.domain import DomainError, ErrorCode
 from flameox.mcp import create_server
 from flameox.storage import Workspace
 from tests.support.capture import disable_containment, write_workload
@@ -45,7 +48,7 @@ async def test_mcp_status_rebuilds_an_unreadable_catalog_through_its_typed_actio
 @pytest.mark.anyio
 async def test_unknown_declared_workflow_routes_back_to_discovery(tmp_path: Path) -> None:
     Workspace.initialize(tmp_path)
-    (tmp_path / "flameox.toml").write_text("schema_version = 1\n")
+    (tmp_path / "flameox.toml").write_text("")
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:
         result = await client.call_tool(
             "get_declared_workflow",
@@ -55,16 +58,11 @@ async def test_unknown_declared_workflow_routes_back_to_discovery(tmp_path: Path
     assert result.is_error is True
     assert result.structured_content is not None
     assert result.structured_content["error"]["recovery"] == {
-        "kind": "tool_action",
+        "kind": "tool",
         "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
-        "action": {
-            "kind": "tool",
-            "action": "workflow.list",
-            "arguments": {"kind": "workload", "limit": 50},
-        },
-        "next_tool": "list_declared_workflows",
-        "next_arguments": {"kind": "workload", "limit": 50},
+        "tool_name": "list_declared_workflows",
+        "arguments": {"kind": "workload", "limit": 50},
     }
 
 
@@ -95,7 +93,6 @@ async def test_missing_workload_configuration_routes_to_configure_workload(
     assert status.is_error is False
     assert status.structured_content is not None
     assert status.structured_content["result"] == {
-        "schema_version": 1,
         "status": "missing",
         "config_path": "flameox.toml",
         "configuration_id": None,
@@ -114,18 +111,12 @@ async def test_missing_workload_configuration_routes_to_configure_workload(
         "kind": "manual",
         "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
-        "next_tool": None,
-        "action": {
-            "kind": "manual",
-            "instruction": "Supply a complete named workload definition before continuing.",
-            "suggested_action": "workload.configure",
-            "missing_arguments": ["name", "operation", "argv"],
-        },
+        "instruction": "Supply a complete named workload definition before continuing.",
+        "missing_arguments": ["name", "operation", "argv"],
     }
     assert configured.is_error is False
     assert configured.structured_content is not None
     assert configured.structured_content["result"]["action"] == "created"
-    assert configured.structured_content["result"]["configuration_source"] == "agent"
     assert configured.structured_content["result"]["changed_paths"] == [
         "flameox.toml",
     ]
@@ -139,7 +130,6 @@ async def test_invalid_capture_adapter_returns_bounded_workflow_recovery(tmp_pat
     Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.probe]
 argv = ["python", "-c", "print('ok')"]
 """
@@ -159,16 +149,11 @@ argv = ["python", "-c", "print('ok')"]
     error = result.structured_content["error"]
     assert error["details"]["allowed_adapters"]
     assert error["recovery"] == {
-        "kind": "tool_action",
+        "kind": "tool",
         "safe_to_repeat_same_call": False,
         "retry_after_ms": None,
-        "action": {
-            "kind": "tool",
-            "action": "workflow.get",
-            "arguments": {"kind": "workload", "name": "probe"},
-        },
-        "next_tool": "get_declared_workflow",
-        "next_arguments": {"kind": "workload", "name": "probe"},
+        "tool_name": "get_declared_workflow",
+        "arguments": {"kind": "workload", "name": "probe"},
     }
 
 
@@ -249,6 +234,26 @@ async def test_mcp_rejects_external_workspace_bound_to_another_project(tmp_path:
 
 
 @pytest.mark.anyio
+async def test_mcp_rejects_an_explicit_workspace_without_control_plane_format(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    with sqlite3.connect(workspace.paths.control_plane) as connection:
+        connection.execute("DROP TABLE control_plane_format")
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    with pytest.raises(DomainError) as error:
+        async with Client(
+            create_server(tmp_path, workspace_root=workspace.paths.root),
+            raise_exceptions=True,
+        ):
+            pass
+
+    assert error.value.code is ErrorCode.WORKSPACE_INVALID
+
+
+@pytest.mark.anyio
 async def test_mcp_inspect_instructions_match_initialize_metadata(tmp_path: Path) -> None:
     Workspace.initialize(tmp_path)
     async with Client(create_server(tmp_path), raise_exceptions=True) as client:
@@ -263,7 +268,6 @@ async def test_mcp_inspect_instructions_match_initialize_metadata(tmp_path: Path
 
     assert cli.exit_code == 0, cli.output
     inspected = json.loads(cli.stdout)
-    assert inspected["schema_version"] == 1
     assert inspected["instructions"] == initialize_instructions
     assert [item["name"] for item in inspected["tools"]] == [tool.name for tool in listed.tools]
 

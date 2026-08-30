@@ -51,6 +51,7 @@ class ActionId(StrEnum):
     EXECUTE_REDUCTION = "reduction.execute"
     GET_REDUCTION = "reduction.status"
     ANALYZE_MEMORY = "analysis.memory"
+    ANALYZE_NSIGHT_COMPUTE = "analysis.nsight_compute"
 
 
 class ToolName(StrEnum):
@@ -87,14 +88,7 @@ class ToolName(StrEnum):
     EXECUTE_REDUCTION = "execute_reduction"
     GET_REDUCTION = "get_reduction"
     ANALYZE_MEMORY = "analyze_memory"
-
-
-class ActionLifecycle(StrEnum):
-    READ = "read"
-    CONFIGURE = "configure"
-    EXECUTE = "execute"
-    START = "start"
-    STATUS = "status"
+    ANALYZE_NSIGHT_COMPUTE = "analyze_nsight_compute"
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +184,8 @@ class _PlanCaptureArguments(ContractModel):
     capture_mode: Literal["auto", "managed", "trusted_local"] = "auto"
     external_context: dict[str, JsonValue] | None = None
     compute_sanitizer_options: dict[str, JsonValue] | None = None
+    nsight_compute_options: dict[str, JsonValue] | None = None
+    memray_options: dict[str, JsonValue] | None = None
     torch_profiler_options: dict[str, JsonValue] | None = None
 
 
@@ -295,13 +291,17 @@ class _AnalyzeMemoryArguments(ContractModel):
     query: MemoryFrameQuery = Field(default_factory=MemoryFrameQuery)
 
 
+class _AnalyzeNsightComputeArguments(ContractModel):
+    run_or_artifact: str = Field(min_length=1, max_length=200)
+    limit: StrictInt = Field(ge=1, le=1_000)
+
+
 @dataclass(frozen=True, slots=True)
 class ActionDescriptor:
     action: ActionId
     tool_name: ToolName
     input_model: type[ContractModel]
     annotations: ActionAnnotations
-    lifecycle: ActionLifecycle
 
     def validate_arguments(self, arguments: object) -> dict[str, Any]:
         validated = self.input_model.model_validate(arguments)
@@ -313,9 +313,8 @@ def _descriptor(
     tool_name: ToolName,
     input_model: type[ContractModel],
     annotations: ActionAnnotations,
-    lifecycle: ActionLifecycle,
 ) -> ActionDescriptor:
-    return ActionDescriptor(action, tool_name, input_model, annotations, lifecycle)
+    return ActionDescriptor(action, tool_name, input_model, annotations)
 
 
 ACTION_REGISTRY = MappingProxyType(
@@ -327,231 +326,204 @@ ACTION_REGISTRY = MappingProxyType(
                 ToolName.INITIALIZE_WORKSPACE,
                 _EmptyArguments,
                 CONFIGURE_ACTION,
-                ActionLifecycle.CONFIGURE,
             ),
             _descriptor(
                 ActionId.INSPECT_WORKLOAD_CONFIGURATION,
                 ToolName.WORKLOAD_CONFIGURATION_STATUS,
                 _EmptyArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.READ,
             ),
             _descriptor(
                 ActionId.CONFIGURE_WORKLOAD,
                 ToolName.CONFIGURE_WORKLOAD,
                 _ConfigureWorkloadArguments,
                 CONFIGURE_ACTION,
-                ActionLifecycle.CONFIGURE,
             ),
             _descriptor(
                 ActionId.INSPECT_CAPABILITIES,
                 ToolName.LIST_CAPABILITIES,
                 _ListCapabilitiesArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.READ,
             ),
             _descriptor(
                 ActionId.START_CAPABILITY_SETUP,
                 ToolName.START_CAPABILITY_SETUP,
                 _StartCapabilitySetupArguments,
                 CONFIGURE_ACTION,
-                ActionLifecycle.START,
             ),
             _descriptor(
                 ActionId.GET_CAPABILITY_SETUP,
                 ToolName.GET_CAPABILITY_SETUP,
                 _OperationIdArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.STATUS,
             ),
             _descriptor(
                 ActionId.PREPARE_ADAPTER,
                 ToolName.PREPARE_ADAPTER,
                 _PrepareAdapterArguments,
                 CONFIGURE_ACTION,
-                ActionLifecycle.CONFIGURE,
             ),
             _descriptor(
                 ActionId.PREPARE_WORKLOAD_DEPENDENCIES,
                 ToolName.PREPARE_WORKLOAD_DEPENDENCIES,
                 _WorkloadNameArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.READ,
             ),
             _descriptor(
                 ActionId.LIST_DECLARED_WORKFLOWS,
                 ToolName.LIST_DECLARED_WORKFLOWS,
                 _ListDeclaredWorkflowsArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.READ,
             ),
             _descriptor(
                 ActionId.GET_DECLARED_WORKFLOW,
                 ToolName.GET_DECLARED_WORKFLOW,
                 _GetDeclaredWorkflowArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.READ,
             ),
             _descriptor(
                 ActionId.PLAN_FAULT_EXPERIMENT,
                 ToolName.PLAN_FAULT_EXPERIMENT,
                 _PlanFaultExperimentArguments,
                 ADDITIVE_ACTION,
-                ActionLifecycle.CONFIGURE,
             ),
             _descriptor(
                 ActionId.PLAN_CAPTURE,
                 ToolName.PLAN_CAPTURE,
                 _PlanCaptureArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.READ,
             ),
             _descriptor(
                 ActionId.START_DETACHED_CAPTURE,
                 ToolName.START_DETACHED_CAPTURE,
                 _StartDetachedCaptureArguments,
                 IDEMPOTENT_EXECUTE_ACTION,
-                ActionLifecycle.START,
             ),
             _descriptor(
                 ActionId.GET_DETACHED_CAPTURE,
                 ToolName.GET_DETACHED_CAPTURE,
                 _RunIdArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.STATUS,
             ),
             _descriptor(
                 ActionId.REBUILD_CATALOG,
                 ToolName.REBUILD_CATALOG,
                 _EmptyArguments,
                 CONFIGURE_ACTION,
-                ActionLifecycle.CONFIGURE,
             ),
             _descriptor(
                 ActionId.LIST_RUNS,
                 ToolName.LIST_RUNS,
                 _ListRunsArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.READ,
             ),
             _descriptor(
                 ActionId.LIST_ARTIFACTS,
                 ToolName.LIST_ARTIFACTS,
                 _ListArtifactsArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.READ,
             ),
             _descriptor(
                 ActionId.PREVIEW_ARTIFACT,
                 ToolName.PREVIEW_ARTIFACT,
                 _PreviewArtifactArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.READ,
             ),
             _descriptor(
                 ActionId.GET_NATIVE_VIEWER_PLAN,
                 ToolName.GET_NATIVE_VIEWER_PLAN,
                 _ArtifactIdArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.READ,
             ),
             _descriptor(
                 ActionId.IMPORT_ARTIFACT,
                 ToolName.IMPORT_ARTIFACT,
                 _ImportArtifactArguments,
                 ADDITIVE_ACTION,
-                ActionLifecycle.CONFIGURE,
             ),
             _descriptor(
                 ActionId.IMPORT_XCTRACE,
                 ToolName.IMPORT_XCTRACE,
                 _ImportXctraceArguments,
                 ADDITIVE_ACTION,
-                ActionLifecycle.CONFIGURE,
             ),
             _descriptor(
                 ActionId.EXTRACT_PERFETTO,
                 ToolName.EXTRACT_PERFETTO,
                 _ExtractPerfettoArguments,
                 ADDITIVE_ACTION,
-                ActionLifecycle.EXECUTE,
             ),
             _descriptor(
                 ActionId.EXTRACT_MEMRAY,
                 ToolName.EXTRACT_MEMRAY,
                 _StartMemrayExtractionArguments,
                 CONFIGURE_ACTION,
-                ActionLifecycle.START,
             ),
             _descriptor(
                 ActionId.GET_EXTRACTION,
                 ToolName.GET_EXTRACTION,
                 _OperationIdArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.STATUS,
             ),
             _descriptor(
                 ActionId.EXTRACT_NSIGHT_SYSTEMS,
                 ToolName.EXTRACT_NSIGHT_SYSTEMS,
                 _RunIdArguments,
                 ADDITIVE_ACTION,
-                ActionLifecycle.EXECUTE,
             ),
             _descriptor(
                 ActionId.EXTRACT_NSIGHT_COMPUTE,
                 ToolName.EXTRACT_NSIGHT_COMPUTE,
                 _RunIdArguments,
                 ADDITIVE_ACTION,
-                ActionLifecycle.EXECUTE,
             ),
             _descriptor(
                 ActionId.EXTRACT_COMPUTE_SANITIZER,
                 ToolName.EXTRACT_COMPUTE_SANITIZER,
                 _RunIdArguments,
                 ADDITIVE_ACTION,
-                ActionLifecycle.EXECUTE,
             ),
             _descriptor(
                 ActionId.CONFIGURE_INFERENCE_SERVER,
                 ToolName.CONFIGURE_INFERENCE_SERVER,
                 _ConfigureInferenceServerArguments,
                 CONFIGURE_ACTION,
-                ActionLifecycle.CONFIGURE,
             ),
             _descriptor(
                 ActionId.LIST_INFERENCE_CONFIGURATIONS,
                 ToolName.LIST_INFERENCE_CONFIGURATIONS,
                 _EmptyArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.READ,
             ),
             _descriptor(
                 ActionId.PLAN_INFERENCE_SCENARIO,
                 ToolName.PLAN_INFERENCE_SCENARIO,
                 _PlanInferenceScenarioArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.READ,
             ),
             _descriptor(
                 ActionId.EXECUTE_REDUCTION,
                 ToolName.EXECUTE_REDUCTION,
                 _ReductionPlanArguments,
                 EXECUTE_ACTION,
-                ActionLifecycle.EXECUTE,
             ),
             _descriptor(
                 ActionId.GET_REDUCTION,
                 ToolName.GET_REDUCTION,
                 _ReductionIdArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.STATUS,
             ),
             _descriptor(
                 ActionId.ANALYZE_MEMORY,
                 ToolName.ANALYZE_MEMORY,
                 _AnalyzeMemoryArguments,
                 READ_ONLY_ACTION,
-                ActionLifecycle.READ,
+            ),
+            _descriptor(
+                ActionId.ANALYZE_NSIGHT_COMPUTE,
+                ToolName.ANALYZE_NSIGHT_COMPUTE,
+                _AnalyzeNsightComputeArguments,
+                READ_ONLY_ACTION,
             ),
         )
     }
@@ -563,6 +535,8 @@ ACTION_BY_TOOL_NAME = MappingProxyType(
 
 
 class ToolAction(ContractModel):
+    # These models appear inside response projections. Keep their serialization schema stable
+    # when Pydantic traverses them from a response-only contract.
     model_config = ConfigDict(json_schema_mode_override="serialization")
 
     kind: Literal["tool"] = "tool"
@@ -617,25 +591,6 @@ def manual_action(
         instruction=instruction,
         suggested_action=suggested_action,
         missing_arguments=missing_arguments,
-    )
-
-
-def next_action_for_tool(
-    tool_name: ToolName | str,
-    *,
-    context: Mapping[str, object] = MappingProxyType({}),
-    instruction: str,
-) -> NextAction:
-    """Resolve legacy recovery context into an executable or explicitly manual edge."""
-
-    try:
-        normalized_tool = ToolName(tool_name)
-    except ValueError as error:
-        raise ValueError(f"Unregistered workflow tool {tool_name!r}.") from error
-    return next_action_for_action(
-        ACTION_BY_TOOL_NAME[normalized_tool],
-        context=context,
-        instruction=instruction,
     )
 
 

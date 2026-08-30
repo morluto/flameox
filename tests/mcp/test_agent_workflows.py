@@ -84,13 +84,13 @@ def _no_setup(workspace: Workspace) -> None:
 
 def _write_workload(workspace: Workspace, argv: str = "pass") -> None:
     (workspace.project_root / "flameox.toml").write_text(
-        f'schema_version = 1\n[workloads.probe]\nargv = ["python", "-c", "{argv}"]\n'
+        f'[workloads.probe]\nargv = ["python", "-c", "{argv}"]\n'
     )
 
 
 def _setup_existing_workload(workspace: Workspace) -> None:
     (workspace.project_root / "flameox.toml").write_text(
-        'schema_version = 1\n[workloads.existing]\nargv = ["python", "-c", "pass"]\n'
+        '[workloads.existing]\nargv = ["python", "-c", "pass"]\n'
     )
 
 
@@ -100,7 +100,7 @@ def _setup_probe_workload(workspace: Workspace) -> None:
 
 def _setup_invalid_configuration(workspace: Workspace) -> None:
     (workspace.project_root / "flameox.toml").write_text(
-        'schema_version = 1\n[experiments.broken]\nworkload = "missing"\n'
+        '[experiments.broken]\nworkload = "missing"\n'
     )
 
 

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from jsonschema.validators import validator_for  # type: ignore[import-untyped]
+from mcp import Client
 
 from flameox.action_graph import (
     ACTION_REGISTRY,
@@ -14,7 +17,10 @@ from flameox.action_graph import (
     tool_action,
 )
 from flameox.domain.errors import DomainError, ErrorCode
+from flameox.evidence import GenerationPublisher
 from flameox.mcp import create_server
+from flameox.storage import Workspace
+from tests.support.analysis import run_row
 
 pytestmark = pytest.mark.integration
 
@@ -153,6 +159,11 @@ def _representative_actions() -> dict[ActionId, ToolAction]:
             run_or_artifact="run-1",
             limit=30,
         ),
+        ActionId.ANALYZE_NSIGHT_COMPUTE: tool_action(
+            ActionId.ANALYZE_NSIGHT_COMPUTE,
+            run_or_artifact="run-1",
+            limit=30,
+        ),
     }
 
 
@@ -194,6 +205,115 @@ def test_incomplete_recovery_is_explicitly_manual() -> None:
     assert action.missing_arguments == ("name", "argv")
 
 
+def test_capture_action_keeps_nsight_compute_options_transport_shaped() -> None:
+    action = tool_action(
+        ActionId.PLAN_CAPTURE,
+        workload_name="demo",
+        adapter="nsight.compute",
+        parameters={},
+        nsight_compute_options={
+            "sections": ["SpeedOfLight_RooflineChart"],
+            "kernel_name": "vector_add",
+            "replay_mode": "kernel",
+        },
+    )
+
+    assert action.arguments["nsight_compute_options"] == {
+        "sections": ["SpeedOfLight_RooflineChart"],
+        "kernel_name": "vector_add",
+        "replay_mode": "kernel",
+    }
+
+
+def test_capture_action_keeps_memray_options_transport_shaped() -> None:
+    action = tool_action(
+        ActionId.PLAN_CAPTURE,
+        workload_name="demo",
+        adapter="memray",
+        parameters={},
+        memray_options={
+            "mode": "sdk",
+            "region": "steady_step",
+            "warmup_count": 2,
+        },
+    )
+
+    assert action.arguments["memray_options"] == {
+        "mode": "sdk",
+        "region": "steady_step",
+        "warmup_count": 2,
+    }
+
+
+def test_action_graph_import_does_not_load_adapters() -> None:
+    check = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import flameox.action_graph; "
+                "assert not any(name == 'flameox.adapters' or name.startswith('flameox.adapters.') "
+                "for name in sys.modules)"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert check.returncode == 0, check.stderr
+
+
+@pytest.mark.anyio
+async def test_mcp_nsight_compute_analysis_returns_typed_unavailable_evidence(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    artifact_id = "sha256:" + "a" * 64
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "runs": [run_row("ncu-run")],
+            "artifact_registrations": [
+                {
+                    "registration_id": "ncu-registration",
+                    "run_id": "ncu-run",
+                    "artifact_id": artifact_id,
+                    "display_name": "profile.ncu-rep",
+                    "kind": "kernel_profile",
+                    "media_type": "application/octet-stream",
+                    "byte_length": 1,
+                    "sensitivity": "internal",
+                    "role": "primary",
+                    "producer": "nsight.compute",
+                    "producer_version": "2099.1",
+                    "registered_at": run_row("ncu-run")["created_at"],
+                }
+            ],
+        },
+        publisher="ncu-mcp-fixture",
+        publisher_version="1",
+    )
+
+    async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        result = await client.call_tool(
+            "analyze_nsight_compute",
+            {"run_or_artifact": "ncu-run", "limit": 10},
+        )
+
+    assert result.is_error is False
+    assert result.structured_content is not None
+    analysis = result.structured_content["result"]
+    assert analysis["evidence"] == {
+        "status": "unavailable",
+        "reason": "nsight_compute_not_extracted",
+        "next_action": {
+            "kind": "tool",
+            "action": "artifact.extract.nsight_compute",
+            "arguments": {"run_id": "ncu-run"},
+        },
+    }
+
+
 def test_domain_error_preserves_validated_recovery_action() -> None:
     error = DomainError(
         ErrorCode.ARTIFACT_PARSE_FAILED,
@@ -207,12 +327,3 @@ def test_domain_error_preserves_validated_recovery_action() -> None:
     assert error.next_action.action is ActionId.EXTRACT_PERFETTO
     assert error.next_action.arguments == {"run_id": "run-1"}
     assert "next_tool" not in error.details
-
-
-def test_domain_error_rejects_legacy_recovery_fields() -> None:
-    with pytest.raises(ValueError, match="Legacy recovery fields are not accepted"):
-        DomainError(
-            ErrorCode.INTERNAL_ERROR,
-            "Recovery metadata is invalid.",
-            details={"next_tool": "extract_perfetto"},
-        )

@@ -8,15 +8,17 @@ from pathlib import Path
 import pytest
 
 from flameox.action_graph import ActionId, ToolAction
-from flameox.adapters import PerfettoExtractor, PyPerfExtractor
 from flameox.adapters.builtins import build_capture_invocation
+from flameox.adapters.perfetto import PerfettoExtractor
+from flameox.adapters.pyperf import PyPerfExtractor
 from flameox.analysis import RecipeService
-from flameox.application import (
-    CaptureService,
-    ExecutionPolicy,
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportService,
 )
+from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, ExecutionStatus
 from flameox.storage import Workspace
 from flameox.storage.artifacts import StoredArtifact
@@ -113,6 +115,40 @@ def test_torch_capture_launcher_binds_declared_inline_python(tmp_path: Path) -> 
         "--inline-code=print('inline')",
         "--",
         "argument",
+    )
+
+
+def test_torch_benchmark_binds_sdk_timer_options_without_a_launcher(tmp_path: Path) -> None:
+    workload = ("/workload/.venv/bin/python", "benchmarks/gae.py", "--size", "2048")
+
+    invocation = build_capture_invocation(
+        "torch.benchmark",
+        workload,
+        tmp_path,
+        executable=None,
+        options={
+            "min_run_time_seconds": 0.5,
+            "max_samples": 20,
+            "num_threads": 2,
+            "cuda_event_timing": True,
+        },
+    )
+
+    assert invocation.argv == workload
+    assert invocation.artifact_kinds == (ArtifactKind.BENCHMARK_SAMPLES,)
+    assert invocation.environment["FLAMEOX_BENCHMARK_OUTPUT"] == str(
+        tmp_path / "benchmark-samples.json"
+    )
+    assert json.loads(invocation.environment["FLAMEOX_TORCH_BENCHMARK_CONFIG"]) == {
+        "min_run_time_seconds": 0.5,
+        "max_samples": 20,
+        "num_threads": 2,
+        "cuda_event_timing": True,
+    }
+    assert "CUDA event timing is enabled" in invocation.expected_overhead
+    assert any(
+        "Timer records host-observed operation time" in message
+        for message in invocation.limitations
     )
 
 
@@ -343,7 +379,6 @@ async def test_pyperf_capture_preserves_native_worker_hierarchy(
     )
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.scan]
 argv = ["python", "scan.py"]
 cwd = "."
@@ -368,6 +403,11 @@ timeout_seconds = 30
     extracted = PyPerfExtractor(workspace).extract(captured.run.run_id)
 
     assert captured.run.execution_status is ExecutionStatus.SUCCEEDED
+    assert any("fresh interpreter process" in warning for warning in plan.warnings)
+    assert any("torch.benchmark" in warning for warning in plan.warnings)
+    assert plan.semantics.scope.process_scope is not None
+    assert plan.semantics.scope.process_scope.value == "fresh_process_invocation"
+    assert plan.alternative_action is None
     separator = captured.plan.collector_argv.index("--")
     assert Path(captured.plan.collector_argv[separator + 1]).name.startswith("python")
     assert captured.plan.collector_argv[separator + 2 :] == ("scan.py",)
@@ -378,3 +418,72 @@ timeout_seconds = 30
     assert primary.producer == "pyperf"
     assert primary.producer_version == captured.plan.adapter_version
     assert extracted.limitations == ()
+
+
+@pytest.mark.anyio
+@pytest.mark.process
+async def test_pyperf_plan_marks_declared_accelerator_workloads_as_process_scope(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "fake_accelerator.py").write_text("def synchronize(): pass\n")
+    (tmp_path / "operation.py").write_text(
+        "import time\n"
+        "from fake_accelerator import synchronize\n"
+        "synchronize()\n"
+        "time.sleep(0.001)\n"
+        "synchronize()\n"
+    )
+    (tmp_path / "flameox.toml").write_text(
+        """
+[workloads.operation]
+argv = ["python", "operation.py"]
+cwd = "."
+[workloads.operation.identity.environment]
+required = ["cuda.devices"]
+"""
+    )
+    config = workspace.config.validated_copy(
+        update={
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
+        }
+    )
+    workspace.paths.config.write_text(config.to_toml())
+    plan = await CaptureService(workspace).plan(
+        workload_name="operation",
+        adapter="pyperf",
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+
+    assert plan.semantics.scope.process_scope is not None
+    assert plan.semantics.scope.process_scope.value == "fresh_process_invocation"
+    assert plan.alternative_action is not None
+    assert plan.alternative_action.action is ActionId.PLAN_CAPTURE
+    assert plan.alternative_action.arguments == {
+        "workload_name": "operation",
+        "adapter": "benchmark-samples",
+        "parameters": {},
+        "preflight_mode": plan.preflight.mode.value,
+        "capture_mode": "trusted_local",
+    }
+    assert any(
+        "not an operation metric" in warning and "alternative_action" in warning
+        for warning in plan.warnings
+    )
+    captured = await CaptureService(workspace).execute(plan.plan_token)
+    extracted = PyPerfExtractor(workspace).extract(captured.run.run_id)
+    Catalog(workspace).rebuild()
+    with Catalog(workspace).open_snapshot() as snapshot:
+        rows = snapshot.execute(
+            "SELECT name, scope, is_warmup FROM measurements "
+            "WHERE run_id = ? AND name = 'pyperf.workload'",
+            (captured.run.run_id,),
+        ).fetchall()
+
+    assert captured.run.execution_status is ExecutionStatus.SUCCEEDED
+    assert extracted.measurement_count > 0
+    assert {name for name, _scope, _is_warmup in rows} == {"pyperf.workload"}
+    assert {scope for _name, scope, _is_warmup in rows} == {"workload"}
+    assert {is_warmup for _name, _scope, is_warmup in rows} == {False, True}

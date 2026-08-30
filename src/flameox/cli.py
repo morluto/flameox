@@ -17,97 +17,126 @@ from mcp import Client
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from flameox import __version__, setup_ui
-from flameox.action_graph import ARTIFACT_PREVIEW_MAX_BYTES, ARTIFACT_PREVIEW_MAX_LINES
-from flameox.adapters import (
-    AdapterRegistry,
-    BenchmarkSamplesExtractor,
-    ComputeSanitizerExtractor,
-    CoverageExtractor,
-    InferenceArtifactExtractor,
-    KernelValidationExtractor,
-    MemrayExtractor,
-    NsightComputeExtractor,
-    NsightSystemsExtractor,
-    NvbenchExtractor,
-    ObservationExtractor,
-    PerfettoExtractor,
-    PyPerfExtractor,
-    PytestExtractor,
-    PythonStartupExtractor,
-    SetupClient,
-    V8CpuProfExtractor,
-    V8HeapProfExtractor,
+from flameox.action_graph import (
+    ARTIFACT_PREVIEW_MAX_BYTES,
+    ARTIFACT_PREVIEW_MAX_LINES,
+    ActionId,
+    tool_action,
 )
-from flameox.adapters.memray import memray_extraction_limits
+from flameox.adapters.benchmark_samples import BenchmarkSamplesExtractor
+from flameox.adapters.client_setup import SetupClient
+from flameox.adapters.compute_sanitizer import ComputeSanitizerExtractor
+from flameox.adapters.coverage import CoverageExtractor
+from flameox.adapters.inference import InferenceArtifactExtractor
+from flameox.adapters.kernel_validation import KernelValidationExtractor
+from flameox.adapters.memray import MemrayExtractor, memray_extraction_limits
+from flameox.adapters.nsight_compute import NsightComputeExtractor
+from flameox.adapters.nsight_systems import NsightSystemsExtractor
+from flameox.adapters.nvbench import NvbenchExtractor
+from flameox.adapters.observations import ObservationExtractor
+from flameox.adapters.perfetto import PerfettoExtractor
+from flameox.adapters.pyperf import PyPerfExtractor
+from flameox.adapters.pytest import PytestExtractor
+from flameox.adapters.python_startup import PythonStartupExtractor
+from flameox.adapters.registry import AdapterRegistry
+from flameox.adapters.v8_cpu_prof import V8CpuProfExtractor
+from flameox.adapters.v8_heap_prof import V8HeapProfExtractor
 from flameox.analysis import MemoryAllocationView, MemoryFrameQuery, MemoryRanking, RecipeService
-from flameox.application import (
+from flameox.application.analysis_records import (
     AnalysisMaterializationService,
-    ArtifactPipelineService,
+    MaterializeAnalysisRequest,
+)
+from flameox.application.artifacts import (
     ArtifactService,
     ArtifactTextPreview,
-    CapabilityService,
-    CaptureService,
-    CompactionService,
+)
+from flameox.application.capabilities import CapabilityService
+from flameox.application.capture import CaptureService
+from flameox.application.comparisons import (
     CompareRunSetsRequest,
     ComparisonService,
-    ConfigurationOperation,
-    ConfigureInferenceScenarioRequest,
-    ConfigureInferenceServerRequest,
-    CreateInvestigationRequest,
-    DrilldownService,
-    EvidenceLookupService,
-    EvidenceQueryService,
-    EvidenceSummaryRequest,
-    EvidenceSummaryService,
-    ExecutionPolicy,
-    ExperimentService,
-    FaultExperimentService,
-    FindingService,
     FreezeRunIdsRequest,
-    GarbageCollector,
+    RunSetService,
+)
+from flameox.application.discovery import (
+    RunDiscoveryService,
+    RunFilter,
+)
+from flameox.application.drilldown import DrilldownService
+from flameox.application.evidence_lookup import EvidenceLookupService
+from flameox.application.evidence_query import EvidenceQueryService
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.experiments import ExperimentService
+from flameox.application.faults import FaultExperimentService
+from flameox.application.gc import GarbageCollector
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportProfile,
     ImportService,
+    QualifyArtifactImportRequest,
+)
+from flameox.application.inference import InferenceScenarioService
+from flameox.application.inference_profiling import InferenceProfilingService
+from flameox.application.inference_providers import (
     InferenceEndpointType,
-    InferenceProfilingService,
-    InferenceReplayService,
     InferenceScenarioProvider,
     InferenceServerMode,
     InferenceServerProvider,
+)
+from flameox.application.integrity import (
     IntegrityLevel,
     IntegrityService,
-    InvestigationService,
-    KernelBuildImportService,
+)
+from flameox.application.kernel_builds import KernelBuildImportService
+from flameox.application.kernel_validation import (
+    KernelValidationRegistrationService,
+    RegisterKernelValidationRequest,
+)
+from flameox.application.kernel_validation_comparisons import (
     KernelValidationCompareRequest,
     KernelValidationComparisonService,
-    KernelValidationRegistrationService,
-    LifecycleEvidenceService,
-    MaterializeAnalysisRequest,
-    NativeViewerService,
-    NvbenchImportService,
-    OtlpTraceService,
+)
+from flameox.application.lifecycle import LifecycleEvidenceService
+from flameox.application.nvbench_imports import NvbenchImportService
+from flameox.application.otlp import OtlpTraceService
+from flameox.application.pipelines import (
+    ArtifactPipelineService,
     PipelineFilter,
-    QualifyArtifactImportRequest,
-    QuarantineService,
+    RegisterPipelineRequest,
+)
+from flameox.application.quarantine import QuarantineService
+from flameox.application.records import (
+    CreateInvestigationRequest,
+    FindingService,
+    InvestigationService,
     RecordFindingRequest,
     RecordHypothesisRequest,
-    RecoveryService,
-    RegisterKernelValidationRequest,
-    RegisterPipelineRequest,
-    RunDiscoveryService,
-    RunFilter,
-    RunSetService,
+)
+from flameox.application.recovery import RecoveryService
+from flameox.application.setup import (
     SetupOperation,
     SetupService,
+)
+from flameox.application.status import workspace_status
+from flameox.application.summaries import (
+    EvidenceSummaryRequest,
+    EvidenceSummaryService,
     SummaryExcerptPolicy,
     SummarySensitiveContextPolicy,
-    TraceWindowService,
+)
+from flameox.application.trace_windows import TraceWindowService
+from flameox.application.viewers import NativeViewerService
+from flameox.application.workloads import (
+    ConfigurationOperation,
+    ConfigureInferenceScenarioRequest,
+    ConfigureInferenceServerRequest,
     WorkloadService,
-    XctraceImportRequest,
-    XctraceService,
     parse_inference_scenario_config,
     parse_inference_server_config,
-    workspace_status,
+)
+from flameox.application.xctrace import (
+    XctraceImportRequest,
+    XctraceService,
 )
 from flameox.catalog import Catalog
 from flameox.domain import (
@@ -332,7 +361,6 @@ def _fail(error: DomainError, *, as_json: bool = False) -> NoReturn:
         typer.echo(
             json.dumps(
                 {
-                    "schema_version": 1,
                     "ok": False,
                     "result": None,
                     "error": error.to_detail(),
@@ -923,7 +951,10 @@ def import_xctrace(
 
 @app.command("import-kernel-build")
 def import_kernel_build(
-    path: Annotated[Path, typer.Argument(help="flameox.kernel-build.v1 or v2 manifest to import.")],
+    path: Annotated[
+        Path,
+        typer.Argument(help="Canonical kernel-build provenance manifest to import."),
+    ],
     sensitivity: Annotated[
         Sensitivity,
         typer.Option("--sensitivity", case_sensitive=False),
@@ -974,7 +1005,6 @@ def import_nvbench(
 def pipeline_list(
     run_id: Annotated[str | None, typer.Option("--run-id")] = None,
     pipeline_name: Annotated[str | None, typer.Option("--pipeline-name")] = None,
-    pipeline_schema: Annotated[str | None, typer.Option("--pipeline-schema")] = None,
     producer: Annotated[str | None, typer.Option("--producer")] = None,
     source_artifact_id: Annotated[str | None, typer.Option("--source-artifact-id")] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, max=1_000)] = 20,
@@ -988,7 +1018,6 @@ def pipeline_list(
             filter=PipelineFilter(
                 run_id=run_id,
                 pipeline_name=pipeline_name,
-                pipeline_schema=pipeline_schema,
                 producer=producer,
                 source_artifact_id=source_artifact_id,
             ),
@@ -1105,7 +1134,6 @@ def workload_list(
     try:
         service = WorkloadService(_workspace(workspace))
         result = {
-            "schema_version": 1,
             "workloads": [
                 service.definition(name).model_dump(mode="json") for name in service.names()
             ],
@@ -1160,7 +1188,7 @@ def inference_list(
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
-    """List declared inference servers and replay scenarios."""
+    """List declared inference servers and generic benchmark scenarios."""
     try:
         result = WorkloadService(_workspace(workspace)).list_inference()
     except DomainError as error:
@@ -1176,7 +1204,16 @@ def inference_configure_server(
     provider: Annotated[InferenceServerProvider, typer.Option("--provider")] = (
         InferenceServerProvider.VLLM
     ),
-    benchmark_python: Annotated[str | None, typer.Option("--benchmark-python")] = None,
+    benchmark_python: Annotated[
+        str | None,
+        typer.Option(
+            "--benchmark-python",
+            help=(
+                "Absolute Python launcher for sglang.benchmark.serving; it may differ from the "
+                "server runtime and is required with --provider sglang."
+            ),
+        ),
+    ] = None,
     operation: ConfigurationOperation = ConfigurationOperation.CREATE,
     workload: Annotated[str | None, typer.Option("--workload")] = None,
     base_url: Annotated[str, typer.Option("--base-url")] = "http://127.0.0.1:8000",
@@ -1190,7 +1227,39 @@ def inference_configure_server(
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
-    """Create or replace a typed vLLM server declaration."""
+    """Create or replace a typed local vLLM or SGLang server declaration."""
+    if provider is InferenceServerProvider.SGLANG and benchmark_python is None:
+        _fail(
+            DomainError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "SGLang server declarations require --benchmark-python.",
+                details={
+                    "server": name,
+                    "provider": provider.value,
+                    "missing_field": "benchmark_python",
+                },
+                remediation=(
+                    "Supply an absolute Python launcher that can run "
+                    "sglang.benchmark.serving, then retry this declaration.",
+                ),
+                next_action=tool_action(
+                    ActionId.CONFIGURE_INFERENCE_SERVER,
+                    name=name,
+                    operation=operation.value,
+                    mode=mode.value,
+                    model=model,
+                    provider=provider.value,
+                    workload=workload,
+                    base_url=base_url,
+                    model_revision=model_revision,
+                    tokenizer=tokenizer,
+                    tokenizer_revision=tokenizer_revision,
+                    quantization=quantization,
+                    expected_configuration_id=expected_configuration_id,
+                ),
+            ),
+            as_json=json_output,
+        )
     try:
         result = WorkloadService(_workspace(workspace)).configure_inference_server(
             ConfigureInferenceServerRequest(
@@ -1293,9 +1362,9 @@ def inference_plan(
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
-    """Probe a local server and construct a replay command without executing it."""
+    """Qualify a generic benchmark launcher and construct its command without executing it."""
     try:
-        result = InferenceReplayService(_workspace(workspace)).plan(
+        result = InferenceScenarioService(_workspace(workspace)).plan(
             name, timeout_seconds=timeout_seconds
         )
     except DomainError as error:
@@ -1311,10 +1380,10 @@ def inference_run(
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
-    """Run one planned replay through the bounded subprocess broker."""
+    """Run one qualified generic benchmark through the bounded subprocess broker."""
 
     async def run() -> BaseModel:
-        service = InferenceReplayService(_workspace(workspace))
+        service = InferenceScenarioService(_workspace(workspace))
         plan = service.plan(
             name,
             timeout_seconds=timeout_seconds,
@@ -1337,7 +1406,7 @@ def inference_requests(
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
-    """Page through bounded prompt-free inference request evidence."""
+    """Page through prompt-free request evidence with one typed outcome."""
     try:
         result = EvidenceQueryService(_workspace(workspace)).inference_requests(
             run_id=run_id, limit=limit, cursor=cursor
@@ -1491,9 +1560,9 @@ def experiment_show(
     workspace: WorkspaceOption = None,
     json_output: JsonOption = False,
 ) -> None:
-    """Show one immutable experiment protocol."""
+    """Reconstruct one experiment's bounded durable outcome."""
     try:
-        result = ExperimentService(_workspace(workspace)).experiments.read(experiment_id)
+        result = ExperimentService(_workspace(workspace)).status(experiment_id)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -1731,19 +1800,6 @@ def catalog_rebuild(
     _emit(result, as_json=json_output)
 
 
-@catalog_app.command("compact")
-def catalog_compact(
-    workspace: WorkspaceOption = None,
-    json_output: JsonOption = False,
-) -> None:
-    """Replace reachable small generations with one immutable generation."""
-    try:
-        result = asyncio.run(CompactionService(_workspace(workspace)).compact())
-    except DomainError as error:
-        _fail(error)
-    _emit(result, as_json=json_output)
-
-
 @catalog_app.command("status")
 def catalog_status(
     workspace: WorkspaceOption = None,
@@ -1883,7 +1939,6 @@ def investigations_list(
     try:
         values = InvestigationService(_workspace(workspace)).investigations.list()
         result = {
-            "schema_version": 1,
             "investigations": [value.model_dump(mode="json") for value in values[:1_000]],
             "total": len(values),
             "returned": min(len(values), 1_000),
@@ -1963,7 +2018,6 @@ def findings_list(
     try:
         values = FindingService(_workspace(workspace)).findings.list()
         result = {
-            "schema_version": 1,
             "findings": [value.model_dump(mode="json") for value in values[:1_000]],
             "total": len(values),
             "returned": min(len(values), 1_000),
@@ -2168,6 +2222,21 @@ def analyze_memory(
                 exclude_zero_self=not include_zero_self,
             ),
         )
+    except DomainError as error:
+        _fail(error)
+    _emit(result, as_json=json_output)
+
+
+@analyze_app.command("nsight-compute")
+def analyze_nsight_compute(
+    input_id: Annotated[str, typer.Argument(help="Run or artifact identifier.")],
+    limit: Annotated[int | None, typer.Option(min=1)] = None,
+    workspace: WorkspaceOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Project bounded, typed Nsight Compute rule evidence without reopening .ncu-rep."""
+    try:
+        result = RecipeService(_workspace(workspace)).nsight_compute(input_id, limit=limit)
     except DomainError as error:
         _fail(error)
     _emit(result, as_json=json_output)
@@ -2882,7 +2951,6 @@ def mcp_inspect(
             resources = await client.list_resource_templates()
             instructions = client.instructions
         return {
-            "schema_version": 1,
             "instructions": instructions,
             "tools": [tool.model_dump(mode="json") for tool in tools.tools],
             "resource_templates": [

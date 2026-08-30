@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import os
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 
 from flameox.action_graph import ActionId
 from flameox.adapters.memray import (
@@ -21,7 +20,7 @@ from flameox.application.operations import (
 from flameox.application.task_supervisor import TaskSupervisor
 from flameox.domain import DomainError, ErrorCode
 from flameox.filesystem import BoundedFileSystem
-from flameox.storage import GenerationManifest, Workspace
+from flameox.storage import Workspace
 from flameox.workers.memray_contract import MEMRAY_WORKER, MemrayExtractionLimits
 
 
@@ -159,16 +158,10 @@ class ExtractionManager:
         try:
             result = MemrayExtractionResult.model_validate(receipt.get("extraction"))
             commit = self.workspace.corpus.read_commit(result.corpus_commit_id)
-            relative_manifest = (
-                Path("generations") / result.evidence_generation_id / "manifest.json"
-            )
-            if relative_manifest.as_posix() not in commit.generation_manifests:
+            if result.evidence_generation_id not in commit.generation_ids:
                 return False
-            manifest_path = self.workspace.paths.root / relative_manifest
-            manifest = GenerationManifest.model_validate_json(
-                manifest_path.read_text(encoding="utf-8")
-            )
-            return manifest.generation_id == result.evidence_generation_id and all(
+            manifest = self.workspace.corpus.read_generation(result.evidence_generation_id)
+            return all(
                 self._generation_file_matches(item.path, item.byte_length, item.sha256)
                 for item in manifest.files
             )

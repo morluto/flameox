@@ -7,309 +7,296 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from flameox.adapters import (
-    KernelBuildManifestV1,
-    KernelBuildManifestV2,
-    KernelBuildTarget,
+from flameox.adapters.kernel_build import (
+    KernelBuildManifest,
     kernel_build_json_schema,
-    kernel_build_v1_json_schema,
 )
-from flameox.application import (
+from flameox.application.kernel_builds import KernelBuildImportService
+from flameox.application.pipelines import (
+    ArtifactPipeline,
     ArtifactPipelineService,
-    KernelBuildImportService,
 )
-from flameox.domain import DomainError, ErrorCode, digest_model
+from flameox.domain import DomainError, ErrorCode
 from flameox.storage import RunStore, Workspace
 
 pytestmark = pytest.mark.unit
 
 
-def _manifest(**updates: object) -> KernelBuildManifestV1:
-    payload: dict[str, object] = {
-        "producer": "triton",
-        "producer_version": "3.7.1",
-        "workload_identity": "vector-add",
-        "device_identity": "NVIDIA sm_86",
-        "outcome": "succeeded",
-        "cache_status": "miss",
-        "source_environment": {
-            "TRITON_DUMP_DIR": "compiler-dumps",
-            "TRITON_KERNEL_DUMP": "1",
-        },
-        "stages": [
-            {
-                "name": "ttir",
-                "ordinal": 0,
-                "status": "available",
-                "format": "mlir",
-                "format_schema": "triton-ttir",
-                "artifact": {
-                    "path": "kernel/vector_add.ttir",
-                    "byte_length": 4,
-                    "sha256": "a" * 64,
-                    "media_type": "text/plain",
-                },
-            },
-            {
-                "name": "ptx",
-                "ordinal": 1,
-                "predecessor": "ttir",
-                "status": "cached",
-                "format": "ptx",
-                "format_schema": "nvidia-ptx",
-                "artifact": {
-                    "path": "kernel/vector_add.ptx",
-                    "byte_length": 4,
-                    "sha256": "b" * 64,
-                    "media_type": "text/plain",
-                },
-            },
-        ],
+def _artifact(path: str, payload: bytes) -> dict[str, object]:
+    return {
+        "path": path,
+        "byte_length": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "media_type": "application/json" if path.endswith(".json") else "text/plain",
     }
-    payload.update(updates)
-    return KernelBuildManifestV1.model_validate(payload)
 
 
-def _manifest_v2(**updates: object) -> KernelBuildManifestV2:
-    target = KernelBuildTarget(backend="cuda", architecture="sm_86", warp_size=32)
-    payload: dict[str, object] = {
-        **_manifest().model_dump(
-            mode="json",
-            exclude={"schema_version", "workload_identity", "device_identity"},
-        ),
-        "workload_label": "vector-add",
-        "build_context": {
-            "workload_definition_id": f"sha256:{'1' * 64}",
-            "workload_instance_id": f"sha256:{'2' * 64}",
-            "command_digest": f"sha256:{'3' * 64}",
-            "parameters_digest": f"sha256:{'4' * 64}",
-            "compiler_identity_id": f"sha256:{'5' * 64}",
-            "build_protocol_id": f"sha256:{'6' * 64}",
-            "target": target.model_dump(mode="json"),
-            "target_identity_id": digest_model(target.model_dump(mode="json")),
-        },
-    }
-    payload.update(updates)
-    return KernelBuildManifestV2.model_validate(payload)
-
-
-@pytest.mark.parametrize("path", ["../secret", "/absolute", "kernel/../secret", "."])
-def test_kernel_build_rejects_uncontained_artifact_paths(path: str) -> None:
-    stages = _manifest().model_dump(mode="json")["stages"]
-    stages[0]["artifact"]["path"] = path
-
-    with pytest.raises(ValidationError, match=r"contained relative|normalized"):
-        _manifest(stages=stages)
-
-
-def test_kernel_build_rejects_duplicate_artifacts_and_out_of_order_stages() -> None:
-    duplicate = _manifest().model_dump(mode="json")["stages"]
-    duplicate[1]["artifact"]["path"] = duplicate[0]["artifact"]["path"]
-    with pytest.raises(ValidationError, match="artifact paths must be unique"):
-        _manifest(stages=duplicate)
-
-    out_of_order = _manifest().model_dump(mode="json")["stages"]
-    out_of_order[0]["ordinal"], out_of_order[1]["ordinal"] = 1, 0
-    with pytest.raises(ValidationError, match="declared in ordinal order"):
-        _manifest(stages=out_of_order)
-
-
-def test_failed_build_requires_failed_stage_and_success_rejects_missing_output() -> None:
-    stages = _manifest().model_dump(mode="json")["stages"]
-    stages[1]["status"] = "unavailable"
-    stages[1]["artifact"] = None
-
-    with pytest.raises(ValidationError, match="successful build"):
-        _manifest(stages=stages)
-    with pytest.raises(ValidationError, match="requires a failed stage"):
-        _manifest(outcome="failed")
-
-
-def test_kernel_build_rejects_unknown_fields() -> None:
-    with pytest.raises(ValidationError, match="Extra inputs"):
-        _manifest(unverified_hint=True)
-
-
-def test_kernel_build_generated_schema_does_not_drift() -> None:
-    v1_schema_path = (
-        Path(__file__).resolve().parents[2] / "src/flameox/schemas/kernel-build-v1.schema.json"
-    )
-    v2_schema_path = (
-        Path(__file__).resolve().parents[2] / "src/flameox/schemas/kernel-build-v2.schema.json"
-    )
-
-    assert json.loads(v1_schema_path.read_text(encoding="utf-8")) == kernel_build_v1_json_schema()
-    assert json.loads(v2_schema_path.read_text(encoding="utf-8")) == kernel_build_json_schema()
-
-
-def test_kernel_build_v2_rejects_target_identity_that_does_not_match_target() -> None:
-    context = _manifest_v2().build_context.model_dump(mode="json")
-    context["target_identity_id"] = f"sha256:{'f' * 64}"
-
-    with pytest.raises(ValidationError, match="target identity must match"):
-        _manifest_v2(build_context=context)
-
-
-def test_kernel_build_bundle_import_registers_existing_pipeline(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    artifact_path = tmp_path / "kernel.ttir"
-    artifact_path.write_text("ttir", encoding="utf-8")
-    (tmp_path / "unrelated.ptx").write_text("must not be imported")
-    manifest = _manifest(
-        diagnostics=["diagnostic text remains native manifest data"],
-        limitations=[f"limitation-{index}" for index in range(20)],
-        stages=[
-            {
-                "name": "ttir",
-                "ordinal": 0,
-                "status": "available",
-                "format": "mlir",
-                "format_schema": "triton-ttir",
-                "artifact": {
-                    "path": artifact_path.name,
-                    "byte_length": 4,
-                    "sha256": hashlib.sha256(b"ttir").hexdigest(),
-                    "media_type": "text/plain",
-                },
-            }
-        ],
-    )
-    manifest_path = tmp_path / "kernel-build.json"
-    manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
-
-    result = KernelBuildImportService(workspace).import_manifest(manifest_path)
-
-    assert len(result.run.artifacts) == 2
-    assert result.run.artifacts[0].role == "kernel_build_manifest"
-    assert result.run.artifacts[1].role == "compiler_stage"
-    assert result.pipeline.workload_identity == "vector-add"
-    assert result.pipeline.device_identity == "NVIDIA sm_86"
-    assert result.pipeline.run_id == result.run.run_id
-    assert result.pipeline.stages[0].artifact_id == result.run.artifacts[1].artifact_id
-    assert len(result.pipeline.limitations) == 20
-    assert "diagnostics are preserved" in result.pipeline.limitations[0]
-    assert any(item.startswith("Additional limitations") for item in result.pipeline.limitations)
-    assert "producer-declared" in result.pipeline.limitations[-1]
-
-
-def test_v2_import_preserves_exact_claims_but_does_not_authenticate_them(
-    tmp_path: Path,
-) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    pipeline_ids: list[str] = []
-    for index, command_digit in enumerate(("3", "3", "9")):
-        root = tmp_path / f"import-{index}"
-        root.mkdir()
-        artifact = root / "kernel.ttir"
-        artifact.write_text("ttir")
-        context = _manifest_v2().build_context.model_dump(mode="json")
-        context["command_digest"] = f"sha256:{command_digit * 64}"
-        manifest = _manifest_v2(
-            build_context=context,
-            stages=[
+def _manifest(*, native_groups: list[dict[str, object]] | None = None) -> KernelBuildManifest:
+    return KernelBuildManifest.model_validate(
+        {
+            "producer": "triton",
+            "native_groups": native_groups
+            or [
                 {
-                    "name": "ttir",
-                    "ordinal": 0,
-                    "status": "available",
-                    "format": "mlir",
-                    "format_schema": "triton-ttir",
-                    "artifact": {
-                        "path": artifact.name,
-                        "byte_length": 4,
-                        "sha256": hashlib.sha256(b"ttir").hexdigest(),
-                    },
+                    "path": "triton-dumps/group-a",
+                    "artifacts": [_artifact("triton-dumps/group-a/kernel.ttir", b"ttir")],
                 }
             ],
-        )
-        manifest_path = root / "kernel-build.json"
-        manifest_path.write_text(manifest.model_dump_json())
-        pipeline = KernelBuildImportService(workspace).import_manifest(manifest_path).pipeline
-        assert pipeline.identity_quality == "producer_declared"
-        assert pipeline.workload_definition_id == context["workload_definition_id"]
-        assert pipeline.workload_instance_id == context["workload_instance_id"]
-        pipeline_ids.append(pipeline.pipeline_id)
-
-    service = ArtifactPipelineService(workspace)
-    same_claims = service.compare(pipeline_ids[0], pipeline_ids[1])
-    changed_command = service.compare(pipeline_ids[0], pipeline_ids[2])
-
-    assert same_claims.compatibility == "unknown"
-    assert any("identity_quality" in limitation for limitation in same_claims.limitations)
-    assert changed_command.compatibility == "incompatible"
-    assert "command_digest" in changed_command.identity_mismatches
-    assert changed_command.first_observed_divergent_stage is None
+        }
+    )
 
 
-def test_imported_pipeline_comparison_distinguishes_mismatch_from_missing_version(
-    tmp_path: Path,
+def _write_groups(root: Path, *, changed_group: str | None = None) -> KernelBuildManifest:
+    """Write an external import fixture, including provider metadata evidence."""
+
+    groups: list[dict[str, object]] = []
+    for group_name in ("source-hash-a", "source-hash-b"):
+        artifacts: list[dict[str, object]] = []
+        for extension in (
+            "ttir",
+            "ttgir",
+            "llir",
+            "ptx",
+            "cubin",
+            "sass",
+            "json",
+            "metadata",
+        ):
+            path = f"triton-dumps/{group_name}/kernel.{extension}"
+            payload = f"{group_name}:{extension}".encode()
+            if group_name == changed_group and extension == "ptx":
+                payload = b"changed-ptx"
+            artifact_path = root / path
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_path.write_bytes(payload)
+            artifacts.append(_artifact(path, payload))
+        groups.append({"path": f"triton-dumps/{group_name}", "artifacts": artifacts})
+    manifest = _manifest(native_groups=groups)
+    (root / "kernel-build.json").write_text(manifest.model_dump_json(), encoding="utf-8")
+    return manifest
+
+
+@pytest.mark.parametrize(
+    ("group_path", "artifact_path"),
+    [
+        ("../secret", "../secret/kernel.ttir"),
+        ("/absolute", "/absolute/kernel.ttir"),
+        ("triton-dumps//group", "triton-dumps//group/kernel.ttir"),
+        ("triton-dumps/group", "triton-dumps/group/../kernel.ttir"),
+        ("triton-dumps/group", "triton-dumps/group//kernel.ttir"),
+        ("triton-dumps/group", "../secret/kernel.ttir"),
+        ("triton-dumps/group", "triton-dumps/other/kernel.ttir"),
+    ],
+)
+def test_kernel_build_manifest_rejects_paths_outside_the_declared_group(
+    group_path: str,
+    artifact_path: str,
 ) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    pipeline_ids: dict[str, str] = {}
-    for directory, workload, device in (
-        ("baseline", "vector-add", "sm_86"),
-        ("same-identity", "vector-add", "sm_86"),
-        ("different-identity", "matrix-multiply", "sm_90"),
+    with pytest.raises(
+        ValidationError,
+        match=r"contained relative|below their native directory|normalized",
     ):
-        root = tmp_path / directory
-        root.mkdir()
-        artifact = root / "kernel.ttir"
-        artifact.write_text("ttir")
-        manifest = _manifest(
-            producer_version="unknown",
-            workload_identity=workload,
-            device_identity=device,
-            stages=[
+        _manifest(
+            native_groups=[
                 {
-                    "name": "ttir",
-                    "ordinal": 0,
-                    "status": "available",
-                    "format": "mlir",
-                    "format_schema": "triton-ttir",
-                    "artifact": {
-                        "path": artifact.name,
-                        "byte_length": 4,
-                        "sha256": hashlib.sha256(b"ttir").hexdigest(),
-                    },
+                    "path": group_path,
+                    "artifacts": [_artifact(artifact_path, b"ttir")],
                 }
-            ],
-        )
-        manifest_path = root / "kernel-build.json"
-        manifest_path.write_text(manifest.model_dump_json())
-        pipeline_ids[directory] = (
-            KernelBuildImportService(workspace).import_manifest(manifest_path).pipeline.pipeline_id
+            ]
         )
 
-    unknown = ArtifactPipelineService(workspace).compare(
-        pipeline_ids["baseline"], pipeline_ids["same-identity"]
-    )
-    incompatible = ArtifactPipelineService(workspace).compare(
-        pipeline_ids["baseline"], pipeline_ids["different-identity"]
-    )
 
-    assert unknown.compatibility == "unknown"
-    assert any("producer_version" in item for item in unknown.limitations)
-    assert incompatible.compatibility == "incompatible"
-    assert incompatible.identity_mismatches == ("workload_identity", "device_identity")
+def test_kernel_build_manifest_is_a_versionless_group_provenance_document() -> None:
+    manifest = _manifest()
+    payload = manifest.model_dump(mode="json")
+
+    assert "stages" not in payload
+    assert set(payload) == {"producer", "native_groups", "attachments"}
 
 
-def test_kernel_build_import_uses_bounded_declared_role(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    artifact = tmp_path / "kernel.ttir"
-    artifact.write_text("ttir")
-    stage = _manifest().stages[0].model_dump(mode="json")
-    stage["name"] = "x" * 100
-    stage["artifact"] = {
-        "path": artifact.name,
-        "byte_length": 4,
-        "sha256": hashlib.sha256(b"ttir").hexdigest(),
-        "role": "compiler_stage",
+def test_kernel_build_generated_schema_uses_the_canonical_unversioned_name() -> None:
+    schema_root = Path(__file__).resolve().parents[2] / "src/flameox/schemas"
+    canonical = schema_root / "kernel-build.schema.json"
+
+    assert json.loads(canonical.read_text(encoding="utf-8")) == kernel_build_json_schema()
+
+
+def _pipelines_by_group(
+    workspace: Workspace,
+    *,
+    run_id: str,
+) -> dict[str, ArtifactPipeline]:
+    registrations = {
+        registration.artifact_id: registration.display_name
+        for registration in RunStore(workspace).read(run_id).artifacts
     }
-    manifest_path = tmp_path / "kernel-build.json"
-    manifest_path.write_text(_manifest(stages=[stage]).model_dump_json())
+    pipelines: dict[str, ArtifactPipeline] = {}
+    for pipeline in ArtifactPipelineService(workspace).pipelines.list():
+        if pipeline.run_id != run_id:
+            continue
+        first_artifact_id = pipeline.stages[0].artifact_id
+        assert first_artifact_id is not None
+        pipelines[registrations[first_artifact_id].rsplit("/", 1)[0]] = pipeline
+    return pipelines
 
-    result = KernelBuildImportService(workspace).import_manifest(manifest_path)
 
-    assert result.run.artifacts[1].role == "compiler_stage"
+def test_kernel_build_import_preserves_two_groups_and_registers_sibling_lineages(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    source = tmp_path / "source"
+    source.mkdir()
+    manifest = _write_groups(source)
+
+    result = KernelBuildImportService(workspace).import_manifest(
+        source / "kernel-build.json",
+        allow_external_path=True,
+    )
+    pipelines = _pipelines_by_group(workspace, run_id=result.run.run_id)
+
+    assert len(result.pipeline_ids) == 2
+    assert set(pipelines) == {"triton-dumps/source-hash-a", "triton-dumps/source-hash-b"}
+    assert [registration.display_name for registration in result.run.artifacts[1:]] == [
+        artifact.path for artifact in manifest.artifacts
+    ]
+    for group_path, pipeline in pipelines.items():
+        assert pipeline.identity_quality == "imported_unverified"
+        assert {
+            "workload_identity",
+            "workload_definition_id",
+            "environment_id",
+            "producer_version",
+        }.isdisjoint(pipeline.model_dump())
+        assert [stage.name for stage in pipeline.stages] == [
+            "ttir",
+            "ttgir",
+            "llir",
+            "ptx",
+            "cubin",
+            "sass",
+        ]
+        assert [stage.predecessor for stage in pipeline.stages] == [
+            None,
+            "ttir",
+            "ttgir",
+            "llir",
+            "ptx",
+            "cubin",
+        ]
+        assert all(
+            registration.display_name.startswith(f"{group_path}/")
+            for registration in result.run.artifacts
+            if registration.artifact_id in {stage.artifact_id for stage in pipeline.stages}
+        )
+    metadata_ids = {
+        registration.artifact_id
+        for registration in result.run.artifacts
+        if registration.display_name
+        in {
+            "triton-dumps/source-hash-a/kernel.json",
+            "triton-dumps/source-hash-a/kernel.metadata",
+        }
+    }
+    assert len(metadata_ids) == 2
+    assert all(
+        registration.role == "compiler_output"
+        for registration in result.run.artifacts
+        if registration.artifact_id in metadata_ids
+    )
+    assert all(
+        metadata_ids.isdisjoint({stage.artifact_id for stage in pipeline.stages})
+        for pipeline in pipelines.values()
+    )
+
+
+def test_kernel_build_import_preserves_a_metadata_only_group_without_a_stage(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    source = tmp_path / "source"
+    source.mkdir()
+    artifacts = [
+        _artifact("triton-dumps/source-hash-metadata/kernel.json", b"{}"),
+        _artifact("triton-dumps/source-hash-metadata/kernel.metadata", b"metadata"),
+    ]
+    for artifact in artifacts:
+        path = source / str(artifact["path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"{}" if path.suffix == ".json" else b"metadata")
+    manifest = _manifest(
+        native_groups=[
+            {
+                "path": "triton-dumps/source-hash-metadata",
+                "artifacts": artifacts,
+            }
+        ]
+    )
+    (source / "kernel-build.json").write_text(manifest.model_dump_json(), encoding="utf-8")
+
+    result = KernelBuildImportService(workspace).import_manifest(
+        source / "kernel-build.json",
+        allow_external_path=True,
+    )
+    pipelines = [
+        pipeline
+        for pipeline in ArtifactPipelineService(workspace).pipelines.list()
+        if pipeline.run_id == result.run.run_id
+    ]
+
+    assert len(result.pipeline_ids) == 1
+    assert pipelines[0].stages == ()
+    assert all(
+        registration.role == "compiler_output"
+        for registration in result.run.artifacts
+        if registration.display_name in {artifact["path"] for artifact in artifacts}
+    )
+
+
+def test_kernel_build_comparison_selects_one_sibling_pipeline_at_a_time(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    baseline_root = tmp_path / "baseline"
+    candidate_root = tmp_path / "candidate"
+    baseline_root.mkdir()
+    candidate_root.mkdir()
+    _write_groups(baseline_root)
+    _write_groups(candidate_root, changed_group="source-hash-b")
+
+    importer = KernelBuildImportService(workspace)
+    baseline = importer.import_manifest(
+        baseline_root / "kernel-build.json",
+        allow_external_path=True,
+    )
+    candidate = importer.import_manifest(
+        candidate_root / "kernel-build.json",
+        allow_external_path=True,
+    )
+    baseline_pipelines = _pipelines_by_group(workspace, run_id=baseline.run.run_id)
+    candidate_pipelines = _pipelines_by_group(workspace, run_id=candidate.run.run_id)
+
+    comparison = ArtifactPipelineService(workspace).compare(
+        baseline_pipelines["triton-dumps/source-hash-a"].pipeline_id,
+        candidate_pipelines["triton-dumps/source-hash-a"].pipeline_id,
+    )
+
+    group_b_artifact_ids = {
+        stage.artifact_id
+        for pipeline in (
+            baseline_pipelines["triton-dumps/source-hash-b"],
+            candidate_pipelines["triton-dumps/source-hash-b"],
+        )
+        for stage in pipeline.stages
+        if stage.artifact_id is not None
+    }
+    assert comparison.compatibility == "unknown"
+    assert {stage.stage_name for stage in comparison.stages} == {
+        "ttir",
+        "ttgir",
+        "llir",
+        "ptx",
+        "cubin",
+        "sass",
+    }
+    assert not group_b_artifact_ids.intersection(comparison.input_artifact_ids)
 
 
 def test_kernel_build_import_rejects_symlinked_manifest_before_parsing(tmp_path: Path) -> None:
@@ -332,7 +319,7 @@ def test_malformed_kernel_build_manifest_leaves_no_anonymous_state(tmp_path: Pat
     manifest_path.write_text('{"unique-invalid-manifest": true}')
 
     with pytest.raises(DomainError) as error:
-        KernelBuildImportService(workspace).import_manifest(manifest_path)
+        KernelBuildImportService(workspace).import_manifest(manifest_path, allow_external_path=True)
 
     assert error.value.code is ErrorCode.ARTIFACT_INTEGRITY_FAILED
     assert tuple(workspace.paths.artifacts.rglob("artifact.json")) == ()
@@ -340,77 +327,66 @@ def test_malformed_kernel_build_manifest_leaves_no_anonymous_state(tmp_path: Pat
     assert tuple(workspace.paths.staging.iterdir()) == ()
 
 
-def test_kernel_build_import_applies_manifest_document_limit(
-    tmp_path: Path,
-) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    manifest_path = tmp_path / "kernel-build.json"
-    manifest_path.write_text(_manifest().model_dump_json())
-    with manifest_path.open("ab") as manifest_file:
-        manifest_file.truncate(1024 * 1024 + 1)
+def test_kernel_build_import_applies_manifest_document_limit(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    source = tmp_path / "source"
+    source.mkdir()
+    manifest_path = source / "kernel-build.json"
+    manifest_path.write_text(_manifest().model_dump_json(), encoding="utf-8")
+    with manifest_path.open("ab") as stream:
+        stream.truncate(1024 * 1024 + 1)
 
     with pytest.raises(DomainError) as error:
-        KernelBuildImportService(workspace).import_manifest(manifest_path)
+        KernelBuildImportService(workspace).import_manifest(manifest_path, allow_external_path=True)
+
     assert error.value.code is ErrorCode.ARTIFACT_TOO_LARGE
 
 
 def test_kernel_build_bundle_rejects_digest_mismatch_before_registration(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    (tmp_path / "kernel.ttir").write_text("fail", encoding="utf-8")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    source = tmp_path / "source"
+    source.mkdir()
+    artifact = source / "triton-dumps/group-a/kernel.ttir"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("actualxx", encoding="utf-8")
     manifest = _manifest(
-        stages=[
+        native_groups=[
             {
-                "name": "ttir",
-                "ordinal": 0,
-                "status": "available",
-                "format": "mlir",
-                "format_schema": "triton-ttir",
-                "artifact": {
-                    "path": "kernel.ttir",
-                    "byte_length": 4,
-                    "sha256": hashlib.sha256(b"ttir").hexdigest(),
-                },
+                "path": "triton-dumps/group-a",
+                "artifacts": [_artifact("triton-dumps/group-a/kernel.ttir", b"expected")],
             }
         ]
     )
-    manifest_path = tmp_path / "kernel-build.json"
+    manifest_path = source / "kernel-build.json"
     manifest_path.write_text(manifest.model_dump_json(), encoding="utf-8")
 
     with pytest.raises(DomainError, match="sha256 mismatch"):
-        KernelBuildImportService(workspace).import_manifest(manifest_path)
+        KernelBuildImportService(workspace).import_manifest(manifest_path, allow_external_path=True)
 
     assert tuple(workspace.paths.artifacts.rglob("artifact.json")) == ()
 
 
-def test_kernel_build_import_preserves_distinct_paths_with_same_basename(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path)
-    stages: list[dict[str, object]] = []
-    for ordinal, directory in enumerate(("kernel-a", "kernel-b")):
-        artifact_path = tmp_path / directory / "kernel.ptx"
-        artifact_path.parent.mkdir()
-        payload = f"ptx-{ordinal}".encode()
-        artifact_path.write_bytes(payload)
-        stages.append(
+def test_kernel_build_import_rejects_unsupported_group_artifacts_without_importing(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    source = tmp_path / "source"
+    source.mkdir()
+    artifact = source / "triton-dumps/group-a/kernel.txt"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("unsupported", encoding="utf-8")
+    manifest = _manifest(
+        native_groups=[
             {
-                "name": f"ptx-{ordinal}",
-                "ordinal": ordinal,
-                "status": "available",
-                "format": "ptx",
-                "format_schema": "nvidia-ptx",
-                "artifact": {
-                    "path": f"{directory}/kernel.ptx",
-                    "byte_length": len(payload),
-                    "sha256": hashlib.sha256(payload).hexdigest(),
-                    "media_type": "text/plain",
-                },
+                "path": "triton-dumps/group-a",
+                "artifacts": [_artifact("triton-dumps/group-a/kernel.txt", b"unsupported")],
             }
-        )
-    manifest_path = tmp_path / "kernel-build.json"
-    manifest_path.write_text(_manifest(stages=stages).model_dump_json())
+        ]
+    )
+    manifest_path = source / "kernel-build.json"
+    manifest_path.write_text(manifest.model_dump_json(), encoding="utf-8")
 
-    result = KernelBuildImportService(workspace).import_manifest(manifest_path)
+    with pytest.raises(DomainError, match="unsupported compiler artifact"):
+        KernelBuildImportService(workspace).import_manifest(manifest_path, allow_external_path=True)
 
-    assert [item.display_name for item in result.run.artifacts[1:]] == [
-        "kernel-a/kernel.ptx",
-        "kernel-b/kernel.ptx",
-    ]
+    assert RunStore(workspace).list() == ()

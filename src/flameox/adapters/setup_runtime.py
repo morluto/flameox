@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import shutil
@@ -17,13 +16,12 @@ from mcp.client.stdio import stdio_client
 from packaging.version import InvalidVersion, Version
 
 from flameox.action_graph import ActionId, NextAction, manual_action, tool_action
-from flameox.application.concurrency import race_with_cancellation
+from flameox.application.concurrency import process_output_detail, run_brokered_from_worker
 from flameox.atomic import atomic_write_json, atomic_write_text
 from flameox.command_binding import ExecutableResolver
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import DomainError, ErrorCode, process_exit_code
 from flameox.execution import (
     INSTALLER_ENVIRONMENT_ALLOWLIST,
-    ExecutionOutcome,
     ExecutionRequest,
     SubprocessBroker,
 )
@@ -152,8 +150,8 @@ class ManagedRuntime:
             )
         except (DomainError, OSError) as exc:
             raise self._installation_error(version, str(exc)) from exc
-        if outcome.process.exit_code != 0 or not executable.is_file():
-            detail = _output_detail(outcome)
+        if process_exit_code(outcome.process.termination) != 0 or not executable.is_file():
+            detail = process_output_detail(outcome)
             raise self._installation_error(version, detail or "uv produced no launcher")
 
         try:
@@ -164,7 +162,6 @@ class ManagedRuntime:
         atomic_write_json(
             manifest,
             {
-                "schema_version": 1,
                 "distribution": self.distribution,
                 "version": version,
                 "executable": str(executable),
@@ -189,10 +186,10 @@ class ManagedRuntime:
             )
         except (DomainError, OSError) as exc:
             raise self._verification_error(executable, str(exc)) from exc
-        if outcome.process.exit_code != 0:
+        if process_exit_code(outcome.process.termination) != 0:
             raise self._verification_error(
                 executable,
-                _output_detail(outcome) or "the version command failed",
+                process_output_detail(outcome) or "the version command failed",
             )
         stdout = outcome.stdout.decode("utf-8", errors="replace").strip()
         if stdout != version:
@@ -250,7 +247,6 @@ class ManagedRuntime:
         if not isinstance(value, dict):
             return False
         return value == {
-            "schema_version": 1,
             "distribution": ManagedRuntime.distribution,
             "version": version,
             "executable": str(executable),
@@ -334,7 +330,7 @@ _TRACE_PROCESSOR_ASSETS: dict[tuple[str, str], ManagedToolAsset] = {
 
 
 def _trace_processor_asset() -> ManagedToolAsset | None:
-    machine = _machine().lower()
+    machine = os.uname().machine.lower() if hasattr(os, "uname") else ""
     if machine == "amd64":
         machine = "x86_64"
     return _TRACE_PROCESSOR_ASSETS.get((sys.platform, machine))
@@ -437,7 +433,7 @@ def install_trace_processor(
     except DomainError as exc:
         raise _annotate_staging_error(exc) from exc
     except (OSError, ValueError) as exc:
-        category = _staging_failure_category(exc)
+        category = "filesystem" if isinstance(exc, OSError) else "verification"
         detail = _bounded_staging_detail(exc)
         raise DomainError(
             ErrorCode.PROCESS_FAILED,
@@ -467,10 +463,21 @@ def install_trace_processor(
     )
 
 
+def _bounded_staging_detail(error: object) -> str:
+    detail = " ".join(str(error).split())
+    return detail[:500] or "The staging operation returned no diagnostic detail."
+
+
 def _annotate_staging_error(error: DomainError) -> DomainError:
     """Retain a bounded cause when a staging helper already raised a domain error."""
     details = dict(error.details)
-    details.setdefault("failure_category", _domain_failure_category(error))
+    category = {
+        ErrorCode.PROCESS_CANCELLED: "cancelled",
+        ErrorCode.PROCESS_TIMEOUT: "timeout",
+        ErrorCode.ARTIFACT_TOO_LARGE: "download_limit",
+        ErrorCode.CAPABILITY_UNAVAILABLE: "unsupported_platform",
+    }.get(error.code, "verification")
+    details.setdefault("failure_category", category)
     details.setdefault(
         "failure_detail",
         _bounded_staging_detail(details.get("error") or error.message),
@@ -487,29 +494,6 @@ def _annotate_staging_error(error: DomainError) -> DomainError:
     )
 
 
-def _domain_failure_category(error: DomainError) -> str:
-    if error.code is ErrorCode.PROCESS_CANCELLED:
-        return "cancelled"
-    if error.code is ErrorCode.PROCESS_TIMEOUT:
-        return "timeout"
-    if error.code is ErrorCode.ARTIFACT_TOO_LARGE:
-        return "download_limit"
-    if error.code is ErrorCode.CAPABILITY_UNAVAILABLE:
-        return "unsupported_platform"
-    return "verification"
-
-
-def _staging_failure_category(error: BaseException) -> str:
-    if isinstance(error, OSError):
-        return "filesystem"
-    return "verification"
-
-
-def _bounded_staging_detail(error: object) -> str:
-    detail = " ".join(str(error).split())
-    return detail[:500] or "The staging operation returned no diagnostic detail."
-
-
 def _verify_trace_processor(
     executable: Path,
     *,
@@ -518,7 +502,7 @@ def _verify_trace_processor(
 ) -> None:
     execution_broker = broker or SubprocessBroker()
     try:
-        outcome = _run_brokered_sync(
+        outcome = run_brokered_from_worker(
             execution_broker,
             ExecutionRequest(
                 argv=(str(executable), "--version"),
@@ -549,84 +533,9 @@ def _verify_trace_processor(
             next_action=_trace_processor_setup_action(),
         ) from exc
     _validate_trace_processor_result(
-        outcome.process.exit_code,
+        process_exit_code(outcome.process.termination),
         outcome.stdout.decode("utf-8", errors="replace"),
         outcome.stderr.decode("utf-8", errors="replace"),
-    )
-
-
-async def _run_brokered(
-    broker: SubprocessBroker,
-    request: ExecutionRequest,
-    *,
-    cancel_event: threading.Event | None,
-    cancellation_message: str,
-    cancellation_details: dict[str, str],
-    cancellation_next_action: NextAction,
-) -> ExecutionOutcome:
-    if cancel_event is None:
-        return await broker.run(request)
-    return await race_with_cancellation(
-        broker.run(request),
-        lambda: _wait_for_cancellation(cancel_event),
-        lambda: DomainError(
-            ErrorCode.PROCESS_CANCELLED,
-            cancellation_message,
-            retryable=True,
-            details=cancellation_details,
-            next_action=cancellation_next_action,
-        ),
-    )
-
-
-async def _wait_for_cancellation(cancel_event: threading.Event) -> None:
-    while not cancel_event.is_set():
-        await asyncio.sleep(0.05)
-
-
-def _run_brokered_sync(
-    broker: SubprocessBroker,
-    request: ExecutionRequest,
-    *,
-    cancel_event: threading.Event | None,
-    cancellation_message: str,
-    cancellation_details: dict[str, str],
-    cancellation_next_action: NextAction,
-) -> ExecutionOutcome:
-    coroutine = _run_brokered(
-        broker,
-        request,
-        cancel_event=cancel_event,
-        cancellation_message=cancellation_message,
-        cancellation_details=cancellation_details,
-        cancellation_next_action=cancellation_next_action,
-    )
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coroutine)
-
-    result: list[ExecutionOutcome] = []
-    error: list[BaseException] = []
-
-    def run() -> None:
-        try:
-            result.append(asyncio.run(coroutine))
-        except BaseException as exc:
-            error.append(exc)
-
-    thread = threading.Thread(target=run, name="flameox-broker-bridge")
-    thread.start()
-    thread.join()
-    if error:
-        raise error[0]
-    return result[0]
-
-
-def _output_detail(outcome: ExecutionOutcome) -> str:
-    return (
-        outcome.stderr.decode("utf-8", errors="replace").strip()
-        or outcome.stdout.decode("utf-8", errors="replace").strip()
     )
 
 
@@ -655,7 +564,3 @@ def _check_staging_cancelled(cancel_event: threading.Event | None) -> None:
             details={"adapter": "perfetto"},
             next_action=_trace_processor_setup_action(),
         )
-
-
-def _machine() -> str:
-    return os.uname().machine.lower() if hasattr(os, "uname") else ""

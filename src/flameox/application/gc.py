@@ -20,7 +20,7 @@ from flameox.atomic import atomic_write_json, fsync_directory
 from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode, digest_model
 from flameox.models import ContractModel
-from flameox.storage import GenerationManifest, RetentionIntentStore, Workspace, tree_bytes
+from flameox.storage import RetentionIntentStore, Workspace, tree_bytes
 from flameox.storage.locks import RETENTION_EXCLUSIVE, WRITE_EXCLUSIVE
 
 
@@ -41,7 +41,6 @@ class GarbageEntry(ContractModel):
 
 
 class GarbagePlan(ContractModel):
-    schema_version: int = 1
     plan_id: str
     corpus_commit_id: str
     cutoff: datetime
@@ -54,7 +53,6 @@ class GarbagePlan(ContractModel):
 
 
 class GarbageApplyResult(ContractModel):
-    schema_version: int = 1
     trash_manifest_id: str
     moved: tuple[GarbageEntry, ...]
     total_bytes: int
@@ -62,7 +60,6 @@ class GarbageApplyResult(ContractModel):
 
 
 class _TrashManifest(ContractModel):
-    schema_version: int = 1
     trash_manifest_id: str
     operation: Literal["garbage_collection"] = "garbage_collection"
     created_at: datetime
@@ -152,14 +149,12 @@ _TRASH_MANIFEST: TypeAdapter[TrashManifest] = TypeAdapter(TrashManifest)
 
 
 class GarbagePurgeResult(ContractModel):
-    schema_version: int = 1
     trash_manifest_id: str
     purged_entries: int
     purged_bytes: int
 
 
 class GarbageRestoreResult(ContractModel):
-    schema_version: int = 1
     trash_manifest_id: str
     restored: tuple[GarbageEntry, ...]
 
@@ -175,6 +170,7 @@ class GarbageCollector:
         root_commit_ids.update(RetentionIntentStore(self.workspace).pending_commit_ids())
         root_commit_ids.update(self.workspace.cursors.retained_corpus_commit_ids())
         referenced_generations: set[str] = set()
+        referenced_evidence_directories: set[str] = set()
         referenced_artifacts: set[str] = set()
         catalog = Catalog(self.workspace)
         with catalog.open_snapshot(catalog.pin(head.commit_id)) as snapshot:
@@ -205,12 +201,7 @@ class GarbageCollector:
             )
         for commit_id in sorted(root_commit_ids):
             commit = self.workspace.corpus.read_commit(commit_id)
-            for relative in commit.generation_manifests:
-                manifest = GenerationManifest.model_validate_json(
-                    (self.workspace.paths.root / relative).read_text()
-                )
-                referenced_generations.add(manifest.generation_id)
-                referenced_artifacts.update(manifest.input_artifact_ids)
+            referenced_generations.update(commit.generation_ids)
             catalog = Catalog(self.workspace)
             with catalog.open_snapshot(catalog.pin(commit_id)) as snapshot:
                 referenced_artifacts.update(
@@ -219,6 +210,12 @@ class GarbageCollector:
                         "SELECT DISTINCT artifact_id FROM artifact_registrations"
                     ).fetchall()
                 )
+        for generation_id in referenced_generations:
+            manifest = self.workspace.corpus.read_generation(generation_id)
+            referenced_evidence_directories.update(
+                str(Path(file.path).parent) for file in manifest.files
+            )
+            referenced_artifacts.update(manifest.input_artifact_ids)
         entries: list[GarbageEntry] = []
         staging_ownership = StagingOwnershipService(self.workspace)
         for path in sorted(self.workspace.paths.staging.iterdir()):
@@ -250,7 +247,8 @@ class GarbageCollector:
                 staging_owner_digest=ownership[1],
             )
         for path in sorted(self.workspace.paths.generations.iterdir()):
-            if path.name not in referenced_generations:
+            path_generation_id = f"sha256:{path.stem}" if path.is_file() else None
+            if path_generation_id not in referenced_generations:
                 self._candidate(
                     entries,
                     path,
@@ -258,9 +256,9 @@ class GarbageCollector:
                     reason="Generation is not reachable from a retained corpus commit.",
                     cutoff=cutoff,
                 )
-        for path in sorted(self.workspace.paths.evidence.glob("*/generation=*")):
-            generation_id = path.name.removeprefix("generation=")
-            if path.is_dir() and generation_id not in referenced_generations:
+        for path in sorted(self.workspace.paths.evidence.glob("*/placement=*")):
+            relative = path.relative_to(self.workspace.paths.root).as_posix()
+            if path.is_dir() and relative not in referenced_evidence_directories:
                 self._candidate(
                     entries,
                     path,

@@ -5,20 +5,22 @@ from pathlib import Path
 
 import pytest
 
-from flameox.adapters import PerfettoExtractor
+from flameox.adapters.perfetto import PerfettoExtractor
 from flameox.analysis import RecipeService
-from flameox.application import (
+from flameox.application.analysis_records import (
     AnalysisMaterializationService,
-    ArtifactService,
-    DrilldownService,
-    EvidenceLookupService,
     HotspotAnalysisRequest,
+)
+from flameox.application.artifacts import ArtifactService
+from flameox.application.drilldown import DrilldownService
+from flameox.application.evidence_lookup import EvidenceLookupService
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportProfile,
     ImportService,
-    NativeViewerService,
-    TraceWindowService,
 )
+from flameox.application.trace_windows import TraceWindowService
+from flameox.application.viewers import NativeViewerService
 from flameox.catalog import Catalog
 from flameox.domain import ArtifactKind, DomainError, ErrorCode, EvidenceReferenceType
 from flameox.storage import Workspace

@@ -8,14 +8,22 @@ import pytest
 from pydantic import ValidationError
 
 from flameox.action_graph import ActionId, ToolAction
-from flameox.application import (
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportService,
+)
+from flameox.application.viewers import (
     NativeViewerPlan,
     NativeViewerService,
 )
 from flameox.catalog import Catalog
-from flameox.domain import ArtifactKind, DomainError, ErrorCode, Sensitivity
+from flameox.domain import (
+    ArtifactKind,
+    DomainError,
+    ErrorCode,
+    ExitedProcessTermination,
+    Sensitivity,
+)
 from flameox.storage import Workspace
 
 pytestmark = pytest.mark.integration
@@ -194,7 +202,7 @@ async def test_explicit_viewer_launch_uses_bounded_subprocess_broker(
 
     assert result.plan.launches is True
     assert result.validated_copy().plan.launches is True
-    assert result.process.exit_code == 0
+    assert result.process.termination == ExitedProcessTermination(exit_code=0)
 
 
 def test_unlaunched_viewer_plan_cannot_claim_launch_side_effect() -> None:

@@ -8,30 +8,27 @@ readiness checks.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import sys
 import time
 from enum import StrEnum
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, NoReturn
 from urllib.parse import urlsplit
 
 from pydantic import (
     ConfigDict,
     Field,
-    TypeAdapter,
     ValidationError,
-    computed_field,
     field_validator,
     model_validator,
 )
 
-from flameox.action_graph import manual_action
+from flameox.action_graph import ActionId, NextAction, manual_action, tool_action
 from flameox.application.provider_runtime import ProviderRuntime
 from flameox.command_binding import ExecutableResolver
-from flameox.domain import DomainError, ErrorCode
+from flameox.domain import DomainError, ErrorCode, process_exit_code
 from flameox.domain.executables import ResolvedExecutable
 from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.http_transport import (
@@ -74,10 +71,6 @@ class InferenceTool(StrEnum):
     SGLANG = "sglang"
 
 
-def _loopback_http_url(value: str) -> str:
-    return validate_loopback_base_url(value)
-
-
 class AIPerfProfileRequest(ContractModel):
     executable: Path
     base_url: str
@@ -99,7 +92,7 @@ class AIPerfProfileRequest(ContractModel):
     @field_validator("base_url")
     @classmethod
     def valid_url(cls, value: str) -> str:
-        return _loopback_http_url(value)
+        return validate_loopback_base_url(value)
 
     @model_validator(mode="after")
     def replay_schedule_is_unambiguous(self) -> AIPerfProfileRequest:
@@ -167,7 +160,7 @@ class VllmBenchServeRequest(ContractModel):
     @field_validator("base_url")
     @classmethod
     def valid_url(cls, value: str) -> str:
-        return _loopback_http_url(value)
+        return validate_loopback_base_url(value)
 
     @model_validator(mode="after")
     def burstiness_has_request_rate(self) -> VllmBenchServeRequest:
@@ -213,9 +206,9 @@ class VllmBenchServeRequest(ContractModel):
 
 
 class SglangBenchServingRequest(ContractModel):
-    """Bounded SGLang 0.5.16 ``bench_serving`` random-workload invocation."""
+    """Bounded SGLang ``benchmark.serving`` random-workload invocation."""
 
-    benchmark_python: Path
+    executable: Path
     base_url: str
     model: Annotated[str, Field(min_length=1, max_length=500)]
     tokenizer: Annotated[str, Field(min_length=1, max_length=500)] | None = None
@@ -234,25 +227,25 @@ class SglangBenchServingRequest(ContractModel):
     @field_validator("base_url")
     @classmethod
     def valid_url(cls, value: str) -> str:
-        value = _loopback_http_url(value)
+        value = validate_loopback_base_url(value)
         if urlsplit(value).path not in ("", "/"):
-            raise ValueError("sglang bench_serving requires a root base_url in v1")
+            raise ValueError("sglang benchmark serving requires a root base_url")
         return value
 
-    @field_validator("benchmark_python")
+    @field_validator("executable")
     @classmethod
-    def absolute_benchmark_python(cls, value: Path) -> Path:
+    def absolute_executable(cls, value: Path) -> Path:
         if not value.is_absolute():
-            raise ValueError("benchmark_python must be absolute")
+            raise ValueError("executable must be absolute")
         return value
 
     def argv(self) -> tuple[str, ...]:
         parsed = urlsplit(self.base_url)
         assert parsed.hostname is not None
         values = [
-            str(self.benchmark_python),
+            str(self.executable),
             "-m",
-            "sglang.bench_serving",
+            "sglang.benchmark.serving",
             "--backend",
             (
                 "sglang-oai-chat"
@@ -290,133 +283,184 @@ class SglangBenchServingRequest(ContractModel):
         return tuple(values)
 
 
-class _InferenceToolDiscovery(ContractModel):
-    model_config = ConfigDict(json_schema_mode_override="serialization")
+class QualifiedInferenceTool(ContractModel):
+    """One executable admitted for a reviewed inference command."""
 
     tool: InferenceTool
-    version: str | None = None
-    executable_digest: str | None = None
-    provider_environment_id: str | None = None
-    provider_python: Path | None = None
-    provider_python_sha256: str | None = None
-    available: bool
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def compatible(self) -> bool:
-        return self.available
-
-
-class AvailableInferenceToolDiscovery(_InferenceToolDiscovery):
-    executable: Path
     executable_binding: ResolvedExecutable
-    available: Literal[True] = True
-    compatibility_reason: Literal[None] = None
-    remediation: tuple[()] = ()
+    version: str | None = None
+    benchmark_capabilities: Annotated[tuple[str, ...], Field(max_length=32)] = ()
+    provider_environment_id: str | None = None
 
 
-class UnavailableInferenceToolDiscovery(_InferenceToolDiscovery):
-    executable: Path | None = None
-    available: Literal[False] = False
-    compatibility_reason: str | None = None
-    remediation: tuple[str, ...] = ()
-
-
-type InferenceToolDiscovery = Annotated[
-    AvailableInferenceToolDiscovery | UnavailableInferenceToolDiscovery,
-    Field(discriminator="available"),
-]
-
-_INFERENCE_TOOL_DISCOVERY_ADAPTER: TypeAdapter[InferenceToolDiscovery] = TypeAdapter(
-    InferenceToolDiscovery
+_SGLANG_BENCHMARK_MODULE = "sglang.benchmark.serving"
+_SGLANG_REQUIRED_OPTIONS = (
+    "--backend",
+    "--host",
+    "--port",
+    "--model",
+    "--dataset-name",
+    "--random-input-len",
+    "--random-output-len",
+    "--random-range-ratio",
+    "--num-prompts",
+    "--seed",
+    "--output-file",
+    "--warmup-requests",
 )
 
 
-def parse_inference_tool_discovery(value: object) -> InferenceToolDiscovery:
-    """Parse a probe result into an available or unavailable tool case."""
-
-    return _INFERENCE_TOOL_DISCOVERY_ADAPTER.validate_python(value)
+def _capability_unavailable(
+    tool: InferenceTool,
+    message: str,
+    *,
+    remediation: tuple[str, ...],
+    next_action: NextAction,
+    details: dict[str, object] | None = None,
+) -> NoReturn:
+    raise DomainError(
+        ErrorCode.CAPABILITY_UNAVAILABLE,
+        message,
+        details={"tool": tool.value, **(details or {})},
+        remediation=remediation,
+        next_action=next_action,
+    )
 
 
 def discover_sglang(
     benchmark_python: Path, *, broker: SubprocessBroker | None = None
-) -> InferenceToolDiscovery:
-    """Discover SGLang through its declared launcher, never Flameox's PATH."""
+) -> QualifiedInferenceTool:
+    """Qualify the declared launcher for SGLang's current serving benchmark."""
     executable = benchmark_python.resolve()
-    binding = (
-        ExecutableResolver().resolve_host_tool(str(executable), cwd=executable.parent)
-        if executable.is_file() and os.access(executable, os.X_OK)
-        else None
-    )
-    digest = binding.identity.sha256 if binding is not None else _digest_executable(executable)
-    tool_version: str | None = None
-    if binding is not None:
-        try:
-            outcome = (broker or SubprocessBroker()).run_sync(
-                ExecutionRequest(
-                    argv=(
-                        str(executable),
-                        "-c",
-                        "from importlib.metadata import version; print(version('sglang'))",
-                    ),
-                    executable_binding=binding,
-                    cwd=executable.parent,
-                    environment_allowlist=("PATH",),
-                    allowed_working_roots=(executable.parent,),
-                    timeout_seconds=5,
-                    max_output_bytes=1024,
-                )
-            )
-            if outcome.process.exit_code == 0:
-                candidate = outcome.stdout.decode("utf-8", errors="strict").strip()
-                tool_version = candidate if candidate else None
-        except (DomainError, OSError, UnicodeDecodeError):
-            pass
-    compatible = tool_version == "0.5.16"
-    if binding is not None and compatible:
-        return AvailableInferenceToolDiscovery(
-            tool=InferenceTool.SGLANG,
-            executable=executable,
-            executable_binding=binding,
-            version=tool_version,
-            executable_digest=digest,
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        _capability_unavailable(
+            InferenceTool.SGLANG,
+            "The declared SGLang benchmark launcher is missing or not executable.",
+            details={"benchmark_python": str(benchmark_python)},
+            remediation=(
+                "Set benchmark_python to an executable Python runtime with SGLang installed, "
+                "then plan the scenario again.",
+            ),
+            next_action=manual_action(
+                "Update the declared SGLang server with an absolute executable benchmark_python.",
+                suggested_action=ActionId.CONFIGURE_INFERENCE_SERVER,
+                missing_arguments=("name", "operation", "benchmark_python"),
+            ),
         )
-    return UnavailableInferenceToolDiscovery(
-        tool=InferenceTool.SGLANG,
-        executable=executable if executable.is_file() else None,
-        version=tool_version,
-        executable_digest=digest,
-        compatibility_reason="SGLang 0.5.16 is required in benchmark_python.",
-        remediation=(
-            "Install sglang==0.5.16 in the declared benchmark_python runtime; "
-            "Flameox does not install it.",
-        ),
-    )
-
-
-def _digest_executable(executable: Path) -> str | None:
-    digest = hashlib.sha256()
+    binding = ExecutableResolver().resolve_host_tool(str(executable), cwd=executable.parent)
+    if binding is None:
+        _capability_unavailable(
+            InferenceTool.SGLANG,
+            "The declared SGLang benchmark launcher could not be qualified.",
+            details={"benchmark_python": str(executable)},
+            remediation=(
+                "Set benchmark_python to an executable trusted by the configured workspace policy, "
+                "then plan the scenario again.",
+            ),
+            next_action=manual_action(
+                "Update the declared SGLang server launcher and retry planning.",
+                suggested_action=ActionId.CONFIGURE_INFERENCE_SERVER,
+                missing_arguments=("name", "operation", "benchmark_python"),
+            ),
+        )
     try:
-        with executable.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except OSError:
-        return None
-    return f"sha256:{digest.hexdigest()}"
+        outcome = (broker or SubprocessBroker()).run_sync(
+            ExecutionRequest(
+                argv=(str(executable), "-m", _SGLANG_BENCHMARK_MODULE, "--help"),
+                executable_binding=binding,
+                cwd=executable.parent,
+                environment_allowlist=("PATH",),
+                allowed_working_roots=(executable.parent,),
+                timeout_seconds=10,
+                max_output_bytes=128 * 1024,
+            )
+        )
+        help_text = outcome.stdout.decode("utf-8", errors="strict")
+    except (DomainError, OSError, UnicodeDecodeError):
+        _capability_unavailable(
+            InferenceTool.SGLANG,
+            "The declared launcher could not inspect sglang.benchmark.serving.",
+            details={"benchmark_python": str(executable)},
+            remediation=(
+                "Install an SGLang runtime that provides sglang.benchmark.serving at "
+                "benchmark_python, then plan the scenario again.",
+            ),
+            next_action=manual_action(
+                "Repair the declared SGLang benchmark launcher and retry planning.",
+                suggested_action=ActionId.CONFIGURE_INFERENCE_SERVER,
+                missing_arguments=("name", "operation", "benchmark_python"),
+            ),
+        )
+    supported_options = all(option in help_text for option in _SGLANG_REQUIRED_OPTIONS)
+    if process_exit_code(outcome.process.termination) != 0 or not supported_options:
+        _capability_unavailable(
+            InferenceTool.SGLANG,
+            "The declared launcher does not provide Flameox's supported "
+            "sglang.benchmark.serving interface.",
+            details={
+                "benchmark_python": str(executable),
+                "module": _SGLANG_BENCHMARK_MODULE,
+                "missing_options": tuple(
+                    option for option in _SGLANG_REQUIRED_OPTIONS if option not in help_text
+                ),
+            },
+            remediation=(
+                "Point benchmark_python at an SGLang runtime that supports the canonical "
+                "sglang.benchmark.serving benchmark interface, then plan again.",
+            ),
+            next_action=manual_action(
+                "Update the declared SGLang benchmark launcher and retry planning.",
+                suggested_action=ActionId.CONFIGURE_INFERENCE_SERVER,
+                missing_arguments=("name", "operation", "benchmark_python"),
+            ),
+        )
+    tool_version: str | None = None
+    try:
+        version_outcome = (broker or SubprocessBroker()).run_sync(
+            ExecutionRequest(
+                argv=(
+                    str(executable),
+                    "-c",
+                    "from importlib.metadata import version; print(version('sglang'))",
+                ),
+                executable_binding=binding,
+                cwd=executable.parent,
+                environment_allowlist=("PATH",),
+                allowed_working_roots=(executable.parent,),
+                timeout_seconds=5,
+                max_output_bytes=1024,
+            )
+        )
+        if process_exit_code(version_outcome.process.termination) == 0:
+            candidate = version_outcome.stdout.decode("utf-8", errors="strict").strip()
+            tool_version = candidate or None
+    except (DomainError, OSError, UnicodeDecodeError):
+        pass
+    return QualifiedInferenceTool(
+        tool=InferenceTool.SGLANG,
+        executable_binding=binding,
+        version=tool_version,
+        benchmark_capabilities=_SGLANG_REQUIRED_OPTIONS,
+    )
 
 
 def discover_inference_tool(
     tool: Literal[InferenceTool.AIPERF, InferenceTool.VLLM],
     *,
     provider_runtime: ProviderRuntime | None = None,
-) -> InferenceToolDiscovery:
+) -> QualifiedInferenceTool:
     if tool is InferenceTool.AIPERF and provider_runtime is None:
-        return UnavailableInferenceToolDiscovery(
-            tool=tool,
-            compatibility_reason="No verified AIPerf provider environment is available.",
+        _capability_unavailable(
+            tool,
+            "No verified AIPerf provider environment is available.",
             remediation=(
                 "Call start_capability_setup with adapters=['aiperf'], wait for completion, "
                 "then plan the inference scenario again.",
+            ),
+            next_action=tool_action(
+                ActionId.START_CAPABILITY_SETUP,
+                adapters=["aiperf"],
+                idempotency_key="inference-aiperf",
             ),
         )
     if provider_runtime is not None:
@@ -431,11 +475,8 @@ def discover_inference_tool(
         environment = dict(os.environ)
         environment["PATH"] = os.pathsep.join((str(scripts_dir), environment.get("PATH", "")))
         binding = ExecutableResolver().resolve_host_tool(str(tool), environment=environment)
-    executable = binding.canonical_target if binding is not None else None
     tool_version: str | None = None
-    executable_digest: str | None = None
-    if executable is not None and binding is not None:
-        executable_digest = binding.identity.sha256
+    if binding is not None:
         if provider_runtime is not None:
             tool_version = provider_runtime.receipt.distributions.get(str(tool))
         else:
@@ -443,42 +484,52 @@ def discover_inference_tool(
                 tool_version = version(tool)
             except PackageNotFoundError:
                 tool_version = None
-    compatible = executable is not None
-    compatibility_reason: str | None = None
-    if executable is not None and tool is InferenceTool.AIPERF:
-        compatible = tool_version is not None and tool_version.split(".")[:2] == ["0", "12"]
-        if not compatible:
-            compatibility_reason = (
-                "AIPerf version is unknown or outside Flameox's supported >=0.12,<0.13 range."
-            )
-    if executable is not None and binding is not None and compatible:
-        return AvailableInferenceToolDiscovery(
-            tool=tool,
-            executable=executable,
-            executable_binding=binding,
-            version=tool_version,
-            executable_digest=executable_digest,
-            provider_environment_id=(
-                provider_runtime.receipt.environment_id if provider_runtime is not None else None
-            ),
-            provider_python=provider_runtime.python if provider_runtime is not None else None,
-            provider_python_sha256=(
-                provider_runtime.receipt.python_sha256 if provider_runtime is not None else None
-            ),
-        )
-    return UnavailableInferenceToolDiscovery(
-        tool=tool,
-        executable=executable,
-        version=tool_version,
-        executable_digest=executable_digest,
-        compatibility_reason=compatibility_reason,
-        remediation=(
-            (
-                "Call start_capability_setup with adapters=['aiperf'] to create a compatible "
-                "provider environment, then retry.",
+    if binding is None:
+        _capability_unavailable(
+            tool,
+            f"No executable for inference tool {tool.value!r} is available.",
+            remediation=(
+                "Call start_capability_setup with adapters=['aiperf'] to create a qualified "
+                "provider environment, then plan again.",
             )
             if tool is InferenceTool.AIPERF
-            else ("Install vLLM in the target runtime; Flameox does not install it.",)
+            else ("Install vLLM in the target runtime; Flameox does not install it.",),
+            next_action=(
+                tool_action(
+                    ActionId.START_CAPABILITY_SETUP,
+                    adapters=["aiperf"],
+                    idempotency_key="inference-aiperf",
+                )
+                if tool is InferenceTool.AIPERF
+                else manual_action(
+                    "Install vLLM in the target runtime and retry planning.",
+                    suggested_action=ActionId.INSPECT_CAPABILITIES,
+                )
+            ),
+        )
+    if tool is InferenceTool.AIPERF and (
+        tool_version is None or tool_version.split(".")[:2] != ["0", "12"]
+    ):
+        _capability_unavailable(
+            tool,
+            "AIPerf is outside Flameox's supported >=0.12,<0.13 range.",
+            details={"version": tool_version},
+            remediation=(
+                "Call start_capability_setup with adapters=['aiperf'] to create a compatible "
+                "provider environment, then plan again.",
+            ),
+            next_action=tool_action(
+                ActionId.START_CAPABILITY_SETUP,
+                adapters=["aiperf"],
+                idempotency_key="inference-aiperf",
+            ),
+        )
+    return QualifiedInferenceTool(
+        tool=tool,
+        executable_binding=binding,
+        version=tool_version,
+        provider_environment_id=(
+            provider_runtime.receipt.environment_id if provider_runtime is not None else None
         ),
     )
 
@@ -509,7 +560,7 @@ def probe_existing_vllm_server(
 ) -> ExistingServerProbe:
     """Probe only documented read endpoints; never send an inference request."""
 
-    normalized = _loopback_http_url(base_url)
+    normalized = validate_loopback_base_url(base_url)
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
     deadline = time.monotonic() + timeout_seconds
@@ -536,7 +587,7 @@ async def probe_existing_vllm_server_async(
 ) -> ExistingServerProbe:
     """Asynchronously probe the same bounded read-only readiness contract."""
 
-    normalized = _loopback_http_url(base_url)
+    normalized = validate_loopback_base_url(base_url)
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
     deadline = time.monotonic() + timeout_seconds

@@ -9,7 +9,6 @@ from flameox.workers.protocol import WorkerDefinition, WorkerOperationId
 
 
 class V8ProfileRequest(ContractModel):
-    schema_version: Literal[1] = 1
     profile_kind: Literal["cpu", "heap"]
     artifact_path: str = Field(min_length=1, max_length=4_096)
     artifact_id: str = Field(min_length=1, max_length=200)
@@ -20,7 +19,6 @@ class V8ProfileRequest(ContractModel):
 
 
 class V8ProfileResult(ContractModel):
-    schema_version: Literal[1] = 1
     profile_kind: Literal["cpu", "heap"]
     node_count: Annotated[int, Field(ge=0)]
     sample_count: Annotated[int, Field(ge=0)]

@@ -1,7 +1,7 @@
-"""Focused tests for inference replay comparison compatibility.
+"""Focused tests for inference benchmark comparison compatibility.
 
 These tests prove that:
-- Inference replay runs with incomplete identity (existing_local, no oracle)
+- Inference benchmark runs with incomplete identity (existing_local, no oracle)
   produce EXPLORATORY comparisons, not INVALID.
 - Differing protocol facets still produce INVALID comparisons.
 - Non-inference runs are unaffected by the inference compatibility path.
@@ -27,7 +27,7 @@ from flameox.analysis.inference_protocol import (
     ServerConfigIdentity,
     TraceIdentity,
 )
-from flameox.application import (
+from flameox.application.comparisons import (
     ComparisonService,
     FreezeRunIdsRequest,
     FreezeRunMembersRequest,
@@ -132,7 +132,7 @@ def _publish_inference_run(
         capture_status=CaptureStatus.REGISTERED,
         validation_status=validation_status,
         environment_id=environment.environment_id,
-        semantics=RunSemantics.unavailable(origin="import", adapter="inference-replay"),
+        semantics=RunSemantics.unavailable(origin="import", adapter="inference-benchmark"),
         inference_protocol_identity_id=digest_model(protocol_json),
         inference_protocol_identity_json=protocol_json,
     )
@@ -529,7 +529,7 @@ def test_within_treatment_protocol_difference_is_invalid(
         publisher_version="1",
         input_run_ids=(baseline_run_a, baseline_run_b, candidate_id),
     )
-    from flameox.application import IncludedFreezeRunSetMember
+    from flameox.application.comparisons import IncludedFreezeRunSetMember
 
     run_sets = RunSetService(workspace)
     baseline = run_sets.freeze(
@@ -588,7 +588,7 @@ def test_malformed_protocol_json_is_invalidating_not_leaking(
         capture_status=CaptureStatus.REGISTERED,
         validation_status=ValidationStatus.NOT_REQUESTED,
         environment_id=environment.environment_id,
-        semantics=RunSemantics.unavailable(origin="import", adapter="inference-replay"),
+        semantics=RunSemantics.unavailable(origin="import", adapter="inference-benchmark"),
         inference_protocol_identity_id=digest_model("garbage"),
         inference_protocol_identity_json="{not valid json",
     )

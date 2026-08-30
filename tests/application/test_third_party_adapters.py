@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from flameox.adapters import AdapterDescriptor
-from flameox.application import CaptureService, ExecutionPolicy
+from flameox.adapters.registry import AdapterDescriptor
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
 from flameox.catalog import Catalog
 from flameox.domain import (
-    ADAPTER_API_VERSION,
     AdapterArtifactDeclaration,
     AdapterExecutionPlan,
     AdapterExtractionResult,
@@ -44,7 +44,7 @@ output.write_text('samples=7\\n')
 
 class FixtureAdapter:
     name = "fixture"
-    api_version = ADAPTER_API_VERSION
+    api_version = 1
 
     def __init__(
         self,
@@ -136,7 +136,6 @@ def _workspace(tmp_path: Path, command: str = "print('workload')") -> Workspace:
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 [workloads.fixture]
 argv = [{json.dumps(sys.executable)}, "-c", {json.dumps(command)}]
 timeout_seconds = 30

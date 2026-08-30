@@ -12,10 +12,10 @@ import pytest
 from flameox.adapters.builtins import build_capture_invocation
 from flameox.adapters.nvbench import NvbenchExtractor
 from flameox.adapters.options import bind_adapter_options
-from flameox.application import NvbenchImportService
+from flameox.application.nvbench_imports import NvbenchImportService
 from flameox.catalog import Catalog
 from flameox.domain import DomainError, ErrorCode
-from flameox.storage import GenerationManifest, RunStore, Workspace
+from flameox.storage import RunStore, Workspace
 
 pytestmark = pytest.mark.unit
 
@@ -140,10 +140,7 @@ def test_nvbench_extracts_float32_sample_times_without_lossy_conversion(
     }
     head = workspace.corpus.read_head()
     generations = [
-        GenerationManifest.model_validate_json(
-            (workspace.paths.root / relative_path).read_text(encoding="utf-8")
-        )
-        for relative_path in head.generation_manifests
+        workspace.corpus.read_generation(generation_id) for generation_id in head.generation_ids
     ]
     generation = next(
         manifest for manifest in generations if manifest.publisher == NvbenchExtractor.name

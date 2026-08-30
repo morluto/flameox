@@ -3,27 +3,29 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, cast
+from urllib.request import urlopen
 
 import pytest
 
 from flameox.adapters.toxiproxy import ToxiproxyToolManager, ToxiproxyToolReceipt
-from flameox.application import (
-    CaptureService,
-    CreateInvestigationRequest,
-    ExecutionPolicy,
+from flameox.application.capture import CaptureService
+from flameox.application.execution_policy import ExecutionPolicy
+from flameox.application.faults import (
     FaultExperimentPlan,
     FaultExperimentService,
-    InvestigationService,
-)
-from flameox.application.faults import (
     _FailedSidecarAttempt,
     _SidecarAttemptCancelled,
     _SidecarAttemptError,
+)
+from flameox.application.records import (
+    CreateInvestigationRequest,
+    InvestigationService,
 )
 from flameox.application.workloads import FaultExperimentConfig, ProjectConfig
 from flameox.domain import (
@@ -69,11 +71,33 @@ def test_fault_configuration_rejects_non_discriminating_transport_definitions() 
         )
 
 
+def test_fault_configuration_hard_migrates_numeric_measurements() -> None:
+    common = {
+        "workload": "client",
+        "endpoint_parameter": "endpoint",
+        "upstream_host": "127.0.0.1",
+        "upstream_port": 8080,
+        "endpoint_template": "http://{host}:{port}",
+        "scenarios": {"delay": {"type": "latency", "latency_ms": 10}},
+    }
+    configured = FaultExperimentConfig.model_validate(
+        {**common, "measurement": {"source": "stdout_json"}}
+    )
+    assert configured.measurement is not None
+    assert configured.measurement.source == "stdout_json"
+
+    with pytest.raises(ValueError, match="primary_metric"):
+        FaultExperimentConfig.model_validate({**common, "primary_metric": "fault.client_elapsed"})
+    with pytest.raises(ValueError, match="polarity"):
+        FaultExperimentConfig.model_validate(
+            {**common, "measurement": {"source": "stdout_json", "polarity": "higher_is_better"}}
+        )
+
+
 def test_fault_configuration_rejects_unused_endpoint_parameter() -> None:
     with pytest.raises(ValueError, match="must be rendered"):
         ProjectConfig.model_validate(
             {
-                "schema_version": 1,
                 "workloads": {
                     "client": {
                         "argv": ["python", "-c", "print(1)"],
@@ -98,7 +122,6 @@ def test_fault_configuration_rejects_escaped_endpoint_parameter() -> None:
     with pytest.raises(ValueError, match="must be rendered"):
         ProjectConfig.model_validate(
             {
-                "schema_version": 1,
                 "workloads": {
                     "client": {
                         "argv": ["python", "-c", "print('{{endpoint}}')"],
@@ -206,6 +229,61 @@ class _CancellingLease(_FakeLease):
         raise asyncio.CancelledError
 
 
+class _LoopbackProxyLease(_FakeLease):
+    def __init__(self, upstream_port: int) -> None:
+        super().__init__()
+        self.upstream_port = upstream_port
+        self.latency_seconds = 0.0
+        self.reset_peer = False
+        self.request_count = 0
+        lease = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                lease.request_count += 1
+                if lease.reset_peer:
+                    self.close_connection = True
+                    return
+                if lease.latency_seconds:
+                    time.sleep(lease.latency_seconds)
+                with urlopen(
+                    f"http://127.0.0.1:{lease.upstream_port}{self.path}",
+                    timeout=2,
+                ) as response:
+                    payload = response.read()
+                    self.send_response(response.status)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def listen_port(self) -> int:
+        return int(self.server.server_port)
+
+    async def add_toxic_async(self, **kwargs: object) -> dict[str, object]:
+        treatment = await super().add_toxic_async(**kwargs)
+        if treatment["toxic_type"] == "latency":
+            attributes = cast(dict[str, int], treatment["attributes"])
+            self.latency_seconds = attributes["latency"] / 1_000
+        if treatment["toxic_type"] == "reset_peer":
+            self.reset_peer = True
+        return treatment
+
+    async def close(self) -> ManagedSidecarOutcome:
+        self.server.shutdown()
+        self.thread.join(timeout=2)
+        self.server.server_close()
+        return await super().close()
+
+
 @pytest.mark.anyio
 async def test_proxy_creation_cancellation_finalizes_attempt_evidence(
     tmp_path: Path,
@@ -264,7 +342,6 @@ async def test_pre_capture_sidecar_failure_preserves_diagnostic_run(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 
 [workloads.client]
 argv = ["python", "-c", "print(1)", "{endpoint}"]
@@ -341,7 +418,6 @@ latency_ms = 10
 
     result = await service.run(plan.plan_token)
 
-    assert result.schema_version == 3
     assert all(trial.run_id is not None for trial in result.trials)
     assert set(result.trial_diagnostics) == {trial.trial_id for trial in result.trials}
     for trial in result.trials:
@@ -391,7 +467,6 @@ async def test_capture_cancellation_preserves_phase_diagnostic(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 
 [workloads.client]
 argv = ["python", "-c", "print(1)", "{endpoint}"]
@@ -464,7 +539,6 @@ async def test_fault_plan_records_workload_and_sidecar_containment_separately(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 
 [workloads.client]
 argv = ["python", "-c", "print(1)", "{endpoint}"]
@@ -496,6 +570,7 @@ latency_ms = 10
         execution_policy=ExecutionPolicy.APPROVED_AGENT,
     )
 
+    assert "request_digest" not in plan.model_dump(mode="json")
     assert plan.workload_containment == ExecutionPolicy.APPROVED_AGENT.value
     assert plan.containment == "managed_process_group"
     assert tool_manager.stage_calls == 0
@@ -534,7 +609,6 @@ async def test_fault_run_preserves_proxy_config_process_evidence_and_endpoint_in
     )
     (tmp_path / "flameox.toml").write_text(
         f"""
-schema_version = 1
 
 [workloads.client]
 argv = ["python", "-c", {json.dumps(client_code)}, "{{endpoint}}"]
@@ -662,6 +736,202 @@ latency_ms = 10
 
 
 @pytest.mark.anyio
+async def test_fault_receipt_compares_latency_without_measuring_reset_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    config = workspace.config.validated_copy(
+        update={
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
+        }
+    )
+    workspace.paths.config.write_text(config.to_toml())
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    client_code = (
+        "from urllib.request import urlopen; import json, sys, time; "
+        "started = time.monotonic_ns(); urlopen(sys.argv[1], timeout=2).read(); "
+        "print(json.dumps({'elapsed_ns': time.monotonic_ns() - started, 'outcome': 'completed'}))"
+    )
+    (tmp_path / "flameox.toml").write_text(
+        f"""
+
+[workloads.client]
+argv = ["python", "-c", {json.dumps(client_code)}, "{{endpoint}}"]
+cwd = "."
+timeout_seconds = 5
+
+[workloads.client.parameters]
+endpoint = ["unused"]
+
+[fault_experiments.transport]
+workload = "client"
+endpoint_parameter = "endpoint"
+upstream_host = "127.0.0.1"
+upstream_port = {upstream.server_port}
+endpoint_template = "http://{{host}}:{{port}}"
+blocks = 2
+
+[fault_experiments.transport.measurement]
+source = "stdout_json"
+practical_threshold = 0.01
+
+[fault_experiments.transport.scenarios.delay]
+type = "latency"
+latency_ms = 40
+
+[fault_experiments.transport.scenarios.reset]
+type = "reset_peer"
+"""
+    )
+    investigation = InvestigationService(workspace).create(
+        CreateInvestigationRequest(question="how do transport faults affect client wall time?")
+    )
+    service = FaultExperimentService(workspace, tool_manager=_ToolManager(Path("/bin/true")))
+    leases: list[_LoopbackProxyLease] = []
+
+    async def fake_start(
+        *_args: object,
+        **_kwargs: object,
+    ) -> tuple[_LoopbackProxyLease, int, int, tuple[_FailedSidecarAttempt, ...]]:
+        lease = _LoopbackProxyLease(upstream.server_port)
+        leases.append(lease)
+        return lease, 48000 + len(leases), lease.listen_port, ()
+
+    monkeypatch.setattr(service, "_start_sidecar", fake_start)
+    try:
+        plan = await service.plan(
+            experiment_name="transport",
+            investigation_id=investigation.investigation_id,
+            execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+        )
+        result = await service.run(plan.plan_token)
+    finally:
+        upstream.shutdown()
+        thread.join(timeout=2)
+        upstream.server_close()
+
+    assert result.experiment.primary_metric == "fault.client_elapsed"
+    assert result.experiment.primary_metric_unit == "ns"
+    assert len(result.run_sets) == 3
+    assert len(result.comparisons) == 2
+    delay = next(
+        comparison
+        for comparison in result.comparisons
+        if comparison.candidate_run_set.selection["variant"] == "delay"
+    ).comparison
+    reset = next(
+        comparison
+        for comparison in result.comparisons
+        if comparison.candidate_run_set.selection["variant"] == "reset"
+    ).comparison
+    assert delay.baseline_eligible_n == 2
+    assert delay.candidate_eligible_n == 2
+    assert delay.absolute_change is not None
+    assert sum(lease.request_count for lease in leases if lease.latency_seconds) == 2
+    assert delay.absolute_change.value > 20_000_000, {
+        "baseline": delay.baseline_value,
+        "candidate": delay.candidate_value,
+        "change": delay.absolute_change,
+    }
+    assert reset.candidate_eligible_n == 0
+    assert reset.candidate_value is None
+    assert all(
+        trial.outcome.value != "succeeded"
+        for trial in result.trials
+        if trial.factors["scenario"] == "reset"
+    )
+    assert result.measurement_recovery is not None
+    assert result.measurement_recovery.suggested_action is not None
+    assert result.measurement_recovery.suggested_action.value == "fault_experiment.plan"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("client_code", "error_code"),
+    [
+        ("print('not-json')", ErrorCode.ARTIFACT_PARSE_FAILED),
+        ("pass", ErrorCode.ARTIFACT_NOT_FOUND),
+    ],
+)
+async def test_fault_invalid_receipt_is_diagnostic_and_inconclusive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    client_code: str,
+    error_code: ErrorCode,
+) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    config = workspace.config.validated_copy(
+        update={
+            "execution": workspace.config.execution.validated_copy(
+                update={"containment": "disabled"}
+            )
+        }
+    )
+    workspace.paths.config.write_text(config.to_toml())
+    (tmp_path / "flameox.toml").write_text(
+        f"""
+
+[workloads.client]
+argv = ["python", "-c", {json.dumps(client_code)}, "{{endpoint}}"]
+cwd = "."
+
+[workloads.client.parameters]
+endpoint = ["unused"]
+
+[fault_experiments.transport]
+workload = "client"
+endpoint_parameter = "endpoint"
+upstream_host = "127.0.0.1"
+upstream_port = 8080
+endpoint_template = "http://{{host}}:{{port}}"
+
+[fault_experiments.transport.measurement]
+source = "stdout_json"
+
+[fault_experiments.transport.scenarios.delay]
+type = "latency"
+latency_ms = 10
+"""
+    )
+    investigation = InvestigationService(workspace).create(
+        CreateInvestigationRequest(question="what if a fault workload emits no receipt?")
+    )
+    service = FaultExperimentService(workspace, tool_manager=_ToolManager(Path("/bin/true")))
+
+    async def fake_start(
+        *_args: object,
+        **_kwargs: object,
+    ) -> tuple[_FakeLease, int, int, tuple[_FailedSidecarAttempt, ...]]:
+        return _FakeLease(), 48000, 48001, ()
+
+    monkeypatch.setattr(service, "_start_sidecar", fake_start)
+    plan = await service.plan(
+        experiment_name="transport",
+        investigation_id=investigation.investigation_id,
+        execution_policy=ExecutionPolicy.TRUSTED_LOCAL,
+    )
+    result = await service.run(plan.plan_token)
+
+    assert len(result.trial_diagnostics) == 2
+    assert {
+        (diagnostic.phase, diagnostic.error_code)
+        for diagnostic in result.trial_diagnostics.values()
+    } == {("measurement_receipt", error_code)}
+    assert len(result.comparisons) == 1
+    comparison = result.comparisons[0].comparison
+    assert comparison.baseline_eligible_n == 0
+    assert comparison.candidate_eligible_n == 0
+    assert comparison.absolute_change is None
+    assert comparison.validity.value == "invalid"
+    assert result.measurement_recovery is not None
+
+
+@pytest.mark.anyio
 async def test_fault_plan_randomizes_treatment_order_across_blocks(
     tmp_path: Path,
 ) -> None:
@@ -674,7 +944,6 @@ async def test_fault_plan_randomizes_treatment_order_across_blocks(
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 
 [workloads.client]
 argv = ["python", "-c", "print(1)", "{endpoint}"]

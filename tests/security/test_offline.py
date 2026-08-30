@@ -7,11 +7,11 @@ from typing import Any
 import pytest
 
 from flameox.analysis import RecipeService
-from flameox.application import (
+from flameox.application.imports import (
     ImportArtifactRequest,
     ImportService,
-    workspace_status,
 )
+from flameox.application.status import workspace_status
 from flameox.storage import Workspace
 
 pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]

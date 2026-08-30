@@ -9,7 +9,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from flameox.action_graph import ActionId, ManualAction, ToolAction
-from flameox.application import (
+from flameox.application.workloads import (
     ConfigurationOperation,
     ConfigureWorkloadRequest,
     DeclaredWorkflowKind,
@@ -31,6 +31,16 @@ pytestmark = pytest.mark.integration
 def test_oracle_declaration_requires_a_command() -> None:
     with pytest.raises(ValidationError, match="argv"):
         WorkloadOracleConfig.model_validate({"strength": "execution_check"})
+
+
+def test_cross_treatment_oracle_requires_a_typed_receipt() -> None:
+    with pytest.raises(ValidationError, match="typed oracle receipt"):
+        WorkloadOracleConfig.model_validate(
+            {
+                "strength": "cross_treatment_equivalence",
+                "argv": ["python", "oracle.py"],
+            }
+        )
 
 
 def _request(
@@ -130,7 +140,7 @@ def test_inference_declaration_names_are_safe_identifiers(name: str) -> None:
         )
 
 
-def test_configure_workload_is_idempotent_and_records_configuration_source(tmp_path: Path) -> None:
+def test_configure_workload_is_idempotent_and_reports_its_mutation(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
     service = WorkloadService(workspace)
     request = _request("probe")
@@ -141,7 +151,6 @@ def test_configure_workload_is_idempotent_and_records_configuration_source(tmp_p
 
     assert first.action == "created"
     assert first.changed_paths == ("flameox.toml",)
-    assert first.configuration_source == "agent"
     assert second.action == "unchanged"
     assert second.configuration_id == first.configuration_id
     assert second.workload_definition_id == first.workload_definition_id
@@ -176,7 +185,6 @@ def test_referenced_workflows_expose_workload_execution_protocol(tmp_path: Path)
     workspace = Workspace.initialize(tmp_path)
     (tmp_path / "flameox.toml").write_text(
         """
-schema_version = 1
 [workloads.benchmark]
 argv = ["./benchmark", "{endpoint}"]
 execution_protocol = "nvbench"
@@ -274,69 +282,21 @@ def test_unknown_plain_placeholder_is_still_rejected(tmp_path: Path) -> None:
         service.configure(_request("unknown", argv=("python", "-c", "print({missing})")))
 
 
-def test_schema_one_legacy_experiment_fields_remain_loadable() -> None:
-    project = ProjectConfig.model_validate(
-        {
-            "schema_version": 1,
-            "workloads": {
-                "scan": {
-                    "argv": ["python", "-c", "print('{variant}', '{length}')"],
-                    "parameters": {
-                        "variant": ["baseline", "candidate"],
-                        "length": [1, 2],
-                    },
-                }
-            },
-            "experiments": {
-                "scan": {
-                    "workload": "scan",
-                    "variants": ["baseline", "candidate"],
-                    "scaling_parameter": "length",
-                    "scaling_values": [1, 2],
-                }
-            },
-        }
-    )
+def test_invalid_project_config_is_not_repaired_or_overwritten(tmp_path: Path) -> None:
+    source = "unknown = true\n"
+    (tmp_path / "flameox.toml").write_text(source)
+    workspace = Workspace.initialize(tmp_path)
+    service = WorkloadService(workspace)
 
-    experiment = project.experiments["scan"]
-    assert experiment.variants == ("baseline", "candidate")
-    assert experiment.scaling_parameter == "length"
-    assert experiment.scaling_values == (1, 2)
-
-
-def test_legacy_scaled_experiment_accepts_distinct_typed_scaling_values() -> None:
-    project = ProjectConfig.model_validate(
-        {
-            "schema_version": 1,
-            "workloads": {
-                "scan": {
-                    "argv": ["python", "-c", "print('{length}')"],
-                    "parameters": {"length": [1, 1.0]},
-                }
-            },
-            "experiments": {
-                "scan": {
-                    "workload": "scan",
-                    "variants": ["baseline", "candidate"],
-                    "scaling_parameter": "length",
-                    "scaling_values": [1, 1.0],
-                }
-            },
-        }
-    )
-
-    assert project.experiments["scan"].scaling_values == (1, 1.0)
+    assert service.configuration_status().status == "invalid"
+    with pytest.raises(DomainError, match=r"existing flameox\.toml is invalid"):
+        service.configure(_request("probe"))
+    assert (tmp_path / "flameox.toml").read_text() == source
 
 
 @pytest.mark.parametrize(
     "shape",
     (
-        {"variants": ["baseline", "candidate"]},
-        {
-            "variants": ["baseline", "candidate"],
-            "scaling_parameter": "length",
-            "scaling_values": [1, 2],
-        },
         {
             "treatment_factor": "mode",
             "factors": {"mode": ["baseline", "candidate"]},
@@ -390,17 +350,20 @@ def test_experiment_parser_round_trips_each_legal_case(
         },
         {
             "workload": "scan",
-            "variants": ["baseline", "candidate"],
+            "factors": {"mode": ["baseline", "candidate"]},
+            "treatment_factor": "mode",
             "scaling_parameter": "length",
         },
         {
             "workload": "scan",
-            "variants": ["baseline", "candidate"],
+            "factors": {"mode": ["baseline", "candidate"]},
+            "treatment_factor": "mode",
             "outcome_goal": "absence_of_failure",
         },
         {
             "workload": "scan",
-            "variants": ["baseline", "candidate"],
+            "factors": {"mode": ["baseline", "candidate"]},
+            "treatment_factor": "mode",
             "analysis": "outcome",
         },
     ),
@@ -418,7 +381,8 @@ def test_experiment_parser_rejects_outcome_goals_without_evaluable_contracts(
         parse_experiment_config(
             {
                 "workload": "scan",
-                "variants": ["baseline", "candidate"],
+                "factors": {"mode": ["baseline", "candidate"]},
+                "treatment_factor": "mode",
                 "analysis": "outcome",
                 "outcome_goal": goal,
             }
@@ -430,7 +394,6 @@ def test_replace_requires_current_configuration_digest_and_preserves_unrelated_s
 ) -> None:
     (tmp_path / "flameox.toml").write_text(
         """# keep this project note
-schema_version = 1
 
 [workloads.alpha]
 argv = ["python", "-c", "print('alpha')"]
@@ -486,13 +449,10 @@ mode = ["baseline", "candidate"]
     assert "[experiments.compare]" in updated_text
     assert "print('new alpha')" in updated_text
     assert "print('alpha')" not in updated_text
-    assert updated.configuration_source == "agent"
 
 
 def test_invalid_configuration_is_reported_and_never_overwritten(tmp_path: Path) -> None:
-    invalid = """schema_version = 1
-
-[workloads.probe]
+    invalid = """[workloads.probe]
 argv = ["python", "-c", "print('ok')"]
 
 [experiments.broken]
@@ -526,7 +486,6 @@ def test_structured_workload_recovery_repairs_semantically_invalid_configuration
 ) -> None:
     (tmp_path / "flameox.toml").write_text(
         """# preserve this note
-schema_version = 1
 
 [experiments.broken]
 workload = "missing"
@@ -583,7 +542,7 @@ def test_factor_experiment_baseline_value_uses_exact_scalar_identity() -> None:
 
 def test_scalar_identity_distinguishes_exact_json_types() -> None:
     """Scalar identity distinguishes bool/int/float even when Python equality treats them equal."""
-    from flameox.application import (
+    from flameox.application.workloads import (
         scalar_contains,
         scalar_equal,
         scalar_identity,

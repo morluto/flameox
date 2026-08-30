@@ -10,13 +10,17 @@ from pathlib import Path
 
 import pytest
 
-from flameox.adapters import (
+from flameox.adapters.inference import (
     AIPerfCorrelationSummary,
     AIPerfInputsIndex,
     AIPerfRecordParser,
     InferenceArtifactExtractor,
 )
-from flameox.application import EvidenceQueryService, ImportArtifactRequest, ImportService
+from flameox.application.evidence_query import EvidenceQueryService
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.application.provider_runtime import ProviderRuntime, ProviderRuntimeReceipt
 from flameox.domain import ArtifactKind, CapabilityExtra, DomainError, ErrorCode, Sensitivity
 from flameox.domain.identity import new_id
@@ -133,10 +137,7 @@ def test_aiperf_record_parser_normalizes_safe_request_evidence(tmp_path: Path) -
         "latency_ns": 10_000_000,
         "tpot_ns": 4_000_000,
         "mean_itl_ns": 4_000_000,
-        "success": True,
-        "cancelled": False,
-        "error_type": None,
-        "error_code": None,
+        "outcome": {"kind": "succeeded"},
         "queue_ns": None,
         "prefill_ns": None,
         "decode_ns": None,
@@ -168,10 +169,8 @@ def test_aiperf_record_parser_keeps_only_safe_error_classification(tmp_path: Pat
     row = next(_aiperf_parser(tmp_path).iter_rows(result))
 
     assert row.outcome.kind is InferenceRequestOutcomeKind.CANCELLED
-    assert row.success is False
-    assert row.cancelled is True
-    assert row.error_type == "timeout"
-    assert row.error_code == "408"
+    assert row.outcome.error_type == "timeout"
+    assert row.outcome.error_code == "408"
     assert "secret body" not in json.dumps(row.evidence_columns())
 
 
@@ -188,8 +187,8 @@ def test_aiperf_record_parser_collapses_untrusted_error_identifiers(tmp_path: Pa
     row = next(_aiperf_parser(tmp_path).iter_rows(result))
 
     assert row.outcome.kind is InferenceRequestOutcomeKind.FAILED
-    assert row.error_type == "provider_error"
-    assert row.error_code == "499"
+    assert row.outcome.error_type == "provider_error"
+    assert row.outcome.error_code == "499"
     serialized = json.dumps(row.evidence_columns())
     assert "super-secret" not in serialized
     assert "another secret" not in serialized
@@ -826,7 +825,7 @@ def test_extractor_rejects_invalid_inputs_json_as_trace_artifact(tmp_path: Path)
     assert error.value.code is ErrorCode.ARTIFACT_PARSE_FAILED
 
 
-def test_correlation_summary_is_typed_contract_model() -> None:
+def test_correlation_summary_preserves_matched_count() -> None:
     summary = AIPerfCorrelationSummary(
         inputs_session_count=5,
         matched_count=3,
@@ -834,7 +833,6 @@ def test_correlation_summary_is_typed_contract_model() -> None:
         turn_out_of_range_count=1,
         no_correlation_id_count=0,
     )
-    assert summary.schema_version == 1
     assert summary.matched_count == 3
 
 

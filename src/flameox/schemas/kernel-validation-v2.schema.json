@@ -39,7 +39,7 @@
         "profile": {
           "anyOf": [
             {
-              "$ref": "#/$defs/PsnrProfile"
+              "$ref": "#/$defs/ExactPsnrProfile"
             },
             {
               "type": "null"
@@ -507,25 +507,6 @@
       "title": "KernelValidationStatus",
       "type": "string"
     },
-    "LegacyPsnrProfile": {
-      "additionalProperties": false,
-      "properties": {
-        "identity_quality": {
-          "const": "legacy_unqualified",
-          "default": "legacy_unqualified",
-          "title": "Identity Quality",
-          "type": "string"
-        },
-        "reason": {
-          "const": "v1_missing_profile",
-          "default": "v1_missing_profile",
-          "title": "Reason",
-          "type": "string"
-        }
-      },
-      "title": "LegacyPsnrProfile",
-      "type": "object"
-    },
     "PositiveInfinityKernelMetricValue": {
       "additionalProperties": false,
       "properties": {
@@ -546,23 +527,6 @@
       ],
       "title": "PositiveInfinityKernelMetricValue",
       "type": "object"
-    },
-    "PsnrProfile": {
-      "discriminator": {
-        "mapping": {
-          "exact": "#/$defs/ExactPsnrProfile",
-          "legacy_unqualified": "#/$defs/LegacyPsnrProfile"
-        },
-        "propertyName": "identity_quality"
-      },
-      "oneOf": [
-        {
-          "$ref": "#/$defs/ExactPsnrProfile"
-        },
-        {
-          "$ref": "#/$defs/LegacyPsnrProfile"
-        }
-      ]
     },
     "UnavailableKernelValidationMetric": {
       "additionalProperties": false,

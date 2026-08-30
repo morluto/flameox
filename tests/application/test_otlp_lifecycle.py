@@ -7,11 +7,15 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
-from flameox.application import ImportArtifactRequest, ImportService, OtlpExtractionResult
+from flameox.application.imports import (
+    ImportArtifactRequest,
+    ImportService,
+)
 from flameox.application.lifecycle import LifecycleEvidenceService
+from flameox.application.otlp import OtlpExtractionResult
 from flameox.catalog import Catalog
-from flameox.domain import ArtifactKind, DomainError, ErrorCode, ProjectionState
-from flameox.storage import ProjectionIntentStore, Workspace
+from flameox.domain import ArtifactKind, DomainError, ErrorCode
+from flameox.storage import Workspace
 
 json_format: Any = None
 ExportTraceServiceRequest: Any = Any
@@ -168,13 +172,14 @@ def test_otlp_normalization_and_lifecycle_queries_preserve_evidence(
     repeated = ImportService(workspace).extract_otlp_trace(run_id, artifact_id)
 
     assert extracted.evidence_generation_id == repeated.evidence_generation_id
-    [intent] = [
-        item
-        for item in ProjectionIntentStore(workspace).list(state=ProjectionState.PUBLISHED)
-        if item.projection_kind == "extract.otlp"
-    ]
-    assert intent.generation_id == extracted.evidence_generation_id
-    assert intent.domain_kind == "artifact_registration"
+    otlp_generations = tuple(
+        workspace.corpus.read_generation(generation_id)
+        for generation_id in workspace.corpus.read_head().generation_ids
+        if workspace.corpus.read_generation(generation_id).publisher == "flameox.otlp"
+    )
+    assert tuple(item.generation_id for item in otlp_generations) == (
+        extracted.evidence_generation_id,
+    )
     assert (extracted.resource_count, extracted.scope_count) == (1, 1)
     assert extracted.span_count == 9
     assert extracted.event_count == 2
@@ -354,21 +359,15 @@ def test_otlp_row_limit_refuses_partial_generation_and_retains_raw_artifact(
 
     result = ImportService(workspace).extract_otlp_trace(run_id, artifact_id)
 
-    assert result.failed is True
+    assert result.status == "row_limit_exceeded"
     assert result.evidence_generation_id is None
     assert "otlp_row_limit_exceeded" in result.limitations
     assert ImportService(workspace).artifacts.get(artifact_id).payload_path.is_file()
 
 
-def test_otlp_failure_is_derived_from_evidence_publication() -> None:
-    failed = OtlpExtractionResult(run_id="run", artifact_id="artifact")
-
-    assert failed.failed is True
-    assert failed.validated_copy().failed is True
-
-    contradictory = {**failed.model_dump(), "failed": False}
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        OtlpExtractionResult.model_validate(contradictory)
+def test_otlp_complete_status_requires_an_evidence_generation() -> None:
+    with pytest.raises(ValidationError, match="requires an evidence generation"):
+        OtlpExtractionResult(run_id="run", artifact_id="artifact", status="complete")
 
 
 def test_otlp_extraction_does_not_read_artifact_bytes_in_application_process(
@@ -395,5 +394,5 @@ def test_otlp_extraction_does_not_read_artifact_bytes_in_application_process(
 
     result = ImportService(workspace).extract_otlp_trace(run_id, artifact_id)
 
-    assert result.failed is False
+    assert result.status == "complete"
     assert result.span_count == 9

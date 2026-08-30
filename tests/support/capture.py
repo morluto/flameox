@@ -8,7 +8,6 @@ from flameox.storage import Workspace
 def write_workload(project: Path, *, message: str = "hello") -> None:
     (project / "flameox.toml").write_text(
         f"""
-schema_version = 1
 
 [workloads.echo]
 argv = ["python", "-c", "print('{{message}}')"]

@@ -206,8 +206,7 @@ class AcceleratorRecipes(RecipeContext):
                 artifact_column="artifact_id",
             )
             producer_rows = snapshot.execute(
-                "SELECT DISTINCT producer FROM artifact_registrations WHERE "
-                + registration_where,
+                "SELECT DISTINCT producer FROM artifact_registrations WHERE " + registration_where,
                 registration_parameters,
             ).fetchall()
             producers = {str(row[0]).casefold() for row in producer_rows if row[0] is not None}

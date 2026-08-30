@@ -4,17 +4,14 @@ import codecs
 import hashlib
 import os
 import stat
-from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any, Literal, assert_never, cast
+from typing import Annotated, Literal, assert_never, cast
 
 from pydantic import (
-    ConfigDict,
     Field,
     JsonValue,
-    ModelWrapValidatorHandler,
     computed_field,
     model_validator,
 )
@@ -23,16 +20,17 @@ from flameox.domain import (
     CursorNamespace,
     DomainError,
     ErrorCode,
+    RunManifest,
     Sensitivity,
-    WorkloadInstance,
-    canonical_json,
     digest_model,
 )
+from flameox.domain.compiler_build import compiler_identity_id, compiler_target_identity_id
 from flameox.domain.models import utc_now
 from flameox.evidence import GenerationPublisher
 from flameox.models import ContractModel
 from flameox.pagination import CursorPageContract
 from flameox.storage import ArtifactStore, ControlRecordStore, RunStore, Workspace
+from flameox.storage.control_plane import _serialize_control_payload
 
 
 class PipelineStageStatus(StrEnum):
@@ -64,8 +62,7 @@ class PipelineIdentityQuality(StrEnum):
     MANAGED_EXACT = "managed_exact"
     MANAGED_PARTIAL = "managed_partial"
     LOCAL_DECLARED = "local_declared"
-    PRODUCER_DECLARED = "producer_declared"
-    LEGACY_UNQUALIFIED = "legacy_unqualified"
+    IMPORTED_UNVERIFIED = "imported_unverified"
 
 
 class PipelineExtractorProfile(StrEnum):
@@ -106,19 +103,10 @@ type PipelineStageDeclaration = Annotated[
 class RegisterPipelineRequest(ContractModel):
     run_id: str
     pipeline_name: Annotated[str, Field(min_length=1, max_length=100)]
-    pipeline_schema: Annotated[str, Field(min_length=1, max_length=100)]
     producer: Annotated[str, Field(min_length=1, max_length=100)]
-    producer_version: Annotated[str, Field(min_length=1, max_length=100)]
-    workload_identity: Annotated[str, Field(min_length=1, max_length=200)] | None = None
-    device_identity: Annotated[str, Field(min_length=1, max_length=500)] | None = None
-    workload_definition_id: str | None = None
-    workload_instance_id: str | None = None
-    command_digest: str | None = None
-    parameters_digest: str | None = None
     compiler_identity_id: str | None = None
-    build_protocol_id: str | None = None
     target_identity_id: str | None = None
-    stages: Annotated[tuple[PipelineStageDeclaration, ...], Field(min_length=1, max_length=100)]
+    stages: Annotated[tuple[PipelineStageDeclaration, ...], Field(max_length=100)]
     limitations: Annotated[tuple[str, ...], Field(max_length=20)] = ()
 
     @model_validator(mode="after")
@@ -134,22 +122,8 @@ class RegisterPipelineRequest(ContractModel):
             if stage.predecessor is not None and stage.predecessor not in seen:
                 raise ValueError("stage predecessors must identify an earlier declared stage")
             seen.add(stage.name)
-        exact_claims = (
-            self.workload_definition_id,
-            self.workload_instance_id,
-            self.command_digest,
-            self.parameters_digest,
-            self.compiler_identity_id,
-            self.build_protocol_id,
-        )
-        if any(item is not None for item in exact_claims) and not all(
-            item is not None for item in exact_claims
-        ):
-            raise ValueError("exact pipeline identity claims must be supplied together")
-        if self.target_identity_id is not None and not all(
-            item is not None for item in exact_claims
-        ):
-            raise ValueError("target identity requires complete exact pipeline identity claims")
+        if self.target_identity_id is not None and self.compiler_identity_id is None:
+            raise ValueError("target identity requires a compiler identity")
         return self
 
 
@@ -159,8 +133,6 @@ class _PipelineStage(ContractModel):
     predecessor: str | None
     format: str
     format_schema: str
-    producer: str
-    producer_version: str
     extractor_profile: PipelineExtractorProfile | None = None
     extractor: str | None
     extractor_version: str | None
@@ -197,25 +169,13 @@ type PipelineStage = Annotated[
 
 
 class ArtifactPipeline(ContractModel):
-    schema_version: Literal[1, 2] = 2
     pipeline_id: str
     run_id: str
     pipeline_name: str
-    pipeline_schema: str
     producer: str
-    producer_version: str
-    workload_identity: str | None = None
-    device_identity: str | None = None
-    identity_quality: PipelineIdentityQuality = PipelineIdentityQuality.LEGACY_UNQUALIFIED
-    workload_definition_id: str | None = None
-    workload_instance_id: str | None = None
-    command_digest: str | None = None
-    parameters_digest: str | None = None
+    identity_quality: PipelineIdentityQuality
     compiler_identity_id: str | None = None
-    build_protocol_id: str | None = None
     target_identity_id: str | None = None
-    source_state_id: str | None
-    environment_id: str
     stages: tuple[PipelineStage, ...]
     limitations: Annotated[tuple[str, ...], Field(max_length=20)]
     created_at: datetime = Field(default_factory=utc_now)
@@ -224,7 +184,6 @@ class ArtifactPipeline(ContractModel):
 class PipelineFilter(ContractModel):
     run_id: str | None = None
     pipeline_name: str | None = None
-    pipeline_schema: str | None = None
     producer: str | None = None
     source_artifact_id: str | None = None
 
@@ -233,9 +192,7 @@ class PipelineSummary(ContractModel):
     pipeline_id: str
     run_id: str
     pipeline_name: str
-    pipeline_schema: str
     producer: str
-    producer_version: str
     identity_quality: PipelineIdentityQuality
     stage_count: int
     artifact_ids: Annotated[tuple[str, ...], Field(max_length=100)]
@@ -271,7 +228,6 @@ class AddedPipelineStageComparison(_PipelineStageComparison):
     baseline_artifact_id: Literal[None] = None
     candidate_artifact_id: str | None = None
     artifact_length_change: Literal[None] = None
-    extraction_short_circuited: Literal[False] = False
     baseline_summary: Literal[None] = None
     candidate_summary: Literal[None] = None
 
@@ -283,7 +239,6 @@ class MissingPipelineStageComparison(_PipelineStageComparison):
     baseline_artifact_id: str | None = None
     candidate_artifact_id: Literal[None] = None
     artifact_length_change: Literal[None] = None
-    extraction_short_circuited: Literal[False] = False
     baseline_summary: Literal[None] = None
     candidate_summary: Literal[None] = None
 
@@ -298,19 +253,7 @@ type _PairedPipelineStageDisposition = Literal[
 ]
 
 
-def _advertise_short_circuit_projection(schema: dict[str, Any]) -> None:
-    properties = schema.setdefault("properties", {})
-    assert isinstance(properties, dict)
-    properties["extraction_short_circuited"] = {"type": "boolean", "readOnly": True}
-    required = schema.setdefault("required", [])
-    assert isinstance(required, list)
-    if "extraction_short_circuited" not in required:
-        required.append("extraction_short_circuited")
-
-
 class PairedPipelineStageComparison(_PipelineStageComparison):
-    model_config = ConfigDict(json_schema_extra=_advertise_short_circuit_projection)
-
     baseline_ordinal: int
     candidate_ordinal: int
     disposition: _PairedPipelineStageDisposition
@@ -319,14 +262,6 @@ class PairedPipelineStageComparison(_PipelineStageComparison):
     artifact_length_change: int | None = None
     baseline_summary: dict[str, JsonValue] | None = None
     candidate_summary: dict[str, JsonValue] | None = None
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def extraction_short_circuited(self) -> bool:
-        return (
-            self.baseline_artifact_id is not None
-            and self.baseline_artifact_id == self.candidate_artifact_id
-        )
 
 
 type PipelineStageComparison = Annotated[
@@ -350,30 +285,7 @@ def _first_observed_divergent_stage(
     return None
 
 
-def _advertise_pipeline_comparison_projections(schema: dict[str, Any]) -> None:
-    properties = schema.setdefault("properties", {})
-    assert isinstance(properties, dict)
-    properties.update(
-        {
-            "comparison_id": {"type": "string", "readOnly": True},
-            "first_observed_divergent_stage": {
-                "anyOf": [{"type": "string"}, {"type": "null"}],
-                "readOnly": True,
-            },
-            "result_digest": {"type": "string", "readOnly": True},
-        }
-    )
-    required = schema.setdefault("required", [])
-    assert isinstance(required, list)
-    for name in ("comparison_id", "first_observed_divergent_stage", "result_digest"):
-        if name not in required:
-            required.append(name)
-
-
 class PipelineComparison(ContractModel):
-    model_config = ConfigDict(json_schema_extra=_advertise_pipeline_comparison_projections)
-
-    schema_version: Literal[1] = 1
     baseline_pipeline_id: str
     candidate_pipeline_id: str
     compatibility: PipelineCompatibility
@@ -383,35 +295,6 @@ class PipelineComparison(ContractModel):
     extractor_identities: tuple[str, ...]
     limitations: tuple[str, ...]
 
-    @model_validator(mode="wrap")
-    @classmethod
-    def parse_projection_fields(
-        cls,
-        value: Any,
-        handler: ModelWrapValidatorHandler[PipelineComparison],
-    ) -> PipelineComparison:
-        if not isinstance(value, Mapping):
-            return handler(value)
-        payload = dict(value)
-        supplied_comparison_id = payload.pop("comparison_id", None)
-        supplied_divergence = payload.pop("first_observed_divergent_stage", None)
-        divergence_was_supplied = "first_observed_divergent_stage" in value
-        supplied_digest = payload.pop("result_digest", None)
-        comparison = handler(payload)
-        if (
-            divergence_was_supplied
-            and supplied_divergence != comparison.first_observed_divergent_stage
-        ):
-            raise ValueError("first divergent stage does not match the stage comparison")
-        if supplied_digest is not None and supplied_digest != comparison.result_digest:
-            raise ValueError("pipeline comparison digest does not match its content")
-        if (
-            supplied_comparison_id is not None
-            and supplied_comparison_id != comparison.comparison_id
-        ):
-            raise ValueError("pipeline comparison identifier does not match its content")
-        return comparison
-
     @computed_field  # type: ignore[prop-decorator]
     @property
     def first_observed_divergent_stage(self) -> str | None:
@@ -419,13 +302,8 @@ class PipelineComparison(ContractModel):
 
     @computed_field  # type: ignore[prop-decorator]
     @property
-    def result_digest(self) -> str:
-        return digest_model(self.content_without_identity())
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
     def comparison_id(self) -> str:
-        return self.result_digest
+        return digest_model(self.content_without_identity())
 
     def content_without_identity(self) -> dict[str, JsonValue]:
         return {
@@ -444,71 +322,39 @@ class PipelineComparison(ContractModel):
 def _pipeline_identity_compatibility(
     baseline: ArtifactPipeline,
     candidate: ArtifactPipeline,
+    baseline_run: RunManifest,
+    candidate_run: RunManifest,
 ) -> tuple[PipelineCompatibility, tuple[str, ...], tuple[str, ...]]:
     mismatches = [
         name
-        for name in ("pipeline_name", "pipeline_schema", "producer")
+        for name in ("pipeline_name", "producer")
         if getattr(baseline, name) != getattr(candidate, name)
     ]
     unknown_identities: list[str] = []
-    if any(pipeline.producer_version.casefold() == "unknown" for pipeline in (baseline, candidate)):
-        unknown_identities.append("producer_version")
-    elif baseline.producer_version != candidate.producer_version:
-        mismatches.append("producer_version")
-    exact_names = (
+    for name in ("compiler_identity_id", "target_identity_id"):
+        baseline_value = getattr(baseline, name)
+        candidate_value = getattr(candidate, name)
+        if baseline_value is None or candidate_value is None:
+            unknown_identities.append(name)
+        elif baseline_value != candidate_value:
+            mismatches.append(name)
+    if not all(
+        pipeline.identity_quality is PipelineIdentityQuality.MANAGED_EXACT
+        for pipeline in (baseline, candidate)
+    ):
+        unknown_identities.append("identity_quality")
+    for name in (
         "workload_definition_id",
         "workload_instance_id",
-        "command_digest",
-        "parameters_digest",
-        "compiler_identity_id",
-        "build_protocol_id",
-        "target_identity_id",
-    )
-    exact_qualities = {
-        PipelineIdentityQuality.MANAGED_EXACT,
-        PipelineIdentityQuality.MANAGED_PARTIAL,
-        PipelineIdentityQuality.PRODUCER_DECLARED,
-    }
-    exact_identity_expected = any(
-        pipeline.pipeline_schema.startswith("flameox.kernel-build.v")
-        or pipeline.identity_quality in exact_qualities
-        or any(getattr(pipeline, name) is not None for name in exact_names)
-        for pipeline in (baseline, candidate)
-    )
-    if exact_identity_expected:
-        for name in exact_names:
-            baseline_value = getattr(baseline, name)
-            candidate_value = getattr(candidate, name)
-            if baseline_value is None or candidate_value is None:
-                unknown_identities.append(name)
-            elif baseline_value != candidate_value:
-                mismatches.append(name)
-        if not all(
-            pipeline.identity_quality is PipelineIdentityQuality.MANAGED_EXACT
-            for pipeline in (baseline, candidate)
-        ):
-            unknown_identities.append("identity_quality")
-        if all(pipeline.workload_definition_id is None for pipeline in (baseline, candidate)):
-            for name in ("workload_identity", "device_identity"):
-                baseline_value = getattr(baseline, name)
-                candidate_value = getattr(candidate, name)
-                if (
-                    baseline_value is not None
-                    and candidate_value is not None
-                    and baseline_value != candidate_value
-                ):
-                    mismatches.append(name)
-    else:
-        for name in ("workload_identity", "device_identity"):
-            baseline_value = getattr(baseline, name)
-            candidate_value = getattr(candidate, name)
-            if baseline_value is None or candidate_value is None:
-                unknown_identities.append(name)
-            elif baseline_value != candidate_value:
-                mismatches.append(name)
-    if baseline.source_state_id != candidate.source_state_id:
-        mismatches.append("source_state_id")
-    if baseline.environment_id != candidate.environment_id:
+        "source_state_id",
+    ):
+        baseline_value = getattr(baseline_run, name)
+        candidate_value = getattr(candidate_run, name)
+        if baseline_value is None or candidate_value is None:
+            unknown_identities.append(name)
+        elif baseline_value != candidate_value:
+            mismatches.append(name)
+    if baseline_run.environment_id != candidate_run.environment_id:
         mismatches.append("environment_id")
     compatibility = PipelineCompatibility.COMPATIBLE
     if mismatches:
@@ -544,15 +390,6 @@ class ArtifactPipelineService:
             model=ArtifactPipeline,
             id_field="pipeline_id",
         )
-        self.comparisons = ControlRecordStore(
-            workspace,
-            kind="pipeline_comparisons",
-            model=PipelineComparison,
-            id_field="comparison_id",
-            output_only_fields={
-                "stages": {"__all__": {"extraction_short_circuited"}},
-            },
-        )
         self.publisher = GenerationPublisher(workspace)
 
     @staticmethod
@@ -561,16 +398,12 @@ class ArtifactPipelineService:
             pipeline_id=pipeline.pipeline_id,
             run_id=pipeline.run_id,
             pipeline_name=pipeline.pipeline_name,
-            pipeline_schema=pipeline.pipeline_schema,
             producer=pipeline.producer,
-            producer_version=pipeline.producer_version,
             identity_quality=pipeline.identity_quality,
             stage_count=len(pipeline.stages),
             artifact_ids=tuple(
                 dict.fromkeys(
-                    stage.artifact_id
-                    for stage in pipeline.stages
-                    if stage.artifact_id is not None
+                    stage.artifact_id for stage in pipeline.stages if stage.artifact_id is not None
                 )
             ),
             limitation_count=len(pipeline.limitations),
@@ -610,14 +443,11 @@ class ArtifactPipelineService:
                 for name, value in (
                     ("run_id", filter.run_id),
                     ("pipeline_name", filter.pipeline_name),
-                    ("pipeline_schema", filter.pipeline_schema),
                     ("producer", filter.producer),
                 )
             ) and (
                 filter.source_artifact_id is None
-                or any(
-                    stage.artifact_id == filter.source_artifact_id for stage in pipeline.stages
-                )
+                or any(stage.artifact_id == filter.source_artifact_id for stage in pipeline.stages)
             )
 
         pipelines = sorted(
@@ -627,9 +457,7 @@ class ArtifactPipelineService:
         )
         total = len(pipelines)
         if after is not None:
-            pipelines = [
-                item for item in pipelines if (item.created_at, item.pipeline_id) < after
-            ]
+            pipelines = [item for item in pipelines if (item.created_at, item.pipeline_id) < after]
         page = pipelines[: limit + 1]
         items = tuple(self._summary(item) for item in page[:limit])
         return PipelineListResult(
@@ -655,6 +483,7 @@ class ArtifactPipelineService:
                 "Pipeline candidate limit must be 0-20.",
             )
         pipeline = self.pipelines.read(pipeline_id)
+        pipeline_run = self.runs.read(pipeline.run_id)
         compatible = tuple(
             item.pipeline_id
             for item in sorted(
@@ -663,7 +492,12 @@ class ArtifactPipelineService:
                 reverse=True,
             )
             if item.pipeline_id != pipeline.pipeline_id
-            and _pipeline_identity_compatibility(pipeline, item)[0]
+            and _pipeline_identity_compatibility(
+                pipeline,
+                item,
+                pipeline_run,
+                self.runs.read(item.run_id),
+            )[0]
             is not PipelineCompatibility.INCOMPATIBLE
         )
         return PipelineDetail(
@@ -748,12 +582,12 @@ class ArtifactPipelineService:
                         limitations=stage.limitations,
                     )
                 )
-        last = pipeline.stages[-1]
+        last = pipeline.stages[-1] if pipeline.stages else None
         declarations.append(
             RegisteredPipelineStageDeclaration(
                 name=stage_name,
-                ordinal=last.ordinal + 1,
-                predecessor=last.name,
+                ordinal=last.ordinal + 1 if last is not None else 0,
+                predecessor=last.name if last is not None else None,
                 status=PipelineStageStatus.AVAILABLE,
                 registration_id=registration.registration_id,
                 format=registration.media_type,
@@ -763,17 +597,8 @@ class ArtifactPipelineService:
         request = RegisterPipelineRequest(
             run_id=pipeline.run_id,
             pipeline_name=pipeline.pipeline_name,
-            pipeline_schema=pipeline.pipeline_schema,
             producer=pipeline.producer,
-            producer_version=pipeline.producer_version,
-            workload_identity=pipeline.workload_identity,
-            device_identity=pipeline.device_identity,
-            workload_definition_id=pipeline.workload_definition_id,
-            workload_instance_id=pipeline.workload_instance_id,
-            command_digest=pipeline.command_digest,
-            parameters_digest=pipeline.parameters_digest,
             compiler_identity_id=pipeline.compiler_identity_id,
-            build_protocol_id=pipeline.build_protocol_id,
             target_identity_id=pipeline.target_identity_id,
             stages=tuple(declarations),
             limitations=pipeline.limitations,
@@ -787,15 +612,7 @@ class ArtifactPipelineService:
     def register(self, request: RegisterPipelineRequest) -> ArtifactPipeline:
         """Register locally declared pipeline identity without external provenance."""
 
-        exact_claims = (
-            request.workload_definition_id,
-            request.workload_instance_id,
-            request.command_digest,
-            request.parameters_digest,
-            request.compiler_identity_id,
-            request.build_protocol_id,
-            request.target_identity_id,
-        )
+        exact_claims = (request.compiler_identity_id, request.target_identity_id)
         if any(item is not None for item in exact_claims):
             raise DomainError(
                 ErrorCode.EXECUTION_REFUSED,
@@ -804,55 +621,58 @@ class ArtifactPipelineService:
         return self._register(request, identity_quality=PipelineIdentityQuality.LOCAL_DECLARED)
 
     def register_imported(self, request: RegisterPipelineRequest) -> ArtifactPipeline:
-        """Register unverified identity claims parsed from a provider document."""
+        """Register imported native evidence without claiming managed run identity."""
 
-        limitation = (
-            "Imported pipeline identity is producer-declared and was not authenticated by flameox."
-        )
+        limitation = "Imported compiler evidence has no authoritative execution identity."
         return self._register(
             request,
-            identity_quality=PipelineIdentityQuality.PRODUCER_DECLARED,
+            identity_quality=PipelineIdentityQuality.IMPORTED_UNVERIFIED,
             additional_limitations=(limitation,),
         )
 
     def register_managed(
         self,
         request: RegisterPipelineRequest,
-        *,
-        workload_instance: WorkloadInstance,
     ) -> ArtifactPipeline:
-        """Authenticate exact build claims against the authoritative managed run."""
+        """Authenticate compiler qualification against authoritative run semantics."""
 
         run = self.runs.read(request.run_id)
-        expected = {
-            "workload_definition_id": workload_instance.workload_definition_id,
-            "workload_instance_id": workload_instance.workload_instance_id,
-            "command_digest": digest_model(workload_instance.command.model_dump(mode="json")),
-            "parameters_digest": digest_model(workload_instance.parameters),
-        }
-        run_matches = (
-            run.workload_definition_id == workload_instance.workload_definition_id
-            and run.workload_instance_id == workload_instance.workload_instance_id
-            and run.command == workload_instance.command
-        )
-        claims_match = all(getattr(request, name) == value for name, value in expected.items())
-        protocol_complete = (
-            request.compiler_identity_id is not None and request.build_protocol_id is not None
-        )
-        if not run_matches or not claims_match or not protocol_complete:
+        if run.semantics.origin != "capture":
             raise DomainError(
                 ErrorCode.ARTIFACT_INTEGRITY_FAILED,
-                "Kernel-build identity does not match the authoritative managed run.",
+                "Managed compiler lineage requires a captured run.",
             )
-        exact = (
-            request.target_identity_id is not None
-            and request.producer_version.casefold() != "unknown"
-        )
+        qualification = run.compiler_qualification
+        expected_compiler = compiler_identity_id(qualification)
+        try:
+            expected_target = compiler_target_identity_id(qualification)
+        except ValueError as error:
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Managed compiler qualification is invalid in the authoritative run.",
+            ) from error
+        if qualification is not None and (
+            qualification.compiler.adapter != run.semantics.adapter
+            or qualification.compiler.version != run.semantics.adapter_version
+        ):
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Managed compiler qualification contradicts run semantics.",
+            )
+        if (
+            request.compiler_identity_id != expected_compiler
+            or request.target_identity_id != expected_target
+        ):
+            raise DomainError(
+                ErrorCode.ARTIFACT_INTEGRITY_FAILED,
+                "Compiler qualification does not match the authoritative managed run.",
+            )
+        exact = expected_compiler is not None and expected_target is not None
         additional_limitations: tuple[str, ...] = ()
         if not exact:
             additional_limitations = (
-                "Managed pipeline identity is partial because compiler version or target "
-                "identity is unavailable.",
+                "Managed pipeline identity is partial because compiler or target qualification "
+                "is unavailable in run semantics.",
             )
         return self._register(
             request,
@@ -909,8 +729,6 @@ class ArtifactPipelineService:
                     artifact_id=registration.artifact_id,
                     artifact_length=content.byte_length,
                     sensitivity=registration.sensitivity,
-                    producer=registration.producer or "unknown",
-                    producer_version=registration.producer_version or "unknown",
                     extractor=extractor,
                     extractor_version=extractor_version,
                     extraction_operation_id=extraction_operation_id,
@@ -920,8 +738,6 @@ class ArtifactPipelineService:
             elif isinstance(declaration, UnregisteredPipelineStageDeclaration):
                 stage = UnregisteredPipelineStage(
                     **declaration.model_dump(),
-                    producer=request.producer,
-                    producer_version=request.producer_version,
                     extractor=None,
                     extractor_version=None,
                     extraction_operation_id=None,
@@ -932,46 +748,29 @@ class ArtifactPipelineService:
                 assert_never(declaration)
             stages.append(stage)
         locally_declared = (
-            identity_quality is PipelineIdentityQuality.LOCAL_DECLARED
-            and derived_from is None
+            identity_quality is PipelineIdentityQuality.LOCAL_DECLARED and derived_from is None
         )
-        registered_provenance = {
-            (stage.producer, stage.producer_version)
+        registered_producers = {
+            registrations[stage.registration_id].producer or "unknown"
             for stage in stages
             if isinstance(stage, RegisteredPipelineStage)
         }
-        if locally_declared and len(registered_provenance) == 1:
-            producer, producer_version = registered_provenance.pop()
+        if locally_declared and len(registered_producers) == 1:
+            producer = registered_producers.pop()
         elif locally_declared:
-            producer, producer_version = "unknown", "unknown"
+            producer = "unknown"
         else:
-            producer, producer_version = request.producer, request.producer_version
-        workload_identity = None if locally_declared else request.workload_identity
-        device_identity = None if locally_declared else request.device_identity
+            producer = request.producer
         if derived_from is not None:
             producer = derived_from.producer
-            producer_version = derived_from.producer_version
-            workload_identity = derived_from.workload_identity
-            device_identity = derived_from.device_identity
         limitations = _merge_pipeline_limitations(request.limitations, additional_limitations)
         identity = {
             "run_id": request.run_id,
             "pipeline_name": request.pipeline_name,
-            "pipeline_schema": request.pipeline_schema,
             "producer": producer,
-            "producer_version": producer_version,
-            "workload_identity": workload_identity,
-            "device_identity": device_identity,
-            "workload_definition_id": request.workload_definition_id,
-            "workload_instance_id": request.workload_instance_id,
-            "command_digest": request.command_digest,
-            "parameters_digest": request.parameters_digest,
             "compiler_identity_id": request.compiler_identity_id,
-            "build_protocol_id": request.build_protocol_id,
             "target_identity_id": request.target_identity_id,
             "identity_quality": identity_quality,
-            "source_state_id": run.source_state_id,
-            "environment_id": run.environment_id,
             "stages": [stage.model_dump(mode="json") for stage in stages],
             "limitations": list(limitations),
         }
@@ -979,21 +778,10 @@ class ArtifactPipelineService:
             pipeline_id=digest_model(identity),
             run_id=run.run_id,
             pipeline_name=request.pipeline_name,
-            pipeline_schema=request.pipeline_schema,
             producer=producer,
-            producer_version=producer_version,
-            workload_identity=workload_identity,
-            device_identity=device_identity,
             identity_quality=identity_quality,
-            workload_definition_id=request.workload_definition_id,
-            workload_instance_id=request.workload_instance_id,
-            command_digest=request.command_digest,
-            parameters_digest=request.parameters_digest,
             compiler_identity_id=request.compiler_identity_id,
-            build_protocol_id=request.build_protocol_id,
             target_identity_id=request.target_identity_id,
-            source_state_id=run.source_state_id,
-            environment_id=run.environment_id,
             stages=tuple(stages),
             limitations=limitations,
         )
@@ -1015,22 +803,11 @@ class ArtifactPipelineService:
                         "pipeline_id": created.pipeline_id,
                         "run_id": created.run_id,
                         "pipeline_name": created.pipeline_name,
-                        "pipeline_schema": created.pipeline_schema,
                         "producer": created.producer,
-                        "producer_version": created.producer_version,
                         "identity_quality": created.identity_quality,
-                        "workload_identity": created.workload_identity,
-                        "device_identity": created.device_identity,
-                        "workload_definition_id": created.workload_definition_id,
-                        "workload_instance_id": created.workload_instance_id,
-                        "command_digest": created.command_digest,
-                        "parameters_digest": created.parameters_digest,
                         "compiler_identity_id": created.compiler_identity_id,
-                        "build_protocol_id": created.build_protocol_id,
                         "target_identity_id": created.target_identity_id,
-                        "source_state_id": created.source_state_id,
-                        "environment_id": created.environment_id,
-                        "stages_json": canonical_json(
+                        "stages_json": _serialize_control_payload(
                             [stage.model_dump(mode="json") for stage in created.stages]
                         ),
                         "limitations": list(created.limitations),
@@ -1139,6 +916,8 @@ class ArtifactPipelineService:
         compatibility, mismatches, unknown_identities = _pipeline_identity_compatibility(
             baseline,
             candidate,
+            self.runs.read(baseline.run_id),
+            self.runs.read(candidate.run_id),
         )
         baseline_by_name = {stage.name: stage for stage in baseline.stages}
         candidate_by_name = {stage.name: stage for stage in candidate.stages}
@@ -1161,6 +940,11 @@ class ArtifactPipelineService:
             limitations.append(
                 "Critical pipeline identity evidence is unavailable for: "
                 f"{', '.join(unknown_identities)}."
+            )
+        if {"compiler_identity_id", "target_identity_id"}.intersection(unknown_identities):
+            limitations.append(
+                "Exact compiler-pipeline comparison is unavailable; re-capture each run with "
+                "the Triton compiler listener and authoritative CUDA identity available."
             )
         for name in ordered_names:
             left = baseline_by_name.get(name)
@@ -1223,41 +1007,35 @@ class ArtifactPipelineService:
             extractor_identities=extractors,
             limitations=tuple(dict.fromkeys(limitations)),
         )
-        try:
-            created = self.comparisons.create(comparison)
-        except DomainError as error:
-            if error.code is not ErrorCode.REVISION_CONFLICT:
-                raise
-            existing = self.comparisons.read(comparison.comparison_id)
-            if existing != comparison:
-                raise
-            return existing
-        self.publisher.publish_rows(
+        self.publisher.publish_rows_idempotent(
             {
                 "pipeline_comparisons": [
                     {
-                        "comparison_id": created.comparison_id,
-                        "baseline_pipeline_id": created.baseline_pipeline_id,
-                        "candidate_pipeline_id": created.candidate_pipeline_id,
-                        "compatibility": created.compatibility,
-                        "identity_mismatches": list(created.identity_mismatches),
-                        "stages_json": canonical_json(
-                            [stage.model_dump(mode="json") for stage in created.stages]
+                        "comparison_id": comparison.comparison_id,
+                        "baseline_pipeline_id": comparison.baseline_pipeline_id,
+                        "candidate_pipeline_id": comparison.candidate_pipeline_id,
+                        "compatibility": comparison.compatibility,
+                        "identity_mismatches": list(comparison.identity_mismatches),
+                        "stages_json": _serialize_control_payload(
+                            [stage.model_dump(mode="json") for stage in comparison.stages]
                         ),
-                        "first_observed_divergent_stage": (created.first_observed_divergent_stage),
-                        "input_artifact_ids": list(created.input_artifact_ids),
-                        "extractor_identities": list(created.extractor_identities),
-                        "limitations": list(created.limitations),
-                        "result_digest": created.result_digest,
+                        "first_observed_divergent_stage": (
+                            comparison.first_observed_divergent_stage
+                        ),
+                        "input_artifact_ids": list(comparison.input_artifact_ids),
+                        "extractor_identities": list(comparison.extractor_identities),
+                        "limitations": list(comparison.limitations),
                     }
                 ]
             },
             publisher="flameox.pipeline_comparisons",
             publisher_version="1",
             input_run_ids=(baseline.run_id, candidate.run_id),
-            input_artifact_ids=created.input_artifact_ids,
+            input_artifact_ids=comparison.input_artifact_ids,
+            operation_identity={"comparison_id": comparison.comparison_id},
+            supersede_matching=False,
         )
-        return created
+        return comparison
 
     @staticmethod
     def _compare_paired_stage(

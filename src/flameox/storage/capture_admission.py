@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
 
 from flameox.domain import CaptureLease, DomainError, ErrorCode
 from flameox.models import ContractModel
-from flameox.storage.control_plane import ControlPlane, canonical_json
+from flameox.storage.control_plane import ControlPlane, _serialize_control_payload
 from flameox.storage.workspace import Workspace
 
 
 class CaptureAdmissionRecord(ContractModel):
-    schema_version: Literal[1] = 1
     run_id: str
     owner_id: str
     process_lease: CaptureLease
@@ -26,7 +24,7 @@ class CaptureAdmissionStore:
     def try_acquire(self, record: CaptureAdmissionRecord, *, limit: int) -> bool:
         if limit < 1:
             raise ValueError("capture admission limit must be positive")
-        payload = canonical_json(record.model_dump(mode="json"))
+        payload = _serialize_control_payload(record.model_dump(mode="json"))
         lease = record.process_lease
         with self.control_plane.transaction() as connection:
             existing = connection.execute(
@@ -93,7 +91,7 @@ class CaptureAdmissionStore:
                   AND process_id = ? AND process_start_identity = ? AND boot_id = ?
                 """,
                 (
-                    canonical_json(updated.model_dump(mode="json")),
+                    _serialize_control_payload(updated.model_dump(mode="json")),
                     process_lease.observed_at.isoformat(),
                     process_lease.expires_at.isoformat(),
                     record.run_id,

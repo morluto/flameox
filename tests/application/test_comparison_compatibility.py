@@ -5,26 +5,29 @@ from pathlib import Path
 
 import pytest
 
-from flameox.application import (
+from flameox.application.comparisons import (
     ComparisonService,
-    EvidenceInput,
-    EvidenceLookupService,
     ExcludedFreezeRunSetMember,
-    FindingService,
     FreezeRunIdsRequest,
     FreezeRunMembersRequest,
     IncludedFreezeRunSetMember,
     MeasurementCompareRunSetsRequest,
-    RecordFindingRequest,
     RunSetService,
 )
 from flameox.application.environment import collect_environment
+from flameox.application.evidence_lookup import EvidenceLookupService
 from flameox.application.evidence_rows import environment_row
+from flameox.application.records import (
+    EvidenceInput,
+    FindingService,
+    RecordFindingRequest,
+)
 from flameox.application.run_rows import run_row
 from flameox.catalog import Catalog
 from flameox.domain import (
     AcceleratorIdentityFacet,
     AcceleratorIdentityStatus,
+    CaptureScope,
     ComparisonValidity,
     DomainError,
     ErrorCode,
@@ -41,10 +44,12 @@ from flameox.domain import (
     IdentityQuality,
     MetricPolarity,
     RunManifest,
+    RunSemantics,
+    SemanticOption,
     WorkloadExecutionIdentity,
     digest_model,
 )
-from flameox.evidence import SCHEMA_MAJOR, GenerationPublisher
+from flameox.evidence import GenerationPublisher
 from flameox.storage import RunStore, Workspace
 from tests.support.comparisons import (
     imported_benchmark,
@@ -238,7 +243,6 @@ def test_frozen_run_set_comparison_and_evidence_linked_finding(
         EvidenceReferenceType.COMPARISON,
         result.comparison.comparison_id,
     )
-    assert persisted.data["schema_version"] == SCHEMA_MAJOR
     assert (persisted.data["baseline_value_int"] is None) is not (
         persisted.data["baseline_value_float"] is None
     )
@@ -325,6 +329,74 @@ def test_comparison_reads_both_run_sets_from_one_pinned_corpus_commit(
     assert result.corpus_commit_id == baseline.corpus_commit_id
     assert result.comparison.complete_pair_n is None
     assert result.comparison.baseline_eligible_n == 1
+
+
+def test_comparison_rejects_mismatched_memray_region_semantics(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path)
+    baseline_id = imported_benchmark(
+        workspace,
+        tmp_path / "baseline-memray-semantics.json",
+        (0.010, 0.011, 0.012),
+    )
+    candidate_id = imported_benchmark(
+        workspace,
+        tmp_path / "candidate-memray-semantics.json",
+        (0.005, 0.0055, 0.006),
+    )
+
+    def semantics(region: str, warmup_count: int) -> RunSemantics:
+        return RunSemantics(
+            origin="import",
+            adapter="memray",
+            adapter_version="1.19.3",
+            scope=CaptureScope(
+                mode=SemanticOption(name="mode", value="sdk"),
+                process_scope=SemanticOption(name="process_scope", value="workload_process"),
+                bounds={"warmup_count": warmup_count},
+                filters={"region": region, "thread_scope": "all_threads"},
+            ),
+        )
+
+    GenerationPublisher(workspace).publish_rows(
+        {
+            "runs": [
+                run_row(
+                    _revised_run(
+                        workspace,
+                        baseline_id,
+                        semantics=semantics("steady_step", 2),
+                    )
+                ),
+                run_row(
+                    _revised_run(
+                        workspace,
+                        candidate_id,
+                        semantics=semantics("steady_step", 3),
+                    )
+                ),
+            ]
+        },
+        publisher="memray-semantic-compatibility-test",
+        publisher_version="1",
+        input_run_ids=(baseline_id, candidate_id),
+    )
+    run_sets = RunSetService(workspace)
+    baseline = run_sets.freeze(FreezeRunIdsRequest(run_ids=(baseline_id,)))
+    candidate = run_sets.freeze(FreezeRunIdsRequest(run_ids=(candidate_id,)))
+
+    result = ComparisonService(workspace).compare(
+        MeasurementCompareRunSetsRequest(
+            baseline_run_set_id=baseline.run_set_id,
+            candidate_run_set_id=candidate.run_set_id,
+            metric="pyperf.scan",
+            unit="ns",
+            polarity=MetricPolarity.LOWER_IS_BETTER,
+            practical_threshold=0.05,
+        )
+    )
+
+    assert result.comparison.validity is ComparisonValidity.INVALID
+    assert "run semantics differ across treatments" in result.comparison.mismatches
 
 
 def test_comparison_rejects_run_sets_frozen_from_different_snapshots(tmp_path: Path) -> None:

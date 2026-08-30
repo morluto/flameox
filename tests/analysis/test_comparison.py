@@ -59,8 +59,9 @@ def test_paired_comparison_uses_practical_interval(
     assert result.practical_threshold == 0.05
     assert result.method == "scipy.bootstrap.bca.median_paired_log_ratio.v2"
     assert result.independent_unit == "block"
-    assert result.paired
-    assert result.confidence_level == 0.95
+    assert result.complete_pair_n is not None
+    assert result.confidence_interval is not None
+    assert result.confidence_interval.level == 0.95
 
 
 def test_incomplete_experiment_is_not_presented_as_valid() -> None:
@@ -78,7 +79,7 @@ def test_incomplete_experiment_is_not_presented_as_valid() -> None:
     assert result.complete_pair_n == 0
     assert result.validity is ComparisonValidity.INVALID
     assert result.decision is ComparisonDecision.INCONCLUSIVE
-    assert result.confidence_low is None
+    assert result.confidence_interval is None
     assert "paired block coverage differs across treatments" in result.mismatches
 
     with pytest.raises(ValidationError, match="complete pairs"):
@@ -106,7 +107,8 @@ def test_exact_constant_effect_uses_versioned_analytic_interval() -> None:
 
     assert result.validity is ComparisonValidity.VALID
     assert result.method == "analytic.exact_constant_paired_log_ratio.v1"
-    assert result.confidence_low == result.confidence_high == -0.5
+    assert result.confidence_interval is not None
+    assert result.confidence_interval.low == result.confidence_interval.high == -0.5
 
 
 def test_degenerate_bca_is_truthful_and_canonical_json_safe() -> None:
@@ -144,9 +146,8 @@ def test_close_effects_do_not_take_the_exact_interval_shortcut() -> None:
 
     assert result.method == "scipy.bootstrap.bca.median_paired_log_ratio.v2"
     assert result.decision is ComparisonDecision.INCONCLUSIVE
-    assert result.confidence_low is not None
-    assert result.confidence_high is not None
-    assert result.confidence_low < result.confidence_high
+    assert result.confidence_interval is not None
+    assert result.confidence_interval.low < result.confidence_interval.high
 
 
 @pytest.mark.parametrize("invalid_value", (0.0, -1.0, float("nan"), float("inf")))

@@ -23,5 +23,4 @@ def run_row(run_id: str) -> dict[str, object]:
         "run_semantic_id": "sha256:" + "f" * 64,
         "exit_code": 0,
         "wall_time_ns": 1,
-        "manifest_path": f"runs/{run_id}/manifest.json",
     }
