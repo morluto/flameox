@@ -136,6 +136,7 @@ async def test_memray_extractor_preserves_native_capture_and_names_memory_concep
     )
 
     assert result.peak_memory_bytes >= 100_000
+    assert result.retained_end_bytes is not None
     assert result.retained_end_bytes >= 100_000
     assert result.allocation_operations == provider_stats.total_num_allocations
     assert result.total_allocated_bytes == provider_stats.total_memory_allocated
