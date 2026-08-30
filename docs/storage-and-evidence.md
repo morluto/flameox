@@ -147,43 +147,17 @@ the execution attempted to measure. Two runs may therefore reference the same
 content-addressed artifact while retaining different modes, bounds, filters, or
 target scopes.
 
-Compiler dump manifests follow the same boundary. They preserve immutable native
-group membership and exact artifact provenance, while the normalized
-`ArtifactPipeline` is the sole owner of ordered lineage. A run with several
-Triton dump directories has several sibling pipelines; no stored field infers a
-cross-directory stage order. Imported JSON or `.metadata` files remain preserved
-provider evidence, not compiler stages or autotune claims. Bounded
-`triton_autotune_selections` rows are a separate normalized generation derived
-from Triton's listener callback; they retain no artifact or pipeline reference
-because the callback supplies neither. The provider document does not repeat run
-identity, tool qualification, environment, status, limits, or recovery state.
-Pipelines retain only `run_id`, producer, group-local stages, and qualified
-compiler/target identities. Workload, source, environment, command, parameters,
-and build protocol are resolved from the authoritative run during comparison.
-Stage registrations resolve their immutable artifact provenance; lineage does not
-copy producer-version bookkeeping from those registrations.
+The ownership rule is:
 
-For managed Triton runs, the run manifest owns one compiler qualification: the
-declared interpreter's exact `triton` distribution and the target derived from
-the provider listener, observed CUDA environment, and emitted PTX when present.
-The pipeline stores only content-derived identity references to that
-qualification. The native kernel-build document remains provider provenance and
-does not repeat package, target, driver, or environment fields. Explicit target
-options are run-semantic cross-compilation intent; they are not a substitute for
-observed target qualification.
+| Information | Owner |
+| --- | --- |
+| What ran, why, and under which effective scope | Run manifest |
+| Bytes emitted by a producer | Native artifact |
+| Extracted rows and derived evidence | Immutable generation |
+| Small task-specific context | Bounded response projection |
 
-Post-run correctness evidence follows the same ownership rule. Registering a
-`flameox.kernel-validation.v2` document appends its immutable artifact
-registration to the exact succeeded execution run and updates that run's typed
-validation status. The operation requires the reviewed run revision and derives
-producer, workload, environment, source, and execution identity from authoritative
-state; callers cannot submit copied identity fields or create a surrogate import
-run. Generic imports remain appropriate for genuinely external validation evidence.
-If the producing run owns an artifact pipeline, validation creates a new immutable
-pipeline generation that appends the registered evidence. The run manifest owns
-execution and validation semantics; the pipeline owns ordered evidence lineage.
-Capture results return bounded pipeline references, and list/show projections
-provide discovery without copying pipeline records into transport storage.
+Provider-specific contracts follow this rule without repeating the same fields.
+They are documented in [Adapters and producer contracts](adapters.md).
 
 Running, failed, cancelled, timed-out, and completed attempts are all evidence.
 Failure finalization does not discard partial artifacts that pass integrity and
@@ -220,34 +194,10 @@ matters. Conversely, status, effective capture scope, limitations, pagination,
 and truncation metadata belong to typed durable records and their bounded
 projections rather than separate artifact payloads.
 
-SARIF follows this split directly. A supported provider-native SARIF 2.1.0
-document is preserved byte-for-byte as an `analysis_result` artifact. Its import
-run owns the exact source root, effective include and exclude scope, analyzer and
-exit identity, coverage, limitations, and source-state availability. A separate
-immutable `static_candidates` generation contains only bounded source-scoped
-analyzer output: rule, level, message, physical location, fingerprint, and
-optional confidence. Provider extensions remain native evidence; a candidate is
-not a Flameox Finding or runtime confirmation. Unsupported SARIF and unknown
-extensions remain native evidence without a normalized candidate claim. Runtime
-assessment reuses the existing Finding evidence graph: the candidate is a
-context edge, while measured runs, trials, analyses, or comparisons carry the
-supporting or contradicting edge. Bounded candidate projections expose related
-Finding IDs rather than duplicating runtime evidence into the static-candidate
-generation.
-
 Artifact metadata includes kind, media type, producer and version, size, digest,
 sensitivity, run relationship, and extraction state. An artifact may be
 structurally valid yet unsupported by the installed extractor; that state is
 not equivalent to an empty extraction.
-
-Reduced candidates follow the same ownership rule. Their immutable bytes remain
-content-addressed artifacts, their run attachment carries registration metadata,
-and the reduction result owns the reduction ID, source registration, original
-artifact, predicate outcome, coverage, and limitations. Artifact reads project
-that lineage inline. The durable reduction result is the completion boundary;
-run registration and normalized evidence publication are idempotent projections
-reconciled from that result after interruption, so recovery does not rerun
-ShrinkRay.
 
 Sensitive native artifacts are not exposed as MCP binary resources. Agent-facing
 artifact resources return bounded metadata and typed evidence references. The
@@ -269,9 +219,9 @@ publication time, publisher, publisher version, file digest, and row count; its
 stored random field. Corpus commits store those generation digests directly.
 `CorpusStore` derives the manifest path from the digest and rejects a manifest
 whose payload no longer hashes to the committed ID. Catalog views project the
-manifest facts where a query needs provenance. A null input semantic identity is explicit when a
-generation targets an evidence run that has not yet been materialized; it is not
-inferred from artifact bytes.
+manifest facts where a query needs provenance. A null input semantic identity is
+explicit when a generation targets a run that has not been materialized; it is
+not inferred from artifact bytes.
 
 Publication establishes the content-digest inventory before the generation becomes
 visible. Opening a snapshot then checks each referenced file's exact Arrow schema,

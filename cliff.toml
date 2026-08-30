@@ -1,14 +1,15 @@
 # git-cliff configuration for automated flameox changelogs.
 
 [changelog]
-header = "# Changelog\n\nAll notable changes to flameox are documented in this file.\n"
+header = "# Changelog\n\nAll notable changes to flameox are documented in this file.\n\n"
 body = """
 {%- if version -%}\
     ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
 {%- else -%}\
-    ## [unreleased]
-{%- endif -%}\
+    ## [Unreleased]
+{%- endif -%}\n
 {% for group, commits in commits | group_by(attribute="group") %}
+
     ### {{ group | upper_first }}
     {% for commit in commits %}
         - {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\

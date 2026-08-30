@@ -12,7 +12,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat&logo=python&logoColor=white" alt="Python 3.12 or newer">
-  <img src="https://img.shields.io/badge/Data-Stays_Local-F97316?style=flat" alt="Data stays local">
+  <img src="https://img.shields.io/badge/Evidence-Stays_Local-F97316?style=flat" alt="Evidence stays local">
   <img src="https://img.shields.io/badge/Interfaces-CLI_%2B_MCP-7C3AED?style=flat" alt="CLI and MCP interfaces">
 </p>
 
@@ -39,12 +39,21 @@ Restart the client, open the project you intend to inspect, and ask it to:
 
 > Initialize Flameox in this project and list the available profiling capabilities.
 
+After declaring a workload, ask a concrete question:
+
+> Investigate `<symptom>` in `<workload>`. Show the capture scope, strongest
+> evidence, limitations, and links to deeper evidence.
+
 The setup command installs a versioned local runtime, changes only approved
 client configuration, and installs a small marker-owned Flameox skill for the
 selected agents. The skill helps agents compose Flameox evidence without
 imposing a fixed profiling recipe. Project initialization is separate and
 creates `.diagnostics/` only after the client calls the initialization workflow
 for its fixed project root.
+
+Runtime upgrades do not migrate incompatible `.diagnostics/` workspaces. Keep
+the old workspace, create a new one, and import any native artifacts you still
+need before deleting it. See [Format and evolution](docs/storage-and-evidence.md#format-and-evolution).
 
 For source development:
 

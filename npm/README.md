@@ -20,3 +20,7 @@ setup flow, keep `@latest` in the command: an unqualified `npx flameox setup`
 invocation may reuse an older cached bootstrap. The bootstrap refreshes uv
 metadata for the pinned Python package before resolving it, so a newly
 published runtime is visible even when uv has cached an older package index.
+
+Runtime upgrades do not migrate incompatible `.diagnostics/` workspaces. Keep
+the old workspace, create a new one, and import any native artifacts you still
+need before deleting it.

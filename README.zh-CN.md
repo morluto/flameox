@@ -12,7 +12,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat&logo=python&logoColor=white" alt="Python 3.12 或更高版本">
-  <img src="https://img.shields.io/badge/Data-Stays_Local-F97316?style=flat" alt="数据保留在本地">
+  <img src="https://img.shields.io/badge/Evidence-Stays_Local-F97316?style=flat" alt="证据保留在本地">
   <img src="https://img.shields.io/badge/Interfaces-CLI_%2B_MCP-7C3AED?style=flat" alt="CLI 和 MCP 接口">
 </p>
 
@@ -20,7 +20,9 @@
 
 <!-- mcp-name: io.github.morluto/flameox -->
 
-Flameox 协调受支持的性能分析器、基准测试工具和 trace 处理器，保留它们的原生产物及来源信息，并向代理提供有边界的证据。代理说明要验证的内容；Flameox 记录测量结果，并保留实验记录供复核。
+Flameox 协调受支持的性能分析器、基准测试工具和 trace 处理器，保留它们的
+原生产物及来源信息，并向代理提供有边界的证据。代理说明要验证的内容；
+Flameox 将有效执行范围记录到运行记录中，采集测量，并保留实验记录供复核。
 
 ## 快速开始
 
@@ -34,7 +36,18 @@ npx flameox@latest setup
 
 > 在此项目中初始化 Flameox，并列出可用的性能分析能力。
 
-`setup` 命令会安装一个有版本号的本地运行时，并且只修改已批准的客户端配置。项目初始化是独立步骤：只有客户端针对固定的项目根目录调用初始化工作流后，才会创建 `.diagnostics/`。
+声明工作负载后，可以提出具体问题：
+
+> 调查 `<workload>` 中的 `<symptom>`。显示采集范围、最有力的证据、局限，
+> 以及深入查看证据的链接。
+
+`setup` 会安装有版本号的本地运行时，只修改已批准的客户端配置，并为所选
+代理安装 Flameox skill。该 skill 帮助代理组织证据，但不强制采用固定方案。
+项目初始化是独立步骤；只有客户端为固定的项目根目录执行初始化后，才会创建
+`.diagnostics/`。
+
+升级运行时不会迁移不兼容的 `.diagnostics/` 工作区。请保留旧工作区，创建新
+工作区，并在删除旧工作区前导入仍需使用的原生产物。详见[格式与演进](docs/storage-and-evidence.md#format-and-evolution)（英文）。
 
 如果要进行源码开发：
 

@@ -90,6 +90,12 @@ Use maintained formats and models wherever they exist:
 Parsing human diagnostic text, guessing units from field names, or maintaining a
 parallel copy of a provider schema is not an adapter contract.
 
+Static-analysis imports follow the same ownership rule. Flameox preserves a
+supported SARIF 2.1.0 report unchanged, records import scope and limitations on
+the run, and publishes bounded source candidates in a separate generation.
+Provider extensions remain in the native report. A candidate is analyzer output,
+not a Flameox Finding or runtime confirmation.
+
 NVIDIA identity runs in a dedicated module-only provider environment. Its typed
 worker uses read-only NVML queries and keeps UUID and PCI identity distinct from
 the observed NVML index. Apple identity is collected only when declared and

@@ -44,9 +44,7 @@ Mutating commands make mutation explicit. In particular:
 - `capture execute` consumes one previously reviewed plan token and may require its
   public plan identity; it accepts no replacement execution fields;
 - `capture run` plans then consumes one server-owned plan;
-- `open` prints a viewer plan unless `--launch` is supplied. Memray plans require a
-  verified producer-compatible provider and report its environment identity; pyperf plans use the
-  Flameox control interpreter rather than requiring a second host-global command;
+- `open` prints a viewer plan unless `--launch` is supplied;
 - `validate` never repairs;
 - `gc` is a dry run unless `--apply` is supplied;
 - permanent purge names one expired trash manifest;
@@ -97,92 +95,7 @@ semantics needed to interpret the immediate outcome, such as effective mode and
 scope, status, limitations, coverage, and truncation. They use native
 `ResourceLink`s and typed references for native artifacts, normalized evidence
 generations, and other larger durable records. Artifact identifiers remain
-provenance references;
-they are never the sole carrier of run meaning.
-
-`extract_coverage` requires a run-owned `execution_coverage` artifact whose
-registration identifies the exact `coverage` producer and a supported producer
-version (`coverage>=7.14,<8`). It reports that producer version alongside the
-control reader version. The normalized generation records the reader as its
-`publisher`/`publisher_version` and points to the input artifact; an unsupported
-producer is rejected before the native database is parsed and the recovery is a
-new capture with a supported workload package.
-
-`plan_capture` exposes Memray options as a typed input when
-`adapter="memray"`: `mode`, the SDK `region`, `warmup_count`, and the native
-and Python allocator switches. The plan rejects unknown fields and type
-coercion, and the resulting run carries the same region/warm-up semantics used
-by comparison compatibility checks. Workload, source, timeout, generated
-output, and artifact-limit identity remains on the single plan/run contract;
-the MCP response only projects the bounded portion needed for the next action
-and links deeper evidence.
-
-For experiment validation, equal validation-stdout artifacts are not a semantic
-oracle. `cross_treatment_equivalence` requires the versioned typed receipt
-binding described in `docs/investigations.md`; Flameox combines one binding from
-each treatment for every declared block and checks the shared pair contract.
-Independent per-treatment checks remain valid evidence but keep the comparison
-exploratory.
-
-`register_kernel_validation` is the explicit post-run handoff for correctness
-evidence produced by a workload. It requires a succeeded run and its exact
-reviewed revision, returns the linked run and artifact identities inline, and
-links to both resources. When the run has one artifact pipeline, registration
-also derives and links a new immutable pipeline generation containing the
-validation stage. Runs with multiple pipelines require an explicit pipeline ID;
-Flameox never guesses which lineage owns the evidence. `extract_kernel_validation`
-remains idempotent and normalizes the registered document without moving run
-semantics into its bytes.
-
-`import_kernel_build` returns bounded run and pipeline identifiers rather than
-copying compiler lineage into the provider manifest. Its canonical schema
-resource is `flameox://schemas/kernel-build`. A Triton import may return several
-sibling pipeline IDs—one for each native dump directory—so callers select the
-specific lineage to show or compare. JSON and metadata files are available from
-the run's native artifact registrations but do not become synthetic stages.
-They do not establish an autotune choice or any other run semantic.
-
-For managed `triton.compiler` capture, the capture receipt links to
-`flameox://triton-autotune/<run-id>/selections`. The corresponding
-`query_triton_autotune_selections` tool returns a cursor-bounded page of
-provider-listener decisions. Each row contains only the run-scoped function/key
-identity, winner, bounded candidates, timing evidence, coverage limits, and
-recovery-relevant limitations; native compiler artifacts and pipelines remain
-separate resources.
-
-`import_artifact` keeps free-form producer metadata separate from validated run
-semantics. Omitting `profile` creates a generic import even when `producer` is
-declared. `profile="py-spy-chrometrace"` validates the staged native event shape
-before assigning the py-spy adapter identity; rejection returns a failed run
-that still references the immutable bytes. The import receipt returns the
-bounded semantic projection inline and links to the authoritative run and
-artifact resources.
-`qualify_artifact_import` applies the same validation to an artifact already
-owned by a run, so recovery never depends on retaining the original source path
-and does not duplicate content-addressed bytes.
-
-`import_static_analysis` is the narrow import path for provider-native SARIF
-2.1.0. It preserves the report unchanged as an `analysis_result` artifact and
-records the declared source root, effective include/exclude scope, analyzer
-identity, exit status, coverage, and unavailable source identity on the import
-run. Only bounded `static_candidates` fields are normalized: provider rule,
-level, message, physical source location, fingerprint, and optional confidence.
-Unknown SARIF extensions remain native-only. Every source location is resolved
-against the declared root; traversal, paths outside that root, and symlink
-escapes are excluded with explicit coverage. Explicit excludes win; explicit
-includes override default exclusions, including the actual workspace root.
-`query_static_candidates` pages one immutable run-scoped generation with an
-opaque snapshot cursor, while the import result links to the run, native
-artifact, and candidate collection resources. Its bounded response includes the
-safe import semantics needed to interpret the candidates because the run
-resource does not carry free-form import configuration. A static candidate is
-analyzer output, not a Flameox Finding and not runtime confirmation. To assess
-one, record a Finding that references the candidate with `relation="context"`
-and references the measured run, trial, analysis, or comparison with the
-supporting or contradicting relation. Candidate pages return at most 16 related
-Finding IDs; the Finding resource reconstructs the current revision's exact
-evidence edges. Flameox rejects attempts to make a static candidate validate or
-support itself.
+provenance references; they are never the sole carrier of run meaning.
 
 Inline fields are response projections, not an alternate persistence model.
 Property-defining execution semantics remain authoritative in the run manifest,
@@ -190,21 +103,11 @@ and selected findings or summaries remain authoritative in their durable records
 when they must survive the response. A transport may inline a bounded subset for
 agent usability without duplicating or replacing that state.
 
-Capture responses may also return a bounded transport `recovery` action. For a timed-out
-Compute Sanitizer probe, unlimited plans receive an executable one-launch replan;
-already-bounded plans require a changed target-only workload or provider filter
-instead of suggesting that the same capture be repeated.
-
-MCP capture receipts inline the safe semantic projection—semantic identity,
-adapter identity, mode, process scope, bounds, filters, and explicit unavailable
-fields—and link to the bounded run resource and any automatically registered
-artifact pipelines. `list_artifact_pipelines` provides cursor-paginated discovery
-by run, name, producer, or source artifact; `get_artifact_pipeline` returns one
-pipeline plus bounded compatible candidates. A pipeline returns only its
-group-local lineage and compiler/target qualification; callers read its run
-resource for workload, environment, source, and capture semantics. Pipeline
-comparison accepts a pipeline ID or a run ID only when that run resolves to
-exactly one pipeline.
+Feature-specific tool names, fields, and limits are intentionally omitted here.
+Use `mcp inspect` for the installed interface and [Adapters and producer
+contracts](adapters.md) for producer behavior. Across all tools, imports preserve
+native bytes, captures preserve effective run semantics, queries stay bounded,
+and recovery actions name the next valid operation.
 
 ## Agent workflow
 
@@ -226,63 +129,16 @@ plan_capture
   └─ start_detached_capture        long operation
        └─ get_detached_capture
 get_run
-  ├─ extract_memray → get_extraction      durable long extraction
   └─ bounded extract/analyze
        └─ get_evidence → record_analysis/record_finding
-
-V8 profile imports use `extract_node_cpu_prof` or `extract_node_heap_prof` after
-the corresponding native artifact has been preserved.
 ```
 
 Capability responses distinguish passive discovery from execution binding.
-Setup installs only allowlisted managed providers into version-addressed provider
-environments; it never adds packages to the running MCP server. Provider setup
-installs core Flameox plus that provider—not a Flameox “all extras” environment—
-so mutually incompatible profilers and reducers remain usable. The MCP setup
-adapter schema is generated from these same definitions and includes inference
-providers such as AIPerf; there is no separate transport vocabulary to drift.
-Third-party entry points need an exact package-identity approval. From an editable
-Flameox checkout,
-setup builds one wheel into workspace-owned content-addressed storage and binds its
-wheel digest, bounded source-tree identity, revision, and dirty state in the provider
-receipt. Released installations resolve Flameox and the provider into a preserved,
-content-addressed requirements lock and require artifact hashes during installation;
-setup never points a provider environment at a mutable checkout. Workload dependency
-preparation is deliberately
-inspection-only: it queries the exact Python interpreter bound to the workload and
-reports missing distributions without changing that environment or Flameox's own
-runtime. None of these steps runs the workload.
-
-Adapter availability and workload compatibility are separate facts. In
-particular, an NVBench workload declares `execution_protocol = "nvbench"` and
-active planning qualifies the exact executable with `--version` before provider
-flags are constructed. The capture plan exposes that qualification inline because
-it is run-scoped interpretation and authorization evidence, not an artifact.
-
-`import_xctrace` and `flameox import-xctrace` are the same application operation.
-They preserve a native `.trace` directory as a sensitive immutable package with
-its bounded `xctrace` table-of-contents export. They do not record a workload,
-install Xcode, or expose arbitrary XPath queries.
-
-Reduction is a separate task-shaped workflow:
-
-```text
-list_capabilities(adapter="shrinkray")
-  └─ start_capability_setup, when unavailable
-plan_reduction(source_run_id, source_registration_id, predicate_workload, limits)
-execute_reduction(plan_id)
-get_reduction(reduction_id)
-```
-
-The MCP request schema describes this stable capability; it does not expose
-ShrinkRay flags or arbitrary predicate commands. Planning resolves the named
-predicate workload, exact source registration, and managed provider. Execution
-refuses changed provider, bridge, predicate, registration, or artifact identity.
-The terminal result returns the reduced registration ID. Artifact reads inline
-the bounded reduction lineage from the authoritative reduction result rather
-than copying provenance fields into the registration. When that inline page is
-truncated, its cursor continues through `list_artifact_reductions` against the
-same pinned corpus commit.
+Setup installs one allowlisted provider per version-addressed environment; it
+never changes the running MCP environment. Receipts bind the installed package
+and environment identity. Workload dependency preparation only reports missing
+packages and never changes the workload environment. None of these steps runs
+the workload.
 
 `capture_mode="auto"` uses trusted-local execution and records the containment
 limitation. `capture_mode="managed"` requests the stronger project policy and
@@ -297,18 +153,16 @@ ID detects a caller reviewing one plan and presenting another token.
 
 Plans are short-lived authorization receipts, not durable run manifests. They
 retain only the finalized typed values needed to review, execute, and revalidate
-one launch. The authorization digest is derived
-from that finalized plan instead of a separately maintained field list. Durable
-semantics move to the run manifest when execution begins.
+one launch. The authorization digest comes from that plan, not a second field
+list. Durable semantics move to the run manifest when execution begins.
 
 A consumed synchronous capture plan is not retryable. If the response is lost,
 inspect durable run and operation state rather than submitting the token again.
 Detached capture and capability setup are retryable only with the same
 idempotency key and same request digest. A changed intent requires a new key.
-Managed capability setup projects bounded transfer progress inline: received and
-expected bytes, elapsed time, and durable safe-resume availability. In-flight response
-bytes are not reported as resumable until their authenticated checkpoint is committed. It never exposes asset
-URLs, validators, or request headers through operation status.
+Managed setup reports bounded transfer progress. It reports bytes as resumable
+only after a checkpoint is committed and never exposes download credentials or
+request headers.
 
 Configuration, workload, executable, provider, oracle, and environment identity
 are revalidated before launch. Stale intent fails and must be replanned.
@@ -345,19 +199,9 @@ not duplicate that fact as flattened `success`, `cancelled`, or error columns.
 
 List operations are bounded and cursor-paginated. A cursor binds the query,
 ordering, and snapshot; it cannot be reused for a different request. Analysis
-and evidence resolution pin one corpus snapshot before the first lookup.
-`analyze_execution` returns one selected collection (`observations`, `added`,
-`removed`, or `changed`) rather than copying every comparison set into one
-response. Its filters are applied before comparison, `totals` reports each
-collection independently, and `items` contains only the requested page. When
-`next_cursor` is present, call `analyze_execution` again with the same inputs,
-collection, and filters plus that cursor. The opaque cursor retains the original
-immutable corpus commit even if the workspace publishes a newer HEAD; changing
-the query rejects it as stale.
-`get_trace_window` is provider-neutral: it reads normalized temporal evidence
-when available and uses a native Perfetto reader only as a fallback. Its inline
-events carry the provider and interpretation fields needed for the window;
-native traces and full normalized generations remain referenced evidence.
+and evidence resolution pin one corpus snapshot before the first lookup. A
+cursor keeps that snapshot even if the workspace publishes newer evidence.
+Changing the query invalidates the cursor.
 
 MCP resources are bounded JSON projections, not alternate authorities. Current
 templates cover runs, artifacts, pipelines, investigations, hypotheses,
@@ -372,58 +216,10 @@ artifact for deeper inspection. Large result sets and native evidence are not
 repeated in every tool response merely because an inline representation is
 possible.
 
-`analyze_memory` selects one normalized allocation view: `high_watermark`,
-`retained_end`, `allocation_volume`, or `temporary`. It ranks matching frames by `self` bytes from the
-allocating frame or by `inclusive` bytes including descendant allocations. Zero
-self-byte frames are excluded by default even for inclusive ranking; callers can
-include them explicitly. `project_only` uses preserved source-state identity,
-not a filename guess. Include and exclude filters match prefixes of the
-normalized frame file or derived module path. A frame may match any supplied
-include prefix, while any matching exclude prefix removes it. Filtering and ranking happen
-before the response limit.
-
-The result returns the effective query, the exact number of matching normalized
-frame rows as `hotspot_total`, and `hotspots_truncated` when the returned list is
-shorter. The aggregate `truncated` flag also covers the independently bounded
-runtime-resource projection. If filtering produces no frame rows,
-`hotspot_evidence` is typed `empty` with an executable `analyze_memory` action.
-That action preserves the input, limit, allocation view, and ranking while
-removing project and file-prefix restrictions and allowing zero-self frames; it
-does not silently change the completed response or claim that the broader query
-will contain evidence.
-
-`analyze_nsight_compute` and `flameox analyze nsight-compute` return a bounded,
-provider-ranked projection over persisted `nsight_compute.rule` facts. Each
-finding retains its immutable report artifact ID, action/range location, section
-and rule identifiers, provider rule message, estimate meaning and provider
-label, plus any provider focus metrics. The result also reports target
-qualification from the pinned run's recorded kernel filter, roofline coverage,
-and normalized-evidence truncation. It does not reopen the native `.ncu-rep` or
-invent a Flameox bottleneck from the provider result.
-
-When a targeted or fuller recapture is needed, the result carries a bounded
-Nsight Compute selection and a `plan_capture` next action. If the original
-kernel filter was not recorded, its selection leaves `kernel_name` unset and
-asks for the intended filter; it never promotes an observed action into capture
-semantics. If the declared workload name or parameters are not durable run
-semantics, that action explicitly names them as missing rather than guessing
-them. The MCP
-`plan_capture` boundary validates typed `nsight_compute_options`; the action
-graph carries only its bounded JSON transport payload.
-
 An empty result and unavailable evidence are different states. Results carry
 coverage, limitation, or recovery information when the requested evidence was
-not extracted, not supported, outside the snapshot, or truncated by a budget.
-Workspace status and validation return the typed `catalog.rebuild` action when
-the disposable catalog is missing or unreadable. MCP exposes that action as
-`rebuild_catalog`. A new corpus HEAD does not make the catalog stale: each read
-constructs transient views from its exact pinned immutable corpus inventory.
-
-`get_process_snapshot` reads the preserved snapshot summary as well as its bounded
-entries. It reports `available`, `empty`, `partial`, or `unavailable`; an empty row
-set is never presented as proof of zero activity when enumeration coverage is absent.
-Partial and unavailable results include their visibility limitations and a typed
-recovery path for a new capture.
+not extracted, unsupported, outside the snapshot, or truncated. Recovery points
+to the next operation that can change that state.
 
 ## Progress and cancellation
 
@@ -432,29 +228,9 @@ phases report phase changes without invented percentages. Progress delivery is
 non-authoritative: a logging or notification failure cannot change the operation
 result.
 
-Client cancellation propagates into the owning application operation. A cancellation
-tool durably records the request and waits up to 250 milliseconds for immediate cleanup;
-if cleanup is still active, it returns the pollable `cancelling` state instead of blocking.
-Detached operations can be inspected after client disconnect.
-
-`extract_memray` is a durable start operation because provider parsing and aggregation can
-outlive an MCP request. It requires an idempotency key and returns an operation ID. Use
-`get_extraction` for bounded progress and the terminal extraction receipt, or
-`cancel_extraction` for scoped cooperative cancellation. Native profile artifacts remain
-immutable; normalized evidence is published only as a complete generation.
-The start/status request exposes the effective ten-part extraction budget. Running
-status reports named reader, normalization, and publication phases with observed record
-counts; it does not invent a total when Memray cannot provide one. The terminal receipt
-keeps the same limits beside explicit coverage and limitations. A new idempotency key
-with the same run and limits reuses the exact completed receipt instead of parsing the
-profile again.
-
-`get_frame_callers`, `get_frame_callees`, and `get_stack_examples` return bounded
-normalized navigation evidence. Their optional metric filter separates concepts
-such as byte-weighted Memray stacks from nanosecond-weighted sampled CPU stacks;
-each row carries its metric, weight, unit, and sample count. Pagination orders by
-weight with stable metric and identity tie-breakers. These projections do not
-claim causal dependence or replace a provider's complete native stack viewer.
+Client cancellation propagates into the owning operation. If cleanup is still
+running, the tool returns a pollable `cancelling` state. Detached operations can
+be inspected after the client disconnects.
 
 ## Errors
 
