@@ -61,7 +61,7 @@ FLAMEOX_RUN_PERFORMANCE=1 uv run pytest -o addopts='' -ra -q -m performance
 - Process tests prove cleanup and terminal state.
 - Storage tests prove transactions, conflicts, and immutable revision history.
 - Analysis tests pin one snapshot before lookup.
-- Adapter tests preserve native formats and prove explicit compatibility.
+- Adapter tests preserve native formats and prove the declared reader contract.
 - Security tests include hostile paths, bounds, identities, and cancellation.
 
 A passing suite proves only the exercised environments. Report missing provider,

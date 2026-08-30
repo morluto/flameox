@@ -47,7 +47,7 @@ There are six authoritative boundaries:
    capture scope; artifact identity is not a substitute for that state.
 4. The subprocess broker owns child creation, environment construction,
    deadlines, output and resource budgets, observation, and cleanup. The
-   artifact-worker harness owns one versioned, typed, request-bound staged
+   artifact-worker harness owns one typed, request-bound staged
    worker protocol. Every ordinary artifact worker is registered against that
    protocol; workers cannot introduce an ad hoc dictionary envelope.
 5. Native producer formats remain authoritative for the bytes and measurements
@@ -63,6 +63,11 @@ CLI and MCP responses are bounded projections across these authorities. They may
 inline the semantics and summaries needed for the immediate task, but durable
 meaning remains in run and analysis records while native and normalized evidence
 remain in their immutable stores.
+
+MCP results link to larger durable evidence with native `ResourceLink`s. A link
+identifies the exact run, artifact, or normalized generation; it does not move
+run semantics into the artifact or require the response to duplicate its full
+contents.
 
 ## Package boundaries
 
@@ -176,9 +181,11 @@ not authorize an out-of-root executable.
 
 ## Storage and snapshot model
 
-The SQLite control plane is a new workspace contract. Initialization creates the
-complete schema atomically. A workspace with an incompatible control schema is
-rejected; Flameox does not guess how to migrate pre-redesign control files.
+The SQLite control plane has one exact workspace format. Initialization creates
+the complete schema atomically and writes its format sentinel. A workspace with a
+missing or incompatible sentinel is rejected and must be initialized as a new
+workspace; supported import operations can then preserve native evidence from
+elsewhere.
 
 Evidence publication is append-only. A new immutable generation and corpus
 commit are written before `HEAD` advances. Analysis pins the current commit once

@@ -50,6 +50,11 @@ An experiment declares:
 - validation-oracle requirement;
 - maximum trials and resource bounds.
 
+Experiments use one canonical shape: `factors` declares every bounded input,
+`treatment_factor` selects the treatment dimension, and `combination_policy`
+is either `cartesian` or `explicit`. Unknown project, workspace, and experiment
+keys are rejected.
+
 Planning expands and validates the complete matrix, resolves executable and
 provider authority, randomizes treatment order within blocks, and stores the
 complete plan behind an opaque capability. Execution consumes that capability;
@@ -59,6 +64,32 @@ Every attempted trial remains visible. Cancellation, timeout, environment
 failure, workload failure, oracle failure, missing evidence, and explicit
 exclusion are different states. Automatic paired comparison runs only when the
 declared block and identity contract is complete.
+
+### Fault experiments
+
+Fault experiments are categorical by default: they retain the baseline and
+fault-treatment outcomes, but do not claim a numeric effect. To compare a
+successful workload's client elapsed time, declare the one supported bounded
+measurement source:
+
+```toml
+[fault_experiments.transport.measurement]
+source = "stdout_json"
+practical_threshold = 0.05
+confidence_level = 0.95
+```
+
+This binds `fault.client_elapsed` in `ns` to one strict stdout receipt emitted by
+the workload: `{"elapsed_ns": <positive integer>, "outcome": "completed"}`.
+Capture preserves stdout as an immutable process-output artifact; fault
+execution parses those exact bytes and publishes one observed measurement with
+the artifact, trial, block, and treatment provenance needed for normal paired
+comparison. The receipt metric is lower-is-better and uses a median paired log
+ratio. Flameox then compares the baseline with every declared fault treatment. A
+failed, timed-out, reset, or otherwise ineligible trial remains a categorical
+outcome; it never becomes a numeric zero. A missing or malformed receipt adds a
+bounded trial diagnostic and yields the normal typed inconclusive comparison and
+`measurement_recovery` guidance.
 
 ## Oracles
 
@@ -70,6 +101,19 @@ Common strengths are:
 - a contract check for one execution;
 - reference agreement for a declared input;
 - cross-treatment equivalence where the receipt genuinely binds both sides.
+
+`cross_treatment_equivalence` is a hard pairwise contract. Its receipt must
+include a typed `binding` with a pair identity, treatment, shared input identity,
+the current workload and output identities, compared property, oracle identity,
+and tolerance. Flameox combines the two bindings for each declared block and
+requires matching shared fields, the expected treatment labels, and the actual
+workload-instance identities. It never compares validation stdout bytes as a
+semantic oracle. A per-treatment receipt without that binding remains useful
+validation evidence, but produces an exploratory comparison rather than
+confirmatory equivalence. Diagnostic stdout may differ without invalidating a
+semantically matching pair. Flameox supplies the current workload instance as
+`FLAMEOX_WORKLOAD_INSTANCE_ID` while invoking a receipt-producing oracle so the
+binding can be checked against the run manifest.
 
 Planning binds oracle argv, semantic executable identity, outer launch binding,
 cwd, environment, containment, network status, timeout, output paths, and
@@ -87,7 +131,7 @@ that handle. Later imports or record revisions are invisible.
 
 Analysis output identifies:
 
-- recipe and schema version;
+- recipe and recipe revision;
 - pinned corpus commit;
 - complete input identities;
 - observed and derived values;
@@ -126,6 +170,39 @@ Summarizes operator populations, direct and graph launches, kernels,
 synchronization, correlations, and idle gaps from normalized traces. Added and
 removed regions remain visible; analysis does not silently intersect them away.
 
+### Nsight Compute guided analysis
+
+Projects bounded, typed provider rule facts that were extracted from an
+unchanged `.ncu-rep`. Findings retain the provider's action/range location,
+section and rule identities, reported estimate meaning, and focus metrics. The
+recipe reads normalized evidence and the pinned run manifest only; it does not
+reopen native report bytes. Roofline coverage comes from provider-reported
+section identifiers persisted with extraction, not just returned findings.
+Target qualification remains indeterminate when bounded action evidence cannot
+exclude a recorded target. A recapture without a recorded kernel filter leaves
+that filter unset and asks for the intended target. Provider guidance is
+evidence, not a Flameox causal conclusion.
+
+### Scaling readiness
+
+`analyze scaling` reports two separate truths. `evidence` says whether matching
+measurement rows are present; `sufficiency` says whether those rows support
+scaling-model selection. Available rows can still be analytically insufficient
+or incompatible with the declared experiment.
+
+The bounded `missing_requirements` list names the affected variants and, where
+applicable, observed and required counts. Model selection requires one positive
+numeric non-treatment factor, a single numeric representation, at least four
+distinct input values per variant, two completed blocks per value, complete
+treatment blocks, and a primary-metric measurement for every succeeded trial.
+
+Repairable coverage gaps point to the existing declared-workflow action and
+describe the replacement experiment to run. Missing primary measurements or an
+incompatible numeric axis instead require a measurement-protocol or design
+correction; Flameox does not recommend extending the current population with
+more data. `inconclusive` remains a valid conclusion when a sufficient dataset
+does not select a supported model.
+
 ### Memory growth
 
 Keeps allocation, retained/high-water, temporary churn, RSS, and other memory
@@ -143,6 +220,12 @@ source-state identity; normalized file- and module-prefix predicates provide
 narrower or broader source selection. The exact post-filter row total and truncation state
 remain visible. An empty filtered view carries a typed broader query rather than
 being interpreted as proof that the workload made no allocations.
+
+For Memray region captures, the region name, declared warm-up count, process and
+thread scope, and allocator options are part of run semantics. Baseline and
+candidate comparisons reject different region or warm-up semantics before
+interpreting allocation measurements; identical native bytes do not override a
+mismatched run contract.
 
 ### Execution path
 

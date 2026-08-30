@@ -80,8 +80,6 @@ Commands live in `flameox.toml` as argument arrays. Parameters are declared
 scalars; there is no shell expansion.
 
 ```toml
-schema_version = 1
-
 [workloads.scan]
 argv = ["python", "bench.py", "--implementation", "{implementation}"]
 cwd = "."
@@ -93,6 +91,7 @@ implementation = ["baseline", "candidate"]
 [workloads.scan.oracle]
 strength = "cross_treatment_equivalence"
 argv = ["python", "validate.py", "--implementation", "{implementation}"]
+receipt_schema = "flameox.oracle-receipt.v1"
 
 [experiments.scan_comparison]
 workload = "scan"
@@ -110,6 +109,13 @@ random_seed = 1984
 [experiments.scan_comparison.factors]
 implementation = ["baseline", "candidate"]
 ```
+
+Cross-treatment equivalence requires each oracle invocation to write a typed
+receipt to `FLAMEOX_ORACLE_RECEIPT`. The receipt binding must identify the pair,
+shared input and compared property, both treatment-side identities across the
+paired receipts, the oracle, tolerance, and verdict. Flameox does not treat
+equal stdout bytes as semantic proof; an ordinary per-treatment oracle is
+recorded as exploratory validation.
 
 The MCP `configure_workload` tool validates and writes the canonical definition
 without executing it. A manually authored valid definition is active
@@ -173,10 +179,11 @@ Large evidence does not live in SQLite. Deleting `catalog.duckdb` does not
 delete evidence; `flameox catalog rebuild` recreates it from committed
 generations.
 
-Runs preserve what was attempted, native artifacts preserve what producers
-emitted, and immutable generations preserve normalized evidence. CLI and MCP
-responses inline only the bounded semantics and summaries needed to interpret an
-outcome, with references for deeper evidence.
+Runs preserve what was attempted and the effective semantics needed to interpret
+it. Native artifacts preserve what producers emitted; immutable generations hold
+normalized evidence. CLI and MCP responses inline only bounded semantics and
+summaries for the immediate task, then use typed references and MCP
+`ResourceLink`s for deeper evidence reads.
 
 The CLI and MCP server expose bounded task-shaped operations, not shell strings,
 raw SQL, or arbitrary artifact bytes. Workloads may access the network unless

@@ -62,8 +62,6 @@ uv run flameox status
 命令以参数数组的形式写在 `flameox.toml` 中。参数只能声明为标量；Flameox 不执行 shell 展开。
 
 ```toml
-schema_version = 1
-
 [workloads.scan]
 argv = ["python", "bench.py", "--implementation", "{implementation}"]
 cwd = "."
@@ -75,6 +73,7 @@ implementation = ["baseline", "candidate"]
 [workloads.scan.oracle]
 strength = "cross_treatment_equivalence"
 argv = ["python", "validate.py", "--implementation", "{implementation}"]
+receipt_schema = "flameox.oracle-receipt.v1"
 
 [experiments.scan_comparison]
 workload = "scan"
@@ -92,6 +91,11 @@ random_seed = 1984
 [experiments.scan_comparison.factors]
 implementation = ["baseline", "candidate"]
 ```
+
+跨 treatment 的等价性要求每次 oracle 调用都通过 `FLAMEOX_ORACLE_RECEIPT`
+写出类型化 receipt。receipt binding 必须关联 pair、共享输入、比较属性、两侧
+运行与输出身份、oracle、容差和结论。Flameox 不把相同 stdout 字节当作语义证明；
+只有单侧检查的 oracle 会被记录为探索性验证。
 
 MCP 的 `configure_workload` 工具会校验并写入规范定义，但不会执行命令。手动编写的有效定义会立即生效；不存在审批副本或第二份工作负载注册表。
 
@@ -141,6 +145,10 @@ uv run flameox analyze failures
 - 可重建的 `catalog.duckdb` 分析缓存。
 
 大体积证据不会存放在 SQLite 中。删除 `catalog.duckdb` 不会删除证据；`flameox catalog rebuild` 会从已提交的 generation 重新创建它。
+
+运行记录保留实际尝试及解释结果所需的有效语义。原生 artifact 保留生产者输出；
+不可变 generation 保存规范化证据。CLI 和 MCP 响应只内联当前任务所需的有边界语义和摘要，
+并通过类型化引用及 MCP `ResourceLink` 提供更深层的证据读取。
 
 CLI 和 MCP 服务器提供的是有边界、面向任务的操作，不接受 shell 字符串、原始 SQL 或任意证据字节。除非主动的隔离（containment）禁止，工作负载可以访问网络。控制进程只会在明确的 setup、upgrade、已批准的 provider 获取或显式启用的符号服务（symbol service）中进行网络 I/O；普通采集和分析不会进行网络 I/O。
 

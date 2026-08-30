@@ -52,9 +52,9 @@ Mutating commands make mutation explicit. In particular:
 - permanent purge names one expired trash manifest;
 - catalog rebuild changes only derived DuckDB state.
 
-CLI JSON is the validated domain model, not a separately versioned response
-shape. Scripts should still bind to a released Flameox version because domain
-schema evolution is explicit, not indefinitely permissive.
+CLI JSON is the validated domain model. Scripts should bind to a released
+Flameox version because domain changes are explicit and unknown fields are not
+silently accepted.
 
 ## MCP transport
 
@@ -65,7 +65,8 @@ no prompts.
 Tool inputs are generated from strict SDK/Pydantic models. Unknown keys, invalid
 unions, coercion-dependent values, malformed paths, and unbounded strings are
 rejected at the boundary. Domain failures return `isError=true` with a stable
-typed error projection and, when recovery exists, exact next-tool arguments.
+typed error projection and, when recovery exists, one canonical action with
+the exact MCP tool name and validated arguments.
 
 Extractor prerequisites use the same error contract across formats. An unknown
 run is `RUN_NOT_FOUND`; an existing run without the required evidence is
@@ -93,10 +94,35 @@ provides the equivalent `artifacts preview` operation.
 
 Tool results use a hybrid response boundary. They return the bounded run
 semantics needed to interpret the immediate outcome, such as effective mode and
-scope, status, limitations, coverage, and truncation. They use resource links
-and typed references for native artifacts, normalized evidence generations, and
-other larger durable records. Artifact identifiers remain provenance references;
+scope, status, limitations, coverage, and truncation. They use native
+`ResourceLink`s and typed references for native artifacts, normalized evidence
+generations, and other larger durable records. Artifact identifiers remain
+provenance references;
 they are never the sole carrier of run meaning.
+
+`extract_coverage` requires a run-owned `execution_coverage` artifact whose
+registration identifies the exact `coverage` producer and a supported producer
+version (`coverage>=7.14,<8`). It reports that producer version alongside the
+control reader version. The normalized generation records the reader as its
+`publisher`/`publisher_version` and points to the input artifact; an unsupported
+producer is rejected before the native database is parsed and the recovery is a
+new capture with a supported workload package.
+
+`plan_capture` exposes Memray options as a typed input when
+`adapter="memray"`: `mode`, the SDK `region`, `warmup_count`, and the native
+and Python allocator switches. The plan rejects unknown fields and type
+coercion, and the resulting run carries the same region/warm-up semantics used
+by comparison compatibility checks. Workload, source, timeout, generated
+output, and artifact-limit identity remains on the single plan/run contract;
+the MCP response only projects the bounded portion needed for the next action
+and links deeper evidence.
+
+For experiment validation, equal validation-stdout artifacts are not a semantic
+oracle. `cross_treatment_equivalence` requires the versioned typed receipt
+binding described in `docs/investigations.md`; Flameox combines one binding from
+each treatment for every declared block and checks the shared pair contract.
+Independent per-treatment checks remain valid evidence but keep the comparison
+exploratory.
 
 `register_kernel_validation` is the explicit post-run handoff for correctness
 evidence produced by a workload. It requires a succeeded run and its exact
@@ -107,6 +133,22 @@ validation stage. Runs with multiple pipelines require an explicit pipeline ID;
 Flameox never guesses which lineage owns the evidence. `extract_kernel_validation`
 remains idempotent and normalizes the registered document without moving run
 semantics into its bytes.
+
+`import_kernel_build` returns bounded run and pipeline identifiers rather than
+copying compiler lineage into the provider manifest. Its canonical schema
+resource is `flameox://schemas/kernel-build`. A Triton import may return several
+sibling pipeline IDs—one for each native dump directory—so callers select the
+specific lineage to show or compare. JSON and metadata files are available from
+the run's native artifact registrations but do not become synthetic stages.
+They do not establish an autotune choice or any other run semantic.
+
+For managed `triton.compiler` capture, the capture receipt links to
+`flameox://triton-autotune/<run-id>/selections`. The corresponding
+`query_triton_autotune_selections` tool returns a cursor-bounded page of
+provider-listener decisions. Each row contains only the run-scoped function/key
+identity, winner, bounded candidates, timing evidence, coverage limits, and
+recovery-relevant limitations; native compiler artifacts and pipelines remain
+separate resources.
 
 `import_artifact` keeps free-form producer metadata separate from validated run
 semantics. Omitting `profile` creates a generic import even when `producer` is
@@ -119,13 +161,36 @@ artifact resources.
 owned by a run, so recovery never depends on retaining the original source path
 and does not duplicate content-addressed bytes.
 
+`import_static_analysis` is the narrow import path for provider-native SARIF
+2.1.0. It preserves the report unchanged as an `analysis_result` artifact and
+records the declared source root, effective include/exclude scope, analyzer
+identity, exit status, coverage, and unavailable source identity on the import
+run. Only bounded `static_candidates` fields are normalized: provider rule,
+level, message, physical source location, fingerprint, and optional confidence.
+Unknown SARIF extensions remain native-only. Every source location is resolved
+against the declared root; traversal, paths outside that root, and symlink
+escapes are excluded with explicit coverage. Explicit excludes win; explicit
+includes override default exclusions, including the actual workspace root.
+`query_static_candidates` pages one immutable run-scoped generation with an
+opaque snapshot cursor, while the import result links to the run, native
+artifact, and candidate collection resources. Its bounded response includes the
+safe import semantics needed to interpret the candidates because the run
+resource does not carry free-form import configuration. A static candidate is
+analyzer output, not a Flameox Finding and not runtime confirmation. To assess
+one, record a Finding that references the candidate with `relation="context"`
+and references the measured run, trial, analysis, or comparison with the
+supporting or contradicting relation. Candidate pages return at most 16 related
+Finding IDs; the Finding resource reconstructs the current revision's exact
+evidence edges. Flameox rejects attempts to make a static candidate validate or
+support itself.
+
 Inline fields are response projections, not an alternate persistence model.
 Property-defining execution semantics remain authoritative in the run manifest,
 and selected findings or summaries remain authoritative in their durable records
 when they must survive the response. A transport may inline a bounded subset for
 agent usability without duplicating or replacing that state.
 
-Capture responses may also return a bounded `recovery` action. For a timed-out
+Capture responses may also return a bounded transport `recovery` action. For a timed-out
 Compute Sanitizer probe, unlimited plans receive an executable one-launch replan;
 already-bounded plans require a changed target-only workload or provider filter
 instead of suggesting that the same capture be repeated.
@@ -134,12 +199,12 @@ MCP capture receipts inline the safe semantic projection—semantic identity,
 adapter identity, mode, process scope, bounds, filters, and explicit unavailable
 fields—and link to the bounded run resource and any automatically registered
 artifact pipelines. `list_artifact_pipelines` provides cursor-paginated discovery
-by run, producer, schema, or source artifact; `get_artifact_pipeline` returns one
-pipeline plus bounded compatible candidates. Pipeline comparison accepts a
-pipeline ID or a run ID only when that run resolves to exactly one pipeline.
-Typed MCP output schemas version
-these response contracts; individual success envelopes and receipts do not add
-an ornamental schema-version field.
+by run, name, producer, or source artifact; `get_artifact_pipeline` returns one
+pipeline plus bounded compatible candidates. A pipeline returns only its
+group-local lineage and compiler/target qualification; callers read its run
+resource for workload, environment, source, and capture semantics. Pipeline
+comparison accepts a pipeline ID or a run ID only when that run resolves to
+exactly one pipeline.
 
 ## Agent workflow
 
@@ -230,9 +295,9 @@ execution authority. Execution accepts the opaque `plan_token`; SQLite returns
 the complete issued intent and consumes it atomically. An optional expected plan
 ID detects a caller reviewing one plan and presenting another token.
 
-Plans are short-lived authorization receipts, not durable run manifests and not
-an additional evidence schema. They retain only the finalized typed values needed
-to review, execute, and revalidate one launch. The authorization digest is derived
+Plans are short-lived authorization receipts, not durable run manifests. They
+retain only the finalized typed values needed to review, execute, and revalidate
+one launch. The authorization digest is derived
 from that finalized plan instead of a separately maintained field list. Durable
 semantics move to the run manifest when execution begins.
 
@@ -272,6 +337,9 @@ run_inference_profile(plan_token, expected_plan_id)
 
 Provider output remains prompt-free on agent-facing surfaces; sensitive native
 exports stay local as artifacts.
+
+Normalized inference-request rows carry one typed `outcome` object. They do
+not duplicate that fact as flattened `success`, `cancelled`, or error columns.
 
 ## Evidence reads and snapshots
 
@@ -324,6 +392,25 @@ removing project and file-prefix restrictions and allowing zero-self frames; it
 does not silently change the completed response or claim that the broader query
 will contain evidence.
 
+`analyze_nsight_compute` and `flameox analyze nsight-compute` return a bounded,
+provider-ranked projection over persisted `nsight_compute.rule` facts. Each
+finding retains its immutable report artifact ID, action/range location, section
+and rule identifiers, provider rule message, estimate meaning and provider
+label, plus any provider focus metrics. The result also reports target
+qualification from the pinned run's recorded kernel filter, roofline coverage,
+and normalized-evidence truncation. It does not reopen the native `.ncu-rep` or
+invent a Flameox bottleneck from the provider result.
+
+When a targeted or fuller recapture is needed, the result carries a bounded
+Nsight Compute selection and a `plan_capture` next action. If the original
+kernel filter was not recorded, its selection leaves `kernel_name` unset and
+asks for the intended filter; it never promotes an observed action into capture
+semantics. If the declared workload name or parameters are not durable run
+semantics, that action explicitly names them as missing rather than guessing
+them. The MCP
+`plan_capture` boundary validates typed `nsight_compute_options`; the action
+graph carries only its bounded JSON transport payload.
+
 An empty result and unavailable evidence are different states. Results carry
 coverage, limitation, or recovery information when the requested evidence was
 not extracted, not supported, outside the snapshot, or truncated by a budget.
@@ -372,8 +459,9 @@ claim causal dependence or replace a provider's complete native stack viewer.
 ## Errors
 
 Errors identify a stable code, safe message, retryability, and bounded details.
-Recovery guidance is executable: it names the next tool and complete validated
-arguments rather than asking an agent to reconstruct intent from prose.
+Recovery guidance is executable: a tool action contains only `tool_name` and
+complete validated `arguments`; manual and external actions contain their
+canonical instructions.
 
 Sensitive paths, environment values, child output, prompts, generated text, and
 artifact contents are excluded from agent-facing diagnostics. Local native

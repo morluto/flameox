@@ -40,9 +40,9 @@ Internal workload-side collectors execute authorization-bound source directly,
 never `python -m flameox.collectors...` from the workload environment or a
 mutable staged launcher. Their content identity is part of the reviewed plan
 and durable run semantics and is rechecked before execution. The workload
-interpreter still owns workload packages such as pyperf, pytest, and
-pytest-reportlog; an absent or older workload-side Flameox package cannot
-replace collector code.
+interpreter owns workload packages such as pyperf, pytest, and
+pytest-reportlog. Collector code remains bound to the reviewed plan and its
+recorded source identity.
 
 Capture and extraction results may project a bounded subset of these run
 semantics alongside status, limitations, and artifact references. The projection
@@ -79,7 +79,7 @@ Use maintained formats and models wherever they exist:
 | NVIDIA correctness findings | Compute Sanitizer XML | typed findings and launch correlation |
 | GPU benchmark samples | NVBench JSON and declared sidecars | bundle integrity and metric provenance |
 | ROCm traces | ROCprofiler Perfetto-compatible output | qualified trace semantics |
-| Inference replay | AIPerf models, vLLM/SGLang structured exports | protocol identity and prompt-free request metrics |
+| Inference benchmark | AIPerf models, vLLM/SGLang structured exports | protocol identity and prompt-free request metrics |
 | HTTP | HTTPX policy transport | loopback/readiness limits and typed errors |
 | managed tools | checked-in upstream asset manifests | digest-before-execution and installed-byte receipts |
 | test-case reduction | ShrinkRay 26.7.8.0 CLI | predicate authority, tri-state receipts, final revalidation |
@@ -150,6 +150,50 @@ JSON is authoritative for wall time and `command_max_rss`; a separate raw
 metadata remains missing rather than being replaced by another backend.
 Confirmatory comparison uses preserved samples and declared paired estimands.
 
+The general `pyperf` capture adapter is explicitly a fresh-process command
+benchmark. Each value includes interpreter startup, imports, framework
+initialization, input construction, and other entrypoint setup. It is suitable
+for CLI, startup, and end-to-end process questions, but not for the latency of
+an already-prepared framework operation. Its durable semantics record
+`process_scope=fresh_process_invocation`. For a workload that declares an
+accelerator identity, the plan also returns `alternative_action`: a validated
+`plan_capture` call for `benchmark-samples`. That route remains workload-owned:
+the workload must emit synchronized raw samples. PyTorch workloads can instead
+instrument an already-prepared callable with `torch.benchmark`; choosing
+`pyperf` is a deliberate process-scope measurement, not a substitute for
+device timing.
+
+### PyTorch operation benchmarks
+
+`torch.benchmark` is the narrow in-process counterpart for an already-prepared
+PyTorch callable. The workload performs setup, lazy initialization, and oracle
+validation before it calls `flameox.sdk.torch_benchmark()`. Flameox delegates
+host wall-time collection, warm-up, thread-pool selection, and accelerator
+synchronization to `torch.utils.benchmark.Timer`, then retains its bounded
+per-loop samples through the canonical `flameox.benchmark-samples.v1` artifact
+and normalized `benchmark-samples` extraction path.
+
+```python
+from flameox.sdk import torch_benchmark
+
+# Construct inputs and validate the result before timing.
+torch_benchmark("gae.step", lambda: chunked_gae(rewards, values))
+```
+
+`min_run_time_seconds`, `max_samples`, and `num_threads` are plan-bound
+options; the capture deadline remains the workload deadline. `max_samples`
+bounds retained evidence after the provider's blocked autorange measurement.
+When `cuda_event_timing` is selected, Flameox records an additional
+`<metric>.cuda_event` series with `measurement_clock=cuda_event` and explicit
+device/stream identity. It remains a distinct device-time metric: Timer's
+host-observed latency is never replaced or combined with CUDA event time.
+CUDA-event collection requires CUDA and fails explicitly when unavailable.
+
+For non-Torch or bespoke accelerator producers, use `benchmark-samples` and
+declare the clock, synchronization, warmups, loop count, scope, device, and
+dimensions. A metric name cannot mix host and device clocks, so consumers never
+silently combine incompatible samples.
+
 ### pytest
 
 The unmodified pytest-reportlog JSONL artifact is the source for `CollectReport`,
@@ -171,6 +215,23 @@ reader or export. Frame and allocation rows retain source artifact and run
 identity. Missing native symbols, thread identity, contexts, or native frames
 stay unavailable. Flameox does not infer them from display text.
 
+Coverage uses the control interpreter's bundled `coverage.py` reader, so its
+reader is a core Flameox dependency and is qualified before capture planning.
+The exact workload interpreter is queried for the producer version; a captured
+run registers `producer="coverage"` with that version. Extraction requires
+that identity and a producer version in `coverage>=7.14,<8` before constructing
+or reading `CoverageData`. The native database remains unchanged when the
+producer is unsupported, and the error directs the caller to recapture with a
+supported workload package.
+
+The normalized generation keeps the same provenance chain: its publisher is
+`coverage` (the coverage.py reader) and its publisher version is the control
+reader version, while its input artifact ID points back to the run registration.
+This separates provider-owned SQLite bytes from run-scoped producer identity
+and reader provenance. Checked-in provider-generated fixtures exercise
+coverage.py 7.14.2 and 7.15.2 through the public `CoverageData` API; they are
+read offline by the normal adapter tests.
+
 Memray capture binds the producer version discovered from the declared workload
 interpreter. Planning requires a verified managed reader for that exact version,
 so an unavailable reader fails before capture overhead and returns a typed
@@ -178,6 +239,59 @@ so an unavailable reader fails before capture overhead and returns a typed
 process and records producer version, reader version and environment, and the
 extractor profile separately. Native reader acceptance—not package-major
 comparison—is the format compatibility boundary.
+
+Memray has two capture scopes. `whole_entrypoint` is the default and invokes
+the provider CLI around the declared Python entrypoint. It includes imports,
+setup, and warm-up, so it answers whole-process allocation questions. `sdk`
+uses the maintained `memray.Tracker` API around exactly one workload-owned
+operation. The single capture plan/run contract binds the region name,
+declared warm-up count, provider version, workload and callable identity,
+process/thread scope, native-stack and Python-allocator choices, generated
+output path, timeout, and artifact limits. The durable run semantics carry the
+property-defining subset (`mode`, `process_scope=workload_process`,
+`thread_scope=all_threads`, `warmup_count`, and the declared region); workload,
+source, output, timeout, and limit ownership stays on the plan/run rather than
+being copied into a second Memray schema.
+
+For a warm operation, perform setup and warm-up before the context, then use
+the exact planned name:
+
+```python
+from flameox.sdk import memray_region
+
+for _ in range(2):
+    warm_up_model()
+with memray_region("steady_step"):
+    run_one_step()
+```
+
+Set `warmup_count=2` in the SDK Memray options when the plan uses the two
+warm-up calls above. The count is declared run semantics; Flameox does not
+guess or count arbitrary calls made outside its SDK context. Whole-entrypoint
+captures do not accept a warm-up count because their measured interval starts
+at process entry.
+
+The SDK owns the tracker lifecycle and the plan-authorized `.bin` path. Memray
+records every thread in the workload process while that context is active; it is
+therefore a precise time window, not a thread filter. Forked children are not
+tracked: Flameox currently exposes no `follow-fork` switch, so child-process
+allocations are a stated limitation in both capture scopes. A nested,
+concurrent, or repeated SDK region fails before Flameox starts another tracker
+and directs the caller to make a fresh plan with one region. Missing, repeated,
+overlapping, and never-closed region lifecycles become typed run validation
+errors from the bounded SDK observations. Calling no context leaves the
+required native output absent and the capture fails; if Memray has already
+written a valid `.bin`, stdout/stderr, or process snapshot before a workload or
+validation failure, Flameox preserves that evidence.
+
+The SDK writes its existing bounded semantic observations immediately before
+and after the tracker context. They state whether an already-loaded Torch
+runtime reported CUDA initialized at each boundary; `null` means Torch was not
+loaded or could not report that state. This distinguishes observed runtime state
+from the plan's declared warm-up boundary without making an unsupported claim
+about allocations that occurred before tracking. Native traces and Python
+allocator events are off by default because both increase capture volume and
+overhead; enable them explicitly when their extra evidence is needed.
 
 Memray extraction snapshots its complete complexity budget in the durable
 operation request: input bytes, provider records, unique frames, stack depth,
@@ -264,6 +378,29 @@ correlation, shapes, stacks, and memory only when the trace supplies them.
 Profiler capture is diagnostic; it does not substitute for an unprofiled
 benchmark comparison.
 
+Flameox exposes two capture modes. `whole_entrypoint` profiles the declared
+Python entrypoint with CPU and CUDA-if-available activities, while shapes,
+memory, stacks, FLOPs, and modules are all opt-in. Its run semantics retain the
+selected activities and options, and the plan states their expected overhead.
+It is still an application-wide trace: Flameox cannot infer setup, compilation,
+warm-up, steady state, or a `record_function` region from an unmodified
+workload. `sdk` is the deliberate narrow mode. The workload enters
+`flameox.sdk.torch_profiler()` and supplies explicit `step()` boundaries; its
+declared schedule determines the expected trace files, which are registered as
+the native evidence.
+
+When a Torch capture times out or exceeds process, resource, or artifact bounds,
+Flameox offers one lower-overhead replan with enabled high-cardinality options
+disabled. If they are already disabled, the result says that retrying the same
+whole-entrypoint plan cannot narrow it and directs the agent to SDK/workload
+instrumentation. The launcher preserves bounded scalar provider diagnostics with
+the run: `artifact_size_bytes`, `event_count`, and `active_duration_us` when the
+completed provider exposes event timing. The duration is the span of provider
+events, not a claim about a warm-up or operation region; unsupported fields are
+omitted. Process duration, RSS, staging growth, and output limits remain in the
+existing process/resource owners, while normalized operator counts remain in
+the extraction owner.
+
 ## Accelerator adapters
 
 ### Nsight Systems
@@ -309,16 +446,34 @@ to NVIDIA's installed `ncu_report.py`; its exact reader identity becomes part of
 the extraction generation. UINT64 values remain unsigned/decimal-safe. Missing
 metrics, replay limitations, and restricted counter permissions stay explicit.
 
+Guided analysis is deliberately a second, bounded projection. Extraction calls
+the documented `rule_results_as_dicts()` interface and persists typed
+`rule_identifier`, `section_identifier`, `rule_message`, `speedup_estimation`,
+and `focus_metrics` with the action and range location in the native report.
+Provider message and estimate labels are retained separately from Flameox's
+documented interpretation. Extraction also records the provider-reported rule
+section identifiers in `profile.extraction`, independently of whether a bounded
+typed finding is emitted. `analyze nsight-compute` and
+`analyze_nsight_compute` read those persisted facts and pinned run semantics;
+they never reopen or decode `.ncu-rep`. The native report remains the immutable
+authority for deeper provider inspection or re-extraction.
+
+The analysis projection owns roofline coverage from those persisted section
+identifiers. It prioritizes provider-estimated impact, reports target
+qualification and extraction bounds, and returns a recapture selection when
+coverage is incomplete. Without a recorded kernel filter, that selection leaves
+the filter unset and asks for the intended target; it never adopts an incidental
+observed action. Re-extract the unchanged report to publish typed facts.
+
 Local qualification covers only versions and devices exercised by the live
 lane. A package or executable probe alone does not establish compatibility.
 
 ### Compute Sanitizer
 
 Flameox requests the producer's structured XML and derives finding categories
-from typed fields, not human diagnostic prose. Missing, invalid, older, or newer
-schema families fail rather than being guessed. Unknown record elements remain
-limitations. The result separates tool failure, application failure, and
-reported findings.
+from typed fields, not human diagnostic prose. Unsupported schema families fail
+rather than being guessed. Unknown record elements remain limitations. The result
+separates tool failure, application failure, and reported findings.
 
 ### NVBench
 
@@ -340,9 +495,67 @@ pool unrelated axes.
 ### Kernel build and validation
 
 Triton and CuTe compiler capture preserves exact compiler outputs and binds them
-to the workload definition, instance, toolchain, and device. Kernel-validation
+to the workload definition, instance, toolchain, and device. For Triton,
+planning resolves the `triton` distribution through the declared workload
+interpreter and records its canonical distribution name, version, full RECORD
+content digest, and interpreter digest. Execution repeats that probe immediately
+before launch; a changed distribution invalidates the plan. Kernel-validation
 receipts distinguish exact agreement, tolerance metrics, failure, and
 unavailable backends. Compile success is not semantic correctness.
+
+Triton dump directories are evidence groups, not one flattened compiler pass.
+Triton creates one dump directory for each source-hash compilation and writes
+that compilation's stage files there. Flameox therefore preserves every native
+file under its immediate parent directory and creates one sibling
+`ArtifactPipeline` per group. Each pipeline has deterministic local lineage
+(`TTIR → TTGIR → LLIR → PTX → CUBIN → SASS` when those files exist); it never
+implies an order or predecessor across groups. JSON and `.metadata` files are
+preserved when the provider emits them, but they are never compiler stages or a
+source of selection claims.
+
+Managed Triton capture installs the current provider listener
+`triton.knobs.autotuning.listener` in the declared root Python script or module.
+The listener is the semantic authority for an observed multi-configuration
+decision: function identity, opaque tuning-key digest, selected configuration,
+bounded candidate configurations and timing vectors, cache-hit status, and the
+fresh-tuning duration. Candidate timing values follow Triton's `do_bench`
+milliseconds convention. Cache hits retain provider timings but have no fresh
+tuning duration. String-valued configuration entries and tuning-key values are
+digested rather than copied into normalized evidence.
+
+The hook does not expose a dump directory, compiler cache path, cache hash, or
+pipeline identity. Flameox therefore does not attach a selection to a native
+candidate group and does not inspect cache files to fill that gap. Empty evidence
+means no multi-configuration decision was observed in the root interpreter; a
+workload may have no autotune, one effective configuration, a child-process
+autotune, or a later hook replacement. Re-run the declared workload where the
+decision occurs in the root interpreter, then use
+`query_triton_autotune_selections` or
+`flameox://triton-autotune/<run-id>/selections` for cursor-bounded evidence.
+
+The same managed wrapper uses Triton's current
+`triton.knobs.compilation.listener`. It records no cache path, cache key, or
+cache contents. Instead, the provider callback supplies the target for both a
+fresh compile and a cache hit. Flameox requires that target to agree with every
+emitted PTX `.target` directive, the exact plan-bound Triton distribution, and
+the observed CUDA environment. PTX version is retained when the provider emits
+PTX. An explicit `target` option is cross-compilation intent only: it must agree
+with the provider-reported target, but it may differ from the execution GPU. If
+the callback or authoritative CUDA identity is unavailable, the native evidence
+is still preserved, but its pipeline is managed-partial and exact comparison is
+rejected with explicit re-capture guidance. Conflicting listener, PTX, plan, or
+environment identity rejects the capture rather than assigning a target to the
+wrong dump group.
+
+The kernel-build document is a strict provenance record containing the provider
+discriminator, grouped artifact paths, media types, sizes, digests, and explicit
+attachments. It intentionally excludes tool version, workload,
+target, environment, bounds, status, and limitations. Those are durable run
+semantics in the authoritative run manifest and plan. `ArtifactPipeline` keeps
+only group-local lineage plus qualified compiler and target identities; it
+resolves all run semantics through `run_id`. Imported native dumps therefore
+remain identity-unverified until a managed run supplies those semantics; Flameox
+does not reconstruct them from the provider document.
 
 When a workload emits `flameox.kernel-validation.v2`, use the dedicated
 registration operation with the producing execution run and its reviewed
@@ -359,21 +572,24 @@ The committed project-owned fixture proves normalized schema behavior; it is not
 vendor-host qualification. Live ROCm compatibility remains unclaimed until the
 native lane runs on a supported AMD host.
 
-## Inference replay and profiling
+## Inference benchmarks and profiling
 
-Flameox coordinates AIPerf 0.12, `vllm bench serve`, SGLang benchmark entry
-points, torch.profiler, and Nsight Systems. It does not implement a load
-generator, scheduler, model server, or profiler.
+Flameox coordinates AIPerf 0.12, `vllm bench serve`,
+`python -m sglang.benchmark.serving`, torch.profiler, and Nsight Systems. It
+does not implement a load generator, scheduler, model server, or profiler.
 
 Servers and scenarios are typed `flameox.toml` declarations. Managed servers
 name a workload and run through a broker-owned lease. Existing-local servers are
 restricted to loopback health/model probes and remain exploratory because their
 complete command, model, scheduler, and cache state is outside Flameox authority.
 
-Plans bind the configuration, resolved provider and server executables, model
-and tokenizer revisions, schedule, request population, endpoint, output root,
-deadline, profiler options, and oracle. The public plan is a preview; execution
-consumes its opaque server-owned capability.
+Planning qualifies one executable binding and its supported command interface
+before allocating an output directory or issuing a plan. A qualified plan owns
+that binding and reviewed argv; an unavailable or incompatible launcher returns
+`CAPABILITY_UNAVAILABLE` with recovery instead of a durable unusable plan.
+Launch revalidates the exact executable identity without a second provider
+discovery. The public plan is a preview; execution consumes its opaque
+server-owned capability.
 
 AIPerf records are parsed through maintained provider models with bounded
 conversation/turn correlation. vLLM and SGLang use their structured aggregate
@@ -381,7 +597,15 @@ or record exports. Prompt bodies, generated text, and provider error messages
 remain only in sensitive native artifacts; agent-facing evidence contains token
 counts, timing, schedule, safe error types/codes, and declared cache fields.
 
-Each replay has one canonical run. Imported provider files retain their own
+SGLang support is limited to generic serving-benchmark evidence through the
+current canonical `sglang.benchmark.serving` interface. Flameox does not own a
+SGLang or Slime rollout HTTP replay protocol: request dumps, lifecycle events,
+cancellation, sessions, and rollout coordination remain a declared external
+workload or typed imported evidence path. Flameox preserves those native inputs
+and outputs as immutable artifacts and records the workload's bounded run
+semantics inline.
+
+Each benchmark has one canonical run. Imported provider files retain their own
 artifact/source-run provenance while normalized rows publish under the canonical
 run. Partial files from failure or cancellation are preserved when valid.
 

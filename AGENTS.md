@@ -81,7 +81,7 @@ Read the relevant contract before changing product behavior:
 Use `uv` and the committed `uv.lock`:
 
 ```console
-uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu
+uv sync --extra dev --extra memory --extra trace --extra cpu
 uv run flameox --help
 uv run pytest -q
 uv run ruff check src tests tools

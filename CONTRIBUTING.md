@@ -40,7 +40,7 @@ available extras and their markers. To install every supported integration,
 run:
 
 ```console
-uv sync --extra dev --extra python --extra execution --extra memory --extra trace --extra cpu --extra torch
+uv sync --extra dev --extra memory --extra trace --extra cpu --extra torch
 ```
 
 ## Understand the contract you are changing

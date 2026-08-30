@@ -31,7 +31,8 @@ The durable layout is conceptually:
 ├── workspace.json
 ├── control-plane.sqlite3
 ├── artifacts/objects/       content-addressed native bytes
-├── evidence/generations/    immutable Parquet and manifests
+├── evidence/<table>/placement=<uuid>/ immutable normalized Parquet
+├── generations/<sha256>.json immutable normalized-generation manifests
 ├── corpus/commits/          immutable inventories
 ├── corpus/HEAD              atomic current-commit pointer
 ├── catalog.duckdb           disposable analytical projection
@@ -41,13 +42,14 @@ The durable layout is conceptually:
 └── tools/                   verified managed user-space tools
 ```
 
-`workspace.json` binds the workspace to its project root and format. It is not a
-second database. Configuration lives in project `flameox.toml`; secrets belong
-in the environment, not either file.
+`workspace.json` binds the workspace identity to its project root and creation
+metadata. The SQLite sentinel identifies the control-plane format. Configuration
+lives in project `flameox.toml`; secrets belong in the environment, not either file.
 
-Schema `0` initializes; the current exact schema opens; any other schema version
-is rejected with a new-workspace instruction. Native artifacts can be imported
-through supported import operations.
+An empty SQLite file initializes with one content-derived control-plane format
+sentinel. Any pre-existing file without the exact current sentinel is rejected
+and requires a new workspace. Native artifacts can be imported through supported
+import operations.
 
 ## Control-plane authority
 
@@ -57,7 +59,7 @@ through supported import operations.
 - operation current state and immutable revisions;
 - idempotency bindings;
 - run current state and immutable revisions;
-- projection intents that bind exact domain revisions to replayable corpus work;
+- projection intents that bind exact run revisions to recoverable corpus publication;
 - investigations, hypotheses, experiments, findings, pipelines, and other typed
   control records;
 - typed relationships between those records.
@@ -139,15 +141,36 @@ those disjoint fields rather than stored a second time. Run semantics are
 immutable across lifecycle revisions and have a content digest that normalized
 generation manifests bind alongside their input run identifiers.
 
-This contract starts evidence schema 4.0. Flameox does not reinterpret older
-evidence generations through fallback columns; create a new workspace and
-re-import native evidence when adopting this clean break.
-
 These run-scoped semantics are not artifacts. Content identity answers which
 bytes were produced; it cannot answer why they were produced or which property
 the execution attempted to measure. Two runs may therefore reference the same
 content-addressed artifact while retaining different modes, bounds, filters, or
 target scopes.
+
+Compiler dump manifests follow the same boundary. They preserve immutable native
+group membership and exact artifact provenance, while the normalized
+`ArtifactPipeline` is the sole owner of ordered lineage. A run with several
+Triton dump directories has several sibling pipelines; no stored field infers a
+cross-directory stage order. Imported JSON or `.metadata` files remain preserved
+provider evidence, not compiler stages or autotune claims. Bounded
+`triton_autotune_selections` rows are a separate normalized generation derived
+from Triton's listener callback; they retain no artifact or pipeline reference
+because the callback supplies neither. The provider document does not repeat run
+identity, tool qualification, environment, status, limits, or recovery state.
+Pipelines retain only `run_id`, producer, group-local stages, and qualified
+compiler/target identities. Workload, source, environment, command, parameters,
+and build protocol are resolved from the authoritative run during comparison.
+Stage registrations resolve their immutable artifact provenance; lineage does not
+copy producer-version bookkeeping from those registrations.
+
+For managed Triton runs, the run manifest owns one compiler qualification: the
+declared interpreter's exact `triton` distribution and the target derived from
+the provider listener, observed CUDA environment, and emitted PTX when present.
+The pipeline stores only content-derived identity references to that
+qualification. The native kernel-build document remains provider provenance and
+does not repeat package, target, driver, or environment fields. Explicit target
+options are run-semantic cross-compilation intent; they are not a substitute for
+observed target qualification.
 
 Post-run correctness evidence follows the same ownership rule. Registering a
 `flameox.kernel-validation.v2` document appends its immutable artifact
@@ -157,12 +180,10 @@ producer, workload, environment, source, and execution identity from authoritati
 state; callers cannot submit copied identity fields or create a surrogate import
 run. Generic imports remain appropriate for genuinely external validation evidence.
 If the producing run owns an artifact pipeline, validation creates a new immutable
-pipeline generation that appends the registered evidence; it does not mutate the
-provider artifact or duplicate pipeline state in the run manifest. The run manifest
-remains authoritative for execution and validation semantics, while the pipeline
-records ordered evidence lineage. Capture results return only bounded pipeline
-references, and list/show projections provide discovery without copying pipeline
-records into transport-specific storage.
+pipeline generation that appends the registered evidence. The run manifest owns
+execution and validation semantics; the pipeline owns ordered evidence lineage.
+Capture results return bounded pipeline references, and list/show projections
+provide discovery without copying pipeline records into transport storage.
 
 Running, failed, cancelled, timed-out, and completed attempts are all evidence.
 Failure finalization does not discard partial artifacts that pass integrity and
@@ -199,20 +220,34 @@ matters. Conversely, status, effective capture scope, limitations, pagination,
 and truncation metadata belong to typed durable records and their bounded
 projections rather than separate artifact payloads.
 
+SARIF follows this split directly. A supported provider-native SARIF 2.1.0
+document is preserved byte-for-byte as an `analysis_result` artifact. Its import
+run owns the exact source root, effective include and exclude scope, analyzer and
+exit identity, coverage, limitations, and source-state availability. A separate
+immutable `static_candidates` generation contains only bounded source-scoped
+analyzer output: rule, level, message, physical location, fingerprint, and
+optional confidence. Provider extensions remain native evidence; a candidate is
+not a Flameox Finding or runtime confirmation. Unsupported SARIF and unknown
+extensions remain native evidence without a normalized candidate claim. Runtime
+assessment reuses the existing Finding evidence graph: the candidate is a
+context edge, while measured runs, trials, analyses, or comparisons carry the
+supporting or contradicting edge. Bounded candidate projections expose related
+Finding IDs rather than duplicating runtime evidence into the static-candidate
+generation.
+
 Artifact metadata includes kind, media type, producer and version, size, digest,
 sensitivity, run relationship, and extraction state. An artifact may be
 structurally valid yet unsupported by the installed extractor; that state is
 not equivalent to an empty extraction.
 
 Reduced candidates follow the same ownership rule. Their immutable bytes remain
-content-addressed artifacts, their run attachment carries only registration
-metadata, and the reduction result remains authoritative for the reduction ID,
-source registration, original artifact, predicate outcome, coverage, and
-limitations. Artifact reads project that lineage inline. They do not duplicate
-reduction provenance into another artifact-specific record. The durable
-reduction result is the completion boundary; run registration and normalized
-evidence publication are idempotent projections reconciled from that result
-after interruption, so recovery does not rerun ShrinkRay.
+content-addressed artifacts, their run attachment carries registration metadata,
+and the reduction result owns the reduction ID, source registration, original
+artifact, predicate outcome, coverage, and limitations. Artifact reads project
+that lineage inline. The durable reduction result is the completion boundary;
+run registration and normalized evidence publication are idempotent projections
+reconciled from that result after interruption, so recovery does not rerun
+ShrinkRay.
 
 Sensitive native artifacts are not exposed as MCP binary resources. Agent-facing
 artifact resources return bounded metadata and typed evidence references. The
@@ -228,45 +263,55 @@ remains the diagnostic authority.
 ## Evidence publication
 
 Normalized evidence uses explicit Arrow schemas and immutable Parquet files.
-Every row can be traced to its run and run-semantic identity, source artifact,
-generation, evidence schema, and extractor version. A null input semantic
-identity is explicit when a generation targets an evidence run that has not yet
-been materialized; it is not inferred from artifact bytes.
+Physical rows contain only table-domain values. A generation manifest records
+publication time, publisher, publisher version, file digest, and row count; its
+`generation_id` is the semantic digest of that exact serialized payload, not a
+stored random field. Corpus commits store those generation digests directly.
+`CorpusStore` derives the manifest path from the digest and rejects a manifest
+whose payload no longer hashes to the committed ID. Catalog views project the
+manifest facts where a query needs provenance. A null input semantic identity is explicit when a
+generation targets an evidence run that has not yet been materialized; it is not
+inferred from artifact bytes.
+
+Publication establishes the content-digest inventory before the generation becomes
+visible. Opening a snapshot then checks each referenced file's exact Arrow schema,
+row count, and byte length without reading every payload. Catalog rebuild and full
+integrity validation stream the referenced files to reverify their SHA-256 digests.
+This keeps ordinary bounded queries proportional to their query while retaining an
+explicit whole-corpus verification boundary.
 
 Publication follows one commit protocol:
 
 1. pin the input corpus commit;
 2. write and close staging files;
 3. validate schema, budgets, references, row counts, and hashes;
-4. move immutable files into a new generation;
-5. write the generation manifest;
-6. write a corpus commit whose inventory names every reachable generation;
+4. move immutable files into a staged placement namespace (the UUID is only a
+   file-placement nonce, never a generation identifier);
+5. write the manifest at its content-derived digest path;
+6. write a corpus commit whose inventory lists every reachable generation digest;
 7. atomically advance `corpus/HEAD`;
 8. record the control-plane publication receipt.
 
 Required domain projections use a domain-first transactional outbox. The same
 SQLite transaction that creates or appends a run revision inserts an immutable
-`projection_intents` row containing the workspace, domain kind and ID, exact
-revision and digest, projection schema, expected table set, operation digest,
-and a bounded replay recipe. It does not copy normalized result rows into the
-control plane.
+`projection_intents` row containing the run ID, exact revision and digest, plus
+the bounded context needed to rebuild the core projection. Projection constants
+and derived identities remain implementation details of the single
+run-projection publisher.
 
-After that transaction commits, the projector builds Parquet without holding a
+After that transaction commits, the publisher builds Parquet without holding a
 SQLite transaction or workspace lock. Publication is idempotent by projection
 intent ID. Advancing `corpus/HEAD` and marking the intent published are separate
 durable steps, so a crash can leave one of three explicit states:
 
-- `pending`: the exact domain revision is durable and publication can be replayed;
+- `pending`: the exact run revision is durable and publication can be recovered;
 - `published`: a generation and corpus commit are linked to the intent;
-- `failed`: a bounded failure is recorded and the replay recipe remains available.
+- `failed`: a bounded failure is recorded and the source revision remains available.
 
-Recovery first reconciles run projections. It validates the immutable source
-revision and digest, recognizes an already-published operation by its digest,
-and either finalizes the receipt or republishes from authoritative state. A
-feature-specific projector may retain a pending recipe—for example, an OTLP
-extraction replayable from its immutable native artifact—until that bounded
-projector is invoked. Missing application routing is not treated as evidence
-corruption.
+Recovery reconciles run projections. It validates the immutable source revision
+and digest, then idempotently finalizes or republishes the projection from
+authoritative run state. Feature evidence such as OTLP extraction is published
+directly from its immutable native artifact and does not share this outbox.
 
 The core run projection contains the run row, all artifact registrations, and
 the available environment and source identities. Adapter measurements,
@@ -278,8 +323,8 @@ projection is current. Thus a pending or stale projection is never silently
 presented as current domain state.
 
 Readers see either the previous commit or the new complete commit. Parquet files
-are never edited in place. Compaction publishes replacement files and a new
-commit before superseded generations become eligible for garbage collection.
+are never edited in place; generations preserve their original provenance for
+their entire retention lifetime.
 
 Core normalized families are runs, artifacts, environments, source states,
 measurements, frames, frame measurements, weighted call edges, representative
@@ -294,7 +339,7 @@ that registry.
 ## Snapshot isolation
 
 A corpus commit is an immutable inventory, not merely an ID. `Catalog.pin()`
-returns a `SnapshotHandle` that binds the commit and its manifest set. Analysis
+returns a `SnapshotHandle` that binds the commit and its generation digests. Analysis
 services acquire one handle at construction or request entry and use it for
 every lookup.
 
@@ -308,23 +353,23 @@ that is not snapshot isolation.
 
 ## DuckDB catalog
 
-`catalog.duckdb` contains schema metadata and views over the committed Parquet
+`catalog.duckdb` contains rebuild metadata and views over the committed Parquet
 inventory. It does not own runs, revisions, plans, relationships, or evidence.
 
 `flameox catalog rebuild`:
 
 1. validates the selected corpus commit and manifests;
-2. validates every referenced path, digest, schema, and row count;
+2. validates every referenced path, digest, byte length, schema, and row count;
 3. creates a new catalog with allowlisted snapshot-local views;
 4. validates the catalog;
 5. atomically replaces `catalog.duckdb`.
 
 Existing readers continue on their open snapshot. Corrupt DuckDB state is
 rebuildable; corrupt artifacts, SQLite revisions, manifests, or Parquet are not.
-Compaction changes the authoritative corpus inventory. It does not require a
-catalog rebuild because each read constructs transient views from its pinned
-corpus commit. Catalog metadata records only when the disposable shell was
-built; it does not duplicate corpus HEAD or maintain a freshness sentinel.
+Catalog rebuilds do not change the authoritative corpus inventory: each read
+constructs transient views from its pinned corpus commit. Catalog metadata
+records only when the disposable shell was built; it does not duplicate corpus
+HEAD or maintain a freshness sentinel.
 
 Public interfaces expose curated parameterized queries, never raw SQL. Internal
 connections deny arbitrary extensions, attachments, secrets, and unapproved
@@ -332,13 +377,21 @@ paths; enforce memory, row, string, and time budgets; and use one connection per
 concurrent query. Cancellation interrupts the owning connection and joins its
 worker before returning.
 
-## Compatibility and evolution
+## Format and evolution
 
 Compatibility is scoped, not global:
 
 - control-plane schema support is exact and rejects incompatible workspaces;
-- immutable domain and evidence payloads carry integer schema versions;
-- readers support only their declared version window;
+- normalized Parquet files must exactly match the current Arrow schema; catalog
+  snapshots verify that schema plus each manifest row count and byte length
+  from the Parquet footer and file metadata; publication, catalog rebuild, and
+  full integrity validation also stream every file to verify its digest;
+- generation manifests and corpus commits have one strict shape with
+  content-derived identity;
+- changing a committed manifest changes its semantic generation digest, so every
+  snapshot, lookup, integrity pass, and catalog rebuild rejects it immediately;
+- provider-native payloads retain their own documented format and version fields;
+- readers support only their declared native-format version window;
 - producer adapters qualify explicit native versions and required fields;
 - new extraction creates a new generation and never rewrites native bytes;
 - comparisons declare which identities must match, may differ, or are unknown.
