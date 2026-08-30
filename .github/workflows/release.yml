@@ -26,6 +26,7 @@ jobs:
     permissions:
       contents: read
     outputs:
+      mcp-publishing: ${{ steps.mcp.outputs.publishing }}
       version: ${{ steps.release.outputs.version }}
       publishing: ${{ steps.release.outputs.publishing }}
     steps:
@@ -116,6 +117,7 @@ jobs:
           npm test
 
       - name: Validate MCP Registry metadata
+        id: mcp
         run: |
           set -euo pipefail
           archive=mcp-publisher.tar.gz
@@ -124,7 +126,12 @@ jobs:
             "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
           echo "${MCP_PUBLISHER_LINUX_AMD64_SHA256}  $archive" | sha256sum --check --strict
           tar -xzf "$archive" mcp-publisher
-          ./mcp-publisher validate server.json
+          if ./mcp-publisher validate server.json; then
+            echo "publishing=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::MCP Registry metadata is not publishable; package release will continue"
+            echo "publishing=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build release artifacts
         run: |
@@ -261,7 +268,9 @@ jobs:
     needs:
       - build
       - publish-pypi
-    if: needs.build.outputs.publishing == 'true'
+    if: >-
+      needs.build.outputs.publishing == 'true' &&
+      needs.build.outputs.mcp-publishing == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -269,6 +278,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ inputs.tag }}
           persist-credentials: false
 
       - name: Verify published PyPI identity
@@ -367,7 +377,8 @@ jobs:
       needs.build.outputs.publishing == 'true' &&
       needs.publish-pypi.result == 'success' &&
       needs.publish-npm.result == 'success' &&
-      needs.publish-mcp-registry.result == 'success' &&
+      (needs.publish-mcp-registry.result == 'success' ||
+       needs.publish-mcp-registry.result == 'skipped') &&
       needs.verify-npm-latest.result == 'success'
     runs-on: ubuntu-latest
     permissions:
