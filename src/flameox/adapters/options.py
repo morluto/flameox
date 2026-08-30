@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal, cast
 
 from pydantic import Field, JsonValue, StringConstraints, field_validator, model_validator
 
+from flameox.adapters.bounded_types import BoundedFilter
 from flameox.adapters.memray_options import MemrayCaptureOptions, memray_capture_options
 from flameox.adapters.nsight_compute_options import NsightComputeOptions
 from flameox.adapters.torch_benchmark import TorchBenchmarkOptions, torch_benchmark_options
@@ -16,10 +17,6 @@ from flameox.domain import CaptureScope, DomainError, ErrorCode, RunSemantics, S
 from flameox.domain.compiler_build import CompilerTarget
 from flameox.models import ContractModel
 
-BoundedFilter = Annotated[
-    str,
-    StringConstraints(min_length=1, max_length=500, pattern=r"^[^\x00\r\n]+$"),
-]
 _MAX_SUPPRESSION_BYTES = 1024 * 1024
 
 

@@ -4,12 +4,8 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import Field, StringConstraints, model_validator
 
+from flameox.adapters.bounded_types import BoundedFilter
 from flameox.models import ContractModel
-
-_BoundedFilter = Annotated[
-    str,
-    StringConstraints(min_length=1, max_length=500, pattern=r"^[^\x00\r\n]+$"),
-]
 
 
 class NsightComputeOptions(ContractModel):
@@ -39,7 +35,7 @@ class NsightComputeOptions(ContractModel):
         ]
         | None
     ) = None
-    kernel_name: _BoundedFilter | None = None
+    kernel_name: BoundedFilter | None = None
     launch_skip: Annotated[int, Field(ge=0, le=1_000_000)] = 0
     launch_count: Annotated[int, Field(ge=1, le=1_000_000)] = 1
     replay_mode: Literal["kernel", "application", "range", "app-range"] = "kernel"

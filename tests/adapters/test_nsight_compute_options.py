@@ -4,13 +4,23 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from pydantic import ValidationError
 
 from flameox.adapters.builtins import build_capture_invocation
 from flameox.adapters.nsight_compute import find_ncu_report_interface
-from flameox.adapters.options import bind_adapter_options
+from flameox.adapters.nsight_compute_options import NsightComputeOptions
+from flameox.adapters.options import ComputeSanitizerCaptureOptions, bind_adapter_options
 from flameox.domain import ArtifactKind, DomainError, ErrorCode
 
 pytestmark = pytest.mark.unit
+
+
+def test_bounded_filter_constraints_are_shared() -> None:
+    for options in (ComputeSanitizerCaptureOptions, NsightComputeOptions):
+        with pytest.raises(ValidationError):
+            options(kernel_name="")
+        with pytest.raises(ValidationError):
+            options(kernel_name="line\nbreak")
 
 
 def test_strict_options_build_only_documented_bounded_arguments(tmp_path: Path) -> None:
