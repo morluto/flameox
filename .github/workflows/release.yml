@@ -31,6 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ inputs.tag == 'dry-run' && github.sha || inputs.tag }}
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
@@ -74,8 +75,9 @@ jobs:
               exit 1
             fi
             tag_commit=$(git rev-list -n 1 "$RELEASE_TAG")
-            if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
-              echo "Release tag $RELEASE_TAG points to $tag_commit, not $GITHUB_SHA" >&2
+            checked_out_commit=$(git rev-parse HEAD)
+            if [[ "$tag_commit" != "$checked_out_commit" ]]; then
+              echo "Release tag $RELEASE_TAG points to $tag_commit, not $checked_out_commit" >&2
               exit 1
             fi
             publishing=true
@@ -93,8 +95,6 @@ jobs:
         run: >-
           uv sync
           --extra dev
-          --extra python
-          --extra execution
           --extra memory
           --extra trace
           --extra cpu

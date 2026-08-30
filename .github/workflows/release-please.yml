@@ -307,5 +307,5 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
           gh workflow run release.yml \
-            --ref "$RELEASE_TAG" \
+            --ref main \
             --field tag="$RELEASE_TAG"
