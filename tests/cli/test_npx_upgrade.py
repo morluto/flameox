@@ -63,9 +63,7 @@ def test_npx_upgrade_activates_or_preserves_the_managed_runtime(
     }
     if active_version == "0.1.3":
         install_metadata["obsolete"] = True
-    (data / "install.json").write_text(
-        json.dumps(install_metadata) + "\n"
-    )
+    (data / "install.json").write_text(json.dumps(install_metadata) + "\n")
     config = home / ".claude.json"
     config.write_text(
         json.dumps(

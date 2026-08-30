@@ -177,8 +177,7 @@ class SetupService:
         detected_clients = tuple(
             client
             for client in self.registry.detected_clients()
-            if (driver := self.official_drivers.get(client)) is None
-            or driver.probe() is not None
+            if (driver := self.official_drivers.get(client)) is None or driver.probe() is not None
         )
         return SetupInspection(
             active_version=manifest.active_version if manifest else None,
