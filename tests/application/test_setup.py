@@ -50,6 +50,25 @@ def make_service(tmp_path: Path) -> tuple[SetupService, FakeRuntime, Path]:
     return SetupService(home=home, data_root=data, runtime=runtime), runtime, home
 
 
+def test_setup_does_not_detect_an_official_client_without_its_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    data = tmp_path / "data"
+    home.mkdir()
+    (home / ".claude").mkdir()
+    service = SetupService(
+        home=home,
+        data_root=data,
+        runtime=FakeRuntime(data),
+        prefer_official_clients=True,
+    )
+    monkeypatch.setattr(service.official_drivers[SetupClient.CLAUDE], "probe", lambda: None)
+
+    assert SetupClient.CLAUDE not in service.inspect().detected_clients
+
+
 @pytest.mark.anyio
 async def test_setup_connects_only_explicitly_selected_clients(tmp_path: Path) -> None:
     service, runtime, home = make_service(tmp_path)

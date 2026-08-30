@@ -174,11 +174,17 @@ class SetupService:
 
     def inspect(self) -> SetupInspection:
         manifest = self._discover_install_manifest()
+        detected_clients = tuple(
+            client
+            for client in self.registry.detected_clients()
+            if (driver := self.official_drivers.get(client)) is None
+            or driver.probe() is not None
+        )
         return SetupInspection(
             active_version=manifest.active_version if manifest else None,
             active_executable=manifest.executable if manifest else None,
             configured_clients=self.registry.configured_clients(),
-            detected_clients=self.registry.detected_clients(),
+            detected_clients=detected_clients,
             installed_versions=self.runtime.installed_versions(),
         )
 
