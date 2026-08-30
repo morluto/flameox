@@ -137,7 +137,7 @@ jobs:
         run: |
           mkdir -p dist/python dist/npm
           uv build --out-dir dist/python
-          uvx --from twine==6.1.0 twine check dist/python/*
+          uvx --from twine==7.0.0 twine check dist/python/*
           npm pack ./npm --pack-destination "$PWD/dist/npm" --json > dist/npm-pack.json
           sha256sum dist/python/* dist/npm/*.tgz > dist/SHA256SUMS
 
