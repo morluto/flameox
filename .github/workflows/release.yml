@@ -92,30 +92,6 @@ jobs:
             echo "version=$python_version"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Install Python dependencies
-        run: >-
-          uv sync
-          --extra dev
-          --extra memory
-          --extra trace
-          --extra cpu
-
-      - name: Verify Python package
-        run: |
-          uv run ruff check src tests tools
-          uv run ruff format --check src tests tools
-          uv run mypy src tests tools
-          uv run lint-imports
-          uv run pytest -o addopts='' -ra -q -m 'not optional and not performance'
-
-      - name: Verify npm bootstrap
-        working-directory: npm
-        run: |
-          npm ci
-          npm run lint
-          npm run format:check
-          npm test
-
       - name: Validate MCP Registry metadata
         id: mcp
         run: |

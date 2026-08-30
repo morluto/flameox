@@ -32,6 +32,13 @@ uv run deptry src --optional-dependencies-dev-groups dev,test
 uv run pip-audit
 ```
 
+The pull-request, merge-group, and main CI lanes own static validation and the
+complete deterministic Python and npm suites. The release workflow does not
+repeat those suites after a release commit has merged. It owns the distinct
+publication evidence instead: synchronized tag identity, registry metadata,
+Python and npm artifact construction, installed-wheel behavior, archive
+identity, and post-publication resolution.
+
 ## Optional and performance evidence
 
 Install the relevant extra and select its marker explicitly. For example:
