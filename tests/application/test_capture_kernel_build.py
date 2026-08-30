@@ -585,9 +585,7 @@ async def test_managed_kernel_build_comparison_uses_known_identity_without_inven
     )
     assert target_result.compatibility == "unknown"
     assert target_result.identity_mismatches == ()
-    assert any(
-        "target_identity_id" in limitation for limitation in target_result.limitations
-    )
+    assert any("target_identity_id" in limitation for limitation in target_result.limitations)
     assert command_result.compatibility == "incompatible"
     assert {"workload_definition_id", "workload_instance_id"}.issubset(
         command_result.identity_mismatches

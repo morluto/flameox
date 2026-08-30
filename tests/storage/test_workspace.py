@@ -147,9 +147,9 @@ def test_discovery_validates_control_plane_without_writing_to_workspace(
     with sqlite3.connect(workspace.paths.control_plane) as connection:
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     for suffix in ("-wal", "-shm"):
-        workspace.paths.control_plane.with_name(
-            workspace.paths.control_plane.name + suffix
-        ).unlink(missing_ok=True)
+        workspace.paths.control_plane.with_name(workspace.paths.control_plane.name + suffix).unlink(
+            missing_ok=True
+        )
     before = {path.name for path in workspace.paths.root.iterdir()}
     original_mode = stat.S_IMODE(workspace.paths.root.stat().st_mode)
     workspace.paths.root.chmod(0o555)

@@ -123,9 +123,7 @@ async def test_mcp_static_analysis_import_and_cursor_resource_workflow(tmp_path:
     assert import_result["coverage"]["normalized_count"] == 2
     assert import_result["semantics"]["source_root"] == "."
     assert import_result["semantics"]["source_root_truncated"] is False
-    assert import_result["semantics"]["analyzers"] == [
-        {"name": "example-analyzer", "version": "1"}
-    ]
+    assert import_result["semantics"]["analyzers"] == [{"name": "example-analyzer", "version": "1"}]
     assert import_result["source_state_id"] is not None
     assert {item.uri for item in imported.content if item.type == "resource_link"} == {
         import_result["run_resource_uri"],

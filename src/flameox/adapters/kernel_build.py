@@ -97,5 +97,6 @@ class KernelBuildManifest(ContractModel):
             *self.attachments,
         )
 
+
 def kernel_build_json_schema() -> dict[str, object]:
     return KernelBuildManifest.model_json_schema()

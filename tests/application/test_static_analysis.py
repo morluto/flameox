@@ -207,8 +207,7 @@ def test_static_analysis_bounds_run_semantics_without_dropping_source_findings(
     assert len(analyzers) == 16
     assert all(len(cast(str, analyzer["name"])) <= 256 for analyzer in analyzers)
     assert all(
-        analyzer.get("version") is None
-        or len(cast(str, analyzer["version"])) <= 256
+        analyzer.get("version") is None or len(cast(str, analyzer["version"])) <= 256
         for analyzer in analyzers
     )
     assert result.coverage.normalized_count == 24
@@ -226,8 +225,7 @@ def test_static_analysis_selects_one_deterministic_fingerprint_from_large_fanout
     report = tmp_path / "analysis.sarif"
     candidate = _result("app.py")
     candidate["partialFingerprints"] = {
-        f"fingerprint-{index:05d}": f"value-{index:05d}"
-        for index in reversed(range(20_000))
+        f"fingerprint-{index:05d}": f"value-{index:05d}" for index in reversed(range(20_000))
     }
     _write_sarif(report, [candidate])
     workspace = Workspace.initialize(tmp_path)

@@ -381,9 +381,7 @@ def _normalize_document(
             normalized_count=len(normalization.candidates),
             excluded_count=normalization.excluded_count,
             invalid_count=normalization.invalid_count,
-            omitted_count=(
-                normalization.omitted_count + normalization.deferred_omitted_count
-            ),
+            omitted_count=(normalization.omitted_count + normalization.deferred_omitted_count),
         ),
         limitations=tuple(limitations),
     )
