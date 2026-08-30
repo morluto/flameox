@@ -5,6 +5,8 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from coverage import CoverageData
+from coverage.exceptions import DataError
 from packaging.requirements import Requirement
 from packaging.version import InvalidVersion, Version
 
@@ -89,15 +91,6 @@ class CoverageExtractor:
 
     def extract(self, run_id: str) -> CoverageExtractionResult:
         reader_version = qualified_control_coverage_reader_version()
-        try:
-            from coverage import CoverageData
-            from coverage.exceptions import DataError
-        except ImportError as exc:
-            raise DomainError(
-                ErrorCode.CAPABILITY_UNAVAILABLE,
-                "coverage.py is not installed.",
-                remediation=("Install flameox's execution optional dependencies.",),
-            ) from exc
         run = RunStore(self.workspace).read(run_id)
         registration = self._registration(run)
         producer_version = self._require_compatible_producer(registration, reader_version, run_id)
