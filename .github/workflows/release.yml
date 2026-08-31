@@ -141,6 +141,16 @@ jobs:
             exit 1
           fi
 
+          uv run \
+            --no-config \
+            --no-project \
+            --isolated \
+            --prerelease allow \
+            --python 3.12 \
+            --with "$wheel" \
+            python -c \
+            'import duckdb; assert duckdb.sql("select current_timestamp").fetchone()[0].tzinfo'
+
           package_json=$(tar -xOf "$npm_archive" package/package.json)
           if [[ "$(jq -r '.name' <<< "$package_json")" != "flameox" ]] ||
              [[ "$(jq -r '.version' <<< "$package_json")" != "$RELEASE_VERSION" ]]; then
