@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -1120,7 +1121,12 @@ def test_discovery_reports_missing_and_unsupported_python_providers(
     assert memory["providers"][0]["missing_package"] == "memray"
     assert "flameox setup --provider memray" in memory["remediation"][0]
 
-    monkeypatch.setattr("flameox.stateless.importlib.util.find_spec", original_find_spec)
+    def installed_memray(name: str) -> Any:
+        if name == "memray":
+            return importlib.machinery.ModuleSpec(name, loader=None)
+        return original_find_spec(name)
+
+    monkeypatch.setattr("flameox.stateless.importlib.util.find_spec", installed_memray)
     monkeypatch.setattr("flameox.stateless.importlib.metadata.version", lambda _name: "1.0")
     runtime = AnalysisRuntime(tmp_path)
     unsupported = runtime.discover_capabilities(
@@ -1656,27 +1662,27 @@ def test_experiment_zero_effect_is_within_zero_threshold() -> None:
 def test_concurrent_identical_publication_reuses_complete_bundle(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text('[{"value":1}]')
-    runtimes = [AnalysisRuntime(tmp_path) for _ in range(2)]
+    runtimes = [AnalysisRuntime(tmp_path) for _ in range(8)]
     analyses = [
         runtime.analyze(
             "artifact.preview", [PathSource(path=str(artifact))], {}, limits=RequestLimits()
         )
         for runtime in runtimes
     ]
-    # Freeze the episode timestamp so both publications have the same content identity.
-    runtimes[1].analyses[analyses[1]["analysis_id"]].manifest_body["episode"] = (
-        runtimes[0].analyses[analyses[0]["analysis_id"]].manifest_body["episode"]
-    )
+    # Freeze the episode timestamp so every publication has the same content identity.
+    episode = runtimes[0].analyses[analyses[0]["analysis_id"]].manifest_body["episode"]
+    for runtime, analysis in zip(runtimes[1:], analyses[1:], strict=True):
+        runtime.analyses[analysis["analysis_id"]].manifest_body["episode"] = episode
 
     try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=len(runtimes)) as executor:
             results = list(
                 executor.map(
                     lambda pair: pair[0].preserve_evidence(pair[1]["analysis_id"]),
                     zip(runtimes, analyses, strict=True),
                 )
             )
-        assert results[0]["evidence_id"] == results[1]["evidence_id"]
+        assert len({result["evidence_id"] for result in results}) == 1
         assert (
             runtimes[0].read_evidence(results[0]["evidence_id"])["evidence_id"]
             == results[0]["evidence_id"]

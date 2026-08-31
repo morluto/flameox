@@ -90,6 +90,8 @@ class EvidenceRepository:
         if self.exists:
             return True
         if self._metadata_missing_is_corruption():
+            if self.exists:
+                return True
             raise RepositoryError(
                 "REPOSITORY_CORRUPTION",
                 "repository.json is missing from an existing evidence repository.",
@@ -102,6 +104,9 @@ class EvidenceRepository:
             self._validate_repository()
             return
         if self._metadata_missing_is_corruption():
+            if metadata_path.is_file():
+                self._validate_repository()
+                return
             raise RepositoryError(
                 "REPOSITORY_CORRUPTION",
                 "repository.json is missing from an existing evidence repository.",
@@ -695,12 +700,23 @@ class EvidenceRepository:
                 "INVALID_INPUT", "evidence_id must be a lowercase SHA-256 digest."
             )
 
-    @staticmethod
-    def _write_file(path: Path, content: bytes) -> None:
-        with path.open("xb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
+    def _write_file(self, path: Path, content: bytes) -> None:
+        temporary_parent = path.parent
+        if path == self.root / "repository.json":
+            temporary_parent = self.root / ".staging" / self.session_id
+            self._assert_no_symlink_path(temporary_parent)
+            temporary_parent.mkdir(parents=True, exist_ok=True)
+            self._assert_no_symlink_path(temporary_parent)
+        temporary = temporary_parent / f".{path.name}.{uuid4().hex}.tmp"
+        try:
+            with temporary.open("xb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.link(temporary, path)
+            _fsync_directory(path.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _exclude_from_git(self) -> None:
         git = self.project_root / ".git"

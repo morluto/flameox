@@ -77,7 +77,7 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
-      - run: uv sync --extra dev --extra inference
+      - run: uv sync --extra dev --extra inference --extra trace
       - name: Run process-boundary tests
         env:
           COVERAGE_FILE: .coverage.process
