@@ -1,258 +1,114 @@
 <h1 align="center">flameox</h1>
 
-<p align="center"><strong>Local runtime evidence for coding agents investigating performance, memory, execution, concurrency, and reliability.</strong></p>
-
-<p align="center">
-  <img
-    src="docs/assets/flameox-mascot-flamegraph.png"
-    width="420"
-    alt="flameox mascot: an ox with a flame graph between its horns"
-  >
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat&logo=python&logoColor=white" alt="Python 3.12 or newer">
-  <img src="https://img.shields.io/badge/Evidence-Stays_Local-F97316?style=flat" alt="Evidence stays local">
-  <img src="https://img.shields.io/badge/Interfaces-CLI_%2B_MCP-7C3AED?style=flat" alt="CLI and MCP interfaces">
-</p>
-
-<p align="center"><strong>Language / 语言</strong>: English | <a href="README.zh-CN.md">简体中文</a></p>
+<p align="center"><strong>Bounded local runtime evidence for coding agents.</strong></p>
 
 <!-- mcp-name: io.github.morluto/flameox -->
 
-Flameox connects profilers, benchmark tools, and trace processors to a local
-evidence record. It preserves their native artifacts and provenance, then
-exposes bounded evidence to the agent. The agent states what it wants to test;
-Flameox records that effective execution scope with the run, captures the
-measurements, and preserves the experiment record for review.
+Flameox coordinates profilers, benchmark tools, trace processors, and direct
+local targets. It gives an agent a short path from an explicit native artifact
+or live command to bounded evidence, while keeping preservation optional.
+
+Version 0.2 is a clean break. There is no workspace to initialize, no
+`flameox.toml`, no SQLite control plane, no durable job to poll, and no parent
+directory discovery. Existing artifacts remain usable by passing their exact
+paths and formats to `analyze`; old `.diagnostics` state is not migrated.
 
 ## Quick start
 
-Install the local runtime and connect a supported MCP client through the guided
-setup:
-
 ```console
-npx flameox@latest setup
+uv sync --extra dev --extra memory --extra trace --extra cpu
+uv run flameox capabilities discover --intent "CPU hotspots"
+uv run flameox analyze artifact.preview /absolute/path/to/artifact.json
+uv run flameox capture --provider direct -- python benchmark.py
 ```
 
-Restart the client, open the project you intend to inspect, and ask it to:
-
-> Initialize Flameox in this project and list the available profiling capabilities.
-
-After declaring a workload, ask a concrete question:
-
-> Investigate `<symptom>` in `<workload>`. Show the capture scope, strongest
-> evidence, limitations, and links to deeper evidence.
-
-The setup command installs a versioned local runtime, changes only approved
-client configuration, and installs a small marker-owned Flameox skill for the
-selected agents. The skill helps agents compose Flameox evidence without
-imposing a fixed profiling recipe. Project initialization is separate and
-creates `.diagnostics/` only after the client calls the initialization workflow
-for its fixed project root.
-
-Runtime upgrades do not migrate incompatible `.diagnostics/` workspaces. Keep
-the old workspace, create a new one, and import any native artifacts you still
-need before deleting it. See [Format and evolution](docs/storage-and-evidence.md#format-and-evolution).
-
-For source development:
+The MCP server fixes its project root at startup. Manual launches default to
+the startup working directory:
 
 ```console
-uv sync --extra dev
-uv run flameox init .
-uv run flameox status
+uv run flameox mcp serve --project-root "$PWD"
 ```
 
-Python 3.12 or newer and the committed `uv.lock` are required.
+`flameox setup` prints the equivalent stdio client configuration. Explicit
+`--provider` selections install the matching Python extras into a persistent uv
+tool environment; system and vendor tools are diagnosed with external install
+guidance. Setup never initializes the project or creates `.flameox`.
 
-## Investigation path
+## Authority model
 
 ```text
-symptom → capture or import → bounded evidence → hypothesis
+explicit artifact paths / typed direct target
+                    │
+                    ▼
+         bounded process-lifespan runtime
+             │                │
+             ▼                ▼
+       inline evidence   session scratch/cache
+                              │
+                       explicit preservation
+                              │
+                              ▼
+                    <project>/.flameox
+```
+
+Analysis and unpreserved capture make no durable Flameox writes. Capture
+artifacts stay in bounded session scratch until preservation or server
+shutdown. The first `preserve_evidence` call creates `.flameox`, stores native
+bytes and a canonical evidence bundle by SHA-256, and adds `.flameox/` to the
+repository-local `.git/info/exclude` when applicable.
+
+The agent owns hypotheses and narrative findings in its own notes. Flameox owns
+only observed inputs, effective requests, execution provenance, typed evidence,
+coverage, truncation, limitations, and optional immutable preservation.
+
+## MCP interface
+
+The server exposes exactly six tools:
+
+- `discover_capabilities`
+- `inspect_capabilities`
+- `analyze`
+- `capture_and_analyze`
+- `preserve_evidence`
+- `query_evidence`
+
+It exposes one resource template, `flameox://evidence/{evidence_id}`, for the
+canonical immutable manifest. Native artifact bytes are deliberately not
+available as MCP resources.
+
+Direct capture accepts an argv array, a project-contained cwd, bounded
+environment overrides, provider and analysis arguments, and limits. Shell
+strings are never accepted. Work remains owned by the live MCP request, so SDK
+progress and cancellation apply directly; there are no detached or
+restart-surviving tasks.
+
+## Evidence quality
+
+An investigation still follows:
+
+```text
+symptom → capture or explicit artifact → bounded evidence → hypothesis
         → discriminating experiment → supported, refuted, or inconclusive finding
 ```
 
-Evidence sources include pyperf, py-spy, pytest-reportlog, coverage.py, Memray,
-Perfetto, torch.profiler, Nsight Systems, Nsight Compute, ROCprofiler, Compute
-Sanitizer, NVBench, and typed inference-provider exports. Availability depends
-on the host, permissions, installed extras, and selected adapter. Flameox reports
-missing evidence instead of silently substituting a weaker source.
+A profile supports exploration, not causality. Confirmatory claims require a
+representative target, declared metric and estimand, compatible identities,
+preserved samples, a practical threshold, and an appropriate semantic oracle.
 
-A profile helps explore a problem; it does not establish a performance or
-correctness conclusion. That requires a representative workload, a declared
-metric and estimand, compatible run identity, preserved samples, and an
-appropriate semantic oracle.
-
-## Named workloads
-
-Commands live in `flameox.toml` as argument arrays. Parameters are declared
-scalars; there is no shell expansion.
-
-```toml
-[workloads.scan]
-argv = ["python", "bench.py", "--implementation", "{implementation}"]
-cwd = "."
-timeout_seconds = 60
-
-[workloads.scan.parameters]
-implementation = ["baseline", "candidate"]
-
-[workloads.scan.oracle]
-strength = "cross_treatment_equivalence"
-argv = ["python", "validate.py", "--implementation", "{implementation}"]
-receipt_schema = "flameox.oracle-receipt.v1"
-
-[experiments.scan_comparison]
-workload = "scan"
-design = "randomized_complete_blocks"
-blocks = 10
-treatment_factor = "implementation"
-combination_policy = "cartesian"
-primary_metric = "pyperf.workload"
-polarity = "lower_is_better"
-estimand = "median_paired_log_ratio"
-practical_threshold = 0.05
-confidence_level = 0.95
-random_seed = 1984
-
-[experiments.scan_comparison.factors]
-implementation = ["baseline", "candidate"]
-```
-
-Cross-treatment equivalence requires each oracle invocation to write a typed
-receipt to `FLAMEOX_ORACLE_RECEIPT`. The receipt binding must identify the pair,
-shared input and compared property, both treatment-side identities across the
-paired receipts, the oracle, tolerance, and verdict. Flameox does not treat
-equal stdout bytes as semantic proof; an ordinary per-treatment oracle is
-recorded as exploratory validation.
-
-The MCP `configure_workload` tool validates and writes the canonical definition
-without executing it. A manually authored valid definition is active
-immediately; there is no approval copy or secondary workload registry.
-
-```console
-uv run flameox workload show scan --json
-uv run flameox capture plan pyperf --workload scan \
-  --parameters '{"implementation":"baseline"}' --json
-uv run flameox capture run pyperf --workload scan \
-  --parameters '{"implementation":"baseline"}' --json
-```
-
-Planning resolves every executable once. The resulting binding contains the
-exact invocation path, canonical target, trust decision, and file identity.
-Execution revalidates that binding instead of searching `PATH` again. Plans are
-short-lived, single-use capabilities whose complete intent is retained in the
-workspace SQLite control plane.
-
-## Experiments and analysis
-
-```console
-uv run flameox investigations create \
-  '{"question":"Does the candidate remove reverse-scan overhead?"}' --json
-uv run flameox hypotheses record @hypothesis.json --json
-uv run flameox experiment plan scan_comparison \
-  --investigation <investigation-id> --adapter pyperf --json
-uv run flameox experiment run scan_comparison \
-  --investigation <investigation-id> --adapter pyperf --json
-```
-
-Experiments retain randomized treatment order, attempted trials, failures,
-cancellations, validation receipts, and exclusions. Analyses resolve all input
-through one pinned corpus snapshot:
-
-```console
-uv run flameox analyze hotspots <run-or-artifact>
-uv run flameox analyze scaling <experiment-id>
-uv run flameox analyze compare @comparison-request.json
-uv run flameox analyze memory <run-or-artifact>
-uv run flameox analyze execution <run-or-artifact>
-uv run flameox analyze pytorch <run-or-artifact>
-uv run flameox analyze failures
-```
-
-Read-only analysis does not create a durable claim. Use `analyze record`,
-`analyze record-comparison`, or `findings record` when the result should become
-part of the investigation history.
-
-## Data and safety boundaries
-
-`.diagnostics/` contains:
-
-- `control-plane.sqlite3` for plans, operations, runs, revisions, idempotency,
-  and relationships;
-- content-addressed native artifacts;
-- immutable Parquet generations and corpus commits;
-- a rebuildable `catalog.duckdb` analytical cache.
-
-Large evidence does not live in SQLite. Deleting `catalog.duckdb` does not
-delete evidence; `flameox catalog rebuild` recreates it from committed
-generations.
-
-Runs preserve what was attempted and the effective semantics needed to interpret
-it. Native artifacts preserve what producers emitted; immutable generations hold
-normalized evidence. CLI and MCP responses inline only bounded semantics and
-summaries for the immediate task, then use typed references and MCP
-`ResourceLink`s for deeper evidence reads.
-
-The CLI and MCP server expose bounded task-shaped operations, not shell strings,
-raw SQL, or arbitrary artifact bytes. Workloads may access the network unless
-active containment denies it. The control process performs network I/O only for
-explicit setup, upgrade, approved provider acquisition, or explicitly enabled
-symbol services—not during ordinary capture or analysis.
-
-The trusted-local capture path does not enforce containment for child processes;
-it records that limitation. Projects that require managed containment can select
-it explicitly. Planning refuses when the requested guarantee is unavailable.
-
-## CLI and MCP discovery
-
-```console
-uv run flameox --help
-uv run flameox mcp serve --project-root .
-uv run flameox mcp inspect --project-root . --json
-```
-
-`mcp inspect` is the authoritative inventory of tool schemas, annotations, and
-resource templates for the installed version. See [CLI and MCP
-boundaries](docs/interfaces.md) for workflow and trust semantics.
-
-## Integrity and retention
-
-```console
-uv run flameox validate
-uv run flameox validate --full
-uv run flameox catalog validate
-uv run flameox catalog rebuild
-uv run flameox recover
-uv run flameox gc
-uv run flameox gc --apply
-```
-
-Validation never repairs evidence. Garbage collection is a dry run unless
-`--apply` is supplied, and applied candidates first move to recoverable trash.
-Permanent purge requires a separate explicit command naming an expired trash
-manifest.
-
-## Documentation
-
-- [Architecture](docs/architecture.md) — authoritative module and process boundaries
-- [Storage and evidence](docs/storage-and-evidence.md) — authority, snapshots, and publication
-- [Investigations](docs/investigations.md) — experiments, analysis, and claim quality
-- [Adapters](docs/adapters.md) — producer ownership and compatibility
-- [Runtime safety](docs/runtime-safety.md) — execution, filesystem, cancellation, and retention
-- [CLI and MCP](docs/interfaces.md) — public workflow and trust boundaries
-- [Testing](docs/testing.md) — suite ownership and CI lanes
-- [Contributing](CONTRIBUTING.md) — development and pull-request workflow
+See [architecture](docs/architecture.md), [storage and evidence](docs/storage-and-evidence.md),
+[interfaces](docs/interfaces.md), [runtime safety](docs/runtime-safety.md), and
+[investigations](docs/investigations.md) for the contracts.
 
 ## Development
 
+Flameox requires Python 3.12 or newer and uses the committed `uv.lock`.
+
 ```console
-uv sync --extra dev
 uv run ruff check src tests tools
+uv run ruff format --check src tests tools
 uv run mypy src tests tools
+uv run lint-imports
 uv run pytest -q
 ```
 
-See [the testing guide](docs/testing.md) for marker and provider commands.
-Flameox is available under the
-[MIT License](LICENSE).
+The project is licensed under the MIT License.

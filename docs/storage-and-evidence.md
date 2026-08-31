@@ -1,351 +1,83 @@
 # Storage and evidence
 
-Flameox separates transactional control state, immutable evidence, and
-rebuildable analysis state. Treating those as interchangeable is a data-integrity
-bug.
+Storage is optional. Discovery, inspection, analysis, and unpreserved capture
+must not create `.flameox`, `.diagnostics`, SQLite files, or persistent DuckDB
+files.
+
+## Repository layout
+
+The first explicit preservation creates exactly:
 
 ```text
-control-plane.sqlite3       native artifacts + Parquet + corpus commits
-transactional authority                  immutable authority
-           │                                      │
-           └──────────────────┬───────────────────┘
-                              ▼
-                     catalog.duckdb
-                   rebuildable projection
+.flameox/
+├── repository.json
+├── artifacts/sha256/<prefix>/<digest>/
+│   ├── artifact.json
+│   └── payload
+├── evidence/sha256/<prefix>/<evidence-id>/
+│   ├── manifest.json
+│   └── data/...
+└── .staging/<process-session>/<publication-id>/
 ```
 
-[Architecture](architecture.md) defines module ownership. [Runtime
-safety](runtime-safety.md) defines locking, recovery, retention, and filesystem
-guarantees.
+`repository.json` contains only `format_version` and `created_at`. It does not
+bind the repository to a project path and is not mutable lifecycle state.
+Creation adds `.flameox/` idempotently to `.git/info/exclude` when the fixed
+project root is a Git repository. Tracked `.gitignore` is never edited.
 
-## Workspace
+## Identities
 
-The default workspace is `<project>/.diagnostics`. An explicit `--workspace`
-must identify the workspace itself; `--project-root` discovers one beneath a
-project. Flameox never searches above the declared project root.
+Artifact identity is the lowercase SHA-256 of native bytes. An artifact bundle
+contains the exact payload and metadata needed to validate its digest and size.
+Multi-file native inputs remain separate content-addressed artifacts whose
+manifest roles bind their relative paths. An `EvidenceSource` rebuilds such a
+bundle only in session scratch, so NVBench and similar directory formats remain
+reanalyzable without introducing a mutable repository checkout.
 
-The durable layout is conceptually:
+Evidence identity is SHA-256 of the RFC 8785 canonical manifest body. The body
+contains capability/provider identity, input digests, effective capture and
+analysis requests, the evidence-episode timestamp, data-file digests, coverage,
+and limitations. Process-local handles such as `analysis_id` and continuation
+tokens are excluded from preserved data.
+
+The stored envelope adds `format_version` and `evidence_id`. The canonical MCP
+resource media type is:
 
 ```text
-.diagnostics/
-├── workspace.json
-├── control-plane.sqlite3
-├── artifacts/objects/       content-addressed native bytes
-├── evidence/<table>/placement=<uuid>/ immutable normalized Parquet
-├── generations/<sha256>.json immutable normalized-generation manifests
-├── corpus/commits/          immutable inventories
-├── corpus/HEAD              atomic current-commit pointer
-├── catalog.duckdb           disposable analytical projection
-├── staging/                 bounded in-progress operations
-├── quarantine/              recoverable invalid/incomplete inputs
-├── trash/                   recoverable GC moves
-└── tools/                   verified managed user-space tools
+application/vnd.flameox.evidence+json;version=1
 ```
 
-`workspace.json` binds the workspace identity to its project root and creation
-metadata. The SQLite sentinel identifies the control-plane format. Configuration
-lives in project `flameox.toml`; secrets belong in the environment, not either file.
+## Publication
 
-An empty SQLite file initializes with one content-derived control-plane format
-sentinel. Any pre-existing file without the exact current sentinel is rejected
-and requires a new workspace. Native artifacts can be imported through supported
-import operations.
+Artifact and evidence directories are assembled beneath the same-filesystem
+`.staging` tree. Files are flushed and fsynced, the complete staged bundle is
+validated, then its directory is renamed into its content-addressed destination.
+The manifest therefore becomes visible only with complete data.
 
-## Control-plane authority
+Concurrent identical publications converge on one destination and validate it.
+An existing payload or manifest that differs from its content identity is
+repository corruption. Repeating `preserve_evidence` for the same session
+analysis revalidates the immutable bundle and returns the same evidence reference.
 
-`control-plane.sqlite3` owns:
+Every bundle is independently valid and retained. There are no generations,
+HEAD refs, commits, mutable indexes, catalog locks, trash manifests, or general
+GC. Startup may remove another staging owner only when its recorded process ID
+is provably dead.
 
-- authorized plan intent and single-use capability lifecycle;
-- operation current state and immutable revisions;
-- idempotency bindings;
-- run current state and immutable revisions;
-- projection intents that bind exact run revisions to recoverable corpus publication;
-- investigations, hypotheses, experiments, findings, pipelines, and other typed
-  control records;
-- typed relationships between those records.
+## Queries and resources
 
-SQLite uniqueness, revision predicates, and transactions—not directory scans or
-file rename choreography—enforce control-plane invariants. Pydantic validates a
-payload before commit and after decode. Significant transitions append a
-revision; current rows are indexed projections.
+`query_evidence` sorts the manifest inventory deterministically and computes an
+inventory digest before filtering. A continuation is bound to that inventory;
+mutation makes it stale rather than silently changing the page. Filters cover
+evidence kind, capability, provider, input digest, and time bounds.
 
-The database uses foreign-key enforcement, a bounded busy timeout, and WAL on
-the supported local-filesystem contract. Transactions never remain open while a
-profiler, network request, extractor, or large Parquet write runs.
+`flameox://evidence/{evidence_id}` returns the validated canonical manifest.
+Missing or corrupt resources are MCP resource errors. Native payload bytes are
+not exposed through resources; their digest and role remain visible in the
+manifest.
 
-### Authorized plans
+## Format evolution
 
-The caller-visible `plan_id` is deterministic audit identity. The `plan_token`
-is an opaque random capability. They are not interchangeable.
-
-Issuing a plan stores its complete execution intent and expiry server-side.
-The token is the lookup key and is not duplicated inside the stored intent.
-Inspection reconstructs a preview; consumption atomically makes the capability
-unavailable. Execution receives only the token and optional expected digest.
-
-The plan is an expiring authorization receipt, not a second durable owner of run
-semantics. Its authorization digest is derived from the finalized typed intent;
-there is no parallel request-shaped authorization payload or generic identity
-bag. Executable bindings remain typed, and an approved third-party adapter
-package has one explicit package-identity field.
-
-Every value that can change execution or side effects belongs in stored intent:
-executable bindings, argv, cwd, environment contract, roots, containment,
-budgets, outputs, provider and workload identity, network target, expected
-artifacts, and oracle authority.
-
-### Revisions and relationships
-
-A revision append supplies the expected current revision and the exact next
-revision. SQLite commits the new immutable revision, updates the current row,
-and replaces revision-bound relationships in one transaction. A mismatch is a
-typed revision conflict, never last-writer-wins.
-
-Relationships are written transactionally with the source revision. Application
-services validate typed targets before commit; the generic relationships table
-does not enforce target foreign keys, so target integrity remains an
-application-level contract. External immutable artifact and corpus references
-are likewise checked before they enter published evidence.
-
-## Runs and provenance
-
-A run is one attempted execution or import. Its manifest records:
-
-- run kind, lifecycle state, timestamps, and typed failure;
-- canonical workload definition and instance identity;
-- executable, source, environment, tool, adapter, and package identities;
-- process termination, resource observation, cleanup, and containment;
-- native artifacts and normalized evidence generations;
-- oracle and experimental relationships;
-- explicit limitations and unavailable fields.
-
-The run manifest is the durable semantic authority for what was attempted. It
-records effective values after defaults, adapter policy, and workload binding,
-including the adapter mode, capture bounds, filters, and target-process scope
-when those values define the property being measured. Imports and internal runs
-represent unavailable semantics explicitly rather than inferring them from
-artifact contents.
-
-Generic import preserves declared artifact metadata but does not promote a
-producer string into trusted run semantics. A registered import profile may do
-so only after validating the immutable staged bytes against its bounded native
-format contract. Qualified imports retain `origin="import"` while naming the
-validated adapter separately; unavailable capture scope remains explicit. A
-failed qualification preserves the immutable artifact on a failed import run
-instead of silently falling back to provider-specific semantics.
-
-Each effective adapter option has one persisted owner. Property-defining values
-live in the typed capture scope; remaining adapter configuration lives beside
-that scope. The complete option mapping used by adapter code is derived from
-those disjoint fields rather than stored a second time. Run semantics are
-immutable across lifecycle revisions and have a content digest that normalized
-generation manifests bind alongside their input run identifiers.
-
-These run-scoped semantics are not artifacts. Content identity answers which
-bytes were produced; it cannot answer why they were produced or which property
-the execution attempted to measure. Two runs may therefore reference the same
-content-addressed artifact while retaining different modes, bounds, filters, or
-target scopes.
-
-The ownership rule is:
-
-| Information | Owner |
-| --- | --- |
-| What ran, why, and under which effective scope | Run manifest |
-| Bytes emitted by a producer | Native artifact |
-| Extracted rows and derived evidence | Immutable generation |
-| Small task-specific context | Bounded response projection |
-
-Provider-specific contracts follow this rule without repeating the same fields.
-They are documented in [Adapters and producer contracts](adapters.md).
-
-Running, failed, cancelled, timed-out, and completed attempts are all evidence.
-Failure finalization does not discard partial artifacts that pass integrity and
-privacy checks. A later control revision may add publication receipts or
-recovery state, but it does not rewrite the historical execution outcome.
-
-Executable provenance consumes the `ResolvedExecutable` selected during
-planning. It records requested token, absolute invocation path, canonical
-target, resolution origin, trust decision, stable metadata, and content digest.
-No provenance service repeats executable discovery.
-
-Environment identity records an allowlisted, redacted projection rather than a
-host dump. Source identity uses repository state and bounded diff/untracked
-content digests where configured. Workload identity covers the complete
-validated command and parameters, including its executable binding and oracle.
-
-## Native artifacts
-
-The native producer artifact is authoritative. Imports stage bytes beneath an
-approved root, read from one descriptor under a size budget, verify identity and
-type, hash the staged bytes, then register a content-addressed object. Equal
-bytes are stored once while each run retains its own provenance relationship.
-
-Artifacts preserve produced evidence, not all Flameox state. They are the right
-boundary for provider-native, large, binary, independently reprocessable, or
-otherwise durable inputs such as profiles, traces, reports, and preserved logs.
-Derived normalized evidence remains in immutable evidence generations rather
-than being forced into artifact payloads or run manifests. Flameox does not wrap
-or rewrite native bytes to embed run semantics.
-
-Small size alone does not make evidence transient. A small provider report may
-still be stored as an artifact when integrity, provenance, or later extraction
-matters. Conversely, status, effective capture scope, limitations, pagination,
-and truncation metadata belong to typed durable records and their bounded
-projections rather than separate artifact payloads.
-
-Artifact metadata includes kind, media type, producer and version, size, digest,
-sensitivity, run relationship, and extraction state. An artifact may be
-structurally valid yet unsupported by the installed extractor; that state is
-not equivalent to an empty extraction.
-
-Sensitive native artifacts are not exposed as MCP binary resources. Agent-facing
-artifact resources return bounded metadata and typed evidence references. The
-`process_output` and `validation_output` kinds additionally support an explicit
-UTF-8 preview operation: callers supply byte and line bounds plus an offset, and
-the result reports returned and total bytes, truncation, and the next offset.
-The artifact service resolves and verifies the content-addressed object, applies
-the maximum sensitivity across all registrations, refuses sensitive or
-unsupported content, and never returns its host path. Failed run projections
-carry this preview operation as recovery guidance while the immutable artifact
-remains the diagnostic authority.
-
-## Evidence publication
-
-Normalized evidence uses explicit Arrow schemas and immutable Parquet files.
-Physical rows contain only table-domain values. A generation manifest records
-publication time, publisher, publisher version, file digest, and row count; its
-`generation_id` is the semantic digest of that exact serialized payload, not a
-stored random field. Corpus commits store those generation digests directly.
-`CorpusStore` derives the manifest path from the digest and rejects a manifest
-whose payload no longer hashes to the committed ID. Catalog views project the
-manifest facts where a query needs provenance. A null input semantic identity is
-explicit when a generation targets a run that has not been materialized; it is
-not inferred from artifact bytes.
-
-Publication establishes the content-digest inventory before the generation becomes
-visible. Opening a snapshot then checks each referenced file's exact Arrow schema,
-row count, and byte length without reading every payload. Catalog rebuild and full
-integrity validation stream the referenced files to reverify their SHA-256 digests.
-This keeps ordinary bounded queries proportional to their query while retaining an
-explicit whole-corpus verification boundary.
-
-Publication follows one commit protocol:
-
-1. pin the input corpus commit;
-2. write and close staging files;
-3. validate schema, budgets, references, row counts, and hashes;
-4. move immutable files into a staged placement namespace (the UUID is only a
-   file-placement nonce, never a generation identifier);
-5. write the manifest at its content-derived digest path;
-6. write a corpus commit whose inventory lists every reachable generation digest;
-7. atomically advance `corpus/HEAD`;
-8. record the control-plane publication receipt.
-
-Required domain projections use a domain-first transactional outbox. The same
-SQLite transaction that creates or appends a run revision inserts an immutable
-`projection_intents` row containing the run ID, exact revision and digest, plus
-the bounded context needed to rebuild the core projection. Projection constants
-and derived identities remain implementation details of the single
-run-projection publisher.
-
-After that transaction commits, the publisher builds Parquet without holding a
-SQLite transaction or workspace lock. Publication is idempotent by projection
-intent ID. Advancing `corpus/HEAD` and marking the intent published are separate
-durable steps, so a crash can leave one of three explicit states:
-
-- `pending`: the exact run revision is durable and publication can be recovered;
-- `published`: a generation and corpus commit are linked to the intent;
-- `failed`: a bounded failure is recorded and the source revision remains available.
-
-Recovery reconciles run projections. It validates the immutable source revision
-and digest, then idempotently finalizes or republishes the projection from
-authoritative run state. Feature evidence such as OTLP extraction is published
-directly from its immutable native artifact and does not share this outbox.
-
-The core run projection contains the run row, all artifact registrations, and
-the available environment and source identities. Adapter measurements,
-extractor tables, and other producer evidence are independent immutable
-generations rather than additional copies of mutable run state. Run rows record
-`run_revision` and `run_manifest_digest`; agent-facing run reads also report the
-authoritative revision, projected revision, intent state, and whether the
-projection is current. Thus a pending or stale projection is never silently
-presented as current domain state.
-
-Readers see either the previous commit or the new complete commit. Parquet files
-are never edited in place; generations preserve their original provenance for
-their entire retention lifetime.
-
-Core normalized families are runs, artifacts, environments, source states,
-measurements, frames, frame measurements, weighted call edges, representative
-stacks, observations, analyses, comparisons, and findings. Call edges and stacks
-carry an explicit metric, integer weight, unit, and sample count rather than a
-CPU-specific duration field; optional temporal coordinates remain nullable.
-Adapter-specific tables are allowed when a shared table would
-erase producer semantics. Exact fields and versions live in
-`src/flameox/evidence/schemas.py`; this document deliberately does not mirror
-that registry.
-
-## Snapshot isolation
-
-A corpus commit is an immutable inventory, not merely an ID. `Catalog.pin()`
-returns a `SnapshotHandle` that binds the commit and its generation digests. Analysis
-services acquire one handle at construction or request entry and use it for
-every lookup.
-
-Snapshot-local views resolve run manifests, artifacts, Parquet, comparisons,
-and evidence relationships from that inventory. Mutable control-plane rows and
-later corpus commits are invisible. Holding a snapshot also protects its files
-from garbage collection until the reader releases it.
-
-Passing a snapshot ID while consulting unrelated current stores is forbidden;
-that is not snapshot isolation.
-
-## DuckDB catalog
-
-`catalog.duckdb` contains rebuild metadata and views over the committed Parquet
-inventory. It does not own runs, revisions, plans, relationships, or evidence.
-
-`flameox catalog rebuild`:
-
-1. validates the selected corpus commit and manifests;
-2. validates every referenced path, digest, byte length, schema, and row count;
-3. creates a new catalog with allowlisted snapshot-local views;
-4. validates the catalog;
-5. atomically replaces `catalog.duckdb`.
-
-Existing readers continue on their open snapshot. Corrupt DuckDB state is
-rebuildable; corrupt artifacts, SQLite revisions, manifests, or Parquet are not.
-Catalog rebuilds do not change the authoritative corpus inventory: each read
-constructs transient views from its pinned corpus commit. Catalog metadata
-records only when the disposable shell was built; it does not duplicate corpus
-HEAD or maintain a freshness sentinel.
-
-Public interfaces expose curated parameterized queries, never raw SQL. Internal
-connections deny arbitrary extensions, attachments, secrets, and unapproved
-paths; enforce memory, row, string, and time budgets; and use one connection per
-concurrent query. Cancellation interrupts the owning connection and joins its
-worker before returning.
-
-## Format and evolution
-
-Compatibility is scoped, not global:
-
-- control-plane schema support is exact and rejects incompatible workspaces;
-- normalized Parquet files must exactly match the current Arrow schema; catalog
-  snapshots verify that schema plus each manifest row count and byte length
-  from the Parquet footer and file metadata; publication, catalog rebuild, and
-  full integrity validation also stream every file to verify its digest;
-- generation manifests and corpus commits have one strict shape with
-  content-derived identity;
-- changing a committed manifest changes its semantic generation digest, so every
-  snapshot, lookup, integrity pass, and catalog rebuild rejects it immediately;
-- provider-native payloads retain their own documented format and version fields;
-- readers support only their declared native-format version window;
-- producer adapters qualify explicit native versions and required fields;
-- new extraction creates a new generation and never rewrites native bytes;
-- comparisons declare which identities must match, may differ, or are unknown.
-
-Unknown producer versions, fields, units, or identities remain unavailable or
-incompatible. They are never accepted because a permissive parser happened to
-decode them.
+This is repository format `1`. Unsupported repository or manifest versions
+fail explicitly. Version 0.1 `.diagnostics` workspaces are not read, migrated,
+or dual-written. Their native artifacts can be analyzed by exact path.

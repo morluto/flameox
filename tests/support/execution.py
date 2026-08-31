@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from flameox.command_binding import ExecutableResolver
-from flameox.domain.executables import (
+from flameox.executable_models import (
     ExecutableIdentity,
     ExecutablePolicyDecision,
     ExecutableResolutionOrigin,

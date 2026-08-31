@@ -3,23 +3,20 @@ from __future__ import annotations
 import contextvars
 import json
 import os
-import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager, suppress
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
 
-from flameox.adapters.benchmark_samples import (
+from flameox.adapters.torch_benchmark import TorchBenchmarkOptions, parse_torch_benchmark_options
+from flameox.atomic import atomic_write_json
+from flameox.benchmark_samples import (
     BenchmarkDevice,
     BenchmarkSamplesV1,
     BenchmarkSeries,
 )
-from flameox.adapters.memray_options import MemrayCaptureOptions, memray_capture_options
-from flameox.adapters.torch_benchmark import TorchBenchmarkOptions, parse_torch_benchmark_options
-from flameox.atomic import atomic_write_json
-from flameox.domain import DomainError
 
 _PHASE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "flameox_phase",
@@ -31,10 +28,6 @@ _TORCH_PROFILER_CONFIG = "FLAMEOX_TORCH_PROFILER_CONFIG"
 _TORCH_PROFILER_OUTPUT_ROOT = "FLAMEOX_TORCH_PROFILER_OUTPUT_ROOT"
 _TORCH_BENCHMARK_CONFIG = "FLAMEOX_TORCH_BENCHMARK_CONFIG"
 _TORCH_BENCHMARK_OUTPUT = "FLAMEOX_BENCHMARK_OUTPUT"
-_MEMRAY_CONFIG = "FLAMEOX_MEMRAY_CONFIG"
-_MEMRAY_OUTPUT = "FLAMEOX_MEMRAY_OUTPUT"
-_MEMRAY_REGION_LOCK = threading.Lock()
-_MEMRAY_REGION_STATE = "idle"
 
 
 def observe(name: str, **values: Any) -> None:
@@ -166,7 +159,7 @@ def torch_benchmark(
 def _torch_benchmark_config() -> TorchBenchmarkOptions:
     raw = os.environ.get(_TORCH_BENCHMARK_CONFIG)
     if raw is None:
-        raise RuntimeError("torch_benchmark() requires a Flameox torch.benchmark capture plan")
+        raise RuntimeError("torch_benchmark() requires Flameox benchmark capture configuration")
     try:
         return parse_torch_benchmark_options(json.loads(raw))
     except (json.JSONDecodeError, ValueError) as exc:
@@ -289,11 +282,11 @@ class TorchProfilerSession:
 
 @contextmanager
 def torch_profiler() -> Iterator[TorchProfilerSession]:
-    """Run the scheduled profiler configuration bound into a Flameox capture plan."""
+    """Run the scheduled profiler configuration bound into the live capture request."""
     raw_config = os.environ.get(_TORCH_PROFILER_CONFIG)
     output_root_value = os.environ.get(_TORCH_PROFILER_OUTPUT_ROOT)
     if raw_config is None or output_root_value is None:
-        raise RuntimeError("torch_profiler() requires a Flameox torch.profiler SDK capture plan")
+        raise RuntimeError("torch_profiler() requires Flameox profiler capture configuration")
     try:
         config = json.loads(raw_config)
     except json.JSONDecodeError as exc:
@@ -320,7 +313,7 @@ def torch_profiler() -> Iterator[TorchProfilerSession]:
     if "cpu" in activities:
         selected_activities.append(torch.profiler.ProfilerActivity.CPU)
     if "cuda" in activities and not torch.cuda.is_available():
-        raise RuntimeError("the Flameox capture plan requires CUDA, but CUDA is unavailable")
+        raise RuntimeError("the Flameox capture request requires CUDA, but CUDA is unavailable")
     if "cuda" in activities:
         selected_activities.append(torch.profiler.ProfilerActivity.CUDA)
     if "cuda_if_available" in activities and torch.cuda.is_available():
@@ -334,7 +327,7 @@ def torch_profiler() -> Iterator[TorchProfilerSession]:
     def export_trace(profile: Any) -> None:
         nonlocal cycle
         if cycle >= cycle_count:
-            raise RuntimeError("torch.profiler emitted more trace cycles than planned")
+            raise RuntimeError("torch.profiler emitted more than the requested trace cycle")
         output = output_root / f"torch-trace-cycle-{cycle:04d}.json"
         if output.exists():
             raise RuntimeError(f"torch.profiler cycle output already exists: {output.name}")
@@ -367,108 +360,8 @@ def torch_profiler() -> Iterator[TorchProfilerSession]:
     finally:
         if not failed and cycle != cycle_count:
             raise RuntimeError(
-                f"torch.profiler emitted {cycle} of {cycle_count} planned trace cycles"
+                f"torch.profiler emitted {cycle} of {cycle_count} requested trace cycles"
             )
-
-
-@contextmanager
-def memray_region(name: str) -> Iterator[None]:
-    """Track exactly one plan-bound memory region for this process.
-
-    Memray covers every thread while a tracker is active and permits only one
-    tracker per process. A second Flameox region therefore fails before it can
-    produce ambiguous evidence.
-    """
-
-    selected, output = _memray_region_config(name)
-    try:
-        import memray
-    except ImportError as exc:
-        raise RuntimeError("Memray is unavailable in the workload environment") from exc
-    global _MEMRAY_REGION_STATE
-    with _MEMRAY_REGION_LOCK:
-        if _MEMRAY_REGION_STATE != "idle":
-            reason = "overlap" if _MEMRAY_REGION_STATE == "active" else "repeated"
-            with suppress(BaseException):
-                observe("flameox.memray.region.error", region=name, reason=reason)
-            raise RuntimeError(
-                "Memray SDK capture permits exactly one region per process; end the active "
-                "region or create a fresh capture plan with one declared region."
-            )
-        _MEMRAY_REGION_STATE = "active"
-    completed = False
-    failure: BaseException | None = None
-    cuda_initialized_before = _torch_cuda_initialized()
-    try:
-        observe(
-            "flameox.memray.region.start",
-            region=name,
-            warmup_count=selected.warmup_count,
-            torch_cuda_initialized=cuda_initialized_before,
-        )
-        with memray.Tracker(
-            output,
-            native_traces=selected.native_traces,
-            trace_python_allocators=selected.trace_python_allocators,
-        ):
-            yield
-        completed = True
-    except BaseException as error:
-        failure = error
-        raise
-    finally:
-        with _MEMRAY_REGION_LOCK:
-            _MEMRAY_REGION_STATE = "closed"
-        try:
-            observe(
-                "flameox.memray.region.end",
-                region=name,
-                completed=completed,
-                torch_cuda_initialized=_torch_cuda_initialized(),
-            )
-        except BaseException as observation_error:
-            if failure is None:
-                raise
-            failure.add_note(
-                "Flameox Memray region-end observation also failed "
-                f"({type(observation_error).__name__}); the workload failure remains primary."
-            )
-
-
-def _memray_region_config(name: str) -> tuple[MemrayCaptureOptions, str]:
-    raw_config = os.environ.get(_MEMRAY_CONFIG)
-    output = os.environ.get(_MEMRAY_OUTPUT)
-    if raw_config is None or output is None:
-        raise RuntimeError("memray_region() requires a Flameox Memray SDK capture plan")
-    try:
-        config = json.loads(raw_config)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("invalid Flameox Memray configuration") from exc
-    if not isinstance(config, dict):
-        raise RuntimeError("Flameox Memray SDK configuration is invalid")
-    try:
-        selected = memray_capture_options(config)
-    except DomainError as exc:
-        raise RuntimeError("Flameox Memray SDK configuration is invalid") from exc
-    if selected.mode != "sdk" or selected.region != name:
-        raise RuntimeError("memray_region() must use the exact region declared by the capture plan")
-    return selected, output
-
-
-def _torch_cuda_initialized() -> bool | None:
-    """Read already-loaded Torch state without creating allocations in the region."""
-
-    torch = sys.modules.get("torch")
-    if torch is None:
-        return None
-    cuda = getattr(torch, "cuda", None)
-    is_initialized = getattr(cuda, "is_initialized", None)
-    if not callable(is_initialized):
-        return None
-    try:
-        return bool(is_initialized())
-    except Exception:
-        return None
 
 
 def _bounded_value(value: Any, *, depth: int = 0) -> Any:

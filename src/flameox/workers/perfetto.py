@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from flameox.domain import DomainError, ErrorCode
+from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.workers.perfetto_contract import (
     PERFETTO_WORKER,
     PerfettoExtractRequest,
@@ -86,7 +86,7 @@ def _query(request: PerfettoWorkerRequest) -> PerfettoWorkerResult:
         )
     except ImportError as exc:
         raise DomainError(
-            ErrorCode.CAPABILITY_UNAVAILABLE,
+            ErrorCode.UNAVAILABLE_CAPABILITY,
             "Perfetto's Python package is not installed.",
         ) from exc
 
@@ -177,7 +177,7 @@ def _query(request: PerfettoWorkerRequest) -> PerfettoWorkerResult:
         raise AssertionError("unreachable validated Perfetto operation")
     except (TraceProcessorException, OSError, ValueError, RuntimeError) as exc:
         raise DomainError(
-            ErrorCode.ARTIFACT_PARSE_FAILED,
+            ErrorCode.DECODE_FAILURE,
             f"Perfetto Trace Processor failed: {type(exc).__name__}",
         ) from exc
     finally:

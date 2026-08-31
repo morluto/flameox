@@ -5,19 +5,19 @@ import heapq
 import importlib.metadata
 import json
 import os
-import sqlite3
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
 from typing import Any, Literal, cast
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from flameox.atomic import atomic_write_json
-from flameox.domain import DomainError, ErrorCode, digest_model
-from flameox.evidence.schemas import schema_for
+from flameox.canonical import digest_model
+from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.workers.memray_contract import (
     MEMRAY_WORKER,
     MemrayExtractionCoverage,
@@ -29,6 +29,7 @@ from flameox.workers.memray_contract import (
     MemrayWorkerRequest,
     MemrayWorkerResult,
 )
+from flameox.workers.parquet_schemas import schema_for
 from flameox.workers.protocol import (
     WorkerApplication,
     WorkerFailureKind,
@@ -89,7 +90,6 @@ class _AggregationState:
         workload_cwd: Path | None,
         project_root: Path,
         source_state_id: str | None,
-        database_path: Path,
     ) -> None:
         self.limits = limits
         self.run_id = run_id
@@ -97,16 +97,13 @@ class _AggregationState:
         self.workload_cwd = workload_cwd
         self.project_root = project_root
         self.source_state_id = source_state_id
-        self.database_path = database_path
         self.frame_cache: dict[tuple[str, str, int], str] = {}
         self.contributions = 0
         self.pending_stack: tuple[str, tuple[str, ...], int, int] | None = None
-        self.connection = sqlite3.connect(database_path)
-        self.connection.executescript(
+        self.connection = duckdb.connect(":memory:")
+        self.connection.begin()
+        self.connection.execute(
             """
-            PRAGMA journal_mode=OFF;
-            PRAGMA synchronous=OFF;
-            PRAGMA temp_store=FILE;
             CREATE TABLE frames (
                 frame_id TEXT PRIMARY KEY,
                 function TEXT NOT NULL,
@@ -278,7 +275,7 @@ class _AggregationState:
         self._flush_stack()
         self.connection.commit()
         self._check_budget()
-        self.connection.executescript(
+        self.connection.execute(
             """
             CREATE TEMP TABLE selected_frames (frame_id TEXT PRIMARY KEY);
             CREATE TEMP TABLE selected_aggregates (
@@ -391,7 +388,7 @@ class _AggregationState:
                   ON s.metric = a.metric AND s.frame_id = a.frame_id
                 ORDER BY a.metric, a.frame_id
                 """
-            )
+            ).fetchall()
         ]
         selected_edges = self.connection.execute(
             """
@@ -405,6 +402,7 @@ class _AggregationState:
             ORDER BY e.metric, e.parent_frame_id, e.child_frame_id
             """
         )
+        selected_edge_rows = selected_edges.fetchall()
         edge_rows = [
             {
                 "run_id": self.run_id,
@@ -416,7 +414,7 @@ class _AggregationState:
                 "unit": "bytes",
                 "sample_count": int(samples),
             }
-            for metric, parent_frame_id, child_frame_id, weight_value, samples in selected_edges
+            for metric, parent_frame_id, child_frame_id, weight_value, samples in selected_edge_rows
         ]
         selected_stacks = self.connection.execute(
             """
@@ -447,7 +445,7 @@ class _AggregationState:
                 leaf_frame_id,
                 weight_value,
                 samples,
-            ) in selected_stacks
+            ) in selected_stacks.fetchall()
         ]
         referenced = {frame_id for _metric, frame_id, *_values in aggregate_rows}
         for edge in edge_rows:
@@ -459,6 +457,7 @@ class _AggregationState:
             "SELECT frame_id, function, file, line, source_state_id, symbolization "
             "FROM frames ORDER BY frame_id"
         )
+        selected_frame_rows = selected_frames.fetchall()
         frame_rows = [
             {
                 "frame_id": str(frame_id),
@@ -477,9 +476,20 @@ class _AggregationState:
                 "inlined": False,
                 "symbolization": str(symbolization),
             }
-            for frame_id, function, file, line, source_state_id, symbolization in selected_frames
+            for (
+                frame_id,
+                function,
+                file,
+                line,
+                source_state_id,
+                symbolization,
+            ) in selected_frame_rows
             if frame_id in referenced
         ]
+        assert frame_drop is not None
+        assert aggregate_drop is not None
+        assert edge_drop is not None
+        assert stack_drop is not None
         return _AggregationProjection(
             frame_rows=frame_rows,
             aggregates=aggregate_rows,
@@ -497,15 +507,12 @@ class _AggregationState:
 
     def close(self) -> None:
         self.connection.close()
-        self.database_path.unlink(missing_ok=True)
 
     def _check_budget(self) -> None:
-        self.connection.commit()
-        if self.database_path.stat().st_size > self.limits.max_output_bytes:
-            raise DomainError(
-                ErrorCode.QUERY_BUDGET_EXCEEDED,
-                "Memray aggregation workspace exceeds the extraction output-byte limit.",
-            )
+        # The isolated worker's address-space limit bounds this in-memory database.
+        # Committing here would turn every 1,024 contributions into a separate
+        # DuckDB transaction and dominate high-cardinality captures.
+        return
 
 
 def _aggregate(
@@ -648,13 +655,13 @@ def _handle(request: MemrayWorkerRequest, job_root: Path) -> MemrayWorkerResult:
         from memray._memray import compute_statistics
     except ImportError as error:
         raise DomainError(
-            ErrorCode.CAPABILITY_UNAVAILABLE,
+            ErrorCode.UNAVAILABLE_CAPABILITY,
             "Memray reader is unavailable.",
         ) from error
     try:
         if Path(request.artifact_path).stat().st_size > request.limits.max_input_bytes:
             raise DomainError(
-                ErrorCode.QUERY_BUDGET_EXCEEDED,
+                ErrorCode.LIMIT_EXCEEDED,
                 "Memray capture exceeds the extraction input-byte limit.",
             )
         progress_path = job_root / "progress.json"
@@ -685,7 +692,6 @@ def _handle(request: MemrayWorkerRequest, job_root: Path) -> MemrayWorkerResult:
             workload_cwd=Path(request.workload_cwd) if request.workload_cwd else None,
             project_root=Path(request.project_root),
             source_state_id=request.source_state_id,
-            database_path=job_root / "aggregation.sqlite",
         )
         try:
             with memray.FileReader(request.artifact_path) as reader:
@@ -732,13 +738,13 @@ def _handle(request: MemrayWorkerRequest, job_root: Path) -> MemrayWorkerResult:
                 projection = state.finalize()
         finally:
             state.close()
-    except (OSError, sqlite3.Error, ValueError) as error:
+    except (OSError, duckdb.Error, ValueError) as error:
         diagnostic = str(error)
         raise DomainError(
             (
-                ErrorCode.ADAPTER_INCOMPATIBLE
+                ErrorCode.UNSUPPORTED_FORMAT
                 if "incompatible" in diagnostic.casefold()
-                else ErrorCode.ARTIFACT_PARSE_FAILED
+                else ErrorCode.DECODE_FAILURE
             ),
             f"Memray reader rejected the capture: {diagnostic}",
         ) from error
@@ -871,7 +877,7 @@ def _handle(request: MemrayWorkerRequest, job_root: Path) -> MemrayWorkerResult:
         output_bytes += output.byte_length
         if output_bytes > request.limits.max_output_bytes:
             raise DomainError(
-                ErrorCode.QUERY_BUDGET_EXCEEDED,
+                ErrorCode.LIMIT_EXCEEDED,
                 "Memray normalized evidence exceeds the extraction output-byte limit.",
             )
         files.append(output)

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from pydantic import JsonValue
 
-from flameox.application.otlp import _OtlpRowLimitExceeded, _parse_otlp
 from flameox.workers.otlp_contract import OTLP_WORKER, OtlpWorkerRequest, OtlpWorkerResult
+from flameox.workers.otlp_parser import OtlpRowLimitExceeded, ParsedOtlp, parse_otlp
 from flameox.workers.protocol import (
     WorkerApplication,
     WorkerFailureKind,
@@ -16,25 +16,34 @@ from flameox.workers.protocol import (
 
 def _handle(request: OtlpWorkerRequest, _job_root: Path) -> OtlpWorkerResult:
     try:
-        parsed = _parse_otlp(
+        parsed = parse_otlp(
             Path(request.artifact_path),
             request.media_type,
             row_limit=request.row_limit,
+            start_ns=request.start_ns,
+            end_ns=request.end_ns,
         )
-        return OtlpWorkerResult(
-            resources=cast(tuple[dict[str, JsonValue], ...], tuple(parsed.resources)),
-            scopes=cast(tuple[dict[str, JsonValue], ...], tuple(parsed.scopes)),
-            spans=cast(tuple[dict[str, JsonValue], ...], tuple(parsed.spans)),
-            events=cast(tuple[dict[str, JsonValue], ...], tuple(parsed.events)),
-            links=cast(tuple[dict[str, JsonValue], ...], tuple(parsed.links)),
-            limitations=parsed.limitations,
-        )
-    except _OtlpRowLimitExceeded as exc:
-        return OtlpWorkerResult(
-            row_limit_exceeded=True,
-            counts=exc.counts,  # type: ignore[arg-type]
-            limitations=exc.limitations,
-        )
+        return _result(parsed)
+    except OtlpRowLimitExceeded as exc:
+        return _result(exc.parsed, row_limit_exceeded=True, counts=exc.counts)
+
+
+def _result(
+    parsed: ParsedOtlp,
+    *,
+    row_limit_exceeded: bool = False,
+    counts: dict[str, int] | None = None,
+) -> OtlpWorkerResult:
+    return OtlpWorkerResult(
+        row_limit_exceeded=row_limit_exceeded,
+        resources=cast(tuple[dict[str, JsonValue], ...], tuple(parsed.resources)),
+        scopes=cast(tuple[dict[str, JsonValue], ...], tuple(parsed.scopes)),
+        spans=cast(tuple[dict[str, JsonValue], ...], tuple(parsed.spans)),
+        events=cast(tuple[dict[str, JsonValue], ...], tuple(parsed.events)),
+        links=cast(tuple[dict[str, JsonValue], ...], tuple(parsed.links)),
+        counts=cast(Any, counts or {}),
+        limitations=parsed.limitations,
+    )
 
 
 def main() -> int:

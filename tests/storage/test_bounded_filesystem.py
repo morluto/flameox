@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from flameox.domain import DomainError, ErrorCode
 from flameox.filesystem import BoundedFileSystem
+from flameox.runtime_errors import DomainError, ErrorCode
 
 pytestmark = pytest.mark.unit
 
@@ -21,7 +21,7 @@ def test_bounded_file_read_is_descriptor_relative_and_exact(tmp_path: Path) -> N
     assert files.read_bytes(source, max_bytes=8) == b"evidence"
     with pytest.raises(DomainError) as oversized:
         files.read_bytes(source, max_bytes=7)
-    assert oversized.value.code is ErrorCode.QUERY_BUDGET_EXCEEDED
+    assert oversized.value.code is ErrorCode.LIMIT_EXCEEDED
 
 
 def test_bounded_file_read_rejects_symlink_components(tmp_path: Path) -> None:
@@ -34,4 +34,4 @@ def test_bounded_file_read_rejects_symlink_components(tmp_path: Path) -> None:
 
     with pytest.raises(DomainError) as refused:
         BoundedFileSystem((root,)).read_bytes(root / "escape" / "secret", max_bytes=10)
-    assert refused.value.code is ErrorCode.EXECUTION_REFUSED
+    assert refused.value.code is ErrorCode.EXECUTION_FAILURE

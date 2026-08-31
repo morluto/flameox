@@ -6,8 +6,7 @@ import shutil
 import stat
 from pathlib import Path
 
-from flameox.domain import DomainError, ErrorCode
-from flameox.domain.executables import (
+from flameox.executable_models import (
     ExecutableIdentity,
     ExecutablePolicyDecision,
     ExecutableResolutionOrigin,
@@ -15,6 +14,7 @@ from flameox.domain.executables import (
     ExecutableTrustPolicy,
     ResolvedExecutable,
 )
+from flameox.runtime_errors import DomainError, ErrorCode
 
 
 class ExecutableResolver:
@@ -46,7 +46,7 @@ class ExecutableResolver:
             located = shutil.which(request.token, path=search_path)
             if located is None:
                 raise DomainError(
-                    ErrorCode.CAPABILITY_UNAVAILABLE,
+                    ErrorCode.UNAVAILABLE_CAPABILITY,
                     f"Executable {request.token!r} was not found in the request PATH.",
                     details={"executable": request.token},
                 )
@@ -100,7 +100,7 @@ class ExecutableResolver:
                 )
             )
         except DomainError as error:
-            if error.code is ErrorCode.CAPABILITY_UNAVAILABLE:
+            if error.code is ErrorCode.UNAVAILABLE_CAPABILITY:
                 return None
             raise
 
@@ -116,7 +116,7 @@ class ExecutableResolver:
         binding = self.resolve_host_tool(token, cwd=cwd, environment=environment)
         if binding is None:
             raise DomainError(
-                ErrorCode.CAPABILITY_UNAVAILABLE,
+                ErrorCode.UNAVAILABLE_CAPABILITY,
                 f"Executable {token!r} was not found in the request PATH.",
                 details={"executable": token},
             )
@@ -166,7 +166,7 @@ class ExecutableResolver:
     @staticmethod
     def _refused(token: str, message: str) -> DomainError:
         return DomainError(
-            ErrorCode.EXECUTION_REFUSED,
+            ErrorCode.EXECUTION_FAILURE,
             message,
             details={"executable": token},
         )
@@ -174,7 +174,7 @@ class ExecutableResolver:
     @staticmethod
     def _changed(resolved: ResolvedExecutable, message: str) -> DomainError:
         return DomainError(
-            ErrorCode.INVALID_CAPTURE_PLAN,
+            ErrorCode.MISSING_OR_CHANGED_INPUT,
             message,
             details={"executable": resolved.requested_token},
         )
@@ -187,7 +187,7 @@ def _is_path_like(value: str) -> bool:
 def _normalized_search_path(value: str | None, cwd: Path) -> tuple[str, tuple[Path, ...]]:
     if value is None:
         raise DomainError(
-            ErrorCode.CAPABILITY_UNAVAILABLE,
+            ErrorCode.UNAVAILABLE_CAPABILITY,
             "A bare executable name requires PATH in the request environment.",
         )
     entries = tuple(

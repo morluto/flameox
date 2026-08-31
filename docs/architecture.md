@@ -1,223 +1,71 @@
 # Architecture
 
-Flameox is a local evidence layer for coding agents. It coordinates maintained
-measurement tools, preserves native artifacts and provenance, extracts bounded
-evidence, and supports reproducible comparisons. It does not replace the tools
-that measure runtime behavior or give an agent arbitrary shell, SQL, file, or
-network access.
-
-This document owns module and process boundaries. Storage authority is defined
-in [Storage and evidence](storage-and-evidence.md); operational guarantees are
-defined in [Runtime safety](runtime-safety.md).
+Flameox 0.2 is a process-lifespan capability runtime with an optional immutable
+evidence repository. It is not a workspace application and has no mutable
+control plane.
 
 ## Authority map
 
-```text
-flameox.toml
-  named workloads, experiments, inference declarations
-        │
-        ▼
-application planning ──► ResolvedExecutable + opaque plan capability
-        │                              │
-        ▼                              ▼
-subprocess broker                SQLite control plane
-        │                   plans · operations · runs · revisions
-        ▼
-native artifacts ──► immutable Parquet generations ──► corpus commit
-                                                        │
-                                                        ▼
-                                              pinned SnapshotHandle
-                                                        │
-                                                        ▼
-                                          DuckDB / task-shaped analysis
-```
+| Concern | Authority |
+| --- | --- |
+| Project boundary | `project_root` fixed once at server startup |
+| Available operations | Process-lifespan capability registry |
+| In-progress work | Current MCP request and cancellation scope |
+| Unpreserved output | Bounded session scratch |
+| Completed preserved evidence | Immutable evidence manifest |
+| Native bytes | Content-addressed artifact bundle |
+| Query view | Sorted manifest inventory pinned for one query |
+| Limits | Startup defaults, lowerable per request |
+| Hypotheses and narrative | Agent-owned notes outside Flameox |
 
-There are six authoritative boundaries:
-
-1. `ExecutableResolver` resolves a command under an explicit cwd, environment,
-   and trust policy. Its `ResolvedExecutable` is consumed by planning,
-   execution, identity, and provenance. The broker revalidates it and never
-   repeats command discovery.
-2. `AuthorizedPlanStore` retains complete execution intent in SQLite. Public
-   execution surfaces accept an opaque, expiring, single-use token—not mutable
-   plan fields supplied by the caller.
-3. `ControlPlane` transactionally owns plans, operations, run and record
-   revisions, idempotency, and relationships. Run revisions are the semantic
-   authority for what was attempted, including effective adapter mode and
-   capture scope; artifact identity is not a substitute for that state.
-4. The subprocess broker owns child creation, environment construction,
-   deadlines, output and resource budgets, observation, and cleanup. The
-   artifact-worker harness owns one typed, request-bound staged
-   worker protocol. Every ordinary artifact worker is registered against that
-   protocol; workers cannot introduce an ad hoc dictionary envelope.
-5. Native producer formats remain authoritative for the bytes and measurements
-   they contain. Flameox adds schemas only for run or evidence semantics not
-   owned by the producer and does not rewrite native bytes to carry them.
-6. Every analysis acquires one `SnapshotHandle` before lookup and resolves all
-   evidence through that handle.
-
-Large artifacts and analytical Parquet stay outside SQLite. DuckDB is disposable
-analysis state built from one committed corpus inventory.
-
-CLI and MCP responses are bounded projections across these authorities. They may
-inline the semantics and summaries needed for the immediate task, but durable
-meaning remains in run and analysis records while native and normalized evidence
-remain in their immutable stores.
-
-MCP results link to larger durable evidence with native `ResourceLink`s. A link
-identifies the exact run, artifact, or normalized generation; it does not move
-run semantics into the artifact or require the response to duplicate its full
-contents.
-
-## Package boundaries
-
-The repository uses a Python `src/` layout:
-
-```text
-src/flameox/
-├── domain/          immutable contracts, identities, and errors
-├── application/     transport-independent use cases
-├── storage/         SQLite control state and durable object registration
-├── adapters/        maintained producer integrations and extraction
-├── analysis/        snapshot-bound recipes and comparisons
-├── workers/         isolated child handlers using the shared protocol
-├── mcp/             MCP transport and resource projections
-├── command_binding.py
-├── execution.py     subprocess and managed-sidecar boundary
-├── filesystem.py    descriptor-bound trusted-root reads
-├── catalog.py       corpus commits, snapshots, and DuckDB projection
-└── cli.py           Typer transport
-```
-
-Dependencies point inward:
-
-```text
-CLI ─┐
-     ├─► application ─► domain
-MCP ─┘       │
-             ├─► storage
-             ├─► adapters
-             └─► analysis
-```
-
-`domain` does not import transports or infrastructure. Storage does not import
-CLI, MCP, or adapters. Import-linter enforces these boundaries. CLI and MCP are
-thin transports over the same services; transport code does not own business
-rules.
-
-## Evidence and reasoning
-
-Flameox preserves three claim levels:
-
-- **observed** — emitted or directly measured by a producer;
-- **derived** — deterministically calculated from observed evidence;
-- **inferred** — an interpretation that may require another experiment.
-
-A normalized row never replaces its native artifact. Every row carries run,
-artifact, generation, and extractor provenance. Missing stacks, symbols,
-shapes, samples, or validation remain explicit; adapters do not silently fall
-back and call weaker evidence equivalent.
-
-Experimental structure is evidence. Workload identity, treatment assignment,
-blocks, repetitions, warm-ups, failed attempts, exclusions, validation, and
-stopping rules remain visible. Profiles guide discovery; representative,
-predeclared experiments support confirmation.
+The runtime never searches parents. A manual server defaults `project_root` to
+its startup cwd. Every capture cwd resolves inside that fixed root; explicit
+analysis paths may point elsewhere because the caller names the exact input.
 
 ## Process model
 
-The CLI is short-lived. The stdio MCP server lives with its host client. Both
-invoke the same application services and use the same workspace.
+`AnalysisRuntime` owns the capability registry, subprocess broker, scratch
+directory, conversion cache, and session analysis cache. The MCP lifespan
+creates one runtime and destroys its scratch on shutdown. Long work stays inside
+the request that started it. Progress is reported through the SDK context and
+cancellation unwinds the broker, including descendant cleanup.
 
-All external processes use argument arrays and `shell=False`. A request carries
-an absolute executable binding, allowed working roots, a minimal environment,
-an absolute deadline, output limits, and optional resource policy. The broker
-owns descendants and returns typed termination evidence. Long-lived inference
-servers and Toxiproxy are available only through managed leases with bounded
-readiness and cleanup.
+`analysis_id` is a session handle. It is intentionally meaningless after
+restart and can only be passed to `preserve_evidence`. `evidence_id` is a
+durable SHA-256 identity derived from the canonical manifest body.
 
-Artifact-facing native readers execute through `IsolatedWorkerHarness`. The
-parent writes a bounded request beneath a unique staging root, launches a known
-Python worker through the broker, validates its bounded response, consumes
-declared files beneath the same trusted root, and removes the staging root.
-Workers do not define another launcher or transport.
+## Package boundaries
 
-Heavy or mutually incompatible Python providers never enter the CLI/MCP control
-interpreter. Capability setup creates a version-addressed environment containing
-core Flameox plus exactly one declared provider requirement. Its receipt binds
-the installation profile, Python, complete environment-tree digest, provider
-distribution, and executable. This is dependency and failure isolation, not a
-sandbox against malicious provider code.
+- `stateless.py` owns public models, capability discovery, bounded analysis,
+  capture orchestration, scratch, and the session cache.
+- `repository.py` owns lazy repository creation, validation, publication,
+  inventory queries, and immutable resource reads.
+- `execution.py` and `command_binding.py` own executable binding, subprocess
+  limits, cancellation, output bounds, and descendant cleanup.
+- `mcp/server.py` and `cli.py` are thin projections over the same runtime.
+- Provider adapters accept resolved explicit inputs and return typed evidence;
+  they do not discover workspaces or publish evidence.
 
-Test-case reduction follows the same authority split. ShrinkRay 26.7.8.0 alone
-schedules candidates. Flameox binds its managed environment, offline profile,
-predicate, budgets, and bridge in the plan, records tri-state candidate
-receipts, and independently reruns the final predicate before publication.
-Tool completion never implies minimality.
+DuckDB may be used in memory for bounded aggregation. It is never a durable
+catalog. Flameox production code must not create or depend on SQLite state.
 
-Application task lifetime is explicit. Scoped AnyIO task groups own paired work
-and cancellation watchers where structured cancellation is required. The
-execution substrate retains lower-level asyncio tasks and threads for stream
-draining, process observation, and synchronous adapter bridges; those tasks are
-joined before the owning operation returns.
+## Capability boundary
 
-## Execution policies
+One registry entry owns a capability descriptor, strict argument model,
+accepted formats, provider probes, and capture/analysis semantics. Discovery
+performs only bounded suffix/header sniffing. Missing packages, executables,
+permissions, versions, or platforms are successful discovery states; Flameox
+never installs remediation automatically. The separately invoked CLI setup
+command may install an explicitly selected Python provider-extra set into a uv
+tool environment; it creates no project state and owns no durable operation.
 
-`trusted_local` runs a declared workload directly and records that enforced
-descendant containment is absent. Managed execution is opt-in or required by
-project policy. On supported Linux hosts it combines Bubblewrap and a
-systemd/cgroup scope for filesystem, network, resource, and descendant controls.
-Planning refuses when a required guarantee cannot be supplied.
+Direct capture is trusted local execution, not containment. Typed argv prevents
+shell interpretation, while the broker provides process-group cleanup, bounded
+output, timeouts, resource observation, and exact executable identity.
 
-Trust in an executable is separate from containment of the process:
+## Removed architecture
 
-- project-bound commands must resolve beneath approved project roots;
-- managed tools must resolve to their recorded managed installation;
-- declared host tools may be selected through the request's effective `PATH`
-  and are identity-bound;
-- an already approved exact path is not searched again.
-
-Canonical targets are checked before authorization, so an in-root symlink does
-not authorize an out-of-root executable.
-
-## Storage and snapshot model
-
-The SQLite control plane has one exact workspace format. Initialization creates
-the complete schema atomically and writes its format sentinel. A workspace with a
-missing or incompatible sentinel is rejected and must be initialized as a new
-workspace; supported import operations can then preserve native evidence from
-elsewhere.
-
-Evidence publication is append-only. A new immutable generation and corpus
-commit are written before `HEAD` advances. Analysis pins the current commit once
-and creates snapshot-local DuckDB views from its inventory. A snapshot cannot
-combine an old corpus ID with newer mutable control rows.
-
-Capture and extraction run outside the workspace publication lock. Only short
-registration and commit phases serialize. Deleting `catalog.duckdb` never
-deletes evidence.
-
-## Maintained infrastructure
-
-Flameox builds on public producer and storage contracts, including Perfetto
-Trace Processor, PyArrow/Parquet, DuckDB, pytest-reportlog, pytest-xdist,
-pyperf, SciPy, HTTPX, native profiler readers, and provider models. A custom
-format or parser belongs only when upstream cannot express Flameox-specific
-evidence, safety, or reproducibility semantics.
-
-Control-runtime dependencies and development extras are declared in
-`pyproject.toml` and pinned in `uv.lock`. Managed provider environments are
-separate by design: their exact provider requirement and full installed-tree
-identity live in the provider receipt, so incompatible providers need not be
-co-installable with one another or with the MCP server.
-System and privileged tools are detected but never silently installed. Explicit
-capability setup may install only allowlisted user-space providers into the
-managed runtime and records the result.
-
-## Platform policy
-
-Storage, analysis, CLI, and MCP behavior are platform-neutral. Capture support
-is claimed per adapter and feature. Linux is the primary native-capture platform
-because its profiler, accelerator, and containment facilities cover the widest
-set. macOS and Windows support is reported only where the upstream producer and
-Flameox integration have native validation; package installation alone is not
-evidence of support.
+Version 0.2 removes `Workspace`, SQLite stores, persisted DuckDB, action graphs,
+projection/outbox machinery, plan tokens, operations, durable cursors, generic
+records, investigations, pipelines, recovery, GC, provider approval/receipt state,
+and detached jobs. There is no migration or compatibility alias.

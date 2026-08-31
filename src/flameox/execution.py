@@ -5,7 +5,6 @@ import os
 import re
 import shutil
 import signal
-import socket
 import stat
 import subprocess
 import sys
@@ -18,22 +17,22 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import IO, Annotated, Any, Literal, TypeVar, cast
+from typing import IO, Annotated, Any, Literal, cast
 
 import psutil
 from pydantic import Field, field_validator, model_validator
 
 from flameox.command_binding import ExecutableResolver
-from flameox.domain.errors import DomainError, ErrorCode
-from flameox.domain.executables import ResolvedExecutable
-from flameox.domain.models import (
+from flameox.executable_models import ResolvedExecutable
+from flameox.models import ContractModel
+from flameox.process_models import (
     ProcessCancellationCause,
     ProcessResult,
     ResourcePolicyCancellationCause,
     RuntimeResourceSummary,
     process_termination_from_returncode,
 )
-from flameox.models import ContractModel
+from flameox.runtime_errors import DomainError, ErrorCode
 
 _DANGEROUS_ENVIRONMENT = {
     "BASH_ENV",
@@ -89,8 +88,6 @@ INSTALLER_ENVIRONMENT_ALLOWLIST = (
     "PIP_INDEX_URL",
     "PIP_EXTRA_INDEX_URL",
 )
-
-_T = TypeVar("_T")
 
 
 class ProcessContainment(StrEnum):
@@ -214,45 +211,6 @@ class ExecutionOutcome:
     executable_binding: ResolvedExecutable
     peak_rss_backend: str | None = None
     process_observations: tuple[ProcessObservation, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class ManagedSidecarOutcome:
-    process: ProcessResult
-    stdout: bytes
-    stderr: bytes
-    containment: ProcessContainment
-    process_observations: tuple[ProcessObservation, ...]
-    started_at: datetime
-    finished_at: datetime
-
-
-class ManagedSidecarStartupError(DomainError):
-    """Managed sidecar startup failure with its bounded, finalized process evidence."""
-
-    def __init__(self, cause: Exception, outcome: ManagedSidecarOutcome) -> None:
-        self.outcome = outcome
-        if isinstance(cause, DomainError):
-            super().__init__(
-                cause.code,
-                cause.message,
-                retryable=cause.retryable,
-                details=cause.details,
-                remediation=cause.remediation,
-                next_action=cause.next_action,
-            )
-        else:
-            super().__init__(
-                ErrorCode.PROCESS_FAILED,
-                "Managed sidecar startup failed.",
-                details={"exception_type": type(cause).__name__},
-            )
-
-
-class ManagedSidecarStartupCancelled(asyncio.CancelledError):
-    def __init__(self, outcome: ManagedSidecarOutcome) -> None:
-        super().__init__("managed sidecar startup cancelled")
-        self.outcome = outcome
 
 
 class ProcessObservation(ContractModel):
@@ -462,48 +420,6 @@ class SubprocessBroker:
     _OBSERVED_IO_JOIN_SECONDS = 0.25
     _OBSERVED_IO_STOP_SECONDS = 0.05
 
-    async def start_toxiproxy(
-        self,
-        executable: Path,
-        *,
-        admin_host: str,
-        admin_port: int,
-        readiness: Callable[[], Awaitable[bool]],
-        tool_receipt: object | None = None,
-        readiness_timeout_seconds: float = 10.0,
-    ) -> ManagedSidecarLease:
-        """Start the only long-lived process this broker exposes: Toxiproxy."""
-
-        return await ManagedSidecarLease.start(
-            self,
-            executable,
-            admin_host=admin_host,
-            admin_port=admin_port,
-            readiness=readiness,
-            tool_receipt=tool_receipt,
-            readiness_timeout_seconds=readiness_timeout_seconds,
-        )
-
-    async def start_inference_server(
-        self,
-        request: ExecutionRequest,
-        *,
-        host: str,
-        port: int,
-        readiness: Callable[[], Awaitable[bool]],
-        absolute_deadline: float,
-    ) -> ManagedSidecarLease:
-        """Start one declared loopback inference server under a managed lease."""
-
-        return await ManagedSidecarLease.start_inference(
-            self,
-            request,
-            host=host,
-            port=port,
-            readiness=readiness,
-            absolute_deadline=absolute_deadline,
-        )
-
     def run_sync(
         self,
         request: ExecutionRequest,
@@ -516,7 +432,7 @@ class SubprocessBroker:
         if request.observation == "child_peak_rss":
             if on_started is not None or on_cleanup is not None:
                 raise DomainError(
-                    ErrorCode.EXECUTION_REFUSED,
+                    ErrorCode.INVALID_INPUT,
                     "Child peak-RSS observation does not support async lifecycle callbacks.",
                 )
             try:
@@ -616,7 +532,7 @@ class SubprocessBroker:
                 cleanup_complete=cleanup_complete,
             )
             raise ProcessExecutionError(
-                ErrorCode.PROCESS_TIMEOUT,
+                ErrorCode.EXECUTION_TIMEOUT,
                 f"Process exceeded {request.timeout_seconds} seconds.",
                 process=timeout_process,
                 process_observations=tuple(process_observations),
@@ -703,7 +619,7 @@ class SubprocessBroker:
                 stderr=partial_stderr.decode(errors="replace"),
             )
             raise ProcessExecutionError(
-                ErrorCode.PROCESS_TIMEOUT,
+                ErrorCode.EXECUTION_TIMEOUT,
                 f"Process exceeded {request.timeout_seconds} seconds.",
                 process=timeout_process,
                 process_observations=tuple(process_observations),
@@ -732,7 +648,7 @@ class SubprocessBroker:
                 stderr=partial_stderr.decode(errors="replace"),
             )
             raise ProcessExecutionError(
-                ErrorCode.QUERY_BUDGET_EXCEEDED,
+                ErrorCode.LIMIT_EXCEEDED,
                 f"Process output exceeded {request.max_output_bytes} bytes.",
                 process=output_process,
                 process_observations=tuple(process_observations),
@@ -754,11 +670,7 @@ class SubprocessBroker:
                 ProcessCancellationCause.STORAGE_RESERVE_EXCEEDED,
                 ProcessCancellationCause.WRITABLE_LIMIT_EXCEEDED,
             }
-            code = (
-                ErrorCode.STORAGE_QUOTA_EXCEEDED
-                if storage_cause
-                else ErrorCode.QUERY_BUDGET_EXCEEDED
-            )
+            code = ErrorCode.LIMIT_EXCEEDED
             message = (
                 "Runtime writable-byte policy was exceeded."
                 if storage_cause
@@ -897,7 +809,7 @@ class SubprocessBroker:
     ) -> ExecutionOutcome:
         if on_started is not None:
             raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
+                ErrorCode.INVALID_INPUT,
                 "Child peak-RSS observation does not support an on_started callback.",
             )
         cancellation = threading.Event()
@@ -1231,7 +1143,7 @@ class SubprocessBroker:
                 cleanup_complete=cleanup_complete,
             )
             raise ProcessExecutionError(
-                ErrorCode.PROCESS_FAILED,
+                ErrorCode.EXECUTION_FAILURE,
                 "Process output could not be drained safely.",
                 process=io_process,
                 process_observations=tuple(process_observations),
@@ -1249,7 +1161,7 @@ class SubprocessBroker:
                 stderr=stderr.decode(errors="replace"),
             )
             raise ProcessExecutionError(
-                ErrorCode.QUERY_BUDGET_EXCEEDED,
+                ErrorCode.LIMIT_EXCEEDED,
                 f"Process output exceeded {request.max_output_bytes} bytes.",
                 process=output_process,
                 process_observations=tuple(process_observations),
@@ -1267,7 +1179,7 @@ class SubprocessBroker:
                 stderr=stderr.decode(errors="replace"),
             )
             raise ProcessExecutionError(
-                ErrorCode.PROCESS_TIMEOUT,
+                ErrorCode.EXECUTION_TIMEOUT,
                 f"Process exceeded {request.timeout_seconds} seconds.",
                 process=timeout_process,
                 process_observations=tuple(process_observations),
@@ -1885,7 +1797,7 @@ class SubprocessBroker:
         resolved = cwd.resolve()
         if not resolved.is_dir():
             raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
+                ErrorCode.INVALID_INPUT,
                 f"Working directory does not exist: {resolved}",
             )
         for root in allowed_roots:
@@ -1895,7 +1807,7 @@ class SubprocessBroker:
             except ValueError:
                 continue
         raise DomainError(
-            ErrorCode.EXECUTION_REFUSED,
+            ErrorCode.INVALID_INPUT,
             "Working directory is outside the allowed roots.",
         )
 
@@ -1912,12 +1824,12 @@ class SubprocessBroker:
         for name, value in request.environment_overrides.items():
             if _is_dangerous_environment_name(name) and not _is_safe_control_override(name, value):
                 raise DomainError(
-                    ErrorCode.EXECUTION_REFUSED,
+                    ErrorCode.INVALID_INPUT,
                     f"Environment override {name!r} is blocked by policy.",
                 )
             if "\x00" in name or "\x00" in value or "=" in name:
                 raise DomainError(
-                    ErrorCode.EXECUTION_REFUSED,
+                    ErrorCode.INVALID_INPUT,
                     "Environment overrides contain invalid data.",
                 )
             environment[name] = value
@@ -1935,491 +1847,7 @@ class SubprocessBroker:
             str(binding.canonical_target),
         }:
             raise DomainError(
-                ErrorCode.INVALID_CAPTURE_PLAN,
+                ErrorCode.MISSING_OR_CHANGED_INPUT,
                 "Execution argv does not match the bound executable.",
             )
         return resolver.revalidate(binding)
-
-
-class ManagedSidecarLease:
-    """Broker-owned lease for a typed loopback sidecar process."""
-
-    def __init__(
-        self,
-        broker: SubprocessBroker,
-        process: asyncio.subprocess.Process,
-        executable_binding: ResolvedExecutable,
-        admin_host: str,
-        admin_port: int,
-        stdout_task: asyncio.Task[bytes],
-        stderr_task: asyncio.Task[bytes],
-        output_budget: _OutputBudget,
-        observations: list[ProcessObservation],
-        started_at: datetime,
-        *,
-        supports_toxiproxy_control: bool = False,
-    ) -> None:
-        self._broker = broker
-        self._process = process
-        self._executable_binding = executable_binding
-        self.admin_host = admin_host
-        self.admin_port = admin_port
-        self._stdout_task = stdout_task
-        self._stderr_task = stderr_task
-        self._output_budget = output_budget
-        self._observations = observations
-        self._started_at = started_at
-        self._supports_toxiproxy_control = supports_toxiproxy_control
-        self._tracked_proxies: set[str] = set()
-        self._closed = False
-        self._outcome: ManagedSidecarOutcome | None = None
-
-    @classmethod
-    async def start(
-        cls,
-        broker: SubprocessBroker,
-        executable: Path,
-        *,
-        admin_host: str,
-        admin_port: int,
-        readiness: Callable[[], Awaitable[bool]],
-        tool_receipt: object | None,
-        readiness_timeout_seconds: float,
-    ) -> ManagedSidecarLease:
-        import ipaddress
-
-        try:
-            address = ipaddress.ip_address(admin_host)
-        except ValueError as error:
-            raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                "Toxiproxy admin host must be an IP literal.",
-            ) from error
-        if not address.is_loopback or not 1 <= admin_port <= 65_535:
-            raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                "Toxiproxy admin endpoint must be a loopback address and valid port.",
-            )
-        resolved = executable.resolve()
-        from flameox.adapters.toxiproxy import ToxiproxyToolReceipt
-
-        if not isinstance(tool_receipt, ToxiproxyToolReceipt):
-            raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                "Managed Toxiproxy startup requires a verified setup receipt.",
-            )
-        if tool_receipt.executable.resolve() != resolved:
-            raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                "The Toxiproxy executable does not match its verified setup receipt.",
-            )
-        if resolved.name not in {"toxiproxy-server", "toxiproxy-server.exe"}:
-            raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                "Managed sidecar leases accept only the pinned Toxiproxy server executable.",
-            )
-        if not resolved.is_file() or not os.access(resolved, os.X_OK):
-            raise DomainError(ErrorCode.CAPABILITY_UNAVAILABLE, "Toxiproxy server is not runnable.")
-        executable_binding = ExecutableResolver().require_host_tool(
-            str(resolved), cwd=resolved.parent
-        )
-        request = ExecutionRequest(
-            argv=(str(resolved), "-host", admin_host, "-port", str(admin_port)),
-            executable_binding=executable_binding,
-            cwd=resolved.parent,
-            environment_allowlist=("PATH",),
-            allowed_working_roots=(resolved.parent,),
-            timeout_seconds=86_400,
-            graceful_shutdown_seconds=2,
-            max_output_bytes=2 * 1024 * 1024,
-        )
-        environment = broker._build_environment(request)
-        process = await asyncio.create_subprocess_exec(
-            *request.argv,
-            cwd=broker._resolve_cwd(request.cwd, request.allowed_working_roots),
-            env=environment,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=os.name == "posix",
-            pass_fds=request.inherited_directory_fds,
-        )
-        assert process.stdout is not None and process.stderr is not None
-        observations: list[ProcessObservation] = []
-        output_budget = _OutputBudget(request.max_output_bytes)
-        lease = cls(
-            broker,
-            process,
-            executable_binding,
-            admin_host,
-            admin_port,
-            asyncio.create_task(
-                broker._read_bounded(process.stdout, output_budget, drain_on_limit=True)
-            ),
-            asyncio.create_task(
-                broker._read_bounded(process.stderr, output_budget, drain_on_limit=True)
-            ),
-            output_budget,
-            observations,
-            datetime.now(UTC),
-            supports_toxiproxy_control=True,
-        )
-        deadline = time.monotonic() + readiness_timeout_seconds
-        try:
-            while time.monotonic() < deadline:
-                if process.returncode is not None:
-                    raise DomainError(
-                        ErrorCode.CAPABILITY_UNAVAILABLE,
-                        "Toxiproxy exited before its control API became ready.",
-                    )
-                if await readiness():
-                    observations.extend(
-                        broker._snapshot_processes(
-                            process.pid,
-                            ProcessSnapshotPhase.RUNNING,
-                            True,
-                            None,
-                            None,
-                        )
-                    )
-                    return lease
-                await asyncio.sleep(0.05)
-            raise DomainError(
-                ErrorCode.CAPABILITY_UNAVAILABLE,
-                "Toxiproxy control API did not become ready before the bounded deadline.",
-            )
-        except asyncio.CancelledError:
-            outcome = await asyncio.shield(lease.close())
-            raise ManagedSidecarStartupCancelled(outcome) from None
-        except Exception as error:
-            outcome = await asyncio.shield(lease.close())
-            raise ManagedSidecarStartupError(error, outcome) from error
-
-    @classmethod
-    async def start_inference(
-        cls,
-        broker: SubprocessBroker,
-        request: ExecutionRequest,
-        *,
-        host: str,
-        port: int,
-        readiness: Callable[[], Awaitable[bool]],
-        absolute_deadline: float,
-    ) -> ManagedSidecarLease:
-        import ipaddress
-
-        try:
-            address = ipaddress.ip_address(host)
-        except ValueError as error:
-            raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                "Managed inference server host must be an IP literal.",
-            ) from error
-        if not address.is_loopback or not 1 <= port <= 65_535:
-            raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                "Managed inference servers require a loopback address and valid port.",
-            )
-        if time.monotonic() >= absolute_deadline:
-            raise DomainError(ErrorCode.PROCESS_TIMEOUT, "Inference startup deadline expired.")
-        family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
-        endpoint = (host, port, 0, 0) if address.version == 6 else (host, port)
-        with socket.socket(family, socket.SOCK_STREAM) as port_guard:
-            try:
-                port_guard.bind(endpoint)
-            except OSError as error:
-                raise DomainError(
-                    ErrorCode.EXECUTION_REFUSED,
-                    "Managed inference server endpoint is already occupied before startup.",
-                    details={"host": host, "port": port},
-                ) from error
-        cwd = broker._resolve_cwd(request.cwd, request.allowed_working_roots)
-        environment = broker._build_environment(request)
-        executable = broker._bound_executable(request).invocation_path
-        argv = (str(executable), *request.argv[1:])
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=cwd,
-            env=environment,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=os.name == "posix",
-            pass_fds=request.inherited_directory_fds,
-        )
-        assert process.stdout is not None and process.stderr is not None
-        observations: list[ProcessObservation] = []
-        output_budget = _OutputBudget(request.max_output_bytes)
-        lease = cls(
-            broker,
-            process,
-            request.executable_binding,
-            host,
-            port,
-            asyncio.create_task(
-                broker._read_bounded(process.stdout, output_budget, drain_on_limit=True)
-            ),
-            asyncio.create_task(
-                broker._read_bounded(process.stderr, output_budget, drain_on_limit=True)
-            ),
-            output_budget,
-            observations,
-            datetime.now(UTC),
-        )
-        try:
-            while time.monotonic() < absolute_deadline:
-                if process.returncode is not None:
-                    raise DomainError(
-                        ErrorCode.CAPABILITY_UNAVAILABLE,
-                        "Managed inference server exited before readiness.",
-                    )
-                ready = await cls._await_before_deadline(
-                    readiness(),
-                    absolute_deadline,
-                    "Managed inference server readiness check exceeded the run deadline.",
-                )
-                if ready:
-                    await asyncio.sleep(0)
-                    if process.returncode is not None:
-                        raise DomainError(
-                            ErrorCode.CAPABILITY_UNAVAILABLE,
-                            "Managed inference server exited while reporting readiness.",
-                        )
-                    snapshot = await cls._await_before_deadline(
-                        asyncio.to_thread(
-                            broker._snapshot_processes,
-                            process.pid,
-                            ProcessSnapshotPhase.RUNNING,
-                            True,
-                            None,
-                            None,
-                        ),
-                        absolute_deadline,
-                        "Managed inference server observation exceeded the run deadline.",
-                    )
-                    observations.extend(snapshot)
-                    if process.returncode is not None:
-                        raise DomainError(
-                            ErrorCode.CAPABILITY_UNAVAILABLE,
-                            "Managed inference server exited before its lease was established.",
-                        )
-                    return lease
-                await asyncio.sleep(min(0.05, max(0.0, absolute_deadline - time.monotonic())))
-            raise DomainError(
-                ErrorCode.PROCESS_TIMEOUT,
-                "Managed inference server did not become ready before the run deadline.",
-            )
-        except BaseException:
-            await asyncio.shield(lease.close())
-            raise
-
-    @staticmethod
-    async def _await_before_deadline(
-        awaitable: Awaitable[_T],
-        absolute_deadline: float,
-        timeout_message: str,
-    ) -> _T:
-        """Await external startup work without allowing cancellation to extend its deadline."""
-
-        task = asyncio.ensure_future(awaitable)
-
-        def consume_result(completed: asyncio.Future[_T]) -> None:
-            with suppress(BaseException):
-                completed.result()
-
-        remaining = absolute_deadline - time.monotonic()
-        try:
-            if remaining > 0:
-                done, _pending = await asyncio.wait((task,), timeout=remaining)
-                if done:
-                    return task.result()
-        except BaseException:
-            task.cancel()
-            task.add_done_callback(consume_result)
-            raise
-        task.cancel()
-        task.add_done_callback(consume_result)
-        raise DomainError(ErrorCode.PROCESS_TIMEOUT, timeout_message)
-
-    async def __aenter__(self) -> ManagedSidecarLease:
-        return self
-
-    async def __aexit__(self, *_args: object) -> None:
-        await asyncio.shield(self.close())
-
-    def create_proxy(
-        self, *, name: str, listen: str, upstream: str, enabled: bool = True
-    ) -> dict[str, Any]:
-        self._require_toxiproxy_control()
-        self._ensure_open()
-        from flameox.adapters.toxiproxy import ToxiproxyClient
-
-        result = ToxiproxyClient(self.base_url).create_proxy(
-            name=name, listen=listen, upstream=upstream, enabled=enabled
-        )
-        self._tracked_proxies.add(name)
-        return result
-
-    async def create_proxy_async(
-        self,
-        *,
-        name: str,
-        listen: str,
-        upstream: str,
-        enabled: bool = True,
-    ) -> dict[str, Any]:
-        self._require_toxiproxy_control()
-        self._ensure_open()
-        from flameox.adapters.toxiproxy import ToxiproxyClient
-
-        result = await ToxiproxyClient(self.base_url).create_proxy_async(
-            name=name,
-            listen=listen,
-            upstream=upstream,
-            enabled=enabled,
-        )
-        self._tracked_proxies.add(name)
-        return result
-
-    def update_proxy(self, name: str, *, enabled: bool) -> dict[str, Any]:
-        self._require_toxiproxy_control()
-        self._ensure_open()
-        from flameox.adapters.toxiproxy import ToxiproxyClient
-
-        self._require_tracked(name)
-        return ToxiproxyClient(self.base_url).update_proxy(name, enabled=enabled)
-
-    async def update_proxy_async(self, name: str, *, enabled: bool) -> dict[str, Any]:
-        self._require_toxiproxy_control()
-        self._ensure_open()
-        from flameox.adapters.toxiproxy import ToxiproxyClient
-
-        self._require_tracked(name)
-        return await ToxiproxyClient(self.base_url).update_proxy_async(name, enabled=enabled)
-
-    def add_toxic(self, **kwargs: Any) -> dict[str, Any]:
-        self._require_toxiproxy_control()
-        self._ensure_open()
-        from flameox.adapters.toxiproxy import ToxiproxyClient
-
-        proxy = kwargs.get("proxy")
-        if not isinstance(proxy, str):
-            raise DomainError(ErrorCode.INVALID_CAPTURE_PLAN, "A toxic requires a tracked proxy.")
-        self._require_tracked(proxy)
-        return ToxiproxyClient(self.base_url).add_toxic(**kwargs)
-
-    async def add_toxic_async(self, **kwargs: Any) -> dict[str, Any]:
-        self._require_toxiproxy_control()
-        self._ensure_open()
-        from flameox.adapters.toxiproxy import ToxiproxyClient
-
-        proxy = kwargs.get("proxy")
-        if not isinstance(proxy, str):
-            raise DomainError(ErrorCode.INVALID_CAPTURE_PLAN, "A toxic requires a tracked proxy.")
-        self._require_tracked(proxy)
-        return await ToxiproxyClient(self.base_url).add_toxic_async(**kwargs)
-
-    @property
-    def base_url(self) -> str:
-        return f"http://{self.admin_host}:{self.admin_port}"
-
-    @property
-    def outcome(self) -> ManagedSidecarOutcome | None:
-        return self._outcome
-
-    async def close(self) -> ManagedSidecarOutcome:
-        if self._outcome is not None:
-            return self._outcome
-        self._closed = True
-        cleanup_failures: list[str] = []
-        if self._output_budget.exceeded:
-            cleanup_failures.append(
-                "sidecar output exceeded the bounded capture budget; excess bytes were discarded"
-            )
-        if self._supports_toxiproxy_control:
-            from flameox.adapters.toxiproxy import ToxiproxyApiError, ToxiproxyClient
-
-            client = ToxiproxyClient(self.base_url, timeout_seconds=1.0)
-            for name in tuple(sorted(self._tracked_proxies)):
-                try:
-                    await client.delete_proxy_async(name)
-                except (ToxiproxyApiError, OSError) as error:
-                    cleanup_failures.append(f"proxy {name}: {error}")
-        request = ExecutionRequest(
-            argv=(str(self._executable_binding.invocation_path),),
-            executable_binding=self._executable_binding,
-            cwd=self._executable_binding.invocation_path.parent,
-            allowed_working_roots=(self._executable_binding.invocation_path.parent,),
-            graceful_shutdown_seconds=2,
-        )
-        self._observations.extend(
-            self._broker._snapshot_processes(
-                self._process.pid,
-                ProcessSnapshotPhase.PRE_CLEANUP,
-                True,
-                "terminate",
-                None,
-            )
-        )
-        identities = self._broker._observation_identities(self._observations)
-        tracked_descendants: dict[int, float | None] = {}
-        self._broker._track_observed_descendants(
-            self._process.pid,
-            self._observations,
-            tracked_descendants,
-        )
-        cleanup_complete = await asyncio.shield(
-            self._broker._terminate(self._process, request, tracked_descendants)
-        )
-        self._observations.extend(
-            self._broker._snapshot_known_processes(
-                identities,
-                ProcessSnapshotPhase.POST_CLEANUP,
-                False,
-                "terminate",
-                str(cleanup_complete),
-            )
-        )
-        stdout = await self._broker._collect_readers(self._stdout_task, self._stderr_task)
-        stdout_bytes, stderr_bytes = stdout
-        if cleanup_failures:
-            stderr_bytes += ("\n" + "\n".join(cleanup_failures)).encode()
-        finished = datetime.now(UTC)
-        self._outcome = ManagedSidecarOutcome(
-            process=ProcessResult(
-                termination=process_termination_from_returncode(self._process.returncode),
-                cleanup_complete=cleanup_complete,
-                wall_time_ns=max(0, int((finished - self._started_at).total_seconds() * 1e9)),
-                stdout=stdout_bytes.decode(errors="replace"),
-                stderr=stderr_bytes.decode(errors="replace"),
-            ),
-            stdout=stdout_bytes,
-            stderr=stderr_bytes,
-            containment=(
-                ProcessContainment.PROCESS_GROUP
-                if os.name == "posix"
-                else ProcessContainment.PROCESS
-            ),
-            process_observations=tuple(self._observations),
-            started_at=self._started_at,
-            finished_at=finished,
-        )
-        return self._outcome
-
-    def _ensure_open(self) -> None:
-        if self._closed:
-            raise DomainError(ErrorCode.EXECUTION_REFUSED, "The Toxiproxy sidecar lease is closed.")
-
-    def _require_toxiproxy_control(self) -> None:
-        if not self._supports_toxiproxy_control:
-            raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                "This managed sidecar does not expose Toxiproxy controls.",
-            )
-
-    def _require_tracked(self, name: str) -> None:
-        if name not in self._tracked_proxies:
-            raise DomainError(
-                ErrorCode.EXECUTION_REFUSED,
-                "The proxy is outside this sidecar lease.",
-            )

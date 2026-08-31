@@ -4,36 +4,25 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flameox"
-version = "0.1.15"
+version = "0.2.0"
 description = "Runtime evidence that helps agents trace, profile, and burn down hotspots in application and native code, GPU kernels, and inference stacks."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "anyio>=4.9,<5",
-    "concurrent-log-handler>=0.9.28,<0.10",
     "coverage>=7.14,<8",
     "duckdb>=1.5.4,<1.6",
     "defusedxml>=0.7.1,<0.8",
     "ijson>=3.4,<4",
-    "httpx>=0.28,<0.29",
     "mcp==2.0.0",
     "mcp-types==2.0.0",
-    "numpy>=2.2,<3",
     "packaging>=24,<27",
     "portalocker>=3.2,<4",
-    "platformdirs>=4.3,<5",
-    "python-json-logger>=3.3,<4",
     "pyperf>=2.10,<2.11",
     "pyarrow>=20,<26",
     "pydantic>=2.13.4,<2.14",
-    "pytz>=2024.2",
-    "questionary>=2.1,<3",
     "rfc8785==0.1.4",
-    "scipy>=1.15,<2",
-    "statsmodels>=0.14,<1",
-    "tomli-w>=1.2,<2",
-    "tomlkit>=0.13,<1",
     "typer>=0.16,<1",
     "psutil>=7.0,<8",
 ]
@@ -46,46 +35,33 @@ Issues = "https://github.com/morluto/flameox/issues"
 [project.optional-dependencies]
 memory = ["memray>=1.17"]
 torch = ["torch>=2.7"]
-hardware = ["nvidia-ml-py==13.610.43"]
 inference = ["aiperf>=0.12,<0.13"]
-test = ["pytest>=8.3", "pytest-reportlog>=1,<2", "pytest-xdist>=3.6"]
-trace = ["perfetto>=0.57,<0.58", "opentelemetry-proto>=1.44,<1.45", "protobuf>=5,<7"]
+test = ["pytest>=8.3"]
+trace = ["opentelemetry-proto>=1.44,<1.45", "perfetto>=0.57,<0.58", "protobuf>=5,<7"]
 cpu = ["py-spy>=0.4.2,<0.5"]
 all = [
     "aiperf>=0.12,<0.13",
     "memray>=1.17",
-    "nvidia-ml-py==13.610.43",
-    "perfetto>=0.57,<0.58",
     "opentelemetry-proto>=1.44,<1.45",
+    "perfetto>=0.57,<0.58",
     "protobuf>=5,<7",
     "py-spy>=0.4.2,<0.5",
-    "pytest>=8.3",
-    "pytest-reportlog>=1,<2",
-    "pytest-xdist>=3.6",
     "torch>=2.7",
 ]
 dev = [
     "deptry>=0.23",
-    "hypothesis>=6.130",
     "import-linter>=2.2",
     "mypy>=1.15",
     "pip-audit>=2.9",
     "pytest>=8.3",
     "pytest-cov>=6.1",
-    "pytest-randomly>=3.16",
-    "pytest-reportlog>=1,<2",
-    "pytest-rerunfailures>=15",
-    "pytest-xdist>=3.6",
     "pyarrow-stubs>=20.0.0.20260625",
     "ruff>=0.11",
-    "scipy-stubs>=1.18.0.1,<1.19",
-    "twine>=6.1",
     "vulture>=2.14",
 ]
 
 [project.scripts]
 flameox = "flameox.cli:app"
-flameox-reduction-predicate = "flameox.workers.reduction_predicate:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/flameox"]
@@ -100,20 +76,8 @@ markers = [
     "optional: tests requiring a provider or host capability outside the core install",
     "performance: representative local corpus performance acceptance checks",
     "serial: tests that must not share a process or host resource with another test",
-    "requires_bwrap: requires the Bubblewrap executable",
-    "requires_cargo: requires the Cargo executable",
     "requires_memray: requires the optional Memray provider",
-    "requires_perf: requires the Linux perf executable and permissions",
-    "requires_perfetto: requires a local Trace Processor provider",
-    "requires_pyspy: requires the optional py-spy provider",
-    "requires_systemd: requires a systemd user manager",
-    "requires_toxiproxy: requires the pinned Toxiproxy server binary",
     "requires_torch: requires the optional PyTorch provider",
-    "requires_compute_sanitizer: requires NVIDIA Compute Sanitizer, nvcc, and a compatible GPU",
-    "requires_ncu: requires NVIDIA Nsight Compute and its official Python report interface",
-    "requires_triton: requires the optional Triton provider and a compatible GPU",
-    "requires_nvbench: requires a configured NVBench benchmark executable and compatible GPU",
-    "requires_cute: requires the optional CuTe DSL provider and a compatible GPU",
 ]
 xfail_strict = true
 
@@ -137,7 +101,6 @@ ignore = ["TD002"]
 [tool.ruff.lint.per-file-ignores]
 "src/flameox/mcp/server.py" = ["C901"]
 "src/flameox/cli.py" = ["C901"]
-"src/flameox/application/capture.py" = ["C901"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 18
@@ -167,8 +130,6 @@ module = [
     "perfetto.*",
     "pyperf",
     "pyperf.*",
-    "statsmodels",
-    "statsmodels.*",
     "torch",
     "torch.*",
 ]
@@ -177,7 +138,7 @@ ignore_missing_imports = true
 [tool.vulture]
 min_confidence = 80
 paths = ["src/flameox"]
-ignore_names = ["setUp", "tearDown", "test_*", "Test*", "*_test"]
+ignore_names = ["cls", "setUp", "tearDown", "test_*", "Test*", "*_test"]
 ignore_decorators = ["@app.command", "@property", "@router.*"]
 
 [tool.importlinter]
@@ -185,16 +146,16 @@ root_package = "flameox"
 include_external_packages = false
 
 [[tool.importlinter.contracts]]
-name = "Domain layer must not import application or infrastructure"
+name = "Runtime core must not depend on transports"
 type = "forbidden"
-source_modules = ["flameox.domain"]
-forbidden_modules = ["flameox.application", "flameox.storage", "flameox.adapters", "flameox.cli", "flameox.mcp"]
+source_modules = ["flameox.stateless", "flameox.repository", "flameox.providers", "flameox.workers"]
+forbidden_modules = ["flameox.cli", "flameox.mcp"]
 
 [[tool.importlinter.contracts]]
-name = "Storage must not import CLI, MCP, or adapters"
+name = "Providers and workers must not publish evidence"
 type = "forbidden"
-source_modules = ["flameox.storage"]
-forbidden_modules = ["flameox.cli", "flameox.mcp", "flameox.adapters"]
+source_modules = ["flameox.providers", "flameox.workers"]
+forbidden_modules = ["flameox.repository"]
 
 [dependency-groups]
 dev = [

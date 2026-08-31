@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from flameox.command_binding import ExecutableResolver
-from flameox.domain.executables import (
+from flameox.executable_models import (
     ExecutableResolutionRequest,
     ExecutableTrustPolicy,
 )

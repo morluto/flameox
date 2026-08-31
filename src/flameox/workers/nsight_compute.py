@@ -10,7 +10,6 @@ from typing import Any, cast
 
 from pydantic import JsonValue
 
-from flameox.domain import DomainError, ErrorCode
 from flameox.nsight_compute import (
     NsightComputeFocusMetric,
     NsightComputeProviderRuleFact,
@@ -19,6 +18,7 @@ from flameox.nsight_compute import (
     NsightComputeSpeedupEstimation,
     NsightComputeSpeedupMeaning,
 )
+from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.workers.nsight_compute_contract import (
     NSIGHT_COMPUTE_WORKER,
     NsightComputeWorkerRequest,
@@ -275,7 +275,7 @@ def _metric_value(
         maximum = _UINT32_MAX if kind == uint32_kind else _UINT64_MAX
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
             raise DomainError(
-                ErrorCode.ADAPTER_INCOMPATIBLE,
+                ErrorCode.UNSUPPORTED_FORMAT,
                 "Official ncu_report returned a value outside its declared unsigned range.",
             )
         return ("uint32" if kind == uint32_kind else "uint64"), value
@@ -289,7 +289,7 @@ def _metric_value(
             or not math.isfinite(value)
         ):
             raise DomainError(
-                ErrorCode.ADAPTER_INCOMPATIBLE,
+                ErrorCode.UNSUPPORTED_FORMAT,
                 "Official ncu_report returned an invalid floating-point metric value.",
             )
         return ("float32" if kind == float_kind else "float64"), float(value)

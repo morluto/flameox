@@ -17,7 +17,6 @@ import psutil
 import pytest
 
 from flameox.command_binding import ExecutableResolver
-from flameox.domain import DomainError, ErrorCode, ExitedProcessTermination
 from flameox.execution import (
     ExecutionRequest,
     ProcessCancelledError,
@@ -25,6 +24,8 @@ from flameox.execution import (
     ResourcePolicy,
     SubprocessBroker,
 )
+from flameox.process_models import ExitedProcessTermination
+from flameox.runtime_errors import DomainError, ErrorCode
 
 pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
 
@@ -51,131 +52,6 @@ def _process_is_alive(pid: int) -> bool:
         return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
     except psutil.Error:
         return False
-
-
-def test_managed_sidecars_settle_transports_before_runner_shutdown(tmp_path: Path) -> None:
-    executable = tmp_path / "toxiproxy-server"
-    executable.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
-    executable.chmod(0o755)
-    noisy_root = tmp_path / "noisy"
-    noisy_root.mkdir()
-    noisy_executable = noisy_root / "toxiproxy-server"
-    noisy_executable.write_text(
-        f"#!{sys.executable}\nimport sys, time\n"
-        "sys.stdout.write('x' * (3 * 1024 * 1024))\nsys.stdout.flush()\ntime.sleep(60)\n"
-    )
-    noisy_executable.chmod(0o755)
-    code = """
-import asyncio
-import gc
-import socket
-import sys
-from pathlib import Path
-
-from flameox.adapters.toxiproxy import ToxiproxyToolReceipt
-from flameox.cli import _run_async
-from flameox.domain import DomainError
-from flameox.execution import SubprocessBroker
-
-
-def free_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def receipt(executable):
-    return ToxiproxyToolReceipt(
-        "2.12.0",
-        "fixture",
-        "sha256:" + "a" * 64,
-        executable,
-        "sha256:" + "b" * 64,
-        "fixture",
-    )
-
-
-async def start(executable, readiness, timeout=1):
-    return await SubprocessBroker().start_toxiproxy(
-        executable,
-        admin_host="127.0.0.1",
-        admin_port=free_port(),
-        readiness=readiness,
-        tool_receipt=receipt(executable),
-        readiness_timeout_seconds=timeout,
-    )
-
-
-async def run():
-    executable = Path(sys.argv[1])
-    noisy_executable = Path(sys.argv[2])
-    for _ in range(3):
-        lease = await start(executable, lambda: asyncio.sleep(0, result=True))
-        try:
-            await lease.create_proxy_async(
-                name="invalid:name",
-                listen=f"127.0.0.1:{free_port()}",
-                upstream=f"127.0.0.1:{free_port()}",
-            )
-        except ValueError:
-            pass
-        finally:
-            outcome = await asyncio.shield(lease.close())
-            assert outcome.process.cleanup_complete is True
-
-    try:
-        await start(executable, lambda: asyncio.sleep(0, result=False), timeout=0.05)
-    except DomainError:
-        pass
-    else:
-        raise AssertionError("readiness failure did not close the sidecar")
-
-    pending = asyncio.create_task(
-        start(executable, lambda: asyncio.sleep(0, result=False), timeout=5)
-    )
-    await asyncio.sleep(0.05)
-    pending.cancel()
-    try:
-        await pending
-    except asyncio.CancelledError:
-        pass
-    else:
-        raise AssertionError("sidecar startup did not propagate cancellation")
-
-    noisy = await start(noisy_executable, lambda: asyncio.sleep(0.1, result=True))
-    noisy_outcome = await noisy.close()
-    assert noisy_outcome.process.cleanup_complete is True
-    assert len(noisy_outcome.stdout) == 2 * 1024 * 1024, len(noisy_outcome.stdout)
-    assert b"output exceeded" in noisy_outcome.stderr, noisy_outcome.stderr
-
-
-_run_async(run)
-gc.collect()
-print("sidecar shutdown clean")
-"""
-    environment = os.environ.copy()
-    environment.update({"PYTHONASYNCIODEBUG": "1", "PYTHONWARNINGS": "default"})
-
-    completed = subprocess.run(
-        (sys.executable, "-c", code, str(executable), str(noisy_executable)),
-        cwd=Path.cwd(),
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    assert completed.stdout == "sidecar shutdown clean\n"
-    forbidden = (
-        "BaseSubprocessTransport",
-        "Event loop is closed",
-        "Exception ignored in",
-        "Task was destroyed",
-        "ResourceWarning",
-    )
-    assert not any(marker in completed.stderr for marker in forbidden), completed.stderr
 
 
 @pytest.mark.anyio
@@ -232,162 +108,6 @@ async def test_shell_metacharacters_remain_literal_arguments(tmp_path: Path) -> 
 
 
 @pytest.mark.anyio
-async def test_managed_inference_lease_uses_absolute_readiness_deadline(
-    tmp_path: Path,
-) -> None:
-    ready_calls = 0
-
-    async def readiness() -> bool:
-        nonlocal ready_calls
-        ready_calls += 1
-        return ready_calls >= 2
-
-    lease = await SubprocessBroker().start_inference_server(
-        request(tmp_path, "-c", "import time; time.sleep(60)", timeout_seconds=60),
-        host="127.0.0.1",
-        port=8123,
-        readiness=readiness,
-        absolute_deadline=time.monotonic() + 2,
-    )
-    with pytest.raises(DomainError) as error:
-        lease.create_proxy(
-            name="wrong-sidecar",
-            listen="127.0.0.1:8124",
-            upstream="127.0.0.1:8125",
-        )
-    assert error.value.code is ErrorCode.EXECUTION_REFUSED
-    outcome = await lease.close()
-
-    assert ready_calls == 2
-    assert outcome.process.cleanup_complete is True
-    assert outcome.process.wall_time_ns is not None
-
-
-@pytest.mark.anyio
-async def test_managed_inference_lease_refuses_expired_deadline(tmp_path: Path) -> None:
-    async def readiness() -> bool:
-        return True
-
-    with pytest.raises(DomainError) as caught:
-        await SubprocessBroker().start_inference_server(
-            request(tmp_path, "-c", "pass"),
-            host="127.0.0.1",
-            port=8123,
-            readiness=readiness,
-            absolute_deadline=time.monotonic() - 1,
-        )
-
-    assert caught.value.code is ErrorCode.PROCESS_TIMEOUT
-
-
-@pytest.mark.anyio
-async def test_managed_inference_lease_refuses_an_endpoint_occupied_before_spawn(
-    tmp_path: Path,
-) -> None:
-    marker = tmp_path / "spawned"
-    listener = await asyncio.start_server(lambda _reader, _writer: None, "127.0.0.1", 0)
-    socket_address = listener.sockets[0].getsockname()
-    port = int(socket_address[1])
-    try:
-        with pytest.raises(DomainError) as caught:
-            await SubprocessBroker().start_inference_server(
-                request(
-                    tmp_path,
-                    "-c",
-                    "from pathlib import Path; import time; "
-                    f"Path({str(marker)!r}).write_text('spawned'); time.sleep(60)",
-                    timeout_seconds=60,
-                ),
-                host="127.0.0.1",
-                port=port,
-                readiness=lambda: asyncio.sleep(0, result=True),
-                absolute_deadline=time.monotonic() + 2,
-            )
-    finally:
-        listener.close()
-        await listener.wait_closed()
-
-    assert caught.value.code is ErrorCode.EXECUTION_REFUSED
-    assert not marker.exists()
-
-
-@pytest.mark.anyio
-async def test_managed_inference_lease_rechecks_child_after_readiness(tmp_path: Path) -> None:
-    async def readiness() -> bool:
-        await asyncio.sleep(0.1)
-        return True
-
-    with pytest.raises(DomainError) as caught:
-        await SubprocessBroker().start_inference_server(
-            request(tmp_path, "-c", "import time; time.sleep(0.02)", timeout_seconds=60),
-            host="127.0.0.1",
-            port=8123,
-            readiness=readiness,
-            absolute_deadline=time.monotonic() + 2,
-        )
-
-    assert caught.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
-
-
-@pytest.mark.anyio
-async def test_managed_inference_readiness_callback_cannot_extend_deadline(
-    tmp_path: Path,
-) -> None:
-    pid_path = tmp_path / "managed.pid"
-
-    async def readiness() -> bool:
-        while not pid_path.exists():
-            await asyncio.sleep(0.005)
-        await asyncio.Event().wait()
-        return True
-
-    started = time.monotonic()
-    with pytest.raises(DomainError) as caught:
-        await SubprocessBroker().start_inference_server(
-            request(
-                tmp_path,
-                "-c",
-                "from pathlib import Path; import os, time; "
-                f"Path({str(pid_path)!r}).write_text(str(os.getpid())); time.sleep(60)",
-                timeout_seconds=60,
-            ),
-            host="127.0.0.1",
-            port=8123,
-            readiness=readiness,
-            absolute_deadline=time.monotonic() + 0.2,
-        )
-
-    assert caught.value.code is ErrorCode.PROCESS_TIMEOUT
-    assert time.monotonic() - started < 1
-    assert not _process_is_alive(int(pid_path.read_text()))
-
-
-@pytest.mark.anyio
-async def test_managed_inference_observation_cannot_extend_deadline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    broker = SubprocessBroker()
-
-    def slow_snapshot(*_args: object, **_kwargs: object) -> tuple[object, ...]:
-        time.sleep(0.5)
-        return ()
-
-    monkeypatch.setattr(broker, "_snapshot_processes", slow_snapshot)
-    started = time.monotonic()
-    with pytest.raises(DomainError) as caught:
-        await broker.start_inference_server(
-            request(tmp_path, "-c", "import time; time.sleep(60)", timeout_seconds=60),
-            host="127.0.0.1",
-            port=8123,
-            readiness=lambda: asyncio.sleep(0, result=True),
-            absolute_deadline=time.monotonic() + 0.1,
-        )
-
-    assert caught.value.code is ErrorCode.PROCESS_TIMEOUT
-    assert time.monotonic() - started < 1
-
-
-@pytest.mark.anyio
 async def test_broker_passes_bounded_stdin_to_jsonc_style_helpers(tmp_path: Path) -> None:
     outcome = await SubprocessBroker().run(
         request(
@@ -416,7 +136,7 @@ async def test_broker_bounds_stdin_transfer_when_child_does_not_read(tmp_path: P
             )
         )
 
-    assert error.value.code is ErrorCode.PROCESS_TIMEOUT
+    assert error.value.code is ErrorCode.EXECUTION_TIMEOUT
     assert time.monotonic() - started < 2
 
 
@@ -458,7 +178,7 @@ def test_observed_output_budget_terminates_the_process(tmp_path: Path) -> None:
             )
         )
 
-    assert error.value.code is ErrorCode.QUERY_BUDGET_EXCEEDED
+    assert error.value.code is ErrorCode.LIMIT_EXCEEDED
     assert isinstance(error.value.details["process"], dict)
     assert error.value.details["process"]["cancellation_cause"] == "output_limit"
     assert error.value.details["process_observations"]
@@ -487,7 +207,7 @@ def test_observed_output_budget_stops_a_burst_before_it_completes(tmp_path: Path
             )
         )
 
-    assert error.value.code is ErrorCode.QUERY_BUDGET_EXCEEDED
+    assert error.value.code is ErrorCode.LIMIT_EXCEEDED
     assert not completed.exists()
 
 
@@ -506,7 +226,7 @@ def test_observed_timeout_includes_large_stdin_transfer(tmp_path: Path) -> None:
             )
         )
 
-    assert error.value.code is ErrorCode.PROCESS_TIMEOUT
+    assert error.value.code is ErrorCode.EXECUTION_TIMEOUT
     assert time.monotonic() - started < 0.5
 
 
@@ -531,7 +251,7 @@ def test_observed_timeout_cleans_up_the_process_group(tmp_path: Path) -> None:
             )
         )
 
-    assert error.value.code is ErrorCode.PROCESS_TIMEOUT
+    assert error.value.code is ErrorCode.EXECUTION_TIMEOUT
     details = error.value.details["process"]
     assert isinstance(details, dict)
     assert details["cleanup_complete"] is True
@@ -691,7 +411,7 @@ async def test_environment_is_allowlisted_and_dangerous_overrides_fail(
                 environment_overrides={"PYTHONPATH": str(tmp_path / "unsafe")},
             )
         )
-    assert error.value.code is ErrorCode.EXECUTION_REFUSED
+    assert error.value.code is ErrorCode.INVALID_INPUT
 
 
 @pytest.mark.anyio
@@ -739,7 +459,7 @@ async def test_pattern_dangerous_environment_overrides_fail(
             )
         )
 
-    assert error.value.code is ErrorCode.EXECUTION_REFUSED
+    assert error.value.code is ErrorCode.INVALID_INPUT
 
 
 @pytest.mark.anyio
@@ -763,8 +483,8 @@ async def test_timeout_and_output_budget_terminate_process(tmp_path: Path) -> No
             )
         )
 
-    assert timeout_error.value.code is ErrorCode.PROCESS_TIMEOUT
-    assert output_error.value.code is ErrorCode.QUERY_BUDGET_EXCEEDED
+    assert timeout_error.value.code is ErrorCode.EXECUTION_TIMEOUT
+    assert output_error.value.code is ErrorCode.LIMIT_EXCEEDED
 
 
 @pytest.mark.anyio
@@ -791,7 +511,7 @@ async def test_timeout_terminates_descendants_outside_the_root_process_group(
             )
         )
 
-    assert error.value.code is ErrorCode.PROCESS_TIMEOUT
+    assert error.value.code is ErrorCode.EXECUTION_TIMEOUT
     assert pid_path.is_file()
     assert not _process_is_alive(int(pid_path.read_text()))
 
@@ -820,7 +540,7 @@ async def test_timeout_terminates_observed_descendant_after_parent_exits(
             )
         )
 
-    assert error.value.code is ErrorCode.PROCESS_TIMEOUT
+    assert error.value.code is ErrorCode.EXECUTION_TIMEOUT
     assert pid_path.is_file()
     assert not _process_is_alive(int(pid_path.read_text()))
 
@@ -846,7 +566,7 @@ async def test_timeout_includes_startup_callback_and_cleans_up_child(tmp_path: P
             on_started=slow_started,
         )
 
-    assert error.value.code is ErrorCode.PROCESS_TIMEOUT
+    assert error.value.code is ErrorCode.EXECUTION_TIMEOUT
     assert time.monotonic() - started < 0.2
     assert child_pid is not None
     assert not _process_is_alive(child_pid)
@@ -870,7 +590,7 @@ async def test_timeout_does_not_reawait_a_stalled_subprocess_spawn(
             timeout=0.2,
         )
 
-    assert error.value.code is ErrorCode.PROCESS_TIMEOUT
+    assert error.value.code is ErrorCode.EXECUTION_TIMEOUT
     assert time.monotonic() - started < 0.2
 
 
@@ -888,7 +608,7 @@ async def test_output_budget_is_shared_between_stdout_and_stderr(
             )
         )
 
-    assert error.value.code is ErrorCode.QUERY_BUDGET_EXCEEDED
+    assert error.value.code is ErrorCode.LIMIT_EXCEEDED
 
 
 @pytest.mark.anyio
@@ -982,7 +702,7 @@ async def test_resource_policy_terminates_process_tree_above_memory_limit(
             )
         )
 
-    assert error.value.code is ErrorCode.QUERY_BUDGET_EXCEEDED
+    assert error.value.code is ErrorCode.LIMIT_EXCEEDED
     process = error.value.details["process"]
     assert process["cancellation_cause"] == "memory_limit_exceeded"
     assert process["resources"]["policy_termination"] == "memory_limit_exceeded"
@@ -1016,7 +736,7 @@ async def test_resource_policy_terminates_process_tree_above_writable_growth_lim
             )
         )
 
-    assert error.value.code is ErrorCode.STORAGE_QUOTA_EXCEEDED
+    assert error.value.code is ErrorCode.LIMIT_EXCEEDED
     process = error.value.details["process"]
     assert process["cancellation_cause"] == "writable_limit_exceeded"
     assert process["resources"]["policy_termination"] == "writable_limit_exceeded"
@@ -1051,7 +771,7 @@ async def test_resource_policy_fails_closed_when_writable_growth_exceeds_file_sc
             )
         )
 
-    assert error.value.code is ErrorCode.STORAGE_QUOTA_EXCEEDED
+    assert error.value.code is ErrorCode.LIMIT_EXCEEDED
     process = error.value.details["process"]
     assert process["cancellation_cause"] == "writable_limit_exceeded"
     assert "writable_root_growth_bytes" in process["resources"]["unavailable_metrics"]
@@ -1126,7 +846,7 @@ async def test_resource_policy_terminates_scope_with_structured_storage_outcome(
             )
         )
 
-    assert exceeded.value.code is ErrorCode.STORAGE_QUOTA_EXCEEDED
+    assert exceeded.value.code is ErrorCode.LIMIT_EXCEEDED
     process = exceeded.value.details["process"]
     assert isinstance(process, dict)
     assert process["cancellation_cause"] == "storage_reserve_exceeded"

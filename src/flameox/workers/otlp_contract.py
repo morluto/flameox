@@ -14,6 +14,16 @@ class OtlpWorkerRequest(ContractModel):
     artifact_path: str = Field(min_length=1, max_length=4_096)
     media_type: str = Field(min_length=1, max_length=200)
     row_limit: Annotated[int, Field(gt=0, le=100_000_000)]
+    start_ns: Annotated[int, Field(ge=0)] | None = None
+    end_ns: Annotated[int, Field(gt=0)] | None = None
+
+    @model_validator(mode="after")
+    def window_is_complete_and_ordered(self) -> OtlpWorkerRequest:
+        if (self.start_ns is None) != (self.end_ns is None):
+            raise ValueError("OTLP window bounds must be supplied together")
+        if self.start_ns is not None and self.end_ns is not None and self.end_ns <= self.start_ns:
+            raise ValueError("OTLP end_ns must be greater than start_ns")
+        return self
 
 
 class OtlpWorkerResult(ContractModel):
@@ -30,10 +40,9 @@ class OtlpWorkerResult(ContractModel):
 
     @model_validator(mode="after")
     def result_has_one_shape(self) -> OtlpWorkerResult:
-        rows = self.resources or self.scopes or self.spans or self.events or self.links
         if self.row_limit_exceeded:
-            if rows or set(self.counts) != {"resources", "scopes", "spans", "events", "links"}:
-                raise ValueError("row-limit result requires exact counts and no rows")
+            if set(self.counts) != {"resources", "scopes", "spans", "events", "links"}:
+                raise ValueError("row-limit result requires observed counts")
         elif self.counts:
             raise ValueError("successful row result cannot carry limit counts")
         return self

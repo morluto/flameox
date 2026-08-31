@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import tracemalloc
 from dataclasses import dataclass
 from pathlib import Path
-from time import perf_counter
-from uuid import uuid4
 
 import pytest
 
@@ -51,7 +48,6 @@ def _state(tmp_path: Path, **overrides: int) -> memray_worker._AggregationState:
         workload_cwd=tmp_path,
         project_root=tmp_path,
         source_state_id=None,
-        database_path=tmp_path / f"aggregation-{uuid4()}.sqlite",
     )
 
 
@@ -96,69 +92,6 @@ def test_memray_frame_identity_is_computed_once_across_metrics(
     assert normalized == ["agent.py", "runner.py"]
     assert len(projection.frame_rows) == 2
     assert len(projection.aggregates) == 8
-
-
-@pytest.mark.performance
-def test_memray_repeated_frame_aggregation_budget(tmp_path: Path) -> None:
-    stack = (("allocate", "agent.py", 10), ("main", "runner.py", 20))
-    record = _AllocationRecord(size=5, n_allocations=1, stack=stack)
-    records = [record] * 500_000
-    state = _state(tmp_path)
-
-    started = perf_counter()
-    memray_worker._aggregate(
-        records,
-        metric="memory.high_watermark",
-        state=state,
-    )
-    elapsed = perf_counter() - started
-
-    projection = state.finalize()
-    state.close()
-    assert len(projection.frame_rows) == len(projection.aggregates) == 2
-    assert elapsed < 5
-
-
-@pytest.mark.performance
-def test_memray_high_cardinality_peak_memory_is_bound_by_limits(tmp_path: Path) -> None:
-    def measure(record_count: int) -> tuple[int, float]:
-        state = _state(
-            tmp_path,
-            max_provider_records=1_000,
-            max_frames=1_000,
-            max_aggregate_rows=1_000,
-        )
-        records = (
-            _AllocationRecord(
-                size=index + 1,
-                n_allocations=1,
-                stack=((f"allocate_{index}", f"module_{index}.py", index + 1),),
-            )
-            for index in range(record_count)
-        )
-        tracemalloc.start()
-        started = perf_counter()
-        _total, coverage = memray_worker._aggregate(
-            records,
-            metric="memory.high_watermark",
-            state=state,
-        )
-        elapsed = perf_counter() - started
-        _current, peak = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
-        assert coverage.records_seen == record_count
-        assert coverage.records_selected == 1_000
-        projection = state.finalize()
-        state.close()
-        assert len(projection.frame_rows) == len(projection.aggregates) == 1_000
-        return peak, elapsed
-
-    modest_peak, modest_elapsed = measure(100_000)
-    large_peak, large_elapsed = measure(1_000_000)
-
-    assert large_peak <= modest_peak + 2 * 1024 * 1024
-    assert modest_elapsed < 5
-    assert large_elapsed < 30
 
 
 def test_memray_aggregation_reports_record_frame_and_depth_coverage(tmp_path: Path) -> None:

@@ -1,7 +1,7 @@
 {
   "name": "flameox",
-  "version": "0.1.15",
-  "description": "Bootstrap the local flameox MCP setup wizard",
+  "version": "0.2.0",
+  "description": "Print the local flameox MCP stdio setup through uvx",
   "homepage": "https://github.com/morluto/flameox#readme",
   "bugs": {
     "url": "https://github.com/morluto/flameox/issues"
@@ -16,7 +16,6 @@
   },
   "files": [
     "bin",
-    "lib",
     "README.md"
   ],
   "scripts": {
@@ -25,11 +24,8 @@
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check ."
   },
-  "dependencies": {
-    "jsonc-parser": "^3.3.1"
-  },
+  "dependencies": {},
   "devDependencies": {
-    "oxc-transform": "^0.60.0",
     "oxfmt": "^0.60.0",
     "oxlint": "^1.75.0"
   },
