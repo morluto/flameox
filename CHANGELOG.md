@@ -2,6 +2,37 @@
 
 All notable changes to flameox are documented in this file.
 
+## [0.1.16] - 2026-08-31
+
+### Bug Fixes
+
+- **packaging:** Restore DuckDB timezone dependency
+- **setup:** Qualify detected client CLIs
+- **setup:** Replace invalid install metadata
+- **release:** Publish metadata 2.5 distributions
+- **release:** Support current package metadata
+- **release:** Pin artifact verifier independently
+- **release:** Isolate MCP metadata failures
+- **release:** Make failed tags recoverable
+
+### Continuous Integration
+
+- Isolate process-boundary test shards
+- Shard deterministic test workload
+- Parallelize deterministic test ownership
+- Separate release evidence from test suites
+
+### Documentation
+
+- Clarify evidence ownership and workspace upgrades
+
+### Refactoring
+
+- **mcp:** Simplify artifact references
+
+### Styling
+
+- Format setup upgrade changes
 ## [0.1.15] - 2026-08-30
 
 ### Breaking changes

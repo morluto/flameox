@@ -1,6 +1,6 @@
 {
   "name": "flameox",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "description": "Bootstrap the local flameox MCP setup wizard",
   "homepage": "https://github.com/morluto/flameox#readme",
   "bugs": {
