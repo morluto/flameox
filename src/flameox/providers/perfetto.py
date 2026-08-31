@@ -78,6 +78,7 @@ class PerfettoProvider:
                 artifact_path=str(path),
                 binary_path=str(binary),
                 max_rows=max_rows,
+                projection="call_graph" if capability_id == "trace.call_graph" else "slices",
             ),
             timeout_seconds=timeout_seconds,
             maximum_rss_bytes=maximum_rss_bytes,
@@ -85,16 +86,25 @@ class PerfettoProvider:
         )
         if not isinstance(response, PerfettoExtractResult):
             raise ProviderFailure("DECODE_FAILURE", "Perfetto returned another operation")
-        slices = [row.model_dump(mode="json") for row in response.rows]
-        rows = self._project(capability_id, slices)
+        if capability_id == "trace.call_graph":
+            rows = [row.model_dump(mode="json") for row in response.call_graph_rows]
+            slice_count = 0
+        else:
+            slices = [row.model_dump(mode="json") for row in response.rows]
+            rows = self._project(capability_id, slices)
+            slice_count = len(slices)
         return ProviderAnalysis(
             provider_id="perfetto",
             provider_version=version,
             blocks=[
-                {"type": "metrics", "values": {"slice_count": len(slices)}},
+                {"type": "metrics", "values": {"slice_count": slice_count}},
                 {"type": "table", "rows": rows[:max_rows]},
             ],
-            rows_observed=len(rows) + int(response.truncated),
+            rows_observed=(
+                response.projected_total
+                if capability_id == "trace.call_graph" and response.projected_total is not None
+                else len(rows) + int(response.truncated)
+            ),
             complete=not response.truncated and len(rows) <= max_rows,
             limitations=[
                 "Slice duration is inclusive and nested slices can overlap.",

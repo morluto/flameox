@@ -65,6 +65,7 @@ from flameox.runtime_contracts import (
     CAPTURE_PROBES,
     FORMAT_PROBES,
     MAX_INPUTS,
+    MAX_ROWS,
     MAX_SNIFF_INPUTS,
     AnalysisResult,
     BenchmarkSamplesCaptureArguments,
@@ -380,7 +381,9 @@ class AnalysisRuntime:
             capability_id,
             resolved,
             validated.model_dump(mode="json"),
-            max_rows=offset + selected_limits.max_rows + 1,
+            # Projection providers must see the same bounded prefix on every page.
+            # Asking for offset + page size changes aggregates and mixed metric quotas.
+            max_rows=MAX_ROWS + 1,
             limits=selected_limits,
         )
         if provider_analysis is None and capability.id != "artifact.preview":
@@ -408,6 +411,11 @@ class AnalysisRuntime:
             complete = provider_analysis.complete and len(provider_rows) <= (
                 offset + selected_limits.max_rows
             )
+            if not rows and not complete:
+                raise RuntimeFailure(
+                    "LIMIT_EXCEEDED",
+                    "Provider output exceeded its bounded pagination window; use a narrower input.",
+                )
             blocks = [*provider_analysis.blocks[:-1], {"type": "table", "rows": rows}]
             provider_identity = {
                 "id": provider_analysis.provider_id,
@@ -470,7 +478,7 @@ class AnalysisRuntime:
         )
         return self._copy_result(validated_result)
 
-    async def capture_and_analyze(
+    async def capture_and_analyze(  # noqa: C901 - capture lifecycle keeps failure artifacts together
         self,
         target: CaptureTarget,
         capability_id: str,
@@ -515,6 +523,11 @@ class AnalysisRuntime:
                     await progress(sequence - 1, total, f"capture {case.name} block {block + 1}")
                 argv = case.argv or target.argv
                 environment = {**target.environment, **case.environment}
+                if len(environment) > 32:
+                    raise RuntimeFailure(
+                        "INVALID_INPUT",
+                        "merged capture environment must contain at most 32 entries",
+                    )
                 cwd = self._resolve_project_cwd(target.cwd)
                 directory = request_scratch / f"case-{sequence:04d}"
                 directory.mkdir()
@@ -526,6 +539,18 @@ class AnalysisRuntime:
                     directory,
                     cwd=cwd,
                     request_scratch=request_scratch,
+                )
+                self._check_capture_provenance_capacity(
+                    target=target,
+                    mode=mode,
+                    experiment=experiment,
+                    executions=executions,
+                    case=case,
+                    block=block + 1,
+                    argv=argv,
+                    capture_argv=invocation.argv,
+                    cwd=cwd,
+                    limit=selected_limits.max_provenance_bytes,
                 )
                 request = ExecutionRequest(
                     argv=invocation.argv,
@@ -676,6 +701,13 @@ class AnalysisRuntime:
                         "containment": containment,
                     }
                 )
+                self._check_capture_provenance_capacity(
+                    target=target,
+                    mode=mode,
+                    experiment=experiment,
+                    executions=executions,
+                    limit=selected_limits.max_provenance_bytes,
+                )
                 if progress:
                     await progress(sequence, total, f"captured {case.name} block {block + 1}")
         effective_capability_id, analysis_sources = self._capture_analysis_sources(
@@ -747,6 +779,61 @@ class AnalysisRuntime:
         cached.manifest_body["coverage"] = self._copy_result(validated_result["coverage"])
         cached.manifest_body["limitations"] = list(validated_result["limitations"])
         return self._copy_result(validated_result)
+
+    @staticmethod
+    def _capture_request_body(
+        target: CaptureTarget,
+        mode: str,
+        experiment: ExperimentDesign | None,
+        executions: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        return {
+            "target": target.model_dump(mode="json"),
+            "mode": mode,
+            "experiment": experiment.model_dump(mode="json") if experiment else None,
+            "executions": list(executions),
+        }
+
+    def _check_capture_provenance_capacity(
+        self,
+        *,
+        target: CaptureTarget,
+        mode: str,
+        experiment: ExperimentDesign | None,
+        executions: Sequence[Mapping[str, Any]],
+        limit: int,
+        case: ExperimentCase | None = None,
+        block: int | None = None,
+        argv: Sequence[str] | None = None,
+        capture_argv: Sequence[str] | None = None,
+        cwd: Path | None = None,
+    ) -> None:
+        candidate = list(executions)
+        if case is not None:
+            candidate.append(
+                {
+                    "case": case.name,
+                    "block": block,
+                    "argv": list(argv or ()),
+                    "capture_argv": list(capture_argv or ()),
+                    "cwd": str(cwd) if cwd is not None else str(self.project_root),
+                    "returncode": None,
+                    "status": "pending",
+                    "failure_code": None,
+                    "missing_artifact_roles": [],
+                    "semantic_oracle": None,
+                    "wall_time_ns": None,
+                    "containment": "broker",
+                }
+            )
+        if (
+            len(canonical_bytes(self._capture_request_body(target, mode, experiment, candidate)))
+            > limit
+        ):
+            raise RuntimeFailure(
+                "LIMIT_EXCEEDED",
+                "Capture provenance exceeds max_provenance_bytes",
+            )
 
     @staticmethod
     def _require_host_tool(
@@ -1444,7 +1531,9 @@ class AnalysisRuntime:
             raise RuntimeFailure(
                 "MISSING_EVIDENCE", "The requested evidence artifact role is absent"
             )
-        if len(selected) > 1:
+        if len(selected) > 1 or any(
+            str(item.get("role", "")).startswith(role + ":") for item in selected
+        ):
             return self._materialize_evidence_bundle(source.evidence_id, role, selected)
         artifact = selected[0]
         digest = str(artifact["sha256"])
@@ -1539,7 +1628,7 @@ class AnalysisRuntime:
             for row in self._iter_rows(source.path, source.format):
                 if observed >= offset and len(rows) < limit:
                     normalized = json.loads(json.dumps(row, default=str))
-                    rows.append({"input_sha256": source.sha256, **normalized})
+                    rows.append({**normalized, "input_sha256": source.sha256})
                 observed += 1
                 if observed >= offset + limit + 1:
                     return rows, observed, False
@@ -1994,33 +2083,38 @@ class AnalysisRuntime:
 
     @staticmethod
     def _iter_json_object(path: Path) -> Iterator[dict[str, Any]]:
-        sequence_key: str | None = None
-        scalar_rows: list[dict[str, Any]] = []
+        entries: list[tuple[str, str, Any]] = []
         current_key: str | None = None
         with path.open("rb") as stream:
             for prefix, event, value in ijson.parse(stream, use_float=True):
                 if prefix == "" and event == "map_key":
                     current_key = str(value)
                 elif current_key is not None and prefix == current_key:
+                    key = current_key
                     if event == "start_array":
-                        sequence_key = current_key
-                        break
+                        entries.append(("array", key, None))
+                        current_key = None
                     if event in {"string", "number", "boolean", "null"}:
-                        scalar_rows.append({"key": current_key, "value": value})
+                        entries.append(("scalar", key, value))
                         current_key = None
                     elif event == "start_map":
-                        scalar_rows.append({"key": current_key, "value_type": "object"})
+                        entries.append(("object", key, None))
                         current_key = None
-        if sequence_key is None:
-            yield from sorted(scalar_rows, key=lambda row: str(row["key"]))
-            return
-        with path.open("rb") as stream:
-            for value in ijson.items(stream, f"{sequence_key}.item", use_float=True):
-                yield (
-                    {"section": sequence_key, **value}
-                    if isinstance(value, dict)
-                    else {"section": sequence_key, "value": value}
-                )
+        if any(kind == "array" for kind, _key, _value in entries):
+            entries = [entry for entry in entries if entry[0] != "object"]
+        for kind, key, value in entries:
+            if kind == "array":
+                with path.open("rb") as stream:
+                    for item in ijson.items(stream, f"{key}.item", use_float=True):
+                        yield (
+                            {"section": key, **item}
+                            if isinstance(item, dict)
+                            else {"section": key, "value": item}
+                        )
+            elif kind == "object":
+                yield {"key": key, "value_type": "object"}
+            else:
+                yield {"key": key, "value": value}
 
     def _shrink_result(
         self, result: dict[str, Any], limit: int, identity: Mapping[str, Any], offset: int
@@ -2224,7 +2318,24 @@ class AnalysisRuntime:
 
     def _sniff_source(self, source: Source) -> dict[str, Any]:
         if isinstance(source, EvidenceSource):
-            return {"kind": "evidence", "evidence_id": source.evidence_id, "format": "evidence"}
+            manifest = self.read_evidence(source.evidence_id)
+            artifacts = manifest["body"].get("artifacts", [])
+            if not isinstance(artifacts, list):
+                raise RuntimeFailure("REPOSITORY_CORRUPTION", "Evidence artifacts are invalid")
+            role = source.artifact_role or self._default_evidence_role(artifacts)
+            selected = [
+                item
+                for item in artifacts
+                if isinstance(item, dict)
+                and (item.get("role") == role or str(item.get("role", "")).startswith(role + ":"))
+            ]
+            formats = {str(item.get("format")) for item in selected}
+            if len(formats) != 1:
+                raise RuntimeFailure(
+                    "REPOSITORY_CORRUPTION",
+                    "Evidence bundle metadata is inconsistent",
+                )
+            return {"kind": "evidence", "evidence_id": source.evidence_id, "format": formats.pop()}
         return {
             "kind": "path",
             "path": source.path,
@@ -2420,6 +2531,10 @@ class AnalysisRuntime:
         max_bytes: int | None = None,
         max_files: int | None = None,
     ) -> tuple[str, int, int]:
+        if not path.is_file() and not path.is_dir():
+            raise RuntimeFailure(
+                "INVALID_INPUT", f"Source is not a regular file or directory: {path}"
+            )
         if path.is_file():
             digest, size = sha256_file(path)
             if max_bytes is not None and size > max_bytes:
@@ -2446,6 +2561,10 @@ class AnalysisRuntime:
             if item.is_symlink():
                 raise RuntimeFailure(
                     "INVALID_INPUT", f"Directory sources cannot contain symlinks: {item}"
+                )
+            if not item.is_file() and not item.is_dir():
+                raise RuntimeFailure(
+                    "INVALID_INPUT", f"Directory sources cannot contain special files: {item}"
                 )
             if item.is_file():
                 files.append(item)

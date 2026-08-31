@@ -5,6 +5,7 @@ from typing import Any
 from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.workers.perfetto_contract import (
     PERFETTO_WORKER,
+    PerfettoCallGraphRow,
     PerfettoExtractRequest,
     PerfettoExtractResult,
     PerfettoSliceRow,
@@ -72,6 +73,21 @@ _SLICE_QUERY = """
     ORDER BY s.ts, s.depth, s.id
 """
 
+_CALL_GRAPH_QUERY = f"""
+    WITH bounded_slices AS ({_SLICE_QUERY})
+    SELECT
+        parent.name AS parent,
+        child.name AS child,
+        count(*) AS sample_count,
+        sum(child.dur) AS inclusive_duration_ns,
+        count(*) OVER () AS total
+    FROM bounded_slices AS child
+    JOIN bounded_slices AS parent ON parent.id = child.parent_id
+    GROUP BY parent.name, child.name
+    ORDER BY inclusive_duration_ns DESC, parent.name, child.name
+    LIMIT {{limit:d}}
+"""
+
 
 def _row(row: Any, names: tuple[str, ...]) -> dict[str, object]:
     return {name: getattr(row, name) for name in names}
@@ -103,6 +119,23 @@ def _query(request: PerfettoWorkerRequest) -> PerfettoWorkerResult:
         )
         if isinstance(request, PerfettoExtractRequest):
             max_rows = request.max_rows
+            if request.projection == "call_graph":
+                rows = list(processor.query(_CALL_GRAPH_QUERY.format(limit=max_rows + 1)))
+                total = int(rows[0].total) if rows else 0
+                return PerfettoExtractResult(
+                    truncated=total > max_rows,
+                    rows=(),
+                    call_graph_rows=tuple(
+                        PerfettoCallGraphRow.model_validate(
+                            _row(
+                                row,
+                                ("parent", "child", "sample_count", "inclusive_duration_ns"),
+                            )
+                        )
+                        for row in rows[:max_rows]
+                    ),
+                    projected_total=total,
+                )
             rows = list(
                 processor.query(
                     f"SELECT * FROM ({_SLICE_QUERY}) AS bounded_slices LIMIT {max_rows + 1:d}"

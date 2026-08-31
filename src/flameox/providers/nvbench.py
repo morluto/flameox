@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import math
 import struct
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from flameox.providers.benchmarks import BenchmarkProvider
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 
 _MAX_JSON_BYTES = 64 * 1024 * 1024
@@ -19,6 +19,15 @@ _HINTS = {
     "file/sample_times": ("seconds", "sample_times"),
     "file/sample_freqs": ("hertz", "sample_freqs"),
 }
+
+
+@dataclass(slots=True)
+class _NvbenchBundle:
+    version: str
+    rows: list[dict[str, Any]]
+    measurement_count: int
+    benchmark_names: set[str]
+    series: dict[tuple[str, str], tuple[float, int]]
 
 
 class NvbenchProvider:
@@ -37,25 +46,19 @@ class NvbenchProvider:
             return None
         if not paths or any(format_name != "nvbench" for format_name in formats):
             return None
-        parsed = [self._read_bundle(path) for path in paths]
+        parsed = [self._read_bundle(path, max_rows=max_rows) for path in paths]
         if capability_id == "benchmark.compare":
-            return BenchmarkProvider._compare_row_sets(
-                [item[0] for item in parsed],
-                arguments,
-                max_rows=max_rows,
-                provider_id="nvbench",
-                provider_version=parsed[0][1],
-            )
+            return self._compare(parsed, arguments, max_rows=max_rows)
         rows: list[dict[str, Any]] = []
         observed = 0
-        for input_index, (measurements, _version) in enumerate(parsed):
-            observed += len(measurements)
-            for row in measurements:
+        for input_index, bundle in enumerate(parsed):
+            observed += bundle.measurement_count
+            for row in bundle.rows:
                 if len(rows) < max_rows:
                     rows.append({"input_index": input_index, **row})
         return ProviderAnalysis(
             provider_id="nvbench",
-            provider_version=parsed[0][1],
+            provider_version=parsed[0].version,
             blocks=[
                 {
                     "type": "metrics",
@@ -63,7 +66,7 @@ class NvbenchProvider:
                         "input_count": len(parsed),
                         "measurement_count": observed,
                         "benchmark_names": sorted(
-                            {str(row["benchmark"]) for item, _version in parsed for row in item}
+                            {name for item in parsed for name in item.benchmark_names}
                         ),
                     },
                 },
@@ -78,7 +81,70 @@ class NvbenchProvider:
         )
 
     @staticmethod
-    def _read_bundle(path: Path) -> tuple[list[dict[str, Any]], str]:
+    def _compare(
+        bundles: Sequence[_NvbenchBundle],
+        arguments: Mapping[str, Any],
+        *,
+        max_rows: int,
+    ) -> ProviderAnalysis:
+        if len(bundles) < 2:
+            raise ProviderFailure("INVALID_INPUT", "benchmark.compare requires at least 2 inputs")
+        baseline_index = int(arguments.get("baseline_index", 0))
+        if baseline_index >= len(bundles):
+            raise ProviderFailure("INVALID_INPUT", "baseline_index does not select an input")
+        requested_metric = arguments.get("metric")
+        common = set(bundles[baseline_index].series)
+        for bundle in bundles:
+            common.intersection_update(bundle.series)
+        if requested_metric is not None:
+            common = {identity for identity in common if identity[0] == requested_metric}
+        baseline = bundles[baseline_index].series
+        rows: list[dict[str, Any]] = []
+        for identity in sorted(common):
+            baseline_sum, baseline_count = baseline[identity]
+            baseline_mean = baseline_sum / baseline_count
+            for input_index, bundle in enumerate(bundles):
+                if input_index == baseline_index:
+                    continue
+                candidate_sum, candidate_count = bundle.series[identity]
+                candidate_mean = candidate_sum / candidate_count
+                if len(rows) < max_rows:
+                    rows.append(
+                        {
+                            "benchmark": identity[0],
+                            "unit": identity[1],
+                            "baseline_index": baseline_index,
+                            "candidate_index": input_index,
+                            "baseline_mean": baseline_mean,
+                            "candidate_mean": candidate_mean,
+                            "ratio": candidate_mean / baseline_mean if baseline_mean else None,
+                        }
+                    )
+        observed = len(common) * (len(bundles) - 1)
+        return ProviderAnalysis(
+            provider_id="nvbench",
+            provider_version=bundles[0].version,
+            blocks=[
+                {
+                    "type": "metrics",
+                    "values": {
+                        "input_count": len(bundles),
+                        "compatible_metric_count": len(common),
+                    },
+                },
+                {"type": "table", "rows": rows},
+            ],
+            rows_observed=observed,
+            complete=observed <= len(rows),
+            limitations=[
+                "Ratios summarize observed sample means and do not establish causal improvement."
+            ],
+        )
+
+    @staticmethod
+    def _read_bundle(  # noqa: C901 - bounded traversal mirrors the NVBench document hierarchy
+        path: Path, *, max_rows: int | None
+    ) -> _NvbenchBundle:
         if not path.is_dir():
             raise ProviderFailure(
                 "UNSUPPORTED_FORMAT",
@@ -114,6 +180,9 @@ class NvbenchProvider:
         if not isinstance(benchmarks, list) or len(benchmarks) > _MAX_BENCHMARKS:
             raise ProviderFailure("LIMIT_EXCEEDED", "NVBench benchmark count is invalid")
         rows: list[dict[str, Any]] = []
+        series: dict[tuple[str, str], tuple[float, int]] = {}
+        benchmark_names: set[str] = set()
+        measurement_count = 0
         state_count = 0
         for benchmark_value in benchmarks:
             benchmark = _object(benchmark_value, "NVBench benchmark")
@@ -142,21 +211,36 @@ class NvbenchProvider:
                         continue
                     filename, count = _sidecar_reference(summary)
                     sidecar = _contained_sidecar(path, filename)
-                    rows.extend(
-                        _sidecar_rows(
-                            sidecar,
-                            count=count,
-                            benchmark=benchmark_name,
-                            state=state,
-                            unit=_HINTS[cast(str, hint)][0],
-                            series=_HINTS[cast(str, hint)][1],
-                        )
-                    )
-                    if len(rows) > _MAX_SAMPLES:
+                    unit = _HINTS[cast(str, hint)][0]
+                    series_name = _HINTS[cast(str, hint)][1]
+                    metric_name = f"{benchmark_name}.{series_name}"
+                    benchmark_names.add(metric_name)
+                    total, seen = series.get((metric_name, unit), (0.0, 0))
+                    for row in _sidecar_rows(
+                        sidecar,
+                        count=count,
+                        benchmark=benchmark_name,
+                        state=state,
+                        unit=unit,
+                        series=series_name,
+                    ):
+                        measurement_count += 1
+                        total += float(cast(float, row["value_float"]))
+                        seen += 1
+                        if max_rows is None or len(rows) < max_rows:
+                            rows.append(row)
+                    series[(metric_name, unit)] = total, seen
+                    if measurement_count > _MAX_SAMPLES:
                         raise ProviderFailure(
                             "LIMIT_EXCEEDED", "NVBench sample count exceeds the limit"
                         )
-        return rows, provider_version
+        return _NvbenchBundle(
+            provider_version,
+            rows,
+            measurement_count,
+            benchmark_names,
+            series,
+        )
 
 
 def _sidecar_reference(summary: Mapping[str, Any]) -> tuple[str, int]:
@@ -213,11 +297,10 @@ def _sidecar_rows(
     state: Mapping[str, Any],
     unit: str,
     series: str,
-) -> list[dict[str, Any]]:
+) -> Iterator[dict[str, Any]]:
     expected_bytes = count * 4
     if path.stat().st_size != expected_bytes:
         raise ProviderFailure("DECODE_FAILURE", "NVBench sidecar size contradicts its metadata")
-    rows: list[dict[str, Any]] = []
     with path.open("rb") as stream:
         for index in range(count):
             raw = stream.read(4)
@@ -228,22 +311,19 @@ def _sidecar_rows(
                 raise ProviderFailure(
                     "DECODE_FAILURE", "NVBench sidecar contains a non-finite value"
                 )
-            rows.append(
-                {
-                    "benchmark": f"{benchmark}.{series}",
-                    "unit": unit,
-                    "is_warmup": False,
-                    "value_int": None,
-                    "value_float": value,
-                    "value_index": index,
-                    "dimensions": {
-                        "state": state.get("name"),
-                        "device": state.get("device"),
-                        "type_config_index": state.get("type_config_index"),
-                    },
-                }
-            )
-    return rows
+            yield {
+                "benchmark": f"{benchmark}.{series}",
+                "unit": unit,
+                "is_warmup": False,
+                "value_int": None,
+                "value_float": value,
+                "value_index": index,
+                "dimensions": {
+                    "state": state.get("name"),
+                    "device": state.get("device"),
+                    "type_config_index": state.get("type_config_index"),
+                },
+            }
 
 
 def _object(value: object, subject: str) -> dict[str, Any]:

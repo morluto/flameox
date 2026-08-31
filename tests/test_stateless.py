@@ -27,6 +27,7 @@ from pydantic import ValidationError
 
 from flameox.canonical import canonical_bytes
 from flameox.mcp import create_server
+from flameox.providers.contracts import ProviderAnalysis
 from flameox.repository import EVIDENCE_MEDIA_TYPE, EvidenceRepository
 from flameox.runtime_contracts import (
     CaptureTarget,
@@ -85,6 +86,80 @@ def test_typed_capability_never_falls_back_to_generic_rows(tmp_path: Path) -> No
         runtime.close()
 
     assert failure.value.code == "UNSUPPORTED_FORMAT"
+
+
+def test_special_file_sources_are_rejected_before_decoding(tmp_path: Path) -> None:
+    fifo = tmp_path / "input.fifo"
+    os.mkfifo(fifo)
+    runtime = AnalysisRuntime(tmp_path)
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze("artifact.preview", [PathSource(path=str(fifo))], {})
+    finally:
+        runtime.close()
+
+    assert failure.value.code == "INVALID_INPUT"
+
+
+@pytest.mark.process
+def test_experiment_environment_limit_applies_after_overrides_are_merged(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(tmp_path)
+        try:
+            with pytest.raises(RuntimeFailure) as failure:
+                await runtime.capture_and_analyze(
+                    CaptureTarget(
+                        argv=[sys.executable, "-c", "pass"],
+                        provider_id="direct",
+                        environment={f"TARGET_{index}": "value" for index in range(32)},
+                    ),
+                    "artifact.preview",
+                    mode="experiment",
+                    experiment=ExperimentDesign(
+                        cases=[
+                            ExperimentCase(
+                                name="baseline",
+                                environment={f"CASE_{index}": "value" for index in range(32)},
+                            ),
+                            ExperimentCase(name="candidate"),
+                        ],
+                        blocks=1,
+                        seed=1,
+                        metric="wall_time_ns",
+                        estimand="median_difference",
+                        practical_threshold=0,
+                    ),
+                )
+        finally:
+            runtime.close()
+
+        assert failure.value.code == "INVALID_INPUT"
+
+    anyio.run(exercise)
+
+
+@pytest.mark.process
+def test_capture_rejects_unbounded_durable_provenance_before_execution(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(tmp_path)
+        try:
+            with pytest.raises(RuntimeFailure) as failure:
+                await runtime.capture_and_analyze(
+                    CaptureTarget(
+                        argv=[sys.executable, "-c", "x" * 8_000],
+                        provider_id="direct",
+                    ),
+                    "artifact.preview",
+                    limits=RequestLimits(max_provenance_bytes=4 * 1024),
+                )
+        finally:
+            runtime.close()
+
+        assert failure.value.code == "LIMIT_EXCEEDED"
+
+    anyio.run(exercise)
 
 
 @pytest.mark.unit
@@ -280,6 +355,89 @@ def test_json_object_sequence_is_streamed_with_bounded_continuation(tmp_path: Pa
 
     assert [row["value"] for row in first["blocks"][1]["rows"]] == [0, 1, 2]
     assert [row["value"] for row in second["blocks"][1]["rows"]] == [3, 4, 5]
+
+
+@pytest.mark.unit
+def test_json_object_preview_includes_all_arrays_and_root_scalars(tmp_path: Path) -> None:
+    artifact = tmp_path / "sections.json"
+    artifact.write_text(json.dumps({"first": [1, 2], "label": "kept", "second": [{"value": 3}]}))
+    runtime = AnalysisRuntime(tmp_path)
+    try:
+        result = runtime.analyze(
+            "artifact.preview",
+            [PathSource(path=str(artifact))],
+            {},
+            limits=RequestLimits(max_rows=10),
+        )
+    finally:
+        runtime.close()
+
+    rows = result["blocks"][1]["rows"]
+    assert rows == [
+        {"section": "first", "value": 1, "input_sha256": result["inputs"][0]["sha256"]},
+        {"section": "first", "value": 2, "input_sha256": result["inputs"][0]["sha256"]},
+        {"key": "label", "value": "kept", "input_sha256": result["inputs"][0]["sha256"]},
+        {
+            "section": "second",
+            "value": 3,
+            "input_sha256": result["inputs"][0]["sha256"],
+        },
+    ]
+
+
+@pytest.mark.unit
+def test_preview_source_digest_wins_over_user_row_fields(tmp_path: Path) -> None:
+    artifact = tmp_path / "rows.json"
+    artifact.write_text(json.dumps([{"input_sha256": "f" * 64, "value": 1}]))
+    runtime = AnalysisRuntime(tmp_path)
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+    finally:
+        runtime.close()
+
+    assert result["blocks"][1]["rows"][0]["input_sha256"] == result["inputs"][0]["sha256"]
+
+
+@pytest.mark.unit
+def test_provider_pages_use_one_stable_projection_limit(tmp_path: Path) -> None:
+    artifact = tmp_path / "samples.json"
+    artifact.write_text("[]")
+    runtime = AnalysisRuntime(tmp_path)
+    limits_seen: list[int] = []
+
+    def analyze(*_args: Any, max_rows: int, **_kwargs: Any) -> ProviderAnalysis:
+        limits_seen.append(max_rows)
+        rows = [{"index": index} for index in range(max_rows)]
+        return ProviderAnalysis(
+            provider_id="test",
+            provider_version="1",
+            blocks=[{"type": "metrics", "values": {}}, {"type": "table", "rows": rows}],
+            rows_observed=max_rows + 1,
+            complete=False,
+            limitations=[],
+        )
+
+    runtime.benchmarks.analyze = analyze  # type: ignore[method-assign]
+    try:
+        first = runtime.analyze(
+            "benchmark.summary",
+            [PathSource(path=str(artifact), format="samples")],
+            {},
+            limits=RequestLimits(max_rows=3),
+        )
+        second = runtime.analyze(
+            "benchmark.summary",
+            [PathSource(path=str(artifact), format="samples")],
+            {},
+            limits=RequestLimits(max_rows=3),
+            continuation=first["continuation"],
+        )
+    finally:
+        runtime.close()
+
+    assert limits_seen == [1001, 1001]
+    assert first["blocks"][1]["rows"] == [{"index": 0}, {"index": 1}, {"index": 2}]
+    assert second["blocks"][1]["rows"] == [{"index": 3}, {"index": 4}, {"index": 5}]
 
 
 @pytest.mark.process
@@ -1075,6 +1233,25 @@ def test_discovery_reports_external_remediation_without_setup_action(
     assert match["providers"][0]["missing_executable"] == "nsys"
     assert "system/vendor package manager" in match["remediation"][0]
     assert "setup" not in json.dumps(match).lower()
+
+
+@pytest.mark.integration
+def test_discovery_uses_the_selected_evidence_artifact_format(tmp_path: Path) -> None:
+    artifact = tmp_path / "samples.json"
+    artifact.write_text('[{"value": 1}]')
+    runtime = AnalysisRuntime(tmp_path)
+    try:
+        analysis = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        preserved = runtime.preserve_evidence(analysis["analysis_id"])
+        discovered = runtime.discover_capabilities(
+            sources=[EvidenceSource(kind="evidence", evidence_id=preserved["evidence_id"])],
+        )
+    finally:
+        runtime.close()
+
+    preview = next(item for item in discovered["capabilities"] if item["id"] == "artifact.preview")
+    assert discovered["sniffed_sources"][0]["format"] == "json"
+    assert preview["available"] is True
 
 
 @pytest.mark.unit

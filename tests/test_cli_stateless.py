@@ -85,6 +85,44 @@ def test_capture_accepts_argv_after_separator(tmp_path: Path) -> None:
     assert not (tmp_path / ".flameox").exists()
 
 
+@pytest.mark.process
+def test_capture_returns_nonzero_for_failed_target(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "capture",
+            "--provider",
+            "direct",
+            "--project-root",
+            str(tmp_path),
+            "--",
+            sys.executable,
+            "-c",
+            "raise SystemExit(7)",
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout)["capture"]["executions"][0]["returncode"] == 7
+
+
+def test_analyze_projects_runtime_errors_without_traceback(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "analyze",
+            "unknown.capability",
+            str(tmp_path / "missing.json"),
+            "--project-root",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert '"code": "UNKNOWN_CAPABILITY"' in result.stderr
+    assert "Traceback" not in result.output
+
+
 def test_setup_prints_configuration_without_creating_repository(tmp_path: Path) -> None:
     result = CliRunner().invoke(app, ["setup", "--project-root", str(tmp_path), "--json"])
 

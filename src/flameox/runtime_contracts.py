@@ -107,6 +107,7 @@ class RequestLimits(StrictModel):
     timeout_seconds: float = Field(default=300, gt=0, le=3600)
     max_output_bytes: int = Field(default=16 * 1024 * 1024, ge=1024, le=64 * 1024 * 1024)
     max_memory_bytes: int = Field(default=1024**3, ge=16 * 1024 * 1024, le=16 * 1024**3)
+    max_provenance_bytes: int = Field(default=16 * 1024 * 1024, ge=4 * 1024, le=64 * 1024 * 1024)
 
     def lowered_against(self, startup: RequestLimits) -> RequestLimits:
         effective = startup.model_dump()

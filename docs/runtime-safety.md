@@ -35,7 +35,8 @@ never silently evicted and disappear at shutdown.
 - analysis accepts 1-32 sources and at most 1,000 rows per call;
 - result JSON is capped at 256 KiB by default;
 - continuations bind request arguments, limits, formats, and input digests;
-- capture argv, environment, timeout, and combined output are bounded;
+- capture argv, merged environment, timeout, combined output, and durable
+  provenance are bounded;
 - experiment cases and blocks have explicit maxima.
 
 Invalid digests fail before decoding. Decode and format failures never become

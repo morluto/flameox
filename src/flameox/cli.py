@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, NoReturn, cast
 
 import anyio
 import typer
+from pydantic import ValidationError
 
 from flameox import __version__
 from flameox.mcp import create_server, run_server
-from flameox.runtime_contracts import CaptureTarget, PathSource
+from flameox.runtime_contracts import CaptureTarget, PathSource, RuntimeFailure
 from flameox.setup import SetupFailure, install_providers, provider_guidance
 from flameox.stateless import AnalysisRuntime
 
@@ -60,6 +61,15 @@ def _json_object(value: str, *, option: str) -> dict[str, Any]:
 
 def _write(value: object) -> None:
     typer.echo(json.dumps(value, indent=2, sort_keys=True, default=str))
+
+
+def _cli_failure(error: RuntimeFailure | ValidationError) -> NoReturn:
+    if isinstance(error, ValidationError):
+        value = {"code": "INVALID_INPUT", "message": str(error), "details": {}}
+    else:
+        value = {"code": error.code, "message": error.message, "details": error.details}
+    typer.echo(json.dumps(value, sort_keys=True), err=True)
+    raise typer.Exit(code=1)
 
 
 @app.command("setup")
@@ -121,6 +131,8 @@ def capabilities_discover(
                 limit=limit,
             )
         )
+    except (RuntimeFailure, ValidationError) as error:
+        _cli_failure(error)
     finally:
         runtime.close()
 
@@ -134,6 +146,8 @@ def capabilities_inspect(
     runtime = _runtime(project_root)
     try:
         _write(runtime.inspect_capabilities(capability_ids))
+    except (RuntimeFailure, ValidationError) as error:
+        _cli_failure(error)
     finally:
         runtime.close()
 
@@ -158,6 +172,8 @@ def analyze(
         if preserve:
             result["preserved"] = runtime.preserve_evidence(str(result["analysis_id"]))
         _write(result)
+    except (RuntimeFailure, ValidationError) as error:
+        _cli_failure(error)
     finally:
         runtime.close()
 
@@ -198,6 +214,10 @@ def capture(
         if preserve:
             result["preserved"] = runtime.preserve_evidence(str(result["analysis_id"]))
         _write(result)
+        if any(item["status"] != "succeeded" for item in result["capture"]["executions"]):
+            raise typer.Exit(code=1)
+    except (RuntimeFailure, ValidationError) as error:
+        _cli_failure(error)
     finally:
         runtime.close()
 
@@ -223,6 +243,8 @@ def evidence_query(
                 cursor=cursor,
             )
         )
+    except (RuntimeFailure, ValidationError) as error:
+        _cli_failure(error)
     finally:
         runtime.close()
 
@@ -236,6 +258,8 @@ def evidence_show(
     runtime = _runtime(project_root)
     try:
         _write(runtime.read_evidence(evidence_id))
+    except (RuntimeFailure, ValidationError) as error:
+        _cli_failure(error)
     finally:
         runtime.close()
 

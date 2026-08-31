@@ -41,14 +41,17 @@ EvidenceSource {kind: "evidence", evidence_id, artifact_role?}
 Continuations are opaque, session-bound, and cryptographically bound to the
 request and exact input digests. A changed input cannot reuse a continuation.
 
-Requests may lower startup row, result-byte, timeout, and output-byte limits.
+Requests may lower startup row, result-byte, timeout, output-byte, and durable
+provenance-byte limits. Durable provenance bounds the captured argv and execution
+metadata retained for explicit preservation.
 They cannot raise them.
 
 ## Capture
 
 A direct target contains an argv array, project-contained cwd, at most 32
-bounded environment overrides, provider ID, provider capture arguments,
-analysis arguments, and request limits. Shell command strings are not accepted.
+bounded environment overrides after experiment-case overrides are merged,
+provider ID, provider capture arguments, analysis arguments, and request limits.
+Shell command strings are not accepted.
 
 Experiment mode adds 2-16 cases, 1-100 blocks, a seed, metric, estimand,
 practical threshold, and optional semantic-oracle argv. Version 0.2 evaluates
