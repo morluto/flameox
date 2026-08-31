@@ -96,6 +96,10 @@ scope, status, limitations, coverage, and truncation. They use native
 `ResourceLink`s and typed references for native artifacts, normalized evidence
 generations, and other larger durable records. Artifact identifiers remain
 provenance references; they are never the sole carrier of run meaning.
+Structured references use one `{kind, resource_id, uri}` shape, while the
+matching native `ResourceLink` remains available to hosts that route content
+blocks directly. Artifact resources expose content identity and byte length,
+not content-store filenames or native bytes.
 
 Inline fields are response projections, not an alternate persistence model.
 Property-defining execution semantics remain authoritative in the run manifest,

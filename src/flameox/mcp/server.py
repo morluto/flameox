@@ -576,12 +576,19 @@ class CaptureReceipt(ContractModel):
     recovery: RecoveryAction | None = None
 
 
+class MCPResourceReference(ContractModel):
+    """Compact structured counterpart to a native MCP ResourceLink content block."""
+
+    kind: Literal["run", "artifact", "static_candidates"]
+    resource_id: str
+    uri: str
+
+
 class ImportReceipt(ContractModel):
     run_id: str
     artifact_id: str
     corpus_commit_id: str
-    run_resource_uri: str
-    artifact_resource_uri: str
+    resources: tuple[MCPResourceReference, ...]
     semantics: RunSemanticsProjection
 
 
@@ -595,9 +602,7 @@ class StaticAnalysisImportReceipt(ContractModel):
     coverage: StaticAnalysisCoverage
     limitations: tuple[str, ...]
     first_page: StaticCandidateQueryResult
-    run_resource_uri: str
-    artifact_resource_uri: str
-    candidates_resource_uri: str
+    resources: tuple[MCPResourceReference, ...]
     semantics: StaticAnalysisSemanticsProjection
 
 
@@ -2386,8 +2391,12 @@ def create_server(
                 run_id=result.run.run_id,
                 artifact_id=result.artifact_id,
                 corpus_commit_id=result.corpus_commit_id,
-                run_resource_uri=run_uri,
-                artifact_resource_uri=artifact_uri,
+                resources=(
+                    MCPResourceReference(kind="run", resource_id=result.run.run_id, uri=run_uri),
+                    MCPResourceReference(
+                        kind="artifact", resource_id=result.artifact_id, uri=artifact_uri
+                    ),
+                ),
                 semantics=RunSemanticsProjection.from_semantics(result.run.semantics),
             )
             return _success(
@@ -2469,9 +2478,15 @@ def create_server(
                 coverage=result.coverage,
                 limitations=result.limitations,
                 first_page=result.first_page,
-                run_resource_uri=run_uri,
-                artifact_resource_uri=artifact_uri,
-                candidates_resource_uri=candidates_uri,
+                resources=(
+                    MCPResourceReference(kind="run", resource_id=result.run_id, uri=run_uri),
+                    MCPResourceReference(
+                        kind="artifact", resource_id=result.artifact_id, uri=artifact_uri
+                    ),
+                    MCPResourceReference(
+                        kind="static_candidates", resource_id=result.run_id, uri=candidates_uri
+                    ),
+                ),
                 semantics=result.semantics,
             )
             return _success(
@@ -2598,8 +2613,14 @@ def create_server(
                     run_id=result.run.run_id,
                     artifact_id=result.artifact_id,
                     corpus_commit_id=result.corpus_commit_id,
-                    run_resource_uri=run_uri,
-                    artifact_resource_uri=artifact_uri,
+                    resources=(
+                        MCPResourceReference(
+                            kind="run", resource_id=result.run.run_id, uri=run_uri
+                        ),
+                        MCPResourceReference(
+                            kind="artifact", resource_id=result.artifact_id, uri=artifact_uri
+                        ),
+                    ),
                     semantics=RunSemanticsProjection.from_semantics(result.run.semantics),
                 ),
                 f"Qualified {result.artifact_id} in run {result.run.run_id}.",
@@ -2884,14 +2905,15 @@ def create_server(
             result = ArtifactService(ctx.request_context.lifespan_context.require_workspace()).get(
                 artifact_id
             )
+            resource_uri = f"flameox://artifacts/{artifact_id}"
             return _success(
                 result,
-                f"Artifact {artifact_id} is metadata-only; read {result.resource_uri} for the "
+                f"Artifact {artifact_id} is metadata-only; read {resource_uri} for the "
                 "canonical resource.",
                 resource_links=(
                     ResourceLink(
                         name=f"Artifact {artifact_id}",
-                        uri=result.resource_uri,
+                        uri=resource_uri,
                         description="Opaque artifact metadata resource; no host path is exposed.",
                         mime_type="application/json",
                     ),

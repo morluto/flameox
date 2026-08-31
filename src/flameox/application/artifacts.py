@@ -46,8 +46,8 @@ class ArtifactReductionProvenance(ContractModel):
 
 
 class ArtifactMetadataResult(ContractModel):
-    content: ArtifactContent
-    resource_uri: str
+    artifact_id: str
+    byte_length: Annotated[int, Field(ge=0)]
     registrations: tuple[ArtifactRegistrationSummary, ...]
     total_registrations: int
     reduction_provenance: tuple[ArtifactReductionProvenance, ...]
@@ -99,6 +99,7 @@ class ArtifactTextPreview(ContractModel):
 class SnapshotArtifact:
     """An artifact whose registration and effective policy came from one snapshot."""
 
+    content: ArtifactContent
     metadata: ArtifactMetadataResult
     payload_path: Path
 
@@ -152,7 +153,7 @@ class ArtifactService:
                 "Sensitive artifact content cannot be previewed through this read-only surface.",
                 details={"artifact_id": artifact_id},
             )
-        total_bytes = artifact.metadata.content.byte_length
+        total_bytes = artifact.metadata.byte_length
         if offset > total_bytes:
             raise DomainError(
                 ErrorCode.INVALID_ARGUMENTS,
@@ -163,7 +164,7 @@ class ArtifactService:
             offset=offset,
             max_bytes=max_bytes,
         )
-        if content != artifact.metadata.content:
+        if content != artifact.content:
             raise DomainError(
                 ErrorCode.ARTIFACT_INTEGRITY_FAILED,
                 "Artifact content identity changed after snapshot resolution.",
@@ -284,8 +285,8 @@ class ArtifactService:
         ).fetchone()
         assert reduction_count is not None
         metadata = ArtifactMetadataResult(
-            content=stored.content,
-            resource_uri=f"flameox://artifacts/{artifact_id}",
+            artifact_id=stored.content.artifact_id,
+            byte_length=stored.content.byte_length,
             registrations=registrations,
             total_registrations=int(count_row[0]),
             reduction_provenance=tuple(
@@ -317,7 +318,11 @@ class ArtifactService:
                 2: Sensitivity.SENSITIVE,
             }[count_row[1]],
         )
-        return SnapshotArtifact(metadata=metadata, payload_path=stored.payload_path)
+        return SnapshotArtifact(
+            content=stored.content,
+            metadata=metadata,
+            payload_path=stored.payload_path,
+        )
 
     def list_reductions(
         self,

@@ -317,12 +317,26 @@ async def test_mcp_import_list_get_and_resource_workflow(tmp_path: Path) -> None
         result = imported.structured_content["result"]
         run_id = result["run_id"]
         artifact_id = result["artifact_id"]
+        resource_references = result["resources"]
         listed = await client.call_tool("list_runs", {"limit": 10})
         fetched = await client.call_tool("get_run", {"run_id": run_id})
+        fetched_artifact = await client.call_tool("get_artifact", {"artifact_id": artifact_id})
         resource = await client.read_resource(f"flameox://runs/{run_id}")
         artifact_resource = await client.read_resource(f"flameox://artifacts/{artifact_id}")
 
     assert "run" not in result
+    assert resource_references == [
+        {
+            "kind": "run",
+            "resource_id": run_id,
+            "uri": f"flameox://runs/{run_id}",
+        },
+        {
+            "kind": "artifact",
+            "resource_id": artifact_id,
+            "uri": f"flameox://artifacts/{artifact_id}",
+        },
+    ]
     assert {item.uri for item in imported.content if item.type == "resource_link"} == {
         f"flameox://runs/{run_id}",
         f"flameox://artifacts/{artifact_id}",
@@ -334,12 +348,19 @@ async def test_mcp_import_list_get_and_resource_workflow(tmp_path: Path) -> None
     ]
     assert fetched.structured_content is not None
     assert fetched.structured_content["result"]["run_id"] == run_id
+    assert fetched_artifact.structured_content is not None
+    artifact_metadata = fetched_artifact.structured_content["result"]
+    assert artifact_metadata["artifact_id"] == artifact_id
+    assert artifact_metadata["byte_length"] == len('{"samples": []}')
+    assert "content" not in artifact_metadata
+    assert "resource_uri" not in artifact_metadata
     contents = resource.contents[0]
     assert isinstance(contents, TextResourceContents)
     assert run_id in contents.text
     artifact_contents = artifact_resource.contents[0]
     assert isinstance(artifact_contents, TextResourceContents)
     assert artifact_id in artifact_contents.text
+    assert '"payload_name"' not in artifact_contents.text
 
 
 @pytest.mark.anyio

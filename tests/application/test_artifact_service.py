@@ -42,6 +42,8 @@ def test_artifact_metadata_keeps_registrations_and_max_sensitivity(
     listed = ArtifactService(workspace).list()
 
     assert first.artifact_id == second.artifact_id
+    assert result.artifact_id == first.artifact_id
+    assert result.byte_length == 4
     assert result.total_registrations == 2
     assert {item.run_id for item in result.registrations} == {
         first.run.run_id,

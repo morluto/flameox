@@ -105,7 +105,8 @@ async def test_mcp_static_analysis_import_and_cursor_resource_workflow(tmp_path:
         assert imported.structured_content is not None
         import_result = imported.structured_content["result"]
         run_id = import_result["run_id"]
-        candidates_uri = import_result["candidates_resource_uri"]
+        resources = {item["kind"]: item for item in import_result["resources"]}
+        candidates_uri = resources["static_candidates"]["uri"]
         first_page = await client.call_tool(
             "query_static_candidates",
             {"run_id": run_id, "limit": 1},
@@ -126,8 +127,8 @@ async def test_mcp_static_analysis_import_and_cursor_resource_workflow(tmp_path:
     assert import_result["semantics"]["analyzers"] == [{"name": "example-analyzer", "version": "1"}]
     assert import_result["source_state_id"] is not None
     assert {item.uri for item in imported.content if item.type == "resource_link"} == {
-        import_result["run_resource_uri"],
-        import_result["artifact_resource_uri"],
+        resources["run"]["uri"],
+        resources["artifact"]["uri"],
         candidates_uri,
     }
     assert first_page.structured_content["result"]["total"] == 2
