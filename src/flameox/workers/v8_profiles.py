@@ -6,7 +6,8 @@ from urllib.parse import unquote, urlparse
 
 import ijson
 
-from flameox.domain import DomainError, ErrorCode, digest_model
+from flameox.canonical import digest_model
+from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.workers.protocol import WorkerApplication, WorkerFailureKind, run_typed_worker
 from flameox.workers.v8_profiles_contract import (
     V8_PROFILE_WORKER,
@@ -343,11 +344,11 @@ def _check_rows(request: V8ProfileRequest, frame_count: int, measurement_count: 
 
 
 def _malformed(message: str) -> NoReturn:
-    raise DomainError(ErrorCode.ARTIFACT_PARSE_FAILED, message)
+    raise DomainError(ErrorCode.DECODE_FAILURE, message)
 
 
 def _limit(message: str) -> NoReturn:
-    raise DomainError(ErrorCode.QUERY_BUDGET_EXCEEDED, message)
+    raise DomainError(ErrorCode.LIMIT_EXCEEDED, message)
 
 
 def main() -> int:

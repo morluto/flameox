@@ -8,11 +8,11 @@ from pathlib import Path
 import pytest
 
 from flameox.command_binding import ExecutableResolver
-from flameox.domain import DomainError, ErrorCode
-from flameox.domain.executables import (
+from flameox.executable_models import (
     ExecutableResolutionRequest,
     ExecutableTrustPolicy,
 )
+from flameox.runtime_errors import DomainError, ErrorCode
 
 pytestmark = pytest.mark.unit
 
@@ -62,4 +62,4 @@ def test_revalidation_rejects_an_executable_changed_after_binding(tmp_path: Path
     with pytest.raises(DomainError) as caught:
         resolver.revalidate(resolved)
 
-    assert caught.value.code is ErrorCode.INVALID_CAPTURE_PLAN
+    assert caught.value.code is ErrorCode.MISSING_OR_CHANGED_INPUT

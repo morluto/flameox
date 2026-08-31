@@ -63,7 +63,7 @@ body:
     id: expected-behavior
     attributes:
       label: Expected behavior
-      description: What contract, invariant, output, or recovery action should have occurred instead?
+      description: What contract, invariant, typed result, or remediation should have occurred instead?
     validations:
       required: true
 
@@ -71,7 +71,7 @@ body:
     id: impact-scope
     attributes:
       label: Impact and scope
-      description: Who or what is affected, and what is known not to be affected? Mention data loss, incorrect evidence, blocked recovery, or compatibility impact when relevant.
+      description: Who or what is affected, and what is known not to be affected? Mention missing or incorrect evidence, repository integrity, or compatibility impact when relevant.
     validations:
       required: true
 
@@ -124,11 +124,13 @@ body:
       options:
         - Request parsing or validation
         - Capability discovery or provider setup
-        - Capture or import
-        - Artifact registration or provenance
-        - Extraction or derived catalog
+        - Capture or explicit source resolution
+        - Native artifact validation or provenance
+        - Bounded provider analysis
+        - Evidence preservation or repository publication
+        - Evidence query or resource read
         - Analysis, comparison, or finding
-        - Recovery, cancellation, or lifecycle
+        - Cancellation or process cleanup
         - CLI or MCP transport projection
         - Unknown
     validations:
@@ -144,8 +146,8 @@ body:
   - type: textarea
     id: typed-outcome
     attributes:
-      label: Typed outcome or recovery expected
-      description: Optional but useful for protocol and lifecycle problems. What result, error, recovery action, or state transition should the caller have received?
+      label: Typed outcome or remediation expected
+      description: Optional but useful for protocol failures. What result, stable error, or external remediation should the caller have received?
 
   - type: textarea
     id: relevant-output

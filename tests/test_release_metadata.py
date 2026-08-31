@@ -64,9 +64,9 @@ def test_python_release_installs_pyperf_for_the_eager_adapter_import() -> None:
     )
 
 
-def test_python_release_installs_pytz_for_duckdb_timezone_results() -> None:
+def test_python_release_installs_duckdb_only_for_ephemeral_aggregation() -> None:
     requirements = [Requirement(value) for value in requires("flameox") or []]
 
     assert any(
-        requirement.name == "pytz" and requirement.marker is None for requirement in requirements
+        requirement.name == "duckdb" and requirement.marker is None for requirement in requirements
     )

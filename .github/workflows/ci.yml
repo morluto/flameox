@@ -37,44 +37,9 @@ jobs:
       - run: uv run mypy src tests tools
 
   tests:
-    name: Deterministic tests (${{ matrix.name }})
+    name: Deterministic tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: experiments
-            paths: >-
-              tests/application/test_experiments.py
-          - name: golden-investigations
-            paths: >-
-              tests/golden/test_reverse_scan.py
-              tests/golden/test_configuration_observations.py
-          - name: capture-and-faults
-            paths: >-
-              tests/application/test_faults.py
-              tests/application/test_capture_planning.py
-              tests/application/test_capture_environment.py
-              tests/application/test_capture_containment.py
-          - name: interfaces
-            paths: >-
-              tests/mcp
-              tests/test_cli_smoke.py
-              tests/test_http_transport.py
-          - name: core
-            paths: >-
-              tests
-              --ignore=tests/application/test_experiments.py
-              --ignore=tests/golden/test_reverse_scan.py
-              --ignore=tests/golden/test_configuration_observations.py
-              --ignore=tests/application/test_faults.py
-              --ignore=tests/application/test_capture_planning.py
-              --ignore=tests/application/test_capture_environment.py
-              --ignore=tests/application/test_capture_containment.py
-              --ignore=tests/mcp
-              --ignore=tests/test_cli_smoke.py
-              --ignore=tests/test_http_transport.py
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -86,56 +51,24 @@ jobs:
       - run: uv sync --extra dev --extra inference
       - name: Run deterministic tests
         env:
-          COVERAGE_FILE: .coverage.deterministic.${{ matrix.name }}
+          COVERAGE_FILE: .coverage.deterministic
         run: >-
-          uv run pytest -o addopts='' -ra -q -n 2
+          uv run pytest -o addopts='' -ra -q
           -m 'not optional and not performance and not process'
           --cov=flameox --cov-report= --cov-fail-under=0
-          ${{ matrix.paths }}
+          tests
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: deterministic-${{ matrix.name }}-coverage
+          name: deterministic-coverage
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 14
-          path: .coverage.deterministic.${{ matrix.name }}
+          path: .coverage.deterministic
 
   process-tests:
-    name: Process-boundary tests (${{ matrix.name }})
+    name: Process-boundary tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: lifecycle
-            paths: >-
-              tests/application/test_capture_lifecycle.py
-              tests/application/test_detached.py
-          - name: capture-tools
-            paths: >-
-              tests/application/test_capture_kernel_build.py
-              tests/application/test_capture_compute_sanitizer.py
-          - name: reductions-and-golden
-            paths: >-
-              tests/application/test_reductions.py
-              tests/golden
-          - name: application-core
-            paths: >-
-              tests/application
-              --ignore=tests/application/test_capture_lifecycle.py
-              --ignore=tests/application/test_detached.py
-              --ignore=tests/application/test_capture_kernel_build.py
-              --ignore=tests/application/test_capture_compute_sanitizer.py
-              --ignore=tests/application/test_reductions.py
-          - name: mcp
-            paths: tests/mcp
-          - name: boundary-core
-            paths: >-
-              tests
-              --ignore=tests/application
-              --ignore=tests/golden
-              --ignore=tests/mcp
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -144,22 +77,22 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
-      - run: uv sync --extra dev --extra inference
+      - run: uv sync --extra dev --extra inference --extra trace
       - name: Run process-boundary tests
         env:
-          COVERAGE_FILE: .coverage.process.${{ matrix.name }}
+          COVERAGE_FILE: .coverage.process
         run: >-
-          uv run pytest -o addopts='' -ra -q -n 2
+          uv run pytest -o addopts='' -ra -q
           -m 'not optional and not performance and process'
           --cov=flameox --cov-report= --cov-fail-under=0
-          ${{ matrix.paths }}
+          tests
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: process-${{ matrix.name }}-coverage
+          name: process-coverage
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 14
-          path: .coverage.process.${{ matrix.name }}
+          path: .coverage.process
 
   coverage:
     name: Deterministic coverage
@@ -179,7 +112,7 @@ jobs:
         with:
           pattern: "*-coverage"
           merge-multiple: true
-      - run: uv run coverage combine .coverage.deterministic.* .coverage.process.*
+      - run: uv run coverage combine .coverage.deterministic .coverage.process
       - run: uv run coverage report --fail-under=60
       - run: uv run coverage xml -o coverage.xml
       - uses: codecov/codecov-action@v5
@@ -212,7 +145,7 @@ jobs:
       - run: >-
           uv run deptry src
           --optional-dependencies-dev-groups dev,test
-          --per-rule-ignores 'DEP002=aiperf|nvidia-ml-py|pytz|py-spy|pytest-reportlog|pytest-xdist'
+          --per-rule-ignores 'DEP002=aiperf|py-spy|pytest'
       - run: uv run pip-audit
 
   npm:
@@ -248,12 +181,6 @@ jobs:
           - name: memray
             extra: memory
             marker: requires_memray
-          - name: perfetto
-            extra: trace
-            marker: requires_perfetto
-          - name: py-spy
-            extra: cpu
-            marker: requires_pyspy
           - name: torch
             extra: torch
             marker: requires_torch
@@ -268,7 +195,7 @@ jobs:
       - run: uv sync --extra dev --extra ${{ matrix.extra }}
       - run: >-
           uv run pytest -o addopts='' -ra -q
-          -m 'optional and ${{ matrix.marker }}'
+          -m '${{ matrix.marker }}'
 
   performance:
     name: Performance acceptance
@@ -284,9 +211,7 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync --extra dev
-      - env:
-          FLAMEOX_RUN_PERFORMANCE: "1"
-        run: uv run pytest -o addopts='' -ra -q -m performance
+      - run: uv run pytest -o addopts='' -ra -q -m performance
 
   required:
     name: Required checks

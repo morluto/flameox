@@ -87,7 +87,7 @@ contract is an invariant over a useful input range.
 Run a focused test while iterating:
 
 ```console
-uv run pytest tests/storage/test_workspace.py -q
+uv run pytest tests/test_stateless.py -q
 ```
 
 Then run validation proportional to the change. The usual baseline is:
@@ -106,7 +106,7 @@ process, optional-provider, and performance behavior. In particular:
 - Run `uv run lint-imports` when changing package boundaries.
 - Run the matching optional-provider marker when changing an integration; a skip
   because the provider is unavailable is not provider evidence.
-- Run `FLAMEOX_RUN_PERFORMANCE=1 uv run pytest -o addopts='' -m performance`
+- Run `uv run pytest -o addopts='' -m performance`
   only for changes whose claims depend on the declared performance budgets.
 
 For changes under `npm/`, use the package's own checks:

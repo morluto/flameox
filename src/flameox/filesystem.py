@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from flameox.domain import DomainError, ErrorCode
+from flameox.runtime_errors import DomainError, ErrorCode
 
 
 class BoundedFileSystem:
@@ -31,17 +31,17 @@ class BoundedFileSystem:
             metadata = os.fstat(descriptor)
             if not stat.S_ISREG(metadata.st_mode):
                 raise DomainError(
-                    ErrorCode.EXECUTION_REFUSED,
+                    ErrorCode.EXECUTION_FAILURE,
                     "Trusted-root access requires a regular file.",
                 )
             if require_single_link and metadata.st_nlink != 1:
                 raise DomainError(
-                    ErrorCode.EXECUTION_REFUSED,
+                    ErrorCode.EXECUTION_FAILURE,
                     "Trusted-root access rejects mutable hard-linked files.",
                 )
             if max_bytes is not None and metadata.st_size > max_bytes:
                 raise DomainError(
-                    ErrorCode.QUERY_BUDGET_EXCEEDED,
+                    ErrorCode.LIMIT_EXCEEDED,
                     "Trusted-root file exceeds the configured byte budget.",
                     details={"byte_length": metadata.st_size, "max_bytes": max_bytes},
                 )
@@ -74,7 +74,7 @@ class BoundedFileSystem:
         payload = b"".join(chunks)
         if len(payload) > max_bytes:
             raise DomainError(
-                ErrorCode.QUERY_BUDGET_EXCEEDED,
+                ErrorCode.LIMIT_EXCEEDED,
                 "Trusted-root file exceeded the configured byte budget while reading.",
                 details={"max_bytes": max_bytes},
             )
@@ -95,12 +95,12 @@ class BoundedFileSystem:
             except OSError as exc:
                 if exc.errno in {errno.ELOOP, errno.ENOENT, errno.ENOTDIR}:
                     raise DomainError(
-                        ErrorCode.EXECUTION_REFUSED,
+                        ErrorCode.EXECUTION_FAILURE,
                         "Trusted-root file is missing or contains a symbolic link.",
                     ) from exc
                 raise
         raise DomainError(
-            ErrorCode.EXECUTION_REFUSED,
+            ErrorCode.EXECUTION_FAILURE,
             "File is outside the trusted roots.",
         )
 

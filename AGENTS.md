@@ -22,8 +22,8 @@ symptom → capture or import → bounded evidence → hypothesis
 
 flameox is not a profiler, a generic bug finder, a hosted observability service,
 an unrestricted command or SQL gateway, or an arbitrary source-code modification
-system. Agents may create and update `flameox.toml` through the structured
-workload configuration tool.
+system. Agents pass exact artifact paths or typed direct targets; there is no
+workspace initialization or named workload configuration.
 A feature belongs when it improves trustworthy collection, evidence
 preservation, cross-run analysis, experimental validity, or bounded agent
 drill-down without replacing an upstream tool.
@@ -37,11 +37,14 @@ When changing the product:
 - prefer integrating maintained measurement and replay tools through typed adapters;
   build custom measurement or replay machinery only when maintained tools cannot
   satisfy the required evidence, safety, or reproducibility contract;
-- keep the SQLite control plane authoritative for mutable intent and lifecycle,
-  immutable artifacts and Parquet authoritative for preserved evidence, and
-  DuckDB rebuildable;
-- keep CLI and MCP as thin transports over the same application services;
-- let agents configure validated named workloads and proceed directly to planning;
+- keep in-progress work request-owned, session scratch ephemeral, native
+  artifacts content-addressed, and immutable evidence manifests authoritative;
+- use DuckDB only as an ephemeral query engine; Flameox never creates or imports
+  SQLite, though upstream packages may read their own native formats internally;
+- keep CLI and MCP as thin transports over the same `AnalysisRuntime` and
+  capability registry;
+- let agents pass validated argv, cwd, environment, provider arguments, and
+  request-lowerable limits directly to capture;
 - expose coverage, limitations, compatibility, and containment truthfully;
 - optimize for investigation leverage, not integration count.
 
@@ -56,12 +59,12 @@ remaining proof gaps.
 
 ## Project Structure & Module Organization
 
-flameox is a Python 3.12+ package using a `src/` layout. Production code lives in
-`src/flameox/`: domain types and errors are in `domain/`, orchestration belongs in
-`application/`, persistence is in `storage/`, profiler integrations are in
-`adapters/`, isolated protocols are in `workers/`, and CLI/MCP entry points are
-in `cli.py` and `mcp/`. Tests mirror these boundaries under `tests/`, with
-additional golden and performance suites.
+flameox is a Python 3.12+ package using a `src/` layout. `stateless.py` owns the
+process-lifespan capability runtime and strict public contracts; `repository.py`
+owns optional immutable preservation; `execution.py` owns bounded subprocess
+work; capability integrations live in `providers/`; reusable format parsers live
+in `adapters/`; isolated protocols live in `workers/`; and `cli.py` plus `mcp/`
+are thin transports. Tests mirror these semantic owners under `tests/`.
 
 Read the relevant contract before changing product behavior:
 
@@ -90,7 +93,7 @@ uv run mypy src tests tools
 
 The first command installs development tools and supported lightweight
 integrations. Run a focused test while iterating, for example
-`uv run pytest tests/storage/test_workspace.py -q`. Marked performance checks
+`uv run pytest tests/test_stateless.py -q`. Marked performance checks
 can be selected with `uv run pytest -m performance`.
 
 ## Coding Style & Naming Conventions
@@ -99,9 +102,10 @@ Use four-space indentation, complete type annotations, and Python 3.12 syntax.
 Ruff enforces a 100-character line limit, import ordering, modernization, and
 common bug patterns; mypy runs in strict mode. Keep modules and functions
 `snake_case`, classes `PascalCase`, and constants `UPPER_SNAKE_CASE`. Follow
-existing architectural boundaries: keep domain models independent, put use-case
-coordination in application services, and isolate external formats behind
-adapters.
+existing architectural boundaries: keep request/runtime coordination in
+`stateless.py`, repository publication in `repository.py`, transports thin, and
+provider-specific behavior in `providers/`, with shared format parsing in
+`adapters/` and isolated protocols in `workers/`.
 
 ## Testing Guidelines
 
@@ -115,7 +119,7 @@ behavior should include meaningful success and failure-path coverage.
 ## Commit & Pull Request Guidelines
 
 History follows Conventional Commit-style subjects such as
-`feat(storage): add immutable evidence catalog`, `test: ...`, and `docs: ...`.
+`feat(evidence): add immutable manifest query`, `test: ...`, and `docs: ...`.
 Keep commits focused and use an optional scope when it clarifies ownership.
 Pull requests should explain the problem and chosen approach, link relevant
 issues, list commands actually run, and call out compatibility or safety

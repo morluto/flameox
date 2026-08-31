@@ -70,7 +70,7 @@ body:
     id: desired-outcome
     attributes:
       label: Desired outcome and success criteria
-      description: Describe observable behavior that would make this useful. Include boundedness, recovery, provenance, compatibility, or performance criteria when they matter.
+      description: Describe observable behavior that would make this useful. Include boundedness, cancellation, provenance, compatibility, or performance criteria when they matter.
     validations:
       required: true
 

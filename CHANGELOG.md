@@ -2,6 +2,49 @@
 
 All notable changes to flameox are documented in this file.
 
+## [0.2.0] - 2026-08-31
+
+### Breaking changes
+
+- Replace workspaces, SQLite control-plane state, persisted DuckDB catalogs,
+  action graphs, plan tokens, generic records, detached operations, recovery,
+  and GC with a process-lifespan capability runtime.
+- Remove initialization, named workloads, `.diagnostics` discovery, migration,
+  compatibility aliases, durable provider setup operations/receipts, and
+  resumable jobs.
+- Reduce MCP to six tools and one immutable evidence resource template. Existing
+  native artifacts remain analyzable only through explicit paths and formats.
+
+### Features
+
+- Add typed direct capture with bounded argv, cwd, environment, request limits,
+  progress, cancellation, and single/experiment modes. Experiment mode emits
+  paired wall-time effects, uncertainty coverage, and practical-threshold
+  decisions.
+- Retain direct pytest reliability capture through a request-bound bounded event
+  plugin, without restoring workspace or reportlog infrastructure.
+- Add strict path/evidence source unions, digest-bound continuations, bounded
+  streaming preview readers, and a process-local analysis cache.
+- Retain prompt-free offline readers for AIPerf, vLLM and SGLang aggregate
+  benchmark exports, and Mooncake request traces without managed server leases.
+- Add lazy `.flameox` preservation with content-addressed native artifacts,
+  canonical evidence manifests, atomic publication, deterministic queries, and
+  repository-local Git exclusion.
+- Add CLI mirrors for capability discovery/inspection, analysis, capture,
+  evidence query/show, and MCP serving/inspection.
+- Keep `flameox setup` as a stateless MCP bootstrap and explicit installer for
+  selected Python provider extras; system/vendor tools receive external guidance.
+
+### Safety
+
+- Make unpreserved analysis and capture leave no durable Flameox state.
+- Reject input mutation before preservation and validate every artifact,
+  manifest, and evidence data digest on reuse or read.
+- Reject symlinked repository paths and parse the complete versioned manifest
+  shape before repository queries or evidence reads trust its fields.
+- Report missing providers as discovery state with CLI setup and external
+  remediation; discovery and analysis never install them implicitly.
+
 ## [0.1.15] - 2026-08-30
 
 ### Breaking changes

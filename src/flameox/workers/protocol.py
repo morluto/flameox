@@ -10,8 +10,8 @@ from typing import Annotated, Literal, cast
 
 from pydantic import Field, JsonValue, TypeAdapter, ValidationError, model_validator
 
-from flameox.domain import DomainError, ErrorCode
 from flameox.models import ContractModel
+from flameox.runtime_errors import DomainError, ErrorCode
 
 _MAX_REQUEST_BYTES = 4 * 1024 * 1024
 WORKER_TRANSPORT: Literal["flameox.artifact-worker/v1"] = "flameox.artifact-worker/v1"
@@ -19,14 +19,15 @@ WORKER_TRANSPORT: Literal["flameox.artifact-worker/v1"] = "flameox.artifact-work
 
 class WorkerOperationId(StrEnum):
     AIPERF_PARSE = "aiperf.parse"
+    BENCHMARK_SAMPLES_PARSE = "benchmark_samples.parse"
     COMPUTE_SANITIZER_PARSE = "compute_sanitizer.parse"
+    COVERAGE_PARSE = "coverage.parse"
     MEMRAY_PARSE = "memray.parse"
     NSIGHT_COMPUTE_PARSE = "nsight_compute.parse"
     NSIGHT_SYSTEMS_PARSE = "nsight_systems.parse"
-    NVML_OBSERVE = "nvml.observe"
     OTLP_PARSE = "otlp.parse"
     PERFETTO_QUERY = "perfetto.query"
-    REDUCTION_EXECUTE = "reduction.execute"
+    PYPERF_PARSE = "pyperf.parse"
     V8_PROFILE_PARSE = "v8_profile.parse"
 
 
@@ -43,15 +44,15 @@ class WorkerFailureKind(StrEnum):
 
 
 _FAILURE_ERROR_CODES = {
-    WorkerFailureKind.INVALID_REQUEST: ErrorCode.WORKSPACE_INVALID,
-    WorkerFailureKind.INPUT_UNAVAILABLE: ErrorCode.ARTIFACT_PARSE_FAILED,
-    WorkerFailureKind.INPUT_FORMAT_UNSUPPORTED: ErrorCode.ARTIFACT_PARSE_FAILED,
-    WorkerFailureKind.INPUT_MALFORMED: ErrorCode.ARTIFACT_PARSE_FAILED,
-    WorkerFailureKind.ROW_OR_OUTPUT_LIMIT: ErrorCode.QUERY_BUDGET_EXCEEDED,
-    WorkerFailureKind.PROVIDER_UNAVAILABLE: ErrorCode.CAPABILITY_UNAVAILABLE,
-    WorkerFailureKind.PROVIDER_INCOMPATIBLE: ErrorCode.ADAPTER_INCOMPATIBLE,
-    WorkerFailureKind.WORKER_INTERNAL_ERROR: ErrorCode.INTERNAL_ERROR,
-    WorkerFailureKind.OUTPUT_INVALID: ErrorCode.ARTIFACT_PARSE_FAILED,
+    WorkerFailureKind.INVALID_REQUEST: ErrorCode.INVALID_INPUT,
+    WorkerFailureKind.INPUT_UNAVAILABLE: ErrorCode.MISSING_OR_CHANGED_INPUT,
+    WorkerFailureKind.INPUT_FORMAT_UNSUPPORTED: ErrorCode.UNSUPPORTED_FORMAT,
+    WorkerFailureKind.INPUT_MALFORMED: ErrorCode.DECODE_FAILURE,
+    WorkerFailureKind.ROW_OR_OUTPUT_LIMIT: ErrorCode.LIMIT_EXCEEDED,
+    WorkerFailureKind.PROVIDER_UNAVAILABLE: ErrorCode.UNAVAILABLE_CAPABILITY,
+    WorkerFailureKind.PROVIDER_INCOMPATIBLE: ErrorCode.UNSUPPORTED_FORMAT,
+    WorkerFailureKind.WORKER_INTERNAL_ERROR: ErrorCode.INTERNAL_FAILURE,
+    WorkerFailureKind.OUTPUT_INVALID: ErrorCode.DECODE_FAILURE,
 }
 
 
@@ -196,19 +197,17 @@ def run_typed_worker[RequestT, ResponseT](
 
 
 def _failure_kind(code: ErrorCode) -> WorkerFailureKind:
-    if code is ErrorCode.CAPABILITY_UNAVAILABLE:
+    if code is ErrorCode.UNAVAILABLE_CAPABILITY:
         return WorkerFailureKind.PROVIDER_UNAVAILABLE
     if code in {
-        ErrorCode.QUERY_BUDGET_EXCEEDED,
-        ErrorCode.ARTIFACT_TOO_LARGE,
-        ErrorCode.STORAGE_QUOTA_EXCEEDED,
+        ErrorCode.LIMIT_EXCEEDED,
     }:
         return WorkerFailureKind.ROW_OR_OUTPUT_LIMIT
-    if code in {ErrorCode.INVALID_ARGUMENTS, ErrorCode.WORKSPACE_INVALID}:
+    if code is ErrorCode.INVALID_INPUT:
         return WorkerFailureKind.INVALID_REQUEST
-    if code is ErrorCode.ADAPTER_INCOMPATIBLE:
+    if code is ErrorCode.UNSUPPORTED_FORMAT:
         return WorkerFailureKind.PROVIDER_INCOMPATIBLE
-    if code is ErrorCode.INTERNAL_ERROR:
+    if code is ErrorCode.INTERNAL_FAILURE:
         return WorkerFailureKind.WORKER_INTERNAL_ERROR
     return WorkerFailureKind.INPUT_MALFORMED
 

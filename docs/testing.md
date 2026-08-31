@@ -1,80 +1,52 @@
 # Testing
 
-Pytest markers and test locations are the test contract. There is no separate
-ownership database or affected-test planner. Pull requests and merge groups run
-the complete deterministic suite; scheduled and manual workflows own optional
-providers and performance evidence.
+Tests prove the stateless runtime, bounded execution, provider adapters, and
+optional immutable repository independently.
 
-## Commands
-
-Install the development environment and run the ordinary suite:
-
-```console
-uv sync --extra dev
-uv run pytest -q
-uv run pytest -o addopts='' -ra -q -m process
-```
-
-The configured default excludes process, optional-provider, and performance
-tests for a fast local loop. CI runs all non-optional, non-performance tests,
-parallelizing tests not marked `serial` and then running the serial set in one
-process.
-
-Static validation is direct:
+## Baseline
 
 ```console
 uv run ruff check src tests tools
 uv run ruff format --check src tests tools
 uv run mypy src tests tools
 uv run lint-imports
-uv run vulture src/flameox --min-confidence 80
-uv run deptry src --optional-dependencies-dev-groups dev,test
-uv run pip-audit
+uv run pytest -q
 ```
 
-The pull-request, merge-group, and main CI lanes own static validation and the
-complete deterministic Python and npm suites. Measured experiment, golden
-investigation, capture, interface, core, and process-boundary shards run
-concurrently with two workers each. New test modules route conservatively to a
-core shard. CI combines every shard's coverage data before enforcing the project
-threshold.
-The release workflow does not
-repeat those suites after a release commit has merged. It owns the distinct
-publication evidence instead: synchronized tag identity, registry metadata,
-Python and npm artifact construction, installed-wheel behavior, archive
-identity, and post-publication resolution.
+Use `uv run pytest tests/test_stateless.py -q` while changing the public runtime
+or repository. Process tests use `-o addopts='' -m process`; performance tests
+use `-o addopts='' -m performance`.
 
-## Optional and performance evidence
+## Required behavioral proof
 
-Install the relevant extra and select its marker explicitly. For example:
+Contract tests assert exactly six MCP tools, one resource template, no concrete
+resource list, no output schemas, truthful annotations, a catalog below 128 KiB,
+and direct structured success content without a universal wrapper.
 
-```console
-uv sync --extra dev --extra trace
-uv run pytest -o addopts='' -ra -q -m 'optional and requires_perfetto'
-```
+Runtime tests cover bounded streaming analysis, digest-bound continuation,
+provider states, typed capture, progress, cancellation and descendant cleanup,
+partial/failed evidence, scratch ceilings, and absence of durable writes without
+preservation.
 
-The same pattern applies to `requires_coverage`, `requires_memray`,
-`requires_pyspy`, and `requires_torch`. GPU, system-tool, and platform markers
-remain explicit and require a qualified host. An unavailable prerequisite is a
-classified skip, not evidence that the provider works.
+Repository tests cover lazy creation, Git exclusion, input mutation, artifact
+reuse, concurrent identical/distinct publication, every publication boundary,
+corrupt or incomplete bundles, unsupported versions, abandoned staging cleanup,
+stable queries, resource errors, and restart semantics.
 
-Performance tests require an intentional opt-in:
+Provider tests use explicit native fixture paths without a repository. Optional
+tests must state the actual provider/version and skip rather than claim evidence
+when the host capability is absent.
 
-```console
-FLAMEOX_RUN_PERFORMANCE=1 uv run pytest -o addopts='' -ra -q -m performance
-```
+## Performance evidence
 
-## Test design
+Representative performance cases include 1,000-member identity accumulation,
+10,000 immutable manifests, and repeated Nsight continuation reads through the
+session conversion cache. Performance claims must report the corpus, command,
+host-relevant limits, and result rather than relying on a unit-test timeout.
 
-- Put tests beside their semantic owner and declare requirements with registered
-  module- or test-level markers.
-- Keep mutable workspaces, processes, and handles function-scoped.
-- Assert observable behavior or stable artifacts, not private helper text.
-- Process tests prove cleanup and terminal state.
-- Storage tests prove transactions, conflicts, and immutable revision history.
-- Analysis tests pin one snapshot before lookup.
-- Adapter tests preserve native formats and prove the declared reader contract.
-- Security tests include hostile paths, bounds, identities, and cancellation.
+## Proof gaps
 
-A passing suite proves only the exercised environments. Report missing provider,
-platform, race, crash, and performance evidence explicitly.
+A passing default suite does not prove every provider or platform. Report
+missing hardware, permissions, vendor tools, cross-platform execution, crash
+injection boundaries, or scale runs explicitly. Do not replace behavioral proof
+with source-text assertions about private helpers.

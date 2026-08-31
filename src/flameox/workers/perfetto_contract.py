@@ -13,6 +13,7 @@ class PerfettoExtractRequest(ContractModel):
     artifact_path: str = Field(min_length=1, max_length=4_096)
     binary_path: str = Field(min_length=1, max_length=4_096)
     max_rows: Annotated[int, Field(gt=0, le=100_000_000)]
+    projection: Literal["slices", "call_graph"] = "slices"
 
 
 class PerfettoWindowRequest(ContractModel):
@@ -52,6 +53,13 @@ class PerfettoSliceRow(ContractModel):
     stream: str | None
 
 
+class PerfettoCallGraphRow(ContractModel):
+    parent: str
+    child: str
+    sample_count: int
+    inclusive_duration_ns: int
+
+
 class PerfettoWindowRow(ContractModel):
     id: int
     parent_id: int | None
@@ -66,6 +74,8 @@ class PerfettoExtractResult(ContractModel):
     operation: Literal["extract"] = "extract"
     truncated: bool
     rows: tuple[PerfettoSliceRow, ...]
+    call_graph_rows: tuple[PerfettoCallGraphRow, ...] = ()
+    projected_total: int | None = None
 
 
 class PerfettoWindowResult(ContractModel):

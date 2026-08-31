@@ -4,8 +4,8 @@ from typing import Annotated, cast
 
 from pydantic import Field, StrictBool, StrictFloat, StrictInt, ValidationError
 
-from flameox.domain import DomainError, ErrorCode
 from flameox.models import ContractModel
+from flameox.runtime_errors import DomainError, ErrorCode
 
 
 class TorchBenchmarkOptions(ContractModel):
@@ -22,7 +22,7 @@ def torch_benchmark_options(value: dict[str, object] | None) -> TorchBenchmarkOp
         return TorchBenchmarkOptions.model_validate(value or {})
     except ValidationError as exc:
         raise DomainError(
-            ErrorCode.INVALID_CAPTURE_PLAN,
+            ErrorCode.INVALID_INPUT,
             "Invalid torch.benchmark capture options.",
             details={"validation_errors": exc.errors(include_url=False)},
             remediation=(
@@ -33,7 +33,7 @@ def torch_benchmark_options(value: dict[str, object] | None) -> TorchBenchmarkOp
 
 
 def parse_torch_benchmark_options(value: object) -> TorchBenchmarkOptions:
-    """Validate the plan-bound SDK configuration without accepting compatibility shapes."""
+    """Validate request-bound SDK configuration without compatibility shapes."""
 
     if not isinstance(value, dict):
         raise ValueError("Flameox torch.benchmark configuration must be an object")
