@@ -79,5 +79,4 @@ manifest.
 ## Format evolution
 
 This is repository format `1`. Unsupported repository or manifest versions
-fail explicitly. Version 0.1 `.diagnostics` workspaces are not read, migrated,
-or dual-written. Their native artifacts can be analyzed by exact path.
+fail explicitly before their contents are trusted.

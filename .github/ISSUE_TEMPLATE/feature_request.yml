@@ -53,7 +53,7 @@ body:
     id: use-cases
     attributes:
       label: Use cases
-      description: Give concrete callers, workflows, workloads, or examples. Explain why the current behavior is insufficient.
+      description: Give concrete callers, workflows, direct targets, or examples. Explain why the current behavior is insufficient.
     validations:
       required: true
 
@@ -62,7 +62,7 @@ body:
     attributes:
       label: Evidence and current workaround
       description: State what was actually observed, measured, or read from source. Describe the current workaround and why it is insufficient; label untested ideas explicitly.
-      placeholder: Include bounded measurements, artifact or run identity, provider behavior, or source references when they materially support the request.
+      placeholder: Include bounded measurements, input or evidence identity, provider behavior, or source references when they materially support the request.
     validations:
       required: true
 

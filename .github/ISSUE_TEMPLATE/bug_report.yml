@@ -129,7 +129,7 @@ body:
         - Bounded provider analysis
         - Evidence preservation or repository publication
         - Evidence query or resource read
-        - Analysis, comparison, or finding
+        - Analysis or evidence comparison
         - Cancellation or process cleanup
         - CLI or MCP transport projection
         - Unknown

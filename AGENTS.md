@@ -25,7 +25,7 @@ an unrestricted command or SQL gateway, or an arbitrary source-code modification
 system. Agents pass exact artifact paths or typed direct targets; there is no
 workspace initialization or named workload configuration.
 A feature belongs when it improves trustworthy collection, evidence
-preservation, cross-run analysis, experimental validity, or bounded agent
+preservation, cross-evidence comparison, experimental validity, or bounded agent
 drill-down without replacing an upstream tool.
 
 When changing the product:

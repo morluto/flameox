@@ -20,19 +20,30 @@ and required external resources without mutating the host. Missing dependencies
 are successful availability results with remediation outside Flameox. Invoking
 an unavailable provider is a typed tool error.
 
-## Retained evidence families
+## Evidence and capture support
 
 The registry covers CPU profiles, memory profiles, benchmarks, inference
 exports, execution traces, GPU launches and kernel metrics, correctness and
 sanitizer failures, coverage, static candidates, and bounded generic previews.
-Provider-specific readers include py-spy/perf/Node, Memray, pyperf and benchmark
-samples, PyTorch/NVBench, Perfetto/OTLP/ROCprof PFTrace, Apple xctrace, Nsight
-Systems, Nsight Compute, Compute Sanitizer, Triton, kernel validation, pytest,
-coverage, SARIF, AIPerf request exports, and aggregate vLLM, aggregate SGLang,
-and Mooncake request-trace exports. The offline inference readers omit prompts,
+Artifact analysis and typed capture are separate contracts:
+
+| Evidence family | Explicit artifact analysis | Typed capture provider |
+| --- | --- | --- |
+| CPU profiles | Node/V8, py-spy Speedscope, perf collapsed stacks, perf data | `node-cpu-profile`, `py-spy`, `perf` |
+| Memory profiles | Memray | `memray` |
+| Benchmarks | pyperf, benchmark samples, PyTorch samples, NVBench | `pyperf`, `benchmark-samples`, `nvbench` |
+| Execution traces | Perfetto/Chrome, PyTorch, OTLP, ROCprof PFTrace, xctrace, Nsight Systems | `torch-profiler`, `rocprofv3`, `xctrace`, `nsight-systems` |
+| GPU and kernels | Nsight Systems, Nsight Compute, Compute Sanitizer, Triton, kernel validation | `nsight-systems`, `nsight-compute`, `compute-sanitizer` |
+| Reliability | pytest events, observations, coverage.py | `pytest`, `observations`, `coverage` |
+| Static candidates | SARIF | — |
+| Inference exports | AIPerf, vLLM, SGLang, Mooncake | — |
+| Generic previews | JSON, JSONL, CSV, text, Parquet | — |
+
+An em dash means callers provide an explicit artifact path; it does not mean
+the format is unsupported. The offline inference readers omit prompts,
 generations, error text, endpoints, tools, payloads, and prefix-hash values.
 Pytest capture runs an explicit `python -m pytest` target with a request-bound,
-bounded event plugin; it does not require a workspace or a reportlog service.
+bounded event plugin.
 
 Support is honest rather than substitutive. A missing Trace Processor does not
 turn a Perfetto request into a JSON preview; a missing `ncu` does not become an
@@ -62,10 +73,7 @@ session-local in-memory DuckDB; it does not create a temporary SQLite database.
 
 ## Provider setup boundary
 
-Version 0.2 removes provider approval state, durable setup operations and
-receipts, Toxiproxy orchestration, ShrinkRay reduction, managed inference-server
-leases, viewer launch planning, and generic pipeline/knowledge-record
-infrastructure. An explicit `flameox setup --provider ...` invocation may
-replace the persistent uv tool environment with the complete selected Python
-extra set. System and vendor packages remain externally installed. Setup never
-creates project state or becomes a prerequisite for explicit-path analysis.
+An explicit `flameox setup --provider ...` invocation replaces the persistent
+uv tool environment with the complete selected Python extra set. System and
+vendor packages remain externally installed. Setup creates no project state and
+is not a prerequisite for explicit-path analysis.

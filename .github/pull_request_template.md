@@ -40,7 +40,7 @@ For behavior changes, name the semantic owner and the earliest changed stage.
 - Semantic owner and changed stage:
 - Public CLI or MCP contract:
 - Storage, artifact, provenance, or schema contract:
-- Adapter, provider, platform, or workload compatibility:
+- Adapter, provider, platform, or direct-target compatibility:
 - Cancellation, concurrency, security, or containment impact:
 - Native artifact, failed-attempt, and observed/derived/inferred claim handling:
 

@@ -62,10 +62,3 @@ tool environment; it creates no project state and owns no durable operation.
 Direct capture is trusted local execution, not containment. Typed argv prevents
 shell interpretation, while the broker provides process-group cleanup, bounded
 output, timeouts, resource observation, and exact executable identity.
-
-## Removed architecture
-
-Version 0.2 removes `Workspace`, SQLite stores, persisted DuckDB, action graphs,
-projection/outbox machinery, plan tokens, operations, durable cursors, generic
-records, investigations, pipelines, recovery, GC, provider approval/receipt state,
-and detached jobs. There is no migration or compatibility alias.
