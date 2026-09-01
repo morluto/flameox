@@ -6,6 +6,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -1348,6 +1349,33 @@ def test_discovery_reports_wrong_platform_and_executable_permission(
     trace = next(item for item in permission["capabilities"] if item["id"] == "trace.summary")
     assert trace["available"] is False
     assert trace["providers"][0]["permission_limited"] is True
+
+
+@pytest.mark.unit
+def test_discovery_actively_reports_perf_event_permission_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("flameox.stateless.shutil.which", lambda name: "/usr/bin/perf")
+    monkeypatch.setattr(
+        "flameox.stateless.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 255, stderr="Access denied by perf_event_paranoid"
+        ),
+    )
+    runtime = AnalysisRuntime(tmp_path)
+    try:
+        inspected = runtime.inspect_capabilities(["cpu.hotspots"])
+    finally:
+        runtime.close()
+
+    perf = next(
+        provider
+        for provider in inspected["capabilities"][0]["capture_providers"]
+        if provider["id"] == "perf"
+    )
+    assert perf["availability"]["available"] is False
+    assert perf["availability"]["permission_limited"] is True
+    assert "CAP_PERFMON" in perf["availability"]["remediation"][0]
 
 
 @pytest.mark.unit

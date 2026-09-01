@@ -14,6 +14,7 @@ import random
 import secrets
 import shutil
 import statistics
+import subprocess
 import sys
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
@@ -132,6 +133,37 @@ class CaptureInvocation:
     argv: tuple[str, ...]
     environment: dict[str, str]
     artifacts: tuple[tuple[Path, str, str], ...]
+
+
+def _perf_permission_limited(executable_path: str) -> bool:
+    try:
+        probe = subprocess.run(
+            [executable_path, "stat", "-e", "task-clock", "--", "true"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=2,
+            check=False,
+            text=True,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    diagnostic = probe.stderr.casefold()
+    return probe.returncode != 0 and any(
+        marker in diagnostic for marker in ("permission", "not permitted", "perf_event_paranoid")
+    )
+
+
+def _permission_guidance(provider_id: str, executable_path: str) -> tuple[str, str]:
+    if provider_id == "perf" and os.access(executable_path, os.X_OK):
+        return (
+            "perf events are blocked by the host permission policy.",
+            "Grant CAP_PERFMON or adjust kernel.perf_event_paranoid outside Flameox, then retry.",
+        )
+    return (
+        f"Required executable is not executable: {executable_path}",
+        "Grant execute permission outside Flameox, then retry.",
+    )
 
 
 class AnalysisRuntime:
@@ -2462,6 +2494,8 @@ class AnalysisRuntime:
         permission_limited = bool(
             executable_path is not None and not os.access(executable_path, os.X_OK)
         )
+        if probe.id == "perf" and executable_path is not None and not permission_limited:
+            permission_limited = _perf_permission_limited(executable_path)
         if missing_executable is not None:
             limitations.append(f"Required executable is not on PATH: {missing_executable}")
             remediation.append(
@@ -2469,8 +2503,10 @@ class AnalysisRuntime:
                 "then restart Flameox."
             )
         if permission_limited:
-            limitations.append(f"Required executable is not executable: {executable_path}")
-            remediation.append("Grant execute permission outside Flameox, then retry.")
+            assert executable_path is not None
+            limitation, repair = _permission_guidance(probe.id, executable_path)
+            limitations.append(limitation)
+            remediation.append(repair)
 
         missing_resource: str | None = None
         if (
