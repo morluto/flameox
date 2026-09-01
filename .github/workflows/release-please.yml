@@ -7,6 +7,16 @@ on:
     types: [closed]
     branches: [main]
   workflow_dispatch:
+    inputs:
+      bump:
+        description: Semantic version component for the release PR
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
   schedule:
     - cron: "0 9 * * 1"
 
@@ -79,9 +89,9 @@ jobs:
           if [[ -n "$latest_tag" ]]; then
             latest_version="${latest_tag#v}"
             if [[ "$current_version" != "$latest_version" ]]; then
-              echo "::notice::Package version $current_version is awaiting tag v$current_version"
-              echo "skip=true" >> "$GITHUB_OUTPUT"
-              exit 0
+              echo "Package version $current_version does not match latest tag $latest_tag" >&2
+              echo "Version changes must be made by an autorelease pull request" >&2
+              exit 1
             fi
             baseline="$latest_tag"
           else
@@ -106,6 +116,7 @@ jobs:
 
           {
             echo "baseline=$baseline"
+            echo "bump=${{ inputs.bump || 'patch' }}"
             echo "latest_version=$latest_version"
             echo "skip=false"
           } >> "$GITHUB_OUTPUT"
@@ -123,18 +134,26 @@ jobs:
               --state open \
               --base main \
               --head "$branch" \
-              --json number,headRefName \
-              --jq '.[0] // empty | "\(.number) \(.headRefName)"' 2>/dev/null || true
+              --json number,headRefName,title \
+              --jq '.[0] // empty | [.number, .headRefName, .title] | @tsv'
           )
           if [[ -n "$existing" ]]; then
+            IFS=$'\t' read -r number existing_branch title <<< "$existing"
+            version=$(sed -n 's/^chore(main): release flameox \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' <<< "$title")
+            if [[ -z "$version" ]]; then
+              echo "Existing release PR has an invalid title: $title" >&2
+              exit 1
+            fi
             {
-              echo "number=${existing%% *}"
-              echo "branch=${existing#* }"
+              echo "number=$number"
+              echo "branch=$existing_branch"
+              echo "version=$version"
             } >> "$GITHUB_OUTPUT"
           else
             {
               echo "number="
               echo "branch="
+              echo "version="
             } >> "$GITHUB_OUTPUT"
           fi
 
@@ -151,9 +170,16 @@ jobs:
 
       - name: Bump synchronized package versions
         if: steps.version.outputs.skip != 'true'
+        env:
+          EXISTING_VERSION: ${{ steps.existing-pr.outputs.version }}
+          RELEASE_BUMP: ${{ steps.version.outputs.bump }}
         run: |
           set -euo pipefail
-          uv version --bump patch --no-sync
+          if [[ -n "$EXISTING_VERSION" ]]; then
+            uv version "$EXISTING_VERSION" --no-sync
+          else
+            uv version --bump "$RELEASE_BUMP" --no-sync
+          fi
           version=$(uv version --short)
           npm version "$version" --prefix npm --no-git-tag-version
           jq --arg version "$version" \
@@ -256,7 +282,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: main
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -270,9 +296,14 @@ jobs:
       - name: Resolve and verify release version
         id: version
         env:
+          EXPECTED_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "$EXPECTED_MERGE_SHA" ]]; then
+            echo "Checked out release commit does not match $EXPECTED_MERGE_SHA" >&2
+            exit 1
+          fi
           version=$(sed -n 's/^chore(main): release flameox \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' <<< "$PR_TITLE")
           if [[ -z "$version" ]]; then
             echo "Could not extract a stable version from release PR title: $PR_TITLE" >&2
