@@ -82,7 +82,14 @@ session-local in-memory DuckDB; it does not create a temporary SQLite database.
 
 ## Provider setup boundary
 
-An explicit `flameox setup --provider ...` invocation replaces the persistent
-uv tool environment with the complete selected Python extra set. System and
-vendor packages remain externally installed. Setup creates no project state and
-is not a prerequisite for explicit-path analysis.
+An explicit `flameox setup --provider ...` invocation adds the selected Python
+extras to the persistent uv tool environment while retaining extras from its
+existing uv receipt. The result reports the complete managed provider set.
+System and vendor packages remain externally installed. Setup creates no
+project state and is not a prerequisite for explicit-path analysis.
+
+Provider ownership is explicit during capture. External collectors installed
+with Flameox, such as py-spy, execute from the managed tool environment rather
+than ambient request `PATH`. In-process collectors, including coverage.py and
+Memray, must be installed in the declared workload interpreter; capture probes
+that interpreter before execution and never substitutes Flameox's interpreter.

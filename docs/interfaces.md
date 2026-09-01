@@ -97,9 +97,10 @@ flameox capture [--preserve] -- <argv...>
 flameox evidence query|show
 ```
 
-`setup` prints stdio configuration. Repeated `--provider` options explicitly
-select the complete Python provider-extra set installed into a persistent uv
-tool environment. System and vendor providers receive external installation
-guidance. Setup does not create a project repository, durable operation, or MCP
-setup endpoint. Other CLI commands construct the same runtime and project-root
-rules used by MCP.
+`setup` prints stdio configuration. Repeated `--provider` options add Python
+provider extras to a persistent uv tool environment without removing its
+existing extras, and the result reports the complete managed provider set.
+System and vendor providers receive external installation guidance. Setup does
+not create a project repository, durable operation, or MCP setup endpoint.
+Other CLI commands construct the same runtime and project-root rules used by
+MCP.
