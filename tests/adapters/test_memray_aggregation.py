@@ -94,6 +94,18 @@ def test_memray_frame_identity_is_computed_once_across_metrics(
     assert len(projection.aggregates) == 8
 
 
+def test_memray_aggregation_uses_one_bounded_database_thread(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    try:
+        threads = state.connection.execute(
+            "SELECT value FROM duckdb_settings() WHERE name = 'threads'"
+        ).fetchone()
+    finally:
+        state.close()
+
+    assert threads == ("1",)
+
+
 def test_memray_aggregation_reports_record_frame_and_depth_coverage(tmp_path: Path) -> None:
     state = _state(
         tmp_path,

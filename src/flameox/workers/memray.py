@@ -100,7 +100,13 @@ class _AggregationState:
         self.frame_cache: dict[tuple[str, str, int], str] = {}
         self.contributions = 0
         self.pending_stack: tuple[str, tuple[str, ...], int, int] | None = None
-        self.connection = duckdb.connect(":memory:")
+        self.connection = duckdb.connect(
+            ":memory:",
+            config={
+                "threads": "1",
+                "preserve_insertion_order": "false",
+            },
+        )
         self.connection.begin()
         self.connection.execute(
             """
@@ -652,7 +658,6 @@ def _write_table(
 def _handle(request: MemrayWorkerRequest, job_root: Path) -> MemrayWorkerResult:
     try:
         import memray
-        from memray._memray import compute_statistics
     except ImportError as error:
         raise DomainError(
             ErrorCode.UNAVAILABLE_CAPABILITY,
@@ -669,22 +674,6 @@ def _handle(request: MemrayWorkerRequest, job_root: Path) -> MemrayWorkerResult:
         def report(progress: MemrayWorkerProgress) -> None:
             atomic_write_json(progress_path, progress.model_dump(mode="json"))
 
-        report(
-            MemrayWorkerProgress(
-                phase="computing_statistics",
-                records_seen=0,
-                records_selected=0,
-                record_bytes_seen=0,
-            )
-        )
-        try:
-            stats = compute_statistics(
-                request.artifact_path,
-                report_progress=False,
-                num_largest=1,
-            )
-        except NotImplementedError:
-            stats = None
         state = _AggregationState(
             limits=request.limits,
             run_id=request.run_id,
@@ -709,13 +698,19 @@ def _handle(request: MemrayWorkerRequest, job_root: Path) -> MemrayWorkerResult:
                     progress=report,
                 )
                 allocation_coverage: MemrayMetricCoverageState
+                allocation_operations = 0
+
+                def allocation_records() -> Iterable[Any]:
+                    nonlocal allocation_operations
+                    for record in reader.get_allocation_records():
+                        if int(record.size) <= 0:
+                            continue
+                        allocation_operations += int(record.n_allocations)
+                        yield record
+
                 try:
                     _allocated_bytes, allocation_coverage = _aggregate(
-                        (
-                            record
-                            for record in reader.get_allocation_records()
-                            if int(record.size) > 0
-                        ),
+                        allocation_records(),
                         metric="memory.allocated",
                         state=state,
                         progress=report,
@@ -756,16 +751,16 @@ def _handle(request: MemrayWorkerRequest, job_root: Path) -> MemrayWorkerResult:
     ]
     if temporary_allocated is not None:
         metrics.append(("memory.temporary", temporary_allocated, "bytes", "total"))
-    if stats is not None:
+    if isinstance(allocation_coverage, MemrayMetricCoverage):
         metrics.extend(
             (
                 (
                     "memory.allocation_operations",
-                    int(stats.total_num_allocations),
+                    allocation_operations,
                     "count",
                     "total",
                 ),
-                ("memory.allocated_bytes", int(stats.total_memory_allocated), "bytes", "total"),
+                ("memory.allocated_bytes", _allocated_bytes, "bytes", "total"),
             )
         )
     measurement_rows: list[dict[str, Any]] = [
@@ -886,8 +881,12 @@ def _handle(request: MemrayWorkerRequest, job_root: Path) -> MemrayWorkerResult:
         peak_memory_bytes=int(metadata.peak_memory),
         retained_end_bytes=retained_end,
         temporary_allocated_bytes=temporary_allocated,
-        allocation_operations=(int(stats.total_num_allocations) if stats is not None else None),
-        total_allocated_bytes=(int(stats.total_memory_allocated) if stats is not None else None),
+        allocation_operations=(
+            allocation_operations if isinstance(allocation_coverage, MemrayMetricCoverage) else None
+        ),
+        total_allocated_bytes=(
+            _allocated_bytes if isinstance(allocation_coverage, MemrayMetricCoverage) else None
+        ),
         capture_records=int(metadata.total_allocations),
         has_native_traces=bool(metadata.has_native_traces),
         coverage=MemrayExtractionCoverage(
