@@ -30,9 +30,10 @@ uv run flameox mcp serve --project-root "$PWD"
 ```
 
 `flameox setup` prints the equivalent stdio client configuration. Explicit
-`--provider` selections install the matching Python extras into a persistent uv
-tool environment; system and vendor tools are diagnosed with external install
-guidance. Setup never initializes the project or creates `.flameox`.
+`--provider` selections add the matching Python extras to a persistent uv tool
+environment without removing its existing provider extras. System and vendor
+tools are diagnosed with external install guidance. Setup never initializes the
+project or creates `.flameox`.
 
 ## Authority model
 
@@ -73,14 +74,21 @@ The server exposes exactly six tools:
 - `query_evidence`
 
 It exposes one resource template, `flameox://evidence/{evidence_id}`, for the
-canonical immutable manifest. Native artifact bytes are deliberately not
-available as MCP resources.
+digest-bound, redacted projection of the canonical immutable manifest. Full
+argv, environment values, working directories, and host paths remain available
+only through explicit local manifest inspection. Native artifact bytes are
+deliberately not available as MCP resources.
 
 Direct capture accepts an argv array, a project-contained cwd, bounded
 environment overrides, provider and analysis arguments, and limits. Shell
 strings are never accepted. Work remains owned by the live MCP request, so SDK
 progress and cancellation apply directly; there are no detached or
 restart-surviving tasks.
+
+Managed external collectors such as py-spy execute from Flameox's uv tool
+environment. In-process collectors such as coverage.py and Memray are verified
+in, and run with, the workload's declared Python interpreter. Flameox does not
+substitute one Python runtime for the other.
 
 ## Evidence quality
 

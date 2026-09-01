@@ -40,10 +40,12 @@ PathSource     {kind: "path", path, format?, producer?, expected_sha256?}
 EvidenceSource {kind: "evidence", evidence_id, artifact_role?}
 ```
 
-Continuations are opaque, self-validating, and cryptographically bound to the
-request and exact input digests. They contain no authority or artifact data and
-can cross process boundaries, so a CLI invocation can resume a previous page. A
-changed input cannot reuse a continuation.
+Continuations are opaque integrity cursors bound to the request and exact input
+digests. They contain no authority, credentials, or artifact data and are not
+an authentication boundary: a caller already authorized to submit the analysis
+can choose which of its rows to request. They can cross process boundaries, so
+a CLI invocation can resume a previous page. A changed input cannot reuse a
+continuation.
 
 Projection providers may expose a bounded prefix when their native reader cannot
 resume safely. Such results keep `coverage.complete=false`, identify
