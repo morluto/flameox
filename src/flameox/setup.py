@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from packaging.requirements import InvalidRequirement, Requirement
-
 from flameox import __version__
 
 PYTHON_PROVIDER_EXTRAS = {
@@ -51,20 +49,13 @@ def managed_tool_extras(tool_directory: Path) -> set[str]:
     try:
         document: Any = tomllib.loads(receipt.read_text())
         requirements = document["tool"]["requirements"]
-        extras: Any = []
-        for item in requirements:
-            if isinstance(item, str):
-                requirement = Requirement(item)
-                if requirement.name == "flameox":
-                    extras = list(requirement.extras)
-                    break
-            elif isinstance(item, dict) and item.get("name") == "flameox":
-                extras = item.get("extras", [])
-                break
-        else:
-            raise StopIteration
+        flameox = next(
+            item
+            for item in requirements
+            if isinstance(item, dict) and item.get("name") == "flameox"
+        )
+        extras = flameox.get("extras", [])
     except (
-        InvalidRequirement,
         OSError,
         KeyError,
         StopIteration,

@@ -9,7 +9,7 @@ from typing import Any
 import anyio
 import pytest
 
-from flameox.runtime_contracts import CaptureTarget, PathSource
+from flameox.runtime_contracts import CaptureTarget, PathSource, RuntimeFailure
 from flameox.stateless import AnalysisRuntime
 
 
@@ -123,7 +123,7 @@ def test_collapsed_perf_stacks_are_bounded_cpu_evidence(tmp_path: Path) -> None:
     ]
 
 
-def test_pyspy_capture_uses_typed_options_and_analyzes_native_output(
+def test_pyspy_capture_rejects_ambient_path_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workload_python = sys.executable
@@ -151,23 +151,19 @@ def test_pyspy_capture_uses_typed_options_and_analyzes_native_output(
     async def exercise() -> None:
         runtime = AnalysisRuntime(tmp_path)
         try:
-            result = await runtime.capture_and_analyze(
-                CaptureTarget(
-                    argv=[workload_python, "-c", "print('target')"],
-                    provider_id="py-spy",
-                    capture_arguments={"rate": 250, "gil": True},
-                ),
-                "cpu.hotspots",
-            )
+            with pytest.raises(RuntimeFailure) as failure:
+                await runtime.capture_and_analyze(
+                    CaptureTarget(
+                        argv=[workload_python, "-c", "print('target')"],
+                        provider_id="py-spy",
+                        capture_arguments={"rate": 250, "gil": True},
+                    ),
+                    "cpu.hotspots",
+                )
         finally:
             runtime.close()
 
-        assert result["provider"]["id"] == "py-spy-speedscope"
-        capture_argv = result["capture"]["executions"][0]["capture_argv"]
-        assert capture_argv[:4] == ["py-spy", "record", "--format", "speedscope"]
-        assert capture_argv[6:8] == ["--rate", "250"]
-        assert "--gil" in capture_argv
-        assert workload_python in capture_argv
+        assert failure.value.code == "UNAVAILABLE_CAPABILITY"
 
     anyio.run(exercise)
 

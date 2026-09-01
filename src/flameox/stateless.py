@@ -1027,6 +1027,16 @@ class AnalysisRuntime:
             return str(candidate)
         return None
 
+    @staticmethod
+    def _require_managed_executable(name: str) -> str:
+        executable = AnalysisRuntime._managed_executable(name)
+        if executable is None:
+            raise RuntimeFailure(
+                "UNAVAILABLE_CAPABILITY",
+                f"Managed provider executable is unavailable: {name}. Run flameox setup.",
+            )
+        return executable
+
     def _require_capture_tool(
         self,
         executable: str,
@@ -1255,7 +1265,7 @@ class AnalysisRuntime:
                 pyspy_options.append("--native")
             return CaptureInvocation(
                 (
-                    AnalysisRuntime._managed_executable("py-spy") or "py-spy",
+                    AnalysisRuntime._require_managed_executable("py-spy"),
                     "record",
                     "--format",
                     "speedscope",
@@ -2792,7 +2802,7 @@ class AnalysisRuntime:
         if executable_path is None and probe.executable is not None:
             if probe.setup_provider is not None:
                 executable_path = AnalysisRuntime._managed_executable(probe.executable)
-            if executable_path is None:
+            else:
                 executable_path = shutil.which(probe.executable)
         return executable_path
 
