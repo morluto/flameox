@@ -126,6 +126,12 @@ def test_collapsed_perf_stacks_are_bounded_cpu_evidence(tmp_path: Path) -> None:
 def test_pyspy_capture_uses_typed_options_and_analyzes_native_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    workload_python = sys.executable
+    unmanaged_bin = tmp_path / "control" / "bin"
+    unmanaged_bin.mkdir(parents=True)
+    unmanaged_python = unmanaged_bin / "python"
+    unmanaged_python.symlink_to(workload_python)
+    monkeypatch.setattr("flameox.stateless.sys.executable", str(unmanaged_python))
     executable = tmp_path / "bin" / "py-spy"
     executable.parent.mkdir()
     profile = {
@@ -133,7 +139,7 @@ def test_pyspy_capture_uses_typed_options_and_analyzes_native_output(
         "profiles": [{"type": "sampled", "samples": [[0]], "weights": [1]}],
     }
     executable.write_text(
-        f"#!{sys.executable}\n"
+        f"#!{workload_python}\n"
         "import json, pathlib, sys\n"
         "arguments = sys.argv[1:]\n"
         "output = pathlib.Path(arguments[arguments.index('--output') + 1])\n"
@@ -147,7 +153,7 @@ def test_pyspy_capture_uses_typed_options_and_analyzes_native_output(
         try:
             result = await runtime.capture_and_analyze(
                 CaptureTarget(
-                    argv=[sys.executable, "-c", "print('target')"],
+                    argv=[workload_python, "-c", "print('target')"],
                     provider_id="py-spy",
                     capture_arguments={"rate": 250, "gil": True},
                 ),
@@ -161,7 +167,7 @@ def test_pyspy_capture_uses_typed_options_and_analyzes_native_output(
         assert capture_argv[:4] == ["py-spy", "record", "--format", "speedscope"]
         assert capture_argv[6:8] == ["--rate", "250"]
         assert "--gil" in capture_argv
-        assert sys.executable in capture_argv
+        assert workload_python in capture_argv
 
     anyio.run(exercise)
 
