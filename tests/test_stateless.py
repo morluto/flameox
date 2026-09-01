@@ -25,6 +25,7 @@ from mcp.shared.exceptions import MCPError
 from mcp_types import TextResourceContents
 from pydantic import ValidationError
 
+from flameox import __version__
 from flameox.canonical import canonical_bytes
 from flameox.mcp import create_server
 from flameox.providers.contracts import ProviderAnalysis
@@ -1426,7 +1427,7 @@ def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path
             resources = await session.list_resources()
             templates = await session.list_resource_templates()
 
-        assert initialized.server_info.version == "0.2.0"
+        assert initialized.server_info.version == __version__
         assert [tool.name for tool in tools.tools] == [
             "discover_capabilities",
             "inspect_capabilities",

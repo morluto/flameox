@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from flameox import __version__
 from flameox.cli import app
 
 pytestmark = pytest.mark.integration
@@ -140,7 +141,7 @@ def test_setup_installs_only_explicit_python_providers_and_guides_system_tools(
 
     def install(providers: list[str]) -> list[str]:
         selected.append(providers)
-        return ["uv", "tool", "install", "flameox[memory]==0.2.0"]
+        return ["uv", "tool", "install", f"flameox[memory]=={__version__}"]
 
     monkeypatch.setattr("flameox.cli.install_providers", install)
     result = CliRunner().invoke(

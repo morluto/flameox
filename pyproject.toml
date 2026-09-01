@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flameox"
-version = "0.2.0"
+version = "0.2.1"
 description = "Runtime evidence that helps agents trace, profile, and burn down hotspots in application and native code, GPU kernels, and inference stacks."
 readme = "README.md"
 license = "MIT"
@@ -22,6 +22,7 @@ dependencies = [
     "pyperf>=2.10,<2.11",
     "pyarrow>=20,<26",
     "pydantic>=2.13.4,<2.14",
+    "pytz>=2024.2",
     "rfc8785==0.1.4",
     "typer>=0.16,<1",
     "psutil>=7.0,<8",

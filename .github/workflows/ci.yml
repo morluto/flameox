@@ -145,7 +145,7 @@ jobs:
       - run: >-
           uv run deptry src
           --optional-dependencies-dev-groups dev,test
-          --per-rule-ignores 'DEP002=aiperf|py-spy|pytest'
+          --per-rule-ignores 'DEP002=aiperf|py-spy|pytest|pytz'
       - run: uv run pip-audit
 
   npm:

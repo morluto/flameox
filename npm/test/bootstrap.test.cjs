@@ -8,6 +8,7 @@ const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 
 const bootstrap = path.resolve(__dirname, "../bin/flameox.cjs");
+const packageJson = require("../package.json");
 
 function fakeUvx(directory) {
   const executable = path.join(directory, "uvx");
@@ -22,10 +23,10 @@ function fakeUvx(directory) {
 test("bootstrap reports its matching package version", () => {
   const result = spawnSync(process.execPath, [bootstrap, "--version"], { encoding: "utf8" });
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /^0\.2\.0\n$/);
+  assert.equal(result.stdout, `${packageJson.version}\n`);
 });
 
-test("setup hands off only the 0.2 setup command to uvx", () => {
+test("setup hands off the matching package version to uvx", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "flameox-bootstrap-"));
   const result = spawnSync(process.execPath, [bootstrap, "setup"], {
     encoding: "utf8",
@@ -34,7 +35,7 @@ test("setup hands off only the 0.2 setup command to uvx", () => {
 
   assert.equal(result.status, 0, result.stderr);
   const args = JSON.parse(result.stdout);
-  assert.ok(args.includes("flameox==0.2.0"));
+  assert.ok(args.includes(`flameox==${packageJson.version}`));
   assert.deepEqual(args.slice(-2), ["flameox", "setup"]);
   assert.match(result.stderr, /ephemeral Flameox Python runtime/);
 });
