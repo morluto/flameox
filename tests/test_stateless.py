@@ -860,6 +860,32 @@ def test_coverage_capture_uses_explicit_empty_config_and_native_data(tmp_path: P
     anyio.run(exercise)
 
 
+@pytest.mark.process
+def test_coverage_capture_rejects_workload_interpreter_without_provider(tmp_path: Path) -> None:
+    workload_python = tmp_path / "python"
+    workload_python.write_text("#!/bin/sh\nexit 7\n")
+    workload_python.chmod(0o755)
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(tmp_path, limits=RequestLimits(timeout_seconds=20))
+        try:
+            with pytest.raises(RuntimeFailure) as raised:
+                await runtime.capture_and_analyze(
+                    CaptureTarget(
+                        argv=[str(workload_python), "workload.py"],
+                        provider_id="coverage",
+                    ),
+                    "coverage.summary",
+                )
+        finally:
+            runtime.close()
+
+        assert raised.value.code == "UNAVAILABLE_CAPABILITY"
+        assert "workload interpreter" in raised.value.message
+
+    anyio.run(exercise)
+
+
 @pytest.mark.unit
 def test_nsight_parquetdir_is_analyzed_without_sqlite_or_repository(tmp_path: Path) -> None:
     export = tmp_path / "report.parquetdir"
@@ -1039,10 +1065,15 @@ def test_pytest_stream_has_typed_summary_and_bounded_rows(tmp_path: Path) -> Non
 
 @pytest.mark.process
 def test_pytest_capture_produces_analyzable_session_evidence(tmp_path: Path) -> None:
-    test_file = tmp_path / "test_sample.py"
+    (tmp_path / "local_module.py").write_text("VALUE = 7\n")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "conftest.py").write_text("from local_module import VALUE\nassert VALUE == 7\n")
+    test_file = tests_dir / "test_sample.py"
     test_file.write_text(
+        "from local_module import VALUE\n\n"
         "def test_passes():\n"
-        "    assert True\n\n"
+        "    assert VALUE == 7\n\n"
         "def test_skips():\n"
         "    import pytest\n"
         "    pytest.skip('bounded example')\n"
@@ -1195,6 +1226,32 @@ def test_direct_memray_capture_uses_typed_argv_and_preserves_native_output(
 
 
 @pytest.mark.process
+def test_memray_capture_rejects_workload_interpreter_without_provider(tmp_path: Path) -> None:
+    workload_python = tmp_path / "python"
+    workload_python.write_text("#!/bin/sh\nexit 7\n")
+    workload_python.chmod(0o755)
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(tmp_path, limits=RequestLimits(timeout_seconds=20))
+        try:
+            with pytest.raises(RuntimeFailure) as raised:
+                await runtime.capture_and_analyze(
+                    CaptureTarget(
+                        argv=[str(workload_python), "workload.py"],
+                        provider_id="memray",
+                    ),
+                    "memory.hotspots",
+                )
+        finally:
+            runtime.close()
+
+        assert raised.value.code == "UNAVAILABLE_CAPABILITY"
+        assert "memray >=1.17" in raised.value.message
+
+    anyio.run(exercise)
+
+
+@pytest.mark.process
 def test_aiperf_export_is_projected_without_prompts_or_repository(tmp_path: Path) -> None:
     pytest.importorskip("aiperf")
     export = tmp_path / "profile_export.jsonl"
@@ -1304,6 +1361,7 @@ def test_discovery_separates_builtin_readers_from_capture_dependencies(
 ) -> None:
     monkeypatch.setattr("flameox.stateless.shutil.which", lambda _name: None)
     runtime = AnalysisRuntime(tmp_path)
+    monkeypatch.setattr("flameox.stateless.sys.executable", str(tmp_path / "python"))
     discovered = runtime.discover_capabilities(
         sources=[PathSource(path="/profile.json", format="py-spy")],
         include_unavailable=True,
@@ -1319,6 +1377,81 @@ def test_discovery_separates_builtin_readers_from_capture_dependencies(
     )
     assert pyspy_capture["availability"]["available"] is False
     assert pyspy_capture["availability"]["missing_executable"] == "py-spy"
+
+
+@pytest.mark.unit
+def test_py_spy_capture_discovers_executable_in_managed_tool_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    managed_bin = tmp_path / "managed" / "bin"
+    managed_bin.mkdir(parents=True)
+    managed_python = managed_bin / "python"
+    managed_python.write_text("#!/bin/sh\nexit 0\n")
+    managed_python.chmod(0o755)
+    managed_pyspy = managed_bin / "py-spy"
+    managed_pyspy.write_text("#!/bin/sh\nexit 0\n")
+    managed_pyspy.chmod(0o755)
+    monkeypatch.setattr("flameox.stateless.sys.executable", str(managed_python))
+    monkeypatch.setattr("flameox.stateless.shutil.which", lambda _name: None)
+
+    runtime = AnalysisRuntime(tmp_path)
+    try:
+        inspected = runtime.inspect_capabilities(["cpu.hotspots"])
+    finally:
+        runtime.close()
+
+    capture = next(
+        item
+        for item in inspected["capabilities"][0]["capture_providers"]
+        if item["id"] == "py-spy"
+    )
+    assert capture["availability"]["available"] is True
+    assert capture["availability"]["executable"] == str(managed_pyspy)
+
+
+@pytest.mark.process
+def test_py_spy_capture_executes_managed_tool_when_request_path_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workload_python = sys.executable
+    managed_bin = tmp_path / "managed" / "bin"
+    managed_bin.mkdir(parents=True)
+    managed_python = managed_bin / "python"
+    managed_python.symlink_to(workload_python)
+    managed_pyspy = managed_bin / "py-spy"
+    managed_pyspy.write_text(
+        f"#!{workload_python}\n"
+        "import json, sys\n"
+        "output = sys.argv[sys.argv.index('--output') + 1]\n"
+        "document = {\n"
+        "    'shared': {'frames': [{'name': 'work', 'file': 'work.py', 'line': 1}]},\n"
+        "    'profiles': [{'type': 'sampled', 'samples': [[0]], 'weights': [1.0]}],\n"
+        "}\n"
+        "with open(output, 'w') as stream:\n"
+        "    json.dump(document, stream)\n"
+    )
+    managed_pyspy.chmod(0o755)
+    monkeypatch.setattr("flameox.stateless.sys.executable", str(managed_python))
+
+    async def exercise() -> dict[str, Any]:
+        runtime = AnalysisRuntime(tmp_path)
+        try:
+            return await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[workload_python, "-c", "sum(range(100))"],
+                    environment={"PATH": ""},
+                    provider_id="py-spy",
+                ),
+                "cpu.hotspots",
+            )
+        finally:
+            runtime.close()
+
+    result = anyio.run(exercise)
+    execution = result["capture"]["executions"][0]
+    assert execution["capture_argv"][0] == str(managed_pyspy)
+    assert execution["status"] == "succeeded"
+    assert result["provider"]["id"] == "py-spy-speedscope"
 
 
 @pytest.mark.unit
@@ -1358,6 +1491,23 @@ def test_discovery_reports_missing_and_unsupported_python_providers(
     memory = next(item for item in unsupported["capabilities"] if item["id"] == "memory.hotspots")
     assert memory["available"] is False
     assert memory["providers"][0]["unsupported_version"] is True
+
+
+@pytest.mark.unit
+def test_in_process_capture_availability_is_workload_interpreter_dependent(
+    tmp_path: Path,
+) -> None:
+    runtime = AnalysisRuntime(tmp_path)
+    try:
+        inspected = runtime.inspect_capabilities(["coverage.summary", "memory.hotspots"])
+    finally:
+        runtime.close()
+
+    for capability in inspected["capabilities"]:
+        capture = capability["capture_providers"][0]
+        assert capture["availability"]["available"] is None
+        assert capture["availability"]["status"] == "target_dependent"
+        assert capture["availability"]["environment_scope"] == "workload_interpreter"
 
 
 @pytest.mark.unit
@@ -1624,7 +1774,7 @@ def test_mcp_evidence_resource_redacts_capture_provenance(tmp_path: Path) -> Non
 
 @pytest.mark.integration
 def test_mcp_validation_unknown_capability_and_failed_execution_are_typed(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
@@ -1655,6 +1805,9 @@ def test_mcp_validation_unknown_capability_and_failed_execution_are_typed(
 
             empty_path = tmp_path / "empty-bin"
             empty_path.mkdir()
+            unmanaged_python = empty_path / "python"
+            unmanaged_python.symlink_to(sys.executable)
+            monkeypatch.setattr("flameox.stateless.sys.executable", str(unmanaged_python))
             unavailable = await client.call_tool(
                 "capture_and_analyze",
                 {

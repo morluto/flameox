@@ -38,6 +38,7 @@ from flameox.execution import (
     ResourcePolicy,
     SubprocessBroker,
 )
+from flameox.process_models import process_exit_code
 from flameox.providers.aiperf import AIPerfProvider
 from flameox.providers.benchmarks import BenchmarkProvider
 from flameox.providers.contracts import (
@@ -363,10 +364,35 @@ class AnalysisRuntime:
                 "id": provider_id,
                 "capture_argument_schema": model.model_json_schema(mode="validation"),
                 "artifact": artifact,
-                "availability": self._probe_provider(CAPTURE_PROBES[provider_id]),
+                "availability": self._capture_provider_availability(provider_id),
             }
             for provider_id, model, artifact in providers
         ]
+
+    def _capture_provider_availability(self, provider_id: str) -> dict[str, Any]:
+        availability = self._probe_provider(CAPTURE_PROBES[provider_id])
+        if provider_id not in {"coverage", "memray"}:
+            return availability
+        distribution, supported_versions = {
+            "coverage": ("coverage", ">=7.14,<8"),
+            "memray": ("memray", ">=1.17"),
+        }[provider_id]
+        return {
+            **availability,
+            "available": None,
+            "status": "target_dependent",
+            "environment_scope": "workload_interpreter",
+            "version": None,
+            "limitations": [
+                (
+                    f"Capture requires {distribution} {supported_versions} in the declared "
+                    "workload interpreter; Flameox validates it before execution."
+                )
+            ],
+            "remediation": [
+                f"Install {distribution} {supported_versions} into the workload interpreter."
+            ],
+        }
 
     def analyze(
         self,
@@ -994,6 +1020,13 @@ class AnalysisRuntime:
             )
             raise RuntimeFailure(code, error.message) from error
 
+    @staticmethod
+    def _managed_executable(name: str) -> str | None:
+        candidate = Path(sys.executable).with_name(name)
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+        return None
+
     def _require_capture_tool(
         self,
         executable: str,
@@ -1020,6 +1053,13 @@ class AnalysisRuntime:
         request_scratch: Path,
     ) -> tuple[CaptureInvocation, ResolvedExecutable]:
         try:
+            self._require_workload_python_provider(
+                provider_id,
+                target_argv,
+                environment,
+                cwd=cwd,
+                request_scratch=request_scratch,
+            )
             invocation = self._capture_invocation(
                 provider_id, target_argv, environment, arguments, directory
             )
@@ -1033,6 +1073,73 @@ class AnalysisRuntime:
             shutil.rmtree(request_scratch, ignore_errors=True)
             raise
         return invocation, binding
+
+    def _require_workload_python_provider(
+        self,
+        provider_id: str,
+        target_argv: list[str],
+        environment: dict[str, str],
+        *,
+        cwd: Path,
+        request_scratch: Path,
+    ) -> None:
+        requirements = {
+            "coverage": ("coverage", "coverage", ">=7.14,<8"),
+            "memray": ("memray", "memray", ">=1.17"),
+        }
+        requirement = requirements.get(provider_id)
+        if requirement is None:
+            return
+        module, distribution, supported_versions = requirement
+        if len(target_argv) < 2:
+            return
+        try:
+            binding = self._require_capture_tool(
+                target_argv[0],
+                cwd=cwd,
+                environment={**os.environ, **environment},
+                request_scratch=request_scratch,
+            )
+            probe = self.broker.run_sync(
+                ExecutionRequest(
+                    argv=(
+                        target_argv[0],
+                        "-I",
+                        "-c",
+                        (
+                            "import importlib.metadata as m,importlib.util as u;"
+                            f"assert u.find_spec({module!r}) is not None;"
+                            f"print(m.version({distribution!r}))"
+                        ),
+                    ),
+                    executable_binding=binding,
+                    cwd=cwd,
+                    environment_allowlist=("PATH",),
+                    environment_overrides=environment,
+                    allowed_working_roots=(self.project_root,),
+                    timeout_seconds=10,
+                    max_output_bytes=4_096,
+                )
+            )
+            version = probe.stdout.decode("utf-8", errors="replace").strip()
+            available = (
+                process_exit_code(probe.process.termination) == 0
+                and bool(version)
+                and Version(version) in SpecifierSet(supported_versions)
+            )
+        except (DomainError, InvalidVersion, OSError, UnicodeError):
+            available = False
+        if available:
+            return
+        shutil.rmtree(request_scratch, ignore_errors=True)
+        raise RuntimeFailure(
+            "UNAVAILABLE_CAPABILITY",
+            (
+                f"{distribution} {supported_versions} is not available in the workload "
+                f"interpreter {target_argv[0]!r}. Install it into that interpreter without "
+                "changing the declared workload environment, then retry."
+            ),
+        )
 
     def _resolve_capture_artifact(
         self,
@@ -1148,7 +1255,7 @@ class AnalysisRuntime:
                 pyspy_options.append("--native")
             return CaptureInvocation(
                 (
-                    "py-spy",
+                    AnalysisRuntime._managed_executable("py-spy") or "py-spy",
                     "record",
                     "--format",
                     "speedscope",
@@ -1238,7 +1345,19 @@ class AnalysisRuntime:
         output = directory / "pytest.jsonl"
         runner = Path(__file__).with_name("pytest_runner.py").resolve()
         return CaptureInvocation(
-            (target_argv[0], str(runner), "--output", str(output), "--", *target_argv[3:]),
+            (
+                target_argv[0],
+                "-c",
+                (
+                    "import runpy,sys; runner=sys.argv.pop(1); "
+                    "runpy.run_path(runner,run_name='__main__')"
+                ),
+                str(runner),
+                "--output",
+                str(output),
+                "--",
+                *target_argv[3:],
+            ),
             environment,
             ((output, "pytest", "reliability"),),
         )
@@ -2603,13 +2722,7 @@ class AnalysisRuntime:
                             f"Provider version {version} is outside {probe.supported_versions}."
                         )
 
-        executable_path: str | None = None
-        if probe.configured_path_environment is not None:
-            configured = os.environ.get(probe.configured_path_environment)
-            if configured and Path(configured).is_file():
-                executable_path = configured
-        if executable_path is None and probe.executable is not None:
-            executable_path = shutil.which(probe.executable)
+        executable_path = AnalysisRuntime._probe_executable(probe)
         missing_executable = (
             probe.executable if probe.executable is not None and executable_path is None else None
         )
@@ -2661,12 +2774,27 @@ class AnalysisRuntime:
             "platforms": list(probe.platforms),
             "missing_package": missing_package,
             "missing_executable": missing_executable,
+            "executable": executable_path,
             "missing_resource": missing_resource,
             "permission_limited": permission_limited,
             "unsupported_version": unsupported_version,
             "limitations": limitations,
             "remediation": remediation,
         }
+
+    @staticmethod
+    def _probe_executable(probe: ProviderProbe) -> str | None:
+        executable_path: str | None = None
+        if probe.configured_path_environment is not None:
+            configured = os.environ.get(probe.configured_path_environment)
+            if configured and Path(configured).is_file():
+                executable_path = configured
+        if executable_path is None and probe.executable is not None:
+            if probe.setup_provider is not None:
+                executable_path = AnalysisRuntime._managed_executable(probe.executable)
+            if executable_path is None:
+                executable_path = shutil.which(probe.executable)
+        return executable_path
 
     def _resolve_project_cwd(self, value: str) -> Path:
         candidate = Path(value)
