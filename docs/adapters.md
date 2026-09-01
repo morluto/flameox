@@ -56,6 +56,11 @@ provider arguments, and effective limits. They return typed observed/derived
 blocks, staged native outputs, coverage, truncation, and limitations. They never
 look up runs or mutable records.
 
+The runtime projects provider blocks into the RFC 8785 JSON domain before
+bounding or preservation. Native integers outside JSON's interoperable safe
+integer range are represented as exact decimal strings; they are never rounded
+or allowed to fail later during canonicalization.
+
 Native inputs remain byte-for-byte unchanged. Capture outputs stay in bounded
 session scratch until explicit preservation. Large derived tables are immutable
 files inside an evidence bundle, not rows in a durable database.

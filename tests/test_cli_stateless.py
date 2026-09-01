@@ -61,6 +61,52 @@ def test_analyze_preserves_only_when_requested(tmp_path: Path) -> None:
     assert (tmp_path / ".flameox" / "repository.json").is_file()
 
 
+def test_analyze_consumes_continuation_from_a_previous_cli_invocation(tmp_path: Path) -> None:
+    artifact = tmp_path / "samples.json"
+    artifact.write_text(json.dumps([{"value": value} for value in range(104)]))
+    runner = CliRunner()
+    arguments = [
+        "analyze",
+        "artifact.preview",
+        str(artifact),
+        "--project-root",
+        str(tmp_path),
+    ]
+
+    first = runner.invoke(app, arguments)
+    assert first.exit_code == 0, first.output
+    first_payload = json.loads(first.output)
+
+    second = runner.invoke(app, [*arguments, "--continuation", first_payload["continuation"]])
+    assert second.exit_code == 0, second.output
+    second_payload = json.loads(second.output)
+
+    assert [row["value"] for row in first_payload["blocks"][1]["rows"]] == list(range(100))
+    assert [row["value"] for row in second_payload["blocks"][1]["rows"]] == list(range(100, 104))
+
+
+def test_analyze_rejects_a_malformed_continuation_without_a_traceback(tmp_path: Path) -> None:
+    artifact = tmp_path / "samples.json"
+    artifact.write_text("[]")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "analyze",
+            "artifact.preview",
+            str(artifact),
+            "--continuation",
+            "not-a-token",
+            "--project-root",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert '"code": "INVALID_INPUT"' in result.stderr
+    assert "Traceback" not in result.output
+
+
 @pytest.mark.process
 def test_capture_accepts_argv_after_separator(tmp_path: Path) -> None:
     result = CliRunner().invoke(

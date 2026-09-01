@@ -10,7 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from flameox.runtime_contracts import CaptureTarget
+from flameox.runtime_contracts import CaptureTarget, PathSource
 from flameox.stateless import AnalysisRuntime
 
 
@@ -64,3 +64,26 @@ def test_nsight_systems_capture_preserves_native_report_and_exports_parquetdir(
     assert "profile --trace=cuda,nvtx" in profile
     assert "--export=sqlite" not in profile
     assert "export --type parquetdir" in export
+
+
+def test_nsight_systems_projects_native_uint64_identifiers_losslessly(tmp_path: Path) -> None:
+    parquetdir = tmp_path / "report.parquetdir"
+    parquetdir.mkdir()
+    native_id = 18_302_628_885_633_695_744
+    pq.write_table(
+        pa.table({"correlationId": pa.array([native_id], type=pa.uint64())}),
+        parquetdir / "CUDA_GPU_KERN_SUM.parquet",
+    )
+    runtime = AnalysisRuntime(tmp_path)
+    try:
+        result = runtime.analyze(
+            "gpu.launches",
+            [PathSource(path=str(parquetdir), format="nsys-parquet")],
+            {},
+        )
+        preserved = runtime.preserve_evidence(result["analysis_id"])
+    finally:
+        runtime.close()
+
+    assert result["blocks"][1]["rows"][0]["correlationId"] == str(native_id)
+    assert preserved["evidence_id"]

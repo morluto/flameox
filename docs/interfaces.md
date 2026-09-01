@@ -38,8 +38,16 @@ PathSource     {kind: "path", path, format?, producer?, expected_sha256?}
 EvidenceSource {kind: "evidence", evidence_id, artifact_role?}
 ```
 
-Continuations are opaque, session-bound, and cryptographically bound to the
-request and exact input digests. A changed input cannot reuse a continuation.
+Continuations are opaque, self-validating, and cryptographically bound to the
+request and exact input digests. They contain no authority or artifact data and
+can cross process boundaries, so a CLI invocation can resume a previous page. A
+changed input cannot reuse a continuation.
+
+Projection providers may expose a bounded prefix when their native reader cannot
+resume safely. Such results keep `coverage.complete=false`, identify
+`truncation.reason=provider_limit`, and do not emit a continuation after the last
+retrievable row. A continuation therefore always names a consumable next page;
+it never promises access beyond a provider's declared projection bound.
 
 Requests may lower startup row, result-byte, timeout, output-byte, and durable
 provenance-byte limits. Durable provenance bounds the captured argv and execution
@@ -77,7 +85,7 @@ The retained surface is:
 flameox setup
 flameox mcp serve|inspect
 flameox capabilities discover|inspect
-flameox analyze [--preserve]
+flameox analyze [--continuation TOKEN] [--preserve]
 flameox capture [--preserve] -- <argv...>
 flameox evidence query|show
 ```

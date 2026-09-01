@@ -371,7 +371,7 @@ class Coverage(StrictModel):
 
 
 class Truncation(StrictModel):
-    reason: Literal["row_limit", "result_bytes"]
+    reason: Literal["row_limit", "result_bytes", "provider_limit"]
     next_offset: int = Field(ge=0)
 
 

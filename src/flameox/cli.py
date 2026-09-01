@@ -158,6 +158,7 @@ def analyze(
     sources: Annotated[list[Path], typer.Argument()],
     arguments: Annotated[str, typer.Option("--arguments")] = "{}",
     format_name: Annotated[str | None, typer.Option("--format")] = None,
+    continuation: Annotated[str | None, typer.Option("--continuation")] = None,
     preserve: Annotated[bool, typer.Option("--preserve")] = False,
     project_root: Annotated[Path, typer.Option("--project-root")] = Path("."),
 ) -> None:
@@ -168,6 +169,7 @@ def analyze(
             capability_id,
             [PathSource(path=str(path.resolve()), format=format_name) for path in sources],
             _json_object(arguments, option="--arguments"),
+            continuation=continuation,
         )
         if preserve:
             result["preserved"] = runtime.preserve_evidence(str(result["analysis_id"]))

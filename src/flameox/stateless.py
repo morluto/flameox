@@ -40,7 +40,11 @@ from flameox.execution import (
 )
 from flameox.providers.aiperf import AIPerfProvider
 from flameox.providers.benchmarks import BenchmarkProvider
-from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
+from flameox.providers.contracts import (
+    ProviderAnalysis,
+    ProviderFailure,
+    canonical_provider_projection,
+)
 from flameox.providers.cpu import CpuProfileProvider
 from flameox.providers.inference_exports import InferenceExportProvider
 from flameox.providers.kernel_evidence import KernelEvidenceProvider
@@ -180,7 +184,6 @@ class AnalysisRuntime:
         self.project_root = project_root.resolve(strict=True)
         self.limits = limits or RequestLimits()
         self.session_id = f"{os.getpid()}-{secrets.token_hex(8)}"
-        self._secret = secrets.token_bytes(32)
         self._temporary = tempfile.TemporaryDirectory(prefix="flameox-session-")
         self.scratch = Path(self._temporary.name)
         self.scratch_max_bytes, self.scratch_max_files = scratch_max_bytes, scratch_max_files
@@ -409,14 +412,16 @@ class AnalysisRuntime:
         ).hexdigest()
         if cached := self.analyses.get(analysis_id):
             return self._copy_result(cached.result)
-        provider_analysis = self._provider_analysis(
-            capability_id,
-            resolved,
-            validated.model_dump(mode="json"),
-            # Projection providers must see the same bounded prefix on every page.
-            # Asking for offset + page size changes aggregates and mixed metric quotas.
-            max_rows=MAX_ROWS + 1,
-            limits=selected_limits,
+        provider_analysis = canonical_provider_projection(
+            self._provider_analysis(
+                capability_id,
+                resolved,
+                validated.model_dump(mode="json"),
+                # Projection providers must see the same bounded prefix on every page.
+                # Asking for offset + page size changes aggregates and mixed metric quotas.
+                max_rows=MAX_ROWS + 1,
+                limits=selected_limits,
+            )
         )
         if provider_analysis is None and capability.id != "artifact.preview":
             raise RuntimeFailure(
@@ -425,6 +430,8 @@ class AnalysisRuntime:
             )
         if provider_analysis is None:
             rows, observed, complete = self._read_rows(resolved, offset, selected_limits.max_rows)
+            continuation_available = not complete
+            truncation_reason = "row_limit"
             blocks: list[dict[str, Any]] = [
                 {
                     "type": "metrics",
@@ -440,14 +447,10 @@ class AnalysisRuntime:
                 raise RuntimeFailure("DECODE_FAILURE", "Provider table block is invalid")
             rows = provider_rows[offset : offset + selected_limits.max_rows]
             observed = provider_analysis.rows_observed
-            complete = provider_analysis.complete and len(provider_rows) <= (
-                offset + selected_limits.max_rows
-            )
-            if not rows and not complete:
-                raise RuntimeFailure(
-                    "LIMIT_EXCEEDED",
-                    "Provider output exceeded its bounded pagination window; use a narrower input.",
-                )
+            next_offset = offset + len(rows)
+            continuation_available = next_offset < len(provider_rows)
+            complete = provider_analysis.complete and not continuation_available
+            truncation_reason = "row_limit" if continuation_available else "provider_limit"
             blocks = [*provider_analysis.blocks[:-1], {"type": "table", "rows": rows}]
             provider_identity = {
                 "id": provider_analysis.provider_id,
@@ -480,8 +483,12 @@ class AnalysisRuntime:
             "continuation": None,
         }
         if not complete:
-            result["continuation"] = self._encode_continuation(identity, offset + len(rows))
-            result["truncation"] = {"reason": "row_limit", "next_offset": offset + len(rows)}
+            if continuation_available:
+                result["continuation"] = self._encode_continuation(identity, offset + len(rows))
+            result["truncation"] = {
+                "reason": truncation_reason,
+                "next_offset": offset + len(rows),
+            }
         self._shrink_result(result, selected_limits.max_result_bytes, identity, offset)
         body = {
             "evidence_kind": "analysis",
@@ -2321,9 +2328,9 @@ class AnalysisRuntime:
             "request": hashlib.sha256(canonical_bytes(identity)).hexdigest(),
             "offset": offset,
         }
-        signature = hashlib.sha256(self._secret + canonical_bytes(payload)).hexdigest()
+        checksum = hashlib.sha256(canonical_bytes(payload)).hexdigest()
         return (
-            base64.urlsafe_b64encode(canonical_bytes({"payload": payload, "signature": signature}))
+            base64.urlsafe_b64encode(canonical_bytes({"checksum": checksum, "payload": payload}))
             .decode()
             .rstrip("=")
         )
@@ -2336,9 +2343,9 @@ class AnalysisRuntime:
         try:
             value = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
             payload = value["payload"]
-            expected = hashlib.sha256(self._secret + canonical_bytes(payload)).hexdigest()
+            expected = hashlib.sha256(canonical_bytes(payload)).hexdigest()
             if (
-                not secrets.compare_digest(value["signature"], expected)
+                not secrets.compare_digest(value["checksum"], expected)
                 or payload["request"] != hashlib.sha256(canonical_bytes(identity)).hexdigest()
             ):
                 raise ValueError
