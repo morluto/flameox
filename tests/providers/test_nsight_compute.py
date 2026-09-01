@@ -8,7 +8,7 @@ from typing import Any
 import anyio
 import pytest
 
-from flameox.providers.contracts import ProviderAnalysis
+from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.providers.nsight_compute import find_report_interface
 from flameox.runtime_contracts import CaptureTarget, PathSource, RuntimeFailure
 from flameox.stateless import AnalysisRuntime
@@ -104,3 +104,67 @@ def test_nsight_compute_capture_uses_typed_bounded_options(
     assert "--replay-mode kernel" in invocation
     assert "--launch-skip 2 --launch-count 3" in invocation
     assert "--section SpeedOfLight" in invocation
+
+
+@pytest.mark.process
+def test_preserved_native_capture_survives_analysis_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "bin" / "ncu"
+    executable.parent.mkdir()
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import pathlib, sys\n"
+        "arguments = sys.argv[1:]\n"
+        "output = pathlib.Path(arguments[arguments.index('--export') + 1])\n"
+        "output.write_bytes(b'authoritative-native-report')\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
+
+    async def exercise() -> tuple[str, dict[str, Any]]:
+        runtime = AnalysisRuntime(tmp_path)
+
+        def fail_analysis(_path: Path, **_kwargs: object) -> ProviderAnalysis:
+            raise ProviderFailure("DECODE_FAILURE", "fixture decoder rejected report")
+
+        monkeypatch.setattr(runtime.nsight_compute, "analyze", fail_analysis)
+        try:
+            result = await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[sys.executable, "-c", "pass"],
+                    provider_id="nsight-compute",
+                ),
+                "gpu.kernel_metrics",
+                preserve=True,
+            )
+            return result["preserved"]["evidence_id"], result
+        finally:
+            runtime.close()
+
+    evidence_id, result = anyio.run(exercise)
+    assert result["capture"]["executions"][0]["status"] == "succeeded"
+    assert result["analysis_failure"] == {
+        "code": "DECODE_FAILURE",
+        "message": "fixture decoder rejected report",
+        "details": {},
+    }
+
+    restarted = AnalysisRuntime(tmp_path)
+    try:
+        manifest = restarted.read_evidence(evidence_id)
+    finally:
+        restarted.close()
+    native = next(
+        item for item in manifest["body"]["artifacts"] if item["format"] == "nsight-compute"
+    )
+    payload = (
+        tmp_path
+        / ".flameox"
+        / "artifacts"
+        / "sha256"
+        / native["sha256"][:2]
+        / native["sha256"]
+        / "payload"
+    )
+    assert payload.read_bytes() == b"authoritative-native-report"

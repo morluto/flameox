@@ -30,7 +30,7 @@ from flameox import __version__
 from flameox.canonical import canonical_bytes
 from flameox.mcp import create_server
 from flameox.providers.contracts import ProviderAnalysis
-from flameox.repository import EVIDENCE_MEDIA_TYPE, EvidenceRepository
+from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE, EvidenceRepository
 from flameox.runtime_contracts import (
     MAX_ROWS,
     CaptureTarget,
@@ -1468,7 +1468,7 @@ def test_mcp_catalog_is_exact_small_and_has_one_resource_template() -> None:
         assert all(tool.annotations and tool.annotations.open_world_hint is False for tool in tools)
         assert await server.list_resources() == []
         assert [item.uri_template for item in templates] == ["flameox://evidence/{evidence_id}"]
-        assert templates[0].mime_type == EVIDENCE_MEDIA_TYPE
+        assert templates[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
         catalog = json.dumps([tool.model_dump(mode="json") for tool in tools])
         assert len(catalog) < 128 * 1024
 
@@ -1539,7 +1539,7 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
             queried = await client.call_tool("query_evidence", {"limit": 10})
             assert queried.structured_content["evidence"][0]["evidence_id"] == evidence_id
             resource = await client.read_resource(f"flameox://evidence/{evidence_id}")
-            assert resource.contents[0].mime_type == EVIDENCE_MEDIA_TYPE
+            assert resource.contents[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
 
         async with Client(create_server(tmp_path), raise_exceptions=True) as restarted:
             reanalyzed = await restarted.call_tool(
@@ -1567,6 +1567,57 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
             assert json.loads(content.text)["evidence_id"] == evidence_id
             with pytest.raises(MCPError):
                 await restarted.read_resource(f"flameox://evidence/{'0' * 64}")
+
+    anyio.run(exercise)
+
+
+@pytest.mark.integration
+def test_mcp_evidence_resource_redacts_capture_provenance(tmp_path: Path) -> None:
+    secret_argument = "known-safe-argument-placeholder"
+    secret_environment = "known-safe-environment-placeholder"
+    secret_path = str(tmp_path.resolve())
+
+    async def exercise() -> None:
+        async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+            captured = await client.call_tool(
+                "capture_and_analyze",
+                {
+                    "target": {
+                        "argv": [sys.executable, "-c", "print('ok')", secret_argument],
+                        "cwd": ".",
+                        "environment": {"FLAMEOX_TEST_MARKER": secret_environment},
+                        "provider_id": "direct",
+                    },
+                    "capability_id": "artifact.preview",
+                },
+            )
+            assert captured.is_error is False
+            preserved = await client.call_tool(
+                "preserve_evidence",
+                {"analysis_id": captured.structured_content["analysis_id"]},
+            )
+            evidence_id = preserved.structured_content["evidence_id"]
+            resource = await client.read_resource(f"flameox://evidence/{evidence_id}")
+            content = resource.contents[0]
+            assert isinstance(content, TextResourceContents)
+            projection = content.text
+            assert secret_argument not in projection
+            assert secret_environment not in projection
+            assert secret_path not in projection
+            assert '"argv"' not in projection
+            assert '"capture_argv"' not in projection
+            assert '"cwd"' not in projection
+            assert '"environment"' not in projection
+
+            # The MCP projection must not weaken the canonical local provenance record.
+            canonical = AnalysisRuntime(tmp_path)
+            try:
+                manifest = json.dumps(canonical.read_evidence(evidence_id))
+            finally:
+                canonical.close()
+            assert secret_argument in manifest
+            assert secret_environment in manifest
+            assert secret_path in manifest
 
     anyio.run(exercise)
 

@@ -375,6 +375,12 @@ class Truncation(StrictModel):
     next_offset: int = Field(ge=0)
 
 
+class AnalysisFailure(StrictModel):
+    code: str
+    message: str
+    details: dict[str, JsonValue]
+
+
 class AnalysisResult(StrictModel):
     analysis_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     capability_id: str
@@ -386,6 +392,7 @@ class AnalysisResult(StrictModel):
     limitations: list[str]
     continuation: str | None
     capture: dict[str, JsonValue] | None = None
+    analysis_failure: AnalysisFailure | None = None
 
 
 @dataclass(frozen=True, slots=True)

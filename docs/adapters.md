@@ -65,6 +65,10 @@ Native inputs remain byte-for-byte unchanged. Capture outputs stay in bounded
 session scratch until explicit preservation. Large derived tables are immutable
 files inside an evidence bundle, not rows in a durable database.
 
+When capture-time preservation is requested, native outputs are published independently of
+downstream normalization success. A decoder failure is retained as a typed analysis failure next
+to authoritative native bytes rather than causing the capture to disappear.
+
 ## Isolation and conversion
 
 Unsafe or heavy decoders use the typed isolated-worker protocol and

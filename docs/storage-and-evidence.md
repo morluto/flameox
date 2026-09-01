@@ -40,12 +40,17 @@ analysis requests, the evidence-episode timestamp, data-file digests, coverage,
 and limitations. Process-local handles such as `analysis_id` and continuation
 tokens are excluded from preserved data.
 
-The stored envelope adds `format_version` and `evidence_id`. The canonical MCP
-resource media type is:
+The stored envelope adds `format_version` and `evidence_id`. The canonical manifest remains the
+local repository and CLI contract. MCP resources expose a separate redacted projection so durable
+provenance is not confused with agent-visible metadata:
 
 ```text
-application/vnd.flameox.evidence+json;version=1
+application/vnd.flameox.evidence-projection+json;version=1
 ```
+
+The projection retains immutable identities, digests, capture and analysis status, coverage, and
+provider identity. It replaces capture requests with digests and bounded status fields and never
+returns argv, environment values, working directories, input paths, or scratch paths.
 
 ## Publication
 
@@ -71,7 +76,9 @@ inventory digest before filtering. A continuation is bound to that inventory;
 mutation makes it stale rather than silently changing the page. Filters cover
 evidence kind, capability, provider, input digest, and time bounds.
 
-`flameox://evidence/{evidence_id}` returns the validated canonical manifest.
+`flameox://evidence/{evidence_id}` validates the canonical manifest and returns its redacted MCP
+projection. `flameox evidence show` remains the explicit local administrative view of the full
+canonical manifest.
 Missing or corrupt resources are MCP resource errors. Native payload bytes are
 not exposed through resources; their digest and role remain visible in the
 manifest.

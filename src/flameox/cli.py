@@ -209,14 +209,17 @@ def capture(
                 analysis_arguments=_json_object(analysis_arguments, option="--analysis-arguments"),
             ),
             capability_id,
+            preserve=preserve,
         )
 
     try:
         result = anyio.run(execute)
-        if preserve:
+        if preserve and "preserved" not in result:
             result["preserved"] = runtime.preserve_evidence(str(result["analysis_id"]))
         _write(result)
-        if any(item["status"] != "succeeded" for item in result["capture"]["executions"]):
+        if result.get("analysis_failure") is not None or any(
+            item["status"] != "succeeded" for item in result["capture"]["executions"]
+        ):
             raise typer.Exit(code=1)
     except (RuntimeFailure, ValidationError) as error:
         _cli_failure(error)

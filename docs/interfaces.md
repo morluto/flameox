@@ -22,8 +22,10 @@ There is one resource template:
 flameox://evidence/{evidence_id}
 ```
 
-`resources/list` is empty. `resources/read` returns the canonical manifest with
-the versioned media type. A missing resource is a protocol error.
+`resources/list` is empty. `resources/read` returns a redacted, digest-bound projection of the
+canonical manifest with its own versioned media type. It omits argv, environment values, working
+directories, and host paths. The local CLI `evidence show` command is the explicit full-provenance
+view. A missing resource is a protocol error.
 
 Tools do not advertise output schemas. Success uses structured content directly,
 without an `ok/result/error` envelope. Tool failures set `isError=true` and carry
@@ -60,6 +62,11 @@ A direct target contains an argv array, project-contained cwd, at most 32
 bounded environment overrides after experiment-case overrides are merged,
 provider ID, provider capture arguments, analysis arguments, and request limits.
 Shell command strings are not accepted.
+
+Callers may request preservation as part of capture. Once native collection succeeds, requested
+preservation publishes the native artifacts even if immediate analysis fails; the result then
+reports separate capture execution state and a typed `analysis_failure`. An analysis failure is
+never converted into empty successful evidence.
 
 Experiment mode adds 2-16 cases, 1-100 blocks, a seed, metric, estimand,
 practical threshold, and optional semantic-oracle argv. Version 0.2 evaluates

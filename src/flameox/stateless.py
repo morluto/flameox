@@ -526,6 +526,7 @@ class AnalysisRuntime:
         experiment: ExperimentDesign | None = None,
         limits: RequestLimits | None = None,
         progress: Any | None = None,
+        preserve: bool = False,
     ) -> dict[str, Any]:
         selected_limits = limits.lowered_against(self.limits) if limits else self.limits
         capability = CAPABILITY_BY_ID.get(capability_id)
@@ -752,15 +753,31 @@ class AnalysisRuntime:
         effective_capability_id, analysis_sources = self._capture_analysis_sources(
             capability_id, analysis_sources, captured
         )
-        result = self.analyze(
-            effective_capability_id,
-            [
-                PathSource(path=str(item.path), format=item.format, producer=item.producer)
-                for item in analysis_sources
-            ],
-            target.analysis_arguments,
-            limits=selected_limits,
-        )
+        try:
+            result = self.analyze(
+                effective_capability_id,
+                [
+                    PathSource(path=str(item.path), format=item.format, producer=item.producer)
+                    for item in analysis_sources
+                ],
+                target.analysis_arguments,
+                limits=selected_limits,
+            )
+        except RuntimeFailure as error:
+            if not preserve:
+                raise
+            result = self._capture_failure_result(
+                target=target,
+                capability_id=capability_id,
+                mode=mode,
+                experiment=experiment,
+                executions=executions,
+                captured=captured,
+                limits=selected_limits,
+                failure=error,
+            )
+            result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
+            return result
         cached = self.analyses[str(result["analysis_id"])]
         cached.sources = captured
         cached.manifest_body["capture_request"] = {
@@ -769,7 +786,7 @@ class AnalysisRuntime:
             "experiment": experiment.model_dump(mode="json") if experiment else None,
             "executions": executions,
         }
-        return self._finalize_capture_result(
+        result = self._finalize_capture_result(
             result,
             cached,
             capability_id=capability_id,
@@ -778,6 +795,93 @@ class AnalysisRuntime:
             executions=executions,
             max_result_bytes=selected_limits.max_result_bytes,
         )
+        if preserve:
+            result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
+        return result
+
+    def _capture_failure_result(
+        self,
+        *,
+        target: CaptureTarget,
+        capability_id: str,
+        mode: str,
+        experiment: ExperimentDesign | None,
+        executions: list[dict[str, Any]],
+        captured: list[ResolvedSource],
+        limits: RequestLimits,
+        failure: RuntimeFailure,
+    ) -> dict[str, Any]:
+        capture_request = self._capture_request_body(target, mode, experiment, executions)
+        failure_body = {
+            "code": failure.code,
+            "message": failure.message,
+            "details": failure.details,
+        }
+        analysis_request = {
+            "capability_id": capability_id,
+            "arguments": target.analysis_arguments,
+            "limits": limits.model_dump(mode="json"),
+            "failure": failure_body,
+        }
+        analysis_id = hashlib.sha256(
+            self.session_id.encode()
+            + canonical_bytes(capture_request)
+            + canonical_bytes(analysis_request)
+            + canonical_bytes([item.sha256 for item in captured])
+        ).hexdigest()
+        result: dict[str, Any] = {
+            "analysis_id": analysis_id,
+            "capability_id": capability_id,
+            "provider": {"id": "flameox-capture", "version": __version__},
+            "inputs": [item.public() for item in captured],
+            "blocks": [
+                {
+                    "type": "metrics",
+                    "values": {
+                        "captured_artifact_count": len(captured),
+                        "analysis_succeeded": False,
+                    },
+                },
+                {"type": "table", "rows": []},
+            ],
+            "coverage": {"rows_returned": 0, "rows_observed": 0, "complete": False},
+            "truncation": None,
+            "limitations": [
+                "Native capture succeeded, but requested analysis failed; no analysis claims "
+                "are available."
+            ],
+            "continuation": None,
+            "capture": {
+                "mode": mode,
+                "requested_capability_id": capability_id,
+                "executions": executions,
+            },
+            "analysis_failure": failure_body,
+        }
+        validated = AnalysisResult.model_validate(result).model_dump(
+            mode="json", exclude_none=False
+        )
+        manifest_body = {
+            "evidence_kind": "capture",
+            "capability_id": capability_id,
+            "provider": validated["provider"],
+            "inputs": [
+                {
+                    "sha256": item.sha256,
+                    "size_bytes": item.size_bytes,
+                    "format": item.format,
+                    "role": item.role,
+                }
+                for item in captured
+            ],
+            "capture_request": capture_request,
+            "analysis_request": analysis_request,
+            "episode": {"created_at": datetime.now(UTC).isoformat()},
+            "coverage": validated["coverage"],
+            "limitations": validated["limitations"],
+        }
+        self.analyses[analysis_id] = CachedAnalysis(validated, captured, manifest_body)
+        return self._copy_result(validated)
 
     def _finalize_capture_result(
         self,
@@ -1499,6 +1603,14 @@ class AnalysisRuntime:
         except OSError as exc:
             raise RuntimeFailure("REPOSITORY_IO_FAILURE", str(exc)) from exc
 
+    def read_evidence_agent_projection(self, evidence_id: str) -> dict[str, Any]:
+        try:
+            return self.repository.read_agent_projection(evidence_id)
+        except RepositoryError as exc:
+            raise RuntimeFailure(exc.code, exc.message) from exc
+        except OSError as exc:
+            raise RuntimeFailure("REPOSITORY_IO_FAILURE", str(exc)) from exc
+
     def _resolve_sources(
         self, sources: Sequence[Source], limits: RequestLimits
     ) -> list[ResolvedSource]:
@@ -1893,7 +2005,10 @@ class AnalysisRuntime:
             if source.format == "nsys-rep":
                 path, provider_version = self._nsys_parquetdir(source, limits)
             return self.nsight_systems.analyze(
-                path, max_rows=max_rows, provider_version=provider_version
+                path,
+                capability_id=capability_id,
+                max_rows=max_rows,
+                provider_version=provider_version,
             )
         if source.format == "xctrace" and capability_id == "trace.summary":
             path, provider_version = self._xctrace_toc(source, limits)

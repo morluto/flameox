@@ -87,3 +87,52 @@ def test_nsight_systems_projects_native_uint64_identifiers_losslessly(tmp_path: 
 
     assert result["blocks"][1]["rows"][0]["correlationId"] == str(native_id)
     assert preserved["evidence_id"]
+
+
+@pytest.mark.process
+def test_cpu_only_nsight_capture_is_typed_negative_accelerator_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template = tmp_path / "os-runtime.parquet"
+    pq.write_table(pa.table({"start_ns": [1], "operation": ["poll"]}), template)
+    executable = tmp_path / "bin" / "nsys"
+    executable.parent.mkdir()
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import pathlib, shutil, sys\n"
+        "arguments = sys.argv[1:]\n"
+        "if arguments[0] == 'profile':\n"
+        "    stem = pathlib.Path(arguments[arguments.index('--output') + 1])\n"
+        "    stem.with_suffix('.nsys-rep').write_bytes(b'cpu-only-native-report')\n"
+        "else:\n"
+        "    output = pathlib.Path(arguments[arguments.index('--output') + 1])\n"
+        "    destination = output.with_suffix('.parquetdir')\n"
+        "    destination.mkdir(parents=True, exist_ok=True)\n"
+        f"    shutil.copyfile(pathlib.Path({str(template)!r}), "
+        "destination / 'OS_RUNTIME_SUM.parquet')\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
+
+    async def exercise() -> tuple[dict[str, Any], dict[str, Any]]:
+        runtime = AnalysisRuntime(tmp_path)
+        try:
+            result = await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[sys.executable, "-c", "pass"],
+                    provider_id="nsight-systems",
+                ),
+                "gpu.launches",
+                preserve=True,
+            )
+            manifest = runtime.read_evidence(result["preserved"]["evidence_id"])
+            return result, manifest
+        finally:
+            runtime.close()
+
+    result, manifest = anyio.run(exercise)
+    assert result["coverage"] == {"rows_returned": 0, "rows_observed": 0, "complete": True}
+    assert result["blocks"][0]["values"]["accelerator_activity_observed"] is False
+    assert "no_accelerator_activity_observed" in result["limitations"]
+    assert result["analysis_failure"] is None
+    assert any(item["format"] == "nsys-rep" for item in manifest["body"]["artifacts"])

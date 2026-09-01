@@ -60,3 +60,6 @@ All work stays local. Manifests preserve explicit paths, provider identity,
 effective requests, digests, and execution provenance, so callers must consider
 whether those values are sensitive before preservation. Flameox does not upload
 artifacts, launch native viewers, or expose payload bytes through MCP resources.
+The ordinary MCP evidence resource is a structurally allowlisted projection: full argv,
+environment values, working directories, source paths, and scratch paths remain available only
+through explicit local canonical-manifest inspection.

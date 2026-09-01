@@ -22,6 +22,7 @@ from flameox.canonical import canonical_bytes
 
 REPOSITORY_FORMAT = "1"
 EVIDENCE_MEDIA_TYPE = "application/vnd.flameox.evidence+json;version=1"
+AGENT_EVIDENCE_MEDIA_TYPE = "application/vnd.flameox.evidence-projection+json;version=1"
 
 
 class RepositoryError(RuntimeError):
@@ -192,6 +193,87 @@ class EvidenceRepository:
         if not path.is_dir():
             raise RepositoryError("MISSING_EVIDENCE", f"Evidence {evidence_id} does not exist.")
         return self._validate_evidence(path)
+
+    def read_agent_projection(self, evidence_id: str) -> dict[str, Any]:
+        """Return a bounded MCP-safe view without weakening canonical provenance."""
+
+        manifest = self.read(evidence_id)
+        body = manifest["body"]
+        capture_request = body["capture_request"]
+        safe_capture: dict[str, Any] | None = None
+        if capture_request is not None:
+            target = capture_request.get("target", {})
+            executions = capture_request.get("executions", [])
+            safe_capture = {
+                "request_sha256": hashlib.sha256(canonical_bytes(capture_request)).hexdigest(),
+                "mode": capture_request.get("mode"),
+                "target": {
+                    "provider_id": target.get("provider_id"),
+                    "argument_count": len(target.get("argv", [])),
+                    "environment_override_count": len(target.get("environment", {})),
+                },
+                "experiment_present": capture_request.get("experiment") is not None,
+                "executions": [self._safe_execution_projection(item) for item in executions],
+            }
+        analysis_request = body["analysis_request"]
+        safe_analysis = {
+            "request_sha256": hashlib.sha256(canonical_bytes(analysis_request)).hexdigest(),
+            "capability_id": analysis_request.get("capability_id"),
+            "inputs": [
+                {key: value for key, value in item.items() if key in {"sha256", "format"}}
+                for item in analysis_request.get("inputs", [])
+            ],
+            "offset": analysis_request.get("offset"),
+        }
+        limitations = body["limitations"]
+        return {
+            "format_version": manifest["format_version"],
+            "evidence_id": manifest["evidence_id"],
+            "body": {
+                "evidence_kind": body["evidence_kind"],
+                "capability_id": body["capability_id"],
+                "provider": body["provider"],
+                "inputs": [
+                    {key: item[key] for key in ("sha256", "size_bytes", "format")}
+                    for item in body["inputs"]
+                ],
+                "capture_request": safe_capture,
+                "analysis_request": safe_analysis,
+                "episode": body["episode"],
+                "coverage": body["coverage"],
+                "limitations": {
+                    "count": len(limitations),
+                    "sha256": hashlib.sha256(canonical_bytes(limitations)).hexdigest(),
+                },
+                "artifacts": [
+                    {key: item[key] for key in ("sha256", "size_bytes", "format")}
+                    for item in body["artifacts"]
+                ],
+                "data_files": [
+                    {key: item[key] for key in ("sha256", "size_bytes", "media_type")}
+                    for item in body["data_files"]
+                ],
+            },
+        }
+
+    @staticmethod
+    def _safe_execution_projection(execution: Mapping[str, Any]) -> dict[str, Any]:
+        oracle = execution.get("semantic_oracle")
+        safe_oracle = None
+        if isinstance(oracle, dict):
+            safe_oracle = {key: oracle.get(key) for key in ("returncode", "status", "failure_code")}
+        return {
+            key: execution.get(key)
+            for key in (
+                "block",
+                "returncode",
+                "status",
+                "failure_code",
+                "missing_artifact_roles",
+                "wall_time_ns",
+                "containment",
+            )
+        } | {"semantic_oracle": safe_oracle}
 
     def query(
         self,

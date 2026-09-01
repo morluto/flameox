@@ -16,7 +16,7 @@ from mcp_types import CallToolResult, ContentBlock, ResourceLink, TextContent, T
 from pydantic import ValidationError
 
 from flameox import __version__
-from flameox.repository import EVIDENCE_MEDIA_TYPE
+from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE
 from flameox.runtime_contracts import (
     CaptureTarget,
     ExperimentDesign,
@@ -158,6 +158,7 @@ def create_server(
         mode: Literal["single", "experiment"] = "single",
         experiment: ExperimentDesign | None = None,
         limits: RequestLimits | None = None,
+        preserve: bool = False,
         ctx: Context[AnalysisRuntime] | None = None,
     ) -> CallToolResult:
         """Execute a typed target through the broker and immediately analyze its outputs."""
@@ -174,6 +175,7 @@ def create_server(
                 experiment=experiment,
                 limits=limits,
                 progress=progress,
+                preserve=preserve,
             )
             failed = [
                 item for item in value["capture"]["executions"] if item["status"] != "succeeded"
@@ -186,7 +188,16 @@ def create_server(
                         details={"partial_evidence": value, "failed_executions": failed},
                     )
                 )
-            return _success(value)
+            preserved = value.get("preserved")
+            link = None
+            if isinstance(preserved, dict):
+                link = ResourceLink(
+                    type="resource_link",
+                    uri=preserved["uri"],
+                    name=f"Evidence {preserved['evidence_id']}",
+                    mime_type=AGENT_EVIDENCE_MEDIA_TYPE,
+                )
+            return _success(value, resource=link)
         except RuntimeFailure as error:
             return _failure(error)
         except ValidationError as error:
@@ -205,7 +216,7 @@ def create_server(
                 type="resource_link",
                 uri=value["uri"],
                 name=f"Evidence {value['evidence_id']}",
-                mime_type=EVIDENCE_MEDIA_TYPE,
+                mime_type=AGENT_EVIDENCE_MEDIA_TYPE,
             )
             return _success(value, resource=link)
         except RuntimeFailure as error:
@@ -242,12 +253,12 @@ def create_server(
     @server.resource(
         "flameox://evidence/{evidence_id}",
         name="immutable-evidence-manifest",
-        description="Canonical immutable Flameox evidence manifest.",
-        mime_type=EVIDENCE_MEDIA_TYPE,
+        description="Redacted projection of an immutable Flameox evidence manifest.",
+        mime_type=AGENT_EVIDENCE_MEDIA_TYPE,
     )
     async def evidence_manifest(evidence_id: str) -> str:
         try:
-            manifest = runtime().read_evidence(evidence_id)
+            manifest = runtime().read_evidence_agent_projection(evidence_id)
         except RuntimeFailure as error:
             # Resource handlers raise so missing resources are protocol errors, not content.
             raise FileNotFoundError(f"{error.code}: {error.message}") from error
