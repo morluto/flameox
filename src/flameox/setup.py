@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from packaging.requirements import InvalidRequirement, Requirement
+
 from flameox import __version__
 
 PYTHON_PROVIDER_EXTRAS = {
@@ -49,9 +51,26 @@ def managed_tool_extras(tool_directory: Path) -> set[str]:
     try:
         document: Any = tomllib.loads(receipt.read_text())
         requirements = document["tool"]["requirements"]
-        flameox = next(item for item in requirements if item.get("name") == "flameox")
-        extras = flameox.get("extras", [])
-    except (OSError, KeyError, StopIteration, TypeError, tomllib.TOMLDecodeError) as exc:
+        extras: Any = []
+        for item in requirements:
+            if isinstance(item, str):
+                requirement = Requirement(item)
+                if requirement.name == "flameox":
+                    extras = list(requirement.extras)
+                    break
+            elif isinstance(item, dict) and item.get("name") == "flameox":
+                extras = item.get("extras", [])
+                break
+        else:
+            raise StopIteration
+    except (
+        InvalidRequirement,
+        OSError,
+        KeyError,
+        StopIteration,
+        TypeError,
+        tomllib.TOMLDecodeError,
+    ) as exc:
         raise SetupFailure(f"Cannot read the existing uv tool receipt: {receipt}") from exc
     if not isinstance(extras, list) or not all(isinstance(item, str) for item in extras):
         raise SetupFailure(f"The existing uv tool receipt has invalid extras: {receipt}")

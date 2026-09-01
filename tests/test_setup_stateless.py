@@ -51,6 +51,14 @@ requirements = [{ name = "flameox", extras = ["cpu", "memory"], specifier = "==0
     assert managed_tool_extras(tmp_path) == {"cpu", "memory"}
 
 
+def test_managed_tool_extras_support_legacy_string_receipts(tmp_path: Path) -> None:
+    tool = tmp_path / "flameox"
+    tool.mkdir()
+    (tool / "uv-receipt.toml").write_text('[tool]\nrequirements = ["flameox[cpu,memory]==0.2.1"]\n')
+
+    assert managed_tool_extras(tmp_path) == {"cpu", "memory"}
+
+
 def test_provider_install_retains_existing_managed_providers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -685,6 +685,7 @@ def _handle(request: MemrayWorkerRequest, job_root: Path) -> MemrayWorkerResult:
         try:
             with memray.FileReader(request.artifact_path) as reader:
                 metadata = reader.metadata
+                has_allocation_history = metadata.file_format == memray.FileFormat.ALL_ALLOCATIONS
                 _, high_water_coverage = _aggregate(
                     reader.get_high_watermark_allocation_records(),
                     metric="memory.high_watermark",
@@ -751,7 +752,7 @@ def _handle(request: MemrayWorkerRequest, job_root: Path) -> MemrayWorkerResult:
     ]
     if temporary_allocated is not None:
         metrics.append(("memory.temporary", temporary_allocated, "bytes", "total"))
-    if isinstance(allocation_coverage, MemrayMetricCoverage):
+    if has_allocation_history and isinstance(allocation_coverage, MemrayMetricCoverage):
         metrics.extend(
             (
                 (
@@ -882,10 +883,14 @@ def _handle(request: MemrayWorkerRequest, job_root: Path) -> MemrayWorkerResult:
         retained_end_bytes=retained_end,
         temporary_allocated_bytes=temporary_allocated,
         allocation_operations=(
-            allocation_operations if isinstance(allocation_coverage, MemrayMetricCoverage) else None
+            allocation_operations
+            if has_allocation_history and isinstance(allocation_coverage, MemrayMetricCoverage)
+            else None
         ),
         total_allocated_bytes=(
-            _allocated_bytes if isinstance(allocation_coverage, MemrayMetricCoverage) else None
+            _allocated_bytes
+            if has_allocation_history and isinstance(allocation_coverage, MemrayMetricCoverage)
+            else None
         ),
         capture_records=int(metadata.total_allocations),
         has_native_traces=bool(metadata.has_native_traces),

@@ -153,8 +153,10 @@ def test_preserved_native_capture_survives_analysis_failure(
     restarted = AnalysisRuntime(tmp_path)
     try:
         manifest = restarted.read_evidence(evidence_id)
+        projection = restarted.repository.read_agent_projection(evidence_id)
     finally:
         restarted.close()
+    assert projection["body"]["analysis_request"]["failure"] == {"code": "DECODE_FAILURE"}
     native = next(
         item for item in manifest["body"]["artifacts"] if item["format"] == "nsight-compute"
     )

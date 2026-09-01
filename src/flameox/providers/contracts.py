@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -47,7 +48,11 @@ def _canonical_value(value: Any) -> Any:
             return str(value)
         return value
     if isinstance(value, float):
-        return value
+        if math.isfinite(value):
+            return value
+        if math.isnan(value):
+            return "NaN"
+        return "Infinity" if value > 0 else "-Infinity"
     if isinstance(value, list):
         return [_canonical_value(item) for item in value]
     if isinstance(value, dict):

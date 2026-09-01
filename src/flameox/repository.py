@@ -224,6 +224,11 @@ class EvidenceRepository:
                 for item in analysis_request.get("inputs", [])
             ],
             "offset": analysis_request.get("offset"),
+            "failure": (
+                {"code": analysis_request["failure"].get("code")}
+                if isinstance(analysis_request.get("failure"), dict)
+                else None
+            ),
         }
         limitations = body["limitations"]
         return {
