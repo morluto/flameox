@@ -10,8 +10,22 @@ from flameox.setup import (
     SetupFailure,
     install_providers,
     managed_tool_extras,
+    mcp_launcher,
     provider_install_command,
 )
+
+
+def test_mcp_launcher_pins_python_release_and_provider_extras() -> None:
+    command, args = mcp_launcher(["memray", "nsight-compute", "py-spy"])
+
+    assert command == "uvx"
+    assert args[:5] == [
+        "--python",
+        "3.12",
+        "--from",
+        f"flameox[cpu,memory]=={__version__}",
+        "flameox",
+    ]
 
 
 def test_provider_install_command_adds_declared_extras_to_managed_tool() -> None:

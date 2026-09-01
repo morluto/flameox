@@ -99,7 +99,10 @@ flameox capture [--preserve] -- <argv...>
 flameox evidence query|show
 ```
 
-`setup` prints stdio configuration. Repeated `--provider` options add Python
+`setup` prints stdio configuration that launches the exact running Flameox
+release through `uvx` on Python 3.12. It reports that no MCP client registration
+was changed; client-owned management interfaces apply the returned command.
+Repeated `--provider` options add Python
 provider extras to a persistent uv tool environment without removing its
 existing extras, and the result reports the complete managed provider set.
 System and vendor providers receive external installation guidance. Setup does

@@ -110,6 +110,24 @@ def provider_install_command(
     ]
 
 
+def mcp_launcher(providers: list[str]) -> tuple[str, list[str]]:
+    """Return a version-bound MCP launcher for client configuration."""
+
+    extras = sorted(
+        {
+            PYTHON_PROVIDER_EXTRAS[provider]
+            for provider in providers
+            if provider in PYTHON_PROVIDER_EXTRAS
+        }
+    )
+    extras_suffix = f"[{','.join(extras)}]" if extras else ""
+    requirement = f"flameox{extras_suffix}=={__version__}"
+    return (
+        "uvx",
+        ["--python", "3.12", "--from", requirement, "flameox"],
+    )
+
+
 def install_providers(providers: list[str]) -> ProviderInstallation:
     uv_text = shutil.which("uv")
     if uv_text is None:

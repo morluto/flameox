@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from typing import Annotated, Any, NoReturn, cast
 
@@ -13,7 +14,7 @@ from pydantic import ValidationError
 from flameox import __version__
 from flameox.mcp import create_server, run_server
 from flameox.runtime_contracts import CaptureTarget, PathSource, RuntimeFailure
-from flameox.setup import SetupFailure, install_providers, provider_guidance
+from flameox.setup import SetupFailure, install_providers, mcp_launcher, provider_guidance
 from flameox.stateless import AnalysisRuntime
 
 app = typer.Typer(
@@ -78,7 +79,7 @@ def setup(
     provider: Annotated[list[str] | None, typer.Option("--provider")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    """Configure MCP and optionally install explicitly selected provider extras."""
+    """Print version-bound MCP config and optionally install selected provider extras."""
     root = project_root.resolve(strict=True)
     selected = provider or []
     try:
@@ -88,9 +89,13 @@ def setup(
         guidance = provider_guidance(selected)
     except SetupFailure as error:
         raise typer.BadParameter(str(error), param_hint="--provider") from error
+    launcher, launcher_args = mcp_launcher(configured_providers)
+    args = [*launcher_args, "mcp", "serve", "--project-root", str(root)]
     value = {
-        "command": "flameox",
-        "args": ["mcp", "serve", "--project-root", str(root)],
+        "command": launcher,
+        "args": args,
+        "resolved_version": __version__,
+        "client_registration_changed": False,
         "project_root": str(root),
         "durable_repository": str(root / ".flameox"),
         "repository_created": False,
@@ -102,8 +107,8 @@ def setup(
         _write(value)
     else:
         typer.echo(
-            "Configure your MCP client to run:\n"
-            f"  flameox mcp serve --project-root {root}\n\n"
+            "No MCP client registration was changed. Configure your client to run:\n"
+            f"  {shlex.join([launcher, *args])}\n\n"
             + (
                 "Installed the selected Python provider extras into the persistent Flameox "
                 "uv tool environment.\n"

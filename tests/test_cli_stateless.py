@@ -176,7 +176,20 @@ def test_setup_prints_configuration_without_creating_repository(tmp_path: Path) 
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["args"] == ["mcp", "serve", "--project-root", str(tmp_path)]
+    assert payload["command"] == "uvx"
+    assert payload["args"] == [
+        "--python",
+        "3.12",
+        "--from",
+        f"flameox=={__version__}",
+        "flameox",
+        "mcp",
+        "serve",
+        "--project-root",
+        str(tmp_path),
+    ]
+    assert payload["resolved_version"] == __version__
+    assert payload["client_registration_changed"] is False
     assert payload["repository_created"] is False
     assert not (tmp_path / ".flameox").exists()
 
@@ -212,5 +225,6 @@ def test_setup_installs_only_explicit_python_providers_and_guides_system_tools(
     payload = json.loads(result.output)
     assert selected == [["memray", "nsight-compute"]]
     assert payload["providers"] == ["memray", "nsight-compute", "py-spy"]
+    assert f"flameox[cpu,memory]=={__version__}" in payload["args"]
     assert "extras/python" in payload["external_guidance"][0]
     assert not (tmp_path / ".flameox").exists()

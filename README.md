@@ -29,7 +29,10 @@ the startup working directory:
 uv run flameox mcp serve --project-root "$PWD"
 ```
 
-`flameox setup` prints the equivalent stdio client configuration. Explicit
+`flameox setup` prints a version-bound stdio client configuration using Python
+3.12 and the exact running Flameox release. It does not change an MCP client
+registration; apply the printed command through the client's supported MCP
+management interface. Explicit
 `--provider` selections add the matching Python extras to a persistent uv tool
 environment without removing its existing provider extras. System and vendor
 tools are diagnosed with external install guidance. Setup never initializes the
