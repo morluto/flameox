@@ -28,6 +28,10 @@ Session scratch has byte and file ceilings. A capture is rejected before its
 declared output budget could exhaust remaining capacity. Unpreserved files are
 never silently evicted and disappear at shutdown.
 
+Capture preflight is read-only and request-local. It may resolve and hash executable files, but it
+does not execute workload or oracle processes, run workload-interpreter package probes, create
+scratch children, publish evidence, or grant later execution authority.
+
 ## Input and output bounds
 
 - discovery sniffs at most 16 sources and reads only bounded headers;
@@ -41,6 +45,10 @@ never silently evicted and disappear at shutdown.
 
 Invalid digests fail before decoding. Decode and format failures never become
 empty successful evidence.
+
+Capture execution results identify the cancellation cause, configured threshold, available
+observation, unit, and a bounded recovery hint when the broker terminates a process for timeout,
+output, memory, writable-growth, or storage-reserve policy.
 
 ## Repository integrity
 

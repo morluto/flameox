@@ -91,6 +91,73 @@ def test_typed_capability_never_falls_back_to_generic_rows(tmp_path: Path) -> No
     assert failure.value.code == "UNSUPPORTED_FORMAT"
 
 
+@pytest.mark.unit
+def test_capture_rejects_declared_provider_capability_mismatch_before_execution(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "executed"
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(tmp_path)
+        try:
+            with pytest.raises(RuntimeFailure) as failure:
+                await runtime.capture_and_analyze(
+                    CaptureTarget(
+                        argv=[
+                            sys.executable,
+                            "-c",
+                            f"from pathlib import Path; Path({str(marker)!r}).touch()",
+                        ],
+                        provider_id="pyperf",
+                    ),
+                    "failures.summary",
+                )
+        finally:
+            runtime.close()
+        assert failure.value.code == "UNSUPPORTED_FORMAT"
+        assert failure.value.details["output_formats"] == ["pyperf"]
+        assert failure.value.details["compatible_capture_providers"] == [
+            "observations",
+            "pytest",
+        ]
+
+    anyio.run(exercise)
+    assert not marker.exists()
+
+
+@pytest.mark.unit
+def test_capture_preflight_is_read_only_and_returns_resolved_template(tmp_path: Path) -> None:
+    marker = tmp_path / "executed"
+    runtime = AnalysisRuntime(tmp_path)
+    before = list(runtime.scratch.rglob("*"))
+    try:
+        result = runtime.preflight_capture(
+            CaptureTarget(
+                argv=[
+                    sys.executable,
+                    "-c",
+                    f"from pathlib import Path; Path({str(marker)!r}).touch()",
+                ],
+                provider_id="pyperf",
+            ),
+            "benchmark.summary",
+        )
+        after = list(runtime.scratch.rglob("*"))
+    finally:
+        runtime.close()
+
+    assert result["authoritative"] is False
+    assert result["compatibility"]["status"] == "compatible"
+    assert result["cases"][0]["expected_artifacts"][0] == {
+        "role": "benchmark",
+        "format": "pyperf",
+        "path_template": "<request-scratch>/case-0001/benchmark.json",
+    }
+    assert result["cases"][0]["capture_argv_template"][1:4] == ["-m", "pyperf", "command"]
+    assert before == after == []
+    assert not marker.exists()
+
+
 def test_special_file_sources_are_rejected_before_decoding(tmp_path: Path) -> None:
     fifo = tmp_path / "input.fifo"
     os.mkfifo(fifo)
@@ -793,6 +860,66 @@ def test_pyperf_capture_binds_native_output_before_analysis(tmp_path: Path) -> N
 
 
 @pytest.mark.process
+def test_pyperf_capture_preserves_multiline_target_argv(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(tmp_path, limits=RequestLimits(timeout_seconds=20))
+        try:
+            code = "value = 1\nassert value == 1"
+            result = await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[sys.executable, "-c", code],
+                    provider_id="pyperf",
+                    capture_arguments={
+                        "processes": 1,
+                        "values": 1,
+                        "warmups": 0,
+                        "loops": 1,
+                        "min_time": 0.001,
+                        "name": "multiline",
+                    },
+                ),
+                "benchmark.summary",
+            )
+            assert result["provider"]["id"] == "pyperf"
+            assert result["capture"]["executions"][0]["argv"] == [sys.executable, "-c", code]
+            assert result["capture"]["executions"][0]["status"] == "succeeded"
+        finally:
+            runtime.close()
+
+    anyio.run(exercise)
+
+
+def test_composed_evidence_namespaces_colliding_source_roles(tmp_path: Path) -> None:
+    first_path = tmp_path / "first.json"
+    second_path = tmp_path / "second.json"
+    _write_pyperf_suite(first_path, [0.01])
+    _write_pyperf_suite(second_path, [0.02])
+    runtime = AnalysisRuntime(tmp_path)
+    try:
+        evidence_ids = []
+        for path in (first_path, second_path):
+            analysis = runtime.analyze(
+                "benchmark.summary", [PathSource(path=str(path), format="pyperf")], {}
+            )
+            evidence_ids.append(runtime.preserve_evidence(analysis["analysis_id"])["evidence_id"])
+        composed = runtime.analyze(
+            "benchmark.scaling",
+            [EvidenceSource(kind="evidence", evidence_id=value) for value in evidence_ids],
+            {},
+        )
+        preserved = runtime.preserve_evidence(composed["analysis_id"])
+        manifest = runtime.read_evidence(preserved["evidence_id"])
+    finally:
+        runtime.close()
+
+    assert {item["role"] for item in manifest["body"]["artifacts"]} == {
+        "source-0001/input",
+        "source-0002/input",
+    }
+    assert [item["role"] for item in manifest["body"]["inputs"]] == ["input", "input"]
+
+
+@pytest.mark.process
 def test_failed_provider_capture_returns_preservable_stream_evidence(tmp_path: Path) -> None:
     async def exercise() -> None:
         runtime = AnalysisRuntime(tmp_path, limits=RequestLimits(timeout_seconds=20))
@@ -1060,7 +1187,49 @@ def test_pytest_stream_has_typed_summary_and_bounded_rows(tmp_path: Path) -> Non
         "skipped": 0,
         "errored": 0,
     }
-    assert result["coverage"] == {"rows_returned": 2, "rows_observed": 5, "complete": False}
+    assert result["coverage"] == {"rows_returned": 1, "rows_observed": 1, "complete": True}
+    assert result["blocks"][1]["rows"][0]["classification"] == "unexecuted"
+
+
+@pytest.mark.unit
+def test_pytest_failure_identities_precede_large_successful_population(tmp_path: Path) -> None:
+    events = tmp_path / "pytest.jsonl"
+    nodeids = [f"tests/test_large.py::test_{index:04d}" for index in range(1_472)]
+    failing = set(nodeids[-15:])
+    payloads = [{"event": "test_collected", "nodeid": nodeid} for nodeid in nodeids]
+    payloads.extend(
+        {
+            "event": "test_phase",
+            "nodeid": nodeid,
+            "phase": "call",
+            "outcome": "failed" if nodeid in failing else "passed",
+        }
+        for nodeid in nodeids
+    )
+    payloads.append({"event": "run_finished"})
+    events.write_text("\n".join(json.dumps(item) for item in payloads) + "\n")
+    runtime = AnalysisRuntime(tmp_path)
+    try:
+        result = runtime.analyze(
+            "failures.summary",
+            [PathSource(path=str(events), format="pytest")],
+            {},
+            limits=RequestLimits(max_rows=10),
+        )
+        second = runtime.analyze(
+            "failures.summary",
+            [PathSource(path=str(events), format="pytest")],
+            {},
+            limits=RequestLimits(max_rows=10),
+            continuation=result["continuation"],
+        )
+    finally:
+        runtime.close()
+
+    rows = [*result["blocks"][1]["rows"], *second["blocks"][1]["rows"]]
+    assert {row["nodeid"] for row in rows} == failing
+    assert all(row["classification"] == "failed" for row in rows)
+    assert second["coverage"]["complete"] is True
 
 
 @pytest.mark.process
@@ -1598,7 +1767,7 @@ def test_discovery_requires_nsight_compute_official_reader(
 
 
 @pytest.mark.unit
-def test_mcp_catalog_is_exact_small_and_has_one_resource_template() -> None:
+def test_mcp_catalog_is_exact_small_typed_and_has_one_resource_template() -> None:
     async def inspect() -> None:
         server = create_server()
         tools = await server.list_tools()
@@ -1608,17 +1777,18 @@ def test_mcp_catalog_is_exact_small_and_has_one_resource_template() -> None:
             "discover_capabilities",
             "inspect_capabilities",
             "analyze",
+            "preflight_capture",
             "capture_and_analyze",
             "preserve_evidence",
             "query_evidence",
         ]
-        assert all(tool.output_schema is None for tool in tools)
+        assert all(tool.output_schema is not None for tool in tools)
         assert all(tool.annotations and tool.annotations.open_world_hint is False for tool in tools)
         assert await server.list_resources() == []
         assert [item.uri_template for item in templates] == ["flameox://evidence/{evidence_id}"]
         assert templates[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
         catalog = json.dumps([tool.model_dump(mode="json") for tool in tools])
-        assert len(catalog) < 128 * 1024
+        assert len(catalog) < 40 * 1024
 
     anyio.run(inspect)
 
@@ -1644,17 +1814,27 @@ def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path
             tools = await session.list_tools()
             resources = await session.list_resources()
             templates = await session.list_resource_templates()
+            inspected = await session.call_tool(
+                "inspect_capabilities", {"capability_ids": ["cpu.hotspots"]}
+            )
+            invalid = await session.call_tool(
+                "inspect_capabilities", {"capability_ids": ["unknown.capability"]}
+            )
+            await session.validate_tool_result("inspect_capabilities", inspected)
+            await session.validate_tool_result("inspect_capabilities", invalid)
 
         assert initialized.server_info.version == __version__
         assert [tool.name for tool in tools.tools] == [
             "discover_capabilities",
             "inspect_capabilities",
             "analyze",
+            "preflight_capture",
             "capture_and_analyze",
             "preserve_evidence",
             "query_evidence",
         ]
-        assert all(tool.output_schema is None for tool in tools.tools)
+        assert all(tool.output_schema is not None for tool in tools.tools)
+        assert invalid.is_error is True
         assert resources.resources == []
         assert [item.uri_template for item in templates.resource_templates] == [
             "flameox://evidence/{evidence_id}"
@@ -1902,6 +2082,9 @@ def test_timed_out_capture_returns_preservable_partial_evidence(tmp_path: Path) 
             execution = result["capture"]["executions"][0]
             assert execution["status"] == "failed"
             assert execution["failure_code"] == "EXECUTION_TIMEOUT"
+            assert execution["limit"]["kind"] == "timeout"
+            assert execution["limit"]["configured"] == 0.2
+            assert execution["limit"]["unit"] == "seconds"
             assert result["blocks"][1]["rows"][0]["text"] == "before-timeout"
             assert runtime.preserve_evidence(result["analysis_id"])["evidence_id"]
         finally:

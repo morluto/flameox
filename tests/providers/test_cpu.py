@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import cProfile
 import json
 import os
 import sys
@@ -11,6 +12,34 @@ import pytest
 
 from flameox.runtime_contracts import CaptureTarget, PathSource, RuntimeFailure
 from flameox.stateless import AnalysisRuntime
+
+
+def test_pstats_profile_is_bounded_deterministic_cpu_evidence(tmp_path: Path) -> None:
+    profile = tmp_path / "profile.pstats"
+
+    def work() -> int:
+        return sum(range(20))
+
+    profiler = cProfile.Profile()
+    profiler.runcall(work)
+    profiler.dump_stats(profile)
+    runtime = AnalysisRuntime(tmp_path)
+    try:
+        result = runtime.analyze(
+            "cpu.hotspots",
+            [PathSource(path=str(profile), format="pstats", producer="cProfile")],
+            {"metric": "cumulative_time_seconds"},
+        )
+    finally:
+        runtime.close()
+
+    assert result["provider"]["id"] == "python-pstats"
+    assert result["blocks"][0]["values"]["metric"] == "cumulative_time_seconds"
+    work_row = next(row for row in result["blocks"][1]["rows"] if row["function"] == "work")
+    assert work_row["total_calls"] == 1
+    assert work_row["primitive_calls"] == 1
+    assert work_row["cumulative_time_seconds"] >= work_row["self_time_seconds"]
+    assert any("no compatibility guarantee" in item for item in result["limitations"])
 
 
 def test_pyspy_speedscope_profile_ranks_typed_frames(tmp_path: Path) -> None:

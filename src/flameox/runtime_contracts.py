@@ -281,6 +281,141 @@ type CaptureArguments = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class CaptureArtifactContract:
+    role: str
+    format: str
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureProviderContract:
+    id: str
+    argument_model: type[StrictModel]
+    artifacts: tuple[CaptureArtifactContract, ...]
+    artifact_description: str
+    preview_streams: bool = False
+
+
+def _capture_provider(
+    provider_id: str,
+    argument_model: type[StrictModel],
+    artifacts: tuple[tuple[str, str], ...],
+    description: str,
+    *,
+    preview_streams: bool = False,
+) -> CaptureProviderContract:
+    return CaptureProviderContract(
+        provider_id,
+        argument_model,
+        tuple(CaptureArtifactContract(role, format_name) for role, format_name in artifacts),
+        description,
+        preview_streams,
+    )
+
+
+CAPTURE_PROVIDER_CONTRACTS = {
+    item.id: item
+    for item in (
+        _capture_provider(
+            "direct", EmptyArguments, (), "stdout and stderr text", preview_streams=True
+        ),
+        _capture_provider(
+            "pyperf", PyperfCaptureArguments, (("benchmark", "pyperf"),), "native pyperf JSON suite"
+        ),
+        _capture_provider(
+            "py-spy",
+            PySpyCaptureArguments,
+            (("cpu-profile", "py-spy"),),
+            "py-spy Speedscope profile",
+        ),
+        _capture_provider(
+            "perf",
+            PerfCaptureArguments,
+            (("cpu-profile", "perf-data"),),
+            "native perf.data profile",
+        ),
+        _capture_provider(
+            "node-cpu-profile",
+            EmptyArguments,
+            (("cpu-profile", "cpuprofile"),),
+            "native V8 CPU profile",
+        ),
+        _capture_provider(
+            "memray",
+            MemrayCaptureArguments,
+            (("memory", "memray"),),
+            "native Memray allocation file",
+        ),
+        _capture_provider(
+            "torch-profiler",
+            TorchProfilerCaptureArguments,
+            (("trace", "pytorch"),),
+            "native PyTorch Chrome trace",
+        ),
+        _capture_provider(
+            "benchmark-samples",
+            BenchmarkSamplesCaptureArguments,
+            (("benchmark", "samples"),),
+            "native Flameox benchmark samples",
+        ),
+        _capture_provider(
+            "nvbench",
+            EmptyArguments,
+            (("benchmark", "nvbench"),),
+            "native NVBench JSON-bin directory",
+        ),
+        _capture_provider(
+            "compute-sanitizer",
+            ComputeSanitizerCaptureArguments,
+            (("sanitizer", "compute-sanitizer"),),
+            "native Compute Sanitizer log",
+        ),
+        _capture_provider(
+            "nsight-systems",
+            NsightSystemsCaptureArguments,
+            (("trace", "nsys-rep"),),
+            "native Nsight Systems report",
+        ),
+        _capture_provider(
+            "nsight-compute",
+            NsightComputeCaptureArguments,
+            (("report", "nsight-compute"),),
+            "native Nsight Compute report",
+        ),
+        _capture_provider(
+            "rocprofv3",
+            RocprofCaptureArguments,
+            (("trace", "rocprof-pftrace"),),
+            "native ROCprof PFTrace",
+        ),
+        _capture_provider(
+            "xctrace",
+            XctraceCaptureArguments,
+            (("trace", "xctrace"),),
+            "native Apple .trace bundle",
+        ),
+        _capture_provider(
+            "coverage",
+            CoverageCaptureArguments,
+            (("coverage", "coverage"),),
+            "native coverage.py data file",
+        ),
+        _capture_provider(
+            "observations",
+            EmptyArguments,
+            (("observations", "observations"),),
+            "native Flameox observation stream",
+        ),
+        _capture_provider(
+            "pytest",
+            EmptyArguments,
+            (("reliability", "pytest"),),
+            "bounded native pytest event stream",
+        ),
+    )
+}
+
+
 class ExperimentCase(StrictModel):
     name: str = Field(min_length=1, max_length=80)
     argv: list[str] | None = Field(default=None, min_length=1, max_length=256)
@@ -460,7 +595,7 @@ CAPABILITIES = tuple(
     + _caps(
         ("cpu.hotspots",),
         "Rank bounded CPU evidence.",
-        ("cpuprofile", "py-spy", "perf", "perf-data"),
+        ("cpuprofile", "pstats", "py-spy", "perf", "perf-data"),
         SummaryArguments,
     )
     + _caps(

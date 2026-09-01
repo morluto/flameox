@@ -15,6 +15,10 @@ Each capability registry entry owns:
 - capture and analysis handlers;
 - bounded examples, limits, overhead, and limitations.
 
+One immutable capture-provider contract owns each provider's argument model, declared artifact
+roles and formats, and discovery description. Inspection, pre-execution compatibility checks, and
+capture argument validation consume that same contract so their format claims cannot drift.
+
 Discovery probes packages, executables, platform, supported version, permission,
 and required external resources without mutating the host. Missing dependencies
 are successful availability results with remediation outside Flameox. Invoking
@@ -29,7 +33,7 @@ Artifact analysis and typed capture are separate contracts:
 
 | Evidence family | Explicit artifact analysis | Typed capture provider |
 | --- | --- | --- |
-| CPU profiles | Node/V8, py-spy Speedscope, perf collapsed stacks, perf data | `node-cpu-profile`, `py-spy`, `perf` |
+| CPU profiles | Node/V8, cProfile pstats, py-spy Speedscope, perf collapsed stacks, perf data | `node-cpu-profile`, `py-spy`, `perf` |
 | Memory profiles | Memray | `memray` |
 | Benchmarks | pyperf, benchmark samples, PyTorch samples, NVBench | `pyperf`, `benchmark-samples`, `nvbench` |
 | Execution traces | Perfetto/Chrome, PyTorch, OTLP, ROCprof PFTrace, xctrace, Nsight Systems | `torch-profiler`, `rocprofv3`, `xctrace`, `nsight-systems` |
@@ -44,6 +48,10 @@ the format is unsupported. The offline inference readers omit prompts,
 generations, error text, endpoints, tools, payloads, and prefix-hash values.
 Pytest capture runs an explicit `python -m pytest` target with a request-bound,
 bounded event plugin.
+
+`failures.summary` scans the complete bounded pytest event artifact for aggregate outcomes, but its
+table projects only failed, errored, interrupted, and unexecuted identities. Passing, skipped, and
+collection events cannot consume the diagnostic row budget.
 
 Support is honest rather than substitutive. A missing Trace Processor does not
 turn a Perfetto request into a JSON preview; a missing `ncu` does not become an
@@ -93,3 +101,8 @@ with Flameox, such as py-spy, execute from the managed tool environment rather
 than ambient request `PATH`. In-process collectors, including coverage.py and
 Memray, must be installed in the declared workload interpreter; capture probes
 that interpreter before execution and never substitutes Flameox's interpreter.
+
+Pyperf command capture preserves multiline typed argv through a metadata-safe launcher because
+pyperf rejects newline characters in its display metadata. The launcher executes the original argv
+without shell parsing, but its startup is included in each command measurement; exact Flameox
+capture provenance remains authoritative for the requested argv.

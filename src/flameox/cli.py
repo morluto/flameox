@@ -234,6 +234,46 @@ def capture(
         runtime.close()
 
 
+@app.command(
+    "preflight", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+)
+def preflight(
+    ctx: typer.Context,
+    provider_id: Annotated[str, typer.Option("--provider")],
+    capability_id: Annotated[str, typer.Option("--capability")] = "artifact.preview",
+    cwd: Annotated[str, typer.Option("--cwd")] = ".",
+    capture_arguments: Annotated[str, typer.Option("--capture-arguments")] = "{}",
+    analysis_arguments: Annotated[str, typer.Option("--analysis-arguments")] = "{}",
+    project_root: Annotated[Path, typer.Option("--project-root")] = Path("."),
+) -> None:
+    """Resolve a typed capture request after `--` without executing it."""
+    argv = list(ctx.args)
+    if argv and argv[0] == "--":
+        argv.pop(0)
+    if not argv:
+        raise typer.BadParameter("preflight requires an argv after --")
+    runtime = _runtime(project_root)
+    try:
+        _write(
+            runtime.preflight_capture(
+                CaptureTarget(
+                    argv=argv,
+                    cwd=cwd,
+                    provider_id=provider_id,
+                    capture_arguments=_json_object(capture_arguments, option="--capture-arguments"),
+                    analysis_arguments=_json_object(
+                        analysis_arguments, option="--analysis-arguments"
+                    ),
+                ),
+                capability_id,
+            )
+        )
+    except (RuntimeFailure, ValidationError) as error:
+        _cli_failure(error)
+    finally:
+        runtime.close()
+
+
 @evidence_app.command("query")
 def evidence_query(
     capability_id: Annotated[str | None, typer.Option("--capability")] = None,
