@@ -15,6 +15,7 @@ from typing import TypeVar, cast
 from pydantic import JsonValue, ValidationError
 
 from flameox.atomic import atomic_write_json
+from flameox.canonical import sha256_id
 from flameox.command_binding import ExecutableResolver
 from flameox.executable_models import (
     ExecutableResolutionRequest,
@@ -244,7 +245,7 @@ class IsolatedWorkerHarness:
                 ErrorCode.MISSING_OR_CHANGED_INPUT,
                 "Worker output size does not match its declaration.",
             )
-        actual = "sha256:" + digest.hexdigest()
+        actual = sha256_id(digest.hexdigest())
         if actual != output.sha256:
             raise DomainError(
                 ErrorCode.MISSING_OR_CHANGED_INPUT,

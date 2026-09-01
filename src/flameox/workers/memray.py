@@ -16,7 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from flameox.atomic import atomic_write_json
-from flameox.canonical import digest_model
+from flameox.canonical import digest_model, sha256_id
 from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.workers.memray_contract import (
     MEMRAY_WORKER,
@@ -645,7 +645,7 @@ def _write_table(
         relative_path=path.name,
         media_type="application/vnd.apache.parquet",
         byte_length=path.stat().st_size,
-        sha256="sha256:" + digest.hexdigest(),
+        sha256=sha256_id(digest.hexdigest()),
     )
 
 

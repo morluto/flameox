@@ -6,6 +6,7 @@ import shutil
 import stat
 from pathlib import Path
 
+from flameox.canonical import sha256_id
 from flameox.executable_models import (
     ExecutableIdentity,
     ExecutablePolicyDecision,
@@ -202,7 +203,7 @@ def _sha256(path: Path) -> str:
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+    return sha256_id(digest.hexdigest())
 
 
 def _identity(path: Path, path_stat: os.stat_result | None = None) -> ExecutableIdentity:

@@ -12,6 +12,7 @@ from aiperf.common.models import (  # type: ignore[import-not-found,import-untyp
     MetricValue,
 )
 
+from flameox.canonical import sha256_id
 from flameox.workers.aiperf_contract import (
     AIPERF_WORKER,
     AIPerfErrorCategory,
@@ -165,7 +166,7 @@ def _handle(request: AIPerfWorkerRequest, job_root: Path) -> AIPerfWorkerResult:
             relative_path="projection.jsonl",
             media_type="application/x-ndjson",
             byte_length=byte_count,
-            sha256="sha256:" + digest.hexdigest(),
+            sha256=sha256_id(digest.hexdigest()),
         ),
         row_count=row_count,
         truncated=truncated,

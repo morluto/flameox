@@ -16,6 +16,16 @@ def canonical_bytes(value: object) -> bytes:
     return rfc8785.dumps(cast(Any, value))
 
 
+def sha256_id(hex_digest: str) -> str:
+    """Format a SHA-256 hex digest as a content identifier."""
+    return f"sha256:{hex_digest}"
+
+
+def content_id(data: bytes) -> str:
+    """Hash bytes into the canonical SHA-256 content-identifier format."""
+    return sha256_id(hashlib.sha256(data).hexdigest())
+
+
 def digest_model(value: object, *, projection: str = "flameox.identity/v1") -> str:
     """Build a projection-bound identity without losing wide integer values."""
     if isinstance(value, BaseModel):
@@ -27,7 +37,7 @@ def digest_model(value: object, *, projection: str = "flameox.identity/v1") -> s
         "projection": projection,
         "value": _normalize_wide_integers(normalized),
     }
-    return "sha256:" + hashlib.sha256(canonical_bytes(payload)).hexdigest()
+    return content_id(canonical_bytes(payload))
 
 
 def _normalize_wide_integers(value: Any) -> Any:

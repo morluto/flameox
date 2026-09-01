@@ -5,6 +5,7 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
+from flameox.canonical import sha256_id
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.workers.harness import IsolatedWorkerHarness
@@ -64,7 +65,7 @@ class MemrayProvider:
         request = MemrayWorkerRequest(
             artifact_path=str(path),
             run_id=f"direct-{input_sha256[:32]}",
-            artifact_id=f"sha256:{input_sha256}",
+            artifact_id=sha256_id(input_sha256),
             workload_cwd=str(self.project_root),
             project_root=str(self.project_root),
             source_state_id=None,

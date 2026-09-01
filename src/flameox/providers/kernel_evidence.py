@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -8,7 +7,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any, cast
 
-from flameox.canonical import canonical_bytes
+from flameox.canonical import canonical_bytes, content_id
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 
 _MAX_LINE_BYTES = 64 * 1024
@@ -331,14 +330,14 @@ def _triton_row(event: Mapping[str, Any]) -> dict[str, Any]:
         finite_timings = [_finite(value, "Triton timing") for value in timings]
         normalized_candidates.append(
             {
-                "config_id": _content_id(config),
+                "config_id": content_id(canonical_bytes(config)),
                 "config": config,
                 "timings_ms": finite_timings,
                 "mean_ms": fmean(finite_timings),
             }
         )
     winner = _json_object(event.get("winner"), "Triton winner")
-    winner_id = _content_id(winner)
+    winner_id = content_id(canonical_bytes(winner))
     if winner_id not in {str(item["config_id"]) for item in normalized_candidates}:
         raise ProviderFailure("DECODE_FAILURE", "Triton winner is absent from candidates")
     cache_hit = event.get("cache_hit")
@@ -356,10 +355,6 @@ def _triton_row(event: Mapping[str, Any]) -> dict[str, Any]:
         "candidate_count": len(candidates),
         "candidates": normalized_candidates,
     }
-
-
-def _content_id(value: object) -> str:
-    return "sha256:" + hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
 def _object(value: object, subject: str) -> dict[str, Any]:

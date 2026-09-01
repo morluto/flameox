@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from flameox.canonical import sha256_id
 from flameox.command_binding import ExecutableResolver
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.workers.harness import IsolatedWorkerHarness
@@ -156,4 +157,4 @@ class PerfettoProvider:
     @staticmethod
     def _identity(path: Path) -> str:
         with path.open("rb") as stream:
-            return "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
+            return sha256_id(hashlib.file_digest(stream, "sha256").hexdigest())
