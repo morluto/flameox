@@ -1401,9 +1401,7 @@ def test_py_spy_capture_discovers_executable_in_managed_tool_environment(
         runtime.close()
 
     capture = next(
-        item
-        for item in inspected["capabilities"][0]["capture_providers"]
-        if item["id"] == "py-spy"
+        item for item in inspected["capabilities"][0]["capture_providers"] if item["id"] == "py-spy"
     )
     assert capture["availability"]["available"] is True
     assert capture["availability"]["executable"] == str(managed_pyspy)

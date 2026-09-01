@@ -119,9 +119,7 @@ def install_providers(providers: list[str]) -> ProviderInstallation:
         PYTHON_PROVIDER_EXTRAS[item] for item in providers if item in PYTHON_PROVIDER_EXTRAS
     }
     managed_providers = {
-        provider
-        for provider, extra in PYTHON_PROVIDER_EXTRAS.items()
-        if extra in final_extras
+        provider for provider, extra in PYTHON_PROVIDER_EXTRAS.items() if extra in final_extras
     }
     selected_system = set(providers).intersection(SYSTEM_PROVIDER_GUIDANCE)
     return ProviderInstallation(command, sorted(managed_providers | selected_system))
