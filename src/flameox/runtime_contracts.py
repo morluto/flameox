@@ -13,6 +13,8 @@ from pydantic import (
     model_validator,
 )
 
+from flameox.environment_policy import blocked_environment_override
+
 MAX_INPUTS = 32
 MAX_ROWS = 1_000
 MAX_RESULT_BYTES = 256 * 1024
@@ -329,6 +331,9 @@ def _valid_environment(value: dict[str, str]) -> dict[str, str]:
         for key, item in value.items()
     ):
         raise ValueError("environment overrides must be bounded names and values")
+    blocked = blocked_environment_override(value)
+    if blocked is not None:
+        raise ValueError(f"environment override {blocked!r} is blocked by policy")
     return value
 
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import shutil
 import signal
 import stat
@@ -23,6 +22,7 @@ import psutil
 from pydantic import Field, field_validator, model_validator
 
 from flameox.command_binding import ExecutableResolver
+from flameox.environment_policy import is_dangerous_environment_name, is_safe_control_override
 from flameox.executable_models import ResolvedExecutable
 from flameox.models import ContractModel
 from flameox.process_models import (
@@ -34,43 +34,6 @@ from flameox.process_models import (
 )
 from flameox.runtime_errors import DomainError, ErrorCode
 
-_DANGEROUS_ENVIRONMENT = {
-    "BASH_ENV",
-    "CDPATH",
-    "ENV",
-    "GIT_ASKPASS",
-    "LD_LIBRARY_PATH",
-    "LD_PRELOAD",
-    "PYTHONHOME",
-    "PYTHONPATH",
-    "SSH_ASKPASS",
-}
-_DANGEROUS_ENVIRONMENT_PREFIXES = (
-    "DYLD_",
-    "GDB_",
-    "GIT_CONFIG_",
-    "LD_",
-    "LLDB_",
-)
-_DANGEROUS_ENVIRONMENT_NAMES = {
-    "JAVA_TOOL_OPTIONS",
-    "NODE_EXTRA_CA_CERTS",
-    "NODE_OPTIONS",
-    "PERL5LIB",
-    "PERL5OPT",
-    "RUBYLIB",
-    "RUBYOPT",
-    "GDBINIT",
-    "GDBHISTFILE",
-    "PYTHONSTARTUP",
-}
-_CREDENTIAL_ENVIRONMENT = re.compile(
-    r"(?:^|_)(?:TOKEN|PASSWORD|PASSWD|SECRET|KEY|CREDENTIALS?|COOKIES?)(?:_|$)"
-)
-_SAFE_CONTROL_OVERRIDES = {
-    "GIT_CONFIG_GLOBAL": os.devnull,
-    "GIT_CONFIG_NOSYSTEM": "1",
-}
 INSTALLER_ENVIRONMENT_ALLOWLIST = (
     "PATH",
     "HTTP_PROXY",
@@ -109,20 +72,6 @@ class ProcessSnapshotPhase(StrEnum):
     PRE_CLEANUP = "pre_cleanup"
     POST_CLEANUP = "post_cleanup"
     POST_ROOT_EXIT = "post_root_exit"
-
-
-def _is_dangerous_environment_name(name: str) -> bool:
-    normalized = name.upper()
-    return (
-        normalized in _DANGEROUS_ENVIRONMENT
-        or normalized in _DANGEROUS_ENVIRONMENT_NAMES
-        or normalized.startswith(_DANGEROUS_ENVIRONMENT_PREFIXES)
-        or _CREDENTIAL_ENVIRONMENT.search(normalized) is not None
-    )
-
-
-def _is_safe_control_override(name: str, value: str) -> bool:
-    return _SAFE_CONTROL_OVERRIDES.get(name.upper()) == value
 
 
 class ResourcePolicy(ContractModel):
@@ -1815,14 +1764,14 @@ class SubprocessBroker:
         environment = {
             name: os.environ[name]
             for name in request.environment_allowlist
-            if name in os.environ and not _is_dangerous_environment_name(name)
+            if name in os.environ and not is_dangerous_environment_name(name)
         }
         if request.systemd_scope_unit is not None:
             for name in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"):
                 if name in os.environ:
                     environment[name] = os.environ[name]
         for name, value in request.environment_overrides.items():
-            if _is_dangerous_environment_name(name) and not _is_safe_control_override(name, value):
+            if is_dangerous_environment_name(name) and not is_safe_control_override(name, value):
                 raise DomainError(
                     ErrorCode.INVALID_INPUT,
                     f"Environment override {name!r} is blocked by policy.",
