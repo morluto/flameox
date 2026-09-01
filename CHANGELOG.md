@@ -2,6 +2,36 @@
 
 All notable changes to flameox are documented in this file.
 
+## [0.2.2] - 2026-09-01
+
+### Bug Fixes
+
+- **runtime:** Close canonical evidence edge cases
+- **capture:** Bind providers to owning runtimes
+- **setup:** Retain managed provider extras
+- **capture:** Preserve native evidence across analysis failures
+- **runtime:** Make result continuations truthful
+- **cpu:** Retain resolved py-spy samples
+- **cpu:** Actively probe perf event permissions
+- **memory:** Bound Memray aggregation resources
+- **runtime:** Reject blocked environments at validation
+
+### Documentation
+
+- Align runtime ownership and evidence contracts
+- Define provider runtime ownership
+
+### Refactoring
+
+- **runtime:** Remove unsupported provider fallbacks
+
+### Styling
+
+- Normalize integrated runtime changes
+
+### Testing
+
+- **cpu:** Isolate host py-spy fallback
 ## [0.2.1] - 2026-09-02
 
 ### Bug Fixes
