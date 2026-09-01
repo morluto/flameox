@@ -46,6 +46,7 @@ class CpuProfileProvider:
         self_weights: defaultdict[int, float] = defaultdict(float)
         inclusive_weights: defaultdict[int, float] = defaultdict(float)
         sample_count = 0
+        unresolved_sample_count = 0
         for profile_value in profiles:
             profile = _object(profile_value, "Speedscope sampled profile")
             if profile.get("type") != "sampled":
@@ -64,8 +65,11 @@ class CpuProfileProvider:
             if sample_count > _MAX_SAMPLES:
                 raise ProviderFailure("LIMIT_EXCEEDED", "Speedscope sample count exceeds the limit")
             for sample_index, stack_value in enumerate(samples):
-                if not isinstance(stack_value, list) or not stack_value:
+                if not isinstance(stack_value, list):
                     raise ProviderFailure("DECODE_FAILURE", "Speedscope stack is invalid")
+                if not stack_value:
+                    unresolved_sample_count += 1
+                    continue
                 stack = [_frame_index(value, len(normalized_frames)) for value in stack_value]
                 weight = 1.0 if weights is None else _number(weights[sample_index], "sample weight")
                 self_weights[stack[-1]] += weight
@@ -80,22 +84,34 @@ class CpuProfileProvider:
             for index in inclusive_weights
         ]
         rows.sort(key=lambda row: (-float(row["self_weight"]), str(row["function"])))
+        if not rows:
+            raise ProviderFailure(
+                "DECODE_FAILURE", "Speedscope profile contains no resolved samples"
+            )
+        limitations = [
+            "Sample weights rank observed CPU stacks and do not prove causal optimization impact."
+        ]
+        if unresolved_sample_count:
+            limitations.append(
+                f"{unresolved_sample_count} of {sample_count} samples had no resolved Python "
+                "frames and were excluded from frame aggregation."
+            )
+        metrics = {"frame_count": len(frames), "sample_count": sample_count}
+        if unresolved_sample_count:
+            metrics["unresolved_sample_count"] = unresolved_sample_count
         return ProviderAnalysis(
             provider_id="py-spy-speedscope",
             provider_version="speedscope-1",
             blocks=[
                 {
                     "type": "metrics",
-                    "values": {"frame_count": len(frames), "sample_count": sample_count},
+                    "values": metrics,
                 },
                 {"type": "table", "rows": rows[:max_rows]},
             ],
             rows_observed=len(rows),
             complete=len(rows) <= max_rows,
-            limitations=[
-                "Sample weights rank observed CPU stacks and do not prove causal optimization "
-                "impact."
-            ],
+            limitations=limitations,
         )
 
     @staticmethod

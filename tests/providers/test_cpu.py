@@ -55,6 +55,53 @@ def test_pyspy_speedscope_profile_ranks_typed_frames(tmp_path: Path) -> None:
     assert result["blocks"][1]["rows"][0]["self_weight"] == 2
 
 
+def test_pyspy_speedscope_profile_keeps_resolved_samples_when_one_stack_is_empty(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "profile.speedscope.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "shared": {"frames": [{"name": "work", "file": "app.py", "line": 4}]},
+                "profiles": [
+                    {
+                        "type": "sampled",
+                        "samples": [[], [0]],
+                        "weights": [1, 2],
+                    }
+                ],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(tmp_path)
+    try:
+        result = runtime.analyze(
+            "cpu.hotspots",
+            [PathSource(path=str(profile), format="py-spy", producer="py-spy")],
+            {},
+        )
+    finally:
+        runtime.close()
+
+    assert result["blocks"][0]["values"] == {
+        "frame_count": 1,
+        "sample_count": 2,
+        "unresolved_sample_count": 1,
+    }
+    assert result["blocks"][1]["rows"] == [
+        {
+            "frame_index": 0,
+            "function": "work",
+            "file": "app.py",
+            "line": 4,
+            "column": None,
+            "self_weight": 2.0,
+            "inclusive_weight": 2.0,
+        }
+    ]
+    assert any("1 of 2" in limitation for limitation in result["limitations"])
+
+
 def test_collapsed_perf_stacks_are_bounded_cpu_evidence(tmp_path: Path) -> None:
     profile = tmp_path / "perf.collapsed"
     profile.write_text("main;scan 7\nmain;parse 2\nmain;scan 3\n")
