@@ -173,9 +173,12 @@ jobs:
         env:
           EXISTING_VERSION: ${{ steps.existing-pr.outputs.version }}
           RELEASE_BUMP: ${{ steps.version.outputs.bump }}
+          RELEASE_EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          if [[ -n "$EXISTING_VERSION" ]]; then
+          if [[ "$RELEASE_EVENT" == "workflow_dispatch" ]]; then
+            uv version --bump "$RELEASE_BUMP" --no-sync
+          elif [[ -n "$EXISTING_VERSION" ]]; then
             uv version "$EXISTING_VERSION" --no-sync
           else
             uv version --bump "$RELEASE_BUMP" --no-sync
