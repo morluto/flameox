@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 from flameox import __version__
 from flameox.cli import app
+from flameox.setup import ProviderInstallation
 
 pytestmark = pytest.mark.integration
 
@@ -185,9 +186,12 @@ def test_setup_installs_only_explicit_python_providers_and_guides_system_tools(
 ) -> None:
     selected: list[list[str]] = []
 
-    def install(providers: list[str]) -> list[str]:
+    def install(providers: list[str]) -> ProviderInstallation:
         selected.append(providers)
-        return ["uv", "tool", "install", f"flameox[memory]=={__version__}"]
+        return ProviderInstallation(
+            ["uv", "tool", "install", f"flameox[memory]=={__version__}"],
+            ["memray", "nsight-compute", "py-spy"],
+        )
 
     monkeypatch.setattr("flameox.cli.install_providers", install)
     result = CliRunner().invoke(
@@ -207,6 +211,6 @@ def test_setup_installs_only_explicit_python_providers_and_guides_system_tools(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert selected == [["memray", "nsight-compute"]]
-    assert payload["providers"] == ["memray", "nsight-compute"]
+    assert payload["providers"] == ["memray", "nsight-compute", "py-spy"]
     assert "extras/python" in payload["external_guidance"][0]
     assert not (tmp_path / ".flameox").exists()

@@ -82,7 +82,9 @@ def setup(
     root = project_root.resolve(strict=True)
     selected = provider or []
     try:
-        command = install_providers(selected) if selected else []
+        installation = install_providers(selected) if selected else None
+        command = installation.command if installation is not None else []
+        configured_providers = installation.providers if installation is not None else []
         guidance = provider_guidance(selected)
     except SetupFailure as error:
         raise typer.BadParameter(str(error), param_hint="--provider") from error
@@ -92,7 +94,7 @@ def setup(
         "project_root": str(root),
         "durable_repository": str(root / ".flameox"),
         "repository_created": False,
-        "providers": selected,
+        "providers": configured_providers,
         "install_command": command,
         "external_guidance": guidance,
     }
