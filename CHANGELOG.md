@@ -2,6 +2,12 @@
 
 All notable changes to flameox are documented in this file.
 
+## [0.2.1] - 2026-09-02
+
+### Bug Fixes
+
+- **packaging:** Restore DuckDB timezone support in isolated installations
+
 ## [0.2.0] - 2026-08-31
 
 ### Breaking changes

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from flameox import __version__
 from flameox.setup import SetupFailure, provider_install_command
 
 
@@ -19,7 +20,7 @@ def test_provider_install_command_replaces_tool_with_declared_extra_set() -> Non
         "3.12",
         "--prerelease",
         "allow",
-        "flameox[memory,trace]==0.2.0",
+        f"flameox[memory,trace]=={__version__}",
     ]
 
 

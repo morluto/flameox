@@ -1076,7 +1076,7 @@ wheels = [
 
 [[package]]
 name = "flameox"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
@@ -1092,6 +1092,7 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pyperf" },
+    { name = "pytz" },
     { name = "rfc8785" },
     { name = "typer" },
 ]
@@ -1178,6 +1179,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.3" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.1" },
+    { name = "pytz", specifier = ">=2024.2" },
     { name = "rfc8785", specifier = "==0.1.4" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11" },
     { name = "torch", marker = "extra == 'all'", specifier = ">=2.7" },

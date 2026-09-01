@@ -70,3 +70,11 @@ def test_python_release_installs_duckdb_only_for_ephemeral_aggregation() -> None
     assert any(
         requirement.name == "duckdb" and requirement.marker is None for requirement in requirements
     )
+
+
+def test_python_release_installs_duckdb_timezone_support() -> None:
+    requirements = [Requirement(value) for value in requires("flameox") or []]
+
+    assert any(
+        requirement.name == "pytz" and requirement.marker is None for requirement in requirements
+    )
