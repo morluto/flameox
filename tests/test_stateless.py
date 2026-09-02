@@ -41,6 +41,7 @@ from flameox.runtime_contracts import (
     RequestLimits,
     RuntimeFailure,
 )
+from flameox.setup import ExternalRequirement, ProviderPreparation, ProviderSelectionFailure
 from flameox.stateless import AnalysisRuntime
 
 
@@ -1778,18 +1779,106 @@ def test_mcp_catalog_is_exact_typed_and_has_one_resource_template() -> None:
         assert [tool.name for tool in tools] == [
             "discover_capabilities",
             "inspect_capabilities",
+            "prepare_capabilities",
             "analyze",
             "capture_and_analyze",
             "preserve_evidence",
             "query_evidence",
         ]
         assert all(tool.output_schema is not None for tool in tools)
-        assert all(tool.annotations and tool.annotations.open_world_hint is False for tool in tools)
+        prepare = next(tool for tool in tools if tool.name == "prepare_capabilities")
+        assert prepare.annotations and prepare.annotations.open_world_hint is True
+        assert prepare.annotations.read_only_hint is False
+        assert prepare.annotations.destructive_hint is True
+        assert all(
+            tool.annotations and tool.annotations.open_world_hint is False
+            for tool in tools
+            if tool.name != "prepare_capabilities"
+        )
         assert await server.list_resources() == []
         assert [item.uri_template for item in templates] == ["flameox://evidence/{evidence_id}"]
         assert templates[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
 
     anyio.run(inspect)
+
+
+@pytest.mark.unit
+def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed: list[list[str]] = []
+
+    def prepare(provider_ids: list[str], project_root: Path) -> ProviderPreparation:
+        if provider_ids == ["unknown-provider"]:
+            raise ProviderSelectionFailure("Unknown provider 'unknown-provider'")
+        installed.append(provider_ids)
+        return ProviderPreparation(
+            ["memray", "nsight-compute"],
+            ["memray"],
+            [
+                ExternalRequirement(
+                    "nsight-compute",
+                    "Install NVIDIA Nsight Compute with its extras/python interface.",
+                )
+            ],
+            ["uv", "tool", "install", f"flameox[memory]=={__version__}"],
+            "uvx",
+            [
+                "--python",
+                "3.12",
+                "--from",
+                f"flameox[memory]=={__version__}",
+                "flameox",
+                "mcp",
+                "serve",
+                "--project-root",
+                str(project_root),
+            ],
+        )
+
+    monkeypatch.setattr("flameox.mcp.server.prepare_providers", prepare)
+
+    async def exercise() -> None:
+        async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+            result = await client.call_tool(
+                "prepare_capabilities",
+                {"provider_ids": ["memray", "nsight-compute", "memray"]},
+            )
+            invalid = await client.call_tool(
+                "prepare_capabilities",
+                {"provider_ids": ["unknown-provider"]},
+            )
+
+        assert result.is_error is False
+        assert result.structured_content["requested_providers"] == [
+            "memray",
+            "nsight-compute",
+        ]
+        assert result.structured_content["configured_managed_providers"] == ["memray"]
+        assert result.structured_content["external_requirements"] == [
+            {
+                "provider_id": "nsight-compute",
+                "guidance": "Install NVIDIA Nsight Compute with its extras/python interface.",
+            }
+        ]
+        assert result.structured_content["installation"]["status"] == "installed"
+        assert result.structured_content["restart_required"] is True
+        assert result.structured_content["launcher"]["args"][3] == (
+            f"flameox[memory]=={__version__}"
+        )
+        assert result.structured_content["launcher"]["args"][-5:] == [
+            "flameox",
+            "mcp",
+            "serve",
+            "--project-root",
+            str(tmp_path),
+        ]
+
+        assert invalid.is_error is True
+        assert invalid.structured_content["code"] == "INVALID_INPUT"
+
+    anyio.run(exercise)
+    assert installed == [["memray", "nsight-compute", "memray"]]
 
 
 @pytest.mark.process
@@ -1826,6 +1915,7 @@ def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path
         assert [tool.name for tool in tools.tools] == [
             "discover_capabilities",
             "inspect_capabilities",
+            "prepare_capabilities",
             "analyze",
             "capture_and_analyze",
             "preserve_evidence",

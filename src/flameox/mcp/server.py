@@ -10,12 +10,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+import anyio
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp_types import CallToolResult, ContentBlock, ResourceLink, TextContent, ToolAnnotations
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     GetJsonSchemaHandler,
     JsonValue,
     RootModel,
@@ -32,6 +34,11 @@ from flameox.runtime_contracts import (
     RuntimeFailure,
     Source,
 )
+from flameox.setup import (
+    ProviderSelectionFailure,
+    SetupFailure,
+    prepare_providers,
+)
 from flameox.stateless import AnalysisRuntime
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False)
@@ -46,6 +53,12 @@ PRESERVE = ToolAnnotations(
     destructive_hint=False,
     idempotent_hint=True,
     open_world_hint=False,
+)
+PREPARE = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=True,
+    open_world_hint=True,
 )
 
 
@@ -86,6 +99,29 @@ class InspectionEnvelope(_Envelope):
     capabilities: list[dict[str, JsonValue]]
 
 
+class ExternalRequirementEnvelope(BaseModel):
+    provider_id: str
+    guidance: str
+
+
+class InstallationEnvelope(BaseModel):
+    status: Literal["installed", "already_configured", "not_applicable"]
+
+
+class LauncherEnvelope(BaseModel):
+    command: str
+    args: list[str]
+
+
+class PreparationEnvelope(_Envelope):
+    requested_providers: list[str]
+    configured_managed_providers: list[str]
+    external_requirements: list[ExternalRequirementEnvelope]
+    installation: InstallationEnvelope
+    launcher: LauncherEnvelope
+    restart_required: bool
+
+
 class PreservationEnvelope(_Envelope):
     evidence_id: str
     uri: str
@@ -114,6 +150,10 @@ class DiscoveryOutcome(_ObjectOutcome):
 
 class InspectionOutcome(_ObjectOutcome):
     root: InspectionEnvelope | ToolFailureEnvelope
+
+
+class PreparationOutcome(_ObjectOutcome):
+    root: PreparationEnvelope | ToolFailureEnvelope
 
 
 class AnalysisOutcome(_ObjectOutcome):
@@ -179,9 +219,10 @@ def create_server(
         description="Bounded local runtime evidence without a prerequisite workspace.",
         instructions=(
             "Pass explicit artifact paths or a typed direct target. Analysis and capture are "
-            "session-local unless preserve_evidence is called. Flameox never installs providers, "
-            "searches parent directories, accepts shell strings, or creates durable jobs. Use "
-            "inspect_capabilities before capture when provider compatibility or bounds need review."
+            "session-local unless preserve_evidence is called. Use prepare_capabilities only when "
+            "discovery reports a missing Flameox-managed provider; reconnect with its returned "
+            "launcher after installation. Flameox never installs host tools, searches parent "
+            "directories, accepts shell strings, or creates durable jobs."
         ),
         lifespan=lifespan,
     )
@@ -214,6 +255,39 @@ def create_server(
             return _success(runtime().inspect_capabilities(capability_ids))
         except RuntimeFailure as error:
             return _failure(error)
+
+    @server.tool(annotations=PREPARE, structured_output=True)
+    async def prepare_capabilities(
+        provider_ids: Annotated[list[str], Field(min_length=1, max_length=16)],
+    ) -> Annotated[CallToolResult, PreparationOutcome]:
+        """Install selected managed providers; report host-tool setup without changing it."""
+
+        try:
+            preparation = await anyio.to_thread.run_sync(prepare_providers, provider_ids, root)
+        except ProviderSelectionFailure as error:
+            return _failure(RuntimeFailure("INVALID_INPUT", str(error)))
+        except SetupFailure as error:
+            return _failure(RuntimeFailure("SETUP_FAILURE", str(error)))
+
+        return _success(
+            {
+                "requested_providers": preparation.requested_providers,
+                "configured_managed_providers": preparation.configured_managed_providers,
+                "external_requirements": [
+                    {
+                        "provider_id": requirement.provider_id,
+                        "guidance": requirement.guidance,
+                    }
+                    for requirement in preparation.external_requirements
+                ],
+                "installation": {"status": preparation.installation_status},
+                "launcher": {
+                    "command": preparation.launcher_command,
+                    "args": preparation.launcher_args,
+                },
+                "restart_required": preparation.restart_required,
+            }
+        )
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def analyze(

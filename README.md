@@ -67,10 +67,11 @@ coverage, truncation, limitations, and optional immutable preservation.
 
 ## MCP interface
 
-The server exposes exactly six tools:
+The server exposes exactly seven tools:
 
 - `discover_capabilities`
 - `inspect_capabilities`
+- `prepare_capabilities`
 - `analyze`
 - `capture_and_analyze`
 - `preserve_evidence`
@@ -91,7 +92,11 @@ restart-surviving tasks.
 Managed external collectors such as py-spy execute from Flameox's uv tool
 environment. In-process collectors such as coverage.py and Memray are verified
 in, and run with, the workload's declared Python interpreter. Flameox does not
-substitute one Python runtime for the other.
+substitute one Python runtime for the other. When discovery reports a missing
+managed provider, `prepare_capabilities` explicitly installs its version-pinned
+extra and returns the launcher to use after reconnecting. Host tools, drivers,
+and permissions are never installed or changed; the same result reports their
+setup guidance.
 
 ## Evidence quality
 
