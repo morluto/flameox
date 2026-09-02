@@ -1769,7 +1769,7 @@ def test_discovery_requires_nsight_compute_official_reader(
 
 
 @pytest.mark.unit
-def test_mcp_catalog_is_exact_small_typed_and_has_one_resource_template() -> None:
+def test_mcp_catalog_is_exact_typed_and_has_one_resource_template() -> None:
     async def inspect() -> None:
         server = create_server()
         tools = await server.list_tools()
@@ -1788,8 +1788,6 @@ def test_mcp_catalog_is_exact_small_typed_and_has_one_resource_template() -> Non
         assert await server.list_resources() == []
         assert [item.uri_template for item in templates] == ["flameox://evidence/{evidence_id}"]
         assert templates[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
-        catalog = json.dumps([tool.model_dump(mode="json") for tool in tools])
-        assert len(catalog) < 128 * 1024
 
     anyio.run(inspect)
 

@@ -20,8 +20,8 @@ use `-o addopts='' -m performance`.
 ## Required behavioral proof
 
 Contract tests assert exactly six MCP tools, one resource template, no concrete
-resource list, compact output schemas, truthful annotations, a catalog below 128 KiB,
-and direct structured success content without a universal wrapper.
+resource list, output schemas, truthful annotations, and direct structured success content without
+a universal wrapper.
 
 Runtime tests cover bounded streaming analysis, digest-bound continuation,
 provider states, typed capture, progress, cancellation and descendant cleanup,
