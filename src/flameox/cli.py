@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shlex
 import sys
 from pathlib import Path
 from typing import Annotated, Any, NoReturn, cast
@@ -121,12 +120,17 @@ def setup(
             raise SetupFailure("--dry-run requires --client or --all.")
 
         selected_clients = list(SETUP_CLIENTS) if all_clients else explicit_clients
-        if not selected_clients and interactive and not json_output:
+        if not selected_clients:
+            if not interactive or json_output:
+                raise SetupFailure(
+                    "No MCP client selected. Run setup in an interactive terminal, or pass "
+                    "--client <name> --yes (for example, --client codex --yes)."
+                )
             selected_clients = _select_setup_clients(detect_setup_clients())
             if not selected_clients:
                 typer.echo("Flameox setup cancelled. No changes were made.")
                 return
-        elif selected_clients and not interactive and not (yes or dry_run):
+        elif not interactive and not (yes or dry_run):
             raise SetupFailure("Non-interactive setup requires --yes or --dry-run.")
 
         plans = plan_client_setup(selected_clients, selected)
@@ -172,15 +176,6 @@ def setup(
     )
     if json_output:
         _write(value)
-        return
-    if not results:
-        launcher = str(value["command"])
-        args = cast(list[str], value["args"])
-        typer.echo(
-            "No MCP client registration was changed. Configure your client to run:\n"
-            f"  {shlex.join([launcher, *args])}"
-        )
-        _write_external_guidance(value)
         return
     typer.echo("◆ Flameox")
     for result in results:
@@ -236,7 +231,7 @@ def _display_setup_path(path: Path) -> str:
 
 
 def _is_interactive() -> bool:
-    return all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr))
+    return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def _write_setup_plan(plans: list[ClientSetupPlan]) -> None:

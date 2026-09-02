@@ -168,24 +168,12 @@ def test_analyze_projects_runtime_errors_without_traceback(tmp_path: Path) -> No
     assert "Traceback" not in result.output
 
 
-def test_setup_prints_configuration_without_creating_repository(tmp_path: Path) -> None:
+def test_setup_without_a_tty_requires_an_explicit_client(tmp_path: Path) -> None:
     result = CliRunner().invoke(app, ["setup", "--json"])
 
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert payload["command"] == "uvx"
-    assert payload["args"] == [
-        "--python",
-        "3.12",
-        "--from",
-        f"flameox=={__version__}",
-        "flameox",
-        "mcp",
-        "serve",
-    ]
-    assert payload["resolved_version"] == __version__
-    assert payload["client_registration_changed"] is False
-    assert payload["repository_created"] is False
+    assert result.exit_code == 2
+    assert "No MCP client selected" in result.output
+    assert "--client codex --yes" in result.output
     assert not (tmp_path / "flameox-data").exists()
 
 
@@ -193,6 +181,7 @@ def test_setup_prepares_exact_python_providers_and_guides_system_tools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     selected: list[list[str]] = []
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     def prepare(providers: list[str], timeout_seconds: int) -> ProviderPreparation:
         assert timeout_seconds == 1_800
@@ -228,6 +217,9 @@ def test_setup_prepares_exact_python_providers_and_guides_system_tools(
             "memray",
             "--provider",
             "nsight-compute",
+            "--client",
+            "codex",
+            "--yes",
             "--json",
         ],
     )
