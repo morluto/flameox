@@ -17,7 +17,7 @@ paths and formats to `analyze`; old `.diagnostics` state is not migrated.
 
 ```console
 uv sync --extra dev --extra memory --extra trace --extra cpu
-uv run flameox capabilities discover --intent "CPU hotspots"
+uv run flameox mcp inspect
 uv run flameox analyze artifact.preview /absolute/path/to/artifact.json
 uv run flameox capture --provider direct -- python benchmark.py
 ```
@@ -95,9 +95,10 @@ only through explicit local manifest inspection. Native artifact bytes are
 deliberately not available as MCP resources.
 
 Direct capture accepts an argv array, a project-contained cwd, bounded environment overrides, a
-typed compatible-provider variant, capability-specific options, and limits. Shell strings are never
-accepted. Work remains owned by the live MCP request, so SDK progress and cancellation apply
-directly; there are no detached or restart-surviving tasks.
+typed compatible-provider variant, capability-specific options, an explicit single/experiment
+choice, and limits as top-level tool arguments. There is no generic request or arguments envelope.
+Shell strings are never accepted. Work remains owned by the live MCP request, so SDK progress and
+cancellation apply directly; there are no detached or restart-surviving tasks.
 
 Managed external collectors such as py-spy execute from Flameox's uvx
 environment. In-process collectors such as coverage.py and Memray are verified

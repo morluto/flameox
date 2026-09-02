@@ -34,8 +34,6 @@ capture request rather than a separate plan or preflight lifecycle.
 
 ## Input and output bounds
 
-- discovery sniffs at most 16 sources and reads only bounded headers;
-- inspection accepts 1-16 capability IDs;
 - analysis accepts 1-32 sources and at most 1,000 rows per call;
 - result JSON is capped at 256 KiB by default;
 - continuations bind request arguments, limits, formats, and input digests;

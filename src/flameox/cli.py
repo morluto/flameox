@@ -27,10 +27,8 @@ app = typer.Typer(
     help="Collect and query bounded local runtime evidence.",
     no_args_is_help=True,
 )
-capabilities_app = typer.Typer(help="Discover and inspect runtime capabilities.")
 mcp_app = typer.Typer(help="Serve or inspect the local MCP adapter.")
 evidence_app = typer.Typer(help="Query or show optional preserved evidence.")
-app.add_typer(capabilities_app, name="capabilities")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(evidence_app, name="evidence")
 
@@ -125,46 +123,6 @@ def setup(
             )
             + "\n".join(guidance)
         )
-
-
-@capabilities_app.command("discover")
-def capabilities_discover(
-    intent: Annotated[str | None, typer.Option("--intent")] = None,
-    source: Annotated[list[Path] | None, typer.Option("--source")] = None,
-    include_unavailable: Annotated[bool, typer.Option("--include-unavailable")] = False,
-    limit: Annotated[int, typer.Option("--limit", min=1, max=50)] = 10,
-    project_root: Annotated[Path, typer.Option("--project-root")] = Path("."),
-) -> None:
-    """Rank capabilities for an intent and optional explicit artifact paths."""
-    runtime = _runtime(project_root)
-    try:
-        _write(
-            runtime.discover_capabilities(
-                intent,
-                [PathSource(path=str(path.resolve())) for path in source or []],
-                include_unavailable=include_unavailable,
-                limit=limit,
-            )
-        )
-    except (RuntimeFailure, ValidationError) as error:
-        _cli_failure(error)
-    finally:
-        runtime.close()
-
-
-@capabilities_app.command("inspect")
-def capabilities_inspect(
-    capability_ids: Annotated[list[str], typer.Argument()],
-    project_root: Annotated[Path, typer.Option("--project-root")] = Path("."),
-) -> None:
-    """Inspect one to sixteen capability contracts."""
-    runtime = _runtime(project_root)
-    try:
-        _write(runtime.inspect_capabilities(capability_ids))
-    except (RuntimeFailure, ValidationError) as error:
-        _cli_failure(error)
-    finally:
-        runtime.close()
 
 
 @app.command("analyze")

@@ -45,11 +45,11 @@ uv sync --extra dev --extra memory --extra trace --extra cpu --extra torch
 
 ## Understand the contract you are changing
 
-Production code uses a `src/` layout. `stateless.py` owns request-local orchestration and public
-contracts, `repository.py` owns optional immutable preservation, and `execution.py` owns bounded
-subprocess work. Provider integrations live in `providers/`, reusable native-format parsing in
-`adapters/`, isolated protocols in `workers/`, and transport code in `cli.py` and `mcp/`. Tests
-mirror these semantic owners under `tests/`.
+Production code uses a `src/` layout. `runtime_contracts.py` owns public contracts and registries,
+`stateless.py` owns request-local orchestration, `repository.py` owns optional immutable
+preservation, and `execution.py` owns bounded subprocess work. Provider integrations live in
+`providers/`, reusable native-format parsing in `adapters/`, isolated protocols in `workers/`, and
+transport code in `cli.py` and `mcp/`. Tests mirror these semantic owners under `tests/`.
 
 Read the contract that owns the behavior before editing it:
 
@@ -58,7 +58,7 @@ Read the contract that owns the behavior before editing it:
 | Process model, dependencies, and package boundaries | [Architecture](docs/architecture.md) |
 | Storage, provenance, publication, and schemas | [Storage and evidence](docs/storage-and-evidence.md) |
 | Experiments, comparisons, statistics, and evidence quality | [Investigations](docs/investigations.md) |
-| Profiler integrations, compatibility, and capability probing | [Adapters](docs/adapters.md) |
+| Profiler integrations, compatibility, and adapter policy | [Adapters](docs/adapters.md) |
 | Concurrency, recovery, integrity, security, and privacy | [Runtime safety](docs/runtime-safety.md) |
 | CLI and MCP behavior and trust boundaries | [Interfaces](docs/interfaces.md) |
 | Test markers, provider requirements, and CI | [Testing](docs/testing.md) |

@@ -24,7 +24,6 @@ def test_help_exposes_only_stateless_command_families() -> None:
             "setup",
             "analyze",
             "capture",
-            "capabilities",
             "mcp",
             "evidence",
         )

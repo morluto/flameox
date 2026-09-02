@@ -36,8 +36,8 @@ durable SHA-256 identity derived from the canonical manifest body.
 
 ## Package boundaries
 
-- `stateless.py` owns public models, capability discovery, bounded analysis,
-  capture orchestration, scratch, and the session cache.
+- `runtime_contracts.py` owns public models and the capability/capture-provider registries.
+- `stateless.py` owns bounded analysis, capture orchestration, scratch, and the session cache.
 - `repository.py` owns lazy repository creation, validation, publication,
   inventory queries, and immutable resource reads.
 - `execution.py` and `command_binding.py` own executable binding, subprocess
@@ -51,8 +51,8 @@ catalog. Flameox production code must not create or depend on SQLite state.
 
 ## Capability boundary
 
-One registry entry owns a capability descriptor, strict argument model, accepted formats, provider
-probes, capture/analysis semantics, and model-visible selection guidance. MCP projects each entry
+One registry entry owns a capability descriptor, strict argument model, accepted formats,
+capture/analysis semantics, and model-visible selection guidance. MCP projects each entry
 into a read-only analysis tool and, when a compatible capture provider exists, a separate executing
 capture tool. The generated callable closes over the stable capability ID; agents never pass a
 capability selector or a free-form analysis argument object.

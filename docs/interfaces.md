@@ -18,12 +18,26 @@ There are exactly 45 tools:
 | Capture and immediate analysis | 18 | `capture_cpu_hotspots`, `capture_gpu_launches`, `capture_benchmark_compare`, `capture_sanitizer_failures`, `capture_process_output` | Executes typed argv; not read-only or idempotent. |
 | Evidence lifecycle | 3 | `prepare_providers`, `preserve_evidence`, `query_evidence` | Prepare an explicit uvx environment or manage immutable evidence. |
 
-The capability registry generates the analysis and capture tools. A generated analysis tool accepts
-one strict `request` containing 1-32 path/evidence sources, capability-specific typed `options`,
-optional lowered limits, and an optional continuation. A generated capture tool accepts one strict
-`request` containing the direct target, a discriminated union of only compatible capture providers,
-capability-specific typed `options`, a `single` or `experiment` execution union, optional lowered
-limits, and optional preservation. There are no free-form provider or analysis argument objects.
+The capability registry generates the analysis and capture tools through the Python MCP SDK 2.0
+registration API. The SDK derives each top-level input schema directly from the registered callable.
+A generated analysis tool has `sources`, capability-specific typed `options`, optional lowered
+`limits`, and an optional `continuation`. A generated capture tool has `target`, a discriminated
+`provider` union containing only compatible capture providers, capability-specific typed `options`,
+an explicit `single` or `experiment` execution union, optional lowered `limits`, and optional
+`preserve`. There is no extra request envelope and there are no free-form provider or analysis
+argument objects.
+
+For example, a single Nsight Compute capture for kernel metrics has this argument shape:
+
+```json
+{
+  "target": {"argv": ["python", "kernel.py"]},
+  "provider": {"kind": "nsight-compute", "options": {"launch_count": 1}},
+  "options": {},
+  "execution": {"kind": "single"},
+  "preserve": true
+}
+```
 
 Analysis and capture remain separate tools even when they return the same evidence envelope. MCP
 annotations describe a whole tool, so combining read-only artifact analysis and target execution
@@ -127,7 +141,6 @@ The retained surface is:
 ```text
 flameox setup
 flameox mcp serve|inspect
-flameox capabilities discover|inspect
 flameox analyze [--continuation TOKEN] [--preserve]
 flameox capture [--preserve] -- <argv...>
 flameox evidence query|show

@@ -11,7 +11,7 @@ Each capability registry entry owns:
 - the capability descriptor and stable ID;
 - accepted source modes and formats;
 - a strict validation-equivalent argument model;
-- provider probes and compatibility rules;
+- compatibility rules derived from declared artifact formats;
 - capture and analysis handlers;
 - model-visible selection guidance, bounded examples, limits, overhead, and limitations.
 
@@ -20,10 +20,10 @@ roles and formats, and selection description. Generated MCP schemas, pre-executi
 checks, and capture argument validation consume that same contract so their format claims cannot
 drift.
 
-Provider probes inspect packages, executables, platform, supported version, permission, and required
-external resources without mutating the host. Capability tools remain discoverable when a provider
-is absent. Invoking an unavailable provider is a typed tool error with either an exact
-`prepare_providers` retry action or external host guidance.
+Capability tools remain discoverable when a provider is absent. Capture validates the selected
+provider's package, executable, platform, version, permission, and required external resources as
+part of the attempted operation, before workload execution. An unavailable provider returns a typed
+error with either an exact `prepare_providers` retry action or external host guidance.
 
 ## Evidence and capture support
 
@@ -42,7 +42,7 @@ Artifact analysis and typed capture are separate contracts:
 | Reliability | pytest events, observations, coverage.py | `pytest`, `observations`, `coverage` |
 | Static candidates | SARIF | — |
 | Inference exports | AIPerf, vLLM, SGLang, Mooncake | — |
-| Generic previews | JSON, JSONL, CSV, text, Parquet | — |
+| Generic previews | JSON, JSONL, CSV, text, Parquet | `direct` process output |
 
 An em dash means callers provide an explicit artifact path; it does not mean
 the format is unsupported. The offline inference readers omit prompts,
