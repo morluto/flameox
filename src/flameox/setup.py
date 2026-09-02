@@ -38,6 +38,7 @@ class SetupFailure(RuntimeError):
 class ProviderInstallation:
     command: list[str]
     providers: list[str]
+    changed: bool = False
 
 
 def managed_tool_extras(tool_directory: Path) -> set[str]:
@@ -93,7 +94,7 @@ def provider_install_command(
     requested_extras = {
         PYTHON_PROVIDER_EXTRAS[item] for item in providers if item in PYTHON_PROVIDER_EXTRAS
     }
-    if not requested_extras:
+    if not requested_extras or requested_extras.issubset(installed_extras or set()):
         return []
     extras = sorted((installed_extras or set()) | requested_extras)
     requirement = f"flameox[{','.join(extras)}]=={__version__}"
@@ -129,11 +130,18 @@ def mcp_launcher(providers: list[str]) -> tuple[str, list[str]]:
 
 
 def install_providers(providers: list[str]) -> ProviderInstallation:
+    if not any(item in PYTHON_PROVIDER_EXTRAS for item in providers):
+        provider_install_command(providers, uv=Path("uv"))
+        return ProviderInstallation(
+            [],
+            sorted(set(providers).intersection(SYSTEM_PROVIDER_GUIDANCE)),
+        )
     uv_text = shutil.which("uv")
     if uv_text is None:
         raise SetupFailure("Provider installation requires uv on PATH.")
     uv = Path(uv_text)
-    installed_extras = managed_tool_extras(_uv_tool_directory(uv))
+    tool_directory = _uv_tool_directory(uv)
+    installed_extras = managed_tool_extras(tool_directory)
     command = provider_install_command(
         providers,
         uv=uv,
@@ -143,14 +151,25 @@ def install_providers(providers: list[str]) -> ProviderInstallation:
         completed = subprocess.run(command, check=False)
         if completed.returncode != 0:
             raise SetupFailure(f"uv tool install exited with status {completed.returncode}.")
-    final_extras = installed_extras | {
+    final_extras = managed_tool_extras(tool_directory) if command else installed_extras
+    requested_extras = {
         PYTHON_PROVIDER_EXTRAS[item] for item in providers if item in PYTHON_PROVIDER_EXTRAS
     }
+    missing_extras = requested_extras.difference(final_extras)
+    if missing_extras:
+        raise SetupFailure(
+            "uv reported success but the managed tool receipt is missing extras: "
+            + ", ".join(sorted(missing_extras))
+        )
     managed_providers = {
         provider for provider, extra in PYTHON_PROVIDER_EXTRAS.items() if extra in final_extras
     }
     selected_system = set(providers).intersection(SYSTEM_PROVIDER_GUIDANCE)
-    return ProviderInstallation(command, sorted(managed_providers | selected_system))
+    return ProviderInstallation(
+        command,
+        sorted(managed_providers | selected_system),
+        changed=bool(command),
+    )
 
 
 def provider_guidance(providers: list[str]) -> list[str]:

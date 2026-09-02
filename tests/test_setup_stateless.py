@@ -52,6 +52,29 @@ def test_system_provider_has_guidance_but_no_python_install() -> None:
     assert provider_install_command(["nsight-compute"], uv=Path("uv")) == []
 
 
+def test_system_only_preparation_does_not_require_uv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: None)
+
+    prepared = install_providers(["nsight-compute"])
+
+    assert prepared.providers == ["nsight-compute"]
+    assert prepared.command == []
+    assert prepared.changed is False
+
+
+def test_provider_install_is_a_noop_when_requested_extra_is_already_managed() -> None:
+    assert (
+        provider_install_command(
+            ["py-spy"],
+            uv=Path("/usr/bin/uv"),
+            installed_extras={"cpu", "memory"},
+        )
+        == []
+    )
+
+
 def test_managed_tool_extras_are_read_from_uv_receipt(tmp_path: Path) -> None:
     tool = tmp_path / "flameox"
     tool.mkdir()
@@ -79,6 +102,9 @@ def test_provider_install_retains_existing_managed_providers(
         calls.append(command)
         if command[1:] == ["tool", "dir"]:
             return CompletedProcess(command, 0, f"{tmp_path / 'tools'}\n", "")
+        (tool / "uv-receipt.toml").write_text(
+            '[tool]\nrequirements = [{ name = "flameox", extras = ["cpu", "memory"] }]\n'
+        )
         return CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/usr/bin/uv")
@@ -88,6 +114,7 @@ def test_provider_install_retains_existing_managed_providers(
 
     assert calls[-1][-1] == f"flameox[cpu,memory]=={__version__}"
     assert installed.providers == ["memray", "py-spy"]
+    assert installed.changed is True
 
 
 def test_unknown_provider_is_rejected_before_installation() -> None:

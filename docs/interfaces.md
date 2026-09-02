@@ -5,12 +5,13 @@ provider behavior, or lifecycle state.
 
 ## MCP catalog
 
-The catalog contains exactly six tools:
+The catalog contains exactly seven tools:
 
 | Tool | Behavior |
 | --- | --- |
 | `discover_capabilities` | Rank by intent and bounded source sniffing; report provider state and external remediation. |
 | `inspect_capabilities` | Inspect 1-16 IDs with source modes, strict argument schema, examples, limits, and capture semantics. |
+| `prepare_capabilities` | Explicitly install 1-16 selected Flameox-managed providers and return a reconnect launcher; report host-tool guidance without changing the host. |
 | `analyze` | Analyze 1-32 explicit path/evidence sources and return bounded inline evidence plus a session `analysis_id`. |
 | `capture_and_analyze` | Run typed argv through the broker in single or bounded experiment mode, then analyze outputs. |
 | `preserve_evidence` | Idempotently publish one session analysis and return an evidence reference plus `ResourceLink`. |
@@ -31,6 +32,13 @@ Every tool advertises a compact output schema for its stable result envelope. Pr
 metrics and rows remain open JSON values. Success uses structured content directly, without an
 `ok/result/error` wrapper. Tool failures set `isError=true` and carry a stable code, message, and
 details; both success and failure shapes validate against the advertised schema.
+
+`prepare_capabilities` is the only open-world tool. It may resolve packages through `uv`, retains
+already configured Flameox extras, verifies the resulting managed-tool receipt, and reports whether
+the MCP client must reconnect. Repeating a fully satisfied request is a no-op. System profilers,
+drivers, device access, and OS permissions remain external requirements; Flameox returns guidance
+for them but does not invoke a system package manager or elevate privileges. Preparation creates no
+project state, durable job, plan, or setup receipt of its own.
 
 ## Sources and limits
 
