@@ -5,14 +5,13 @@ provider behavior, or lifecycle state.
 
 ## MCP catalog
 
-The catalog contains exactly seven tools:
+The catalog contains exactly six tools:
 
 | Tool | Behavior |
 | --- | --- |
 | `discover_capabilities` | Rank by intent and bounded source sniffing; report provider state and external remediation. |
 | `inspect_capabilities` | Inspect 1-16 IDs with source modes, strict argument schema, examples, limits, and capture semantics. |
 | `analyze` | Analyze 1-32 explicit path/evidence sources and return bounded inline evidence plus a session `analysis_id`. |
-| `preflight_capture` | Resolve and validate one capture request without executing it or creating plan authority. |
 | `capture_and_analyze` | Run typed argv through the broker in single or bounded experiment mode, then analyze outputs. |
 | `preserve_evidence` | Idempotently publish one session analysis and return an evidence reference plus `ResourceLink`. |
 | `query_evidence` | Search a deterministic immutable manifest inventory with bounded pagination. |
@@ -69,9 +68,10 @@ Shell command strings are not accepted.
 
 Provider output formats are compared with the requested capability before scratch creation or
 execution. Statically incompatible pairs fail with the declared formats and compatible capture
-providers. `preflight_capture` shares this validation, resolves executable identity and policy,
-and returns ephemeral-path argv templates and expected artifacts without creating support files or
-running probes. Its digest is informational; capture always resolves and validates again.
+providers. Capture also resolves the cwd and executable, checks aggregate scratch and durable
+provenance capacity, and validates every experiment case before creating request scratch. There is
+no separate plan or preflight authority: the typed capture request is validated atomically by the
+operation that executes it.
 
 Callers may request preservation as part of capture. Once native collection succeeds, requested
 preservation publishes the native artifacts even if immediate analysis fails; the result then
@@ -103,7 +103,6 @@ flameox setup
 flameox mcp serve|inspect
 flameox capabilities discover|inspect
 flameox analyze [--continuation TOKEN] [--preserve]
-flameox preflight --provider ID --capability ID -- <argv...>
 flameox capture [--preserve] -- <argv...>
 flameox evidence query|show
 ```

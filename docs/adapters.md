@@ -50,8 +50,9 @@ Pytest capture runs an explicit `python -m pytest` target with a request-bound,
 bounded event plugin.
 
 `failures.summary` scans the complete bounded pytest event artifact for aggregate outcomes, but its
-table projects only failed, errored, interrupted, and unexecuted identities. Passing, skipped, and
-collection events cannot consume the diagnostic row budget.
+table projects only failed, errored, interrupted, and unexecuted identities. Failed collection
+reports retain their collector identity; successful collection events, passing tests, and skipped
+tests cannot consume the diagnostic row budget.
 
 Support is honest rather than substitutive. A missing Trace Processor does not
 turn a Perfetto request into a JSON preview; a missing `ncu` does not become an
