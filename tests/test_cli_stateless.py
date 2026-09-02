@@ -207,7 +207,10 @@ def test_setup_prepares_exact_python_providers_and_guides_system_tools(
 ) -> None:
     selected: list[list[str]] = []
 
-    def prepare(providers: list[str], project_root: Path) -> ProviderPreparation:
+    def prepare(
+        providers: list[str], project_root: Path, timeout_seconds: int
+    ) -> ProviderPreparation:
+        assert timeout_seconds == 1_800
         selected.append(providers)
         return ProviderPreparation(
             providers,

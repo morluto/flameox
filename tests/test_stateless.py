@@ -1808,7 +1808,10 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
 ) -> None:
     preparation_calls: list[list[str]] = []
 
-    def prepare(provider_ids: list[str], project_root: Path) -> ProviderPreparation:
+    def prepare(
+        provider_ids: list[str], project_root: Path, timeout_seconds: int
+    ) -> ProviderPreparation:
+        assert timeout_seconds == 1_800
         if provider_ids == ["unknown-provider"]:
             raise ProviderSelectionFailure("Unknown provider 'unknown-provider'")
         preparation_calls.append(provider_ids)

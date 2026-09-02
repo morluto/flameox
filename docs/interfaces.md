@@ -40,7 +40,8 @@ Flameox keeps no installed-provider inventory or setup receipt. System profilers
 access, and OS permissions remain external requirements; Flameox returns guidance for them but does
 not invoke a system package manager or elevate privileges. Preparation creates no project state,
 durable job, or plan. A provider such as Perfetto may be both prepared Python support and an external
-host Trace Processor requirement.
+host Trace Processor requirement. Preparation waits up to 1,800 seconds by default; callers may set
+`timeout_seconds` from 1 through 3,600. A uvx failure returns its complete stderr in `SETUP_FAILURE`.
 
 ## Sources and limits
 

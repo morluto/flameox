@@ -35,6 +35,8 @@ from flameox.runtime_contracts import (
     Source,
 )
 from flameox.setup import (
+    DEFAULT_PREPARATION_TIMEOUT_SECONDS,
+    MAX_PREPARATION_TIMEOUT_SECONDS,
     ProviderSelectionFailure,
     SetupFailure,
     prepare_providers,
@@ -259,11 +261,16 @@ def create_server(
     @server.tool(annotations=PREPARE, structured_output=True)
     async def prepare_capabilities(
         provider_ids: Annotated[list[str], Field(min_length=1, max_length=16)],
+        timeout_seconds: Annotated[
+            int, Field(ge=1, le=MAX_PREPARATION_TIMEOUT_SECONDS)
+        ] = DEFAULT_PREPARATION_TIMEOUT_SECONDS,
     ) -> Annotated[CallToolResult, PreparationOutcome]:
-        """Install selected managed providers; report host-tool setup without changing it."""
+        """Prepare selected managed providers; report host-tool setup without changing it."""
 
         try:
-            preparation = await anyio.to_thread.run_sync(prepare_providers, provider_ids, root)
+            preparation = await anyio.to_thread.run_sync(
+                prepare_providers, provider_ids, root, timeout_seconds
+            )
         except ProviderSelectionFailure as error:
             return _failure(RuntimeFailure("INVALID_INPUT", str(error)))
         except SetupFailure as error:

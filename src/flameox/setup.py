@@ -28,6 +28,9 @@ SYSTEM_PROVIDER_GUIDANCE = {
     "triton": "Install Triton in the target Python environment and verify device access.",
 }
 
+DEFAULT_PREPARATION_TIMEOUT_SECONDS = 1_800
+MAX_PREPARATION_TIMEOUT_SECONDS = 3_600
+
 
 class SetupFailure(RuntimeError):
     pass
@@ -90,7 +93,26 @@ def mcp_launcher(providers: list[str]) -> tuple[str, list[str]]:
     )
 
 
-def prepare_providers(providers: list[str], project_root: Path) -> ProviderPreparation:
+def _decode_stderr(stderr: bytes | str | None) -> str:
+    if not stderr:
+        return ""
+    return stderr.strip() if isinstance(stderr, str) else stderr.decode(errors="replace").strip()
+
+
+def _failure_message(message: str, stderr: bytes | str | None) -> str:
+    diagnostic = _decode_stderr(stderr)
+    return f"{message}\n\nuvx stderr:\n{diagnostic}" if diagnostic else message
+
+
+def prepare_providers(
+    providers: list[str],
+    project_root: Path,
+    timeout_seconds: int = DEFAULT_PREPARATION_TIMEOUT_SECONDS,
+) -> ProviderPreparation:
+    if not 1 <= timeout_seconds <= MAX_PREPARATION_TIMEOUT_SECONDS:
+        raise SetupFailure(
+            f"timeout_seconds must be between 1 and {MAX_PREPARATION_TIMEOUT_SECONDS}"
+        )
     requested = list(dict.fromkeys(providers))
     _validate_providers(requested)
     managed = [item for item in requested if item in PYTHON_PROVIDER_EXTRAS]
@@ -113,16 +135,23 @@ def prepare_providers(providers: list[str], project_root: Path) -> ProviderPrepa
                 preparation_command,
                 check=False,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=300,
+                stderr=subprocess.PIPE,
+                timeout=timeout_seconds,
             )
         except OSError as error:
             raise SetupFailure("uvx could not prepare the provider environment.") from error
         except subprocess.TimeoutExpired as error:
-            raise SetupFailure("uvx provider preparation exceeded 300 seconds.") from error
+            raise SetupFailure(
+                _failure_message(
+                    f"uvx provider preparation exceeded {timeout_seconds} seconds.", error.stderr
+                )
+            ) from error
         if completed.returncode != 0:
             raise SetupFailure(
-                f"uvx provider preparation exited with status {completed.returncode}."
+                _failure_message(
+                    f"uvx provider preparation exited with status {completed.returncode}.",
+                    completed.stderr,
+                )
             )
 
     return ProviderPreparation(
