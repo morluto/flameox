@@ -79,14 +79,14 @@ def setup(
     provider: Annotated[list[str] | None, typer.Option("--provider")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    """Print version-bound MCP config and optionally install selected provider extras."""
+    """Print version-bound MCP config and optionally prepare selected provider extras."""
     root = project_root.resolve(strict=True)
     selected = provider or []
     try:
         preparation = prepare_providers(selected, root)
     except SetupFailure as error:
         raise typer.BadParameter(str(error), param_hint="--provider") from error
-    configured_providers = preparation.configured_managed_providers
+    prepared_providers = preparation.prepared_managed_providers
     external_providers = [item.provider_id for item in preparation.external_requirements]
     guidance = [item.guidance for item in preparation.external_requirements]
     launcher, launcher_args = preparation.launcher_command, preparation.launcher_args
@@ -99,8 +99,8 @@ def setup(
         "project_root": str(root),
         "durable_repository": str(root / ".flameox"),
         "repository_created": False,
-        "providers": sorted(set(configured_providers) | set(external_providers)),
-        "install_command": preparation.install_command,
+        "providers": sorted(set(prepared_providers) | set(external_providers)),
+        "preparation_command": preparation.preparation_command,
         "external_guidance": guidance,
     }
     if json_output:
@@ -110,10 +110,9 @@ def setup(
             "No MCP client registration was changed. Configure your client to run:\n"
             f"  {shlex.join([launcher, *args])}\n\n"
             + (
-                "Installed the selected Python provider extras into the persistent Flameox "
-                "uv tool environment.\n"
-                if preparation.changed
-                else "No Python provider packages were installed.\n"
+                "Prepared the exact version-pinned uvx provider environment.\n"
+                if preparation.preparation_command
+                else "No managed provider environment needed preparation.\n"
             )
             + "\n".join(guidance)
         )

@@ -56,7 +56,7 @@ PRESERVE = ToolAnnotations(
 )
 PREPARE = ToolAnnotations(
     read_only_hint=False,
-    destructive_hint=True,
+    destructive_hint=False,
     idempotent_hint=True,
     open_world_hint=True,
 )
@@ -104,8 +104,8 @@ class ExternalRequirementEnvelope(BaseModel):
     guidance: str
 
 
-class InstallationEnvelope(BaseModel):
-    status: Literal["installed", "already_configured", "not_applicable"]
+class PreparationStatusEnvelope(BaseModel):
+    status: Literal["prepared", "not_applicable"]
 
 
 class LauncherEnvelope(BaseModel):
@@ -115,9 +115,9 @@ class LauncherEnvelope(BaseModel):
 
 class PreparationEnvelope(_Envelope):
     requested_providers: list[str]
-    configured_managed_providers: list[str]
+    prepared_managed_providers: list[str]
     external_requirements: list[ExternalRequirementEnvelope]
-    installation: InstallationEnvelope
+    preparation: PreparationStatusEnvelope
     launcher: LauncherEnvelope
     restart_required: bool
 
@@ -221,7 +221,7 @@ def create_server(
             "Pass explicit artifact paths or a typed direct target. Analysis and capture are "
             "session-local unless preserve_evidence is called. Use prepare_capabilities only when "
             "discovery reports a missing Flameox-managed provider; reconnect with its returned "
-            "launcher after installation. Flameox never installs host tools, searches parent "
+            "launcher after preparation. Flameox never installs host tools, searches parent "
             "directories, accepts shell strings, or creates durable jobs."
         ),
         lifespan=lifespan,
@@ -272,7 +272,7 @@ def create_server(
         return _success(
             {
                 "requested_providers": preparation.requested_providers,
-                "configured_managed_providers": preparation.configured_managed_providers,
+                "prepared_managed_providers": preparation.prepared_managed_providers,
                 "external_requirements": [
                     {
                         "provider_id": requirement.provider_id,
@@ -280,7 +280,7 @@ def create_server(
                     }
                     for requirement in preparation.external_requirements
                 ],
-                "installation": {"status": preparation.installation_status},
+                "preparation": {"status": preparation.preparation_status},
                 "launcher": {
                     "command": preparation.launcher_command,
                     "args": preparation.launcher_args,

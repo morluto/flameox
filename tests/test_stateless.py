@@ -1789,7 +1789,7 @@ def test_mcp_catalog_is_exact_typed_and_has_one_resource_template() -> None:
         prepare = next(tool for tool in tools if tool.name == "prepare_capabilities")
         assert prepare.annotations and prepare.annotations.open_world_hint is True
         assert prepare.annotations.read_only_hint is False
-        assert prepare.annotations.destructive_hint is True
+        assert prepare.annotations.destructive_hint is False
         assert all(
             tool.annotations and tool.annotations.open_world_hint is False
             for tool in tools
@@ -1806,12 +1806,12 @@ def test_mcp_catalog_is_exact_typed_and_has_one_resource_template() -> None:
 def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    installed: list[list[str]] = []
+    preparation_calls: list[list[str]] = []
 
     def prepare(provider_ids: list[str], project_root: Path) -> ProviderPreparation:
         if provider_ids == ["unknown-provider"]:
             raise ProviderSelectionFailure("Unknown provider 'unknown-provider'")
-        installed.append(provider_ids)
+        preparation_calls.append(provider_ids)
         return ProviderPreparation(
             ["memray", "nsight-compute"],
             ["memray"],
@@ -1821,7 +1821,7 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
                     "Install NVIDIA Nsight Compute with its extras/python interface.",
                 )
             ],
-            ["uv", "tool", "install", f"flameox[memory]=={__version__}"],
+            ["/usr/bin/uvx", "--from", f"flameox[memory]=={__version__}", "--version"],
             "uvx",
             [
                 "--python",
@@ -1854,14 +1854,14 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
             "memray",
             "nsight-compute",
         ]
-        assert result.structured_content["configured_managed_providers"] == ["memray"]
+        assert result.structured_content["prepared_managed_providers"] == ["memray"]
         assert result.structured_content["external_requirements"] == [
             {
                 "provider_id": "nsight-compute",
                 "guidance": "Install NVIDIA Nsight Compute with its extras/python interface.",
             }
         ]
-        assert result.structured_content["installation"]["status"] == "installed"
+        assert result.structured_content["preparation"]["status"] == "prepared"
         assert result.structured_content["restart_required"] is True
         assert result.structured_content["launcher"]["args"][3] == (
             f"flameox[memory]=={__version__}"
@@ -1878,7 +1878,7 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
         assert invalid.structured_content["code"] == "INVALID_INPUT"
 
     anyio.run(exercise)
-    assert installed == [["memray", "nsight-compute", "memray"]]
+    assert preparation_calls == [["memray", "nsight-compute", "memray"]]
 
 
 @pytest.mark.process

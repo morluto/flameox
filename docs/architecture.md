@@ -56,9 +56,9 @@ accepted formats, provider probes, and capture/analysis semantics. Discovery
 performs only bounded suffix/header sniffing. Missing packages, executables,
 permissions, versions, or platforms are successful discovery states; Flameox
 never installs remediation automatically. The separately invoked CLI setup command or MCP
-`prepare_capabilities` tool may install an explicitly selected Python provider-extra set into a uv
-tool environment; neither creates project state nor owns a durable operation. Host profilers,
-drivers, and permissions remain external and receive guidance only.
+`prepare_capabilities` tool may prepare the exact version-pinned uvx environment named by an
+explicit Python provider set; neither creates project state nor owns a durable operation or provider
+inventory. Host profilers, drivers, and permissions remain external and receive guidance only.
 
 Direct capture is trusted local execution, not containment. Typed argv prevents
 shell interpretation, while the broker provides process-group cleanup, bounded
