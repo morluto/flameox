@@ -40,6 +40,18 @@ test("setup hands off the matching package version to uvx", () => {
   assert.match(result.stderr, /ephemeral Flameox Python runtime/);
 });
 
+test("setup hands explicit client automation flags through to Python", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "flameox-bootstrap-"));
+  const result = spawnSync(process.execPath, [bootstrap, "setup", "--client", "codex", "--yes"], {
+    encoding: "utf8",
+    env: { ...process.env, FLAMEOX_UV_EXECUTABLE: fakeUvx(directory) },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const args = JSON.parse(result.stdout);
+  assert.deepEqual(args.slice(-5), ["flameox", "setup", "--client", "codex", "--yes"]);
+});
+
 test("bootstrap rejects the removed upgrade command", () => {
   const result = spawnSync(process.execPath, [bootstrap, "upgrade"], { encoding: "utf8" });
   assert.equal(result.status, 2);

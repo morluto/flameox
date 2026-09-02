@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import sys
 from pathlib import Path
 from typing import Annotated, Any, NoReturn, cast
 
@@ -17,7 +18,17 @@ from flameox.runtime_contracts import CaptureTarget, PathSource, RuntimeFailure
 from flameox.setup import (
     DEFAULT_PREPARATION_TIMEOUT_SECONDS,
     MAX_PREPARATION_TIMEOUT_SECONDS,
+    SETUP_CLIENTS,
+    ClientSetupPlan,
+    ProviderPreparation,
+    SetupClient,
     SetupFailure,
+    apply_client_setup,
+    detect_setup_clients,
+    external_provider_requirements,
+    mcp_launcher,
+    parse_setup_clients,
+    plan_client_setup,
     prepare_providers,
 )
 from flameox.stateless import AnalysisRuntime
@@ -78,47 +89,200 @@ def _cli_failure(error: RuntimeFailure | ValidationError) -> NoReturn:
 
 @app.command("setup")
 def setup(
-    provider: Annotated[list[str] | None, typer.Option("--provider")] = None,
-    json_output: Annotated[bool, typer.Option("--json")] = False,
+    provider: Annotated[
+        list[str] | None,
+        typer.Option("--provider", help="Include a managed or host profiler provider."),
+    ] = None,
+    client: Annotated[
+        list[str] | None,
+        typer.Option("--client", help="Configure one global MCP client; repeatable."),
+    ] = None,
+    all_clients: Annotated[bool, typer.Option("--all", help="Configure every client.")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Apply explicit selections.")] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show resolved global changes without writing.")
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit structured output.")] = False,
     timeout_seconds: Annotated[
         int,
         typer.Option("--timeout-seconds", min=1, max=MAX_PREPARATION_TIMEOUT_SECONDS),
     ] = DEFAULT_PREPARATION_TIMEOUT_SECONDS,
 ) -> None:
-    """Print version-bound MCP config and optionally prepare selected provider extras."""
+    """Configure global MCP clients and optionally prepare provider extras."""
     selected = provider or []
     try:
+        explicit_clients = parse_setup_clients(client or [])
+        if all_clients and explicit_clients:
+            raise SetupFailure("--all cannot be combined with --client.")
+        interactive = _is_interactive()
+        if yes and not (all_clients or explicit_clients):
+            raise SetupFailure("--yes requires --client or --all; detection is not consent.")
+        if dry_run and not (all_clients or explicit_clients) and (not interactive or json_output):
+            raise SetupFailure("--dry-run requires --client or --all.")
+
+        selected_clients = list(SETUP_CLIENTS) if all_clients else explicit_clients
+        if not selected_clients and interactive and not json_output:
+            selected_clients = _select_setup_clients(detect_setup_clients())
+            if not selected_clients:
+                typer.echo("Flameox setup cancelled. No changes were made.")
+                return
+        elif selected_clients and not interactive and not (yes or dry_run):
+            raise SetupFailure("Non-interactive setup requires --yes or --dry-run.")
+
+        plans = plan_client_setup(selected_clients, selected)
+        if dry_run:
+            value = _setup_value(plans, selected, preparation=None, dry_run=True)
+            if json_output:
+                _write(value)
+            else:
+                _write_setup_plan(plans)
+                _write_external_guidance(value)
+            return
+
         preparation = prepare_providers(selected, timeout_seconds)
+        results = apply_client_setup(plans)
     except SetupFailure as error:
-        raise typer.BadParameter(str(error), param_hint="--provider") from error
-    prepared_providers = preparation.prepared_managed_providers
-    external_providers = [item.provider_id for item in preparation.external_requirements]
-    guidance = [item.guidance for item in preparation.external_requirements]
-    launcher, launcher_args = preparation.launcher_command, preparation.launcher_args
-    args = launcher_args
-    value = {
+        raise typer.BadParameter(str(error)) from error
+
+    value = _setup_value(plans, selected, preparation=preparation, dry_run=False)
+    value["clients"] = [
+        {
+            "id": result.client.value,
+            "name": result.client.display_name,
+            "path": str(result.path),
+            "status": result.action,
+        }
+        for result in results
+    ]
+    value["client_registration_changed"] = any(
+        result.action in {"created", "updated"} for result in results
+    )
+    restart_clients = [
+        result.client.display_name for result in results if result.action != "already_current"
+    ]
+    value["restart_required"] = bool(restart_clients)
+    value["next_action"] = (
+        {
+            "kind": "reconnect_mcp",
+            "clients": restart_clients,
+            "message": f"Restart or reconnect {', '.join(restart_clients)} to load Flameox.",
+        }
+        if restart_clients
+        else None
+    )
+    if json_output:
+        _write(value)
+        return
+    if not results:
+        launcher = str(value["command"])
+        args = cast(list[str], value["args"])
+        typer.echo(
+            "No MCP client registration was changed. Configure your client to run:\n"
+            f"  {shlex.join([launcher, *args])}"
+        )
+        _write_external_guidance(value)
+        return
+    typer.echo("◆ Flameox")
+    for result in results:
+        label = {
+            "created": "configured",
+            "updated": "updated",
+            "already_current": "already configured",
+        }[result.action]
+        typer.echo(f"  ✓ {result.client.display_name} {label}\n    {result.path}")
+    if restart_clients:
+        typer.echo(f"\nRestart or reconnect {', '.join(restart_clients)} to load Flameox.")
+    _write_external_guidance(value)
+
+
+def _write_external_guidance(value: dict[str, object]) -> None:
+    guidance = cast(list[str], value["external_guidance"])
+    if guidance:
+        typer.echo()
+        typer.echo("\n".join(guidance))
+
+
+def _select_setup_clients(detected: list[SetupClient]) -> list[SetupClient]:
+    import questionary
+
+    typer.echo("◆ Flameox\n  Runtime evidence for coding agents\n")
+    choices = [
+        questionary.Choice(
+            title=(
+                f"{item.display_name} — detected · "
+                f"{_display_setup_path(item.config_path(Path.home()))}"
+                if item in detected
+                else f"{item.display_name} · {_display_setup_path(item.config_path(Path.home()))}"
+            ),
+            value=item.value,
+            checked=item in detected,
+        )
+        for item in SETUP_CLIENTS
+    ]
+    selected = questionary.checkbox(
+        "Which agents should use Flameox?",
+        choices=choices,
+        instruction="(space to select, enter to configure)",
+        validate=lambda values: bool(values) or "Select at least one agent.",
+    ).ask()
+    return parse_setup_clients(selected or [])
+
+
+def _display_setup_path(path: Path) -> str:
+    try:
+        return f"~/{path.relative_to(Path.home())}"
+    except ValueError:
+        return str(path)
+
+
+def _is_interactive() -> bool:
+    return all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr))
+
+
+def _write_setup_plan(plans: list[ClientSetupPlan]) -> None:
+    typer.echo("◆ Flameox dry-run\n  No changes were made.")
+    for plan in plans:
+        typer.echo(f"  ◇ {plan.client.display_name}: {plan.action}\n    {plan.path}")
+
+
+def _setup_value(
+    plans: list[ClientSetupPlan],
+    providers: list[str],
+    *,
+    preparation: ProviderPreparation | None,
+    dry_run: bool,
+) -> dict[str, object]:
+    if preparation is None:
+        launcher, launcher_args = mcp_launcher(providers)
+        args = [*launcher_args, "mcp", "serve"]
+        preparation_command: list[str] = []
+        guidance = [item.guidance for item in external_provider_requirements(providers)]
+    else:
+        launcher = preparation.launcher_command
+        args = preparation.launcher_args
+        preparation_command = preparation.preparation_command
+        guidance = [item.guidance for item in preparation.external_requirements]
+    return {
         "command": launcher,
         "args": args,
         "resolved_version": __version__,
         "client_registration_changed": False,
         "repository_created": False,
-        "providers": sorted(set(prepared_providers) | set(external_providers)),
-        "preparation_command": preparation.preparation_command,
+        "providers": sorted(set(providers)),
+        "preparation_command": preparation_command,
         "external_guidance": guidance,
+        "dry_run": dry_run,
+        "plan": [
+            {
+                "client": plan.client.value,
+                "name": plan.client.display_name,
+                "path": str(plan.path),
+                "action": plan.action,
+                "detected": plan.detected,
+            }
+            for plan in plans
+        ],
     }
-    if json_output:
-        _write(value)
-    else:
-        typer.echo(
-            "No MCP client registration was changed. Configure your client to run:\n"
-            f"  {shlex.join([launcher, *args])}\n\n"
-            + (
-                "Prepared the exact version-pinned uvx provider environment.\n"
-                if preparation.preparation_command
-                else "No managed provider environment needed preparation.\n"
-            )
-            + "\n".join(guidance)
-        )
 
 
 @app.command("analyze")

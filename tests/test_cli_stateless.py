@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 
 from flameox import __version__
 from flameox.cli import app
-from flameox.setup import ExternalRequirement, ProviderPreparation
+from flameox.setup import ExternalRequirement, ProviderPreparation, SetupClient
 
 pytestmark = pytest.mark.integration
 
@@ -240,3 +240,159 @@ def test_setup_prepares_exact_python_providers_and_guides_system_tools(
     assert f"flameox[cpu,memory]=={__version__}" in payload["args"]
     assert "extras/python" in payload["external_guidance"][0]
     assert not (tmp_path / "flameox-data").exists()
+
+
+def test_setup_prints_external_provider_guidance_for_humans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "flameox.cli.prepare_providers",
+        lambda *_args, **_kwargs: ProviderPreparation(
+            requested_providers=["perf"],
+            launcher_command="uvx",
+            launcher_args=["flameox", "mcp", "serve"],
+            prepared_managed_providers=[],
+            external_requirements=[ExternalRequirement("perf", "Install perf externally.")],
+            preparation_command=[],
+        ),
+    )
+
+    result = CliRunner().invoke(app, ["setup", "--client", "codex", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "Install perf externally." in result.output
+
+
+def test_setup_configures_explicit_global_clients_and_reports_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    result = CliRunner().invoke(app, ["setup", "--client", "codex", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    config = tmp_path / ".codex" / "config.toml"
+    assert config.is_file()
+    assert f"flameox=={__version__}" in config.read_text()
+    assert "Codex configured" in result.output
+    assert "Restart or reconnect Codex" in result.output
+
+
+def test_setup_json_returns_typed_reconnect_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    result = CliRunner().invoke(app, ["setup", "--client", "gemini", "--yes", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["restart_required"] is True
+    assert payload["next_action"] == {
+        "kind": "reconnect_mcp",
+        "clients": ["Gemini CLI"],
+        "message": "Restart or reconnect Gemini CLI to load Flameox.",
+    }
+
+
+def test_setup_dry_run_does_not_prepare_or_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "flameox.cli.prepare_providers",
+        lambda *_args, **_kwargs: pytest.fail("dry-run prepared providers"),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["setup", "--client", "cursor", "--provider", "memray", "--dry-run", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["dry_run"] is True
+    assert payload["plan"][0]["action"] == "create"
+    assert f"flameox[memory]=={__version__}" in payload["args"]
+    assert not (tmp_path / ".cursor").exists()
+
+
+def test_setup_dry_run_validates_providers_and_reports_external_guidance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    unknown = CliRunner().invoke(
+        app, ["setup", "--client", "codex", "--provider", "mystery", "--dry-run"]
+    )
+    external = CliRunner().invoke(
+        app, ["setup", "--client", "codex", "--provider", "perf", "--dry-run", "--json"]
+    )
+
+    assert unknown.exit_code == 2
+    assert "Unknown provider" in unknown.output
+    assert external.exit_code == 0, external.output
+    assert json.loads(external.output)["external_guidance"]
+
+
+def test_setup_yes_requires_explicit_client_selection() -> None:
+    result = CliRunner().invoke(app, ["setup", "--yes"])
+
+    assert result.exit_code == 2
+    assert "detection is not consent" in result.output
+
+
+@pytest.mark.parametrize("arguments", [["--dry-run"], ["--client", "codex", "--json"]])
+def test_setup_automation_requires_explicit_selection_and_consent(arguments: list[str]) -> None:
+    result = CliRunner().invoke(app, ["setup", *arguments])
+
+    assert result.exit_code == 2
+    assert "requires" in result.output
+
+
+def test_setup_interactive_flow_asks_only_for_clients(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("flameox.cli._is_interactive", lambda: True)
+    selections: list[list[SetupClient]] = []
+
+    def select(detected: list[SetupClient]) -> list[SetupClient]:
+        selections.append(detected)
+        return [SetupClient.CODEX]
+
+    monkeypatch.setattr("flameox.cli._select_setup_clients", select)
+
+    result = CliRunner().invoke(app, ["setup"])
+
+    assert result.exit_code == 0, result.output
+    assert selections == [[]]
+    assert (tmp_path / ".codex" / "config.toml").is_file()
+
+
+def test_setup_interactive_dry_run_uses_the_client_selector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("flameox.cli._is_interactive", lambda: True)
+    monkeypatch.setattr("flameox.cli._select_setup_clients", lambda _detected: [SetupClient.CODEX])
+
+    result = CliRunner().invoke(app, ["setup", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "No changes were made" in result.output
+    assert not (tmp_path / ".codex").exists()
+
+
+def test_setup_interactive_cancellation_makes_no_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("flameox.cli._is_interactive", lambda: True)
+    monkeypatch.setattr("flameox.cli._select_setup_clients", lambda _detected: [])
+
+    result = CliRunner().invoke(app, ["setup"])
+
+    assert result.exit_code == 0, result.output
+    assert "cancelled. No changes were made" in result.output
+    assert not (tmp_path / ".codex").exists()

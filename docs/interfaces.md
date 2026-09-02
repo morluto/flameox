@@ -163,11 +163,15 @@ flameox capture [--preserve] -- <argv...>
 flameox evidence query|show
 ```
 
-`setup` prints stdio configuration that launches the exact running Flameox
-release through `uvx` on Python 3.12. It reports that no MCP client registration
-was changed; client-owned management interfaces apply the returned command.
-Repeated `--provider` options declare the complete Python provider set for the
-exact version-pinned uvx environment used by the returned launcher.
+`setup` detects supported coding agents and uses one multi-select prompt to choose which global MCP
+client configurations to update. It preserves unrelated JSON or TOML content and writes stdio
+configuration that launches the exact running Flameox release through `uvx` on Python 3.12.
+Changed clients must restart or reconnect. Non-interactive setup requires explicit `--client`
+targets or `--all`; `--yes` never converts detection into consent, and `--dry-run` reports the exact
+paths and actions without mutation. Repeated `--provider` options declare the complete Python
+provider set for the exact version-pinned uvx environment used by the saved launcher.
+An existing OpenCode `opencode.jsonc` remains untouched because rewriting it as JSON would discard
+comments; setup reports the file that needs a manual Flameox entry instead.
 `--timeout-seconds` accepts 1 through 3,600 and defaults to 1,800. Resolver,
 download, and compatibility failures retain uvx's complete stderr. System and
 vendor providers receive external installation guidance. Setup does not create a persistent global

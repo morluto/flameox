@@ -28,16 +28,25 @@ The MCP server has no workspace or project binding:
 uv run flameox mcp serve
 ```
 
-`flameox setup` prints a version-bound stdio client configuration using Python
-3.12 and the exact running Flameox release. It does not change an MCP client
-registration; apply the printed command through the client's supported MCP
-management interface. Explicit
-`--provider` selections prepare the exact version-pinned `uvx` environment in
-the printed launcher by resolving it once into uvx's cache; they do not create a
-persistent global `uv tool` installation. Each invocation declares the complete
-managed provider set for that launcher rather than adding to remembered state.
-Use `--timeout-seconds` for a slow cold resolution. System and vendor tools are
-diagnosed with external install guidance. Setup never initializes or mutates a project.
+Run the short global setup wizard through npm:
+
+```console
+npx flameox@latest setup
+```
+
+Setup detects Claude Code, Cursor, OpenCode, Codex, Gemini CLI, and Google Antigravity, then asks
+which clients should use Flameox. It preserves unrelated client configuration and writes a
+Python 3.12 `uvx` launcher pinned to the exact Flameox release that ran setup. Restart or reconnect
+changed clients afterward. For automation, pass `--client codex --yes`, repeat `--client`, or use
+`--all --yes`; `--dry-run` reports the same global paths without writing them. Detection is never
+automation consent.
+
+Explicit `--provider` selections prepare the exact version-pinned `uvx` environment in the saved
+launcher by resolving it once into uvx's cache; they do not create a persistent global `uv tool`
+installation. Each invocation declares the complete managed provider set for that launcher rather
+than adding to remembered state. Use `--timeout-seconds` for a slow cold resolution. System and
+vendor tools are diagnosed with external install guidance. Setup never initializes or mutates a
+project.
 
 ## Authority model
 
