@@ -109,13 +109,18 @@ class LauncherEnvelope(BaseModel):
     args: list[str]
 
 
+class ReconnectActionEnvelope(BaseModel):
+    kind: Literal["reconnect_mcp"]
+    message: str
+
+
 class PreparationEnvelope(_Envelope):
     requested_providers: list[str]
     prepared_managed_providers: list[str]
     external_requirements: list[ExternalRequirementEnvelope]
     preparation: PreparationStatusEnvelope
     launcher: LauncherEnvelope
-    restart_required: bool
+    next_action: ReconnectActionEnvelope | None
 
 
 class PreservationEnvelope(_Envelope):
@@ -222,7 +227,7 @@ def create_server(
             int, Field(ge=1, le=provider_setup.MAX_PREPARATION_TIMEOUT_SECONDS)
         ] = provider_setup.DEFAULT_PREPARATION_TIMEOUT_SECONDS,
     ) -> Annotated[CallToolResult, PreparationOutcome]:
-        """Prepare selected managed providers; report host-tool setup without changing it."""
+        """Prepare managed providers and return any required MCP reconnection action."""
 
         try:
             preparation = await anyio.to_thread.run_sync(
@@ -233,6 +238,15 @@ def create_server(
         except provider_setup.SetupFailure as error:
             return _failure(RuntimeFailure("SETUP_FAILURE", str(error)))
 
+        next_action = None
+        if preparation.restart_required:
+            next_action = {
+                "kind": "reconnect_mcp",
+                "message": (
+                    "Reconnect Flameox with the returned launcher before retrying the capture; "
+                    "the current server process is unchanged."
+                ),
+            }
         return _success(
             {
                 "requested_providers": preparation.requested_providers,
@@ -249,7 +263,7 @@ def create_server(
                     "command": preparation.launcher_command,
                     "args": preparation.launcher_args,
                 },
-                "restart_required": preparation.restart_required,
+                "next_action": next_action,
             }
         )
 

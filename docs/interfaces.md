@@ -69,12 +69,13 @@ Flameox keeps no installed-provider inventory or setup receipt. System profilers
 access, and OS permissions remain external requirements; Flameox returns guidance for them but does
 not invoke a system package manager or elevate privileges. Preparation creates no project state,
 durable job, or plan, and it cannot add packages to the currently running server. A result with
-`restart_required=true` means the MCP client must reconnect with the returned launcher. Managed
-provider IDs are `aiperf`, `memray`, `otlp`, `perfetto`, `py-spy`, and `torch`; every call declares
-the complete desired set. A provider such as Perfetto may be both prepared Python support and an
-external host Trace Processor requirement. Preparation waits up to 1,800 seconds by default;
-callers may set `timeout_seconds` from 1 through 3,600. A uvx failure returns its complete stderr in
-`SETUP_FAILURE`.
+a non-null `next_action` identifies the typed `reconnect_mcp` handoff, explains that the current
+server is unchanged, and directs the agent to reconnect with the returned launcher before retrying
+the capture. Host-only preparation returns `next_action: null`. Managed provider IDs are `aiperf`,
+`memray`, `otlp`, `perfetto`, `py-spy`, and `torch`; every call declares the complete desired set. A
+provider such as Perfetto may be both prepared Python support and an external host Trace Processor
+requirement. Preparation waits up to 1,800 seconds by default; callers may set `timeout_seconds`
+from 1 through 3,600. A uvx failure returns its complete stderr in `SETUP_FAILURE`.
 
 ## Sources and limits
 

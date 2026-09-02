@@ -1635,6 +1635,30 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
         if provider_ids == ["unknown-provider"]:
             raise ProviderSelectionFailure("Unknown provider 'unknown-provider'")
         preparation_calls.append(provider_ids)
+        if provider_ids == ["nsight-compute"]:
+            return ProviderPreparation(
+                ["nsight-compute"],
+                [],
+                [
+                    ExternalRequirement(
+                        "nsight-compute",
+                        "Install NVIDIA Nsight Compute with its extras/python interface.",
+                    )
+                ],
+                [],
+                "uvx",
+                [
+                    "--python",
+                    "3.12",
+                    "--from",
+                    f"flameox=={__version__}",
+                    "flameox",
+                    "mcp",
+                    "serve",
+                    "--project-root",
+                    str(project_root),
+                ],
+            )
         return ProviderPreparation(
             ["memray", "nsight-compute"],
             ["memray"],
@@ -1667,6 +1691,10 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
                 "prepare_providers",
                 {"provider_ids": ["memray", "nsight-compute", "memray"]},
             )
+            host_only = await client.call_tool(
+                "prepare_providers",
+                {"provider_ids": ["nsight-compute"]},
+            )
             invalid = await client.call_tool(
                 "prepare_providers",
                 {"provider_ids": ["unknown-provider"]},
@@ -1685,7 +1713,13 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
             }
         ]
         assert result.structured_content["preparation"]["status"] == "prepared"
-        assert result.structured_content["restart_required"] is True
+        assert result.structured_content["next_action"] == {
+            "kind": "reconnect_mcp",
+            "message": (
+                "Reconnect Flameox with the returned launcher before retrying the capture; "
+                "the current server process is unchanged."
+            ),
+        }
         assert result.structured_content["launcher"]["args"][3] == (
             f"flameox[memory]=={__version__}"
         )
@@ -1696,12 +1730,17 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
             "--project-root",
             str(tmp_path),
         ]
+        assert host_only.is_error is False
+        assert host_only.structured_content["next_action"] is None
 
         assert invalid.is_error is True
         assert invalid.structured_content["code"] == "INVALID_INPUT"
 
     anyio.run(exercise)
-    assert preparation_calls == [["memray", "nsight-compute", "memray"]]
+    assert preparation_calls == [
+        ["memray", "nsight-compute", "memray"],
+        ["nsight-compute"],
+    ]
 
 
 @pytest.mark.process

@@ -106,10 +106,11 @@ in, and run with, the workload's declared Python interpreter. Flameox does not
 substitute one Python runtime for the other. When a capture reports a missing managed provider,
 `prepare_providers` prepares its version-pinned uvx environment and returns that same launcher for
 reconnection. The agent supplies the complete provider list it wants in that launcher; Flameox does
-not merge it with prior calls. Preparation does not modify the running MCP process: when the result
-sets `restart_required=true`, the client reconnects with the returned launcher. The managed provider
-IDs are `aiperf`, `memray`, `otlp`, `perfetto`, `py-spy`, and `torch`. Host tools, drivers, and
-permissions are never installed or changed; the same result reports their setup guidance.
+not merge it with prior calls. Preparation does not modify the running MCP process. When the client
+must reconnect, the result returns a typed `next_action` with `kind: "reconnect_mcp"`, an agent-facing
+message, and the launcher to use. The managed provider IDs are `aiperf`, `memray`, `otlp`, `perfetto`,
+`py-spy`, and `torch`. Host tools, drivers, and permissions are never installed or changed; the same
+result reports their setup guidance.
 
 Comparison is intentionally a two-stage workflow. Flameox captures representative baseline and
 candidate summaries separately, optionally preserves them, and then passes both artifacts to an
