@@ -46,6 +46,17 @@ def pytest_collection_modifyitems(items: list[Any]) -> None:
         _write({"event": "test_collected", "nodeid": _text(item.nodeid)})
 
 
+def pytest_collectreport(report: Any) -> None:
+    if report.failed:
+        _write(
+            {
+                "event": "collection_error",
+                "nodeid": _text(report.nodeid),
+                "outcome": _text(report.outcome),
+            }
+        )
+
+
 def pytest_runtest_logreport(report: Any) -> None:
     worker = getattr(report, "worker_id", "main")
     _write(
@@ -60,9 +71,9 @@ def pytest_runtest_logreport(report: Any) -> None:
     )
 
 
-def pytest_keyboard_interrupt(excinfo: object) -> None:
-    del excinfo
-    _write({"event": "interrupted"})
+def pytest_keyboard_interrupt(excinfo: Any) -> None:
+    if excinfo.type is KeyboardInterrupt:
+        _write({"event": "interrupted"})
 
 
 def pytest_internalerror(

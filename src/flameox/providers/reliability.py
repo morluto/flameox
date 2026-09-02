@@ -26,6 +26,7 @@ class ReliabilityProvider:
     def _pytest(self, path: Path, *, max_rows: int) -> ProviderAnalysis:
         collected: set[str] = set()
         phase_events: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+        collection_errors: list[dict[str, Any]] = []
         global_failures: list[dict[str, Any]] = []
         finished = False
         interrupted = False
@@ -39,6 +40,16 @@ class ReliabilityProvider:
                 outcome = event.get("outcome")
                 if all(isinstance(item, str) for item in (nodeid, phase, outcome)):
                     phase_events[str(nodeid)][str(phase)] = self._pytest_row(index, event)
+            elif event_name == "collection_error" and isinstance(event.get("nodeid"), str):
+                collection_errors.append(
+                    {
+                        "index": index,
+                        "nodeid": str(event["nodeid"]),
+                        "classification": "errored",
+                        "failing_phase": "collection",
+                        "phase_outcomes": {"collection": str(event.get("outcome", "failed"))},
+                    }
+                )
             elif event_name == "run_finished":
                 finished = True
             elif event_name in {"interrupted", "internal_error"}:
@@ -51,12 +62,14 @@ class ReliabilityProvider:
             for nodeid, reports in phase_events.items()
         }
         outcomes = self._outcomes(phases)
+        outcomes["errored"] += len(collection_errors)
         diagnostic_rows = [
             self._pytest_outcome_row(nodeid, reports)
             for nodeid, reports in phase_events.items()
             if self._pytest_classification(phases[nodeid]) in {"failed", "errored"}
         ]
         diagnostic_rows.extend(global_failures)
+        diagnostic_rows.extend(collection_errors)
         diagnostic_rows.extend(
             {
                 "index": None,

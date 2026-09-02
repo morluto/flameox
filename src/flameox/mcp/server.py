@@ -86,17 +86,6 @@ class InspectionEnvelope(_Envelope):
     capabilities: list[dict[str, JsonValue]]
 
 
-class PreflightEnvelope(_Envelope):
-    request_sha256: str
-    authoritative: bool
-    compatibility: dict[str, JsonValue]
-    execution_count: int
-    cwd: str
-    cases: list[dict[str, JsonValue]]
-    effective_limits: dict[str, JsonValue]
-    limitations: list[str]
-
-
 class PreservationEnvelope(_Envelope):
     evidence_id: str
     uri: str
@@ -129,10 +118,6 @@ class InspectionOutcome(_ObjectOutcome):
 
 class AnalysisOutcome(_ObjectOutcome):
     root: AnalysisEnvelope | ToolFailureEnvelope
-
-
-class PreflightOutcome(_ObjectOutcome):
-    root: PreflightEnvelope | ToolFailureEnvelope
 
 
 class PreservationOutcome(_ObjectOutcome):
@@ -196,8 +181,7 @@ def create_server(
             "Pass explicit artifact paths or a typed direct target. Analysis and capture are "
             "session-local unless preserve_evidence is called. Flameox never installs providers, "
             "searches parent directories, accepts shell strings, or creates durable jobs. Use "
-            "inspect_capabilities before capture; use preflight_capture when the resolved command, "
-            "bounds, artifacts, or compatibility decision needs review before execution."
+            "inspect_capabilities before capture when provider compatibility or bounds need review."
         ),
         lifespan=lifespan,
     )
@@ -257,30 +241,6 @@ def create_server(
         except (OSError, ValueError, json.JSONDecodeError) as error:
             return _failure(RuntimeFailure("DECODE_FAILURE", str(error)))
 
-    @server.tool(annotations=READ_ONLY, structured_output=True)
-    async def preflight_capture(
-        target: CaptureTarget,
-        capability_id: str = "artifact.preview",
-        mode: Literal["single", "experiment"] = "single",
-        experiment: ExperimentDesign | None = None,
-        limits: RequestLimits | None = None,
-    ) -> Annotated[CallToolResult, PreflightOutcome]:
-        """Resolve and validate one exact capture request without executing it or creating state."""
-        try:
-            return _success(
-                runtime().preflight_capture(
-                    target,
-                    capability_id,
-                    mode=mode,
-                    experiment=experiment,
-                    limits=limits,
-                )
-            )
-        except RuntimeFailure as error:
-            return _failure(error)
-        except ValidationError as error:
-            return _failure(RuntimeFailure("INVALID_INPUT", str(error)))
-
     @server.tool(annotations=CAPTURE, structured_output=True)
     async def capture_and_analyze(
         target: CaptureTarget,
@@ -291,7 +251,7 @@ def create_server(
         preserve: bool = False,
         ctx: Context[AnalysisRuntime] | None = None,
     ) -> Annotated[CallToolResult, AnalysisOutcome]:
-        """Execute and analyze a typed target; use preflight_capture first when review is needed."""
+        """Validate, execute, and analyze one typed target through the bounded broker."""
 
         async def progress(current: int, total: int, message: str) -> None:
             if ctx is not None:

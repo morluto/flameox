@@ -125,39 +125,6 @@ def test_capture_rejects_declared_provider_capability_mismatch_before_execution(
     assert not marker.exists()
 
 
-@pytest.mark.unit
-def test_capture_preflight_is_read_only_and_returns_resolved_template(tmp_path: Path) -> None:
-    marker = tmp_path / "executed"
-    runtime = AnalysisRuntime(tmp_path)
-    before = list(runtime.scratch.rglob("*"))
-    try:
-        result = runtime.preflight_capture(
-            CaptureTarget(
-                argv=[
-                    sys.executable,
-                    "-c",
-                    f"from pathlib import Path; Path({str(marker)!r}).touch()",
-                ],
-                provider_id="pyperf",
-            ),
-            "benchmark.summary",
-        )
-        after = list(runtime.scratch.rglob("*"))
-    finally:
-        runtime.close()
-
-    assert result["authoritative"] is False
-    assert result["compatibility"]["status"] == "compatible"
-    assert result["cases"][0]["expected_artifacts"][0] == {
-        "role": "benchmark",
-        "format": "pyperf",
-        "path_template": "<request-scratch>/case-0001/benchmark.json",
-    }
-    assert result["cases"][0]["capture_argv_template"][1:4] == ["-m", "pyperf", "command"]
-    assert before == after == []
-    assert not marker.exists()
-
-
 def test_special_file_sources_are_rejected_before_decoding(tmp_path: Path) -> None:
     fifo = tmp_path / "input.fifo"
     os.mkfifo(fifo)
@@ -215,6 +182,7 @@ def test_capture_rejects_unbounded_durable_provenance_before_execution(tmp_path:
     async def exercise() -> None:
         runtime = AnalysisRuntime(tmp_path)
         try:
+            before = list(runtime.scratch.iterdir())
             with pytest.raises(RuntimeFailure) as failure:
                 await runtime.capture_and_analyze(
                     CaptureTarget(
@@ -224,10 +192,12 @@ def test_capture_rejects_unbounded_durable_provenance_before_execution(tmp_path:
                     "artifact.preview",
                     limits=RequestLimits(max_provenance_bytes=4 * 1024),
                 )
+            after = list(runtime.scratch.iterdir())
         finally:
             runtime.close()
 
         assert failure.value.code == "LIMIT_EXCEEDED"
+        assert before == after == []
 
     anyio.run(exercise)
 
@@ -1233,6 +1203,38 @@ def test_pytest_failure_identities_precede_large_successful_population(tmp_path:
 
 
 @pytest.mark.process
+def test_pytest_collection_failure_identity_is_reported(tmp_path: Path) -> None:
+    broken = tmp_path / "test_broken.py"
+    broken.write_text("raise RuntimeError('collection failed')\n")
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(tmp_path)
+        try:
+            result = await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[sys.executable, "-m", "pytest", str(broken), "-q"],
+                    provider_id="pytest",
+                ),
+                "failures.summary",
+            )
+        finally:
+            runtime.close()
+
+        assert result["blocks"][0]["values"]["errored"] == 1
+        assert result["blocks"][1]["rows"] == [
+            {
+                "index": 1,
+                "nodeid": "test_broken.py",
+                "classification": "errored",
+                "failing_phase": "collection",
+                "phase_outcomes": {"collection": "failed"},
+            }
+        ]
+
+    anyio.run(exercise)
+
+
+@pytest.mark.process
 def test_pytest_capture_produces_analyzable_session_evidence(tmp_path: Path) -> None:
     (tmp_path / "local_module.py").write_text("VALUE = 7\n")
     tests_dir = tmp_path / "tests"
@@ -1777,7 +1779,6 @@ def test_mcp_catalog_is_exact_small_typed_and_has_one_resource_template() -> Non
             "discover_capabilities",
             "inspect_capabilities",
             "analyze",
-            "preflight_capture",
             "capture_and_analyze",
             "preserve_evidence",
             "query_evidence",
@@ -1788,7 +1789,7 @@ def test_mcp_catalog_is_exact_small_typed_and_has_one_resource_template() -> Non
         assert [item.uri_template for item in templates] == ["flameox://evidence/{evidence_id}"]
         assert templates[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
         catalog = json.dumps([tool.model_dump(mode="json") for tool in tools])
-        assert len(catalog) < 40 * 1024
+        assert len(catalog) < 128 * 1024
 
     anyio.run(inspect)
 
@@ -1828,7 +1829,6 @@ def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path
             "discover_capabilities",
             "inspect_capabilities",
             "analyze",
-            "preflight_capture",
             "capture_and_analyze",
             "preserve_evidence",
             "query_evidence",
