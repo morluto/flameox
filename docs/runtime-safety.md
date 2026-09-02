@@ -4,18 +4,18 @@ Flameox runs trusted local targets, but it keeps execution and evidence bounds
 explicit. Typed argv avoids shell parsing; it does not make an untrusted program
 safe.
 
-## Fixed authority
+## Explicit authority
 
-The MCP project root is resolved once at startup. Capture cwd must exist inside
-that root after symlink resolution. The runtime never searches parent
-directories and never treats `.flameox` or `.diagnostics` as discovery markers.
-Explicit analysis inputs are resolved exactly and may include an expected
-SHA-256 checked before decoding.
+The MCP runtime has no workspace or project root. Capture requires an existing absolute `cwd` and
+analysis requires explicit absolute inputs; neither falls back to server startup state. Inputs may
+include an expected SHA-256 checked before decoding. Flameox never searches parent directories or
+treats local marker directories as discovery state.
 
-Environment overrides are bounded by count and length. The subprocess broker
-retains its dangerous-variable and credential-name checks, exact executable
-binding, output ceiling, timeout, resource observation, process-group cleanup,
-and descendant cleanup behavior. Effective containment is reported truthfully.
+Environment overrides are bounded by count and length. The subprocess broker retains its
+dangerous-variable and credential-name checks, exact executable binding, output ceiling, timeout,
+resource observation, process-group cleanup, and descendant cleanup behavior. The target remains a
+trusted local process with the operating-system permissions of Flameox; `cwd` is context, not a
+sandbox.
 
 ## Request-owned work
 

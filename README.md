@@ -19,14 +19,13 @@ paths and formats to `analyze`; old `.diagnostics` state is not migrated.
 uv sync --extra dev --extra memory --extra trace --extra cpu
 uv run flameox mcp inspect
 uv run flameox analyze artifact.preview /absolute/path/to/artifact.json
-uv run flameox capture --provider direct -- python benchmark.py
+uv run flameox capture --provider direct --cwd "$PWD" -- python benchmark.py
 ```
 
-The MCP server fixes its project root at startup. Manual launches default to
-the startup working directory:
+The MCP server has no workspace or project binding:
 
 ```console
-uv run flameox mcp serve --project-root "$PWD"
+uv run flameox mcp serve
 ```
 
 `flameox setup` prints a version-bound stdio client configuration using Python
@@ -38,8 +37,7 @@ the printed launcher by resolving it once into uvx's cache; they do not create a
 persistent global `uv tool` installation. Each invocation declares the complete
 managed provider set for that launcher rather than adding to remembered state.
 Use `--timeout-seconds` for a slow cold resolution. System and vendor tools are
-diagnosed with external install guidance. Setup never initializes the project
-or creates `.flameox`.
+diagnosed with external install guidance. Setup never initializes or mutates a project.
 
 ## Authority model
 
@@ -55,14 +53,14 @@ explicit artifact paths / typed direct target
                        explicit preservation
                               │
                               ▼
-                    <project>/.flameox
+             user Flameox data directory
 ```
 
 Analysis and unpreserved capture make no durable Flameox writes. Capture
 artifacts stay in bounded session scratch until preservation or server
-shutdown. The first `preserve_evidence` call creates `.flameox`, stores native
-bytes and a canonical evidence bundle by SHA-256, and adds `.flameox/` to the
-repository-local `.git/info/exclude` when applicable.
+shutdown. The first `preserve_evidence` call creates the user-level Flameox data directory and
+stores native bytes and a canonical evidence bundle by SHA-256. `FLAMEOX_DATA_DIR` overrides the
+platform default for isolation or another storage location. Flameox never edits project Git files.
 
 The agent owns hypotheses and narrative findings in its own notes. Flameox owns
 only observed inputs, effective requests, execution provenance, typed evidence,
@@ -94,7 +92,7 @@ argv, environment values, working directories, and host paths remain available
 only through explicit local manifest inspection. Native artifact bytes are
 deliberately not available as MCP resources.
 
-Direct capture accepts an argv array, a project-contained cwd, bounded environment overrides, a
+Direct capture accepts an argv array, an explicit absolute cwd, bounded environment overrides, a
 typed compatible-provider variant, capability-specific options, an explicit single/experiment
 choice, and limits as top-level tool arguments. There is no generic request or arguments envelope.
 Shell strings are never accepted. Work remains owned by the live MCP request, so SDK progress and

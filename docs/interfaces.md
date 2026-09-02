@@ -106,7 +106,7 @@ They cannot raise them.
 
 ## Capture
 
-A direct target contains an argv array, project-contained cwd, and at most 32 bounded environment
+A direct target contains an argv array, an existing absolute cwd, and at most 32 bounded environment
 overrides after experiment-case overrides are merged. Provider fields live in the capture tool's
 typed provider union, and analysis fields live in its capability-specific `options` model. Shell
 command strings are not accepted.
@@ -166,8 +166,6 @@ Repeated `--provider` options declare the complete Python provider set for the
 exact version-pinned uvx environment used by the returned launcher.
 `--timeout-seconds` accepts 1 through 3,600 and defaults to 1,800. Resolver,
 download, and compatibility failures retain uvx's complete stderr. System and
-vendor providers receive external installation guidance. Setup does not create
-a persistent global tool, project repository, durable operation, or MCP setup
-endpoint.
-Other CLI commands construct the same runtime and project-root rules used by
-MCP.
+vendor providers receive external installation guidance. Setup does not create a persistent global
+tool, durable operation, project state, or MCP setup endpoint. Other CLI commands use the same
+explicit paths, capture working directories, and user-level evidence store as MCP.

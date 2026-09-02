@@ -1,6 +1,6 @@
 # Storage and evidence
 
-Storage is optional. Analysis and unpreserved capture must not create `.flameox`,
+Storage is optional. Analysis and unpreserved capture must not create user data, project files,
 `.diagnostics`, SQLite files, or persistent DuckDB files.
 
 ## Repository layout
@@ -8,7 +8,7 @@ Storage is optional. Analysis and unpreserved capture must not create `.flameox`
 The first explicit preservation creates exactly:
 
 ```text
-.flameox/
+<user-data>/flameox/
 ├── repository.json
 ├── artifacts/sha256/<prefix>/<digest>/
 │   ├── artifact.json
@@ -19,10 +19,9 @@ The first explicit preservation creates exactly:
 └── .staging/<process-session>/<publication-id>/
 ```
 
-`repository.json` contains only `format_version` and `created_at`. It does not
-bind the repository to a project path and is not mutable lifecycle state.
-Creation adds `.flameox/` idempotently to `.git/info/exclude` when the fixed
-project root is a Git repository. Tracked `.gitignore` is never edited.
+`repository.json` contains only `format_version` and `created_at`. It does not bind the repository
+to a project path and is not mutable lifecycle state. The default follows the platform user-data
+location; `FLAMEOX_DATA_DIR` overrides it. Flameox never creates or edits project Git files.
 
 ## Identities
 

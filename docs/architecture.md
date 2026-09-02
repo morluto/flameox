@@ -8,19 +8,20 @@ control plane.
 
 | Concern | Authority |
 | --- | --- |
-| Project boundary | `project_root` fixed once at server startup |
+| Artifact location | Exact paths supplied by each analysis request |
+| Target location | Exact absolute `cwd` supplied by each capture request |
 | Available operations | Process-lifespan capability registry |
 | In-progress work | Current MCP request and cancellation scope |
 | Unpreserved output | Bounded session scratch |
-| Completed preserved evidence | Immutable evidence manifest |
+| Completed preserved evidence | Immutable manifest in the user Flameox data directory |
 | Native bytes | Content-addressed artifact bundle |
 | Query view | Sorted manifest inventory pinned for one query |
 | Limits | Startup defaults, lowerable per request |
 | Hypotheses and narrative | Agent-owned notes outside Flameox |
 
-The runtime never searches parents. A manual server defaults `project_root` to
-its startup cwd. Every capture cwd resolves inside that fixed root; explicit
-analysis paths may point elsewhere because the caller names the exact input.
+The runtime has no workspace identity and never searches parent directories. Analysis consumes
+explicit absolute paths. Capture consumes a typed argv and explicit absolute working directory.
+Neither is interpreted relative to server startup.
 
 ## Process model
 
@@ -44,7 +45,7 @@ durable SHA-256 identity derived from the canonical manifest body.
   limits, cancellation, output bounds, and descendant cleanup.
 - `mcp/server.py` and `cli.py` are thin projections over the same runtime.
 - Provider adapters accept resolved explicit inputs and return typed evidence;
-  they do not discover workspaces or publish evidence.
+  they do not discover source trees or publish evidence.
 
 DuckDB may be used in memory for bounded aggregation. It is never a durable
 catalog. Flameox production code must not create or depend on SQLite state.

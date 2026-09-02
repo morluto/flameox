@@ -5,23 +5,23 @@ Flameox 是面向编码代理的本地、有界运行时证据层。它协调分
 
 0.2 是一次不兼容重构：无需初始化工作区，没有命名工作负载、SQLite 控制面、
 持久 DuckDB 目录或可轮询的后台任务。调用方直接传入原生证据的绝对路径，或
-包含 argv、项目内 cwd、环境覆盖、提供方参数和限制的类型化目标。
+包含 argv、绝对 cwd、环境覆盖、提供方参数和限制的类型化目标。服务本身不绑定项目或工作区。
 
 ```console
 uv run flameox mcp inspect
 uv run flameox analyze artifact.preview /absolute/path/to/artifact.json
-uv run flameox capture --provider direct -- python benchmark.py
-uv run flameox mcp serve --project-root "$PWD"
+uv run flameox capture --provider direct --cwd "$PWD" -- python benchmark.py
+uv run flameox mcp serve
 ```
 
 `flameox setup` 会输出 MCP 客户端配置。显式传入 `--provider` 时，它可将对应的
 Python 扩展安装到持久的 uv 工具环境；NVIDIA 等系统或厂商工具则提供外部安装
-指引。setup 不会初始化项目，也不会创建 `.flameox`。
+指引。setup 不会初始化或修改项目。
 
-分析和未保存的采集不会在项目中写入 Flameox 状态。只有显式调用
-`preserve_evidence` 或 CLI 的 `--preserve` 后，才会延迟创建
-`<project>/.flameox`。原生字节和证据清单按 SHA-256 寻址，并通过同一文件系统
-上的暂存、校验、fsync 和原子重命名发布。
+分析和未保存的采集不会写入持久状态。只有显式调用 `preserve_evidence` 或 CLI 的
+`--preserve` 后，才会延迟创建用户级 Flameox 数据目录；`FLAMEOX_DATA_DIR` 可覆盖
+平台默认位置。原生字节和证据清单按 SHA-256 寻址，并通过同一文件系统上的暂存、
+校验、fsync 和原子重命名发布。Flameox 不修改项目的 Git 配置。
 
 MCP 公开面向任务的类型化分析和采集工具，例如 `analyze_cpu_hotspots`、
 `capture_gpu_launches` 和 `analyze_benchmark_compare`，以及
