@@ -196,9 +196,7 @@ def _torch_profiler(request: CaptureBuildRequest, _: ManagedExecutable) -> Captu
     }
     environment = {
         **request.environment,
-        "FLAMEOX_TORCH_PROFILER_CONFIG": json.dumps(
-            config, separators=(",", ":"), sort_keys=True
-        ),
+        "FLAMEOX_TORCH_PROFILER_CONFIG": json.dumps(config, separators=(",", ":"), sort_keys=True),
         "FLAMEOX_TORCH_PROFILER_OUTPUT_ROOT": str(output_root),
     }
     return CaptureInvocation(
