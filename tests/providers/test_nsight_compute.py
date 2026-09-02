@@ -14,6 +14,12 @@ from flameox.runtime_contracts import CaptureTarget, PathSource, RuntimeFailure
 from flameox.stateless import AnalysisRuntime
 
 
+def _write_fake_report_interface(executable: Path) -> None:
+    interface = executable.parent.parent / "extras" / "python" / "ncu_report.py"
+    interface.parent.mkdir(parents=True)
+    interface.touch()
+
+
 def test_explicit_report_fails_as_unavailable_without_vendor_interface(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -97,6 +103,7 @@ def test_nsight_compute_capture_uses_typed_bounded_options(
         "output.write_bytes(b'native-report')\n"
     )
     executable.chmod(0o755)
+    _write_fake_report_interface(executable)
     monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
 
     async def exercise() -> dict[str, Any]:
@@ -156,6 +163,7 @@ def test_preserved_native_capture_survives_analysis_failure(
         "output.write_bytes(b'authoritative-native-report')\n"
     )
     executable.chmod(0o755)
+    _write_fake_report_interface(executable)
     monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
 
     async def exercise() -> tuple[str, dict[str, Any]]:
