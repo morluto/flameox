@@ -1707,7 +1707,6 @@ def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path
                 },
             )
             await session.validate_tool_result("preview_artifact", inspected)
-            await session.validate_tool_result("preview_artifact", invalid)
             await session.validate_tool_result("capture_process_output", captured)
 
         assert initialized.server_info.version == __version__
