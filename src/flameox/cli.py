@@ -83,14 +83,14 @@ def setup(
     root = project_root.resolve(strict=True)
     selected = provider or []
     try:
-        preparation = prepare_providers(selected)
+        preparation = prepare_providers(selected, root)
     except SetupFailure as error:
         raise typer.BadParameter(str(error), param_hint="--provider") from error
     configured_providers = preparation.configured_managed_providers
     external_providers = [item.provider_id for item in preparation.external_requirements]
     guidance = [item.guidance for item in preparation.external_requirements]
     launcher, launcher_args = preparation.launcher_command, preparation.launcher_args
-    args = [*launcher_args, "mcp", "serve", "--project-root", str(root)]
+    args = launcher_args
     value = {
         "command": launcher,
         "args": args,

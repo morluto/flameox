@@ -207,7 +207,7 @@ def test_setup_installs_only_explicit_python_providers_and_guides_system_tools(
 ) -> None:
     selected: list[list[str]] = []
 
-    def prepare(providers: list[str]) -> ProviderPreparation:
+    def prepare(providers: list[str], project_root: Path) -> ProviderPreparation:
         selected.append(providers)
         return ProviderPreparation(
             providers,
@@ -226,6 +226,10 @@ def test_setup_installs_only_explicit_python_providers_and_guides_system_tools(
                 "--from",
                 f"flameox[cpu,memory]=={__version__}",
                 "flameox",
+                "mcp",
+                "serve",
+                "--project-root",
+                str(project_root),
             ],
         )
 

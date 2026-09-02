@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+import anyio
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp_types import CallToolResult, ContentBlock, ResourceLink, TextContent, ToolAnnotations
@@ -55,7 +56,7 @@ PRESERVE = ToolAnnotations(
 )
 PREPARE = ToolAnnotations(
     read_only_hint=False,
-    destructive_hint=False,
+    destructive_hint=True,
     idempotent_hint=True,
     open_world_hint=True,
 )
@@ -262,7 +263,7 @@ def create_server(
         """Install selected managed providers; report host-tool setup without changing it."""
 
         try:
-            preparation = await asyncio.to_thread(prepare_providers, provider_ids)
+            preparation = await anyio.to_thread.run_sync(prepare_providers, provider_ids, root)
         except ProviderSelectionFailure as error:
             return _failure(RuntimeFailure("INVALID_INPUT", str(error)))
         except SetupFailure as error:
@@ -284,7 +285,7 @@ def create_server(
                     "command": preparation.launcher_command,
                     "args": preparation.launcher_args,
                 },
-                "restart_required": preparation.changed,
+                "restart_required": preparation.restart_required,
             }
         )
 

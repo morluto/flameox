@@ -10,7 +10,7 @@ import pytest
 from flameox import __version__
 from flameox.setup import (
     SetupFailure,
-    managed_tool_extras,
+    installed_tool_extras,
     mcp_launcher,
     prepare_providers,
     provider_install_command,
@@ -55,16 +55,17 @@ def test_system_provider_has_guidance_but_no_python_install() -> None:
 
 
 def test_system_only_preparation_does_not_require_uv(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: None)
 
-    prepared = prepare_providers(["nsight-compute"])
+    prepared = prepare_providers(["nsight-compute"], tmp_path)
 
     assert prepared.configured_managed_providers == []
     assert [item.provider_id for item in prepared.external_requirements] == ["nsight-compute"]
     assert prepared.install_command == []
     assert prepared.changed is False
+    assert prepared.restart_required is False
 
 
 def test_provider_install_is_a_noop_when_requested_extra_is_already_managed() -> None:
@@ -78,7 +79,7 @@ def test_provider_install_is_a_noop_when_requested_extra_is_already_managed() ->
     )
 
 
-def test_managed_tool_extras_are_read_from_uv_receipt(tmp_path: Path) -> None:
+def test_installed_tool_extras_are_read_from_uv_receipt(tmp_path: Path) -> None:
     tool = tmp_path / "flameox"
     tool.mkdir()
     (tool / "uv-receipt.toml").write_text(
@@ -88,7 +89,18 @@ requirements = [{ name = "flameox", extras = ["cpu", "memory"], specifier = "==0
 """
     )
 
-    assert managed_tool_extras(tmp_path) == {"cpu", "memory"}
+    assert installed_tool_extras(tmp_path) == {"cpu", "memory"}
+
+
+def test_all_extra_satisfies_and_survives_managed_provider_preparation() -> None:
+    assert (
+        provider_install_command(
+            ["memray", "py-spy"],
+            uv=Path("/usr/bin/uv"),
+            installed_extras={"all"},
+        )
+        == []
+    )
 
 
 def test_provider_install_retains_existing_managed_providers(
@@ -113,11 +125,48 @@ def test_provider_install_retains_existing_managed_providers(
     monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/usr/bin/uv")
     monkeypatch.setattr("flameox.setup.subprocess.run", run)
 
-    installed = prepare_providers(["memray"])
+    installed = prepare_providers(["memray"], tmp_path)
 
     assert calls[-1][-1] == f"flameox[cpu,memory]=={__version__}"
     assert installed.configured_managed_providers == ["memray", "py-spy"]
     assert installed.changed is True
+    assert installed.restart_required is True
+
+
+def test_satisfied_managed_provider_still_returns_a_reconnect_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool = tmp_path / "tools" / "flameox"
+    tool.mkdir(parents=True)
+    (tool / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{ name = "flameox", extras = ["cpu"] }]\n'
+    )
+
+    def run(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
+        assert command[1:] == ["tool", "dir"]
+        return CompletedProcess(command, 0, f"{tmp_path / 'tools'}\n", "")
+
+    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/usr/bin/uv")
+    monkeypatch.setattr("flameox.setup.subprocess.run", run)
+
+    prepared = prepare_providers(["py-spy"], tmp_path)
+
+    assert prepared.changed is False
+    assert prepared.restart_required is True
+    assert prepared.launcher_args[-4:] == ["mcp", "serve", "--project-root", str(tmp_path)]
+
+
+def test_uv_start_failure_is_normalized_as_setup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> CompletedProcess[str]:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/usr/bin/uv")
+    monkeypatch.setattr("flameox.setup.subprocess.run", fail)
+
+    with pytest.raises(SetupFailure, match="could not start"):
+        prepare_providers(["memray"], tmp_path)
 
 
 def test_concurrent_preparation_retains_both_provider_extra_sets(
@@ -155,7 +204,13 @@ def test_concurrent_preparation_retains_both_provider_extra_sets(
     monkeypatch.setattr("flameox.setup.subprocess.run", run)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(prepare_providers, [["memray"], ["otlp"]]))
+        results = list(
+            executor.map(
+                prepare_providers,
+                [["memray"], ["otlp"]],
+                [tmp_path, tmp_path],
+            )
+        )
 
     assert len(install_requirements) == 2
     assert any("flameox[memory,trace]" in requirement for requirement in install_requirements)
