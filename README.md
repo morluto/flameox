@@ -34,9 +34,12 @@ uv run flameox mcp serve --project-root "$PWD"
 registration; apply the printed command through the client's supported MCP
 management interface. Explicit
 `--provider` selections prepare the exact version-pinned `uvx` environment in
-the printed launcher. Each invocation declares the complete managed provider
-set for that launcher. System and vendor tools are diagnosed with external
-install guidance. Setup never initializes the project or creates `.flameox`.
+the printed launcher by resolving it once into uvx's cache; they do not create a
+persistent global `uv tool` installation. Each invocation declares the complete
+managed provider set for that launcher rather than adding to remembered state.
+Use `--timeout-seconds` for a slow cold resolution. System and vendor tools are
+diagnosed with external install guidance. Setup never initializes the project
+or creates `.flameox`.
 
 ## Authority model
 
@@ -94,9 +97,10 @@ environment. In-process collectors such as coverage.py and Memray are verified
 in, and run with, the workload's declared Python interpreter. Flameox does not
 substitute one Python runtime for the other. When discovery reports a missing
 managed provider, `prepare_capabilities` prepares its version-pinned uvx
-environment and returns that same launcher for reconnection. Host tools, drivers,
-and permissions are never installed or changed; the same result reports their
-setup guidance.
+environment and returns that same launcher for reconnection. The agent supplies
+the complete provider list it wants in that launcher; Flameox does not merge it
+with prior calls. Host tools, drivers, and permissions are never installed or
+changed; the same result reports their setup guidance.
 
 ## Evidence quality
 
