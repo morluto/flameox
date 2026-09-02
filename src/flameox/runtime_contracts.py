@@ -18,7 +18,6 @@ from flameox.environment_policy import blocked_environment_override
 MAX_INPUTS = 32
 MAX_ROWS = 1_000
 MAX_RESULT_BYTES = 256 * 1024
-MAX_SNIFF_INPUTS = 16
 
 
 class RuntimeFailure(RuntimeError):
@@ -121,13 +120,10 @@ class RequestLimits(StrictModel):
         return RequestLimits.model_validate(effective)
 
 
-class CaptureTarget(StrictModel):
+class DirectTarget(StrictModel):
     argv: list[str] = Field(min_length=1, max_length=256)
     cwd: str = "."
     environment: dict[str, str] = Field(default_factory=dict, max_length=32)
-    provider_id: str = Field(min_length=1, max_length=80)
-    capture_arguments: dict[str, Any] = Field(default_factory=dict)
-    analysis_arguments: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("argv")
     @classmethod
@@ -138,6 +134,12 @@ class CaptureTarget(StrictModel):
     @classmethod
     def valid_environment(cls, value: dict[str, str]) -> dict[str, str]:
         return _valid_environment(value)
+
+
+class CaptureTarget(DirectTarget):
+    provider_id: str = Field(min_length=1, max_length=80)
+    capture_arguments: dict[str, Any] = Field(default_factory=dict)
+    analysis_arguments: dict[str, Any] = Field(default_factory=dict)
 
 
 class PyperfCaptureArguments(StrictModel):
@@ -293,7 +295,6 @@ class CaptureProviderContract:
     argument_model: type[StrictModel]
     artifacts: tuple[CaptureArtifactContract, ...]
     artifact_description: str
-    preview_streams: bool = False
 
 
 def _capture_provider(
@@ -301,15 +302,12 @@ def _capture_provider(
     argument_model: type[StrictModel],
     artifacts: tuple[tuple[str, str], ...],
     description: str,
-    *,
-    preview_streams: bool = False,
 ) -> CaptureProviderContract:
     return CaptureProviderContract(
         provider_id,
         argument_model,
         tuple(CaptureArtifactContract(role, format_name) for role, format_name in artifacts),
         description,
-        preview_streams,
     )
 
 
@@ -317,7 +315,10 @@ CAPTURE_PROVIDER_CONTRACTS = {
     item.id: item
     for item in (
         _capture_provider(
-            "direct", EmptyArguments, (), "stdout and stderr text", preview_streams=True
+            "direct",
+            EmptyArguments,
+            (("stdout", "text"), ("stderr", "text")),
+            "stdout and stderr text",
         ),
         _capture_provider(
             "pyperf", PyperfCaptureArguments, (("benchmark", "pyperf"),), "native pyperf JSON suite"
@@ -531,19 +532,6 @@ class AnalysisResult(StrictModel):
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderProbe:
-    id: str
-    formats: tuple[str, ...]
-    module: str | None = None
-    distribution: str | None = None
-    supported_versions: str | None = None
-    executable: str | None = None
-    configured_path_environment: str | None = None
-    platforms: tuple[str, ...] = ()
-    setup_provider: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class Capability:
     id: str
     summary: str
@@ -575,14 +563,26 @@ CAPABILITIES = tuple(
         SummaryArguments,
     )
     + _caps(
-        ("trace.call_graph", "trace.pytorch"),
-        "Project bounded call-graph or PyTorch trace evidence.",
+        ("trace.call_graph",),
+        "Project bounded caller-callee edges from Chrome, Perfetto, or PyTorch traces.",
         ("perfetto", "chrome-trace", "pytorch"),
         SummaryArguments,
     )
     + _caps(
-        ("trace.operations", "trace.lifecycle"),
-        "Summarize bounded operation and lifecycle evidence.",
+        ("trace.pytorch",),
+        "Summarize bounded PyTorch operator and event evidence.",
+        ("perfetto", "chrome-trace", "pytorch"),
+        SummaryArguments,
+    )
+    + _caps(
+        ("trace.operations",),
+        "Summarize bounded operation timing from OTLP or Nsight Systems traces.",
+        ("otlp", "nsys-rep", "nsys-parquet"),
+        SummaryArguments,
+    )
+    + _caps(
+        ("trace.lifecycle",),
+        "Summarize bounded execution lifecycle events from OTLP or Nsight Systems traces.",
         ("otlp", "nsys-rep", "nsys-parquet"),
         SummaryArguments,
     )
@@ -599,14 +599,26 @@ CAPABILITIES = tuple(
         SummaryArguments,
     )
     + _caps(
-        ("memory.hotspots", "memory.retained"),
-        "Rank bounded allocation evidence.",
+        ("memory.hotspots",),
+        "Rank bounded allocation hotspots from a Memray capture.",
         ("memray",),
         SummaryArguments,
     )
     + _caps(
-        ("benchmark.summary", "benchmark.scaling"),
-        "Summarize benchmark measurements.",
+        ("memory.retained",),
+        "Rank bounded retained-memory evidence from a Memray capture.",
+        ("memray",),
+        SummaryArguments,
+    )
+    + _caps(
+        ("benchmark.summary",),
+        "Summarize bounded benchmark latency measurements.",
+        ("pyperf", "samples", "nvbench"),
+        SummaryArguments,
+    )
+    + _caps(
+        ("benchmark.scaling",),
+        "Summarize how benchmark measurements scale across declared parameters.",
         ("pyperf", "samples", "nvbench"),
         SummaryArguments,
     )
@@ -690,139 +702,15 @@ CAPABILITIES = tuple(
     )
 )
 CAPABILITY_BY_ID = {item.id: item for item in CAPABILITIES}
-FORMAT_PROBES = (
-    ProviderProbe("flameox-preview", ("json", "jsonl", "csv", "text", "parquet")),
-    ProviderProbe("v8-cpu-profile", ("cpuprofile",)),
-    ProviderProbe("py-spy-speedscope", ("py-spy",)),
-    ProviderProbe("perf-collapsed", ("perf",)),
-    ProviderProbe("perf-data", ("perf-data",), executable="perf", platforms=("linux",)),
-    ProviderProbe(
-        "memray",
-        ("memray",),
-        module="memray",
-        distribution="memray",
-        supported_versions=">=1.17",
-        setup_provider="memray",
-    ),
-    ProviderProbe(
-        "pyperf",
-        ("pyperf",),
-        module="pyperf",
-        distribution="pyperf",
-        supported_versions=">=2.10,<2.11",
-    ),
-    ProviderProbe("benchmark-samples", ("samples",)),
-    ProviderProbe(
-        "aiperf",
-        ("aiperf",),
-        module="aiperf",
-        distribution="aiperf",
-        supported_versions=">=0.12,<0.13",
-        setup_provider="aiperf",
-    ),
-    ProviderProbe("vllm-benchmark", ("vllm-benchmark",)),
-    ProviderProbe("sglang-benchmark", ("sglang-benchmark",)),
-    ProviderProbe("mooncake-trace", ("mooncake-trace",)),
-    ProviderProbe("nvbench-jsonbin", ("nvbench",)),
-    ProviderProbe(
-        "perfetto",
-        ("perfetto", "chrome-trace", "pytorch", "rocprof-pftrace"),
-        module="perfetto.trace_processor",
-        distribution="perfetto",
-        supported_versions=">=0.57,<0.58",
-        executable="trace_processor_shell",
-        configured_path_environment="FLAMEOX_TRACE_PROCESSOR",
-        setup_provider="perfetto",
-    ),
-    ProviderProbe(
-        "otlp",
-        ("otlp",),
-        module="opentelemetry.proto",
-        distribution="opentelemetry-proto",
-        supported_versions=">=1.44,<1.45",
-        setup_provider="otlp",
-    ),
-    ProviderProbe(
-        "nsight-systems",
-        ("nsys-rep",),
-        executable="nsys",
-        platforms=("linux", "win32"),
-    ),
-    ProviderProbe(
-        "nsight-systems-parquetdir",
-        ("nsys-parquet",),
-        module="pyarrow",
-        distribution="pyarrow",
-        supported_versions=">=20,<26",
-    ),
-    ProviderProbe(
-        "nsight-compute",
-        ("nsight-compute",),
-        executable="ncu",
-        platforms=("linux", "win32"),
-    ),
-    ProviderProbe("xctrace", ("xctrace",), executable="xcrun", platforms=("darwin",)),
-    ProviderProbe("compute-sanitizer-xml", ("compute-sanitizer",)),
-    ProviderProbe("triton-autotune-jsonl", ("triton",)),
-    ProviderProbe("kernel-validation", ("kernel-validation",)),
-    ProviderProbe("pytest", ("pytest",)),
-    ProviderProbe(
-        "coverage.py",
-        ("coverage",),
-        module="coverage",
-        distribution="coverage",
-        supported_versions=">=7.14,<8",
-    ),
-    ProviderProbe("flameox-observations", ("observations",)),
-    ProviderProbe("sarif", ("sarif",)),
-)
 
-CAPTURE_PROBES = {
-    "direct": ProviderProbe("direct", ()),
-    "pyperf": ProviderProbe(
-        "pyperf",
-        (),
-        module="pyperf",
-        distribution="pyperf",
-        supported_versions=">=2.10,<2.11",
-    ),
-    "py-spy": ProviderProbe("py-spy", (), executable="py-spy", setup_provider="py-spy"),
-    "perf": ProviderProbe("perf", (), executable="perf", platforms=("linux",)),
-    "node-cpu-profile": ProviderProbe("node-cpu-profile", ()),
-    "memray": ProviderProbe(
-        "memray",
-        (),
-        module="memray",
-        distribution="memray",
-        supported_versions=">=1.17",
-        setup_provider="memray",
-    ),
-    "torch-profiler": ProviderProbe(
-        "torch-profiler", (), module="torch", distribution="torch", setup_provider="torch"
-    ),
-    "nvbench": ProviderProbe("nvbench", (), platforms=("linux", "win32")),
-    "compute-sanitizer": ProviderProbe(
-        "compute-sanitizer",
-        (),
-        executable="compute-sanitizer",
-        platforms=("linux", "win32"),
-    ),
-    "nsight-systems": ProviderProbe(
-        "nsight-systems", (), executable="nsys", platforms=("linux", "win32")
-    ),
-    "nsight-compute": ProviderProbe(
-        "nsight-compute", (), executable="ncu", platforms=("linux", "win32")
-    ),
-    "rocprofv3": ProviderProbe("rocprofv3", (), executable="rocprofv3", platforms=("linux",)),
-    "xctrace": ProviderProbe("xctrace", (), executable="xcrun", platforms=("darwin",)),
-    "coverage": ProviderProbe(
-        "coverage",
-        (),
-        module="coverage",
-        distribution="coverage",
-        supported_versions=">=7.14,<8",
-    ),
-    "benchmark-samples": ProviderProbe("benchmark-samples", ()),
-    "observations": ProviderProbe("observations", ()),
-    "pytest": ProviderProbe("pytest", ()),
-}
+
+def compatible_capture_providers(capability: Capability) -> tuple[CaptureProviderContract, ...]:
+    """Return capture providers whose artifacts can feed a capability."""
+
+    if capability.id.endswith(".compare"):
+        return ()
+    return tuple(
+        contract
+        for contract in CAPTURE_PROVIDER_CONTRACTS.values()
+        if set(capability.formats).intersection(artifact.format for artifact in contract.artifacts)
+    )

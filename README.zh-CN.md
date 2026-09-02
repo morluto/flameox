@@ -8,7 +8,7 @@ Flameox 是面向编码代理的本地、有界运行时证据层。它协调分
 包含 argv、项目内 cwd、环境覆盖、提供方参数和限制的类型化目标。
 
 ```console
-uv run flameox capabilities discover --intent "CPU 热点"
+uv run flameox mcp inspect
 uv run flameox analyze artifact.preview /absolute/path/to/artifact.json
 uv run flameox capture --provider direct -- python benchmark.py
 uv run flameox mcp serve --project-root "$PWD"
@@ -23,9 +23,10 @@ Python 扩展安装到持久的 uv 工具环境；NVIDIA 等系统或厂商工�
 `<project>/.flameox`。原生字节和证据清单按 SHA-256 寻址，并通过同一文件系统
 上的暂存、校验、fsync 和原子重命名发布。
 
-MCP 只公开六个工具：`discover_capabilities`、`inspect_capabilities`、
-`analyze`、`capture_and_analyze`、`preserve_evidence` 和
-`query_evidence`。唯一资源模板是
+MCP 公开面向任务的类型化分析和采集工具，例如 `analyze_cpu_hotspots`、
+`capture_gpu_launches` 和 `analyze_benchmark_compare`，以及
+`prepare_providers`、`preserve_evidence` 和 `query_evidence`。工具搜索由 MCP
+客户端负责。唯一资源模板是
 `flameox://evidence/{evidence_id}`，只返回不可变规范清单，不公开原生载荷。
 
 `analysis_id` 仅在当前服务进程内有效；重启后过期。`evidence_id` 是持久的内容

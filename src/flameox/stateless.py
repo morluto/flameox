@@ -6,15 +6,12 @@ import base64
 import csv
 import errno
 import hashlib
-import importlib.metadata
-import importlib.util
 import json
 import os
 import random
 import secrets
 import shutil
 import statistics
-import subprocess
 import sys
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
@@ -50,7 +47,7 @@ from flameox.providers.cpu import CpuProfileProvider
 from flameox.providers.inference_exports import InferenceExportProvider
 from flameox.providers.kernel_evidence import KernelEvidenceProvider
 from flameox.providers.memray import MemrayProvider
-from flameox.providers.nsight_compute import NsightComputeProvider, find_report_interface
+from flameox.providers.nsight_compute import NsightComputeProvider
 from flameox.providers.nsight_systems import NsightSystemsParquetProvider
 from flameox.providers.nvbench import NvbenchProvider
 from flameox.providers.otlp import OtlpProvider
@@ -66,14 +63,10 @@ from flameox.repository import (
     sha256_file,
 )
 from flameox.runtime_contracts import (
-    CAPABILITIES,
     CAPABILITY_BY_ID,
-    CAPTURE_PROBES,
     CAPTURE_PROVIDER_CONTRACTS,
-    FORMAT_PROBES,
     MAX_INPUTS,
     MAX_ROWS,
-    MAX_SNIFF_INPUTS,
     AnalysisResult,
     BenchmarkSamplesCaptureArguments,
     Capability,
@@ -91,7 +84,6 @@ from flameox.runtime_contracts import (
     PathSource,
     PerfCaptureArguments,
     PreviewArguments,
-    ProviderProbe,
     PyperfCaptureArguments,
     PySpyCaptureArguments,
     RequestLimits,
@@ -100,8 +92,10 @@ from flameox.runtime_contracts import (
     Source,
     TorchProfilerCaptureArguments,
     XctraceCaptureArguments,
+    compatible_capture_providers,
 )
 from flameox.runtime_errors import DomainError, ErrorCode
+from flameox.setup import SYSTEM_PROVIDER_GUIDANCE
 from flameox.workers.harness import IsolatedWorkerHarness, WorkerRuntimeConfig
 
 
@@ -147,37 +141,6 @@ class ValidatedCaptureRequest:
     limits: RequestLimits
     cases: list[ExperimentCase]
     blocks: int
-
-
-def _perf_permission_limited(executable_path: str) -> bool:
-    try:
-        probe = subprocess.run(
-            [executable_path, "stat", "-e", "task-clock", "--", "true"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            timeout=2,
-            check=False,
-            text=True,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    diagnostic = probe.stderr.casefold()
-    return probe.returncode != 0 and any(
-        marker in diagnostic for marker in ("permission", "not permitted", "perf_event_paranoid")
-    )
-
-
-def _permission_guidance(provider_id: str, executable_path: str) -> tuple[str, str]:
-    if provider_id == "perf" and os.access(executable_path, os.X_OK):
-        return (
-            "perf events are blocked by the host permission policy.",
-            "Grant CAP_PERFMON or adjust kernel.perf_event_paranoid outside Flameox, then retry.",
-        )
-    return (
-        f"Required executable is not executable: {executable_path}",
-        "Grant execute permission outside Flameox, then retry.",
-    )
 
 
 class AnalysisRuntime:
@@ -229,128 +192,6 @@ class AnalysisRuntime:
 
     def close(self) -> None:
         self._temporary.cleanup()
-
-    def discover_capabilities(
-        self,
-        intent: str | None = None,
-        sources: Sequence[Source] | None = None,
-        *,
-        include_unavailable: bool = False,
-        limit: int = 10,
-    ) -> dict[str, Any]:
-        if not 1 <= limit <= 50:
-            raise RuntimeFailure("INVALID_INPUT", "limit must be between 1 and 50")
-        supplied = sources or []
-        if len(supplied) > MAX_SNIFF_INPUTS:
-            raise RuntimeFailure("INVALID_INPUT", "discovery accepts at most 16 sources")
-        sniffed = [self._sniff_source(item) for item in supplied]
-        formats = {str(item["format"]) for item in sniffed}
-        terms = set((intent or "").lower().replace("_", " ").replace(".", " ").split())
-        ranked: list[tuple[int, Capability, dict[str, Any]]] = []
-        for capability in CAPABILITIES:
-            state = self._availability(capability, formats)
-            score = 3 * len(terms.intersection(capability.id.replace(".", " ").split())) + 5 * len(
-                formats.intersection(capability.formats)
-            )
-            if not terms and not formats:
-                score = 1
-            if state["available"] or include_unavailable:
-                ranked.append((score, capability, state))
-        ranked.sort(key=lambda item: (-item[0], item[1].id))
-        return {
-            "sniffed_sources": sniffed,
-            "capabilities": [
-                {
-                    "id": cap.id,
-                    "summary": cap.summary,
-                    "accepted_formats": list(cap.formats),
-                    "providers": state["providers"],
-                    "available": state["available"],
-                    "overhead": "Bounded local analysis; capture overhead is provider-specific.",
-                    "limitations": state["limitations"],
-                    "remediation": state["remediation"],
-                }
-                for _, cap, state in ranked[:limit]
-            ],
-        }
-
-    def inspect_capabilities(self, capability_ids: list[str]) -> dict[str, Any]:
-        if not 1 <= len(capability_ids) <= 16:
-            raise RuntimeFailure("INVALID_INPUT", "capability_ids must contain 1 to 16 entries")
-        if unknown := [item for item in capability_ids if item not in CAPABILITY_BY_ID]:
-            raise RuntimeFailure("UNKNOWN_CAPABILITY", f"Unknown capability: {unknown[0]}")
-        return {
-            "capabilities": [
-                {
-                    "id": cap.id,
-                    "summary": cap.summary,
-                    "source_modes": ["path", "evidence"],
-                    "accepted_formats": list(cap.formats),
-                    "providers": self._availability(cap, set())["providers"],
-                    "capture_providers": self._capture_provider_details(cap),
-                    "argument_schema": cap.model.model_json_schema(mode="validation"),
-                    "example": {
-                        "capability_id": cap.id,
-                        "sources": [{"kind": "path", "path": "/absolute/path/to/artifact"}],
-                        "arguments": {},
-                    },
-                    "limits": self.limits.model_dump(mode="json"),
-                    "capture_semantics": (
-                        "Typed argv is executed through the bounded subprocess broker."
-                    ),
-                    "limitations": [cap.limitation],
-                }
-                for cap in (CAPABILITY_BY_ID[item] for item in capability_ids)
-            ]
-        }
-
-    def _capture_provider_details(self, capability: Capability) -> list[dict[str, Any]]:
-        providers = [
-            contract
-            for contract in CAPTURE_PROVIDER_CONTRACTS.values()
-            if (
-                (capability.id == "artifact.preview" and contract.preview_streams)
-                or set(capability.formats).intersection(
-                    artifact.format for artifact in contract.artifacts
-                )
-            )
-        ]
-        return [
-            {
-                "id": contract.id,
-                "capture_argument_schema": contract.argument_model.model_json_schema(
-                    mode="validation"
-                ),
-                "artifact": contract.artifact_description,
-                "availability": self._capture_provider_availability(contract.id),
-            }
-            for contract in providers
-        ]
-
-    def _capture_provider_availability(self, provider_id: str) -> dict[str, Any]:
-        availability = self._probe_provider(CAPTURE_PROBES[provider_id])
-        if provider_id not in {"coverage", "memray"}:
-            return availability
-        distribution, supported_versions = {
-            "coverage": ("coverage", ">=7.14,<8"),
-            "memray": ("memray", ">=1.17"),
-        }[provider_id]
-        return {
-            **availability,
-            "available": None,
-            "status": "target_dependent",
-            "environment_scope": "workload_interpreter",
-            "version": None,
-            "limitations": [
-                (
-                    f"Capture requires {distribution} {supported_versions} in the declared "
-                    "workload interpreter; Flameox validates it before execution."
-                )
-            ],
-            "remediation": [
-                f"Install {distribution} {supported_versions} into the workload interpreter."
-            ],
-        }
 
     def analyze(
         self,
@@ -521,17 +362,10 @@ class AnalysisRuntime:
                 "INVALID_INPUT", "experiment mode and design must be supplied together"
             )
         output_formats = set(self._capture_output_formats(target.provider_id))
-        compatible = (
-            capability_id == "artifact.preview" and target.provider_id == "direct"
-        ) or bool(output_formats.intersection(capability.formats))
-        if not compatible:
-            compatible_providers = [
-                contract.id
-                for contract in CAPTURE_PROVIDER_CONTRACTS.values()
-                if set(capability.formats).intersection(
-                    artifact.format for artifact in contract.artifacts
-                )
-            ]
+        compatible_provider_ids = [
+            contract.id for contract in compatible_capture_providers(capability)
+        ]
+        if target.provider_id not in compatible_provider_ids:
             raise RuntimeFailure(
                 "UNSUPPORTED_FORMAT",
                 (
@@ -543,10 +377,23 @@ class AnalysisRuntime:
                     "output_formats": sorted(output_formats),
                     "capability_id": capability_id,
                     "accepted_formats": list(capability.formats),
-                    "compatible_capture_providers": compatible_providers,
+                    "compatible_capture_providers": compatible_provider_ids,
                 },
             )
         cases = experiment.cases if experiment else [ExperimentCase(name="single")]
+        source_count = (
+            len(cases)
+            * (experiment.blocks if experiment else 1)
+            * len(CAPTURE_PROVIDER_CONTRACTS[target.provider_id].artifacts)
+        )
+        if source_count > MAX_INPUTS:
+            raise RuntimeFailure(
+                "LIMIT_EXCEEDED",
+                (
+                    f"Capture would produce {source_count} analysis sources; "
+                    f"the limit is {MAX_INPUTS}."
+                ),
+            )
         return ValidatedCaptureRequest(
             capability=capability,
             capture_arguments=capture_arguments,
@@ -601,9 +448,24 @@ class AnalysisRuntime:
                 target.provider_id, argv, environment, capture_arguments, directory
             )
             self._require_workload_python_provider(target.provider_id, argv, environment, cwd=cwd)
-            self._require_host_tool(
-                invocation.argv[0], cwd=cwd, environment={**os.environ, **invocation.environment}
+            binding = self._require_host_tool(
+                invocation.argv[0],
+                cwd=cwd,
+                environment={**os.environ, **invocation.environment},
+                provider_id=target.provider_id,
             )
+            if (
+                target.provider_id == "nsight-compute"
+                and self.nsight_compute.resolve_interface(binding.invocation_path) is None
+            ):
+                raise RuntimeFailure(
+                    "UNAVAILABLE_CAPABILITY",
+                    "The official Nsight Compute ncu_report.py interface is missing.",
+                    details={
+                        "provider_id": target.provider_id,
+                        "external_setup_guidance": SYSTEM_PROVIDER_GUIDANCE[target.provider_id],
+                    },
+                )
             if experiment is not None and experiment.semantic_oracle is not None:
                 self._require_host_tool(
                     experiment.semantic_oracle[0],
@@ -1045,7 +907,11 @@ class AnalysisRuntime:
 
     @staticmethod
     def _require_host_tool(
-        executable: str, *, cwd: Path, environment: Mapping[str, str]
+        executable: str,
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        provider_id: str | None = None,
     ) -> ResolvedExecutable:
         try:
             return ExecutableResolver().require_host_tool(
@@ -1057,7 +923,13 @@ class AnalysisRuntime:
                 if error.code is ErrorCode.UNAVAILABLE_CAPABILITY
                 else "EXECUTION_FAILURE"
             )
-            raise RuntimeFailure(code, error.message) from error
+            details = {}
+            if provider_id in SYSTEM_PROVIDER_GUIDANCE:
+                details = {
+                    "provider_id": provider_id,
+                    "external_setup_guidance": SYSTEM_PROVIDER_GUIDANCE[provider_id],
+                }
+            raise RuntimeFailure(code, error.message, details=details) from error
 
     @staticmethod
     def _managed_executable(name: str) -> str | None:
@@ -1067,12 +939,21 @@ class AnalysisRuntime:
         return None
 
     @staticmethod
-    def _require_managed_executable(name: str) -> str:
+    def _require_managed_executable(provider_id: str, name: str) -> str:
         executable = AnalysisRuntime._managed_executable(name)
         if executable is None:
             raise RuntimeFailure(
                 "UNAVAILABLE_CAPABILITY",
-                f"Managed provider executable is unavailable: {name}. Run flameox setup.",
+                (
+                    f"Managed provider executable is unavailable: {name}. Call "
+                    f"prepare_providers with provider_ids=[{provider_id!r}], reconnect with "
+                    "the returned launcher, then retry."
+                ),
+                details={
+                    "provider_id": provider_id,
+                    "preparation_tool": "prepare_providers",
+                    "provider_ids": [provider_id],
+                },
             )
         return executable
 
@@ -1286,7 +1167,7 @@ class AnalysisRuntime:
                 pyspy_options.append("--native")
             return CaptureInvocation(
                 (
-                    AnalysisRuntime._require_managed_executable("py-spy"),
+                    AnalysisRuntime._require_managed_executable("py-spy", "py-spy"),
                     "record",
                     "--format",
                     "speedscope",
@@ -1876,6 +1757,41 @@ class AnalysisRuntime:
                 )
             )
         return result
+
+    @staticmethod
+    def _sniff(path: Path) -> str:
+        known = {
+            ".json": "json",
+            ".jsonl": "jsonl",
+            ".csv": "csv",
+            ".parquet": "parquet",
+            ".cpuprofile": "cpuprofile",
+            ".pftrace": "perfetto",
+            ".perfetto-trace": "perfetto",
+            ".trace": "xctrace",
+            ".bin": "memray",
+            ".nsys-rep": "nsys-rep",
+            ".ncu-rep": "nsight-compute",
+            ".ncu-repz": "nsight-compute",
+            ".sarif": "sarif",
+            ".pstats": "pstats",
+        }
+        if path.suffix.lower() in known:
+            return known[path.suffix.lower()]
+        if path.is_dir():
+            return "directory"
+        try:
+            with path.open("rb") as stream:
+                header = stream.read(16).lstrip()
+        except OSError:
+            return "unknown"
+        if path.name == ".coverage" and header.startswith(b"SQLite format 3"):
+            return "coverage"
+        if header.startswith(b"PAR1"):
+            return "parquet"
+        if header.startswith((b"{", b"[")):
+            return "json"
+        return "text"
 
     def _resolve_evidence_source(self, source: EvidenceSource) -> ResolvedSource:
         manifest = self.read_evidence(source.evidence_id)
@@ -2682,214 +2598,6 @@ class AnalysisRuntime:
             raise RuntimeFailure(
                 "INVALID_INPUT", "Continuation does not match this request and its inputs"
             ) from exc
-
-    def _sniff_source(self, source: Source) -> dict[str, Any]:
-        if isinstance(source, EvidenceSource):
-            manifest = self.read_evidence(source.evidence_id)
-            artifacts = manifest["body"].get("artifacts", [])
-            if not isinstance(artifacts, list):
-                raise RuntimeFailure("REPOSITORY_CORRUPTION", "Evidence artifacts are invalid")
-            role = source.artifact_role or self._default_evidence_role(artifacts)
-            selected = [
-                item
-                for item in artifacts
-                if isinstance(item, dict)
-                and (item.get("role") == role or str(item.get("role", "")).startswith(role + ":"))
-            ]
-            formats = {str(item.get("format")) for item in selected}
-            if len(formats) != 1:
-                raise RuntimeFailure(
-                    "REPOSITORY_CORRUPTION",
-                    "Evidence bundle metadata is inconsistent",
-                )
-            return {"kind": "evidence", "evidence_id": source.evidence_id, "format": formats.pop()}
-        return {
-            "kind": "path",
-            "path": source.path,
-            "format": source.format or self._sniff(Path(source.path)),
-        }
-
-    @staticmethod
-    def _sniff(path: Path) -> str:
-        known = {
-            ".json": "json",
-            ".jsonl": "jsonl",
-            ".csv": "csv",
-            ".parquet": "parquet",
-            ".cpuprofile": "cpuprofile",
-            ".pftrace": "perfetto",
-            ".perfetto-trace": "perfetto",
-            ".trace": "xctrace",
-            ".bin": "memray",
-            ".nsys-rep": "nsys-rep",
-            ".ncu-rep": "nsight-compute",
-            ".ncu-repz": "nsight-compute",
-            ".sarif": "sarif",
-            ".pstats": "pstats",
-        }
-        if path.suffix.lower() in known:
-            return known[path.suffix.lower()]
-        if path.is_dir():
-            return "directory"
-        try:
-            with path.open("rb") as stream:
-                header = stream.read(16).lstrip()
-        except OSError:
-            return "unknown"
-        return (
-            "coverage"
-            if path.name == ".coverage" and header.startswith(b"SQLite format 3")
-            else "parquet"
-            if header.startswith(b"PAR1")
-            else "json"
-            if header.startswith((b"{", b"["))
-            else "text"
-        )
-
-    def _availability(self, capability: Capability, formats: set[str]) -> dict[str, Any]:
-        source_issues: list[str] = []
-        if formats and not formats.intersection(capability.formats):
-            source_issues.append("No supplied artifact matches a declared format.")
-        selected_formats = (
-            formats.intersection(capability.formats) if formats else set(capability.formats)
-        )
-        probes = [probe for probe in FORMAT_PROBES if selected_formats.intersection(probe.formats)]
-        providers = [self._probe_provider(probe) for probe in probes]
-        provider_issues = [
-            limitation
-            for provider in providers
-            if not provider["available"]
-            for limitation in provider["limitations"]
-        ]
-        remediation = list(
-            dict.fromkeys(item for provider in providers for item in provider["remediation"])
-        )
-        return {
-            "available": not source_issues and any(provider["available"] for provider in providers),
-            "providers": providers,
-            "limitations": source_issues + provider_issues or [capability.limitation],
-            "remediation": remediation,
-        }
-
-    @staticmethod
-    def _probe_provider(probe: ProviderProbe) -> dict[str, Any]:
-        limitations: list[str] = []
-        remediation: list[str] = []
-        wrong_platform = bool(probe.platforms and sys.platform not in probe.platforms)
-        if wrong_platform:
-            limitations.append(f"Provider is not supported on {sys.platform}.")
-
-        missing_package: str | None = None
-        version: str | None = None
-        unsupported_version = False
-        if probe.module is not None:
-            try:
-                installed = importlib.util.find_spec(probe.module) is not None
-            except (ImportError, ModuleNotFoundError, ValueError):
-                installed = False
-            if not installed:
-                missing_package = probe.distribution or probe.module
-                limitations.append(f"Optional package is not installed: {missing_package}")
-                if probe.setup_provider is not None:
-                    remediation.append(
-                        f"Run flameox setup --provider {probe.setup_provider}, then restart "
-                        "the server."
-                    )
-                else:
-                    remediation.append(
-                        f"Install {missing_package} outside Flameox, then restart the server."
-                    )
-            elif probe.distribution is not None:
-                try:
-                    version = importlib.metadata.version(probe.distribution)
-                except importlib.metadata.PackageNotFoundError:
-                    missing_package = probe.distribution
-                    limitations.append(f"Package metadata is unavailable for: {probe.distribution}")
-                if version is not None and probe.supported_versions is not None:
-                    try:
-                        unsupported_version = Version(version) not in SpecifierSet(
-                            probe.supported_versions
-                        )
-                    except InvalidVersion:
-                        unsupported_version = True
-                    if unsupported_version:
-                        limitations.append(
-                            f"Provider version {version} is outside {probe.supported_versions}."
-                        )
-
-        executable_path = AnalysisRuntime._probe_executable(probe)
-        missing_executable = (
-            probe.executable if probe.executable is not None and executable_path is None else None
-        )
-        permission_limited = bool(
-            executable_path is not None and not os.access(executable_path, os.X_OK)
-        )
-        if probe.id == "perf" and executable_path is not None and not permission_limited:
-            permission_limited = _perf_permission_limited(executable_path)
-        if missing_executable is not None:
-            limitations.append(f"Required executable is not on PATH: {missing_executable}")
-            remediation.append(
-                f"Install {missing_executable} with the system/vendor package manager, "
-                "then restart Flameox."
-            )
-        if permission_limited:
-            assert executable_path is not None
-            limitation, repair = _permission_guidance(probe.id, executable_path)
-            limitations.append(limitation)
-            remediation.append(repair)
-
-        missing_resource: str | None = None
-        if (
-            probe.id == "nsight-compute"
-            and not wrong_platform
-            and executable_path is not None
-            and find_report_interface(Path(executable_path)) is None
-        ):
-            missing_resource = "ncu_report.py"
-            limitations.append("The official Nsight Compute ncu_report.py interface is missing.")
-            remediation.append(
-                "Install Nsight Compute with its extras/python interface outside Flameox, "
-                "then restart the server."
-            )
-
-        unavailable = bool(
-            wrong_platform
-            or missing_package
-            or unsupported_version
-            or missing_executable
-            or permission_limited
-            or missing_resource
-        )
-        return {
-            "id": probe.id,
-            "available": not unavailable,
-            "version": version
-            or (__version__ if probe.module is None and probe.executable is None else None),
-            "formats": list(probe.formats),
-            "platforms": list(probe.platforms),
-            "missing_package": missing_package,
-            "missing_executable": missing_executable,
-            "executable": executable_path,
-            "missing_resource": missing_resource,
-            "permission_limited": permission_limited,
-            "unsupported_version": unsupported_version,
-            "limitations": limitations,
-            "remediation": remediation,
-        }
-
-    @staticmethod
-    def _probe_executable(probe: ProviderProbe) -> str | None:
-        executable_path: str | None = None
-        if probe.configured_path_environment is not None:
-            configured = os.environ.get(probe.configured_path_environment)
-            if configured and Path(configured).is_file():
-                executable_path = configured
-        if executable_path is None and probe.executable is not None:
-            if probe.setup_provider is not None:
-                executable_path = AnalysisRuntime._managed_executable(probe.executable)
-            else:
-                executable_path = shutil.which(probe.executable)
-        return executable_path
 
     def _resolve_project_cwd(self, value: str) -> Path:
         candidate = Path(value)

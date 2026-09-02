@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import importlib.machinery
-import importlib.util
 import json
 import os
-import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -29,9 +26,14 @@ from pydantic import ValidationError
 from flameox import __version__
 from flameox.canonical import canonical_bytes
 from flameox.mcp import create_server
+from flameox.mcp.capability_tools import (
+    analysis_tool_name,
+    capture_tool_name,
+)
 from flameox.providers.contracts import ProviderAnalysis
 from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE, EvidenceRepository
 from flameox.runtime_contracts import (
+    CAPABILITIES,
     MAX_ROWS,
     CaptureTarget,
     EvidenceSource,
@@ -40,6 +42,7 @@ from flameox.runtime_contracts import (
     PathSource,
     RequestLimits,
     RuntimeFailure,
+    compatible_capture_providers,
 )
 from flameox.setup import ExternalRequirement, ProviderPreparation, ProviderSelectionFailure
 from flameox.stateless import AnalysisRuntime
@@ -121,6 +124,38 @@ def test_capture_rejects_declared_provider_capability_mismatch_before_execution(
             "observations",
             "pytest",
         ]
+
+    anyio.run(exercise)
+    assert not marker.exists()
+
+
+@pytest.mark.unit
+def test_capture_rejects_experiments_that_exceed_analysis_source_limit(tmp_path: Path) -> None:
+    marker = tmp_path / "executed"
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(tmp_path)
+        try:
+            with pytest.raises(RuntimeFailure) as failure:
+                await runtime.capture_and_analyze(
+                    CaptureTarget(
+                        argv=[sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"],
+                        provider_id="direct",
+                    ),
+                    "artifact.preview",
+                    mode="experiment",
+                    experiment=ExperimentDesign(
+                        cases=[ExperimentCase(name="a"), ExperimentCase(name="b")],
+                        blocks=9,
+                        seed=1,
+                        metric="wall_time_ns",
+                        estimand="median_difference",
+                        practical_threshold=0,
+                    ),
+                )
+        finally:
+            runtime.close()
+        assert failure.value.code == "LIMIT_EXCEEDED"
 
     anyio.run(exercise)
     assert not marker.exists()
@@ -1471,114 +1506,6 @@ def test_aiperf_export_is_projected_without_prompts_or_repository(tmp_path: Path
     assert not (tmp_path / ".flameox").exists()
 
 
-@pytest.mark.unit
-def test_inspection_exposes_strict_validation_schema(tmp_path: Path) -> None:
-    runtime = AnalysisRuntime(tmp_path)
-    details = runtime.inspect_capabilities(["trace.window", "benchmark.summary"])["capabilities"]
-    runtime.close()
-    detail = details[0]
-    schema = detail["argument_schema"]
-
-    assert schema["additionalProperties"] is False
-    assert schema["required"] == ["start_ns", "end_ns"]
-    assert detail["source_modes"] == ["path", "evidence"]
-    pyperf_capture = details[1]["capture_providers"][0]
-    assert pyperf_capture["id"] == "pyperf"
-    assert pyperf_capture["capture_argument_schema"]["additionalProperties"] is False
-    assert "processes" in pyperf_capture["capture_argument_schema"]["properties"]
-
-
-@pytest.mark.unit
-def test_discovery_reports_external_remediation_without_setup_action(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("flameox.stateless.shutil.which", lambda _name: None)
-    runtime = AnalysisRuntime(Path.cwd())
-    result = runtime.discover_capabilities(
-        "gpu launches",
-        [PathSource(path="/artifact.nsys-rep", format="nsys-rep")],
-        include_unavailable=True,
-    )
-    runtime.close()
-    match = next(item for item in result["capabilities"] if item["id"] == "gpu.launches")
-
-    assert match["available"] is False
-    assert match["providers"][0]["missing_executable"] == "nsys"
-    assert "system/vendor package manager" in match["remediation"][0]
-    assert "setup" not in json.dumps(match).lower()
-
-
-@pytest.mark.integration
-def test_discovery_uses_the_selected_evidence_artifact_format(tmp_path: Path) -> None:
-    artifact = tmp_path / "samples.json"
-    artifact.write_text('[{"value": 1}]')
-    runtime = AnalysisRuntime(tmp_path)
-    try:
-        analysis = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
-        preserved = runtime.preserve_evidence(analysis["analysis_id"])
-        discovered = runtime.discover_capabilities(
-            sources=[EvidenceSource(kind="evidence", evidence_id=preserved["evidence_id"])],
-        )
-    finally:
-        runtime.close()
-
-    preview = next(item for item in discovered["capabilities"] if item["id"] == "artifact.preview")
-    assert discovered["sniffed_sources"][0]["format"] == "json"
-    assert preview["available"] is True
-
-
-@pytest.mark.unit
-def test_discovery_separates_builtin_readers_from_capture_dependencies(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("flameox.stateless.shutil.which", lambda _name: None)
-    runtime = AnalysisRuntime(tmp_path)
-    monkeypatch.setattr("flameox.stateless.sys.executable", str(tmp_path / "python"))
-    discovered = runtime.discover_capabilities(
-        sources=[PathSource(path="/profile.json", format="py-spy")],
-        include_unavailable=True,
-    )
-    inspected = runtime.inspect_capabilities(["cpu.hotspots"])
-    runtime.close()
-
-    cpu = next(item for item in discovered["capabilities"] if item["id"] == "cpu.hotspots")
-    assert cpu["available"] is True
-    assert cpu["providers"][0]["id"] == "py-spy-speedscope"
-    pyspy_capture = next(
-        item for item in inspected["capabilities"][0]["capture_providers"] if item["id"] == "py-spy"
-    )
-    assert pyspy_capture["availability"]["available"] is False
-    assert pyspy_capture["availability"]["missing_executable"] == "py-spy"
-
-
-@pytest.mark.unit
-def test_py_spy_capture_discovers_executable_in_managed_tool_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    managed_bin = tmp_path / "managed" / "bin"
-    managed_bin.mkdir(parents=True)
-    managed_python = managed_bin / "python"
-    managed_python.write_text("#!/bin/sh\nexit 0\n")
-    managed_python.chmod(0o755)
-    managed_pyspy = managed_bin / "py-spy"
-    managed_pyspy.write_text("#!/bin/sh\nexit 0\n")
-    managed_pyspy.chmod(0o755)
-    monkeypatch.setattr("flameox.stateless.sys.executable", str(managed_python))
-    monkeypatch.setattr("flameox.stateless.shutil.which", lambda _name: None)
-
-    runtime = AnalysisRuntime(tmp_path)
-    try:
-        inspected = runtime.inspect_capabilities(["cpu.hotspots"])
-    finally:
-        runtime.close()
-
-    capture = next(
-        item for item in inspected["capabilities"][0]["capture_providers"] if item["id"] == "py-spy"
-    )
-    assert capture["availability"]["available"] is True
-    assert capture["availability"]["executable"] == str(managed_pyspy)
-
-
 @pytest.mark.process
 def test_py_spy_capture_executes_managed_tool_when_request_path_is_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1625,175 +1552,68 @@ def test_py_spy_capture_executes_managed_tool_when_request_path_is_empty(
 
 
 @pytest.mark.unit
-def test_discovery_reports_missing_and_unsupported_python_providers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    original_find_spec = importlib.util.find_spec
-
-    def missing_memray(name: str) -> Any:
-        return None if name == "memray" else original_find_spec(name)
-
-    monkeypatch.setattr("flameox.stateless.importlib.util.find_spec", missing_memray)
-    runtime = AnalysisRuntime(tmp_path)
-    missing = runtime.discover_capabilities(
-        sources=[PathSource(path="/artifact.bin", format="memray")],
-        include_unavailable=True,
-    )
-    runtime.close()
-    memory = next(item for item in missing["capabilities"] if item["id"] == "memory.hotspots")
-    assert memory["available"] is False
-    assert memory["providers"][0]["missing_package"] == "memray"
-    assert "flameox setup --provider memray" in memory["remediation"][0]
-
-    def installed_memray(name: str) -> Any:
-        if name == "memray":
-            return importlib.machinery.ModuleSpec(name, loader=None)
-        return original_find_spec(name)
-
-    monkeypatch.setattr("flameox.stateless.importlib.util.find_spec", installed_memray)
-    monkeypatch.setattr("flameox.stateless.importlib.metadata.version", lambda _name: "1.0")
-    runtime = AnalysisRuntime(tmp_path)
-    unsupported = runtime.discover_capabilities(
-        sources=[PathSource(path="/artifact.bin", format="memray")],
-        include_unavailable=True,
-    )
-    runtime.close()
-    memory = next(item for item in unsupported["capabilities"] if item["id"] == "memory.hotspots")
-    assert memory["available"] is False
-    assert memory["providers"][0]["unsupported_version"] is True
-
-
-@pytest.mark.unit
-def test_in_process_capture_availability_is_workload_interpreter_dependent(
-    tmp_path: Path,
-) -> None:
-    runtime = AnalysisRuntime(tmp_path)
-    try:
-        inspected = runtime.inspect_capabilities(["coverage.summary", "memory.hotspots"])
-    finally:
-        runtime.close()
-
-    for capability in inspected["capabilities"]:
-        capture = capability["capture_providers"][0]
-        assert capture["availability"]["available"] is None
-        assert capture["availability"]["status"] == "target_dependent"
-        assert capture["availability"]["environment_scope"] == "workload_interpreter"
-
-
-@pytest.mark.unit
-def test_discovery_reports_wrong_platform_and_executable_permission(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    host_platform = sys.platform
-    monkeypatch.setattr("flameox.stateless.sys.platform", "darwin")
-    monkeypatch.setattr("flameox.stateless.shutil.which", lambda _name: "/usr/bin/nsys")
-    runtime = AnalysisRuntime(tmp_path)
-    wrong_platform = runtime.discover_capabilities(
-        sources=[PathSource(path="/artifact.nsys-rep", format="nsys-rep")],
-        include_unavailable=True,
-    )
-    runtime.close()
-    launches = next(item for item in wrong_platform["capabilities"] if item["id"] == "gpu.launches")
-    assert launches["available"] is False
-    assert "not supported on darwin" in launches["limitations"][0]
-
-    processor = tmp_path / "trace_processor_shell"
-    processor.write_text("binary")
-    monkeypatch.setenv("FLAMEOX_TRACE_PROCESSOR", str(processor))
-    monkeypatch.setattr("flameox.stateless.sys.platform", host_platform)
-    runtime = AnalysisRuntime(tmp_path)
-    monkeypatch.setattr("flameox.stateless.os.access", lambda _path, _mode: False)
-    permission = runtime.discover_capabilities(
-        sources=[PathSource(path="/artifact.pftrace", format="perfetto")],
-        include_unavailable=True,
-    )
-    runtime.close()
-    trace = next(item for item in permission["capabilities"] if item["id"] == "trace.summary")
-    assert trace["available"] is False
-    assert trace["providers"][0]["permission_limited"] is True
-
-
-@pytest.mark.unit
-def test_discovery_actively_reports_perf_event_permission_policy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("flameox.stateless.shutil.which", lambda name: "/usr/bin/perf")
-    monkeypatch.setattr(
-        "flameox.stateless.subprocess.run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            [], 255, stderr="Access denied by perf_event_paranoid"
-        ),
-    )
-    runtime = AnalysisRuntime(tmp_path)
-    try:
-        inspected = runtime.inspect_capabilities(["cpu.hotspots"])
-    finally:
-        runtime.close()
-
-    perf = next(
-        provider
-        for provider in inspected["capabilities"][0]["capture_providers"]
-        if provider["id"] == "perf"
-    )
-    assert perf["availability"]["available"] is False
-    assert perf["availability"]["permission_limited"] is True
-    assert "CAP_PERFMON" in perf["availability"]["remediation"][0]
-
-
-@pytest.mark.unit
-def test_discovery_requires_nsight_compute_official_reader(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    executable = tmp_path / "ncu"
-    executable.write_text("binary")
-    executable.chmod(0o755)
-    monkeypatch.setattr(
-        "flameox.stateless.shutil.which",
-        lambda name: str(executable) if name == "ncu" else None,
-    )
-    monkeypatch.setattr("flameox.stateless.find_report_interface", lambda _path: None)
-    runtime = AnalysisRuntime(tmp_path)
-    try:
-        discovered = runtime.discover_capabilities(
-            sources=[PathSource(path="/artifact.ncu-rep", format="nsight-compute")],
-            include_unavailable=True,
-        )
-    finally:
-        runtime.close()
-
-    metrics = next(
-        item for item in discovered["capabilities"] if item["id"] == "gpu.kernel_metrics"
-    )
-    assert metrics["available"] is False
-    assert metrics["providers"][0]["missing_resource"] == "ncu_report.py"
-    assert "extras/python interface" in metrics["remediation"][0]
-
-
-@pytest.mark.unit
 def test_mcp_catalog_is_exact_typed_and_has_one_resource_template() -> None:
     async def inspect() -> None:
         server = create_server()
         tools = await server.list_tools()
         templates = await server.list_resource_templates()
 
-        assert [tool.name for tool in tools] == [
+        expected = ["prepare_providers"]
+        for capability in CAPABILITIES:
+            expected.append(analysis_tool_name(capability))
+            if compatible_capture_providers(capability):
+                expected.append(capture_tool_name(capability))
+        expected.extend(["preserve_evidence", "query_evidence"])
+        assert [tool.name for tool in tools] == expected
+        assert len(tools) == 44
+        assert all(tool.output_schema is not None for tool in tools)
+        assert not {
             "discover_capabilities",
             "inspect_capabilities",
-            "prepare_capabilities",
             "analyze",
             "capture_and_analyze",
-            "preserve_evidence",
-            "query_evidence",
-        ]
-        assert all(tool.output_schema is not None for tool in tools)
-        prepare = next(tool for tool in tools if tool.name == "prepare_capabilities")
+        }.intersection(expected)
+        by_name = {tool.name: tool for tool in tools}
+        analysis_schema = by_name["analyze_cpu_hotspots"].input_schema
+        assert set(analysis_schema["properties"]) == {
+            "sources",
+            "options",
+            "limits",
+            "continuation",
+        }
+        assert analysis_schema["required"] == ["sources", "options"]
+        capture_schema = by_name["capture_cpu_hotspots"].input_schema
+        assert set(capture_schema["properties"]) == {
+            "target",
+            "provider",
+            "options",
+            "execution",
+            "limits",
+            "preserve",
+        }
+        assert capture_schema["properties"]["provider"]["discriminator"]["mapping"] == {
+            "node-cpu-profile": "#/$defs/NodeCpuProfileProvider",
+            "perf": "#/$defs/PerfProvider",
+            "py-spy": "#/$defs/PySpyProvider",
+        }
+        assert capture_schema["required"] == ["target", "provider", "options", "execution"]
+        assert (
+            by_name["analyze_benchmark_compare"].input_schema["properties"]["sources"]["minItems"]
+            == 2
+        )
+        assert "capture_benchmark_compare" not in by_name
+        analysis_annotations = by_name["analyze_cpu_hotspots"].annotations
+        capture_annotations = by_name["capture_cpu_hotspots"].annotations
+        assert analysis_annotations and analysis_annotations.read_only_hint is True
+        assert capture_annotations and capture_annotations.destructive_hint is True
+        prepare = next(tool for tool in tools if tool.name == "prepare_providers")
         assert prepare.annotations and prepare.annotations.open_world_hint is True
         assert prepare.annotations.read_only_hint is False
         assert prepare.annotations.destructive_hint is False
         assert all(
             tool.annotations and tool.annotations.open_world_hint is False
             for tool in tools
-            if tool.name != "prepare_capabilities"
+            if tool.name != "prepare_providers"
         )
         assert await server.list_resources() == []
         assert [item.uri_template for item in templates] == ["flameox://evidence/{evidence_id}"]
@@ -1839,16 +1659,16 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
             ],
         )
 
-    monkeypatch.setattr("flameox.mcp.server.prepare_providers", prepare)
+    monkeypatch.setattr("flameox.mcp.server.provider_setup.prepare_providers", prepare)
 
     async def exercise() -> None:
         async with Client(create_server(tmp_path), raise_exceptions=True) as client:
             result = await client.call_tool(
-                "prepare_capabilities",
+                "prepare_providers",
                 {"provider_ids": ["memray", "nsight-compute", "memray"]},
             )
             invalid = await client.call_tool(
-                "prepare_capabilities",
+                "prepare_providers",
                 {"provider_ids": ["unknown-provider"]},
             )
 
@@ -1905,27 +1725,34 @@ def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path
             tools = await session.list_tools()
             resources = await session.list_resources()
             templates = await session.list_resource_templates()
+            artifact = tmp_path / "sample.json"
+            artifact.write_text('[{"value":1}]')
             inspected = await session.call_tool(
-                "inspect_capabilities", {"capability_ids": ["cpu.hotspots"]}
+                "preview_artifact",
+                {"sources": [{"kind": "path", "path": str(artifact)}], "options": {}},
             )
             invalid = await session.call_tool(
-                "inspect_capabilities", {"capability_ids": ["unknown.capability"]}
+                "preview_artifact", {"sources": [], "options": {}, "unexpected": True}
             )
-            await session.validate_tool_result("inspect_capabilities", inspected)
-            await session.validate_tool_result("inspect_capabilities", invalid)
+            captured = await session.call_tool(
+                "capture_process_output",
+                {
+                    "target": {"argv": [sys.executable, "-c", "print('stdio capture')"]},
+                    "provider": {"kind": "direct"},
+                    "options": {},
+                    "execution": {"kind": "single"},
+                },
+            )
+            await session.validate_tool_result("preview_artifact", inspected)
+            await session.validate_tool_result("capture_process_output", captured)
 
         assert initialized.server_info.version == __version__
-        assert [tool.name for tool in tools.tools] == [
-            "discover_capabilities",
-            "inspect_capabilities",
-            "prepare_capabilities",
-            "analyze",
-            "capture_and_analyze",
-            "preserve_evidence",
-            "query_evidence",
-        ]
+        assert len(tools.tools) == 44
+        assert "preview_artifact" in [tool.name for tool in tools.tools]
+        assert "capture_gpu_kernel_metrics" in [tool.name for tool in tools.tools]
         assert all(tool.output_schema is not None for tool in tools.tools)
         assert invalid.is_error is True
+        assert captured.structured_content["blocks"][1]["rows"][0]["text"] == "stdio capture"
         assert resources.resources == []
         assert [item.uri_template for item in templates.resource_templates] == [
             "flameox://evidence/{evidence_id}"
@@ -1942,11 +1769,10 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
     async def exercise() -> None:
         async with Client(create_server(tmp_path), raise_exceptions=True) as client:
             analyzed = await client.call_tool(
-                "analyze",
+                "preview_artifact",
                 {
-                    "capability_id": "artifact.preview",
                     "sources": [{"kind": "path", "path": str(artifact)}],
-                    "arguments": {},
+                    "options": {},
                 },
             )
             assert analyzed.is_error is False
@@ -1962,9 +1788,8 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
 
         async with Client(create_server(tmp_path), raise_exceptions=True) as restarted:
             reanalyzed = await restarted.call_tool(
-                "analyze",
+                "preview_artifact",
                 {
-                    "capability_id": "artifact.preview",
                     "sources": [
                         {
                             "kind": "evidence",
@@ -1972,7 +1797,7 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
                             "artifact_role": "input",
                         }
                     ],
-                    "arguments": {},
+                    "options": {},
                 },
             )
             assert reanalyzed.is_error is False
@@ -1999,15 +1824,16 @@ def test_mcp_evidence_resource_redacts_capture_provenance(tmp_path: Path) -> Non
     async def exercise() -> None:
         async with Client(create_server(tmp_path), raise_exceptions=True) as client:
             captured = await client.call_tool(
-                "capture_and_analyze",
+                "capture_process_output",
                 {
                     "target": {
                         "argv": [sys.executable, "-c", "print('ok')", secret_argument],
                         "cwd": ".",
                         "environment": {"FLAMEOX_TEST_MARKER": secret_environment},
-                        "provider_id": "direct",
                     },
-                    "capability_id": "artifact.preview",
+                    "provider": {"kind": "direct"},
+                    "options": {},
+                    "execution": {"kind": "single"},
                 },
             )
             assert captured.is_error is False
@@ -2042,7 +1868,7 @@ def test_mcp_evidence_resource_redacts_capture_provenance(tmp_path: Path) -> Non
 
 
 @pytest.mark.integration
-def test_mcp_validation_unknown_capability_and_failed_execution_are_typed(
+def test_mcp_validation_unavailable_provider_and_failed_execution_are_typed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     artifact = tmp_path / "samples.json"
@@ -2051,26 +1877,15 @@ def test_mcp_validation_unknown_capability_and_failed_execution_are_typed(
     async def exercise() -> None:
         async with Client(create_server(tmp_path), raise_exceptions=True) as client:
             invalid = await client.call_tool(
-                "analyze",
+                "preview_artifact",
                 {
-                    "capability_id": "artifact.preview",
                     "sources": [{"kind": "path", "path": str(artifact)}],
-                    "arguments": {"unexpected": True},
+                    "options": {"unexpected": True},
                 },
             )
             assert invalid.is_error is True
-            assert invalid.structured_content["code"] == "INVALID_INPUT"
-
-            unknown = await client.call_tool(
-                "analyze",
-                {
-                    "capability_id": "unknown.capability",
-                    "sources": [{"kind": "path", "path": str(artifact)}],
-                    "arguments": {},
-                },
-            )
-            assert unknown.is_error is True
-            assert unknown.structured_content["code"] == "UNKNOWN_CAPABILITY"
+            # MCP SDK 2.0 rejects schema-invalid input before invoking the tool.
+            assert invalid.structured_content is None
 
             empty_path = tmp_path / "empty-bin"
             empty_path.mkdir()
@@ -2078,26 +1893,34 @@ def test_mcp_validation_unknown_capability_and_failed_execution_are_typed(
             unmanaged_python.symlink_to(sys.executable)
             monkeypatch.setattr("flameox.stateless.sys.executable", str(unmanaged_python))
             unavailable = await client.call_tool(
-                "capture_and_analyze",
+                "capture_cpu_hotspots",
                 {
                     "target": {
                         "argv": [sys.executable, "-c", "pass"],
                         "environment": {"PATH": str(empty_path)},
-                        "provider_id": "py-spy",
                     },
-                    "capability_id": "cpu.hotspots",
+                    "provider": {"kind": "py-spy"},
+                    "options": {},
+                    "execution": {"kind": "single"},
                 },
             )
             assert unavailable.is_error is True
             assert unavailable.structured_content["code"] == "UNAVAILABLE_CAPABILITY"
+            assert unavailable.structured_content["details"] == {
+                "provider_id": "py-spy",
+                "preparation_tool": "prepare_providers",
+                "provider_ids": ["py-spy"],
+            }
 
             failed = await client.call_tool(
-                "capture_and_analyze",
+                "capture_process_output",
                 {
                     "target": {
                         "argv": [sys.executable, "-c", "raise SystemExit(7)"],
-                        "provider_id": "direct",
-                    }
+                    },
+                    "provider": {"kind": "direct"},
+                    "options": {},
+                    "execution": {"kind": "single"},
                 },
             )
             assert failed.is_error is True
@@ -2531,8 +2354,6 @@ def test_unpreserved_operations_create_no_durable_state(tmp_path: Path) -> None:
     artifact.write_text("[]")
     runtime = AnalysisRuntime(tmp_path)
     try:
-        runtime.discover_capabilities(sources=[PathSource(path=str(artifact))])
-        runtime.inspect_capabilities(["artifact.preview"])
         runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
     finally:
         runtime.close()

@@ -58,6 +58,10 @@ class NsightComputeProvider:
         self.harness = harness
         self.interface_path = interface_path
 
+    def resolve_interface(self, executable: Path | None = None) -> Path | None:
+        """Resolve the vendor reader used by both capture preflight and analysis."""
+        return self.interface_path or find_report_interface(executable)
+
     def analyze(
         self,
         path: Path,
@@ -68,9 +72,7 @@ class NsightComputeProvider:
         maximum_output_bytes: int,
     ) -> ProviderAnalysis:
         executable_text = shutil.which("ncu")
-        interface = self.interface_path or find_report_interface(
-            Path(executable_text) if executable_text else None
-        )
+        interface = self.resolve_interface(Path(executable_text) if executable_text else None)
         if interface is None:
             raise ProviderFailure(
                 "UNAVAILABLE_CAPABILITY",

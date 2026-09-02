@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -21,25 +21,28 @@ from pydantic import (
     GetJsonSchemaHandler,
     JsonValue,
     RootModel,
-    ValidationError,
 )
 from pydantic.json_schema import JsonSchemaValue
 
+import flameox.setup as provider_setup
 from flameox import __version__
+from flameox.mcp.capability_tools import (
+    Execution,
+    ExperimentExecution,
+    analysis_tool_name,
+    capture_provider_type,
+    capture_tool_name,
+)
 from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE
 from flameox.runtime_contracts import (
+    CAPABILITIES,
+    Capability,
     CaptureTarget,
-    ExperimentDesign,
+    DirectTarget,
     RequestLimits,
     RuntimeFailure,
     Source,
-)
-from flameox.setup import (
-    DEFAULT_PREPARATION_TIMEOUT_SECONDS,
-    MAX_PREPARATION_TIMEOUT_SECONDS,
-    ProviderSelectionFailure,
-    SetupFailure,
-    prepare_providers,
+    compatible_capture_providers,
 )
 from flameox.stateless import AnalysisRuntime
 
@@ -92,15 +95,6 @@ class AnalysisEnvelope(_Envelope):
     continuation: str | None
 
 
-class DiscoveryEnvelope(_Envelope):
-    sniffed_sources: list[dict[str, JsonValue]]
-    capabilities: list[dict[str, JsonValue]]
-
-
-class InspectionEnvelope(_Envelope):
-    capabilities: list[dict[str, JsonValue]]
-
-
 class ExternalRequirementEnvelope(BaseModel):
     provider_id: str
     guidance: str
@@ -144,14 +138,6 @@ class _ObjectOutcome(RootModel[Any]):
         schema = handler(core_schema)
         schema["type"] = "object"
         return schema
-
-
-class DiscoveryOutcome(_ObjectOutcome):
-    root: DiscoveryEnvelope | ToolFailureEnvelope
-
-
-class InspectionOutcome(_ObjectOutcome):
-    root: InspectionEnvelope | ToolFailureEnvelope
 
 
 class PreparationOutcome(_ObjectOutcome):
@@ -221,59 +207,30 @@ def create_server(
         description="Bounded local runtime evidence without a prerequisite workspace.",
         instructions=(
             "Pass explicit artifact paths or a typed direct target. Analysis and capture are "
-            "session-local unless preserve_evidence is called. Use prepare_capabilities only when "
-            "discovery reports a missing Flameox-managed provider; reconnect with its returned "
-            "launcher after preparation. Flameox never installs host tools, searches parent "
-            "directories, accepts shell strings, or creates durable jobs."
+            "session-local unless preserve_evidence is called. If a capture reports a missing "
+            "Flameox-managed provider, call prepare_providers with the complete desired provider "
+            "set and reconnect with its returned launcher. Flameox never installs host tools, "
+            "searches parent directories, accepts shell strings, or creates durable jobs."
         ),
         lifespan=lifespan,
     )
 
-    @server.tool(annotations=READ_ONLY, structured_output=True)
-    async def discover_capabilities(
-        intent: str | None = None,
-        sources: list[Source] | None = None,
-        include_unavailable: bool = False,
-        limit: int = 10,
-    ) -> Annotated[CallToolResult, DiscoveryOutcome]:
-        """Rank capabilities by intent and bounded source sniffing; never install providers."""
-        try:
-            return _success(
-                runtime().discover_capabilities(
-                    intent, sources, include_unavailable=include_unavailable, limit=limit
-                )
-            )
-        except (RuntimeFailure, ValidationError) as error:
-            if isinstance(error, ValidationError):
-                return _failure(RuntimeFailure("INVALID_INPUT", str(error)))
-            return _failure(error)
-
-    @server.tool(annotations=READ_ONLY, structured_output=True)
-    async def inspect_capabilities(
-        capability_ids: list[str],
-    ) -> Annotated[CallToolResult, InspectionOutcome]:
-        """Batch-inspect 1-16 capability contracts, providers, limits, and examples."""
-        try:
-            return _success(runtime().inspect_capabilities(capability_ids))
-        except RuntimeFailure as error:
-            return _failure(error)
-
     @server.tool(annotations=PREPARE, structured_output=True)
-    async def prepare_capabilities(
+    async def prepare_providers(
         provider_ids: Annotated[list[str], Field(min_length=1, max_length=16)],
         timeout_seconds: Annotated[
-            int, Field(ge=1, le=MAX_PREPARATION_TIMEOUT_SECONDS)
-        ] = DEFAULT_PREPARATION_TIMEOUT_SECONDS,
+            int, Field(ge=1, le=provider_setup.MAX_PREPARATION_TIMEOUT_SECONDS)
+        ] = provider_setup.DEFAULT_PREPARATION_TIMEOUT_SECONDS,
     ) -> Annotated[CallToolResult, PreparationOutcome]:
         """Prepare selected managed providers; report host-tool setup without changing it."""
 
         try:
             preparation = await anyio.to_thread.run_sync(
-                prepare_providers, provider_ids, root, timeout_seconds
+                provider_setup.prepare_providers, provider_ids, root, timeout_seconds
             )
-        except ProviderSelectionFailure as error:
+        except provider_setup.ProviderSelectionFailure as error:
             return _failure(RuntimeFailure("INVALID_INPUT", str(error)))
-        except SetupFailure as error:
+        except provider_setup.SetupFailure as error:
             return _failure(RuntimeFailure("SETUP_FAILURE", str(error)))
 
         return _success(
@@ -296,87 +253,131 @@ def create_server(
             }
         )
 
-    @server.tool(annotations=READ_ONLY, structured_output=True)
-    async def analyze(
-        capability_id: str,
-        sources: list[Source],
-        arguments: dict[str, Any],
-        limits: RequestLimits | None = None,
-        continuation: str | None = None,
-    ) -> Annotated[CallToolResult, AnalysisOutcome]:
-        """Analyze 1-32 explicit path or evidence sources without durable writes."""
-        try:
-            return _success(
-                runtime().analyze(
-                    capability_id,
-                    sources,
-                    arguments,
-                    limits=limits,
-                    continuation=continuation,
-                )
-            )
-        except RuntimeFailure as error:
-            return _failure(error)
-        except ValidationError as error:
-            return _failure(RuntimeFailure("INVALID_INPUT", str(error)))
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            return _failure(RuntimeFailure("DECODE_FAILURE", str(error)))
-
-    @server.tool(annotations=CAPTURE, structured_output=True)
-    async def capture_and_analyze(
-        target: CaptureTarget,
-        capability_id: str = "artifact.preview",
-        mode: Literal["single", "experiment"] = "single",
-        experiment: ExperimentDesign | None = None,
-        limits: RequestLimits | None = None,
-        preserve: bool = False,
-        ctx: Context[AnalysisRuntime] | None = None,
-    ) -> Annotated[CallToolResult, AnalysisOutcome]:
-        """Validate, execute, and analyze one typed target through the bounded broker."""
-
-        async def progress(current: int, total: int, message: str) -> None:
-            if ctx is not None:
-                await ctx.report_progress(float(current), float(total), message)
-
-        try:
-            value = await runtime().capture_and_analyze(
-                target,
-                capability_id,
-                mode=mode,
-                experiment=experiment,
-                limits=limits,
-                progress=progress,
-                preserve=preserve,
-            )
-            failed = [
-                item for item in value["capture"]["executions"] if item["status"] != "succeeded"
-            ]
-            if failed:
-                return _failure(
-                    RuntimeFailure(
-                        "EXECUTION_FAILURE",
-                        "One or more captured targets exited unsuccessfully.",
-                        details={"partial_evidence": value, "failed_executions": failed},
+    def analysis_handler(capability: Capability) -> Callable[..., Awaitable[CallToolResult]]:
+        async def handler(
+            sources: Annotated[list[Source], Field(min_length=1, max_length=32)],
+            options: Any,
+            limits: RequestLimits | None = None,
+            continuation: str | None = None,
+        ) -> Annotated[CallToolResult, AnalysisOutcome]:
+            try:
+                return _success(
+                    runtime().analyze(
+                        capability.id,
+                        sources,
+                        options.model_dump(),
+                        limits=limits,
+                        continuation=continuation,
                     )
                 )
-            preserved = value.get("preserved")
-            link = None
-            if isinstance(preserved, dict):
-                link = ResourceLink(
-                    type="resource_link",
-                    uri=preserved["uri"],
-                    name=f"Evidence {preserved['evidence_id']}",
-                    mime_type=AGENT_EVIDENCE_MEDIA_TYPE,
+            except RuntimeFailure as error:
+                return _failure(error)
+            except (OSError, ValueError, json.JSONDecodeError) as error:
+                return _failure(RuntimeFailure("DECODE_FAILURE", str(error)))
+
+        # MCP SDK 2.0 derives schemas and diagnostic names from the registered callable.
+        handler.__name__ = analysis_tool_name(capability)
+        minimum_sources = 2 if capability.id.endswith(".compare") else 1
+        handler.__annotations__["sources"] = Annotated[
+            list[Source], Field(min_length=minimum_sources, max_length=32)
+        ]
+        handler.__annotations__["options"] = capability.model
+        return handler
+
+    def capture_handler(
+        capability: Capability,
+        provider_type: Any,
+    ) -> Callable[..., Awaitable[CallToolResult]]:
+        async def handler(
+            target: DirectTarget,
+            provider: Any,
+            options: Any,
+            execution: Execution,
+            ctx: Context[AnalysisRuntime],
+            limits: RequestLimits | None = None,
+            preserve: bool = False,
+        ) -> Annotated[CallToolResult, AnalysisOutcome]:
+            async def progress(current: int, total: int, message: str) -> None:
+                await ctx.report_progress(float(current), float(total), message)
+
+            target = CaptureTarget(
+                **target.model_dump(),
+                provider_id=provider.kind,
+                capture_arguments=provider.options.model_dump(),
+                analysis_arguments=options.model_dump(),
+            )
+            experiment = execution.design if isinstance(execution, ExperimentExecution) else None
+            try:
+                value = await runtime().capture_and_analyze(
+                    target,
+                    capability.id,
+                    mode=execution.kind,
+                    experiment=experiment,
+                    limits=limits,
+                    progress=progress,
+                    preserve=preserve,
                 )
-            return _success(value, resource=link)
-        except RuntimeFailure as error:
-            return _failure(error)
-        except ValidationError as error:
-            return _failure(RuntimeFailure("INVALID_INPUT", str(error)))
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            return _failure(RuntimeFailure("EXECUTION_FAILURE", str(error) or type(error).__name__))
+                failed = [
+                    item for item in value["capture"]["executions"] if item["status"] != "succeeded"
+                ]
+                if failed:
+                    return _failure(
+                        RuntimeFailure(
+                            "EXECUTION_FAILURE",
+                            "One or more captured targets exited unsuccessfully.",
+                            details={"partial_evidence": value, "failed_executions": failed},
+                        )
+                    )
+                preserved = value.get("preserved")
+                link = None
+                if isinstance(preserved, dict):
+                    link = ResourceLink(
+                        type="resource_link",
+                        uri=preserved["uri"],
+                        name=f"Evidence {preserved['evidence_id']}",
+                        mime_type=AGENT_EVIDENCE_MEDIA_TYPE,
+                    )
+                return _success(value, resource=link)
+            except RuntimeFailure as error:
+                return _failure(error)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                return _failure(
+                    RuntimeFailure("EXECUTION_FAILURE", str(error) or type(error).__name__)
+                )
+
+        handler.__name__ = capture_tool_name(capability)
+        handler.__annotations__["provider"] = provider_type
+        handler.__annotations__["options"] = capability.model
+        return handler
+
+    for capability in CAPABILITIES:
+        server.add_tool(
+            analysis_handler(capability),
+            name=analysis_tool_name(capability),
+            title=capability.summary,
+            description=(
+                f"{capability.summary} Accepts: {', '.join(capability.formats)}. "
+                f"Limitation: {capability.limitation}"
+            ),
+            annotations=READ_ONLY,
+            structured_output=True,
+        )
+        provider_type = capture_provider_type(capability)
+        if provider_type is not None:
+            providers = compatible_capture_providers(capability)
+            server.add_tool(
+                capture_handler(capability, provider_type),
+                name=capture_tool_name(capability),
+                title=f"Capture and {capability.summary.lower()}",
+                description=(
+                    f"Execute typed argv and {capability.summary.lower()} Compatible providers: "
+                    f"{', '.join(provider.id for provider in providers)}."
+                ),
+                annotations=CAPTURE,
+                structured_output=True,
+            )
 
     @server.tool(annotations=PRESERVE, structured_output=True)
     async def preserve_evidence(

@@ -36,8 +36,8 @@ durable SHA-256 identity derived from the canonical manifest body.
 
 ## Package boundaries
 
-- `stateless.py` owns public models, capability discovery, bounded analysis,
-  capture orchestration, scratch, and the session cache.
+- `runtime_contracts.py` owns public models and the capability/capture-provider registries.
+- `stateless.py` owns bounded analysis, capture orchestration, scratch, and the session cache.
 - `repository.py` owns lazy repository creation, validation, publication,
   inventory queries, and immutable resource reads.
 - `execution.py` and `command_binding.py` own executable binding, subprocess
@@ -51,13 +51,17 @@ catalog. Flameox production code must not create or depend on SQLite state.
 
 ## Capability boundary
 
-One registry entry owns a capability descriptor, strict argument model,
-accepted formats, provider probes, and capture/analysis semantics. Discovery
-performs only bounded suffix/header sniffing. Missing packages, executables,
-permissions, versions, or platforms are successful discovery states; Flameox
-never installs remediation automatically. The separately invoked CLI setup command or MCP
-`prepare_capabilities` tool may prepare the exact version-pinned uvx environment named by an
-explicit Python provider set; neither creates project state nor owns a durable operation or provider
+One registry entry owns a capability descriptor, strict argument model, accepted formats,
+capture/analysis semantics, and model-visible selection guidance. MCP projects each entry
+into a read-only analysis tool and, when a compatible capture provider exists, a separate executing
+capture tool. The generated callable closes over the stable capability ID; agents never pass a
+capability selector or a free-form analysis argument object.
+
+Capture-provider contracts supply the discriminated provider variants for each compatible capture
+tool. Missing packages, executables, permissions, versions, or platforms do not change the catalog;
+the attempted tool returns typed remediation. The separately invoked CLI setup command or MCP
+`prepare_providers` tool may prepare the exact version-pinned uvx environment named by an explicit
+Python provider set; neither creates project state nor owns a durable operation or provider
 inventory. Host profilers, drivers, and permissions remain external and receive guidance only.
 
 Direct capture is trusted local execution, not containment. Typed argv prevents

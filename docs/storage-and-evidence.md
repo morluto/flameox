@@ -1,8 +1,7 @@
 # Storage and evidence
 
-Storage is optional. Discovery, inspection, analysis, and unpreserved capture
-must not create `.flameox`, `.diagnostics`, SQLite files, or persistent DuckDB
-files.
+Storage is optional. Analysis and unpreserved capture must not create `.flameox`,
+`.diagnostics`, SQLite files, or persistent DuckDB files.
 
 ## Repository layout
 

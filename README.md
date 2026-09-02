@@ -17,7 +17,7 @@ paths and formats to `analyze`; old `.diagnostics` state is not migrated.
 
 ```console
 uv sync --extra dev --extra memory --extra trace --extra cpu
-uv run flameox capabilities discover --intent "CPU hotspots"
+uv run flameox mcp inspect
 uv run flameox analyze artifact.preview /absolute/path/to/artifact.json
 uv run flameox capture --provider direct -- python benchmark.py
 ```
@@ -70,15 +70,23 @@ coverage, truncation, limitations, and optional immutable preservation.
 
 ## MCP interface
 
-The server exposes exactly seven tools:
+The server exposes actual evidence operations for client-side tool search instead of hiding its
+capabilities behind `discover`, `inspect`, or generic `analyze(capability_id, arguments)` calls.
+There are 24 read-only analysis tools, 17 executing capture tools, and three lifecycle tools. For
+example:
 
-- `discover_capabilities`
-- `inspect_capabilities`
-- `prepare_capabilities`
-- `analyze`
-- `capture_and_analyze`
-- `preserve_evidence`
-- `query_evidence`
+```text
+analyze_cpu_hotspots       capture_cpu_hotspots
+analyze_gpu_launches       capture_gpu_launches
+analyze_benchmark_compare  capture_benchmark_summary
+analyze_kernel_validation  capture_sanitizer_failures
+prepare_providers          preserve_evidence          query_evidence
+```
+
+Each tool advertises its capability-specific options and compatible providers in its input schema.
+Analysis and capture have separate names and annotations because reading an artifact and executing a
+target are materially different effects. Tool search happens in the MCP client; Flameox does not
+require an additional catalog-search call.
 
 It exposes one resource template, `flameox://evidence/{evidence_id}`, for the
 digest-bound, redacted projection of the canonical immutable manifest. Full
@@ -86,21 +94,20 @@ argv, environment values, working directories, and host paths remain available
 only through explicit local manifest inspection. Native artifact bytes are
 deliberately not available as MCP resources.
 
-Direct capture accepts an argv array, a project-contained cwd, bounded
-environment overrides, provider and analysis arguments, and limits. Shell
-strings are never accepted. Work remains owned by the live MCP request, so SDK
-progress and cancellation apply directly; there are no detached or
-restart-surviving tasks.
+Direct capture accepts an argv array, a project-contained cwd, bounded environment overrides, a
+typed compatible-provider variant, capability-specific options, an explicit single/experiment
+choice, and limits as top-level tool arguments. There is no generic request or arguments envelope.
+Shell strings are never accepted. Work remains owned by the live MCP request, so SDK progress and
+cancellation apply directly; there are no detached or restart-surviving tasks.
 
 Managed external collectors such as py-spy execute from Flameox's uvx
 environment. In-process collectors such as coverage.py and Memray are verified
 in, and run with, the workload's declared Python interpreter. Flameox does not
-substitute one Python runtime for the other. When discovery reports a missing
-managed provider, `prepare_capabilities` prepares its version-pinned uvx
-environment and returns that same launcher for reconnection. The agent supplies
-the complete provider list it wants in that launcher; Flameox does not merge it
-with prior calls. Host tools, drivers, and permissions are never installed or
-changed; the same result reports their setup guidance.
+substitute one Python runtime for the other. When a capture reports a missing managed provider,
+`prepare_providers` prepares its version-pinned uvx environment and returns that same launcher for
+reconnection. The agent supplies the complete provider list it wants in that launcher; Flameox does
+not merge it with prior calls. Host tools, drivers, and permissions are never installed or changed;
+the same result reports their setup guidance.
 
 ## Evidence quality
 
