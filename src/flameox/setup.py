@@ -23,6 +23,7 @@ from flameox.providers.availability import (
 
 DEFAULT_PREPARATION_TIMEOUT_SECONDS = 1_800
 MAX_PREPARATION_TIMEOUT_SECONDS = 3_600
+PATH_CLI_PROBE_TIMEOUT_SECONDS = 5
 
 
 class SetupFailure(RuntimeError):
@@ -100,6 +101,48 @@ class ClientSetupResult:
     client: SetupClient
     path: Path
     action: Literal["created", "updated", "already_current"]
+
+
+@dataclass(frozen=True, slots=True)
+class CliVersionAdvisory:
+    executable: str
+    cli_version: str
+    mcp_version: str
+
+    @property
+    def message(self) -> str:
+        return (
+            f"Direct CLI commands use Flameox {self.cli_version} at {self.executable}, while the "
+            f"configured MCP launcher uses {self.mcp_version}. Manage that CLI separately if "
+            "you want the versions aligned."
+        )
+
+
+def path_cli_version_advisory() -> CliVersionAdvisory | None:
+    """Return a non-fatal advisory when the PATH CLI differs from this release."""
+
+    executable = shutil.which("flameox")
+    if executable is None:
+        return None
+    try:
+        completed = subprocess.run(
+            [executable, "--version"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=PATH_CLI_PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    output = completed.stdout
+    version = (
+        output.decode(errors="replace").strip() if isinstance(output, bytes) else output.strip()
+    )
+    if not version or "\n" in version or version == __version__:
+        return None
+    return CliVersionAdvisory(executable, version, __version__)
 
 
 def parse_setup_clients(values: list[str]) -> list[SetupClient]:

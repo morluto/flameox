@@ -33,9 +33,10 @@ containment must not be silently promoted to complete evidence.
 
 ## Experiments
 
-Every `capture_*` capability tool accepts a discriminated `single` or `experiment` execution
-request. An experiment declares cases, blocks, seed, metric, estimand, practical threshold, and an
-optional semantic oracle. Cases are bounded and execute through the same broker as a single capture.
+Every MCP `capture_*` capability tool accepts a discriminated `single` or `experiment` execution
+request. The CLI accepts the same `ExperimentDesign` object through `capture --experiment JSON`.
+An experiment declares cases, blocks, seed, metric, estimand, practical threshold, and an optional
+semantic oracle. Cases are bounded and execute through the same broker as a single capture.
 
 For GPU kernel work, the agent normally compiles and edits with its native coding tools, records
 correctness through `analyze_kernel_validation` and `analyze_kernel_compare`, checks hazards with

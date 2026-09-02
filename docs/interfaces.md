@@ -27,6 +27,11 @@ an explicit `single` or `experiment` execution union, optional lowered `limits`,
 `preserve`. There is no extra request envelope and there are no free-form provider or analysis
 argument objects.
 
+Field descriptions are part of the public MCP contract. Shared source, target, limit, provider,
+and experiment descriptions are declared on their owning Pydantic models so CLI validation,
+runtime validation, and every generated capability tool use the same semantics. Transport-only
+fields such as continuations and preservation handles are described at the MCP boundary.
+
 For example, a single Nsight Compute capture for kernel metrics has this argument shape:
 
 ```json
@@ -108,6 +113,9 @@ provenance-byte limits. Durable provenance bounds the captured argv and executio
 metadata retained for explicit preservation.
 They cannot raise them.
 
+`query_evidence` returns 1-200 manifests per page. Its cursor is bound to both the immutable
+inventory snapshot and the original filters; callers resume by repeating those filters unchanged.
+
 ## Capture
 
 A direct target contains an argv array, an existing absolute cwd, and at most 32 bounded environment
@@ -134,6 +142,11 @@ eligible blocks and a deterministic percentile interval when at least three
 blocks survive capture/oracle validation, and classifies the effect against the
 declared threshold. Work is not detached; the request receives progress and owns
 cancellation.
+The first declared case is the baseline. A case inherits the target argv when it omits `argv`, and
+its environment overrides the target environment. Each block randomizes case order from the
+declared seed. The semantic oracle runs after every successful capture in that case environment;
+`FLAMEOX_CAPTURE_STDOUT` and `FLAMEOX_CAPTURE_STDERR` identify its captured files, and a nonzero
+exit excludes the corresponding case-block observation from paired comparison.
 
 Comparison tools consume explicit artifacts; they do not capture their inputs. A caller captures
 representative baseline and candidate summaries separately, preserves them when durable provenance
@@ -159,7 +172,7 @@ The retained surface is:
 flameox setup
 flameox mcp serve|inspect
 flameox analyze [--continuation TOKEN] [--preserve]
-flameox capture [--preserve] -- <argv...>
+flameox capture [--experiment JSON] [--preserve] -- <argv...>
 flameox evidence query|show
 ```
 
@@ -177,3 +190,5 @@ download, and compatibility failures retain uvx's complete stderr. System and
 vendor providers receive external installation guidance. Setup does not create a persistent global
 tool, durable operation, project state, or MCP setup endpoint. Other CLI commands use the same
 explicit paths, capture working directories, and user-level evidence store as MCP.
+When another `flameox` executable on `PATH` reports a different version, setup emits a non-fatal
+advisory in human and JSON output. It never upgrades or removes that independently managed CLI.

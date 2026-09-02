@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 
 from flameox import __version__
 from flameox.cli import app
-from flameox.setup import ExternalRequirement, ProviderPreparation, SetupClient
+from flameox.setup import CliVersionAdvisory, ExternalRequirement, ProviderPreparation, SetupClient
 
 pytestmark = pytest.mark.integration
 
@@ -153,6 +153,76 @@ def test_capture_returns_nonzero_for_failed_target(tmp_path: Path) -> None:
     assert json.loads(result.stdout)["capture"]["executions"][0]["returncode"] == 7
 
 
+@pytest.mark.process
+def test_capture_accepts_the_runtime_experiment_contract(tmp_path: Path) -> None:
+    experiment = {
+        "cases": [
+            {"name": "baseline"},
+            {
+                "name": "candidate",
+                "argv": [sys.executable, "-c", "print('candidate')"],
+            },
+        ],
+        "blocks": 2,
+        "seed": 7,
+        "metric": "wall_time_ns",
+        "estimand": "median_difference",
+        "practical_threshold": 0,
+    }
+    result = CliRunner().invoke(
+        app,
+        [
+            "capture",
+            "--provider",
+            "direct",
+            "--cwd",
+            str(tmp_path),
+            "--experiment",
+            json.dumps(experiment),
+            "--",
+            sys.executable,
+            "-c",
+            "print('baseline')",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    executions = payload["capture"]["executions"]
+    assert len(executions) == 4
+    assert {(item["case"], item["block"]) for item in executions} == {
+        ("baseline", 1),
+        ("candidate", 1),
+        ("baseline", 2),
+        ("candidate", 2),
+    }
+    assert payload["blocks"][-1]["rows"][0]["baseline_case"] == "baseline"
+
+
+def test_capture_rejects_an_invalid_experiment_before_execution(tmp_path: Path) -> None:
+    marker = tmp_path / "executed"
+    result = CliRunner().invoke(
+        app,
+        [
+            "capture",
+            "--provider",
+            "direct",
+            "--cwd",
+            str(tmp_path),
+            "--experiment",
+            '{"cases": []}',
+            "--",
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(marker)!r}).touch()",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert '"code": "INVALID_INPUT"' in result.stderr
+    assert not marker.exists()
+
+
 def test_analyze_projects_runtime_errors_without_traceback(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,
@@ -166,6 +236,13 @@ def test_analyze_projects_runtime_errors_without_traceback(tmp_path: Path) -> No
     assert result.exit_code == 1
     assert '"code": "UNKNOWN_CAPABILITY"' in result.stderr
     assert "Traceback" not in result.output
+
+
+def test_evidence_query_rejects_a_malformed_input_digest() -> None:
+    result = CliRunner().invoke(app, ["evidence", "query", "--input-sha256", "not-a-digest"])
+
+    assert result.exit_code == 1
+    assert '"code": "INVALID_INPUT"' in result.stderr
 
 
 def test_setup_without_a_tty_requires_an_explicit_client(tmp_path: Path) -> None:
@@ -286,6 +363,35 @@ def test_setup_json_returns_typed_reconnect_action(
         "clients": ["Gemini CLI"],
         "message": "Restart or reconnect Gemini CLI to load Flameox.",
     }
+
+
+def test_setup_reports_a_different_path_cli_without_changing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "flameox.cli.path_cli_version_advisory",
+        lambda: CliVersionAdvisory("/tools/flameox", "0.1.0", __version__),
+    )
+
+    structured = CliRunner().invoke(app, ["setup", "--client", "codex", "--yes", "--json"])
+    human = CliRunner().invoke(app, ["setup", "--client", "codex", "--yes"])
+
+    assert structured.exit_code == 0, structured.output
+    assert json.loads(structured.output)["advisories"] == [
+        {
+            "kind": "path_cli_version_mismatch",
+            "executable": "/tools/flameox",
+            "cli_version": "0.1.0",
+            "mcp_version": __version__,
+            "message": (
+                f"Direct CLI commands use Flameox 0.1.0 at /tools/flameox, while the "
+                f"configured MCP launcher uses {__version__}. Manage that CLI separately if "
+                "you want the versions aligned."
+            ),
+        }
+    ]
+    assert "Direct CLI commands use Flameox 0.1.0" in human.output
 
 
 def test_setup_dry_run_does_not_prepare_or_write(

@@ -18,9 +18,54 @@ from flameox.setup import (
     detect_setup_clients,
     mcp_launcher,
     parse_setup_clients,
+    path_cli_version_advisory,
     plan_client_setup,
     prepare_providers,
 )
+
+
+def test_path_cli_version_advisory_reports_only_a_different_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/tools/flameox")
+    monkeypatch.setattr(
+        "flameox.setup.subprocess.run",
+        lambda command, **_kwargs: CompletedProcess(command, 0, stdout=b"0.1.0\n"),
+    )
+
+    advisory = path_cli_version_advisory()
+
+    assert advisory is not None
+    assert advisory.executable == "/tools/flameox"
+    assert advisory.cli_version == "0.1.0"
+    assert advisory.mcp_version == __version__
+    assert "direct cli commands" in advisory.message.lower()
+
+
+def test_path_cli_version_advisory_is_nonfatal_when_probe_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/tools/flameox")
+    monkeypatch.setattr(
+        "flameox.setup.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("denied")),
+    )
+
+    assert path_cli_version_advisory() is None
+
+
+def test_path_cli_version_advisory_ignores_an_absent_or_aligned_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: None)
+    assert path_cli_version_advisory() is None
+
+    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/tools/flameox")
+    monkeypatch.setattr(
+        "flameox.setup.subprocess.run",
+        lambda command, **_kwargs: CompletedProcess(command, 0, stdout=f"{__version__}\n".encode()),
+    )
+    assert path_cli_version_advisory() is None
 
 
 def test_mcp_launcher_pins_python_release_and_provider_extras() -> None:

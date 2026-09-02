@@ -13,12 +13,13 @@ from pydantic import ValidationError
 
 from flameox import __version__
 from flameox.mcp import create_server, run_server
-from flameox.runtime_contracts import CaptureTarget, PathSource, RuntimeFailure
+from flameox.runtime_contracts import CaptureTarget, ExperimentDesign, PathSource, RuntimeFailure
 from flameox.setup import (
     DEFAULT_PREPARATION_TIMEOUT_SECONDS,
     MAX_PREPARATION_TIMEOUT_SECONDS,
     SETUP_CLIENTS,
     ClientSetupPlan,
+    CliVersionAdvisory,
     ProviderPreparation,
     SetupClient,
     SetupFailure,
@@ -27,6 +28,7 @@ from flameox.setup import (
     external_provider_requirements,
     mcp_launcher,
     parse_setup_clients,
+    path_cli_version_advisory,
     plan_client_setup,
     prepare_providers,
 )
@@ -134,13 +136,15 @@ def setup(
             raise SetupFailure("Non-interactive setup requires --yes or --dry-run.")
 
         plans = plan_client_setup(selected_clients, selected)
+        advisory = path_cli_version_advisory()
         if dry_run:
-            value = _setup_value(plans, selected, preparation=None, dry_run=True)
+            value = _setup_value(plans, selected, preparation=None, advisory=advisory, dry_run=True)
             if json_output:
                 _write(value)
             else:
                 _write_setup_plan(plans)
                 _write_external_guidance(value)
+                _write_advisories(value)
             return
 
         preparation = prepare_providers(selected, timeout_seconds)
@@ -148,7 +152,7 @@ def setup(
     except SetupFailure as error:
         raise typer.BadParameter(str(error)) from error
 
-    value = _setup_value(plans, selected, preparation=preparation, dry_run=False)
+    value = _setup_value(plans, selected, preparation=preparation, advisory=advisory, dry_run=False)
     value["clients"] = [
         {
             "id": result.client.value,
@@ -188,6 +192,7 @@ def setup(
     if restart_clients:
         typer.echo(f"\nRestart or reconnect {', '.join(restart_clients)} to load Flameox.")
     _write_external_guidance(value)
+    _write_advisories(value)
 
 
 def _write_external_guidance(value: dict[str, object]) -> None:
@@ -195,6 +200,13 @@ def _write_external_guidance(value: dict[str, object]) -> None:
     if guidance:
         typer.echo()
         typer.echo("\n".join(guidance))
+
+
+def _write_advisories(value: dict[str, object]) -> None:
+    advisories = cast(list[dict[str, str]], value["advisories"])
+    if advisories:
+        typer.echo()
+        typer.echo("\n".join(f"Warning: {item['message']}" for item in advisories))
 
 
 def _select_setup_clients(detected: list[SetupClient]) -> list[SetupClient]:
@@ -245,6 +257,7 @@ def _setup_value(
     providers: list[str],
     *,
     preparation: ProviderPreparation | None,
+    advisory: CliVersionAdvisory | None,
     dry_run: bool,
 ) -> dict[str, object]:
     if preparation is None:
@@ -266,6 +279,19 @@ def _setup_value(
         "providers": sorted(set(providers)),
         "preparation_command": preparation_command,
         "external_guidance": guidance,
+        "advisories": (
+            [
+                {
+                    "kind": "path_cli_version_mismatch",
+                    "executable": advisory.executable,
+                    "cli_version": advisory.cli_version,
+                    "mcp_version": advisory.mcp_version,
+                    "message": advisory.message,
+                }
+            ]
+            if advisory is not None
+            else []
+        ),
         "dry_run": dry_run,
         "plan": [
             {
@@ -315,6 +341,16 @@ def capture(
     cwd: Annotated[Path, typer.Option("--cwd")] = Path("."),
     capture_arguments: Annotated[str, typer.Option("--capture-arguments")] = "{}",
     analysis_arguments: Annotated[str, typer.Option("--analysis-arguments")] = "{}",
+    experiment_json: Annotated[
+        str | None,
+        typer.Option(
+            "--experiment",
+            help=(
+                "JSON experiment with cases, blocks, seed, metric, estimand, threshold, and "
+                "optional oracle; the argv after -- is the default target."
+            ),
+        ),
+    ] = None,
     preserve: Annotated[bool, typer.Option("--preserve")] = False,
 ) -> None:
     """Capture a typed argv target after `--` and immediately analyze its output."""
@@ -323,6 +359,14 @@ def capture(
         argv.pop(0)
     if not argv:
         raise typer.BadParameter("capture requires an argv after --")
+    try:
+        experiment = (
+            ExperimentDesign.model_validate(_json_object(experiment_json, option="--experiment"))
+            if experiment_json is not None
+            else None
+        )
+    except ValidationError as error:
+        _cli_failure(error)
     runtime = _runtime()
 
     async def execute() -> dict[str, Any]:
@@ -335,6 +379,8 @@ def capture(
                 analysis_arguments=_json_object(analysis_arguments, option="--analysis-arguments"),
             ),
             capability_id,
+            mode="experiment" if experiment is not None else "single",
+            experiment=experiment,
             preserve=preserve,
         )
 
