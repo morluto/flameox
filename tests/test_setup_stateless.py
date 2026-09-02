@@ -89,7 +89,7 @@ def test_preparation_runs_and_returns_the_same_exact_uvx_environment(
 
 
 def test_host_only_preparation_returns_guidance_without_requiring_uvx(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: None)
 
@@ -103,7 +103,7 @@ def test_host_only_preparation_returns_guidance_without_requiring_uvx(
 
 
 def test_uvx_is_required_before_managed_preparation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: None)
 
@@ -112,7 +112,7 @@ def test_uvx_is_required_before_managed_preparation(
 
 
 def test_uvx_failure_is_normalized_as_setup_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/usr/bin/uvx")
     monkeypatch.setattr(
@@ -132,7 +132,7 @@ def test_uvx_failure_is_normalized_as_setup_failure(
 
 
 def test_preparation_timeout_is_configurable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed: dict[str, object] = {}
 
@@ -149,7 +149,7 @@ def test_preparation_timeout_is_configurable(
 
 
 def test_preparation_timeout_preserves_uvx_stderr(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def run(*_args: object, **_kwargs: object) -> CompletedProcess[bytes]:
         raise subprocess.TimeoutExpired("uvx", 2_400, stderr=b"download stalled\xff")
@@ -165,13 +165,13 @@ def test_preparation_timeout_preserves_uvx_stderr(
 
 
 @pytest.mark.parametrize("timeout_seconds", [0, 3_601])
-def test_preparation_timeout_is_bounded(timeout_seconds: int, tmp_path: Path) -> None:
+def test_preparation_timeout_is_bounded(timeout_seconds: int) -> None:
     with pytest.raises(SetupFailure, match="between 1 and 3600"):
         prepare_providers(["torch"], timeout_seconds=timeout_seconds)
 
 
 def test_uvx_start_failure_is_normalized_as_setup_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail(*_args: object, **_kwargs: object) -> CompletedProcess[str]:
         raise PermissionError("denied")
@@ -183,7 +183,7 @@ def test_uvx_start_failure_is_normalized_as_setup_failure(
         prepare_providers(["memray"])
 
 
-def test_unknown_provider_is_rejected_before_preparation(tmp_path: Path) -> None:
+def test_unknown_provider_is_rejected_before_preparation() -> None:
     with pytest.raises(SetupFailure, match="Unknown provider"):
         prepare_providers(["mystery"])
 
