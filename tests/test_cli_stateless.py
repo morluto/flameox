@@ -20,7 +20,15 @@ def test_help_exposes_only_stateless_command_families() -> None:
     assert result.exit_code == 0, result.output
     assert all(
         command in result.output
-        for command in ("setup", "analyze", "capture", "capabilities", "mcp", "evidence")
+        for command in (
+            "setup",
+            "analyze",
+            "preflight",
+            "capture",
+            "capabilities",
+            "mcp",
+            "evidence",
+        )
     )
     assert all(
         removed not in result.output

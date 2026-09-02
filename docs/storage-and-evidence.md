@@ -34,6 +34,11 @@ manifest roles bind their relative paths. An `EvidenceSource` rebuilds such a
 bundle only in session scratch, so NVBench and similar directory formats remain
 reanalyzable without introducing a mutable repository checkout.
 
+When an analysis composes independently preserved bundles, their source-local artifact roles may
+legitimately collide. Publication assigns deterministic `source-NNNN/` role namespaces only to
+colliding artifacts; the analysis inputs retain each original bundle role and evidence identity as
+provenance.
+
 Evidence identity is SHA-256 of the RFC 8785 canonical manifest body. The body
 contains capability/provider identity, input digests, effective capture and
 analysis requests, the evidence-episode timestamp, data-file digests, coverage,

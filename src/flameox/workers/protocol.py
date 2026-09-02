@@ -27,6 +27,7 @@ class WorkerOperationId(StrEnum):
     NSIGHT_SYSTEMS_PARSE = "nsight_systems.parse"
     OTLP_PARSE = "otlp.parse"
     PERFETTO_QUERY = "perfetto.query"
+    PSTATS_PARSE = "pstats.parse"
     PYPERF_PARSE = "pyperf.parse"
     V8_PROFILE_PARSE = "v8_profile.parse"
 

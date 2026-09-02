@@ -24,14 +24,12 @@ class ReliabilityProvider:
         )
 
     def _pytest(self, path: Path, *, max_rows: int) -> ProviderAnalysis:
-        rows: list[dict[str, Any]] = []
-        observed = 0
         collected: set[str] = set()
-        phases: dict[str, dict[str, str]] = defaultdict(dict)
+        phase_events: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+        global_failures: list[dict[str, Any]] = []
         finished = False
         interrupted = False
         for index, event in self._events(path):
-            observed += 1
             event_name = event.get("event")
             if event_name == "test_collected" and isinstance(event.get("nodeid"), str):
                 collected.add(event["nodeid"])
@@ -40,14 +38,48 @@ class ReliabilityProvider:
                 phase = event.get("phase")
                 outcome = event.get("outcome")
                 if all(isinstance(item, str) for item in (nodeid, phase, outcome)):
-                    phases[str(nodeid)][str(phase)] = str(outcome)
+                    phase_events[str(nodeid)][str(phase)] = self._pytest_row(index, event)
             elif event_name == "run_finished":
                 finished = True
             elif event_name in {"interrupted", "internal_error"}:
                 interrupted = True
-            if len(rows) < max_rows:
-                rows.append(self._pytest_row(index, event))
+                global_failures.append(
+                    {"index": index, "classification": str(event_name), "nodeid": None}
+                )
+        phases = {
+            nodeid: {phase: str(event["outcome"]) for phase, event in reports.items()}
+            for nodeid, reports in phase_events.items()
+        }
         outcomes = self._outcomes(phases)
+        diagnostic_rows = [
+            self._pytest_outcome_row(nodeid, reports)
+            for nodeid, reports in phase_events.items()
+            if self._pytest_classification(phases[nodeid]) in {"failed", "errored"}
+        ]
+        diagnostic_rows.extend(global_failures)
+        diagnostic_rows.extend(
+            {
+                "index": None,
+                "nodeid": nodeid,
+                "classification": "unexecuted",
+                "failing_phase": None,
+                "phase_outcomes": {},
+            }
+            for nodeid in sorted(collected.difference(phases))
+        )
+        priority = {
+            "errored": 0,
+            "failed": 1,
+            "internal_error": 2,
+            "interrupted": 3,
+            "unexecuted": 4,
+        }
+        diagnostic_rows.sort(
+            key=lambda row: (
+                priority[str(row["classification"])],
+                str(row.get("nodeid") or ""),
+            )
+        )
         completion = "interrupted" if interrupted else "complete" if finished else "incomplete"
         return ProviderAnalysis(
             provider_id="pytest",
@@ -63,14 +95,44 @@ class ReliabilityProvider:
                         **outcomes,
                     },
                 },
-                {"type": "table", "rows": rows},
+                {"type": "table", "rows": diagnostic_rows[:max_rows]},
             ],
-            rows_observed=observed,
-            complete=observed <= len(rows),
+            rows_observed=len(diagnostic_rows),
+            complete=len(diagnostic_rows) <= max_rows,
             limitations=[
-                "Failure tracebacks remain in the native pytest artifact and are not projected."
+                "Rows contain failure, error, interruption, and unexecuted identities; passing "
+                "and skipped identities remain summarized in metrics.",
+                "Failure tracebacks remain in the native pytest artifact and are not projected.",
             ],
         )
+
+    @staticmethod
+    def _pytest_classification(reports: dict[str, str]) -> str:
+        if reports.get("setup") == "failed" or reports.get("teardown") == "failed":
+            return "errored"
+        if reports.get("call") == "failed":
+            return "failed"
+        if "skipped" in reports.values():
+            return "skipped"
+        if reports.get("call") == "passed":
+            return "passed"
+        return "errored"
+
+    @classmethod
+    def _pytest_outcome_row(cls, nodeid: str, reports: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        outcomes = {phase: str(event["outcome"]) for phase, event in reports.items()}
+        classification = cls._pytest_classification(outcomes)
+        failing_phase = next(
+            (phase for phase in ("setup", "call", "teardown") if outcomes.get(phase) == "failed"),
+            None,
+        )
+        return {
+            "index": min(int(event["index"]) for event in reports.values()),
+            "nodeid": nodeid,
+            "classification": classification,
+            "failing_phase": failing_phase,
+            "phase_outcomes": outcomes,
+        }
 
     def _observations(self, path: Path, *, max_rows: int) -> ProviderAnalysis:
         rows: list[dict[str, Any]] = []

@@ -38,7 +38,7 @@ from flameox.execution import (
     ResourcePolicy,
     SubprocessBroker,
 )
-from flameox.process_models import process_exit_code
+from flameox.process_models import ProcessResult, process_exit_code
 from flameox.providers.aiperf import AIPerfProvider
 from flameox.providers.benchmarks import BenchmarkProvider
 from flameox.providers.contracts import (
@@ -69,6 +69,7 @@ from flameox.runtime_contracts import (
     CAPABILITIES,
     CAPABILITY_BY_ID,
     CAPTURE_PROBES,
+    CAPTURE_PROVIDER_CONTRACTS,
     FORMAT_PROBES,
     MAX_INPUTS,
     MAX_ROWS,
@@ -97,7 +98,6 @@ from flameox.runtime_contracts import (
     RocprofCaptureArguments,
     RuntimeFailure,
     Source,
-    StrictModel,
     TorchProfilerCaptureArguments,
     XctraceCaptureArguments,
 )
@@ -138,6 +138,15 @@ class CaptureInvocation:
     argv: tuple[str, ...]
     environment: dict[str, str]
     artifacts: tuple[tuple[Path, str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedCaptureRequest:
+    capability: Capability
+    capture_arguments: CaptureArguments
+    limits: RequestLimits
+    cases: list[ExperimentCase]
+    blocks: int
 
 
 def _perf_permission_limited(executable_path: str) -> bool:
@@ -296,77 +305,26 @@ class AnalysisRuntime:
         }
 
     def _capture_provider_details(self, capability: Capability) -> list[dict[str, Any]]:
-        providers: list[tuple[str, type[StrictModel], str]] = []
-        if capability.id == "artifact.preview":
-            providers.append(("direct", EmptyArguments, "stdout and stderr text"))
-        if "pyperf" in capability.formats:
-            providers.append(("pyperf", PyperfCaptureArguments, "native pyperf JSON suite"))
-        if "py-spy" in capability.formats:
-            providers.append(("py-spy", PySpyCaptureArguments, "py-spy Speedscope profile"))
-        if "perf-data" in capability.formats:
-            providers.append(("perf", PerfCaptureArguments, "native perf.data profile"))
-        if "cpuprofile" in capability.formats:
-            providers.append(("node-cpu-profile", EmptyArguments, "native V8 CPU profile"))
-        if "memray" in capability.formats:
-            providers.append(("memray", MemrayCaptureArguments, "native Memray allocation file"))
-        if "pytorch" in capability.formats:
-            providers.append(
-                (
-                    "torch-profiler",
-                    TorchProfilerCaptureArguments,
-                    "native PyTorch Chrome trace",
+        providers = [
+            contract
+            for contract in CAPTURE_PROVIDER_CONTRACTS.values()
+            if (
+                (capability.id == "artifact.preview" and contract.preview_streams)
+                or set(capability.formats).intersection(
+                    artifact.format for artifact in contract.artifacts
                 )
             )
-        if "samples" in capability.formats:
-            providers.append(
-                (
-                    "benchmark-samples",
-                    BenchmarkSamplesCaptureArguments,
-                    "native Flameox benchmark samples",
-                )
-            )
-        if "nvbench" in capability.formats:
-            providers.append(("nvbench", EmptyArguments, "native NVBench JSON-bin directory"))
-        if "compute-sanitizer" in capability.formats:
-            providers.append(
-                (
-                    "compute-sanitizer",
-                    ComputeSanitizerCaptureArguments,
-                    "native Compute Sanitizer log",
-                )
-            )
-        if "nsys-rep" in capability.formats:
-            providers.append(
-                (
-                    "nsight-systems",
-                    NsightSystemsCaptureArguments,
-                    "native Nsight Systems report",
-                )
-            )
-        if "nsight-compute" in capability.formats:
-            providers.append(
-                (
-                    "nsight-compute",
-                    NsightComputeCaptureArguments,
-                    "native Nsight Compute report",
-                )
-            )
-        if "rocprof-pftrace" in capability.formats:
-            providers.append(("rocprofv3", RocprofCaptureArguments, "native ROCprof PFTrace"))
-        if "xctrace" in capability.formats:
-            providers.append(("xctrace", XctraceCaptureArguments, "native Apple .trace bundle"))
-        if "coverage" in capability.formats:
-            providers.append(("coverage", CoverageCaptureArguments, "native coverage.py data file"))
-        if "pytest" in capability.formats:
-            providers.append(("pytest", EmptyArguments, "bounded native pytest event stream"))
+        ]
         return [
             {
-                "id": provider_id,
-                "capture_argument_schema": model.model_json_schema(mode="validation"),
-                "artifact": artifact,
-                "availability": self._capture_provider_availability(provider_id),
+                "id": contract.id,
+                "capture_argument_schema": contract.argument_model.model_json_schema(
+                    mode="validation"
+                ),
+                "artifact": contract.artifact_description,
+                "availability": self._capture_provider_availability(contract.id),
             }
-            for provider_id, model, artifact in providers
+            for contract in providers
         ]
 
     def _capture_provider_availability(self, provider_id: str) -> dict[str, Any]:
@@ -543,6 +501,149 @@ class AnalysisRuntime:
         )
         return self._copy_result(validated_result)
 
+    def preflight_capture(
+        self,
+        target: CaptureTarget,
+        capability_id: str,
+        *,
+        mode: Literal["single", "experiment"] = "single",
+        experiment: ExperimentDesign | None = None,
+        limits: RequestLimits | None = None,
+    ) -> dict[str, Any]:
+        validated = self._validate_capture_request(
+            target, capability_id, mode=mode, experiment=experiment, limits=limits
+        )
+        total = len(validated.cases) * validated.blocks
+        self._reserve_capture_capacity(
+            total,
+            provider_id=target.provider_id,
+            has_oracle=experiment is not None and experiment.semantic_oracle is not None,
+            limits=validated.limits,
+        )
+        cwd = self._resolve_project_cwd(target.cwd)
+        case_plans: list[dict[str, Any]] = []
+        for case_index, case in enumerate(validated.cases, start=1):
+            argv = case.argv or target.argv
+            environment = {**target.environment, **case.environment}
+            if len(environment) > 32:
+                raise RuntimeFailure(
+                    "INVALID_INPUT", "merged capture environment must contain at most 32 entries"
+                )
+            directory = Path("<request-scratch>") / f"case-{case_index:04d}"
+            invocation = self._capture_invocation(
+                target.provider_id,
+                argv,
+                environment,
+                validated.capture_arguments,
+                directory,
+            )
+            binding = self._require_host_tool(
+                invocation.argv[0], cwd=cwd, environment={**os.environ, **invocation.environment}
+            )
+            case_plans.append(
+                {
+                    "case": case.name,
+                    "requested_argv": argv,
+                    "capture_argv_template": list(invocation.argv),
+                    "environment_names": sorted(invocation.environment),
+                    "executable": binding.model_dump(mode="json"),
+                    "expected_artifacts": [
+                        {
+                            "role": role,
+                            "format": format_name,
+                            "path_template": str(path),
+                        }
+                        for path, format_name, role in invocation.artifacts
+                    ],
+                }
+            )
+        request = {
+            "target": target.model_dump(mode="json"),
+            "capability_id": capability_id,
+            "mode": mode,
+            "experiment": experiment.model_dump(mode="json") if experiment else None,
+            "limits": validated.limits.model_dump(mode="json"),
+        }
+        return {
+            "request_sha256": hashlib.sha256(canonical_bytes(request)).hexdigest(),
+            "authoritative": False,
+            "compatibility": {
+                "status": "compatible",
+                "provider_id": target.provider_id,
+                "output_formats": self._capture_output_formats(target.provider_id),
+                "capability_id": capability_id,
+                "accepted_formats": list(validated.capability.formats),
+            },
+            "execution_count": total,
+            "cwd": str(cwd),
+            "cases": case_plans,
+            "effective_limits": validated.limits.model_dump(mode="json"),
+            "limitations": [
+                "Preflight creates no plan or execution authority.",
+                "Capture resolves and validates the request again before execution.",
+                "Workload-interpreter package readiness remains target-dependent.",
+            ],
+        }
+
+    def _validate_capture_request(
+        self,
+        target: CaptureTarget,
+        capability_id: str,
+        *,
+        mode: Literal["single", "experiment"],
+        experiment: ExperimentDesign | None,
+        limits: RequestLimits | None,
+    ) -> ValidatedCaptureRequest:
+        selected_limits = limits.lowered_against(self.limits) if limits else self.limits
+        capability = CAPABILITY_BY_ID.get(capability_id)
+        if capability is None:
+            raise RuntimeFailure("UNKNOWN_CAPABILITY", f"Unknown capability: {capability_id}")
+        capture_arguments = self._capture_arguments(target.provider_id, target.capture_arguments)
+        TypeAdapter(capability.model).validate_python(target.analysis_arguments)
+        if (mode == "experiment") != (experiment is not None):
+            raise RuntimeFailure(
+                "INVALID_INPUT", "experiment mode and design must be supplied together"
+            )
+        output_formats = set(self._capture_output_formats(target.provider_id))
+        compatible = (
+            capability_id == "artifact.preview" and target.provider_id == "direct"
+        ) or bool(output_formats.intersection(capability.formats))
+        if not compatible:
+            compatible_providers = [
+                contract.id
+                for contract in CAPTURE_PROVIDER_CONTRACTS.values()
+                if set(capability.formats).intersection(
+                    artifact.format for artifact in contract.artifacts
+                )
+            ]
+            raise RuntimeFailure(
+                "UNSUPPORTED_FORMAT",
+                (
+                    f"Capture provider {target.provider_id!r} cannot feed capability "
+                    f"{capability_id!r}."
+                ),
+                details={
+                    "provider_id": target.provider_id,
+                    "output_formats": sorted(output_formats),
+                    "capability_id": capability_id,
+                    "accepted_formats": list(capability.formats),
+                    "compatible_capture_providers": compatible_providers,
+                },
+            )
+        cases = experiment.cases if experiment else [ExperimentCase(name="single")]
+        return ValidatedCaptureRequest(
+            capability=capability,
+            capture_arguments=capture_arguments,
+            limits=selected_limits,
+            cases=cases,
+            blocks=experiment.blocks if experiment else 1,
+        )
+
+    @staticmethod
+    def _capture_output_formats(provider_id: str) -> list[str]:
+        contract = CAPTURE_PROVIDER_CONTRACTS[provider_id]
+        return [artifact.format for artifact in contract.artifacts]
+
     async def capture_and_analyze(  # noqa: C901 - capture lifecycle keeps failure artifacts together
         self,
         target: CaptureTarget,
@@ -554,18 +655,13 @@ class AnalysisRuntime:
         progress: Any | None = None,
         preserve: bool = False,
     ) -> dict[str, Any]:
-        selected_limits = limits.lowered_against(self.limits) if limits else self.limits
-        capability = CAPABILITY_BY_ID.get(capability_id)
-        if capability is None:
-            raise RuntimeFailure("UNKNOWN_CAPABILITY", f"Unknown capability: {capability_id}")
-        capture_arguments = self._capture_arguments(target.provider_id, target.capture_arguments)
-        TypeAdapter(capability.model).validate_python(target.analysis_arguments)
-        if (mode == "experiment") != (experiment is not None):
-            raise RuntimeFailure(
-                "INVALID_INPUT", "experiment mode and design must be supplied together"
-            )
-        cases = experiment.cases if experiment else [ExperimentCase(name="single")]
-        blocks = experiment.blocks if experiment else 1
+        validated_capture = self._validate_capture_request(
+            target, capability_id, mode=mode, experiment=experiment, limits=limits
+        )
+        selected_limits = validated_capture.limits
+        capture_arguments = validated_capture.capture_arguments
+        cases = validated_capture.cases
+        blocks = validated_capture.blocks
         total = len(cases) * blocks
         self._reserve_capture_capacity(
             total,
@@ -597,6 +693,7 @@ class AnalysisRuntime:
                 cwd = self._resolve_project_cwd(target.cwd)
                 directory = request_scratch / f"case-{sequence:04d}"
                 directory.mkdir()
+                self._materialize_capture_support(target.provider_id, directory)
                 invocation, binding = self._bind_capture_invocation(
                     target.provider_id,
                     argv,
@@ -765,6 +862,7 @@ class AnalysisRuntime:
                         "semantic_oracle": oracle,
                         "wall_time_ns": process.wall_time_ns,
                         "containment": containment,
+                        "limit": self._terminated_limit(process, selected_limits),
                     }
                 )
                 self._check_capture_provenance_capacity(
@@ -1185,29 +1283,10 @@ class AnalysisRuntime:
 
     @staticmethod
     def _capture_arguments(provider_id: str, arguments: Mapping[str, Any]) -> CaptureArguments:
-        models: dict[str, type[CaptureArguments]] = {
-            "direct": EmptyArguments,
-            "pyperf": PyperfCaptureArguments,
-            "py-spy": PySpyCaptureArguments,
-            "perf": PerfCaptureArguments,
-            "node-cpu-profile": EmptyArguments,
-            "memray": MemrayCaptureArguments,
-            "torch-profiler": TorchProfilerCaptureArguments,
-            "nvbench": EmptyArguments,
-            "compute-sanitizer": ComputeSanitizerCaptureArguments,
-            "nsight-systems": NsightSystemsCaptureArguments,
-            "nsight-compute": NsightComputeCaptureArguments,
-            "rocprofv3": RocprofCaptureArguments,
-            "xctrace": XctraceCaptureArguments,
-            "coverage": CoverageCaptureArguments,
-            "benchmark-samples": BenchmarkSamplesCaptureArguments,
-            "observations": EmptyArguments,
-            "pytest": EmptyArguments,
-        }
-        model = models.get(provider_id)
-        if model is None:
+        contract = CAPTURE_PROVIDER_CONTRACTS.get(provider_id)
+        if contract is None:
             raise RuntimeFailure("UNKNOWN_CAPABILITY", f"Unknown capture provider: {provider_id}")
-        return model.model_validate(arguments)
+        return cast(CaptureArguments, contract.argument_model.model_validate(arguments))
 
     @staticmethod
     def _capture_invocation(
@@ -1233,6 +1312,17 @@ class AnalysisRuntime:
             )
         if provider_id == "pyperf" and isinstance(arguments, PyperfCaptureArguments):
             output = directory / "benchmark.json"
+            pyperf_target = tuple(target_argv)
+            if any("\n" in item or "\r" in item for item in target_argv):
+                encoded_argv = base64.urlsafe_b64encode(
+                    json.dumps(target_argv, ensure_ascii=False).encode("utf-8")
+                ).decode("ascii")
+                pyperf_target = (
+                    sys.executable,
+                    "-m",
+                    "flameox.workers.pyperf_target",
+                    encoded_argv,
+                )
             argv = (
                 sys.executable,
                 "-m",
@@ -1253,7 +1343,7 @@ class AnalysisRuntime:
                 str(arguments.min_time),
                 "--name",
                 arguments.name,
-                *target_argv,
+                *pyperf_target,
             )
             return CaptureInvocation(argv, environment, ((output, "pyperf", "benchmark"),))
         if provider_id == "py-spy" and isinstance(arguments, PySpyCaptureArguments):
@@ -1302,7 +1392,6 @@ class AnalysisRuntime:
             )
         if provider_id == "nvbench" and isinstance(arguments, EmptyArguments):
             output_root = directory / "nvbench"
-            output_root.mkdir()
             output = output_root / "results.json"
             return CaptureInvocation(
                 (*target_argv, "--jsonbin", str(output)),
@@ -1386,7 +1475,6 @@ class AnalysisRuntime:
             )
         output = directory / ".coverage"
         empty_config = directory / "coverage.ini"
-        empty_config.write_text("[run]\n")
         options: list[str] = [
             "--data-file",
             str(output),
@@ -1437,7 +1525,6 @@ class AnalysisRuntime:
             )
         if provider_id == "torch-profiler" and isinstance(arguments, TorchProfilerCaptureArguments):
             output_root = directory / "torch-profiler"
-            output_root.mkdir()
             config = {
                 "mode": "sdk",
                 "activities": arguments.activities,
@@ -1544,7 +1631,6 @@ class AnalysisRuntime:
             )
         if provider_id == "rocprofv3" and isinstance(arguments, RocprofCaptureArguments):
             output_root = directory / "rocprof"
-            output_root.mkdir()
             output = output_root / "rocprofv3_results.pftrace"
             options: list[str] = []
             for enabled, flag in (
@@ -1595,6 +1681,18 @@ class AnalysisRuntime:
             "INVALID_INPUT", f"Invalid arguments for capture provider: {provider_id}"
         )
 
+    @staticmethod
+    def _materialize_capture_support(provider_id: str, directory: Path) -> None:
+        child_directory = {
+            "nvbench": "nvbench",
+            "torch-profiler": "torch-profiler",
+            "rocprofv3": "rocprof",
+        }.get(provider_id)
+        if child_directory is not None:
+            (directory / child_directory).mkdir()
+        if provider_id == "coverage":
+            (directory / "coverage.ini").write_text("[run]\n")
+
     def _reserve_capture_capacity(
         self,
         total: int,
@@ -1635,12 +1733,20 @@ class AnalysisRuntime:
                 return dict(cached.preserved)
         if cached.preserved is None:
             artifacts: list[NativeArtifact] = []
+            role_counts: dict[str, int] = {}
             for source in cached.sources:
+                role_counts[source.role] = role_counts.get(source.role, 0) + 1
+            for source_index, source in enumerate(cached.sources, start=1):
+                publication_role = (
+                    source.role
+                    if role_counts[source.role] == 1
+                    else f"source-{source_index:04d}/{source.role}"
+                )
                 if source.path.is_file():
                     artifacts.append(
                         NativeArtifact(
                             source.path,
-                            source.role,
+                            publication_role,
                             source.sha256,
                             source.size_bytes,
                             source.format,
@@ -1660,7 +1766,7 @@ class AnalysisRuntime:
                     artifacts.append(
                         NativeArtifact(
                             path,
-                            f"{source.role}:{relative}",
+                            f"{publication_role}:{relative}",
                             digest,
                             size,
                             source.format,
@@ -1678,6 +1784,51 @@ class AnalysisRuntime:
             except OSError as exc:
                 raise RuntimeFailure("REPOSITORY_IO_FAILURE", str(exc)) from exc
         return dict(cached.preserved)
+
+    @staticmethod
+    def _terminated_limit(process: ProcessResult, limits: RequestLimits) -> dict[str, Any] | None:
+        cause = process.cancellation_cause
+        if cause is None:
+            return None
+        resources = process.resources
+        configured: int | float | None = None
+        observed: int | float | None = None
+        unit: str | None = None
+        recovery: str | None = None
+        if cause.value == "timeout":
+            configured = limits.timeout_seconds
+            observed = process.wall_time_ns / 1_000_000_000 if process.wall_time_ns else None
+            unit = "seconds"
+            recovery = "Retry with a larger timeout_seconds if the workload duration is expected."
+        elif cause.value == "output_limit":
+            configured = limits.max_output_bytes
+            unit = "bytes"
+            recovery = "Retry with a larger max_output_bytes or reduce target output."
+        elif cause.value == "memory_limit_exceeded":
+            configured = limits.max_memory_bytes
+            observed = process.peak_rss_bytes
+            unit = "bytes"
+            recovery = "Retry with a larger max_memory_bytes only if the workload is trusted."
+        elif cause.value == "writable_limit_exceeded":
+            configured = limits.max_output_bytes
+            if resources is not None and resources.writable_root_growth_bytes:
+                observed = sum(resources.writable_root_growth_bytes.values())
+            unit = "bytes"
+            recovery = "Retry with a larger max_output_bytes or reduce capture artifacts."
+        elif cause.value == "storage_reserve_exceeded":
+            configured = resources.minimum_free_bytes if resources is not None else None
+            unit = "bytes_free"
+            recovery = "Free storage before retrying; do not lower the reserve blindly."
+        else:
+            return None
+        return {
+            "kind": cause.value,
+            "configured": configured,
+            "observed": observed,
+            "unit": unit,
+            "observation_available": observed is not None,
+            "recovery": recovery,
+        }
 
     @staticmethod
     def _durable_analysis(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -2074,6 +2225,7 @@ class AnalysisRuntime:
                     sources[0].path,
                     sources[0].sha256,
                     sources[0].format,
+                    dict(arguments),
                     max_rows=max_rows,
                     timeout_seconds=limits.timeout_seconds,
                     maximum_rss_bytes=limits.max_memory_bytes,
@@ -2427,6 +2579,7 @@ class AnalysisRuntime:
                 "failure_code": item["failure_code"],
                 "wall_time_ns": item["wall_time_ns"],
                 "containment": item["containment"],
+                "limit": item["limit"],
                 "semantic_oracle": (
                     {
                         "status": item["semantic_oracle"]["status"],
@@ -2641,6 +2794,7 @@ class AnalysisRuntime:
             ".ncu-rep": "nsight-compute",
             ".ncu-repz": "nsight-compute",
             ".sarif": "sarif",
+            ".pstats": "pstats",
         }
         if path.suffix.lower() in known:
             return known[path.suffix.lower()]
