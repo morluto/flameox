@@ -14,9 +14,8 @@ from flameox.workers.harness import IsolatedWorkerHarness
 class SourceEvidenceProvider:
     """Bounded projections for native coverage.py and SARIF artifacts."""
 
-    def __init__(self, harness: IsolatedWorkerHarness, project_root: Path) -> None:
+    def __init__(self, harness: IsolatedWorkerHarness) -> None:
         self.harness = harness
-        self.project_root = project_root
 
     def analyze(
         self,
@@ -35,7 +34,6 @@ class SourceEvidenceProvider:
                 COVERAGE_WORKER,
                 CoverageWorkerRequest(
                     artifact_path=str(path),
-                    project_root=str(self.project_root),
                     max_rows=max_rows,
                 ),
                 timeout_seconds=timeout_seconds,
@@ -65,7 +63,7 @@ class SourceEvidenceProvider:
             return None
         parsed = parse_sarif(
             path,
-            source_root=self.project_root,
+            source_root=path.parent,
             include_paths=tuple(arguments.get("include_paths", ())),
             exclude_paths=tuple(arguments.get("exclude_paths", ())),
             default_exclude_paths=DEFAULT_EXCLUDE_PATHS,

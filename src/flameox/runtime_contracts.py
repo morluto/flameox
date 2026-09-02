@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -122,13 +123,20 @@ class RequestLimits(StrictModel):
 
 class DirectTarget(StrictModel):
     argv: list[str] = Field(min_length=1, max_length=256)
-    cwd: str = "."
+    cwd: str = Field(min_length=1, max_length=4_096)
     environment: dict[str, str] = Field(default_factory=dict, max_length=32)
 
     @field_validator("argv")
     @classmethod
     def valid_argv(cls, value: list[str]) -> list[str]:
         return _valid_argv(value)
+
+    @field_validator("cwd")
+    @classmethod
+    def absolute_cwd(cls, value: str) -> str:
+        if not Path(value).is_absolute():
+            raise ValueError("cwd must be an absolute path")
+        return value
 
     @field_validator("environment")
     @classmethod

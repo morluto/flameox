@@ -4,7 +4,6 @@ import hashlib
 import heapq
 import importlib.metadata
 import json
-import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import pairwise
@@ -38,30 +37,10 @@ from flameox.workers.protocol import (
 )
 
 
-def _normalize(
-    filename: str,
-    *,
-    workload_cwd: Path | None,
-    project_root: Path,
-    source_state_id: str | None,
-) -> tuple[str, str | None, str]:
+def _normalize(filename: str) -> tuple[str, str | None, str]:
     if filename.startswith("<") and filename.endswith(">"):
         return filename, None, "partial"
-    provider_path = Path(filename)
-    if provider_path.is_absolute():
-        candidate = provider_path
-    else:
-        if workload_cwd is None:
-            return provider_path.as_posix(), None, "partial"
-        candidate = workload_cwd / provider_path
-    path = Path(os.path.normpath(candidate))
-    if not provider_path.is_absolute() and not path.is_relative_to(project_root):
-        return provider_path.as_posix(), None, "partial"
-    try:
-        normalized = path.relative_to(project_root).as_posix()
-        return normalized, source_state_id, "complete" if source_state_id else "partial"
-    except ValueError:
-        return str(path), None, "partial"
+    return Path(filename).as_posix(), None, "partial"
 
 
 @dataclass(frozen=True)
@@ -87,16 +66,10 @@ class _AggregationState:
         limits: MemrayExtractionLimits,
         run_id: str,
         artifact_id: str,
-        workload_cwd: Path | None,
-        project_root: Path,
-        source_state_id: str | None,
     ) -> None:
         self.limits = limits
         self.run_id = run_id
         self.artifact_id = artifact_id
-        self.workload_cwd = workload_cwd
-        self.project_root = project_root
-        self.source_state_id = source_state_id
         self.frame_cache: dict[tuple[str, str, int], str] = {}
         self.contributions = 0
         self.pending_stack: tuple[str, tuple[str, ...], int, int] | None = None
@@ -163,12 +136,7 @@ class _AggregationState:
     ) -> str:
         frame_id = self.frame_cache.get(raw_frame)
         if frame_id is None:
-            normalized, frame_source_state_id, symbolization = _normalize(
-                raw_frame[1],
-                workload_cwd=self.workload_cwd,
-                project_root=self.project_root,
-                source_state_id=self.source_state_id,
-            )
+            normalized, frame_source_state_id, symbolization = _normalize(raw_frame[1])
             frame_id = digest_model(
                 {
                     "language": "Python",
@@ -678,9 +646,6 @@ def _handle(request: MemrayWorkerRequest, job_root: Path) -> MemrayWorkerResult:
             limits=request.limits,
             run_id=request.run_id,
             artifact_id=request.artifact_id,
-            workload_cwd=Path(request.workload_cwd) if request.workload_cwd else None,
-            project_root=Path(request.project_root),
-            source_state_id=request.source_state_id,
         )
         try:
             with memray.FileReader(request.artifact_path) as reader:

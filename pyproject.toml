@@ -18,7 +18,6 @@ dependencies = [
     "mcp==2.0.0",
     "mcp-types==2.0.0",
     "packaging>=24,<27",
-    "portalocker>=3.2,<4",
     "pyperf>=2.10,<2.11",
     "pyarrow>=20,<26",
     "pydantic>=2.13.4,<2.14",

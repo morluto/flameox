@@ -3,7 +3,6 @@ from __future__ import annotations
 import shutil
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal
 
 from flameox import __version__
@@ -106,7 +105,6 @@ def _failure_message(message: str, stderr: bytes | str | None) -> str:
 
 def prepare_providers(
     providers: list[str],
-    project_root: Path,
     timeout_seconds: int = DEFAULT_PREPARATION_TIMEOUT_SECONDS,
 ) -> ProviderPreparation:
     if not 1 <= timeout_seconds <= MAX_PREPARATION_TIMEOUT_SECONDS:
@@ -122,7 +120,7 @@ def prepare_providers(
         if item in SYSTEM_PROVIDER_GUIDANCE
     ]
     launcher_command, launcher_args = mcp_launcher(managed)
-    server_args = [*launcher_args, "mcp", "serve", "--project-root", str(project_root)]
+    server_args = [*launcher_args, "mcp", "serve"]
     preparation_command: list[str] = []
 
     if managed:

@@ -32,11 +32,12 @@ def test_compute_sanitizer_capture_emits_typed_xml_evidence(
     monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
 
     async def exercise() -> dict[str, Any]:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             return await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-c", "pass"],
+                    cwd=str(tmp_path),
                     provider_id="compute-sanitizer",
                     capture_arguments={"tool": "memcheck"},
                 ),

@@ -48,8 +48,6 @@ def test_mcp_registry_metadata_launches_the_python_distribution() -> None:
             "packageArguments": [
                 {"type": "positional", "value": "mcp"},
                 {"type": "positional", "value": "serve"},
-                {"type": "positional", "value": "--project-root"},
-                {"type": "positional", "value": "."},
             ],
         }
     ]

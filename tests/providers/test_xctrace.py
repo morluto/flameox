@@ -36,11 +36,12 @@ def test_xctrace_capture_preserves_bundle_and_analyzes_bounded_toc(
     monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
 
     async def exercise() -> dict[str, Any]:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             return await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-c", "pass"],
+                    cwd=str(tmp_path),
                     provider_id="xctrace",
                     capture_arguments={"template": "Metal System Trace"},
                 ),

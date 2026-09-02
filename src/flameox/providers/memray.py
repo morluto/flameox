@@ -30,9 +30,8 @@ _EXPECTED_OUTPUTS = {
 class MemrayProvider:
     """Analyze one explicit Memray capture without run or repository ownership."""
 
-    def __init__(self, harness: IsolatedWorkerHarness, project_root: Path) -> None:
+    def __init__(self, harness: IsolatedWorkerHarness) -> None:
         self.harness = harness
-        self.project_root = project_root
 
     def analyze(
         self,
@@ -66,9 +65,6 @@ class MemrayProvider:
             artifact_path=str(path),
             run_id=f"direct-{input_sha256[:32]}",
             artifact_id=sha256_id(input_sha256),
-            workload_cwd=str(self.project_root),
-            project_root=str(self.project_root),
-            source_state_id=None,
             limits=limits,
         )
         try:

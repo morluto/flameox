@@ -51,7 +51,7 @@ def test_vllm_summary_and_comparison_are_prompt_free(tmp_path: Path) -> None:
     candidate = tmp_path / "candidate.json"
     baseline.write_text(json.dumps(_vllm_payload(throughput=5.0)))
     candidate.write_text(json.dumps(_vllm_payload(throughput=10.0)))
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         summary = runtime.analyze(
             "inference.summary",
@@ -104,7 +104,7 @@ def test_sglang_rejects_detailed_output_and_projects_scalars(tmp_path: Path) -> 
         )
         + "\n"
     )
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "inference.summary",
@@ -149,7 +149,7 @@ def test_mooncake_trace_is_streamed_without_sensitive_payloads(tmp_path: Path) -
         )
         + "\n"
     )
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "inference.summary",
@@ -180,7 +180,7 @@ def test_mooncake_summary_aggregates_beyond_returned_rows(tmp_path: Path) -> Non
         )
         + "\n"
     )
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "inference.summary",

@@ -74,7 +74,7 @@ def test_kernel_validation_summary_and_comparison_use_typed_rows(tmp_path: Path)
     candidate = tmp_path / "candidate.json"
     baseline.write_text(json.dumps(_kernel_document(0.0001)))
     candidate.write_text(json.dumps(_kernel_document(0.0002)))
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         summary = runtime.analyze(
             "kernel.validation",
@@ -104,7 +104,7 @@ def test_kernel_validation_rejects_an_unknown_native_schema(tmp_path: Path) -> N
     document = _kernel_document(0.0)
     document["schema_version"] = "flameox.kernel-validation.v1"
     artifact.write_text(json.dumps(document))
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
@@ -121,7 +121,7 @@ def test_kernel_validation_rejects_an_unknown_native_schema(tmp_path: Path) -> N
 def test_triton_autotune_stream_reports_provider_selection(tmp_path: Path) -> None:
     artifact = tmp_path / "triton.jsonl"
     artifact.write_text(json.dumps(_triton_event()) + "\n")
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "triton.autotune",

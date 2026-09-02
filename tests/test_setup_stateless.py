@@ -29,7 +29,7 @@ def test_mcp_launcher_pins_python_release_and_provider_extras() -> None:
 
 
 def test_preparation_runs_and_returns_the_same_exact_uvx_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[list[str]] = []
     options: list[dict[str, object]] = []
@@ -42,7 +42,7 @@ def test_preparation_runs_and_returns_the_same_exact_uvx_environment(
     monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/usr/bin/uvx")
     monkeypatch.setattr("flameox.setup.subprocess.run", run)
 
-    prepared = prepare_providers(["memray", "py-spy", "memray"], tmp_path)
+    prepared = prepare_providers(["memray", "py-spy", "memray"])
 
     requirement = f"flameox[cpu,memory]=={__version__}"
     assert prepared.requested_providers == ["memray", "py-spy"]
@@ -77,8 +77,6 @@ def test_preparation_runs_and_returns_the_same_exact_uvx_environment(
         "flameox",
         "mcp",
         "serve",
-        "--project-root",
-        str(tmp_path),
     ]
 
 
@@ -87,7 +85,7 @@ def test_host_only_preparation_returns_guidance_without_requiring_uvx(
 ) -> None:
     monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: None)
 
-    prepared = prepare_providers(["nsight-compute"], tmp_path)
+    prepared = prepare_providers(["nsight-compute"])
 
     assert prepared.prepared_managed_providers == []
     assert [item.provider_id for item in prepared.external_requirements] == ["nsight-compute"]
@@ -102,7 +100,7 @@ def test_uvx_is_required_before_managed_preparation(
     monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: None)
 
     with pytest.raises(SetupFailure, match="requires uvx"):
-        prepare_providers(["memray"], tmp_path)
+        prepare_providers(["memray"])
 
 
 def test_uvx_failure_is_normalized_as_setup_failure(
@@ -119,7 +117,7 @@ def test_uvx_failure_is_normalized_as_setup_failure(
     )
 
     with pytest.raises(SetupFailure) as raised:
-        prepare_providers(["memray"], tmp_path)
+        prepare_providers(["memray"])
 
     assert "status 2" in str(raised.value)
     assert "No solution found: dependency conflict.\ufffd" in str(raised.value)
@@ -137,7 +135,7 @@ def test_preparation_timeout_is_configurable(
     monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/usr/bin/uvx")
     monkeypatch.setattr("flameox.setup.subprocess.run", run)
 
-    prepare_providers(["torch"], tmp_path, timeout_seconds=2_400)
+    prepare_providers(["torch"], timeout_seconds=2_400)
 
     assert observed["timeout"] == 2_400
 
@@ -152,7 +150,7 @@ def test_preparation_timeout_preserves_uvx_stderr(
     monkeypatch.setattr("flameox.setup.subprocess.run", run)
 
     with pytest.raises(SetupFailure) as raised:
-        prepare_providers(["torch"], tmp_path, timeout_seconds=2_400)
+        prepare_providers(["torch"], timeout_seconds=2_400)
 
     assert "exceeded 2400 seconds" in str(raised.value)
     assert "download stalled\ufffd" in str(raised.value)
@@ -161,7 +159,7 @@ def test_preparation_timeout_preserves_uvx_stderr(
 @pytest.mark.parametrize("timeout_seconds", [0, 3_601])
 def test_preparation_timeout_is_bounded(timeout_seconds: int, tmp_path: Path) -> None:
     with pytest.raises(SetupFailure, match="between 1 and 3600"):
-        prepare_providers(["torch"], tmp_path, timeout_seconds=timeout_seconds)
+        prepare_providers(["torch"], timeout_seconds=timeout_seconds)
 
 
 def test_uvx_start_failure_is_normalized_as_setup_failure(
@@ -174,9 +172,9 @@ def test_uvx_start_failure_is_normalized_as_setup_failure(
     monkeypatch.setattr("flameox.setup.subprocess.run", fail)
 
     with pytest.raises(SetupFailure, match="could not prepare"):
-        prepare_providers(["memray"], tmp_path)
+        prepare_providers(["memray"])
 
 
 def test_unknown_provider_is_rejected_before_preparation(tmp_path: Path) -> None:
     with pytest.raises(SetupFailure, match="Unknown provider"):
-        prepare_providers(["mystery"], tmp_path)
+        prepare_providers(["mystery"])

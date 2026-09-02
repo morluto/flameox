@@ -16,8 +16,6 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
-import portalocker
-
 from flameox.canonical import canonical_bytes
 
 REPOSITORY_FORMAT = "1"
@@ -65,9 +63,8 @@ def _fsync_directory(path: Path) -> None:
 class EvidenceRepository:
     """Content-addressed repository with no mutable catalog or control plane."""
 
-    def __init__(self, project_root: Path, session_id: str) -> None:
-        self.project_root = project_root.resolve(strict=True)
-        self.root = self.project_root / ".flameox"
+    def __init__(self, root: Path, session_id: str) -> None:
+        self.root = root.expanduser().absolute()
         self.session_id = session_id
 
     @property
@@ -114,7 +111,7 @@ class EvidenceRepository:
             )
         if self.root.is_symlink() or (self.root.exists() and not self.root.is_dir()):
             raise RepositoryError(
-                "REPOSITORY_CORRUPTION", ".flameox must be a project-local directory."
+                "REPOSITORY_CORRUPTION", "The Flameox data path must be a directory."
             )
         self.root.mkdir(mode=0o700, exist_ok=True)
         for relative in (
@@ -133,7 +130,6 @@ class EvidenceRepository:
             self._validate_repository()
         _fsync_directory(self.root)
         self._validate_repository()
-        self._exclude_from_git()
 
     def preserve(
         self,
@@ -593,7 +589,7 @@ class EvidenceRepository:
             relative = path.relative_to(self.root)
         except ValueError as exc:
             raise RepositoryError(
-                "REPOSITORY_CORRUPTION", "Repository path escapes .flameox."
+                "REPOSITORY_CORRUPTION", "Repository path escapes the evidence data directory."
             ) from exc
         current = self.root
         if current.is_symlink():
@@ -804,50 +800,6 @@ class EvidenceRepository:
             _fsync_directory(path.parent)
         finally:
             temporary.unlink(missing_ok=True)
-
-    def _exclude_from_git(self) -> None:
-        git = self.project_root / ".git"
-        git_directory = self._git_directory(git)
-        if git_directory is None:
-            return
-        common_directory = git_directory
-        common_file = git_directory / "commondir"
-        if common_file.is_file():
-            common_value = common_file.read_text(encoding="utf-8").strip()
-            common_directory = (git_directory / common_value).resolve()
-        info = common_directory / "info"
-        info.mkdir(exist_ok=True)
-        exclude = info / "exclude"
-        with portalocker.Lock(exclude, mode="a+", timeout=10, encoding="utf-8") as stream:
-            stream.seek(0)
-            existing = stream.read()
-            if ".flameox/" in existing.splitlines():
-                return
-            suffix = "" if not existing or existing.endswith("\n") else "\n"
-            stream.write(f"{suffix}.flameox/\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-
-    @staticmethod
-    def _git_directory(marker: Path) -> Path | None:
-        if marker.is_dir():
-            return marker
-        if not marker.is_file():
-            return None
-        try:
-            prefix, value = marker.read_text(encoding="utf-8").strip().split(":", 1)
-        except (OSError, ValueError):
-            return None
-        if prefix.lower() != "gitdir" or not value.strip():
-            return None
-        candidate = Path(value.strip())
-        if not candidate.is_absolute():
-            candidate = marker.parent / candidate
-        try:
-            resolved = candidate.resolve(strict=True)
-        except OSError:
-            return None
-        return resolved if resolved.is_dir() else None
 
 
 def _empty_digest() -> str:

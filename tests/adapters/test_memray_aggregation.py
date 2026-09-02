@@ -45,9 +45,6 @@ def _state(tmp_path: Path, **overrides: int) -> memray_worker._AggregationState:
         limits=MemrayExtractionLimits.model_validate(values),
         run_id="run",
         artifact_id="artifact",
-        workload_cwd=tmp_path,
-        project_root=tmp_path,
-        source_state_id=None,
     )
 
 
@@ -59,14 +56,7 @@ def test_memray_frame_identity_is_computed_once_across_metrics(
 
     def normalize(
         filename: str,
-        *,
-        workload_cwd: Path,
-        project_root: Path,
-        source_state_id: str | None,
     ) -> tuple[str, str | None, str]:
-        assert workload_cwd == tmp_path
-        assert project_root == tmp_path
-        assert source_state_id is None
         normalized.append(filename)
         return filename, None, "complete"
 
@@ -315,59 +305,20 @@ def test_memray_navigation_does_not_guess_native_frame_identity(tmp_path: Path) 
     assert {row["language"] for row in projection.frame_rows} == {"Python"}
 
 
-def test_memray_paths_use_captured_cwd_and_source_identity(
+def test_memray_paths_preserve_recorded_identity_without_a_source_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    project = tmp_path / "project"
-    workload = project / "workload"
-    source_state_id = "sha256:" + "a" * 64
     elsewhere = tmp_path / "extractor"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
 
-    assert memray_worker._normalize(
-        "entry.py",
-        workload_cwd=workload,
-        project_root=project,
-        source_state_id=source_state_id,
-    ) == ("workload/entry.py", source_state_id, "complete")
-    assert memray_worker._normalize(
-        "entry.py",
-        workload_cwd=None,
-        project_root=project,
-        source_state_id=None,
-    ) == ("entry.py", None, "partial")
-    assert memray_worker._normalize(
-        "entry.py",
-        workload_cwd=workload,
-        project_root=project,
-        source_state_id=None,
-    ) == ("workload/entry.py", None, "partial")
-    assert memray_worker._normalize(
+    assert memray_worker._normalize("entry.py") == ("entry.py", None, "partial")
+    assert memray_worker._normalize("../../outside.py") == (
         "../../outside.py",
-        workload_cwd=workload,
-        project_root=project,
-        source_state_id=source_state_id,
-    ) == ("../../outside.py", None, "partial")
-    assert memray_worker._normalize(
-        "<listcomp>",
-        workload_cwd=workload,
-        project_root=project,
-        source_state_id=source_state_id,
-    ) == ("<listcomp>", None, "partial")
+        None,
+        "partial",
+    )
+    assert memray_worker._normalize("<listcomp>") == ("<listcomp>", None, "partial")
     external = tmp_path / "site-packages" / "dependency.py"
-    assert memray_worker._normalize(
-        str(external),
-        workload_cwd=workload,
-        project_root=project,
-        source_state_id=source_state_id,
-    ) == (str(external), None, "partial")
-
-    moved_project = tmp_path / "moved"
-    assert memray_worker._normalize(
-        "entry.py",
-        workload_cwd=moved_project / "workload",
-        project_root=moved_project,
-        source_state_id=source_state_id,
-    ) == ("workload/entry.py", source_state_id, "complete")
+    assert memray_worker._normalize(str(external)) == (str(external), None, "partial")

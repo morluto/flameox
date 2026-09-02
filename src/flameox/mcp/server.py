@@ -180,13 +180,11 @@ def _failure(error: RuntimeFailure) -> CallToolResult:
 
 
 def create_server(
-    project_root: Path | None = None,
     *,
+    evidence_directory: Path | None = None,
     limits: RequestLimits | None = None,
 ) -> MCPServer[AnalysisRuntime]:
-    """Create a server whose fixed project root defaults to the startup cwd."""
-
-    root = (project_root or Path.cwd()).resolve(strict=True)
+    """Create a process-lifespan runtime over explicit artifacts and targets."""
     active_runtime: AnalysisRuntime | None = None
 
     def runtime() -> AnalysisRuntime:
@@ -197,7 +195,7 @@ def create_server(
     @asynccontextmanager
     async def lifespan(_: MCPServer[AnalysisRuntime]) -> AsyncIterator[AnalysisRuntime]:
         nonlocal active_runtime
-        active_runtime = AnalysisRuntime(root, limits=limits)
+        active_runtime = AnalysisRuntime(evidence_directory=evidence_directory, limits=limits)
         try:
             if active_runtime.repository.exists:
                 active_runtime.repository.cleanup_abandoned_staging()
@@ -231,7 +229,7 @@ def create_server(
 
         try:
             preparation = await anyio.to_thread.run_sync(
-                provider_setup.prepare_providers, provider_ids, root, timeout_seconds
+                provider_setup.prepare_providers, provider_ids, timeout_seconds
             )
         except provider_setup.ProviderSelectionFailure as error:
             return _failure(RuntimeFailure("INVALID_INPUT", str(error)))
@@ -455,5 +453,5 @@ def create_server(
     return server
 
 
-def run_server(project_root: Path | None = None, *, limits: RequestLimits | None = None) -> None:
-    create_server(project_root, limits=limits).run()
+def run_server(*, limits: RequestLimits | None = None) -> None:
+    create_server(limits=limits).run()

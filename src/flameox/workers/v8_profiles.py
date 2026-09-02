@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, NoReturn, cast
-from urllib.parse import unquote, urlparse
 
 import ijson
 
@@ -278,7 +277,7 @@ def _frame_identity(call_frame: dict[str, Any], request: V8ProfileRequest) -> di
     )
     url_value = call_frame.get("url")
     url = url_value if isinstance(url_value, str) else ""
-    normalized = _normalize_url(url, Path(request.project_root))
+    normalized = url
     line = _strict_int(call_frame.get("lineNumber", 0), "line number")
     column = _strict_int(call_frame.get("columnNumber", 0), "column number")
     script_id = call_frame.get("scriptId")
@@ -321,21 +320,6 @@ def _frame_identity(call_frame: dict[str, Any], request: V8ProfileRequest) -> di
             else "partial"
         ),
     }
-
-
-def _normalize_url(value: str, project_root: Path) -> str:
-    if not value:
-        return ""
-    if value.startswith("node:"):
-        return value
-    parsed = urlparse(value)
-    path = Path(unquote(parsed.path)) if parsed.scheme == "file" else Path(value)
-    if not path.is_absolute():
-        return value
-    try:
-        return path.resolve().relative_to(project_root.resolve()).as_posix()
-    except (OSError, ValueError):
-        return value
 
 
 def _check_rows(request: V8ProfileRequest, frame_count: int, measurement_count: int) -> None:

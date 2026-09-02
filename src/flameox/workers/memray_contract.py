@@ -114,12 +114,6 @@ class MemrayWorkerRequest(ContractModel):
     artifact_path: str = Field(min_length=1, max_length=4_096)
     run_id: str = Field(min_length=1, max_length=200)
     artifact_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    workload_cwd: str | None = Field(default=None, min_length=1, max_length=4_096)
-    project_root: str = Field(min_length=1, max_length=4_096)
-    source_state_id: str | None = Field(
-        default=None,
-        pattern=r"^sha256:[0-9a-f]{64}$",
-    )
     limits: MemrayExtractionLimits
 
 

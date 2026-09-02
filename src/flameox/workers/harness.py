@@ -42,7 +42,7 @@ ResponseT = TypeVar("ResponseT")
 
 @dataclass(frozen=True, slots=True)
 class WorkerRuntimeConfig:
-    project_root: Path
+    working_directory: Path
     staging_root: Path
     filesystem_path: Path
     child_environment_allowlist: tuple[str, ...] = ("PATH",)
@@ -69,7 +69,7 @@ class IsolatedWorkerHarness:
         self.executable_binding = ExecutableResolver().resolve(
             ExecutableResolutionRequest(
                 token=str(python),
-                cwd=runtime.project_root,
+                cwd=runtime.working_directory,
                 environment={},
                 policy=ExecutableTrustPolicy.TRUSTED_HOST_TOOL,
             )
@@ -327,9 +327,9 @@ class IsolatedWorkerHarness:
                 str(response_path),
             ),
             executable_binding=self.executable_binding,
-            cwd=self.runtime.project_root,
+            cwd=self.runtime.working_directory,
             environment_allowlist=self.runtime.child_environment_allowlist,
-            allowed_working_roots=(self.runtime.project_root,),
+            allowed_working_roots=(self.runtime.working_directory,),
             timeout_seconds=timeout_seconds,
             max_output_bytes=1_048_576,
             resource_policy=ResourcePolicy(

@@ -27,14 +27,6 @@
         {
           "type": "positional",
           "value": "serve"
-        },
-        {
-          "type": "positional",
-          "value": "--project-root"
-        },
-        {
-          "type": "positional",
-          "value": "."
         }
       ]
     }

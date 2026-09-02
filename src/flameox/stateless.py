@@ -35,6 +35,7 @@ from flameox.execution import (
     ResourcePolicy,
     SubprocessBroker,
 )
+from flameox.paths import default_data_directory
 from flameox.process_models import ProcessResult, process_exit_code
 from flameox.providers.aiperf import AIPerfProvider
 from flameox.providers.benchmarks import BenchmarkProvider
@@ -148,13 +149,12 @@ class AnalysisRuntime:
 
     def __init__(
         self,
-        project_root: Path,
         *,
+        evidence_directory: Path | None = None,
         limits: RequestLimits | None = None,
         scratch_max_bytes: int = 1024**3,
         scratch_max_files: int = 8192,
     ) -> None:
-        self.project_root = project_root.resolve(strict=True)
         self.limits = limits or RequestLimits()
         self.session_id = f"{os.getpid()}-{secrets.token_hex(8)}"
         self._temporary = tempfile.TemporaryDirectory(prefix="flameox-session-")
@@ -163,7 +163,7 @@ class AnalysisRuntime:
         self.broker = SubprocessBroker()
         self.workers = IsolatedWorkerHarness(
             WorkerRuntimeConfig(
-                project_root=self.project_root,
+                working_directory=self.scratch,
                 staging_root=self.scratch,
                 filesystem_path=self.scratch,
                 maximum_rss_bytes=self.limits.max_memory_bytes,
@@ -177,16 +177,18 @@ class AnalysisRuntime:
         self.cpu_profiles = CpuProfileProvider()
         self.inference_exports = InferenceExportProvider()
         self.kernel_evidence = KernelEvidenceProvider()
-        self.memray = MemrayProvider(self.workers, self.project_root)
+        self.memray = MemrayProvider(self.workers)
         self.nvbench = NvbenchProvider()
         self.nsight_compute = NsightComputeProvider(self.workers)
         self.nsight_systems = NsightSystemsParquetProvider()
         self.otlp = OtlpProvider(self.workers)
         self.reliability = ReliabilityProvider()
-        self.source_evidence = SourceEvidenceProvider(self.workers, self.project_root)
-        self.structured_workers = StructuredWorkerProviders(self.workers, self.project_root)
+        self.source_evidence = SourceEvidenceProvider(self.workers)
+        self.structured_workers = StructuredWorkerProviders(self.workers)
         self.xctrace = XctraceProvider()
-        self.repository = EvidenceRepository(self.project_root, self.session_id)
+        self.repository = EvidenceRepository(
+            evidence_directory or default_data_directory(), self.session_id
+        )
         self.analyses: dict[str, CachedAnalysis] = {}
         self.conversions: dict[tuple[str, str], Path] = {}
 
@@ -433,7 +435,7 @@ class AnalysisRuntime:
             has_oracle=experiment is not None and experiment.semantic_oracle is not None,
             limits=selected_limits,
         )
-        cwd = self._resolve_project_cwd(target.cwd)
+        cwd = self._resolve_capture_cwd(target.cwd)
         anticipated_root = self.scratch / f"capture-{'0' * 24}"
         pending_executions: list[dict[str, Any]] = []
         for sequence_number, block, case in sequence:
@@ -510,7 +512,7 @@ class AnalysisRuntime:
                 cwd=cwd,
                 environment_allowlist=("PATH",),
                 environment_overrides=invocation.environment,
-                allowed_working_roots=(self.project_root,),
+                allowed_working_roots=(cwd,),
                 timeout_seconds=selected_limits.timeout_seconds,
                 max_output_bytes=selected_limits.max_output_bytes,
                 resource_policy=self._resource_policy(selected_limits, writable_root=directory),
@@ -585,7 +587,7 @@ class AnalysisRuntime:
                     cwd=cwd,
                     environment_allowlist=("PATH",),
                     environment_overrides=oracle_environment,
-                    allowed_working_roots=(self.project_root,),
+                    allowed_working_roots=(cwd,),
                     timeout_seconds=selected_limits.timeout_seconds,
                     max_output_bytes=selected_limits.max_output_bytes,
                     resource_policy=self._resource_policy(selected_limits, writable_root=directory),
@@ -1037,7 +1039,7 @@ class AnalysisRuntime:
                     cwd=cwd,
                     environment_allowlist=("PATH",),
                     environment_overrides=environment,
-                    allowed_working_roots=(self.project_root,),
+                    allowed_working_roots=(cwd,),
                     timeout_seconds=10,
                     max_output_bytes=4_096,
                 )
@@ -2145,7 +2147,7 @@ class AnalysisRuntime:
 
     def _perf_collapsed(self, source: ResolvedSource, limits: RequestLimits) -> tuple[Path, str]:
         binding = ExecutableResolver().require_host_tool(
-            "perf", cwd=self.project_root, environment=dict(os.environ)
+            "perf", cwd=source.path.parent, environment=dict(os.environ)
         )
         provider_version = binding.identity.sha256
         key = (source.sha256, f"perf-script:{provider_version}")
@@ -2158,9 +2160,9 @@ class AnalysisRuntime:
         request = ExecutionRequest(
             argv=(str(binding.invocation_path), "script", "--input", str(source.path)),
             executable_binding=binding,
-            cwd=self.project_root,
+            cwd=source.path.parent,
             environment_allowlist=("PATH",),
-            allowed_working_roots=(self.project_root,),
+            allowed_working_roots=(source.path.parent,),
             timeout_seconds=limits.timeout_seconds,
             max_output_bytes=limits.max_output_bytes,
             resource_policy=ResourcePolicy(
@@ -2212,7 +2214,7 @@ class AnalysisRuntime:
 
     def _nsys_parquetdir(self, source: ResolvedSource, limits: RequestLimits) -> tuple[Path, str]:
         binding = ExecutableResolver().require_host_tool(
-            "nsys", cwd=self.project_root, environment=dict(os.environ)
+            "nsys", cwd=source.path.parent, environment=dict(os.environ)
         )
         provider_version = binding.identity.sha256
         key = (source.sha256, provider_version)
@@ -2237,9 +2239,9 @@ class AnalysisRuntime:
                 str(source.path),
             ),
             executable_binding=binding,
-            cwd=self.project_root,
+            cwd=source.path.parent,
             environment_allowlist=("PATH",),
-            allowed_working_roots=(self.project_root,),
+            allowed_working_roots=(source.path.parent,),
             timeout_seconds=limits.timeout_seconds,
             max_output_bytes=min(limits.max_output_bytes, 1024 * 1024),
             resource_policy=ResourcePolicy(
@@ -2263,7 +2265,7 @@ class AnalysisRuntime:
 
     def _xctrace_toc(self, source: ResolvedSource, limits: RequestLimits) -> tuple[Path, str]:
         binding = ExecutableResolver().require_host_tool(
-            "xcrun", cwd=self.project_root, environment=dict(os.environ)
+            "xcrun", cwd=source.path.parent, environment=dict(os.environ)
         )
         provider_version = binding.identity.sha256
         key = (source.sha256, f"xctrace-toc:{provider_version}")
@@ -2285,9 +2287,9 @@ class AnalysisRuntime:
                 str(output),
             ),
             executable_binding=binding,
-            cwd=self.project_root,
+            cwd=source.path.parent,
             environment_allowlist=("PATH",),
-            allowed_working_roots=(self.project_root,),
+            allowed_working_roots=(source.path.parent,),
             timeout_seconds=limits.timeout_seconds,
             max_output_bytes=min(limits.max_output_bytes, 1024 * 1024),
             resource_policy=ResourcePolicy(
@@ -2599,16 +2601,13 @@ class AnalysisRuntime:
                 "INVALID_INPUT", "Continuation does not match this request and its inputs"
             ) from exc
 
-    def _resolve_project_cwd(self, value: str) -> Path:
+    @staticmethod
+    def _resolve_capture_cwd(value: str) -> Path:
         candidate = Path(value)
-        candidate = candidate if candidate.is_absolute() else self.project_root / candidate
         try:
             resolved = candidate.resolve(strict=True)
-            resolved.relative_to(self.project_root)
         except (OSError, ValueError) as exc:
-            raise RuntimeFailure(
-                "INVALID_INPUT", "cwd must be an existing project-contained directory"
-            ) from exc
+            raise RuntimeFailure("INVALID_INPUT", "cwd must be an existing directory") from exc
         if not resolved.is_dir():
             raise RuntimeFailure("INVALID_INPUT", "cwd must be a directory")
         return resolved

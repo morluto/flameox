@@ -62,14 +62,11 @@ def _address(element: ET.Element | None, name: str) -> int | None:
     return parsed
 
 
-def _normalize_path(value: str | None, project_root: Path) -> str | None:
+def _normalize_path(value: str | None) -> str | None:
     if value is None:
         return None
     path = Path(value)
-    try:
-        return path.resolve().relative_to(project_root).as_posix()
-    except (OSError, ValueError):
-        return f"<external>/{path.name}" if path.name else "<external>"
+    return path.as_posix()
 
 
 def _axes(element: ET.Element | None) -> dict[str, int] | None:
@@ -114,7 +111,6 @@ def _classification(kind: str | None, message: str | None, error: str | None) ->
 def _record(
     element: ET.Element,
     *,
-    project_root: Path,
     max_frames: int,
 ) -> tuple[dict[str, object], tuple[str, ...]]:
     kind = _text(element, "kind")
@@ -131,8 +127,8 @@ def _record(
         frames.append(
             {
                 "function": _text(frame, "func"),
-                "module": _normalize_path(_text(frame, "module"), project_root),
-                "path": _normalize_path(_text(frame, "path"), project_root),
+                "module": _normalize_path(_text(frame, "module")),
+                "path": _normalize_path(_text(frame, "path")),
                 "line": _integer(frame, "line"),
                 "pc": _text(frame, "pc"),
             }
@@ -170,7 +166,7 @@ def _record(
             "direction": _text(what, "direction"),
             "error": error,
             "function": _text(where, "func"),
-            "path": _normalize_path(_text(where, "path"), project_root),
+            "path": _normalize_path(_text(where, "path")),
             "line": _integer(where, "line"),
             "pc": _text(where, "pc"),
             "thread": _axes(who.find("threadIdx") if who is not None else None),
@@ -184,7 +180,6 @@ def _record(
 def _extract(
     artifact_path: Path,
     *,
-    project_root: Path,
     max_records: int,
     max_frames: int,
 ) -> dict[str, object]:
@@ -205,7 +200,6 @@ def _extract(
             else:
                 record, record_limitations = _record(
                     element,
-                    project_root=project_root,
                     max_frames=max_frames,
                 )
                 records.append(record)
@@ -265,7 +259,6 @@ def _handle(
 ) -> ComputeSanitizerWorkerResult:
     result = _extract(
         Path(request.artifact_path),
-        project_root=Path(request.project_root).resolve(),
         max_records=request.max_records,
         max_frames=request.max_frames,
     )

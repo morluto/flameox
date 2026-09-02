@@ -78,7 +78,7 @@ def test_typed_capability_never_falls_back_to_generic_rows(tmp_path: Path) -> No
     samples_artifact = tmp_path / "benchmark.samples.json"
     pyperf_artifact.write_text("{}")
     samples_artifact.write_text("{}")
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
@@ -102,7 +102,7 @@ def test_capture_rejects_declared_provider_capability_mismatch_before_execution(
     marker = tmp_path / "executed"
 
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             with pytest.raises(RuntimeFailure) as failure:
                 await runtime.capture_and_analyze(
@@ -112,6 +112,7 @@ def test_capture_rejects_declared_provider_capability_mismatch_before_execution(
                             "-c",
                             f"from pathlib import Path; Path({str(marker)!r}).touch()",
                         ],
+                        cwd=str(tmp_path),
                         provider_id="pyperf",
                     ),
                     "failures.summary",
@@ -134,12 +135,13 @@ def test_capture_rejects_experiments_that_exceed_analysis_source_limit(tmp_path:
     marker = tmp_path / "executed"
 
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             with pytest.raises(RuntimeFailure) as failure:
                 await runtime.capture_and_analyze(
                     CaptureTarget(
                         argv=[sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"],
+                        cwd=str(tmp_path),
                         provider_id="direct",
                     ),
                     "artifact.preview",
@@ -164,7 +166,7 @@ def test_capture_rejects_experiments_that_exceed_analysis_source_limit(tmp_path:
 def test_special_file_sources_are_rejected_before_decoding(tmp_path: Path) -> None:
     fifo = tmp_path / "input.fifo"
     os.mkfifo(fifo)
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze("artifact.preview", [PathSource(path=str(fifo))], {})
@@ -179,12 +181,13 @@ def test_experiment_environment_limit_applies_after_overrides_are_merged(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             with pytest.raises(RuntimeFailure) as failure:
                 await runtime.capture_and_analyze(
                     CaptureTarget(
                         argv=[sys.executable, "-c", "pass"],
+                        cwd=str(tmp_path),
                         provider_id="direct",
                         environment={f"TARGET_{index}": "value" for index in range(32)},
                     ),
@@ -216,13 +219,14 @@ def test_experiment_environment_limit_applies_after_overrides_are_merged(
 @pytest.mark.process
 def test_capture_rejects_unbounded_durable_provenance_before_execution(tmp_path: Path) -> None:
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             before = list(runtime.scratch.iterdir())
             with pytest.raises(RuntimeFailure) as failure:
                 await runtime.capture_and_analyze(
                     CaptureTarget(
                         argv=[sys.executable, "-c", "x" * 8_000],
+                        cwd=str(tmp_path),
                         provider_id="direct",
                     ),
                     "artifact.preview",
@@ -244,7 +248,7 @@ def test_analysis_is_bounded_deterministic_and_does_not_change_input(tmp_path: P
     artifact.write_text(json.dumps([{"value": value} for value in range(4)]))
     before = artifact.read_bytes()
     request = [PathSource(path=str(artifact))]
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         limits = RequestLimits(max_rows=2)
         first = runtime.analyze("artifact.preview", request, {}, limits=limits)
@@ -265,7 +269,7 @@ def test_analysis_is_bounded_deterministic_and_does_not_change_input(tmp_path: P
 def test_continuation_pages_have_distinct_preservable_analysis_ids(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text(json.dumps([{"value": value} for value in range(4)]))
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         first = runtime.analyze(
             "artifact.preview",
@@ -295,7 +299,7 @@ def test_capability_arguments_reject_unknown_fields(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
 
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     with pytest.raises(ValidationError):
         runtime.analyze(
             "artifact.preview",
@@ -338,7 +342,7 @@ def test_explicit_inputs_fail_at_byte_and_file_bounds(tmp_path: Path) -> None:
     directory.mkdir()
     (directory / "one.txt").write_text("one")
     (directory / "two.txt").write_text("two")
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         with pytest.raises(RuntimeFailure) as byte_failure:
             runtime.analyze(
@@ -368,7 +372,7 @@ def test_input_limits_apply_across_all_explicit_sources(tmp_path: Path) -> None:
     first.write_bytes(b"a" * 600)
     second.write_bytes(b"b" * 600)
     sources = [PathSource(path=str(first)), PathSource(path=str(second))]
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         with pytest.raises(RuntimeFailure) as byte_failure:
             runtime.analyze(
@@ -396,7 +400,7 @@ def test_digest_mismatch_fails_before_decoding(tmp_path: Path) -> None:
     artifact = tmp_path / "invalid.json"
     artifact.write_text("not json")
 
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     with pytest.raises(RuntimeFailure, match="SHA-256 mismatch") as failure:
         runtime.analyze(
             "artifact.preview",
@@ -411,7 +415,7 @@ def test_digest_mismatch_fails_before_decoding(tmp_path: Path) -> None:
 def test_json_object_sequence_is_streamed_with_bounded_continuation(tmp_path: Path) -> None:
     artifact = tmp_path / "report.json"
     artifact.write_text(json.dumps({"metadata": {"ignored": True}, "results": list(range(20))}))
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         first = runtime.analyze(
             "artifact.preview",
@@ -437,7 +441,7 @@ def test_json_object_sequence_is_streamed_with_bounded_continuation(tmp_path: Pa
 def test_json_object_preview_includes_all_arrays_and_root_scalars(tmp_path: Path) -> None:
     artifact = tmp_path / "sections.json"
     artifact.write_text(json.dumps({"first": [1, 2], "label": "kept", "second": [{"value": 3}]}))
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "artifact.preview",
@@ -465,7 +469,7 @@ def test_json_object_preview_includes_all_arrays_and_root_scalars(tmp_path: Path
 def test_preview_source_digest_wins_over_user_row_fields(tmp_path: Path) -> None:
     artifact = tmp_path / "rows.json"
     artifact.write_text(json.dumps([{"input_sha256": "f" * 64, "value": 1}]))
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
     finally:
@@ -478,7 +482,7 @@ def test_preview_source_digest_wins_over_user_row_fields(tmp_path: Path) -> None
 def test_provider_pages_use_one_stable_projection_limit(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     limits_seen: list[int] = []
 
     def analyze(*_args: Any, max_rows: int, **_kwargs: Any) -> ProviderAnalysis:
@@ -542,7 +546,7 @@ def test_cpu_profile_uses_explicit_isolated_worker_without_repository(tmp_path: 
             }
         )
     )
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "cpu.hotspots",
@@ -566,7 +570,7 @@ def test_coverage_data_uses_isolated_reader_and_continuation(tmp_path: Path) -> 
     data = CoverageData(basename=str(artifact))
     data.add_lines({str(source): {1, 2, 3}})
     data.write()
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         first = runtime.analyze(
             "coverage.summary",
@@ -605,7 +609,7 @@ def test_provider_continuation_stops_at_a_truthfully_reported_bounded_prefix(
     data = CoverageData(basename=str(artifact))
     data.add_lines({str(source): set(range(1, 1_206))})
     data.write()
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     pages: list[dict[str, Any]] = []
     continuation: str | None = None
     try:
@@ -678,7 +682,7 @@ def test_sarif_candidates_are_scoped_to_project_paths(tmp_path: Path) -> None:
             }
         )
     )
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "static.performance_candidates",
@@ -729,7 +733,7 @@ def _write_benchmark_samples(path: Path, values: list[int]) -> None:
 def test_pyperf_summary_uses_native_isolated_reader(tmp_path: Path) -> None:
     artifact = tmp_path / "benchmark.json"
     _write_pyperf_suite(artifact, [0.010, 0.012])
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "benchmark.summary",
@@ -754,7 +758,7 @@ def test_pyperf_compare_reads_explicit_artifacts_without_catalog(tmp_path: Path)
     candidate = tmp_path / "candidate.json"
     _write_pyperf_suite(baseline, [0.010, 0.012])
     _write_pyperf_suite(candidate, [0.005, 0.006])
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "benchmark.compare",
@@ -800,7 +804,7 @@ def test_structured_benchmark_samples_are_isolated_and_comparable(tmp_path: Path
     candidate = tmp_path / "candidate.samples.json"
     _write_benchmark_samples(baseline, [10, 12])
     _write_benchmark_samples(candidate, [5, 6])
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         summary = runtime.analyze(
             "benchmark.summary",
@@ -827,11 +831,14 @@ def test_structured_benchmark_samples_are_isolated_and_comparable(tmp_path: Path
 @pytest.mark.process
 def test_pyperf_capture_binds_native_output_before_analysis(tmp_path: Path) -> None:
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path, limits=RequestLimits(timeout_seconds=20))
+        runtime = AnalysisRuntime(
+            evidence_directory=tmp_path / ".flameox", limits=RequestLimits(timeout_seconds=20)
+        )
         try:
             result = await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-c", "pass"],
+                    cwd=str(tmp_path),
                     provider_id="pyperf",
                     capture_arguments={
                         "processes": 1,
@@ -868,12 +875,15 @@ def test_pyperf_capture_binds_native_output_before_analysis(tmp_path: Path) -> N
 @pytest.mark.process
 def test_pyperf_capture_preserves_multiline_target_argv(tmp_path: Path) -> None:
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path, limits=RequestLimits(timeout_seconds=20))
+        runtime = AnalysisRuntime(
+            evidence_directory=tmp_path / ".flameox", limits=RequestLimits(timeout_seconds=20)
+        )
         try:
             code = "value = 1\nassert value == 1"
             result = await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-c", code],
+                    cwd=str(tmp_path),
                     provider_id="pyperf",
                     capture_arguments={
                         "processes": 1,
@@ -900,7 +910,7 @@ def test_composed_evidence_namespaces_colliding_source_roles(tmp_path: Path) -> 
     second_path = tmp_path / "second.json"
     _write_pyperf_suite(first_path, [0.01])
     _write_pyperf_suite(second_path, [0.02])
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         evidence_ids = []
         for path in (first_path, second_path):
@@ -928,7 +938,9 @@ def test_composed_evidence_namespaces_colliding_source_roles(tmp_path: Path) -> 
 @pytest.mark.process
 def test_failed_provider_capture_returns_preservable_stream_evidence(tmp_path: Path) -> None:
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path, limits=RequestLimits(timeout_seconds=20))
+        runtime = AnalysisRuntime(
+            evidence_directory=tmp_path / ".flameox", limits=RequestLimits(timeout_seconds=20)
+        )
         try:
             result = await runtime.capture_and_analyze(
                 CaptureTarget(
@@ -937,6 +949,7 @@ def test_failed_provider_capture_returns_preservable_stream_evidence(tmp_path: P
                         "-c",
                         "import sys; print('before-failure'); raise SystemExit(7)",
                     ],
+                    cwd=str(tmp_path),
                     provider_id="pyperf",
                     capture_arguments={
                         "processes": 1,
@@ -970,11 +983,14 @@ def test_coverage_capture_uses_explicit_empty_config_and_native_data(tmp_path: P
     script.write_text("value = 1\nprint(value)\n")
 
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path, limits=RequestLimits(timeout_seconds=20))
+        runtime = AnalysisRuntime(
+            evidence_directory=tmp_path / ".flameox", limits=RequestLimits(timeout_seconds=20)
+        )
         try:
             result = await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, str(script)],
+                    cwd=str(tmp_path),
                     provider_id="coverage",
                     capture_arguments={"branch": True, "source": [str(tmp_path)]},
                 ),
@@ -1000,12 +1016,15 @@ def test_coverage_capture_rejects_workload_interpreter_without_provider(tmp_path
     workload_python.chmod(0o755)
 
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path, limits=RequestLimits(timeout_seconds=20))
+        runtime = AnalysisRuntime(
+            evidence_directory=tmp_path / ".flameox", limits=RequestLimits(timeout_seconds=20)
+        )
         try:
             with pytest.raises(RuntimeFailure) as raised:
                 await runtime.capture_and_analyze(
                     CaptureTarget(
                         argv=[str(workload_python), "workload.py"],
+                        cwd=str(tmp_path),
                         provider_id="coverage",
                     ),
                     "coverage.summary",
@@ -1027,7 +1046,7 @@ def test_nsight_parquetdir_is_analyzed_without_sqlite_or_repository(tmp_path: Pa
         pa.table({"start_ns": [1, 2, 3], "kernel": ["a", "b", "c"]}),
         export / "CUDA_GPU_KERN_SUM.parquet",
     )
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "gpu.launches",
@@ -1069,7 +1088,7 @@ def test_native_nsight_report_uses_cached_parquetdir_export(
     report = tmp_path / "capture.nsys-rep"
     report.write_bytes(b"native-nsight-report")
 
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         first = runtime.analyze("gpu.launches", [PathSource(path=str(report))], {})
         runtime.analyses.clear()
@@ -1106,7 +1125,7 @@ def _write_otlp_trace(path: Path) -> None:
 def test_otlp_partial_rows_continue_without_legacy_application_service(tmp_path: Path) -> None:
     trace = tmp_path / "trace.otlp"
     _write_otlp_trace(trace)
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         first = runtime.analyze(
             "trace.summary",
@@ -1135,7 +1154,7 @@ def test_otlp_partial_rows_continue_without_legacy_application_service(tmp_path:
 def test_otlp_window_filters_inside_isolated_parser(tmp_path: Path) -> None:
     trace = tmp_path / "trace.otlp"
     _write_otlp_trace(trace)
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "trace.window",
@@ -1172,7 +1191,7 @@ def test_pytest_stream_has_typed_summary_and_bounded_rows(tmp_path: Path) -> Non
         )
         + "\n"
     )
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "failures.summary",
@@ -1214,7 +1233,7 @@ def test_pytest_failure_identities_precede_large_successful_population(tmp_path:
     )
     payloads.append({"event": "run_finished"})
     events.write_text("\n".join(json.dumps(item) for item in payloads) + "\n")
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "failures.summary",
@@ -1244,11 +1263,12 @@ def test_pytest_collection_failure_identity_is_reported(tmp_path: Path) -> None:
     broken.write_text("raise RuntimeError('collection failed')\n")
 
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             result = await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-m", "pytest", str(broken), "-q"],
+                    cwd=str(tmp_path),
                     provider_id="pytest",
                 ),
                 "failures.summary",
@@ -1287,11 +1307,12 @@ def test_pytest_capture_produces_analyzable_session_evidence(tmp_path: Path) -> 
     )
 
     async def exercise() -> dict[str, Any]:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             return await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-m", "pytest", "-q", str(test_file)],
+                    cwd=str(tmp_path),
                     provider_id="pytest",
                 ),
                 "failures.summary",
@@ -1330,7 +1351,7 @@ def test_pytest_interruption_is_not_overwritten_by_session_finish(tmp_path: Path
         )
         + "\n"
     )
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "failures.summary", [PathSource(path=str(events), format="pytest")], {}
@@ -1356,7 +1377,7 @@ def test_semantic_observations_reject_unknown_fields(tmp_path: Path) -> None:
         )
         + "\n"
     )
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
@@ -1379,7 +1400,7 @@ def test_memray_capture_is_analyzed_without_workspace_or_repository(tmp_path: Pa
         retained = [bytearray(1_024) for _ in range(8)]
     assert retained
 
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "memory.hotspots",
@@ -1404,11 +1425,12 @@ def test_direct_memray_capture_uses_typed_argv_and_preserves_native_output(
     pytest.importorskip("memray")
 
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             result = await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-c", "retained = [bytearray(4096) for _ in range(8)]"],
+                    cwd=str(tmp_path),
                     provider_id="memray",
                     capture_arguments={"native": False},
                 ),
@@ -1439,12 +1461,15 @@ def test_memray_capture_rejects_workload_interpreter_without_provider(tmp_path: 
     workload_python.chmod(0o755)
 
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path, limits=RequestLimits(timeout_seconds=20))
+        runtime = AnalysisRuntime(
+            evidence_directory=tmp_path / ".flameox", limits=RequestLimits(timeout_seconds=20)
+        )
         try:
             with pytest.raises(RuntimeFailure) as raised:
                 await runtime.capture_and_analyze(
                     CaptureTarget(
                         argv=[str(workload_python), "workload.py"],
+                        cwd=str(tmp_path),
                         provider_id="memray",
                     ),
                     "memory.hotspots",
@@ -1489,7 +1514,7 @@ def test_aiperf_export_is_projected_without_prompts_or_repository(tmp_path: Path
         )
         + "\n"
     )
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "inference.summary",
@@ -1531,12 +1556,13 @@ def test_py_spy_capture_executes_managed_tool_when_request_path_is_empty(
     monkeypatch.setattr("flameox.stateless.sys.executable", str(managed_python))
 
     async def exercise() -> dict[str, Any]:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             return await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[workload_python, "-c", "sum(range(100))"],
                     environment={"PATH": ""},
+                    cwd=str(tmp_path),
                     provider_id="py-spy",
                 ),
                 "cpu.hotspots",
@@ -1628,9 +1654,7 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
 ) -> None:
     preparation_calls: list[list[str]] = []
 
-    def prepare(
-        provider_ids: list[str], project_root: Path, timeout_seconds: int
-    ) -> ProviderPreparation:
+    def prepare(provider_ids: list[str], timeout_seconds: int) -> ProviderPreparation:
         assert timeout_seconds == 1_800
         if provider_ids == ["unknown-provider"]:
             raise ProviderSelectionFailure("Unknown provider 'unknown-provider'")
@@ -1655,8 +1679,6 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
                     "flameox",
                     "mcp",
                     "serve",
-                    "--project-root",
-                    str(project_root),
                 ],
             )
         return ProviderPreparation(
@@ -1678,15 +1700,15 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
                 "flameox",
                 "mcp",
                 "serve",
-                "--project-root",
-                str(project_root),
             ],
         )
 
     monkeypatch.setattr("flameox.mcp.server.provider_setup.prepare_providers", prepare)
 
     async def exercise() -> None:
-        async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        async with Client(
+            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+        ) as client:
             result = await client.call_tool(
                 "prepare_providers",
                 {"provider_ids": ["memray", "nsight-compute", "memray"]},
@@ -1723,12 +1745,10 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
         assert result.structured_content["launcher"]["args"][3] == (
             f"flameox[memory]=={__version__}"
         )
-        assert result.structured_content["launcher"]["args"][-5:] == [
+        assert result.structured_content["launcher"]["args"][-3:] == [
             "flameox",
             "mcp",
             "serve",
-            "--project-root",
-            str(tmp_path),
         ]
         assert host_only.is_error is False
         assert host_only.structured_content["next_action"] is None
@@ -1754,8 +1774,6 @@ def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path
                 "flameox",
                 "mcp",
                 "serve",
-                "--project-root",
-                str(tmp_path),
             ],
             cwd=tmp_path,
         )
@@ -1806,7 +1824,9 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
     artifact.write_text('[{"value":1},{"value":2}]')
 
     async def exercise() -> None:
-        async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        async with Client(
+            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+        ) as client:
             analyzed = await client.call_tool(
                 "preview_artifact",
                 {
@@ -1825,7 +1845,9 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
             resource = await client.read_resource(f"flameox://evidence/{evidence_id}")
             assert resource.contents[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
 
-        async with Client(create_server(tmp_path), raise_exceptions=True) as restarted:
+        async with Client(
+            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+        ) as restarted:
             reanalyzed = await restarted.call_tool(
                 "preview_artifact",
                 {
@@ -1861,13 +1883,15 @@ def test_mcp_evidence_resource_redacts_capture_provenance(tmp_path: Path) -> Non
     secret_path = str(tmp_path.resolve())
 
     async def exercise() -> None:
-        async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        async with Client(
+            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+        ) as client:
             captured = await client.call_tool(
                 "capture_process_output",
                 {
                     "target": {
                         "argv": [sys.executable, "-c", "print('ok')", secret_argument],
-                        "cwd": ".",
+                        "cwd": str(tmp_path),
                         "environment": {"FLAMEOX_TEST_MARKER": secret_environment},
                     },
                     "provider": {"kind": "direct"},
@@ -1894,7 +1918,7 @@ def test_mcp_evidence_resource_redacts_capture_provenance(tmp_path: Path) -> Non
             assert '"environment"' not in projection
 
             # The MCP projection must not weaken the canonical local provenance record.
-            canonical = AnalysisRuntime(tmp_path)
+            canonical = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
             try:
                 manifest = json.dumps(canonical.read_evidence(evidence_id))
             finally:
@@ -1914,7 +1938,9 @@ def test_mcp_validation_unavailable_provider_and_failed_execution_are_typed(
     artifact.write_text("[]")
 
     async def exercise() -> None:
-        async with Client(create_server(tmp_path), raise_exceptions=True) as client:
+        async with Client(
+            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+        ) as client:
             invalid = await client.call_tool(
                 "preview_artifact",
                 {
@@ -1936,6 +1962,7 @@ def test_mcp_validation_unavailable_provider_and_failed_execution_are_typed(
                 {
                     "target": {
                         "argv": [sys.executable, "-c", "pass"],
+                        "cwd": str(tmp_path),
                         "environment": {"PATH": str(empty_path)},
                     },
                     "provider": {"kind": "py-spy"},
@@ -1956,6 +1983,7 @@ def test_mcp_validation_unavailable_provider_and_failed_execution_are_typed(
                 {
                     "target": {
                         "argv": [sys.executable, "-c", "raise SystemExit(7)"],
+                        "cwd": str(tmp_path),
                     },
                     "provider": {"kind": "direct"},
                     "options": {},
@@ -1974,7 +2002,9 @@ def test_mcp_validation_unavailable_provider_and_failed_execution_are_typed(
 @pytest.mark.process
 def test_direct_capture_reports_progress_and_preserves_native_output(tmp_path: Path) -> None:
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path, limits=RequestLimits(timeout_seconds=10))
+        runtime = AnalysisRuntime(
+            evidence_directory=tmp_path / ".flameox", limits=RequestLimits(timeout_seconds=10)
+        )
         updates: list[tuple[int, int]] = []
 
         async def progress(current: int, total: int, _message: str) -> None:
@@ -1984,6 +2014,7 @@ def test_direct_capture_reports_progress_and_preserves_native_output(tmp_path: P
             result = await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-c", "print('captured')"],
+                    cwd=str(tmp_path),
                     provider_id="direct",
                 ),
                 "artifact.preview",
@@ -2018,7 +2049,7 @@ def test_direct_capture_reports_progress_and_preserves_native_output(tmp_path: P
 @pytest.mark.process
 def test_timed_out_capture_returns_preservable_partial_evidence(tmp_path: Path) -> None:
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             result = await runtime.capture_and_analyze(
                 CaptureTarget(
@@ -2027,6 +2058,7 @@ def test_timed_out_capture_returns_preservable_partial_evidence(tmp_path: Path) 
                         "-c",
                         "import time; print('before-timeout', flush=True); time.sleep(5)",
                     ],
+                    cwd=str(tmp_path),
                     provider_id="direct",
                 ),
                 "artifact.preview",
@@ -2051,7 +2083,7 @@ def test_cancelled_capture_cleans_up_descendants(tmp_path: Path) -> None:
     child_pid_file = tmp_path / "child.pid"
 
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         task = asyncio.create_task(
             runtime.capture_and_analyze(
                 CaptureTarget(
@@ -2066,6 +2098,7 @@ def test_cancelled_capture_cleans_up_descendants(tmp_path: Path) -> None:
                             "time.sleep(30)"
                         ),
                     ],
+                    cwd=str(tmp_path),
                     provider_id="direct",
                 ),
                 "artifact.preview",
@@ -2104,11 +2137,12 @@ def test_cancelled_capture_cleans_up_descendants(tmp_path: Path) -> None:
 @pytest.mark.process
 def test_experiment_runs_bounded_cases_and_semantic_oracle(tmp_path: Path) -> None:
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             result = await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-c", "print('base')"],
+                    cwd=str(tmp_path),
                     provider_id="direct",
                 ),
                 "artifact.preview",
@@ -2167,11 +2201,12 @@ def test_experiment_runs_bounded_cases_and_semantic_oracle(tmp_path: Path) -> No
 @pytest.mark.process
 def test_capture_result_applies_byte_bound_after_provenance(tmp_path: Path) -> None:
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             result = await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-c", "pass", "x" * 1_000],
+                    cwd=str(tmp_path),
                     provider_id="direct",
                 ),
                 "artifact.preview",
@@ -2200,7 +2235,7 @@ def test_capture_result_applies_byte_bound_after_provenance(tmp_path: Path) -> N
 def test_missing_repository_metadata_does_not_hide_preserved_evidence(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text('[{"value":1}]')
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         analysis = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
         preserved = runtime.preserve_evidence(analysis["analysis_id"])
@@ -2248,7 +2283,7 @@ def test_experiment_zero_effect_is_within_zero_threshold() -> None:
 def test_concurrent_identical_publication_reuses_complete_bundle(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text('[{"value":1}]')
-    runtimes = [AnalysisRuntime(tmp_path) for _ in range(8)]
+    runtimes = [AnalysisRuntime(evidence_directory=tmp_path / ".flameox") for _ in range(8)]
     analyses = [
         runtime.analyze(
             "artifact.preview", [PathSource(path=str(artifact))], {}, limits=RequestLimits()
@@ -2284,7 +2319,7 @@ def test_interrupted_evidence_publication_never_exposes_partial_manifest(
 ) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text('[{"value":1}]')
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
     original = EvidenceRepository._publish_directory
 
@@ -2310,7 +2345,7 @@ def test_interrupted_artifact_publication_never_exposes_partial_bundle(
 ) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text('[{"value":1}]')
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
     original = EvidenceRepository._publish_directory
 
@@ -2333,7 +2368,7 @@ def test_interrupted_artifact_publication_never_exposes_partial_bundle(
 
 @pytest.mark.integration
 def test_abandoned_staging_cleanup_removes_only_proven_dead_owner(tmp_path: Path) -> None:
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         runtime.repository.initialize()
         dead = tmp_path / ".flameox" / ".staging" / "999999999-dead" / "publication"
@@ -2356,7 +2391,7 @@ def test_unsupported_repository_format_is_not_read(tmp_path: Path) -> None:
     (repository / "repository.json").write_text(
         json.dumps({"format_version": "999", "created_at": "2026-08-31T00:00:00+00:00"})
     )
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.query_evidence()
@@ -2374,7 +2409,7 @@ def test_preservation_rejects_symlinked_repository_root(tmp_path: Path) -> None:
     (project / ".flameox").symlink_to(outside, target_is_directory=True)
     artifact = project / "samples.json"
     artifact.write_text("[]")
-    runtime = AnalysisRuntime(project)
+    runtime = AnalysisRuntime(evidence_directory=project / ".flameox")
     try:
         result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
 
@@ -2391,7 +2426,7 @@ def test_preservation_rejects_symlinked_repository_root(tmp_path: Path) -> None:
 def test_unpreserved_operations_create_no_durable_state(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
     finally:
@@ -2407,7 +2442,7 @@ def test_unpreserved_operations_create_no_durable_state(tmp_path: Path) -> None:
 def test_preservation_rejects_input_mutation(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
         artifact.write_text('[{"changed":true}]')
@@ -2422,7 +2457,7 @@ def test_preservation_rejects_input_mutation(tmp_path: Path) -> None:
 def test_corrupt_manifest_and_missing_data_are_not_returned(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
         preserved = runtime.preserve_evidence(result["analysis_id"])
@@ -2441,7 +2476,7 @@ def test_corrupt_manifest_and_missing_data_are_not_returned(tmp_path: Path) -> N
 def test_repository_rejects_symlinked_evidence_data(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
         preserved = runtime.preserve_evidence(result["analysis_id"])
@@ -2461,7 +2496,7 @@ def test_repository_rejects_symlinked_evidence_data(tmp_path: Path) -> None:
 
 @pytest.mark.integration
 def test_query_rejects_symlinked_inventory_prefix(tmp_path: Path) -> None:
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         runtime.repository.initialize()
         outside = tmp_path / "outside-inventory"
@@ -2481,7 +2516,7 @@ def test_query_rejects_symlinked_inventory_prefix(tmp_path: Path) -> None:
 def test_repository_rejects_extra_metadata_and_missing_native_artifacts(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
         preserved = runtime.preserve_evidence(result["analysis_id"])
@@ -2513,7 +2548,7 @@ def test_repository_rejects_self_consistent_manifest_with_invalid_body_shape(
 ) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
         preserved = runtime.preserve_evidence(result["analysis_id"])
@@ -2542,7 +2577,7 @@ def test_repeated_preservation_revalidates_bundle_and_returns_defensive_referenc
 ) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
         first = runtime.preserve_evidence(result["analysis_id"])
@@ -2563,7 +2598,7 @@ def test_repeated_preservation_revalidates_bundle_and_returns_defensive_referenc
 
 @pytest.mark.integration
 def test_query_pagination_is_deterministic_and_inventory_bound(tmp_path: Path) -> None:
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         for index in range(3):
             artifact = tmp_path / f"samples-{index}.json"
@@ -2588,7 +2623,7 @@ def test_query_pagination_is_deterministic_and_inventory_bound(tmp_path: Path) -
 
 
 @pytest.mark.integration
-def test_first_preservation_updates_only_repository_local_git_exclude(tmp_path: Path) -> None:
+def test_preservation_does_not_mutate_project_git_configuration(tmp_path: Path) -> None:
     git_info = tmp_path / ".git" / "info"
     git_info.mkdir(parents=True)
     exclude = git_info / "exclude"
@@ -2597,7 +2632,7 @@ def test_first_preservation_updates_only_repository_local_git_exclude(tmp_path: 
     tracked_ignore.write_text("tracked-pattern\n")
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
         runtime.preserve_evidence(result["analysis_id"])
@@ -2605,27 +2640,5 @@ def test_first_preservation_updates_only_repository_local_git_exclude(tmp_path: 
     finally:
         runtime.close()
 
-    assert exclude.read_text().splitlines() == ["existing-pattern", ".flameox/"]
+    assert exclude.read_text().splitlines() == ["existing-pattern"]
     assert tracked_ignore.read_text() == "tracked-pattern\n"
-
-
-@pytest.mark.integration
-def test_first_preservation_handles_git_worktree_indirection(tmp_path: Path) -> None:
-    project = tmp_path / "project"
-    project.mkdir()
-    common = tmp_path / "repository.git"
-    worktree_git = common / "worktrees" / "project"
-    worktree_git.mkdir(parents=True)
-    (worktree_git / "commondir").write_text("../..\n")
-    (project / ".git").write_text(f"gitdir: {worktree_git}\n")
-    artifact = project / "samples.json"
-    artifact.write_text("[]")
-
-    runtime = AnalysisRuntime(project)
-    try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
-        runtime.preserve_evidence(result["analysis_id"])
-    finally:
-        runtime.close()
-
-    assert (common / "info" / "exclude").read_text() == ".flameox/\n"

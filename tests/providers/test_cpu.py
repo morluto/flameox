@@ -23,7 +23,7 @@ def test_pstats_profile_is_bounded_deterministic_cpu_evidence(tmp_path: Path) ->
     profiler = cProfile.Profile()
     profiler.runcall(work)
     profiler.dump_stats(profile)
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "cpu.hotspots",
@@ -68,7 +68,7 @@ def test_pyspy_speedscope_profile_ranks_typed_frames(tmp_path: Path) -> None:
             }
         )
     )
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "cpu.hotspots",
@@ -102,7 +102,7 @@ def test_pyspy_speedscope_profile_keeps_resolved_samples_when_one_stack_is_empty
             }
         )
     )
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "cpu.hotspots",
@@ -134,7 +134,7 @@ def test_pyspy_speedscope_profile_keeps_resolved_samples_when_one_stack_is_empty
 def test_collapsed_perf_stacks_are_bounded_cpu_evidence(tmp_path: Path) -> None:
     profile = tmp_path / "perf.collapsed"
     profile.write_text("main;scan 7\nmain;parse 2\nmain;scan 3\n")
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "cpu.hotspots",
@@ -178,12 +178,13 @@ def test_pyspy_capture_rejects_ambient_path_fallback(
     monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
 
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             with pytest.raises(RuntimeFailure) as failure:
                 await runtime.capture_and_analyze(
                     CaptureTarget(
                         argv=[workload_python, "-c", "print('target')"],
+                        cwd=str(tmp_path),
                         provider_id="py-spy",
                         capture_arguments={"rate": 250, "gil": True},
                     ),
@@ -223,11 +224,12 @@ def test_perf_capture_converts_native_data_in_session_scratch(
     monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
 
     async def exercise() -> dict[str, Any]:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             return await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-c", "pass"],
+                    cwd=str(tmp_path),
                     provider_id="perf",
                     capture_arguments={"frequency": 199, "call_graph": "fp"},
                 ),
@@ -281,10 +283,14 @@ name = next(
     executable.chmod(0o755)
 
     async def exercise() -> dict[str, Any]:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             return await runtime.capture_and_analyze(
-                CaptureTarget(argv=[str(executable), "app.js"], provider_id="node-cpu-profile"),
+                CaptureTarget(
+                    argv=[str(executable), "app.js"],
+                    cwd=str(tmp_path),
+                    provider_id="node-cpu-profile",
+                ),
                 "cpu.hotspots",
             )
         finally:

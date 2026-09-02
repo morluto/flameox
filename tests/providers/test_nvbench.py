@@ -69,7 +69,7 @@ def _bundle(root: Path, samples: list[float]) -> Path:
 def test_nvbench_directory_preserves_native_sample_values_and_compares(tmp_path: Path) -> None:
     baseline = _bundle(tmp_path / "baseline", [0.004, 0.006])
     candidate = _bundle(tmp_path / "candidate", [0.002, 0.003])
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         summary = runtime.analyze(
             "benchmark.summary",
@@ -102,7 +102,7 @@ def test_nvbench_rejects_unbound_sidecars_and_nonfinite_samples(tmp_path: Path) 
     standalone = tmp_path / "results.json"
     standalone.write_text("{}")
     invalid = _bundle(tmp_path / "invalid", [float("nan")])
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         with pytest.raises(RuntimeFailure) as unbound:
             runtime.analyze(
@@ -155,11 +155,11 @@ output.write_text(json.dumps({
 """
     )
     executable.chmod(0o755)
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = asyncio.run(
             runtime.capture_and_analyze(
-                CaptureTarget(argv=[str(executable)], provider_id="nvbench"),
+                CaptureTarget(argv=[str(executable)], cwd=str(tmp_path), provider_id="nvbench"),
                 "benchmark.summary",
             )
         )

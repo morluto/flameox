@@ -12,7 +12,6 @@ class V8ProfileRequest(ContractModel):
     profile_kind: Literal["cpu", "heap"]
     artifact_path: str = Field(min_length=1, max_length=4_096)
     artifact_id: str = Field(min_length=1, max_length=200)
-    project_root: str = Field(min_length=1, max_length=4_096)
     max_nodes: Annotated[int, Field(gt=0, le=100_000)]
     max_samples: Annotated[int, Field(gt=0, le=1_000_000)]
     max_rows: Annotated[int, Field(gt=0, le=100_000)]

@@ -33,7 +33,7 @@ def test_rocprof_capture_produces_native_pftrace_for_perfetto(
     monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
 
     async def exercise() -> dict[str, Any]:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         monkeypatch.setattr(
             runtime.perfetto,
             "analyze",
@@ -53,6 +53,7 @@ def test_rocprof_capture_produces_native_pftrace_for_perfetto(
             return await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-c", "pass"],
+                    cwd=str(tmp_path),
                     provider_id="rocprofv3",
                     capture_arguments={
                         "kernel_trace": True,
@@ -75,11 +76,12 @@ def test_rocprof_capture_produces_native_pftrace_for_perfetto(
 
 def test_rocprof_capture_requires_at_least_one_trace_domain(tmp_path: Path) -> None:
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-c", "pass"],
+                    cwd=str(tmp_path),
                     provider_id="rocprofv3",
                     capture_arguments={
                         "hip_trace": False,

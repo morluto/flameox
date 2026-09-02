@@ -19,9 +19,8 @@ from flameox.workers.v8_profiles_contract import (
 class StructuredWorkerProviders:
     """Explicit adapters for workers whose result is already bounded structured evidence."""
 
-    def __init__(self, harness: IsolatedWorkerHarness, project_root: Path) -> None:
+    def __init__(self, harness: IsolatedWorkerHarness) -> None:
         self.harness = harness
-        self.project_root = project_root
 
     def analyze(
         self,
@@ -81,7 +80,6 @@ class StructuredWorkerProviders:
                     profile_kind="cpu",
                     artifact_path=str(path),
                     artifact_id=input_sha256,
-                    project_root=str(self.project_root),
                     max_nodes=max_rows,
                     max_samples=max_rows,
                     max_rows=max_rows,
@@ -113,7 +111,6 @@ class StructuredWorkerProviders:
                 COMPUTE_SANITIZER_WORKER,
                 ComputeSanitizerWorkerRequest(
                     artifact_path=str(path),
-                    project_root=str(self.project_root),
                     max_records=max_rows,
                     max_frames=max_rows,
                 ),

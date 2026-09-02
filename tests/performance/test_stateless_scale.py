@@ -130,7 +130,7 @@ def test_nsight_continuations_reuse_one_session_export(
     report = tmp_path / "capture.nsys-rep"
     report.write_bytes(b"native-nsight-report")
 
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         continuation: str | None = None
         rows = 0

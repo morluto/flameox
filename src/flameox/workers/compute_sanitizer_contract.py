@@ -10,7 +10,6 @@ from flameox.workers.protocol import WorkerDefinition, WorkerOperationId
 
 class ComputeSanitizerWorkerRequest(ContractModel):
     artifact_path: str = Field(min_length=1, max_length=4_096)
-    project_root: str = Field(min_length=1, max_length=4_096)
     max_records: Annotated[int, Field(gt=0, le=100_000_000)]
     max_frames: Annotated[int, Field(gt=0, le=4_096)]
 

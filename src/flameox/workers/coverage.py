@@ -16,15 +16,7 @@ from flameox.workers.coverage_contract import (
 from flameox.workers.protocol import WorkerApplication, WorkerFailureKind, run_typed_worker
 
 
-def _relative_path(filename: str, project_root: Path) -> str | None:
-    try:
-        return Path(filename).resolve().relative_to(project_root).as_posix()
-    except (OSError, ValueError):
-        return None
-
-
 def _handle(request: CoverageWorkerRequest, _job_root: Path) -> CoverageWorkerResult:
-    project_root = Path(request.project_root).resolve(strict=True)
     data = CoverageData(basename=request.artifact_path)
     data.read()
     measured_files = sorted(data.measured_files())
@@ -33,10 +25,7 @@ def _handle(request: CoverageWorkerRequest, _job_root: Path) -> CoverageWorkerRe
     line_count = 0
     arc_count = 0
     for filename in measured_files:
-        relative = _relative_path(filename, project_root)
-        if relative is None:
-            limitations.append(f"Skipped coverage outside the project root: {filename}")
-            continue
+        display_path = Path(filename).as_posix()
         contexts = data.contexts_by_lineno(filename)
         for line in sorted(data.lines(filename) or ()):
             line_contexts = sorted(contexts.get(line) or ("",))
@@ -46,7 +35,7 @@ def _handle(request: CoverageWorkerRequest, _job_root: Path) -> CoverageWorkerRe
                     rows.append(
                         {
                             "kind": "line_hit",
-                            "file": relative,
+                            "file": display_path,
                             "line_from": line,
                             "line_to": None,
                             "context": context or None,
@@ -59,7 +48,7 @@ def _handle(request: CoverageWorkerRequest, _job_root: Path) -> CoverageWorkerRe
                     rows.append(
                         {
                             "kind": "branch_arc",
-                            "file": relative,
+                            "file": display_path,
                             "line_from": line_from,
                             "line_to": line_to,
                             "context": None,

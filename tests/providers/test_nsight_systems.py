@@ -43,11 +43,12 @@ def test_nsight_systems_capture_preserves_native_report_and_exports_parquetdir(
     monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
 
     async def exercise() -> dict[str, Any]:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             return await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-c", "pass"],
+                    cwd=str(tmp_path),
                     provider_id="nsight-systems",
                     capture_arguments={"trace": ["cuda", "nvtx"]},
                 ),
@@ -74,7 +75,7 @@ def test_nsight_systems_projects_native_uint64_identifiers_losslessly(tmp_path: 
         pa.table({"correlationId": pa.array([native_id], type=pa.uint64())}),
         parquetdir / "CUDA_GPU_KERN_SUM.parquet",
     )
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "gpu.launches",
@@ -115,11 +116,12 @@ def test_cpu_only_nsight_capture_is_typed_negative_accelerator_evidence(
     monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
 
     async def exercise() -> tuple[dict[str, Any], dict[str, Any]]:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             result = await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-c", "pass"],
+                    cwd=str(tmp_path),
                     provider_id="nsight-systems",
                 ),
                 "gpu.launches",

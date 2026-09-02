@@ -14,6 +14,11 @@ from flameox.setup import ExternalRequirement, ProviderPreparation
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture(autouse=True)
+def isolated_data_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FLAMEOX_DATA_DIR", str(tmp_path / "flameox-data"))
+
+
 def test_help_exposes_only_stateless_command_families() -> None:
     result = CliRunner().invoke(app, ["--help"])
 
@@ -46,12 +51,10 @@ def test_analyze_preserves_only_when_requested(tmp_path: Path) -> None:
             "analyze",
             "artifact.preview",
             str(artifact),
-            "--project-root",
-            str(tmp_path),
         ],
     )
     assert inline.exit_code == 0, inline.output
-    assert not (tmp_path / ".flameox").exists()
+    assert not (tmp_path / "flameox-data").exists()
 
     preserved = runner.invoke(
         app,
@@ -60,13 +63,11 @@ def test_analyze_preserves_only_when_requested(tmp_path: Path) -> None:
             "artifact.preview",
             str(artifact),
             "--preserve",
-            "--project-root",
-            str(tmp_path),
         ],
     )
     assert preserved.exit_code == 0, preserved.output
     assert json.loads(preserved.output)["preserved"]["evidence_id"]
-    assert (tmp_path / ".flameox" / "repository.json").is_file()
+    assert (tmp_path / "flameox-data" / "repository.json").is_file()
 
 
 def test_analyze_consumes_continuation_from_a_previous_cli_invocation(tmp_path: Path) -> None:
@@ -77,8 +78,6 @@ def test_analyze_consumes_continuation_from_a_previous_cli_invocation(tmp_path: 
         "analyze",
         "artifact.preview",
         str(artifact),
-        "--project-root",
-        str(tmp_path),
     ]
 
     first = runner.invoke(app, arguments)
@@ -105,8 +104,6 @@ def test_analyze_rejects_a_malformed_continuation_without_a_traceback(tmp_path: 
             str(artifact),
             "--continuation",
             "not-a-token",
-            "--project-root",
-            str(tmp_path),
         ],
     )
 
@@ -125,7 +122,7 @@ def test_capture_accepts_argv_after_separator(tmp_path: Path) -> None:
             "direct",
             "--capture-arguments",
             "{}",
-            "--project-root",
+            "--cwd",
             str(tmp_path),
             "--",
             sys.executable,
@@ -148,7 +145,7 @@ def test_capture_returns_nonzero_for_failed_target(tmp_path: Path) -> None:
             "capture",
             "--provider",
             "direct",
-            "--project-root",
+            "--cwd",
             str(tmp_path),
             "--",
             sys.executable,
@@ -168,8 +165,6 @@ def test_analyze_projects_runtime_errors_without_traceback(tmp_path: Path) -> No
             "analyze",
             "unknown.capability",
             str(tmp_path / "missing.json"),
-            "--project-root",
-            str(tmp_path),
         ],
     )
 
@@ -179,7 +174,7 @@ def test_analyze_projects_runtime_errors_without_traceback(tmp_path: Path) -> No
 
 
 def test_setup_prints_configuration_without_creating_repository(tmp_path: Path) -> None:
-    result = CliRunner().invoke(app, ["setup", "--project-root", str(tmp_path), "--json"])
+    result = CliRunner().invoke(app, ["setup", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -192,13 +187,11 @@ def test_setup_prints_configuration_without_creating_repository(tmp_path: Path) 
         "flameox",
         "mcp",
         "serve",
-        "--project-root",
-        str(tmp_path),
     ]
     assert payload["resolved_version"] == __version__
     assert payload["client_registration_changed"] is False
     assert payload["repository_created"] is False
-    assert not (tmp_path / ".flameox").exists()
+    assert not (tmp_path / "flameox-data").exists()
 
 
 def test_setup_prepares_exact_python_providers_and_guides_system_tools(
@@ -206,9 +199,7 @@ def test_setup_prepares_exact_python_providers_and_guides_system_tools(
 ) -> None:
     selected: list[list[str]] = []
 
-    def prepare(
-        providers: list[str], project_root: Path, timeout_seconds: int
-    ) -> ProviderPreparation:
+    def prepare(providers: list[str], timeout_seconds: int) -> ProviderPreparation:
         assert timeout_seconds == 1_800
         selected.append(providers)
         return ProviderPreparation(
@@ -230,8 +221,6 @@ def test_setup_prepares_exact_python_providers_and_guides_system_tools(
                 "flameox",
                 "mcp",
                 "serve",
-                "--project-root",
-                str(project_root),
             ],
         )
 
@@ -240,8 +229,6 @@ def test_setup_prepares_exact_python_providers_and_guides_system_tools(
         app,
         [
             "setup",
-            "--project-root",
-            str(tmp_path),
             "--provider",
             "memray",
             "--provider",
@@ -257,4 +244,4 @@ def test_setup_prepares_exact_python_providers_and_guides_system_tools(
     assert payload["preparation_command"][0] == "/usr/bin/uvx"
     assert f"flameox[cpu,memory]=={__version__}" in payload["args"]
     assert "extras/python" in payload["external_guidance"][0]
-    assert not (tmp_path / ".flameox").exists()
+    assert not (tmp_path / "flameox-data").exists()

@@ -29,7 +29,7 @@ def test_explicit_report_fails_as_unavailable_without_vendor_interface(
     monkeypatch.setattr(
         "flameox.providers.nsight_compute.find_report_interface", lambda _executable: None
     )
-    runtime = AnalysisRuntime(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze("gpu.kernel_metrics", [PathSource(path=str(report))], {})
@@ -67,12 +67,13 @@ def test_capture_rejects_missing_vendor_interface_before_execution(
     )
 
     async def exercise() -> None:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             with pytest.raises(RuntimeFailure) as failure:
                 await runtime.capture_and_analyze(
                     CaptureTarget(
                         argv=[sys.executable, "-c", "pass"],
+                        cwd=str(tmp_path),
                         provider_id="nsight-compute",
                     ),
                     "gpu.kernel_metrics",
@@ -107,7 +108,7 @@ def test_nsight_compute_capture_uses_typed_bounded_options(
     monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
 
     async def exercise() -> dict[str, Any]:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         monkeypatch.setattr(
             runtime.nsight_compute,
             "analyze",
@@ -127,6 +128,7 @@ def test_nsight_compute_capture_uses_typed_bounded_options(
             return await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-c", "pass"],
+                    cwd=str(tmp_path),
                     provider_id="nsight-compute",
                     capture_arguments={
                         "replay_mode": "kernel",
@@ -167,7 +169,7 @@ def test_preserved_native_capture_survives_analysis_failure(
     monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
 
     async def exercise() -> tuple[str, dict[str, Any]]:
-        runtime = AnalysisRuntime(tmp_path)
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
 
         def fail_analysis(_path: Path, **_kwargs: object) -> ProviderAnalysis:
             raise ProviderFailure("DECODE_FAILURE", "fixture decoder rejected report")
@@ -177,6 +179,7 @@ def test_preserved_native_capture_survives_analysis_failure(
             result = await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, "-c", "pass"],
+                    cwd=str(tmp_path),
                     provider_id="nsight-compute",
                 ),
                 "gpu.kernel_metrics",
@@ -194,7 +197,7 @@ def test_preserved_native_capture_survives_analysis_failure(
         "details": {},
     }
 
-    restarted = AnalysisRuntime(tmp_path)
+    restarted = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         manifest = restarted.read_evidence(evidence_id)
         projection = restarted.repository.read_agent_projection(evidence_id)

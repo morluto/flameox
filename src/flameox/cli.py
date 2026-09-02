@@ -49,8 +49,8 @@ def main(
     """Run Flameox without creating a workspace or repository."""
 
 
-def _runtime(project_root: Path) -> AnalysisRuntime:
-    return AnalysisRuntime(project_root)
+def _runtime() -> AnalysisRuntime:
+    return AnalysisRuntime()
 
 
 def _json_object(value: str, *, option: str) -> dict[str, Any]:
@@ -78,7 +78,6 @@ def _cli_failure(error: RuntimeFailure | ValidationError) -> NoReturn:
 
 @app.command("setup")
 def setup(
-    project_root: Annotated[Path, typer.Option("--project-root")] = Path("."),
     provider: Annotated[list[str] | None, typer.Option("--provider")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
     timeout_seconds: Annotated[
@@ -87,10 +86,9 @@ def setup(
     ] = DEFAULT_PREPARATION_TIMEOUT_SECONDS,
 ) -> None:
     """Print version-bound MCP config and optionally prepare selected provider extras."""
-    root = project_root.resolve(strict=True)
     selected = provider or []
     try:
-        preparation = prepare_providers(selected, root, timeout_seconds)
+        preparation = prepare_providers(selected, timeout_seconds)
     except SetupFailure as error:
         raise typer.BadParameter(str(error), param_hint="--provider") from error
     prepared_providers = preparation.prepared_managed_providers
@@ -103,8 +101,6 @@ def setup(
         "args": args,
         "resolved_version": __version__,
         "client_registration_changed": False,
-        "project_root": str(root),
-        "durable_repository": str(root / ".flameox"),
         "repository_created": False,
         "providers": sorted(set(prepared_providers) | set(external_providers)),
         "preparation_command": preparation.preparation_command,
@@ -133,10 +129,9 @@ def analyze(
     format_name: Annotated[str | None, typer.Option("--format")] = None,
     continuation: Annotated[str | None, typer.Option("--continuation")] = None,
     preserve: Annotated[bool, typer.Option("--preserve")] = False,
-    project_root: Annotated[Path, typer.Option("--project-root")] = Path("."),
 ) -> None:
     """Analyze explicit artifacts and optionally preserve the result."""
-    runtime = _runtime(project_root)
+    runtime = _runtime()
     try:
         result = runtime.analyze(
             capability_id,
@@ -158,11 +153,10 @@ def capture(
     ctx: typer.Context,
     provider_id: Annotated[str, typer.Option("--provider")],
     capability_id: Annotated[str, typer.Option("--capability")] = "artifact.preview",
-    cwd: Annotated[str, typer.Option("--cwd")] = ".",
+    cwd: Annotated[Path, typer.Option("--cwd")] = Path("."),
     capture_arguments: Annotated[str, typer.Option("--capture-arguments")] = "{}",
     analysis_arguments: Annotated[str, typer.Option("--analysis-arguments")] = "{}",
     preserve: Annotated[bool, typer.Option("--preserve")] = False,
-    project_root: Annotated[Path, typer.Option("--project-root")] = Path("."),
 ) -> None:
     """Capture a typed argv target after `--` and immediately analyze its output."""
     argv = list(ctx.args)
@@ -170,13 +164,13 @@ def capture(
         argv.pop(0)
     if not argv:
         raise typer.BadParameter("capture requires an argv after --")
-    runtime = _runtime(project_root)
+    runtime = _runtime()
 
     async def execute() -> dict[str, Any]:
         return await runtime.capture_and_analyze(
             CaptureTarget(
                 argv=argv,
-                cwd=cwd,
+                cwd=str(cwd.resolve(strict=True)),
                 provider_id=provider_id,
                 capture_arguments=_json_object(capture_arguments, option="--capture-arguments"),
                 analysis_arguments=_json_object(analysis_arguments, option="--analysis-arguments"),
@@ -207,10 +201,9 @@ def evidence_query(
     input_sha256: Annotated[str | None, typer.Option("--input-sha256")] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
     cursor: Annotated[str | None, typer.Option("--cursor")] = None,
-    project_root: Annotated[Path, typer.Option("--project-root")] = Path("."),
 ) -> None:
     """Search immutable evidence manifests."""
-    runtime = _runtime(project_root)
+    runtime = _runtime()
     try:
         _write(
             runtime.query_evidence(
@@ -230,10 +223,9 @@ def evidence_query(
 @evidence_app.command("show")
 def evidence_show(
     evidence_id: Annotated[str, typer.Argument()],
-    project_root: Annotated[Path, typer.Option("--project-root")] = Path("."),
 ) -> None:
     """Read one canonical immutable evidence manifest."""
-    runtime = _runtime(project_root)
+    runtime = _runtime()
     try:
         _write(runtime.read_evidence(evidence_id))
     except (RuntimeFailure, ValidationError) as error:
@@ -243,21 +235,17 @@ def evidence_show(
 
 
 @mcp_app.command("serve")
-def mcp_serve(
-    project_root: Annotated[Path, typer.Option("--project-root")] = Path("."),
-) -> None:
-    """Serve Flameox over repo-local stdio with a fixed project root."""
-    run_server(project_root)
+def mcp_serve() -> None:
+    """Serve composable Flameox evidence tools over stdio."""
+    run_server()
 
 
 @mcp_app.command("inspect")
-def mcp_inspect(
-    project_root: Annotated[Path, typer.Option("--project-root")] = Path("."),
-) -> None:
+def mcp_inspect() -> None:
     """Print the exact MCP catalog without starting a transport."""
 
     async def inspect_server() -> dict[str, Any]:
-        server = create_server(project_root)
+        server = create_server()
         return {
             "tools": [item.model_dump(mode="json") for item in await server.list_tools()],
             "resources": [
