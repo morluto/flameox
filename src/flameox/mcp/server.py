@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 import anyio
 from mcp.server import MCPServer
@@ -185,16 +185,12 @@ def create_server(
     limits: RequestLimits | None = None,
 ) -> MCPServer[AnalysisRuntime]:
     """Create a process-lifespan runtime over explicit artifacts and targets."""
-    active_runtime: AnalysisRuntime | None = None
 
-    def runtime() -> AnalysisRuntime:
-        if active_runtime is None:
-            raise RuntimeError("The Flameox server lifespan is not active.")
-        return active_runtime
+    def runtime(ctx: Context[Any]) -> AnalysisRuntime:
+        return cast(AnalysisRuntime, ctx.request_context.lifespan_context)
 
     @asynccontextmanager
     async def lifespan(_: MCPServer[AnalysisRuntime]) -> AsyncIterator[AnalysisRuntime]:
-        nonlocal active_runtime
         active_runtime = AnalysisRuntime(evidence_directory=evidence_directory, limits=limits)
         try:
             if active_runtime.repository.exists:
@@ -202,7 +198,6 @@ def create_server(
             yield active_runtime
         finally:
             active_runtime.close()
-            active_runtime = None
 
     server = MCPServer(
         "flameox",
@@ -269,12 +264,13 @@ def create_server(
         async def handler(
             sources: Annotated[list[Source], Field(min_length=1, max_length=32)],
             options: Any,
+            ctx: Context[AnalysisRuntime],
             limits: RequestLimits | None = None,
             continuation: str | None = None,
         ) -> Annotated[CallToolResult, AnalysisOutcome]:
             try:
                 return _success(
-                    runtime().analyze(
+                    runtime(ctx).analyze(
                         capability.id,
                         sources,
                         options.model_dump(),
@@ -320,7 +316,7 @@ def create_server(
             )
             experiment = execution.design if isinstance(execution, ExperimentExecution) else None
             try:
-                value = await runtime().capture_and_analyze(
+                value = await runtime(ctx).capture_and_analyze(
                     target,
                     capability.id,
                     mode=execution.kind,
@@ -394,10 +390,11 @@ def create_server(
     @server.tool(annotations=PRESERVE, structured_output=True)
     async def preserve_evidence(
         analysis_id: str,
+        ctx: Context[AnalysisRuntime],
     ) -> Annotated[CallToolResult, PreservationOutcome]:
         """Idempotently preserve one session analysis and its native artifacts."""
         try:
-            value = runtime().preserve_evidence(analysis_id)
+            value = runtime(ctx).preserve_evidence(analysis_id)
             link = ResourceLink(
                 type="resource_link",
                 uri=value["uri"],
@@ -410,6 +407,7 @@ def create_server(
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def query_evidence(
+        ctx: Context[AnalysisRuntime],
         evidence_kind: str | None = None,
         capability_id: str | None = None,
         provider_id: str | None = None,
@@ -422,7 +420,7 @@ def create_server(
         """Search an immutable, request-pinned manifest inventory in deterministic order."""
         try:
             return _success(
-                runtime().query_evidence(
+                runtime(ctx).query_evidence(
                     evidence_kind=evidence_kind,
                     capability_id=capability_id,
                     provider_id=provider_id,
@@ -442,9 +440,9 @@ def create_server(
         description="Redacted projection of an immutable Flameox evidence manifest.",
         mime_type=AGENT_EVIDENCE_MEDIA_TYPE,
     )
-    async def evidence_manifest(evidence_id: str) -> str:
+    async def evidence_manifest(evidence_id: str, ctx: Context) -> str:
         try:
-            manifest = runtime().read_evidence_agent_projection(evidence_id)
+            manifest = runtime(ctx).read_evidence_agent_projection(evidence_id)
         except RuntimeFailure as error:
             # Resource handlers raise so missing resources are protocol errors, not content.
             raise FileNotFoundError(f"{error.code}: {error.message}") from error

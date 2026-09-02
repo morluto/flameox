@@ -64,10 +64,11 @@ protocol error shape rather than the tool's output schema.
 
 `prepare_providers` is the only open-world tool. It resolves the exact package requirement through
 `uvx`, verifies that environment by running Flameox's version command, and returns the same
-requirement in a project-bound MCP launcher. The request names the complete managed provider set;
-Flameox keeps no installed-provider inventory or setup receipt. System profilers, drivers, device
-access, and OS permissions remain external requirements; Flameox returns guidance for them but does
-not invoke a system package manager or elevate privileges. Preparation creates no project state,
+requirement in a global, version-pinned MCP launcher. The request names the complete managed
+provider set; Flameox keeps no installed-provider inventory or setup receipt. System profilers,
+drivers, device access, and OS permissions remain external requirements. Flameox returns guidance
+for them but does not invoke a system package manager or elevate privileges. Preparation creates no
+project state,
 durable job, or plan, and it cannot add packages to the currently running server. A result with
 a non-null `next_action` identifies the typed `reconnect_mcp` handoff, explains that the current
 server is unchanged, and directs the agent to reconnect with the returned launcher before retrying
@@ -111,12 +112,12 @@ overrides after experiment-case overrides are merged. Provider fields live in th
 typed provider union, and analysis fields live in its capability-specific `options` model. Shell
 command strings are not accepted.
 
-Provider output formats are compared with the requested capability before scratch creation or
+Provider output formats are compared with the requested capability before scratch allocation or
 execution. Statically incompatible pairs fail with the declared formats and compatible capture
-providers. Capture also resolves the cwd and executable, checks aggregate scratch and durable
-provenance capacity, and validates every experiment case before creating request scratch. There is
-no separate plan or preflight authority: the typed capture request is validated atomically by the
-operation that executes it.
+providers. Capture then binds every real invocation, resolves the cwd and executables, and validates
+aggregate scratch and durable provenance capacity before allocating one request-owned scratch
+directory or starting a workload. There is no separate plan or preflight authority: the operation
+validates and executes the same bound invocations.
 
 Callers may request preservation as part of capture. Once native collection succeeds, requested
 preservation publishes the native artifacts even if immediate analysis fails; the result then

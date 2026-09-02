@@ -295,6 +295,35 @@ def test_continuation_pages_have_distinct_preservable_analysis_ids(tmp_path: Pat
 
 
 @pytest.mark.unit
+def test_session_analysis_cache_expires_least_recently_used_handles(tmp_path: Path) -> None:
+    artifact = tmp_path / "samples.json"
+    artifact.write_text(json.dumps([{"value": value} for value in range(65)]))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        first = runtime.analyze(
+            "artifact.preview",
+            [PathSource(path=str(artifact))],
+            {},
+            limits=RequestLimits(max_rows=1),
+        )
+        latest = first
+        for _ in range(64):
+            latest = runtime.analyze(
+                "artifact.preview",
+                [PathSource(path=str(artifact))],
+                {},
+                limits=RequestLimits(max_rows=1),
+                continuation=latest["continuation"],
+            )
+
+        assert latest["analysis_id"] in runtime.analyses
+        with pytest.raises(RuntimeFailure, match="expired"):
+            runtime.preserve_evidence(first["analysis_id"])
+    finally:
+        runtime.close()
+
+
+@pytest.mark.unit
 def test_capability_arguments_reject_unknown_fields(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
@@ -860,6 +889,7 @@ def test_pyperf_capture_binds_native_output_before_analysis(tmp_path: Path) -> N
                 "command",
             ]
             preserved = runtime.preserve_evidence(result["analysis_id"])
+            assert list(runtime.scratch.glob("capture-*")) == []
             manifest = runtime.read_evidence(preserved["evidence_id"])
             assert {item["role"] for item in manifest["body"]["artifacts"]} == {
                 "capture-0001/stdout",

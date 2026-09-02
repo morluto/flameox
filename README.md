@@ -57,10 +57,12 @@ explicit artifact paths / typed direct target
 ```
 
 Analysis and unpreserved capture make no durable Flameox writes. Capture
-artifacts stay in bounded session scratch until preservation or server
-shutdown. The first `preserve_evidence` call creates the user-level Flameox data directory and
-stores native bytes and a canonical evidence bundle by SHA-256. `FLAMEOX_DATA_DIR` overrides the
-platform default for isolation or another storage location. Flameox never edits project Git files.
+artifacts stay in bounded session scratch until preservation, least-recently-used eviction, or
+server shutdown. An evicted `analysis_id` returns `EXPIRED_SESSION_ANALYSIS`; preserve conclusions
+before relying on them. The first `preserve_evidence` call creates the user-level Flameox data
+directory and stores native bytes and a canonical evidence bundle by SHA-256. `FLAMEOX_DATA_DIR`
+overrides the platform default for isolation or another storage location. Flameox never edits
+project Git files.
 
 The agent owns hypotheses and narrative findings in its own notes. Flameox owns
 only observed inputs, effective requests, execution provenance, typed evidence,

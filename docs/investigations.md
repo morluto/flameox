@@ -65,7 +65,8 @@ behavioral equivalence; benchmark timing is not an oracle.
 ## Identity and preservation
 
 `analysis_id` exists only to preserve one result during the current process. It
-must not appear in a durable claim. `evidence_id` binds the effective request,
+may expire earlier when the bounded session cache evicts it and must not appear in a durable claim.
+`evidence_id` binds the effective request,
 provider/input identity, data files, coverage, limitations, and episode time.
 
 Preservation is optional but required for conclusions another person or agent

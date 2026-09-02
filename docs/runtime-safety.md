@@ -25,12 +25,14 @@ group and settles bounded output readers before unwinding. No operation can be
 polled, resumed, or recovered after restart.
 
 Session scratch has byte and file ceilings. A capture is rejected before its
-declared output budget could exhaust remaining capacity. Unpreserved files are
-never silently evicted and disappear at shutdown.
+declared output budget could exhaust remaining capacity. Least-recently-used session analyses and
+conversion outputs are evicted to make room; their `analysis_id` handles then report
+`EXPIRED_SESSION_ANALYSIS`. Successful preservation releases capture scratch after the immutable
+bundle is published. All remaining scratch disappears at shutdown.
 
-Capture performs compatibility, executable, aggregate scratch, and provenance admission before it
-creates request scratch or executes workload and oracle processes. These checks are part of the
-capture request rather than a separate plan or preflight lifecycle.
+Capture performs compatibility, invocation binding, executable, aggregate scratch, and provenance
+admission before allocating request scratch or executing workload and oracle processes. These
+checks are part of the capture request rather than a separate plan or preflight lifecycle.
 
 ## Input and output bounds
 

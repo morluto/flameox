@@ -25,11 +25,12 @@ Neither is interpreted relative to server startup.
 
 ## Process model
 
-`AnalysisRuntime` owns the capability registry, subprocess broker, scratch
-directory, conversion cache, and session analysis cache. The MCP lifespan
-creates one runtime and destroys its scratch on shutdown. Long work stays inside
-the request that started it. Progress is reported through the SDK context and
-cancellation unwinds the broker, including descendant cleanup.
+`AnalysisRuntime` owns the capability registry, subprocess broker, bounded scratch,
+conversion cache, and least-recently-used session analysis cache. The MCP lifespan creates one
+runtime, exposes it through the SDK request context, and destroys its scratch on shutdown. Evicting
+a capture analysis removes its native session artifacts; a later preservation attempt reports that
+the session handle expired. Long work stays inside the request that started it. Progress is reported
+through the SDK context and cancellation unwinds the broker, including descendant cleanup.
 
 `analysis_id` is a session handle. It is intentionally meaningless after
 restart and can only be passed to `preserve_evidence`. `evidence_id` is a
@@ -39,6 +40,8 @@ durable SHA-256 identity derived from the canonical manifest body.
 
 - `runtime_contracts.py` owns public models and the capability/capture-provider registries.
 - `stateless.py` owns bounded analysis, capture orchestration, scratch, and the session cache.
+- `providers/capture.py` owns provider-specific command construction and expected native outputs;
+  `providers/availability.py` owns installation and workload requirements.
 - `repository.py` owns lazy repository creation, validation, publication,
   inventory queries, and immutable resource reads.
 - `execution.py` and `command_binding.py` own executable binding, subprocess

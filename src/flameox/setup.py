@@ -6,26 +6,10 @@ from dataclasses import dataclass
 from typing import Literal
 
 from flameox import __version__
-
-PYTHON_PROVIDER_EXTRAS = {
-    "aiperf": "inference",
-    "memray": "memory",
-    "otlp": "trace",
-    "perfetto": "trace",
-    "py-spy": "cpu",
-    "torch": "torch",
-}
-
-SYSTEM_PROVIDER_GUIDANCE = {
-    "compute-sanitizer": "Install NVIDIA Compute Sanitizer with the CUDA Toolkit.",
-    "nsight-compute": "Install NVIDIA Nsight Compute with its extras/python interface.",
-    "nsight-systems": "Install NVIDIA Nsight Systems and make nsys available on PATH.",
-    "nvbench": "Build the target benchmark with NVBench and verify CUDA device access.",
-    "perf": "Install Linux perf for the running kernel and grant profiling permission.",
-    "perfetto": "Install Perfetto Trace Processor and make trace_processor_shell available.",
-    "rocprofv3": "Install ROCProfiler SDK and make rocprofv3 available on PATH.",
-    "triton": "Install Triton in the target Python environment and verify device access.",
-}
+from flameox.providers.availability import (
+    MANAGED_PROVIDER_EXTRAS,
+    SYSTEM_PROVIDER_GUIDANCE,
+)
 
 DEFAULT_PREPARATION_TIMEOUT_SECONDS = 1_800
 MAX_PREPARATION_TIMEOUT_SECONDS = 3_600
@@ -65,10 +49,10 @@ class ProviderPreparation:
 
 def _validate_providers(providers: list[str]) -> None:
     unknown = sorted(
-        set(providers).difference(PYTHON_PROVIDER_EXTRAS).difference(SYSTEM_PROVIDER_GUIDANCE)
+        set(providers).difference(MANAGED_PROVIDER_EXTRAS).difference(SYSTEM_PROVIDER_GUIDANCE)
     )
     if unknown:
-        supported = ", ".join(sorted(PYTHON_PROVIDER_EXTRAS | SYSTEM_PROVIDER_GUIDANCE))
+        supported = ", ".join(sorted(MANAGED_PROVIDER_EXTRAS | SYSTEM_PROVIDER_GUIDANCE))
         raise ProviderSelectionFailure(
             f"Unknown provider {unknown[0]!r}; choose one of: {supported}"
         )
@@ -79,9 +63,9 @@ def mcp_launcher(providers: list[str]) -> tuple[str, list[str]]:
 
     extras = sorted(
         {
-            PYTHON_PROVIDER_EXTRAS[provider]
+            MANAGED_PROVIDER_EXTRAS[provider]
             for provider in providers
-            if provider in PYTHON_PROVIDER_EXTRAS
+            if provider in MANAGED_PROVIDER_EXTRAS
         }
     )
     extras_suffix = f"[{','.join(extras)}]" if extras else ""
@@ -113,7 +97,7 @@ def prepare_providers(
         )
     requested = list(dict.fromkeys(providers))
     _validate_providers(requested)
-    managed = [item for item in requested if item in PYTHON_PROVIDER_EXTRAS]
+    managed = [item for item in requested if item in MANAGED_PROVIDER_EXTRAS]
     external = [
         ExternalRequirement(item, SYSTEM_PROVIDER_GUIDANCE[item])
         for item in requested

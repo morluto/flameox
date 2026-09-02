@@ -14,6 +14,7 @@ import shutil
 import statistics
 import sys
 import tempfile
+from collections import OrderedDict
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -38,7 +39,16 @@ from flameox.execution import (
 from flameox.paths import default_data_directory
 from flameox.process_models import ProcessResult, process_exit_code
 from flameox.providers.aiperf import AIPerfProvider
+from flameox.providers.availability import (
+    SYSTEM_PROVIDER_GUIDANCE,
+    WORKLOAD_PYTHON_REQUIREMENTS,
+)
 from flameox.providers.benchmarks import BenchmarkProvider
+from flameox.providers.capture import (
+    CaptureInvocation,
+    build_capture_invocation,
+    materialize_capture_support,
+)
 from flameox.providers.contracts import (
     ProviderAnalysis,
     ProviderFailure,
@@ -69,35 +79,25 @@ from flameox.runtime_contracts import (
     MAX_INPUTS,
     MAX_ROWS,
     AnalysisResult,
-    BenchmarkSamplesCaptureArguments,
     Capability,
     CaptureArguments,
     CaptureTarget,
-    ComputeSanitizerCaptureArguments,
-    CoverageCaptureArguments,
-    EmptyArguments,
     EvidenceSource,
     ExperimentCase,
     ExperimentDesign,
-    MemrayCaptureArguments,
-    NsightComputeCaptureArguments,
-    NsightSystemsCaptureArguments,
     PathSource,
-    PerfCaptureArguments,
     PreviewArguments,
-    PyperfCaptureArguments,
-    PySpyCaptureArguments,
     RequestLimits,
-    RocprofCaptureArguments,
     RuntimeFailure,
     Source,
-    TorchProfilerCaptureArguments,
-    XctraceCaptureArguments,
     compatible_capture_providers,
 )
 from flameox.runtime_errors import DomainError, ErrorCode
-from flameox.setup import SYSTEM_PROVIDER_GUIDANCE
 from flameox.workers.harness import IsolatedWorkerHarness, WorkerRuntimeConfig
+
+MAX_SESSION_ANALYSES = 64
+MAX_SESSION_SCRATCH_BYTES = 1024**3
+MAX_SESSION_SCRATCH_FILES = 8192
 
 
 @dataclass(slots=True)
@@ -129,19 +129,24 @@ class CachedAnalysis:
 
 
 @dataclass(frozen=True, slots=True)
-class CaptureInvocation:
-    argv: tuple[str, ...]
-    environment: dict[str, str]
-    artifacts: tuple[tuple[Path, str, str], ...]
-
-
-@dataclass(frozen=True, slots=True)
 class ValidatedCaptureRequest:
     capability: Capability
     capture_arguments: CaptureArguments
     limits: RequestLimits
     cases: list[ExperimentCase]
     blocks: int
+
+
+@dataclass(frozen=True, slots=True)
+class BoundCapture:
+    sequence_number: int
+    block: int
+    case: ExperimentCase
+    argv: list[str]
+    environment: dict[str, str]
+    directory: Path
+    invocation: CaptureInvocation
+    binding: ResolvedExecutable
 
 
 class AnalysisRuntime:
@@ -152,14 +157,11 @@ class AnalysisRuntime:
         *,
         evidence_directory: Path | None = None,
         limits: RequestLimits | None = None,
-        scratch_max_bytes: int = 1024**3,
-        scratch_max_files: int = 8192,
     ) -> None:
         self.limits = limits or RequestLimits()
         self.session_id = f"{os.getpid()}-{secrets.token_hex(8)}"
         self._temporary = tempfile.TemporaryDirectory(prefix="flameox-session-")
         self.scratch = Path(self._temporary.name)
-        self.scratch_max_bytes, self.scratch_max_files = scratch_max_bytes, scratch_max_files
         self.broker = SubprocessBroker()
         self.workers = IsolatedWorkerHarness(
             WorkerRuntimeConfig(
@@ -189,11 +191,102 @@ class AnalysisRuntime:
         self.repository = EvidenceRepository(
             evidence_directory or default_data_directory(), self.session_id
         )
-        self.analyses: dict[str, CachedAnalysis] = {}
-        self.conversions: dict[tuple[str, str], Path] = {}
+        self.analyses: OrderedDict[str, CachedAnalysis] = OrderedDict()
+        self.conversions: OrderedDict[tuple[str, str], Path] = OrderedDict()
 
     def close(self) -> None:
         self._temporary.cleanup()
+
+    def _cache_analysis(self, analysis_id: str, cached: CachedAnalysis) -> None:
+        self.analyses[analysis_id] = cached
+        self.analyses.move_to_end(analysis_id)
+        while len(self.analyses) > MAX_SESSION_ANALYSES:
+            self._evict_oldest_analysis()
+
+    def _evict_oldest_analysis(self, *, protected_root: Path | None = None) -> bool:
+        selected = next(
+            (
+                analysis_id
+                for analysis_id, cached in self.analyses.items()
+                if protected_root is None
+                or not any(source.path.is_relative_to(protected_root) for source in cached.sources)
+            ),
+            None,
+        )
+        if selected is None:
+            return False
+        cached = self.analyses.pop(selected)
+        self._release_analysis_scratch(cached)
+        return True
+
+    def _release_analysis_scratch(self, cached: CachedAnalysis) -> None:
+        capture_roots: set[Path] = set()
+        for source in cached.sources:
+            try:
+                relative = source.path.relative_to(self.scratch)
+            except ValueError:
+                continue
+            if relative.parts and relative.parts[0].startswith("capture-"):
+                capture_roots.add(self.scratch / relative.parts[0])
+        for root in capture_roots:
+            retained = any(
+                source.path.is_relative_to(root)
+                for analysis in self.analyses.values()
+                if analysis is not cached
+                for source in analysis.sources
+            )
+            if not retained:
+                shutil.rmtree(root, ignore_errors=True)
+
+    @staticmethod
+    def _remove_conversion(path: Path) -> None:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+
+    def _cache_conversion(self, key: tuple[str, str], path: Path) -> None:
+        self.conversions[key] = path
+        self.conversions.move_to_end(key)
+        try:
+            self._prune_scratch(protected_root=path)
+        except RuntimeFailure:
+            self.conversions.pop(key, None)
+            self._remove_conversion(path)
+            raise
+
+    def _prune_scratch(
+        self,
+        *,
+        protected_root: Path | None = None,
+        reserved_bytes: int = 0,
+        reserved_files: int = 0,
+    ) -> None:
+        used_bytes, used_files = self._scratch_usage()
+        while (
+            used_bytes + reserved_bytes > MAX_SESSION_SCRATCH_BYTES
+            or used_files + reserved_files > MAX_SESSION_SCRATCH_FILES
+        ):
+            if self._evict_oldest_analysis(protected_root=protected_root):
+                used_bytes, used_files = self._scratch_usage()
+                continue
+            removable = next(
+                (
+                    key
+                    for key, path in self.conversions.items()
+                    if protected_root is None or not path.is_relative_to(protected_root)
+                ),
+                None,
+            )
+            if removable is None:
+                break
+            self._remove_conversion(self.conversions.pop(removable))
+            used_bytes, used_files = self._scratch_usage()
+        if (
+            used_bytes + reserved_bytes > MAX_SESSION_SCRATCH_BYTES
+            or used_files + reserved_files > MAX_SESSION_SCRATCH_FILES
+        ):
+            raise RuntimeFailure("LIMIT_EXCEEDED", "Request exceeded the session scratch ceiling")
 
     def analyze(
         self,
@@ -238,6 +331,7 @@ class AnalysisRuntime:
             self.session_id.encode() + canonical_bytes(analysis_request)
         ).hexdigest()
         if cached := self.analyses.get(analysis_id):
+            self.analyses.move_to_end(analysis_id)
             return self._copy_result(cached.result)
         provider_analysis = canonical_provider_projection(
             self._provider_analysis(
@@ -339,8 +433,9 @@ class AnalysisRuntime:
         validated_result = AnalysisResult.model_validate(result).model_dump(
             mode="json", exclude_none=False
         )
-        self.analyses[analysis_id] = CachedAnalysis(
-            self._copy_result(validated_result), resolved, body
+        self._cache_analysis(
+            analysis_id,
+            CachedAnalysis(self._copy_result(validated_result), resolved, body),
         )
         return self._copy_result(validated_result)
 
@@ -429,83 +524,107 @@ class AnalysisRuntime:
         blocks = validated_capture.blocks
         sequence = self._capture_sequence(cases, blocks, experiment)
         total = len(sequence)
-        self._reserve_capture_capacity(
-            total,
-            provider_id=target.provider_id,
-            has_oracle=experiment is not None and experiment.semantic_oracle is not None,
-            limits=selected_limits,
-        )
         cwd = self._resolve_capture_cwd(target.cwd)
-        anticipated_root = self.scratch / f"capture-{'0' * 24}"
+        request_scratch = self.scratch / f"capture-{secrets.token_hex(12)}"
         pending_executions: list[dict[str, Any]] = []
-        for sequence_number, block, case in sequence:
-            argv = case.argv or target.argv
-            environment = {**target.environment, **case.environment}
-            if len(environment) > 32:
-                raise RuntimeFailure(
-                    "INVALID_INPUT", "merged capture environment must contain at most 32 entries"
+        bound_captures: list[BoundCapture] = []
+        probed_workloads: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
+        try:
+            for sequence_number, block, case in sequence:
+                argv = case.argv or target.argv
+                environment = {**target.environment, **case.environment}
+                if len(environment) > 32:
+                    raise RuntimeFailure(
+                        "INVALID_INPUT",
+                        "merged capture environment must contain at most 32 entries",
+                    )
+                directory = request_scratch / f"case-{sequence_number:04d}"
+                invocation = build_capture_invocation(
+                    target.provider_id,
+                    argv,
+                    environment,
+                    capture_arguments,
+                    directory,
+                    self._require_managed_executable,
                 )
-            directory = anticipated_root / f"case-{sequence_number:04d}"
-            invocation = self._capture_invocation(
-                target.provider_id, argv, environment, capture_arguments, directory
-            )
-            self._require_workload_python_provider(target.provider_id, argv, environment, cwd=cwd)
-            binding = self._require_host_tool(
-                invocation.argv[0],
-                cwd=cwd,
-                environment={**os.environ, **invocation.environment},
-                provider_id=target.provider_id,
-            )
-            if (
-                target.provider_id == "nsight-compute"
-                and self.nsight_compute.resolve_interface(binding.invocation_path) is None
-            ):
-                raise RuntimeFailure(
-                    "UNAVAILABLE_CAPABILITY",
-                    "The official Nsight Compute ncu_report.py interface is missing.",
-                    details={
-                        "provider_id": target.provider_id,
-                        "external_setup_guidance": SYSTEM_PROVIDER_GUIDANCE[target.provider_id],
-                    },
-                )
-            if experiment is not None and experiment.semantic_oracle is not None:
-                self._require_host_tool(
-                    experiment.semantic_oracle[0],
+                workload_key = (argv[0], tuple(sorted(environment.items())))
+                if workload_key not in probed_workloads:
+                    self._require_workload_python_provider(
+                        target.provider_id, argv, environment, cwd=cwd
+                    )
+                    probed_workloads.add(workload_key)
+                binding = self._require_host_tool(
+                    invocation.argv[0],
                     cwd=cwd,
-                    environment={**os.environ, **environment},
+                    environment={**os.environ, **invocation.environment},
+                    provider_id=target.provider_id,
                 )
-            pending_executions.append(
-                self._pending_capture_execution(case, block, argv, invocation.argv, cwd)
+                if (
+                    target.provider_id == "nsight-compute"
+                    and self.nsight_compute.resolve_interface(binding.invocation_path) is None
+                ):
+                    raise RuntimeFailure(
+                        "UNAVAILABLE_CAPABILITY",
+                        "The official Nsight Compute ncu_report.py interface is missing.",
+                        details={
+                            "provider_id": target.provider_id,
+                            "external_setup_guidance": SYSTEM_PROVIDER_GUIDANCE[target.provider_id],
+                        },
+                    )
+                if experiment is not None and experiment.semantic_oracle is not None:
+                    self._require_host_tool(
+                        experiment.semantic_oracle[0],
+                        cwd=cwd,
+                        environment={**os.environ, **environment},
+                    )
+                bound_captures.append(
+                    BoundCapture(
+                        sequence_number,
+                        block,
+                        case,
+                        argv,
+                        environment,
+                        directory,
+                        invocation,
+                        binding,
+                    )
+                )
+                pending_executions.append(
+                    self._pending_capture_execution(case, block, argv, invocation.argv, cwd)
+                )
+            self._check_capture_provenance_capacity(
+                target=target,
+                mode=mode,
+                experiment=experiment,
+                executions=pending_executions,
+                limit=selected_limits.max_provenance_bytes,
             )
-        self._check_capture_provenance_capacity(
-            target=target,
-            mode=mode,
-            experiment=experiment,
-            executions=pending_executions,
-            limit=selected_limits.max_provenance_bytes,
-        )
+            self._reserve_capture_capacity(
+                total,
+                provider_id=target.provider_id,
+                has_oracle=experiment is not None and experiment.semantic_oracle is not None,
+                limits=selected_limits,
+            )
+        except BaseException:
+            shutil.rmtree(request_scratch, ignore_errors=True)
+            raise
+        try:
+            request_scratch.mkdir()
+            for item in bound_captures:
+                item.directory.mkdir()
+                materialize_capture_support(target.provider_id, item.directory)
+        except BaseException:
+            shutil.rmtree(request_scratch, ignore_errors=True)
+            raise
         captured: list[ResolvedSource] = []
         analysis_sources: list[ResolvedSource] = []
         executions: list[dict[str, Any]] = []
-        request_scratch = self.scratch / f"capture-{secrets.token_hex(12)}"
-        request_scratch.mkdir()
-        for sequence_number, block, case in sequence:
+        for item in bound_captures:
+            sequence_number, block, case = item.sequence_number, item.block, item.case
             if progress:
                 await progress(sequence_number - 1, total, f"capture {case.name} block {block}")
-            argv = case.argv or target.argv
-            environment = {**target.environment, **case.environment}
-            directory = request_scratch / f"case-{sequence_number:04d}"
-            directory.mkdir()
-            self._materialize_capture_support(target.provider_id, directory)
-            invocation, binding = self._bind_capture_invocation(
-                target.provider_id,
-                argv,
-                environment,
-                capture_arguments,
-                directory,
-                cwd=cwd,
-                request_scratch=request_scratch,
-            )
+            argv, environment, directory = item.argv, item.environment, item.directory
+            invocation, binding = item.invocation, item.binding
             request = ExecutionRequest(
                 argv=invocation.argv,
                 executable_binding=binding,
@@ -627,7 +746,7 @@ class AnalysisRuntime:
                     "status": "passed" if oracle_exit_code == 0 else "failed",
                     "failure_code": oracle_failure_code,
                 }
-            self._assert_scratch_capacity()
+            self._prune_scratch(protected_root=request_scratch)
             termination = process.termination
             exit_code = getattr(termination, "exit_code", None)
             status = "succeeded" if exit_code == 0 else "failed"
@@ -710,6 +829,7 @@ class AnalysisRuntime:
         )
         if preserve:
             result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
+        self._prune_scratch(protected_root=request_scratch)
         return result
 
     def _capture_failure_result(
@@ -973,32 +1093,6 @@ class AnalysisRuntime:
             shutil.rmtree(request_scratch, ignore_errors=True)
             raise
 
-    def _bind_capture_invocation(
-        self,
-        provider_id: str,
-        target_argv: list[str],
-        environment: dict[str, str],
-        arguments: CaptureArguments,
-        directory: Path,
-        *,
-        cwd: Path,
-        request_scratch: Path,
-    ) -> tuple[CaptureInvocation, ResolvedExecutable]:
-        try:
-            invocation = self._capture_invocation(
-                provider_id, target_argv, environment, arguments, directory
-            )
-            binding = self._require_capture_tool(
-                invocation.argv[0],
-                cwd=cwd,
-                environment={**os.environ, **invocation.environment},
-                request_scratch=request_scratch,
-            )
-        except OSError:
-            shutil.rmtree(request_scratch, ignore_errors=True)
-            raise
-        return invocation, binding
-
     def _require_workload_python_provider(
         self,
         provider_id: str,
@@ -1007,11 +1101,7 @@ class AnalysisRuntime:
         *,
         cwd: Path,
     ) -> None:
-        requirements = {
-            "coverage": ("coverage", "coverage", ">=7.14,<8"),
-            "memray": ("memray", "memray", ">=1.17"),
-        }
-        requirement = requirements.get(provider_id)
+        requirement = WORKLOAD_PYTHON_REQUIREMENTS.get(provider_id)
         if requirement is None:
             return
         module, distribution, supported_versions = requirement
@@ -1102,411 +1192,6 @@ class AnalysisRuntime:
             raise RuntimeFailure("UNKNOWN_CAPABILITY", f"Unknown capture provider: {provider_id}")
         return cast(CaptureArguments, contract.argument_model.model_validate(arguments))
 
-    @staticmethod
-    def _capture_invocation(
-        provider_id: str,
-        target_argv: list[str],
-        environment: dict[str, str],
-        arguments: CaptureArguments,
-        directory: Path,
-    ) -> CaptureInvocation:
-        if provider_id in {
-            "direct",
-            "node-cpu-profile",
-            "torch-profiler",
-            "compute-sanitizer",
-            "nsight-systems",
-            "nsight-compute",
-            "perf",
-            "rocprofv3",
-            "xctrace",
-        }:
-            return AnalysisRuntime._special_capture_invocation(
-                provider_id, target_argv, environment, arguments, directory
-            )
-        if provider_id == "pyperf" and isinstance(arguments, PyperfCaptureArguments):
-            output = directory / "benchmark.json"
-            pyperf_target = tuple(target_argv)
-            if any("\n" in item or "\r" in item for item in target_argv):
-                encoded_argv = base64.urlsafe_b64encode(
-                    json.dumps(target_argv, ensure_ascii=False).encode("utf-8")
-                ).decode("ascii")
-                pyperf_target = (
-                    sys.executable,
-                    "-m",
-                    "flameox.workers.pyperf_target",
-                    encoded_argv,
-                )
-            argv = (
-                sys.executable,
-                "-m",
-                "pyperf",
-                "command",
-                "--quiet",
-                "--output",
-                str(output),
-                "--processes",
-                str(arguments.processes),
-                "--values",
-                str(arguments.values),
-                "--warmups",
-                str(arguments.warmups),
-                "--loops",
-                str(arguments.loops),
-                "--min-time",
-                str(arguments.min_time),
-                "--name",
-                arguments.name,
-                *pyperf_target,
-            )
-            return CaptureInvocation(argv, environment, ((output, "pyperf", "benchmark"),))
-        if provider_id == "py-spy" and isinstance(arguments, PySpyCaptureArguments):
-            output = directory / "profile.speedscope.json"
-            pyspy_options = ["--rate", str(arguments.rate)]
-            if arguments.gil:
-                pyspy_options.append("--gil")
-            if arguments.native:
-                pyspy_options.append("--native")
-            return CaptureInvocation(
-                (
-                    AnalysisRuntime._require_managed_executable("py-spy", "py-spy"),
-                    "record",
-                    "--format",
-                    "speedscope",
-                    "--output",
-                    str(output),
-                    *pyspy_options,
-                    "--",
-                    *target_argv,
-                ),
-                environment,
-                ((output, "py-spy", "cpu-profile"),),
-            )
-        if provider_id == "memray" and isinstance(arguments, MemrayCaptureArguments):
-            if len(target_argv) < 2:
-                raise RuntimeFailure(
-                    "INVALID_INPUT",
-                    "memray capture requires a Python interpreter followed by a script, -m, or -c",
-                )
-            output = directory / "memory.bin"
-            memray_options = ["--output", str(output)]
-            if arguments.native:
-                memray_options.append("--native")
-            return CaptureInvocation(
-                (
-                    target_argv[0],
-                    "-m",
-                    "memray",
-                    "run",
-                    *memray_options,
-                    *target_argv[1:],
-                ),
-                environment,
-                ((output, "memray", "memory"),),
-            )
-        if provider_id == "nvbench" and isinstance(arguments, EmptyArguments):
-            output_root = directory / "nvbench"
-            output = output_root / "results.json"
-            return CaptureInvocation(
-                (*target_argv, "--jsonbin", str(output)),
-                environment,
-                ((output_root, "nvbench", "benchmark"),),
-            )
-        if provider_id == "benchmark-samples" and isinstance(
-            arguments, BenchmarkSamplesCaptureArguments
-        ):
-            output = directory / "benchmark-samples.json"
-            capture_environment = {
-                **environment,
-                "FLAMEOX_BENCHMARK_OUTPUT": str(output),
-            }
-            if arguments.torch_benchmark is not None:
-                capture_environment["FLAMEOX_TORCH_BENCHMARK_CONFIG"] = json.dumps(
-                    arguments.torch_benchmark.model_dump(mode="json"),
-                    separators=(",", ":"),
-                    sort_keys=True,
-                )
-            return CaptureInvocation(
-                tuple(target_argv),
-                capture_environment,
-                ((output, "samples", "benchmark"),),
-            )
-        if provider_id == "observations" and isinstance(arguments, EmptyArguments):
-            output = directory / "observations.jsonl"
-            return CaptureInvocation(
-                tuple(target_argv),
-                {**environment, "FLAMEOX_OBSERVATIONS_PATH": str(output)},
-                ((output, "observations", "observations"),),
-            )
-        if provider_id == "pytest" and isinstance(arguments, EmptyArguments):
-            return AnalysisRuntime._pytest_capture_invocation(target_argv, environment, directory)
-        if provider_id == "coverage" and isinstance(arguments, CoverageCaptureArguments):
-            return AnalysisRuntime._coverage_capture_invocation(
-                target_argv, environment, arguments, directory
-            )
-        raise RuntimeFailure(
-            "INVALID_INPUT", f"Invalid arguments for capture provider: {provider_id}"
-        )
-
-    @staticmethod
-    def _pytest_capture_invocation(
-        target_argv: list[str], environment: dict[str, str], directory: Path
-    ) -> CaptureInvocation:
-        executable = Path(target_argv[0]).name
-        if not executable.startswith("python") or target_argv[1:3] != ["-m", "pytest"]:
-            raise RuntimeFailure("INVALID_INPUT", "pytest capture requires a python -m pytest argv")
-        output = directory / "pytest.jsonl"
-        runner = Path(__file__).with_name("pytest_runner.py").resolve()
-        return CaptureInvocation(
-            (
-                target_argv[0],
-                "-c",
-                (
-                    "import runpy,sys; runner=sys.argv.pop(1); "
-                    "runpy.run_path(runner,run_name='__main__')"
-                ),
-                str(runner),
-                "--output",
-                str(output),
-                "--",
-                *target_argv[3:],
-            ),
-            environment,
-            ((output, "pytest", "reliability"),),
-        )
-
-    @staticmethod
-    def _coverage_capture_invocation(
-        target_argv: list[str],
-        environment: dict[str, str],
-        arguments: CoverageCaptureArguments,
-        directory: Path,
-    ) -> CaptureInvocation:
-        if len(target_argv) < 2:
-            raise RuntimeFailure(
-                "INVALID_INPUT",
-                "coverage capture requires a Python interpreter followed by a script or -m",
-            )
-        output = directory / ".coverage"
-        empty_config = directory / "coverage.ini"
-        options: list[str] = [
-            "--data-file",
-            str(output),
-            "--rcfile",
-            str(empty_config),
-        ]
-        if arguments.branch:
-            options.append("--branch")
-        for name, values in (
-            ("source", arguments.source),
-            ("include", arguments.include),
-            ("omit", arguments.omit),
-        ):
-            if values:
-                options.extend((f"--{name}", ",".join(values)))
-        argv = (
-            target_argv[0],
-            "-m",
-            "coverage",
-            "run",
-            *options,
-            *target_argv[1:],
-        )
-        return CaptureInvocation(argv, environment, ((output, "coverage", "coverage"),))
-
-    @staticmethod
-    def _special_capture_invocation(
-        provider_id: str,
-        target_argv: list[str],
-        environment: dict[str, str],
-        arguments: CaptureArguments,
-        directory: Path,
-    ) -> CaptureInvocation:
-        if provider_id == "direct" and isinstance(arguments, EmptyArguments):
-            return CaptureInvocation(tuple(target_argv), environment, ())
-        if provider_id == "node-cpu-profile" and isinstance(arguments, EmptyArguments):
-            output = directory / "profile.cpuprofile"
-            return CaptureInvocation(
-                (
-                    target_argv[0],
-                    "--cpu-prof",
-                    f"--cpu-prof-dir={directory}",
-                    f"--cpu-prof-name={output.name}",
-                    *target_argv[1:],
-                ),
-                environment,
-                ((output, "cpuprofile", "cpu-profile"),),
-            )
-        if provider_id == "torch-profiler" and isinstance(arguments, TorchProfilerCaptureArguments):
-            output_root = directory / "torch-profiler"
-            config = {
-                "mode": "sdk",
-                "activities": arguments.activities,
-                "schedule": {
-                    "wait": arguments.wait,
-                    "warmup": arguments.warmup,
-                    "active": arguments.active,
-                    "repeat": 1,
-                    "skip_first": arguments.skip_first,
-                },
-                "record_shapes": arguments.record_shapes,
-                "profile_memory": arguments.profile_memory,
-                "with_stack": arguments.with_stack,
-                "with_flops": arguments.with_flops,
-                "with_modules": arguments.with_modules,
-            }
-            output = output_root / "torch-trace-cycle-0000.json"
-            return CaptureInvocation(
-                tuple(target_argv),
-                {
-                    **environment,
-                    "FLAMEOX_TORCH_PROFILER_CONFIG": json.dumps(
-                        config, separators=(",", ":"), sort_keys=True
-                    ),
-                    "FLAMEOX_TORCH_PROFILER_OUTPUT_ROOT": str(output_root),
-                },
-                ((output, "pytorch", "trace"),),
-            )
-        if provider_id == "compute-sanitizer" and isinstance(
-            arguments, ComputeSanitizerCaptureArguments
-        ):
-            output = directory / "compute-sanitizer.log"
-            return CaptureInvocation(
-                (
-                    "compute-sanitizer",
-                    "--tool",
-                    arguments.tool,
-                    "--xml",
-                    "--save",
-                    str(output),
-                    "--error-exitcode",
-                    "99",
-                    *target_argv,
-                ),
-                environment,
-                ((output, "compute-sanitizer", "sanitizer"),),
-            )
-        if provider_id == "perf" and isinstance(arguments, PerfCaptureArguments):
-            output = directory / "perf.data"
-            return CaptureInvocation(
-                (
-                    "perf",
-                    "record",
-                    "--freq",
-                    str(arguments.frequency),
-                    "--call-graph",
-                    arguments.call_graph,
-                    "--output",
-                    str(output),
-                    "--",
-                    *target_argv,
-                ),
-                environment,
-                ((output, "perf-data", "cpu-profile"),),
-            )
-        if provider_id == "nsight-systems" and isinstance(arguments, NsightSystemsCaptureArguments):
-            output_stem = directory / "nsight-systems"
-            output = output_stem.with_suffix(".nsys-rep")
-            return CaptureInvocation(
-                (
-                    "nsys",
-                    "profile",
-                    f"--trace={','.join(arguments.trace)}",
-                    "--sample=none",
-                    "--cpuctxsw=none",
-                    "--resolve-symbols=false",
-                    "--force-overwrite=true",
-                    "--output",
-                    str(output_stem),
-                    *target_argv,
-                ),
-                environment,
-                ((output, "nsys-rep", "trace"),),
-            )
-        if provider_id == "nsight-compute" and isinstance(arguments, NsightComputeCaptureArguments):
-            output = directory / "nsight-compute.ncu-rep"
-            ncu_options: list[str] = [
-                "--export",
-                str(output),
-                "--force-overwrite",
-                "--replay-mode",
-                arguments.replay_mode,
-                "--launch-skip",
-                str(arguments.launch_skip),
-                "--launch-count",
-                str(arguments.launch_count),
-            ]
-            for section in arguments.section:
-                ncu_options.extend(("--section", section))
-            return CaptureInvocation(
-                ("ncu", *ncu_options, *target_argv),
-                environment,
-                ((output, "nsight-compute", "kernel-metrics"),),
-            )
-        if provider_id == "rocprofv3" and isinstance(arguments, RocprofCaptureArguments):
-            output_root = directory / "rocprof"
-            output = output_root / "rocprofv3_results.pftrace"
-            options: list[str] = []
-            for enabled, flag in (
-                (arguments.hip_trace, "--hip-trace"),
-                (arguments.kernel_trace, "--kernel-trace"),
-                (arguments.memory_copy_trace, "--memory-copy-trace"),
-                (arguments.memory_allocation_trace, "--memory-allocation-trace"),
-                (arguments.scratch_memory_trace, "--scratch-memory-trace"),
-                (arguments.marker_trace, "--marker-trace"),
-            ):
-                if enabled:
-                    options.append(flag)
-            return CaptureInvocation(
-                (
-                    "rocprofv3",
-                    "--output-format",
-                    "pftrace",
-                    "-o",
-                    "rocprofv3",
-                    "-d",
-                    str(output_root),
-                    *options,
-                    "--",
-                    *target_argv,
-                ),
-                environment,
-                ((output, "rocprof-pftrace", "trace"),),
-            )
-        if provider_id == "xctrace" and isinstance(arguments, XctraceCaptureArguments):
-            output = directory / "capture.trace"
-            return CaptureInvocation(
-                (
-                    "xcrun",
-                    "xctrace",
-                    "record",
-                    "--template",
-                    arguments.template,
-                    "--output",
-                    str(output),
-                    "--launch",
-                    "--",
-                    *target_argv,
-                ),
-                environment,
-                ((output, "xctrace", "trace"),),
-            )
-        raise RuntimeFailure(
-            "INVALID_INPUT", f"Invalid arguments for capture provider: {provider_id}"
-        )
-
-    @staticmethod
-    def _materialize_capture_support(provider_id: str, directory: Path) -> None:
-        child_directory = {
-            "nvbench": "nvbench",
-            "torch-profiler": "torch-profiler",
-            "rocprofv3": "rocprof",
-        }.get(provider_id)
-        if child_directory is not None:
-            (directory / child_directory).mkdir()
-        if provider_id == "coverage":
-            (directory / "coverage.ini").write_text("[run]\n")
-
     def _reserve_capture_capacity(
         self,
         total: int,
@@ -1518,15 +1203,10 @@ class AnalysisRuntime:
         provider_files = 2 if provider_id == "coverage" else int(provider_id != "direct")
         files_per_capture = 2 + provider_files + (2 if has_oracle else 0)
         bounded_outputs = 1 + int(provider_id != "direct") + int(has_oracle)
-        used_bytes, used_files = self._scratch_usage()
-        if used_bytes + total * bounded_outputs * limits.max_output_bytes > self.scratch_max_bytes:
-            raise RuntimeFailure(
-                "LIMIT_EXCEEDED", "Capture would exceed the session scratch ceiling"
-            )
-        if used_files + total * files_per_capture > self.scratch_max_files:
-            raise RuntimeFailure(
-                "LIMIT_EXCEEDED", "Capture would exceed the session scratch file ceiling"
-            )
+        self._prune_scratch(
+            reserved_bytes=total * bounded_outputs * limits.max_output_bytes,
+            reserved_files=total * files_per_capture,
+        )
 
     def preserve_evidence(self, analysis_id: str) -> dict[str, Any]:
         cached = self.analyses.get(analysis_id)
@@ -1544,6 +1224,7 @@ class AnalysisRuntime:
             except OSError as exc:
                 raise RuntimeFailure("REPOSITORY_IO_FAILURE", str(exc)) from exc
             else:
+                self.analyses.move_to_end(analysis_id)
                 return dict(cached.preserved)
         if cached.preserved is None:
             artifacts: list[NativeArtifact] = []
@@ -1593,10 +1274,12 @@ class AnalysisRuntime:
                     artifacts=artifacts,
                     analysis=self._durable_analysis(cached.result),
                 )
+                self._release_analysis_scratch(cached)
             except RepositoryError as exc:
                 raise RuntimeFailure(exc.code, exc.message) from exc
             except OSError as exc:
                 raise RuntimeFailure("REPOSITORY_IO_FAILURE", str(exc)) from exc
+        self.analyses.move_to_end(analysis_id)
         return dict(cached.preserved)
 
     @staticmethod
@@ -2153,6 +1836,7 @@ class AnalysisRuntime:
         key = (source.sha256, f"perf-script:{provider_version}")
         cached = self.conversions.get(key)
         if cached is not None and cached.is_file():
+            self.conversions.move_to_end(key)
             return cached, "perf"
         conversion_root = self.scratch / "conversions"
         conversion_root.mkdir(exist_ok=True)
@@ -2176,7 +1860,7 @@ class AnalysisRuntime:
         )
         outcome = self.broker.run_sync(request)
         self._write_collapsed_perf_script(outcome.stdout, output)
-        self.conversions[key] = output
+        self._cache_conversion(key, output)
         return output, "perf"
 
     @staticmethod
@@ -2220,6 +1904,7 @@ class AnalysisRuntime:
         key = (source.sha256, provider_version)
         cached = self.conversions.get(key)
         if cached is not None and cached.is_dir():
+            self.conversions.move_to_end(key)
             return cached, provider_version
         conversion_root = self.scratch / "conversions"
         conversion_root.mkdir(exist_ok=True)
@@ -2260,7 +1945,7 @@ class AnalysisRuntime:
             raise RuntimeFailure(
                 "EXECUTION_FAILURE", "Nsight Systems did not create a parquetdir export"
             )
-        self.conversions[key] = exported
+        self._cache_conversion(key, exported)
         return exported, provider_version
 
     def _xctrace_toc(self, source: ResolvedSource, limits: RequestLimits) -> tuple[Path, str]:
@@ -2271,6 +1956,7 @@ class AnalysisRuntime:
         key = (source.sha256, f"xctrace-toc:{provider_version}")
         cached = self.conversions.get(key)
         if cached is not None and cached.is_file():
+            self.conversions.move_to_end(key)
             return cached, provider_version
         conversion_root = self.scratch / "conversions"
         conversion_root.mkdir(exist_ok=True)
@@ -2306,12 +1992,12 @@ class AnalysisRuntime:
             raise RuntimeFailure(
                 "EXECUTION_FAILURE", "xctrace did not create a table-of-contents export"
             )
-        self.conversions[key] = output
+        self._cache_conversion(key, output)
         return output, provider_version
 
     def _resource_policy(self, limits: RequestLimits, *, writable_root: Path) -> ResourcePolicy:
         _used_bytes, used_files = self._scratch_usage()
-        remaining_files = self.scratch_max_files - used_files - 4
+        remaining_files = MAX_SESSION_SCRATCH_FILES - used_files - 4
         if remaining_files < 1:
             raise RuntimeFailure(
                 "LIMIT_EXCEEDED", "Capture would exceed the session scratch file ceiling"
@@ -2663,8 +2349,3 @@ class AnalysisRuntime:
     def _scratch_usage(self) -> tuple[int, int]:
         files = [item for item in self.scratch.rglob("*") if item.is_file()]
         return sum(item.stat().st_size for item in files), len(files)
-
-    def _assert_scratch_capacity(self) -> None:
-        used_bytes, used_files = self._scratch_usage()
-        if used_bytes > self.scratch_max_bytes or used_files > self.scratch_max_files:
-            raise RuntimeFailure("LIMIT_EXCEEDED", "Capture exceeded the session scratch ceiling")
