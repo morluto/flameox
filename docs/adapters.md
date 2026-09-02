@@ -13,16 +13,17 @@ Each capability registry entry owns:
 - a strict validation-equivalent argument model;
 - provider probes and compatibility rules;
 - capture and analysis handlers;
-- bounded examples, limits, overhead, and limitations.
+- model-visible selection guidance, bounded examples, limits, overhead, and limitations.
 
 One immutable capture-provider contract owns each provider's argument model, declared artifact
-roles and formats, and discovery description. Inspection, pre-execution compatibility checks, and
-capture argument validation consume that same contract so their format claims cannot drift.
+roles and formats, and selection description. Generated MCP schemas, pre-execution compatibility
+checks, and capture argument validation consume that same contract so their format claims cannot
+drift.
 
-Discovery probes packages, executables, platform, supported version, permission,
-and required external resources without mutating the host. Missing dependencies
-are successful availability results with remediation outside Flameox. Invoking
-an unavailable provider is a typed tool error.
+Provider probes inspect packages, executables, platform, supported version, permission, and required
+external resources without mutating the host. Capability tools remain discoverable when a provider
+is absent. Invoking an unavailable provider is a typed tool error with either an exact
+`prepare_providers` retry action or external host guidance.
 
 ## Evidence and capture support
 

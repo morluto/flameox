@@ -33,10 +33,16 @@ containment must not be silently promoted to complete evidence.
 
 ## Experiments
 
-`capture_and_analyze` supports `single` and `experiment` modes. An experiment
-declares cases, blocks, seed, metric, estimand, practical threshold, and an
-optional semantic oracle. Cases are bounded and execute through the same broker
-as a single capture.
+Every `capture_*` capability tool accepts a discriminated `single` or `experiment` execution
+request. An experiment declares cases, blocks, seed, metric, estimand, practical threshold, and an
+optional semantic oracle. Cases are bounded and execute through the same broker as a single capture.
+
+For GPU kernel work, the agent normally compiles and edits with its native coding tools, records
+correctness through `analyze_kernel_validation` and `analyze_kernel_compare`, checks hazards with
+`capture_sanitizer_failures`, measures representative baseline/candidate cases with
+`capture_benchmark_compare`, and profiles only the remaining uncertainty with
+`capture_gpu_launches` or `capture_gpu_kernel_metrics`. Flameox preserves the verification evidence;
+it does not generate kernels, wrap compilers, or decide which optimization to implement.
 
 The 0.2 runtime accepts `wall_time_ns` and paired `median_difference` or
 `mean_difference`. Each non-baseline case is compared with the first declared

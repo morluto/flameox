@@ -19,7 +19,7 @@ use `-o addopts='' -m performance`.
 
 ## Required behavioral proof
 
-Contract tests assert exactly seven MCP tools, one resource template, no concrete
+Contract tests assert exactly 45 MCP tools, one resource template, no concrete
 resource list, output schemas, truthful annotations, and direct structured success content without
 a universal wrapper.
 
