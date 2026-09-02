@@ -123,7 +123,10 @@ release through `uvx` on Python 3.12. It reports that no MCP client registration
 was changed; client-owned management interfaces apply the returned command.
 Repeated `--provider` options declare the complete Python provider set for the
 exact version-pinned uvx environment used by the returned launcher.
-System and vendor providers receive external installation guidance. Setup does
-not create a project repository, durable operation, or MCP setup endpoint.
+`--timeout-seconds` accepts 1 through 3,600 and defaults to 1,800. Resolver,
+download, and compatibility failures retain uvx's complete stderr. System and
+vendor providers receive external installation guidance. Setup does not create
+a persistent global tool, project repository, durable operation, or MCP setup
+endpoint.
 Other CLI commands construct the same runtime and project-root rules used by
 MCP.
