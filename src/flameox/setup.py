@@ -122,7 +122,8 @@ def detect_setup_clients(home: Path | None = None) -> list[SetupClient]:
 
 def _launcher_is_managed(command: object, args: object) -> bool:
     if (
-        command != "uvx"
+        not isinstance(command, str)
+        or Path(command).name != "uvx"
         or not isinstance(args, list)
         or not all(isinstance(item, str) for item in args)
     ):
@@ -131,9 +132,18 @@ def _launcher_is_managed(command: object, args: object) -> bool:
         requirement = args[args.index("--from") + 1]
     except (ValueError, IndexError):
         return False
+    try:
+        serve_index = args.index("flameox")
+    except ValueError:
+        return False
+    trailing = args[serve_index + 3 :]
+    legacy_project_root = (
+        len(trailing) == 2 and trailing[0] == "--project-root" and bool(trailing[1])
+    )
     return bool(
         re.fullmatch(r"flameox(?:\[[a-z0-9,-]+\])?==[^=]+", requirement)
-        and args[-3:] == ["flameox", "mcp", "serve"]
+        and args[serve_index : serve_index + 3] == ["flameox", "mcp", "serve"]
+        and (not trailing or legacy_project_root)
     )
 
 

@@ -371,6 +371,24 @@ def test_setup_updates_a_previous_version_pinned_launcher(tmp_path: Path) -> Non
     assert f"flameox=={__version__}" in plans[0].content
 
 
+def test_setup_migrates_the_legacy_project_bound_launcher(tmp_path: Path) -> None:
+    config = tmp_path / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        '[mcp_servers.flameox]\ncommand = "/opt/uv/bin/uvx"\n'
+        'args = ["--python", "3.12", "--from", "flameox==0.2.2", '
+        '"flameox", "mcp", "serve", "--project-root", "/work/old"]\n'
+    )
+
+    plan = plan_client_setup([SetupClient.CODEX], [], home=tmp_path)[0]
+    apply_client_setup([plan])
+
+    entry = tomlkit.parse(config.read_text())["mcp_servers"]["flameox"]
+    assert entry["command"] == "uvx"
+    assert entry["args"][-3:] == ["flameox", "mcp", "serve"]
+    assert "--project-root" not in entry["args"]
+
+
 def test_setup_preserves_custom_fields_inside_managed_entries(tmp_path: Path) -> None:
     cursor = tmp_path / ".cursor" / "mcp.json"
     cursor.parent.mkdir(parents=True)
