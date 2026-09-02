@@ -2,6 +2,28 @@
 
 All notable changes to flameox are documented in this file.
 
+## [0.2.3] - 2026-09-02
+
+### Bug Fixes
+
+- **setup:** Pin generated MCP launchers
+
+### Documentation
+
+- **mcp:** Clarify provider and comparison workflows
+- **setup:** Clarify uvx preparation lifecycle (#421) ([#421](https://github.com/morluto/flameox/pull/421))
+
+### Features
+
+- **mcp:** Return provider reconnection action
+- **mcp:** Expose typed capability tools (#422) ([#422](https://github.com/morluto/flameox/pull/422))
+- **mcp:** Restore explicit provider preparation (#419) ([#419](https://github.com/morluto/flameox/pull/419))
+- **runtime:** Unify bounded capture contracts (#417) ([#417](https://github.com/morluto/flameox/pull/417))
+
+### Refactoring
+
+- **setup:** Prepare the returned uvx environment (#420) ([#420](https://github.com/morluto/flameox/pull/420))
+- **runtime:** Validate captures atomically (#418) ([#418](https://github.com/morluto/flameox/pull/418))
 ## [0.2.2] - 2026-09-01
 
 ### Bug Fixes
