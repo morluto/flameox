@@ -1,2 +1,0 @@
-def load_report(path):
-    raise RuntimeError("corrupt official report")

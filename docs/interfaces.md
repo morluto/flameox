@@ -31,7 +31,10 @@ For example, a single Nsight Compute capture for kernel metrics has this argumen
 
 ```json
 {
-  "target": {"argv": ["python", "kernel.py"]},
+  "target": {
+    "argv": ["python", "kernel.py"],
+    "cwd": "/absolute/path/to/project"
+  },
   "provider": {"kind": "nsight-compute", "options": {"launch_count": 1}},
   "options": {},
   "execution": {"kind": "single"},

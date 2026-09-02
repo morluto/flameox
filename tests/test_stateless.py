@@ -1824,7 +1824,10 @@ def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path
             captured = await session.call_tool(
                 "capture_process_output",
                 {
-                    "target": {"argv": [sys.executable, "-c", "print('stdio capture')"]},
+                    "target": {
+                        "argv": [sys.executable, "-c", "print('stdio capture')"],
+                        "cwd": str(tmp_path),
+                    },
                     "provider": {"kind": "direct"},
                     "options": {},
                     "execution": {"kind": "single"},
