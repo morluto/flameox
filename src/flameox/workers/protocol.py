@@ -24,7 +24,6 @@ class WorkerOperationId(StrEnum):
     COVERAGE_PARSE = "coverage.parse"
     MEMRAY_PARSE = "memray.parse"
     NSIGHT_COMPUTE_PARSE = "nsight_compute.parse"
-    NSIGHT_SYSTEMS_PARSE = "nsight_systems.parse"
     OTLP_PARSE = "otlp.parse"
     PERFETTO_QUERY = "perfetto.query"
     PSTATS_PARSE = "pstats.parse"
