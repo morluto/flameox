@@ -7,6 +7,7 @@ import errno
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Iterable, Mapping
@@ -17,6 +18,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 from flameox.canonical import canonical_bytes
+from flameox.runtime_contracts import LOWERCASE_SHA256_PATTERN
 
 REPOSITORY_FORMAT = "1"
 EVIDENCE_MEDIA_TYPE = "application/vnd.flameox.evidence+json;version=1"
@@ -290,6 +292,13 @@ class EvidenceRepository:
     ) -> dict[str, Any]:
         if not 1 <= limit <= 200:
             raise RepositoryError("INVALID_INPUT", "limit must be between 1 and 200")
+        if (
+            input_sha256 is not None
+            and re.fullmatch(LOWERCASE_SHA256_PATTERN, input_sha256) is None
+        ):
+            raise RepositoryError(
+                "INVALID_INPUT", "input_sha256 must be a lowercase SHA-256 digest"
+            )
         if created_after is not None and created_after.tzinfo is None:
             raise RepositoryError("INVALID_INPUT", "created_after must include a timezone")
         if created_before is not None and created_before.tzinfo is None:
@@ -308,7 +317,15 @@ class EvidenceRepository:
         inventory = sorted(evidence_root.glob("*/*/manifest.json"))
         inventory_ids = [path.parent.name for path in inventory]
         inventory_digest = hashlib.sha256("\n".join(inventory_ids).encode()).hexdigest()
-        offset = self._decode_cursor(cursor, inventory_digest)
+        query_digest = self._query_digest(
+            evidence_kind=evidence_kind,
+            capability_id=capability_id,
+            provider_id=provider_id,
+            input_sha256=input_sha256,
+            created_after=created_after,
+            created_before=created_before,
+        )
+        offset = self._decode_cursor(cursor, inventory_digest, query_digest)
         matches: list[dict[str, Any]] = []
         next_offset: int | None = None
         for index, path in enumerate(inventory[offset:], offset):
@@ -329,7 +346,9 @@ class EvidenceRepository:
                 break
             matches.append(self._summary(manifest))
         continuation = (
-            self._encode_cursor(inventory_digest, next_offset) if next_offset is not None else None
+            self._encode_cursor(inventory_digest, query_digest, next_offset)
+            if next_offset is not None
+            else None
         )
         return {
             "evidence": matches,
@@ -746,12 +765,34 @@ class EvidenceRepository:
         }
 
     @staticmethod
-    def _encode_cursor(inventory_digest: str, offset: int) -> str:
-        value = canonical_bytes({"inventory": inventory_digest, "offset": offset})
+    def _query_digest(
+        *,
+        evidence_kind: str | None,
+        capability_id: str | None,
+        provider_id: str | None,
+        input_sha256: str | None,
+        created_after: datetime | None,
+        created_before: datetime | None,
+    ) -> str:
+        filters = {
+            "evidence_kind": evidence_kind,
+            "capability_id": capability_id,
+            "provider_id": provider_id,
+            "input_sha256": input_sha256,
+            "created_after": created_after.isoformat() if created_after is not None else None,
+            "created_before": created_before.isoformat() if created_before is not None else None,
+        }
+        return hashlib.sha256(canonical_bytes(filters)).hexdigest()
+
+    @staticmethod
+    def _encode_cursor(inventory_digest: str, query_digest: str, offset: int) -> str:
+        value = canonical_bytes(
+            {"inventory": inventory_digest, "query": query_digest, "offset": offset}
+        )
         return base64.urlsafe_b64encode(value).decode().rstrip("=")
 
     @staticmethod
-    def _decode_cursor(cursor: str | None, inventory_digest: str) -> int:
+    def _decode_cursor(cursor: str | None, inventory_digest: str, query_digest: str) -> int:
         if cursor is None:
             return 0
         try:
@@ -759,6 +800,10 @@ class EvidenceRepository:
             value = json.loads(base64.urlsafe_b64decode(cursor + padding))
             if value["inventory"] != inventory_digest:
                 raise RepositoryError("INVALID_INPUT", "Repository query continuation is stale.")
+            if value["query"] != query_digest:
+                raise RepositoryError(
+                    "INVALID_INPUT", "Repository query continuation does not match its filters."
+                )
             offset = int(value["offset"])
             if offset < 0:
                 raise ValueError

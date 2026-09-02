@@ -19,12 +19,14 @@ from flameox.runtime_contracts import (
 
 
 class SingleExecution(StrictModel):
-    kind: Literal["single"] = "single"
+    kind: Literal["single"] = Field(
+        default="single", description="Execute the target once without a paired experiment."
+    )
 
 
 class ExperimentExecution(StrictModel):
-    kind: Literal["experiment"]
-    design: ExperimentDesign
+    kind: Literal["experiment"] = Field(description="Execute a randomized paired experiment.")
+    design: ExperimentDesign = Field(description="Paired experiment design and decision rule.")
 
 
 Execution = Annotated[SingleExecution | ExperimentExecution, Field(discriminator="kind")]
@@ -54,8 +56,17 @@ def _provider_model(contract: CaptureProviderContract) -> type[StrictModel]:
     return create_model(
         f"{contract.id.title().replace('-', '')}Provider",
         __base__=StrictModel,
-        kind=(Literal[contract.id], ...),
-        options=(contract.argument_model, Field(default_factory=contract.argument_model)),
+        kind=(
+            Literal[contract.id],
+            Field(description=f"Use the {contract.id} capture provider."),
+        ),
+        options=(
+            contract.argument_model,
+            Field(
+                default_factory=contract.argument_model,
+                description=f"Provider settings; produces {contract.artifact_description}.",
+            ),
+        ),
     )
 
 

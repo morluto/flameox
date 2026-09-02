@@ -36,8 +36,10 @@ from flameox.mcp.capability_tools import (
 from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE
 from flameox.runtime_contracts import (
     CAPABILITIES,
+    LOWERCASE_SHA256_PATTERN,
     Capability,
     CaptureTarget,
+    Coverage,
     DirectTarget,
     RequestLimits,
     RuntimeFailure,
@@ -72,67 +74,89 @@ class _Envelope(BaseModel):
 
 
 class ToolFailureEnvelope(_Envelope):
-    code: str
-    message: str
-    details: dict[str, JsonValue]
-
-
-class CoverageEnvelope(_Envelope):
-    rows_returned: int
-    rows_observed: int
-    complete: bool
+    code: str = Field(description="Stable machine-readable failure code.")
+    message: str = Field(description="Human-readable failure and recovery guidance.")
+    details: dict[str, JsonValue] = Field(description="Failure-specific structured context.")
 
 
 class AnalysisEnvelope(_Envelope):
-    analysis_id: str
-    capability_id: str
-    provider: dict[str, JsonValue]
-    inputs: list[dict[str, JsonValue]]
-    blocks: list[dict[str, JsonValue]]
-    coverage: CoverageEnvelope
-    truncation: dict[str, JsonValue] | None
-    limitations: list[str]
-    continuation: str | None
+    analysis_id: str = Field(description="Session-local handle accepted by preserve_evidence.")
+    capability_id: str = Field(description="Evidence question answered by this result.")
+    provider: dict[str, JsonValue] = Field(description="Provider identity and version.")
+    inputs: list[dict[str, JsonValue]] = Field(
+        description="Digests and identities of analyzed inputs."
+    )
+    blocks: list[dict[str, JsonValue]] = Field(description="Bounded metrics and evidence tables.")
+    coverage: Coverage
+    truncation: dict[str, JsonValue] | None = Field(
+        description="The terminating bound and next unread offset, or null when not truncated."
+    )
+    limitations: list[str] = Field(
+        description="Constraints on interpreting or generalizing the evidence."
+    )
+    continuation: str | None = Field(
+        description="Opaque next-page token; null means no further page is retrievable."
+    )
 
 
 class ExternalRequirementEnvelope(BaseModel):
-    provider_id: str
-    guidance: str
+    provider_id: str = Field(description="Host provider that Flameox cannot install.")
+    guidance: str = Field(description="Host installation or access requirement.")
 
 
 class PreparationStatusEnvelope(BaseModel):
-    status: Literal["prepared", "not_applicable"]
+    status: Literal["prepared", "not_applicable"] = Field(
+        description="Whether a managed uvx environment was prepared."
+    )
 
 
 class LauncherEnvelope(BaseModel):
-    command: str
-    args: list[str]
+    command: str = Field(description="Executable for the prepared MCP launcher.")
+    args: list[str] = Field(description="Arguments for the prepared MCP launcher.")
 
 
 class ReconnectActionEnvelope(BaseModel):
-    kind: Literal["reconnect_mcp"]
-    message: str
+    kind: Literal["reconnect_mcp"] = Field(description="Reconnect the MCP server process.")
+    message: str = Field(description="Required handoff before retrying with the prepared provider.")
 
 
 class PreparationEnvelope(_Envelope):
-    requested_providers: list[str]
-    prepared_managed_providers: list[str]
-    external_requirements: list[ExternalRequirementEnvelope]
-    preparation: PreparationStatusEnvelope
-    launcher: LauncherEnvelope
-    next_action: ReconnectActionEnvelope | None
+    requested_providers: list[str] = Field(
+        description="Complete provider set requested by the caller."
+    )
+    prepared_managed_providers: list[str] = Field(
+        description="Requested providers included in the uvx environment."
+    )
+    external_requirements: list[ExternalRequirementEnvelope] = Field(
+        description="Host tools, drivers, devices, or permissions still required."
+    )
+    preparation: PreparationStatusEnvelope = Field(
+        description="Managed environment preparation status."
+    )
+    launcher: LauncherEnvelope = Field(
+        description="Version-pinned launcher for the requested provider set."
+    )
+    next_action: ReconnectActionEnvelope | None = Field(
+        description="Required reconnection action, or null when the current server can continue."
+    )
 
 
 class PreservationEnvelope(_Envelope):
-    evidence_id: str
-    uri: str
-    artifact_count: int
+    evidence_id: str = Field(description="Content-addressed immutable evidence identifier.")
+    uri: str = Field(description="Opaque MCP resource URI for the preserved manifest projection.")
+    artifact_count: int = Field(description="Native artifacts preserved with the manifest.")
 
 
 class QueryEnvelope(_Envelope):
-    evidence: list[dict[str, JsonValue]]
-    continuation: str | None
-    inventory_digest: str
+    evidence: list[dict[str, JsonValue]] = Field(
+        description="Matching immutable evidence summaries."
+    )
+    continuation: str | None = Field(
+        description="Opaque cursor bound to this immutable inventory snapshot."
+    )
+    inventory_digest: str = Field(
+        description="Digest of the inventory snapshot used for this query."
+    )
 
 
 class _ObjectOutcome(RootModel[Any]):
@@ -215,9 +239,21 @@ def create_server(
 
     @server.tool(annotations=PREPARE, structured_output=True)
     async def prepare_providers(
-        provider_ids: Annotated[list[str], Field(min_length=1, max_length=16)],
+        provider_ids: Annotated[
+            list[str],
+            Field(
+                description="Complete desired set of Flameox-managed and host provider IDs.",
+                min_length=1,
+                max_length=16,
+            ),
+        ],
         timeout_seconds: Annotated[
-            int, Field(ge=1, le=provider_setup.MAX_PREPARATION_TIMEOUT_SECONDS)
+            int,
+            Field(
+                description="Maximum uvx environment preparation time in seconds.",
+                ge=1,
+                le=provider_setup.MAX_PREPARATION_TIMEOUT_SECONDS,
+            ),
         ] = provider_setup.DEFAULT_PREPARATION_TIMEOUT_SECONDS,
     ) -> Annotated[CallToolResult, PreparationOutcome]:
         """Prepare managed providers and return any required MCP reconnection action."""
@@ -262,11 +298,29 @@ def create_server(
 
     def analysis_handler(capability: Capability) -> Callable[..., Awaitable[CallToolResult]]:
         async def handler(
-            sources: Annotated[list[Source], Field(min_length=1, max_length=32)],
+            sources: Annotated[
+                list[Source],
+                Field(
+                    description="Native paths or preserved evidence artifacts to analyze.",
+                    min_length=1,
+                    max_length=32,
+                ),
+            ],
             options: Any,
             ctx: Context[AnalysisRuntime],
-            limits: RequestLimits | None = None,
-            continuation: str | None = None,
+            limits: Annotated[
+                RequestLimits | None,
+                Field(description="Optional bounds that may only lower the server limits."),
+            ] = None,
+            continuation: Annotated[
+                str | None,
+                Field(
+                    description=(
+                        "Opaque token from the previous page; repeat the same sources, "
+                        "options, and limits."
+                    )
+                ),
+            ] = None,
         ) -> Annotated[CallToolResult, AnalysisOutcome]:
             try:
                 return _success(
@@ -287,9 +341,17 @@ def create_server(
         handler.__name__ = analysis_tool_name(capability)
         minimum_sources = 2 if capability.id.endswith(".compare") else 1
         handler.__annotations__["sources"] = Annotated[
-            list[Source], Field(min_length=minimum_sources, max_length=32)
+            list[Source],
+            Field(
+                description="Native paths or preserved evidence artifacts to analyze.",
+                min_length=minimum_sources,
+                max_length=32,
+            ),
         ]
-        handler.__annotations__["options"] = capability.model
+        handler.__annotations__["options"] = Annotated[
+            capability.model,
+            Field(description=f"Options for {capability.summary.lower()}"),
+        ]
         return handler
 
     def capture_handler(
@@ -297,13 +359,28 @@ def create_server(
         provider_type: Any,
     ) -> Callable[..., Awaitable[CallToolResult]]:
         async def handler(
-            target: DirectTarget,
+            target: Annotated[
+                DirectTarget, Field(description="Process target to execute and capture.")
+            ],
             provider: Any,
             options: Any,
-            execution: Execution,
+            execution: Annotated[
+                Execution, Field(description="Run once or execute a randomized paired experiment.")
+            ],
             ctx: Context[AnalysisRuntime],
-            limits: RequestLimits | None = None,
-            preserve: bool = False,
+            limits: Annotated[
+                RequestLimits | None,
+                Field(description="Optional bounds that may only lower the server limits."),
+            ] = None,
+            preserve: Annotated[
+                bool,
+                Field(
+                    description=(
+                        "Preserve this session analysis and its native artifacts as "
+                        "immutable evidence."
+                    )
+                ),
+            ] = False,
         ) -> Annotated[CallToolResult, AnalysisOutcome]:
             async def progress(current: int, total: int, message: str) -> None:
                 await ctx.report_progress(float(current), float(total), message)
@@ -356,8 +433,13 @@ def create_server(
                 )
 
         handler.__name__ = capture_tool_name(capability)
-        handler.__annotations__["provider"] = provider_type
-        handler.__annotations__["options"] = capability.model
+        handler.__annotations__["provider"] = Annotated[
+            provider_type, Field(description="Compatible capture provider and its typed settings.")
+        ]
+        handler.__annotations__["options"] = Annotated[
+            capability.model,
+            Field(description=f"Options for {capability.summary.lower()}"),
+        ]
         return handler
 
     for capability in CAPABILITIES:
@@ -389,7 +471,10 @@ def create_server(
 
     @server.tool(annotations=PRESERVE, structured_output=True)
     async def preserve_evidence(
-        analysis_id: str,
+        analysis_id: Annotated[
+            str,
+            Field(description="Session analysis handle returned by an analysis or capture tool."),
+        ],
         ctx: Context[AnalysisRuntime],
     ) -> Annotated[CallToolResult, PreservationOutcome]:
         """Idempotently preserve one session analysis and its native artifacts."""
@@ -408,14 +493,36 @@ def create_server(
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def query_evidence(
         ctx: Context[AnalysisRuntime],
-        evidence_kind: str | None = None,
-        capability_id: str | None = None,
-        provider_id: str | None = None,
-        input_sha256: str | None = None,
-        created_after: datetime | None = None,
-        created_before: datetime | None = None,
-        limit: int = 50,
-        cursor: str | None = None,
+        evidence_kind: Annotated[
+            str | None, Field(description="Exact preserved evidence-kind filter.")
+        ] = None,
+        capability_id: Annotated[
+            str | None, Field(description="Exact capability ID filter.")
+        ] = None,
+        provider_id: Annotated[str | None, Field(description="Exact provider ID filter.")] = None,
+        input_sha256: Annotated[
+            str | None,
+            Field(
+                description="Lowercase SHA-256 digest of a contributing input.",
+                pattern=LOWERCASE_SHA256_PATTERN,
+            ),
+        ] = None,
+        created_after: Annotated[
+            datetime | None, Field(description="Inclusive lower creation-time bound with timezone.")
+        ] = None,
+        created_before: Annotated[
+            datetime | None, Field(description="Inclusive upper creation-time bound with timezone.")
+        ] = None,
+        limit: Annotated[
+            int,
+            Field(description="Maximum matching manifests returned on this page.", ge=1, le=200),
+        ] = 50,
+        cursor: Annotated[
+            str | None,
+            Field(
+                description="Opaque cursor from the preceding query page; reuse the same filters."
+            ),
+        ] = None,
     ) -> Annotated[CallToolResult, QueryOutcome]:
         """Search an immutable, request-pinned manifest inventory in deterministic order."""
         try:

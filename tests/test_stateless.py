@@ -1646,6 +1646,28 @@ def test_mcp_tools_are_generated_from_typed_capabilities() -> None:
             "py-spy": "#/$defs/PySpyProvider",
         }
         assert capture_schema["required"] == ["target", "provider", "options", "execution"]
+        target_schema = capture_schema["$defs"]["DirectTarget"]["properties"]
+        assert "without a shell" in target_schema["argv"]["description"]
+        assert "existing absolute directory" in target_schema["cwd"]["description"].lower()
+        assert "minimal allowlisted environment" in target_schema["environment"]["description"]
+        experiment_schema = capture_schema["$defs"]["ExperimentDesign"]["properties"]
+        assert "first case is the baseline" in experiment_schema["cases"]["description"]
+        assert "nanoseconds" in experiment_schema["practical_threshold"]["description"]
+        assert (
+            "after each successful capture" in experiment_schema["semantic_oracle"]["description"]
+        )
+        assert "FLAMEOX_CAPTURE_STDOUT" in experiment_schema["semantic_oracle"]["description"]
+        analysis_properties = analysis_schema["properties"]
+        assert (
+            "same sources, options, and limits"
+            in analysis_properties["continuation"]["description"]
+        )
+        limits_schema = analysis_schema["$defs"]["RequestLimits"]["properties"]
+        assert "lower the server" in analysis_properties["limits"]["description"]
+        assert "structured result" in limits_schema["max_result_bytes"]["description"]
+        provider_schema = capture_schema["$defs"]["PySpyProvider"]["properties"]
+        assert "py-spy Speedscope profile" in provider_schema["options"]["description"]
+        assert "session analysis" in capture_schema["properties"]["preserve"]["description"]
         assert (
             by_name["analyze_benchmark_compare"].input_schema["properties"]["sources"]["minItems"]
             == 2
@@ -1664,6 +1686,12 @@ def test_mcp_tools_are_generated_from_typed_capabilities() -> None:
             for tool in tools
             if tool.name != "prepare_providers"
         )
+        query = by_name["query_evidence"]
+        assert query.input_schema["properties"]["limit"]["minimum"] == 1
+        assert query.input_schema["properties"]["limit"]["maximum"] == 200
+        assert query.output_schema is not None
+        query_output = query.output_schema["$defs"]["QueryEnvelope"]["properties"]
+        assert "inventory snapshot" in query_output["continuation"]["description"]
         assert await server.list_resources() == []
         assert [item.uri_template for item in templates] == ["flameox://evidence/{evidence_id}"]
         assert templates[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
@@ -1978,6 +2006,19 @@ def test_mcp_validation_unavailable_provider_and_failed_execution_are_typed(
             # MCP SDK 2.0 rejects schema-invalid input before invoking the tool.
             assert invalid.structured_content is None
 
+            for arguments in (
+                {"limit": 0},
+                {"limit": 201},
+                {"input_sha256": "not-a-digest"},
+            ):
+                invalid_query = await client.call_tool("query_evidence", arguments)
+                assert invalid_query.is_error is True
+                assert invalid_query.structured_content is None
+            for limit in (1, 200):
+                valid_query = await client.call_tool("query_evidence", {"limit": limit})
+                assert valid_query.is_error is False
+                assert valid_query.structured_content is not None
+
             empty_path = tmp_path / "empty-bin"
             empty_path.mkdir()
             unmanaged_python = empty_path / "python"
@@ -2218,6 +2259,44 @@ def test_experiment_runs_bounded_cases_and_semantic_oracle(tmp_path: Path) -> No
             preserved = runtime.preserve_evidence(result["analysis_id"])
             manifest = runtime.read_evidence(preserved["evidence_id"])
             assert manifest["body"]["limitations"] == result["limitations"]
+        finally:
+            runtime.close()
+
+    anyio.run(exercise)
+
+
+@pytest.mark.process
+def test_experiment_skips_semantic_oracle_after_failed_capture(tmp_path: Path) -> None:
+    marker = tmp_path / "oracle-ran"
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+        try:
+            result = await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[sys.executable, "-c", "raise SystemExit(7)"],
+                    cwd=str(tmp_path),
+                    provider_id="direct",
+                ),
+                "artifact.preview",
+                mode="experiment",
+                experiment=ExperimentDesign(
+                    cases=[ExperimentCase(name="baseline"), ExperimentCase(name="candidate")],
+                    blocks=1,
+                    seed=7,
+                    metric="wall_time_ns",
+                    estimand="median_difference",
+                    practical_threshold=0,
+                    semantic_oracle=[
+                        sys.executable,
+                        "-c",
+                        f"from pathlib import Path; Path({str(marker)!r}).touch()",
+                    ],
+                ),
+            )
+            assert all(item["status"] == "failed" for item in result["capture"]["executions"])
+            assert all(item["semantic_oracle"] is None for item in result["capture"]["executions"])
+            assert not marker.exists()
         finally:
             runtime.close()
 
@@ -2638,6 +2717,19 @@ def test_query_pagination_is_deterministic_and_inventory_bound(tmp_path: Path) -
         assert ids == sorted(ids)
         assert len(ids) == 3
         assert second["continuation"] is None
+
+        filtered = runtime.query_evidence(limit=1, capability_id="artifact.preview")
+        with pytest.raises(RuntimeFailure) as changed_filters:
+            runtime.query_evidence(
+                limit=1,
+                capability_id="cpu.hotspots",
+                cursor=filtered["continuation"],
+            )
+        assert changed_filters.value.code == "INVALID_INPUT"
+
+        with pytest.raises(RuntimeFailure) as malformed_digest:
+            runtime.query_evidence(input_sha256="not-a-digest")
+        assert malformed_digest.value.code == "INVALID_INPUT"
 
         earliest = runtime.read_evidence(ids[0])
         input_digest = earliest["body"]["inputs"][0]["sha256"]

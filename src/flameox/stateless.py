@@ -78,6 +78,8 @@ from flameox.runtime_contracts import (
     CAPTURE_PROVIDER_CONTRACTS,
     MAX_INPUTS,
     MAX_ROWS,
+    SEMANTIC_ORACLE_STDERR_ENV,
+    SEMANTIC_ORACLE_STDOUT_ENV,
     AnalysisResult,
     Capability,
     CaptureArguments,
@@ -686,13 +688,23 @@ class AnalysisRuntime:
                 )
                 captured.append(captured_native)
                 analysis_sources.append(captured_native)
+            termination = process.termination
+            exit_code = getattr(termination, "exit_code", None)
+            status = "succeeded" if exit_code == 0 else "failed"
+            if status == "succeeded" and missing_artifact_roles:
+                status = "failed"
+                failure_code = "CAPTURE_ARTIFACT_MISSING"
             oracle: dict[str, Any] | None = None
-            if experiment is not None and experiment.semantic_oracle is not None:
+            if (
+                status == "succeeded"
+                and experiment is not None
+                and experiment.semantic_oracle is not None
+            ):
                 oracle_argv = experiment.semantic_oracle
                 oracle_environment = {
                     **environment,
-                    "FLAMEOX_CAPTURE_STDOUT": str(directory / "stdout.txt"),
-                    "FLAMEOX_CAPTURE_STDERR": str(directory / "stderr.txt"),
+                    SEMANTIC_ORACLE_STDOUT_ENV: str(directory / "stdout.txt"),
+                    SEMANTIC_ORACLE_STDERR_ENV: str(directory / "stderr.txt"),
                 }
                 oracle_binding = self._require_capture_tool(
                     oracle_argv[0],
@@ -747,12 +759,6 @@ class AnalysisRuntime:
                     "failure_code": oracle_failure_code,
                 }
             self._prune_scratch(protected_root=request_scratch)
-            termination = process.termination
-            exit_code = getattr(termination, "exit_code", None)
-            status = "succeeded" if exit_code == 0 else "failed"
-            if status == "succeeded" and missing_artifact_roles:
-                status = "failed"
-                failure_code = "CAPTURE_ARTIFACT_MISSING"
             if oracle is not None and oracle["status"] == "failed":
                 status = "failed"
                 failure_code = "SEMANTIC_ORACLE_FAILED"

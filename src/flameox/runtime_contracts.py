@@ -19,6 +19,9 @@ from flameox.environment_policy import blocked_environment_override
 MAX_INPUTS = 32
 MAX_ROWS = 1_000
 MAX_RESULT_BYTES = 256 * 1024
+LOWERCASE_SHA256_PATTERN = r"^[0-9a-f]{64}$"
+SEMANTIC_ORACLE_STDOUT_ENV = "FLAMEOX_CAPTURE_STDOUT"
+SEMANTIC_ORACLE_STDERR_ENV = "FLAMEOX_CAPTURE_STDERR"
 
 
 class RuntimeFailure(RuntimeError):
@@ -35,16 +38,44 @@ class StrictModel(BaseModel):
 
 class PathSource(StrictModel):
     kind: Literal["path"] = "path"
-    path: str = Field(min_length=1, max_length=4096)
-    format: str | None = Field(default=None, min_length=1, max_length=80)
-    producer: str | None = Field(default=None, min_length=1, max_length=80)
-    expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    path: str = Field(
+        description="Path to the native artifact or artifact directory.",
+        min_length=1,
+        max_length=4096,
+    )
+    format: str | None = Field(
+        default=None,
+        description="Explicit artifact format; omit to detect it from the artifact.",
+        min_length=1,
+        max_length=80,
+    )
+    producer: str | None = Field(
+        default=None,
+        description="Optional producer identity used to interpret otherwise ambiguous formats.",
+        min_length=1,
+        max_length=80,
+    )
+    expected_sha256: str | None = Field(
+        default=None,
+        description="Expected lowercase SHA-256 digest; analysis fails if the artifact differs.",
+        pattern=LOWERCASE_SHA256_PATTERN,
+    )
 
 
 class EvidenceSource(StrictModel):
     kind: Literal["evidence"]
-    evidence_id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    artifact_role: str | None = Field(default=None, min_length=1, max_length=80)
+    evidence_id: str = Field(
+        description="Identifier of previously preserved immutable evidence.",
+        pattern=LOWERCASE_SHA256_PATTERN,
+    )
+    artifact_role: str | None = Field(
+        default=None,
+        description=(
+            "Select one artifact role when preserved evidence contains multiple artifacts."
+        ),
+        min_length=1,
+        max_length=80,
+    )
 
 
 Source = Annotated[PathSource | EvidenceSource, Field(discriminator="kind")]
@@ -55,17 +86,35 @@ class EmptyArguments(StrictModel):
 
 
 class PreviewArguments(StrictModel):
-    offset: int = Field(default=0, ge=0)
+    offset: int = Field(
+        default=0, description="Zero-based byte offset at which to begin the preview.", ge=0
+    )
 
 
 class SummaryArguments(StrictModel):
-    metric: str | None = Field(default=None, max_length=120)
-    group_by: str | None = Field(default=None, max_length=120)
+    metric: str | None = Field(
+        default=None,
+        description="Provider-supported metric to summarize; omit for its default metric.",
+        max_length=120,
+    )
+    group_by: str | None = Field(
+        default=None,
+        description="Provider-supported dimension used to group summary rows.",
+        max_length=120,
+    )
 
 
 class StaticArguments(StrictModel):
-    include_paths: list[str] = Field(default_factory=list, max_length=128)
-    exclude_paths: list[str] = Field(default_factory=list, max_length=128)
+    include_paths: list[str] = Field(
+        default_factory=list,
+        description="Path patterns eligible for static analysis.",
+        max_length=128,
+    )
+    exclude_paths: list[str] = Field(
+        default_factory=list,
+        description="Path patterns excluded after includes are applied.",
+        max_length=128,
+    )
 
     @field_validator("include_paths", "exclude_paths")
     @classmethod
@@ -76,8 +125,8 @@ class StaticArguments(StrictModel):
 
 
 class WindowArguments(StrictModel):
-    start_ns: int = Field(ge=0)
-    end_ns: int = Field(gt=0)
+    start_ns: int = Field(description="Inclusive trace-window start in nanoseconds.", ge=0)
+    end_ns: int = Field(description="Exclusive trace-window end in nanoseconds.", gt=0)
 
     @model_validator(mode="after")
     def ordered(self) -> WindowArguments:
@@ -87,8 +136,17 @@ class WindowArguments(StrictModel):
 
 
 class CompareArguments(StrictModel):
-    metric: str | None = Field(default=None, max_length=120)
-    baseline_index: int = Field(default=0, ge=0, le=31)
+    metric: str | None = Field(
+        default=None,
+        description="Metric to compare; omit for the capability's default metric.",
+        max_length=120,
+    )
+    baseline_index: int = Field(
+        default=0,
+        description="Zero-based source index used as the comparison baseline.",
+        ge=0,
+        le=31,
+    )
 
 
 ArgumentModel = type[
@@ -102,14 +160,48 @@ ArgumentModel = type[
 
 
 class RequestLimits(StrictModel):
-    max_rows: int = Field(default=100, ge=1, le=MAX_ROWS)
-    max_result_bytes: int = Field(default=MAX_RESULT_BYTES, ge=1024, le=MAX_RESULT_BYTES)
-    max_input_bytes: int = Field(default=1024**3, ge=1024, le=1024**3)
-    max_input_files: int = Field(default=4096, ge=1, le=4096)
-    timeout_seconds: float = Field(default=300, gt=0, le=3600)
-    max_output_bytes: int = Field(default=16 * 1024 * 1024, ge=1024, le=64 * 1024 * 1024)
-    max_memory_bytes: int = Field(default=1024**3, ge=16 * 1024 * 1024, le=16 * 1024**3)
-    max_provenance_bytes: int = Field(default=16 * 1024 * 1024, ge=4 * 1024, le=64 * 1024 * 1024)
+    max_rows: int = Field(
+        default=100, description="Maximum evidence rows returned on this page.", ge=1, le=MAX_ROWS
+    )
+    max_result_bytes: int = Field(
+        default=MAX_RESULT_BYTES,
+        description="Maximum serialized structured result size in bytes.",
+        ge=1024,
+        le=MAX_RESULT_BYTES,
+    )
+    max_input_bytes: int = Field(
+        default=1024**3,
+        description="Maximum total bytes read from source artifacts.",
+        ge=1024,
+        le=1024**3,
+    )
+    max_input_files: int = Field(
+        default=4096, description="Maximum files traversed across source artifacts.", ge=1, le=4096
+    )
+    timeout_seconds: float = Field(
+        default=300,
+        description="Maximum time for each bounded capture, conversion, or worker in seconds.",
+        gt=0,
+        le=3600,
+    )
+    max_output_bytes: int = Field(
+        default=16 * 1024 * 1024,
+        description="Maximum output bytes from each bounded process or generated artifact.",
+        ge=1024,
+        le=64 * 1024 * 1024,
+    )
+    max_memory_bytes: int = Field(
+        default=1024**3,
+        description="Maximum resident memory for each bounded capture or worker process tree.",
+        ge=16 * 1024 * 1024,
+        le=16 * 1024**3,
+    )
+    max_provenance_bytes: int = Field(
+        default=16 * 1024 * 1024,
+        description="Maximum captured execution metadata retained for preservation, in bytes.",
+        ge=4 * 1024,
+        le=64 * 1024 * 1024,
+    )
 
     def lowered_against(self, startup: RequestLimits) -> RequestLimits:
         effective = startup.model_dump()
@@ -122,9 +214,24 @@ class RequestLimits(StrictModel):
 
 
 class DirectTarget(StrictModel):
-    argv: list[str] = Field(min_length=1, max_length=256)
-    cwd: str = Field(min_length=1, max_length=4_096)
-    environment: dict[str, str] = Field(default_factory=dict, max_length=32)
+    argv: list[str] = Field(
+        description="Executable and arguments passed directly without a shell.",
+        min_length=1,
+        max_length=256,
+    )
+    cwd: str = Field(
+        description="Existing absolute directory in which to execute the target.",
+        min_length=1,
+        max_length=4_096,
+    )
+    environment: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Variables added to Flameox's minimal allowlisted environment (normally PATH); "
+            "sensitive loader overrides are rejected."
+        ),
+        max_length=32,
+    )
 
     @field_validator("argv")
     @classmethod
@@ -151,31 +258,63 @@ class CaptureTarget(DirectTarget):
 
 
 class PyperfCaptureArguments(StrictModel):
-    processes: int = Field(default=1, ge=1, le=32)
-    values: int = Field(default=3, ge=1, le=100)
-    warmups: int = Field(default=1, ge=0, le=100)
-    loops: int = Field(default=0, ge=0, le=1_000_000_000)
-    min_time: float = Field(default=0.1, gt=0, le=60)
-    name: str = Field(default="command", min_length=1, max_length=120)
+    processes: int = Field(
+        default=1, description="Number of worker processes used by pyperf.", ge=1, le=32
+    )
+    values: int = Field(
+        default=3, description="Measured values collected per pyperf process.", ge=1, le=100
+    )
+    warmups: int = Field(
+        default=1, description="Warmup values collected per pyperf process.", ge=0, le=100
+    )
+    loops: int = Field(
+        default=0,
+        description="Loops per value; zero lets pyperf calibrate automatically.",
+        ge=0,
+        le=1_000_000_000,
+    )
+    min_time: float = Field(
+        default=0.1, description="Minimum duration of each pyperf value in seconds.", gt=0, le=60
+    )
+    name: str = Field(
+        default="command",
+        description="Benchmark name recorded in the pyperf suite.",
+        min_length=1,
+        max_length=120,
+    )
 
 
 class PySpyCaptureArguments(StrictModel):
-    rate: int = Field(default=100, ge=1, le=1_000)
-    gil: bool = False
-    native: bool = False
+    rate: int = Field(
+        default=100, description="Sampling frequency in samples per second.", ge=1, le=1_000
+    )
+    gil: bool = Field(
+        default=False, description="Include only threads currently holding the Python GIL."
+    )
+    native: bool = Field(
+        default=False, description="Include native extension frames when supported."
+    )
 
 
 class PerfCaptureArguments(StrictModel):
-    frequency: int = Field(default=99, ge=1, le=1_000)
-    call_graph: Literal["dwarf", "fp"] = "dwarf"
+    frequency: int = Field(
+        default=99, description="Sampling frequency in samples per second.", ge=1, le=1_000
+    )
+    call_graph: Literal["dwarf", "fp"] = Field(
+        default="dwarf", description="Call-graph unwinding mode: DWARF metadata or frame pointers."
+    )
 
 
 class MemrayCaptureArguments(StrictModel):
-    native: bool = False
+    native: bool = Field(
+        default=False, description="Track native allocations and include native stack frames."
+    )
 
 
 class ComputeSanitizerCaptureArguments(StrictModel):
-    tool: Literal["memcheck", "racecheck", "initcheck", "synccheck"] = "memcheck"
+    tool: Literal["memcheck", "racecheck", "initcheck", "synccheck"] = Field(
+        default="memcheck", description="Compute Sanitizer analysis tool to run."
+    )
 
 
 def _default_nsys_traces() -> list[Literal["cuda", "nvtx", "osrt", "cublas", "cudnn"]]:
@@ -184,15 +323,31 @@ def _default_nsys_traces() -> list[Literal["cuda", "nvtx", "osrt", "cublas", "cu
 
 class NsightSystemsCaptureArguments(StrictModel):
     trace: list[Literal["cuda", "nvtx", "osrt", "cublas", "cudnn"]] = Field(
-        default_factory=_default_nsys_traces, min_length=1, max_length=5
+        default_factory=_default_nsys_traces,
+        description="Nsight Systems trace domains to collect.",
+        min_length=1,
+        max_length=5,
     )
 
 
 class NsightComputeCaptureArguments(StrictModel):
-    replay_mode: Literal["kernel", "application", "range"] = "kernel"
-    launch_skip: int = Field(default=0, ge=0, le=1_000_000)
-    launch_count: int = Field(default=1, ge=1, le=1_000_000)
-    section: list[str] = Field(default_factory=list, max_length=32)
+    replay_mode: Literal["kernel", "application", "range"] = Field(
+        default="kernel", description="Nsight Compute replay mode."
+    )
+    launch_skip: int = Field(
+        default=0,
+        description="Matching kernel launches to skip before profiling.",
+        ge=0,
+        le=1_000_000,
+    )
+    launch_count: int = Field(
+        default=1, description="Matching kernel launches to profile.", ge=1, le=1_000_000
+    )
+    section: list[str] = Field(
+        default_factory=list,
+        description="Nsight Compute section identifiers; empty uses its default section set.",
+        max_length=32,
+    )
 
     @field_validator("section")
     @classmethod
@@ -203,12 +358,14 @@ class NsightComputeCaptureArguments(StrictModel):
 
 
 class RocprofCaptureArguments(StrictModel):
-    hip_trace: bool = False
-    kernel_trace: bool = True
-    memory_copy_trace: bool = False
-    memory_allocation_trace: bool = False
-    scratch_memory_trace: bool = False
-    marker_trace: bool = False
+    hip_trace: bool = Field(default=False, description="Collect HIP API events.")
+    kernel_trace: bool = Field(default=True, description="Collect kernel dispatch events.")
+    memory_copy_trace: bool = Field(default=False, description="Collect memory-copy events.")
+    memory_allocation_trace: bool = Field(
+        default=False, description="Collect memory-allocation events."
+    )
+    scratch_memory_trace: bool = Field(default=False, description="Collect scratch-memory events.")
+    marker_trace: bool = Field(default=False, description="Collect marker events.")
 
     @model_validator(mode="after")
     def at_least_one_domain(self) -> RocprofCaptureArguments:
@@ -227,7 +384,9 @@ class RocprofCaptureArguments(StrictModel):
 
 
 class XctraceCaptureArguments(StrictModel):
-    template: Literal["Metal System Trace", "Time Profiler"] = "Metal System Trace"
+    template: Literal["Metal System Trace", "Time Profiler"] = Field(
+        default="Metal System Trace", description="Instruments recording template."
+    )
 
 
 def _default_torch_activities() -> list[Literal["cpu", "cuda", "cuda_if_available"]]:
@@ -236,24 +395,43 @@ def _default_torch_activities() -> list[Literal["cpu", "cuda", "cuda_if_availabl
 
 class TorchProfilerCaptureArguments(StrictModel):
     activities: list[Literal["cpu", "cuda", "cuda_if_available"]] = Field(
-        default_factory=_default_torch_activities, min_length=1, max_length=2
+        default_factory=_default_torch_activities,
+        description="Profiler activities to record; cuda_if_available falls back without error.",
+        min_length=1,
+        max_length=2,
     )
-    wait: int = Field(default=0, ge=0, le=10_000)
-    warmup: int = Field(default=1, ge=0, le=10_000)
-    active: int = Field(default=1, ge=1, le=10_000)
-    skip_first: int = Field(default=0, ge=0, le=10_000)
-    record_shapes: bool = False
-    profile_memory: bool = False
-    with_stack: bool = False
-    with_flops: bool = False
-    with_modules: bool = False
+    wait: int = Field(
+        default=0, description="Profiler schedule steps to wait per cycle.", ge=0, le=10_000
+    )
+    warmup: int = Field(
+        default=1, description="Profiler schedule warmup steps per cycle.", ge=0, le=10_000
+    )
+    active: int = Field(
+        default=1, description="Profiler schedule recording steps per cycle.", ge=1, le=10_000
+    )
+    skip_first: int = Field(
+        default=0, description="Initial target steps skipped before the schedule.", ge=0, le=10_000
+    )
+    record_shapes: bool = Field(default=False, description="Record operator input shapes.")
+    profile_memory: bool = Field(
+        default=False, description="Record tensor allocation and deallocation events."
+    )
+    with_stack: bool = Field(default=False, description="Record source stacks when supported.")
+    with_flops: bool = Field(default=False, description="Estimate supported operator FLOPs.")
+    with_modules: bool = Field(default=False, description="Record module hierarchy when supported.")
 
 
 class CoverageCaptureArguments(StrictModel):
-    branch: bool = False
-    source: list[str] = Field(default_factory=list, max_length=64)
-    include: list[str] = Field(default_factory=list, max_length=64)
-    omit: list[str] = Field(default_factory=list, max_length=64)
+    branch: bool = Field(default=False, description="Measure branch as well as statement coverage.")
+    source: list[str] = Field(
+        default_factory=list, description="coverage.py source selectors to measure.", max_length=64
+    )
+    include: list[str] = Field(
+        default_factory=list, description="coverage.py file patterns to include.", max_length=64
+    )
+    omit: list[str] = Field(
+        default_factory=list, description="coverage.py file patterns to omit.", max_length=64
+    )
 
     @field_validator("source", "include", "omit")
     @classmethod
@@ -264,14 +442,27 @@ class CoverageCaptureArguments(StrictModel):
 
 
 class TorchBenchmarkRuntimeArguments(StrictModel):
-    min_run_time_seconds: float = Field(default=0.2, gt=0, le=60)
-    max_samples: int = Field(default=100, ge=1, le=1_000)
-    num_threads: int = Field(default=1, ge=1, le=256)
-    cuda_event_timing: bool = False
+    min_run_time_seconds: float = Field(
+        default=0.2,
+        description="Minimum adaptive timing duration per sample in seconds.",
+        gt=0,
+        le=60,
+    )
+    max_samples: int = Field(
+        default=100, description="Maximum raw timing samples to retain.", ge=1, le=1_000
+    )
+    num_threads: int = Field(
+        default=1, description="PyTorch intra-op threads used by the benchmark.", ge=1, le=256
+    )
+    cuda_event_timing: bool = Field(
+        default=False, description="Use synchronized CUDA events instead of host wall-clock timing."
+    )
 
 
 class BenchmarkSamplesCaptureArguments(StrictModel):
-    torch_benchmark: TorchBenchmarkRuntimeArguments | None = None
+    torch_benchmark: TorchBenchmarkRuntimeArguments | None = Field(
+        default=None, description="Run the target through the torch.utils.benchmark timing harness."
+    )
 
 
 type CaptureArguments = (
@@ -426,9 +617,20 @@ CAPTURE_PROVIDER_CONTRACTS = {
 
 
 class ExperimentCase(StrictModel):
-    name: str = Field(min_length=1, max_length=80)
-    argv: list[str] | None = Field(default=None, min_length=1, max_length=256)
-    environment: dict[str, str] = Field(default_factory=dict, max_length=32)
+    name: str = Field(
+        description="Stable case label used in comparison evidence.", min_length=1, max_length=80
+    )
+    argv: list[str] | None = Field(
+        default=None,
+        description="Case-specific executable and arguments; omit to inherit target.argv.",
+        min_length=1,
+        max_length=256,
+    )
+    environment: dict[str, str] = Field(
+        default_factory=dict,
+        description="Case variables merged over target.environment.",
+        max_length=32,
+    )
 
     @field_validator("argv")
     @classmethod
@@ -442,13 +644,42 @@ class ExperimentCase(StrictModel):
 
 
 class ExperimentDesign(StrictModel):
-    cases: list[ExperimentCase] = Field(min_length=2, max_length=16)
-    blocks: int = Field(ge=1, le=100)
-    seed: int
-    metric: Literal["wall_time_ns"]
-    estimand: Literal["median_difference", "mean_difference"]
-    practical_threshold: float = Field(ge=0)
-    semantic_oracle: list[str] | None = Field(default=None, min_length=1, max_length=256)
+    cases: list[ExperimentCase] = Field(
+        description="Compared cases in declaration order; the first case is the baseline.",
+        min_length=2,
+        max_length=16,
+    )
+    blocks: int = Field(
+        description="Paired repetitions; case order is randomized independently within each block.",
+        ge=1,
+        le=100,
+    )
+    seed: int = Field(
+        description="Seed for reproducible case ordering and confidence-interval resampling."
+    )
+    metric: Literal["wall_time_ns"] = Field(
+        description="Per-execution metric used for paired differences."
+    )
+    estimand: Literal["median_difference", "mean_difference"] = Field(
+        description="Summary statistic of candidate-minus-baseline paired differences."
+    )
+    practical_threshold: float = Field(
+        description=(
+            "Absolute difference considered practically equivalent, in metric units (nanoseconds)."
+        ),
+        ge=0,
+    )
+    semantic_oracle: list[str] | None = Field(
+        default=None,
+        description=(
+            "Separate executable argv run after each successful capture; element zero is "
+            f"resolved without a shell. {SEMANTIC_ORACLE_STDOUT_ENV} and "
+            f"{SEMANTIC_ORACLE_STDERR_ENV} name the captured files. A nonzero exit excludes "
+            "that case-block pair."
+        ),
+        min_length=1,
+        max_length=256,
+    )
 
     @model_validator(mode="after")
     def case_names_are_unique(self) -> ExperimentDesign:
@@ -483,7 +714,7 @@ def _valid_environment(value: dict[str, str]) -> dict[str, str]:
 
 class InputIdentity(StrictModel):
     path: str
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sha256: str = Field(pattern=LOWERCASE_SHA256_PATTERN)
     size_bytes: int = Field(ge=0)
     format: str
     producer: str | None
@@ -509,14 +740,20 @@ EvidenceBlock = Annotated[MetricsBlock | TableBlock, Field(discriminator="type")
 
 
 class Coverage(StrictModel):
-    rows_returned: int = Field(ge=0)
-    rows_observed: int = Field(ge=0)
-    complete: bool
+    rows_returned: int = Field(description="Evidence rows included on this page.", ge=0)
+    rows_observed: int = Field(
+        description="Evidence rows observed within the provider's readable projection.", ge=0
+    )
+    complete: bool = Field(
+        description="Whether all available evidence was returned without truncation."
+    )
 
 
 class Truncation(StrictModel):
-    reason: Literal["row_limit", "result_bytes", "provider_limit"]
-    next_offset: int = Field(ge=0)
+    reason: Literal["row_limit", "result_bytes", "provider_limit"] = Field(
+        description="Bound that prevented the complete result from being returned."
+    )
+    next_offset: int = Field(description="Zero-based offset of the next unread row.", ge=0)
 
 
 class AnalysisFailure(StrictModel):
@@ -526,7 +763,7 @@ class AnalysisFailure(StrictModel):
 
 
 class AnalysisResult(StrictModel):
-    analysis_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    analysis_id: str = Field(pattern=LOWERCASE_SHA256_PATTERN)
     capability_id: str
     provider: ProviderIdentity
     inputs: list[InputIdentity]
